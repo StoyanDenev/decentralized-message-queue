@@ -30,6 +30,8 @@ public:
     std::function<void(const node::ContribMsg&)>    on_contrib;
     std::function<void(const node::BlockSigMsg&)>   on_block_sig;
     std::function<void(const node::AbortClaimMsg&)> on_abort_claim;
+    std::function<void(uint64_t /*block_index*/, const Hash& /*prev_hash*/,
+                       const chain::AbortEvent&)>   on_abort_event;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,

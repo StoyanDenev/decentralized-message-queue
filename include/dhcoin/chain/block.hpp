@@ -8,6 +8,15 @@
 
 namespace dhcoin::chain {
 
+// Consensus mode for a block. Per-height escalation: shards default to
+// MUTUAL_DISTRUST and escalate to BFT after `bft_escalation_threshold`
+// consecutive Phase-1 aborts at the same height. Single-chain v1 also
+// uses MUTUAL_DISTRUST as the steady state.
+enum class ConsensusMode : uint8_t {
+    MUTUAL_DISTRUST = 0,    // K-of-K within committee, unconditional safety
+    BFT             = 1,    // ceil(2K/3) + designated proposer, safe under f<N/3
+};
+
 enum class TxType : uint8_t {
     TRANSFER   = 0,
     REGISTER   = 1,
@@ -101,6 +110,16 @@ struct Block {
     Hash                     delay_seed{};
     Hash                     delay_output{};
     std::vector<Signature>   creator_block_sigs;            // K (Phase 2 Ed25519 over block_digest)
+
+    // rev.8 per-height escalation. Default mode = MUTUAL_DISTRUST (K-of-K,
+    // today's behavior). After `bft_escalation_threshold` consecutive
+    // round-1 aborts at the same height, the next round escalates to BFT
+    // (ceil(2K/3) sigs + designated proposer). bft_proposer is non-empty
+    // iff consensus_mode == BFT. In MD blocks, every position in
+    // creator_block_sigs is non-zero (full K-of-K). In BFT blocks, up to
+    // K - ceil(2K/3) positions may be sentinel-zero Signature{}.
+    ConsensusMode            consensus_mode{ConsensusMode::MUTUAL_DISTRUST};
+    std::string              bft_proposer;                 // empty for MD blocks
 
     Hash                     cumulative_rand{};
     std::vector<AbortEvent>  abort_events;

@@ -25,6 +25,11 @@ test_run.out
 README.pdf
 WHITEPAPER.pdf
 
+# SSH / private keys at top level (never commit)
+/id
+/id_*
+/id_*.pub
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

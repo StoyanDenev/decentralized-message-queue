@@ -30,8 +30,14 @@ json Config::to_json() const {
     j["chain_path"]      = chain_path;
     j["genesis_path"]    = genesis_path;
     j["genesis_hash"]    = genesis_hash;
-    j["m_creators"]      = m_creators;
-    j["k_block_sigs"]    = k_block_sigs;
+    j["m_creators"]              = m_creators;
+    j["k_block_sigs"]            = k_block_sigs;
+    j["bft_enabled"]             = bft_enabled;
+    j["bft_escalation_threshold"]= bft_escalation_threshold;
+    j["chain_role"]              = static_cast<uint8_t>(chain_role);
+    j["shard_id"]                = shard_id;
+    j["initial_shard_count"]     = initial_shard_count;
+    j["epoch_blocks"]            = epoch_blocks;
     j["tx_commit_ms"]    = tx_commit_ms;
     j["delay_T"]         = delay_T;
     j["block_sig_ms"]    = block_sig_ms;
@@ -52,6 +58,12 @@ Config Config::from_json(const json& j) {
     c.genesis_hash    = j.value("genesis_hash",   "");
     c.m_creators      = j.value("m_creators",     uint32_t{3});
     c.k_block_sigs    = j.value("k_block_sigs",   c.m_creators);   // default = strong
+    c.bft_enabled              = j.value("bft_enabled",              true);
+    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
+    c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
+    c.shard_id                 = j.value("shard_id",                 ShardId{0});
+    c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
+    c.epoch_blocks             = j.value("epoch_blocks",             uint32_t{1000});
     c.tx_commit_ms    = j.value("tx_commit_ms",   uint32_t{200});
     c.delay_T         = j.value("delay_T",        uint64_t{4'000'000});
     c.block_sig_ms    = j.value("block_sig_ms",   uint32_t{200});
@@ -96,11 +108,21 @@ Node::Node(const Config& cfg)
         if (gcfg.k_block_sigs == 0 || gcfg.k_block_sigs > gcfg.m_creators)
             throw std::runtime_error(
                 "genesis: invalid k_block_sigs (must satisfy 1 <= K <= M)");
-        cfg_.m_creators   = gcfg.m_creators;
-        cfg_.k_block_sigs = gcfg.k_block_sigs;
-        genesis_subsidy   = gcfg.block_subsidy;
+        cfg_.m_creators              = gcfg.m_creators;
+        cfg_.k_block_sigs            = gcfg.k_block_sigs;
+        cfg_.bft_enabled             = gcfg.bft_enabled;
+        cfg_.bft_escalation_threshold= gcfg.bft_escalation_threshold;
+        cfg_.chain_role              = gcfg.chain_role;
+        cfg_.shard_id                = gcfg.shard_id;
+        cfg_.initial_shard_count     = gcfg.initial_shard_count;
+        cfg_.epoch_blocks            = gcfg.epoch_blocks;
+        genesis_subsidy              = gcfg.block_subsidy;
         validator_.set_k_block_sigs(cfg_.k_block_sigs);
         validator_.set_m_pool(cfg_.m_creators);
+        validator_.set_bft_enabled(cfg_.bft_enabled);
+        validator_.set_bft_escalation_threshold(cfg_.bft_escalation_threshold);
+        validator_.set_epoch_blocks(cfg_.epoch_blocks);
+        validator_.set_shard_id(cfg_.shard_id);
         gcfg_opt = std::move(gcfg);
     }
 
@@ -122,6 +144,8 @@ Node::Node(const Config& cfg)
                               ? "strong" : "hybrid";
             std::cout << "[node] genesis loaded from " << cfg_.genesis_path
                       << " hash=" << actual_hash
+                      << " role=" << to_string(cfg_.chain_role)
+                      << " shard_id=" << cfg_.shard_id
                       << " M=" << cfg_.m_creators
                       << " K=" << cfg_.k_block_sigs
                       << " subsidy=" << genesis_subsidy
@@ -147,6 +171,8 @@ Node::Node(const Config& cfg)
     gossip_.on_contrib       = [this](auto& c)   { on_contrib(c); };
     gossip_.on_block_sig     = [this](auto& s)   { on_block_sig(s); };
     gossip_.on_abort_claim   = [this](auto& a)   { on_abort_claim(a); };
+    gossip_.on_abort_event   = [this](auto bi, auto& ph, auto& e)
+                                  { on_abort_event(bi, ph, e); };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -228,14 +254,12 @@ void Node::check_if_selected() {
     if (phase_ != ConsensusPhase::IDLE)   return;
 
     auto nodes = registry_.sorted_nodes();
-    size_t k   = cfg_.k_block_sigs;       // committee size per round
+    size_t k_target = cfg_.k_block_sigs;       // committee size per round (MD)
 
     // Build the available pool: registry minus any domains already aborted in
     // this height's current_aborts_. This is the local-aborts equivalent of
     // chain-baked suspension — needed because suspension only kicks in once a
-    // block finalizes and bakes the abort_events into the chain. Until then,
-    // re-selecting within the original pool can keep picking the dead/silent
-    // creator and stall forever (chicken-and-egg).
+    // block finalizes and bakes the abort_events into the chain.
     std::set<std::string> excluded;
     for (auto& ae : current_aborts_) excluded.insert(ae.aborting_node);
     std::vector<std::string> avail_domains;
@@ -243,17 +267,41 @@ void Node::check_if_selected() {
         if (excluded.count(nd.domain)) continue;
         avail_domains.push_back(nd.domain);
     }
-    if (avail_domains.size() < k) return;
 
-    // Effective rand mixes in abort hashes so committee re-selection still
-    // depends on the abort sequence (not just on which domains remain).
-    Hash rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
+    // rev.8 escalation. If the pool is too small to form a K-of-K committee
+    // AND bft_enabled AND we've hit the abort threshold, fall back to a
+    // smaller committee with size ceil(2K/3). The committee will run in
+    // BFT mode (validator enforces). Both round-1 and round-2 aborts count
+    // toward escalation (any kind of abort indicates a stuck round). Note:
+    // suspension (registry.cpp) still counts only round-1 to avoid
+    // Phase-2-timing-skew false-positive suspensions.
+    size_t total_aborts = current_aborts_.size();
+    size_t k_bft = (2 * cfg_.k_block_sigs + 2) / 3;     // ceil(2K/3)
+    size_t k_use = k_target;
+    chain::ConsensusMode round_mode = chain::ConsensusMode::MUTUAL_DISTRUST;
+    if (avail_domains.size() < k_target
+        && cfg_.bft_enabled
+        && total_aborts >= cfg_.bft_escalation_threshold
+        && avail_domains.size() >= k_bft) {
+        k_use      = k_bft;
+        round_mode = chain::ConsensusMode::BFT;
+    }
+    if (avail_domains.size() < k_use) return;
+    current_round_mode_ = round_mode;
+
+    // rev.9 (B1): committee derives from per-shard, per-epoch seed (stable
+    // for the duration of an epoch), then mixes in any in-flight abort
+    // hashes so re-selection within an epoch still depends on the abort
+    // sequence. With S=1 SINGLE the salt is fixed; behavior is the same
+    // as rev.8 within a single epoch.
+    Hash epoch_rand = current_epoch_rand();
+    Hash rand = crypto::epoch_committee_seed(epoch_rand, cfg_.shard_id);
     for (auto& ae : current_aborts_) {
         rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
     }
 
     try {
-        current_creator_indices_ = crypto::select_m_creators(rand, avail_domains.size(), k);
+        current_creator_indices_ = crypto::select_m_creators(rand, avail_domains.size(), k_use);
     } catch (...) { return; }
 
     current_creator_domains_.clear();
@@ -361,24 +409,58 @@ void Node::on_delay_complete(const Hash& output) {
     start_block_sig_phase(output);
 }
 
+chain::ConsensusMode Node::current_mode() const {
+    return current_round_mode_;
+}
+
+EpochIndex Node::current_epoch_index() const {
+    if (cfg_.epoch_blocks == 0) return 0;
+    return chain_.height() / cfg_.epoch_blocks;
+}
+
+Hash Node::current_epoch_rand() const {
+    if (chain_.empty()) return Hash{};
+    if (cfg_.epoch_blocks == 0) return chain_.head().cumulative_rand;
+    uint64_t epoch_start = current_epoch_index() * cfg_.epoch_blocks;
+    if (epoch_start == 0)        return chain_.head().cumulative_rand;
+    if (epoch_start > chain_.height()) return chain_.head().cumulative_rand;
+    return chain_.at(epoch_start - 1).cumulative_rand;
+}
+
+std::string Node::current_proposer_domain() const {
+    if (current_mode() != chain::ConsensusMode::BFT) return "";
+    if (current_creator_domains_.empty()) return "";
+    // Epoch-relative + shard-salted rand keeps proposer derivation
+    // consistent with committee selection (Stage B1). Within an epoch the
+    // proposer rotates only via abort_events.
+    Hash epoch_rand = current_epoch_rand();
+    Hash seed = crypto::epoch_committee_seed(epoch_rand, cfg_.shard_id);
+    size_t idx = proposer_idx(seed, current_aborts_,
+                                current_creator_domains_.size());
+    if (idx >= current_creator_domains_.size()) return "";
+    return current_creator_domains_[idx];
+}
+
 void Node::start_block_sig_phase(const Hash& delay_output) {
     if (phase_ == ConsensusPhase::BLOCK_SIG) return;
     phase_ = ConsensusPhase::BLOCK_SIG;
     current_delay_output_ = delay_output;
 
-    // Build a candidate block to compute the digest we sign over. We need to
-    // produce the same digest every node will compute, so we order contribs
-    // by selection order.
+    // Build a candidate block to compute the digest we sign over. We need
+    // to produce the same digest every node will compute, so we order
+    // contribs by selection order and tag the same mode + proposer.
     std::vector<ContribMsg> ordered_contribs;
     for (auto& d : current_creator_domains_) {
         auto it = pending_contribs_.find(d);
         if (it == pending_contribs_.end()) return;
         ordered_contribs.push_back(it->second);
     }
+    auto mode     = current_mode();
+    auto proposer = current_proposer_domain();
     chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
                                          current_creator_domains_,
                                          ordered_contribs, delay_output,
-                                         cfg_.m_creators);
+                                         cfg_.m_creators, mode, proposer);
     Hash digest = compute_block_digest(tentative);
 
     BlockSigMsg my_sig = make_block_sig(key_, cfg_.domain,
@@ -394,14 +476,12 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
         handle_block_sig_timeout();
     });
 
-    // Same race-avoiding policy as on_block_sig: eager-finalize only on M;
-    // K is the timeout fallback.
     if (pending_block_sigs_.size() == current_creator_domains_.size())
         try_finalize_round();
 }
 
 void Node::try_finalize_round() {
-    // Phase 1 unanimity: all M contribs required for the round to advance.
+    // Phase 1 unanimity preserved in both modes: all K contribs required.
     std::vector<ContribMsg> ordered_contribs;
     for (auto& d : current_creator_domains_) {
         auto cit = pending_contribs_.find(d);
@@ -409,8 +489,16 @@ void Node::try_finalize_round() {
         ordered_contribs.push_back(cit->second);
     }
 
-    // Phase 2 K-of-M: build a sentinel-aligned block_sigs vector. Position i
-    // is creators[i]'s sig if they signed, else Signature{} (zero sentinel).
+    auto mode     = current_mode();
+    auto proposer = current_proposer_domain();
+
+    // BFT mode: only the designated proposer finalizes (eliminates
+    // silent-fork race where different peers pick different K-subsets of
+    // sigs).
+    if (mode == chain::ConsensusMode::BFT && cfg_.domain != proposer) return;
+
+    // Phase 2: build a sentinel-aligned block_sigs vector. Position i is
+    // creators[i]'s sig if they signed, else Signature{} (zero sentinel).
     Signature zero_sig{};
     std::vector<Signature> ordered_block_sigs(current_creator_domains_.size(), zero_sig);
     size_t signed_count = 0;
@@ -422,14 +510,25 @@ void Node::try_finalize_round() {
         }
     }
 
-    if (signed_count < cfg_.k_block_sigs) return;     // not enough yet, wait
+    size_t required = required_block_sigs(mode, current_creator_domains_.size());
+    if (signed_count < required) return;     // not enough yet, wait
     block_sig_timer_.cancel();
+
+    // BFT requires the proposer's own sig present (sentinel-zero at the
+    // proposer's index would be illegal — validator rejects).
+    if (mode == chain::ConsensusMode::BFT) {
+        auto pit = std::find(current_creator_domains_.begin(),
+                              current_creator_domains_.end(), proposer);
+        if (pit == current_creator_domains_.end()) return;
+        size_t pidx = pit - current_creator_domains_.begin();
+        if (ordered_block_sigs[pidx] == zero_sig) return;
+    }
 
     chain::Block body = build_body(tx_store_, chain_, current_aborts_,
                                     current_creator_domains_,
                                     ordered_contribs,
                                     current_delay_output_,
-                                    cfg_.m_creators);
+                                    cfg_.m_creators, mode, proposer);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     apply_block_locked(body);
@@ -469,22 +568,14 @@ void Node::handle_contrib_timeout() {
 }
 
 void Node::handle_block_sig_timeout() {
-    // Honest v1 behavior: only timer-finalize when we have ALL M sigs. The
-    // K-of-M fallback (finalize on ≥K when timer fires) was unsafe — different
-    // peers can collect different K-subsets of sigs, build divergent blocks
-    // with identical (block_index, prev_hash) but different
-    // creator_block_sigs content, and produce silent forks (the dedup-skip
-    // in apply_block_locked then masks the divergence).
-    //
-    // Truly safe weak-mode (K<M) finalize requires either a designated
-    // proposer per round or fork-choice logic with reorg support — neither
-    // is in v1. Until that lands, weak mode is *operationally* equivalent
-    // to strong mode: all rounds need M sigs to finalize, fewer→abort.
-    // The genesis-pinned `k_block_sigs < m_creators` is preserved as a
-    // forward-compatible parameter for v2 once the proper fork resolution
-    // is implemented.
-    if (pending_block_sigs_.size() == current_creator_domains_.size()) {
-        try_finalize_round();
+    // rev.8 mode-aware: in MD mode, finalize only on full K-of-K (today's
+    // behavior). In BFT mode, only the designated proposer finalizes, on
+    // ≥ ceil(2K/3) sigs. Designated proposer eliminates the silent-fork
+    // race (different peers picking different K-subsets).
+    auto mode = current_mode();
+    size_t required = required_block_sigs(mode, current_creator_domains_.size());
+    if (pending_block_sigs_.size() >= required) {
+        try_finalize_round();   // try_finalize_round itself enforces proposer-only in BFT
         return;
     }
 
@@ -570,6 +661,66 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
     std::cout << "[node] abort quorum (round " << int(msg.round)
               << ") against " << msg.missing_creator
               << " (" << bucket.size() << " claims)\n";
+
+    // rev.8 follow-on: broadcast the assembled AbortEvent so peers that
+    // missed a claim can adopt it and advance their abort generation in
+    // lock-step. Without this, peers stuck with only their own claim stay
+    // out-of-sync forever (the original claim isn't re-broadcast).
+    Hash bcast_prev = chain_.empty() ? Hash{} : chain_.head_hash();
+    gossip_.broadcast(net::make_abort_event(ev, chain_.height(), bcast_prev));
+
+    reset_round();
+    check_if_selected();
+}
+
+void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
+                            const chain::AbortEvent& ev) {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+
+    if (block_index != chain_.height()) return;
+    Hash my_prev = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (prev_hash != my_prev) return;
+
+    // Already adopted? Idempotent: ignore duplicates.
+    for (auto& existing : current_aborts_) {
+        if (existing.event_hash == ev.event_hash) return;
+    }
+
+    // Validate the K-1 claim quorum carried inline. We can do this
+    // independently of whether we ever heard the individual AbortClaimMsgs
+    // ourselves — that's the whole point of this message.
+    if (!ev.claims_json.is_array()) return;
+    size_t needed = current_creator_domains_.size() > 0
+                  ? current_creator_domains_.size() - 1 : 0;
+    if (ev.claims_json.size() < needed) return;
+
+    std::set<std::string> seen_claimers;
+    for (auto& cj : ev.claims_json) {
+        auto m_ = node::AbortClaimMsg::from_json(cj);
+        if (m_.block_index     != block_index)       return;
+        if (m_.round           != ev.round)          return;
+        if (m_.prev_hash       != prev_hash)         return;
+        if (m_.missing_creator != ev.aborting_node)  return;
+        if (m_.claimer == m_.missing_creator)        return;
+        // Claimer must be in current committee to be authoritative
+        if (std::find(current_creator_domains_.begin(),
+                       current_creator_domains_.end(),
+                       m_.claimer) == current_creator_domains_.end()) return;
+        if (!seen_claimers.insert(m_.claimer).second) return;
+
+        auto e = registry_.find(m_.claimer);
+        if (!e) return;
+        Hash digest = make_abort_claim_message(m_.block_index, m_.round,
+                                                  m_.prev_hash, m_.missing_creator);
+        if (!crypto::verify(e->pubkey, digest.data(), digest.size(), m_.ed_sig))
+            return;
+    }
+    if (seen_claimers.size() < needed) return;
+
+    // Adopt and advance.
+    current_aborts_.push_back(ev);
+    std::cout << "[node] adopted gossiped abort event (round " << int(ev.round)
+              << ") against " << ev.aborting_node << "\n";
 
     reset_round();
     check_if_selected();
@@ -766,11 +917,13 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
         if (it == pending_contribs_.end()) return;
         ordered_contribs.push_back(it->second);
     }
+    auto mode_local     = current_mode();
+    auto proposer_local = current_proposer_domain();
     chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
                                          current_creator_domains_,
                                          ordered_contribs,
                                          current_delay_output_,
-                                         cfg_.m_creators);
+                                         cfg_.m_creators, mode_local, proposer_local);
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(entry->pubkey, digest.data(), digest.size(), msg.ed_sig)) {
@@ -912,6 +1065,9 @@ json Node::rpc_status() const {
     j["m_creators"]  = cfg_.m_creators;
     j["sync_state"]  = (state_ == SyncState::IN_SYNC) ? "in_sync" : "syncing";
     j["genesis"]     = chain_.empty() ? "" : to_hex(chain_.at(0).compute_hash());
+    j["chain_role"]  = to_string(cfg_.chain_role);
+    j["shard_id"]    = cfg_.shard_id;
+    j["epoch_index"] = current_epoch_index();
 
     auto nodes = registry_.sorted_nodes();
     if (!chain_.empty() && nodes.size() >= cfg_.m_creators) {

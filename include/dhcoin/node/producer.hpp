@@ -101,6 +101,23 @@ Hash compute_delay_seed(uint64_t block_index, const Hash& prev_hash,
 // produces an unverifiable sig.
 Hash compute_block_digest(const chain::Block& b);
 
+// rev.8 BFT-mode designated proposer. Deterministic from
+// (prev_cumulative_rand ‖ abort_event_hashes) so the proposer rotates across
+// abort retries within the same height. Only used when consensus_mode == BFT.
+size_t proposer_idx(const Hash& prev_cum_rand,
+                    const std::vector<chain::AbortEvent>& aborts,
+                    size_t committee_size);
+
+// Count round-1 (Phase 1) AbortEvents — used to decide whether a round
+// should escalate to BFT. Only round-1 aborts count (round-2 are timing-skew
+// noisy, same reason suspension only counts round-1).
+size_t count_round1_aborts(const std::vector<chain::AbortEvent>& aborts);
+
+// Required signature count for a given mode + committee size.
+//   MD  → all K
+//   BFT → ceil(2K/3)
+size_t required_block_sigs(chain::ConsensusMode mode, size_t committee_size);
+
 ContribMsg make_contrib(const crypto::NodeKey& key,
                          const std::string& domain,
                          uint64_t block_index,
@@ -118,6 +135,10 @@ BlockSigMsg make_block_sig(const crypto::NodeKey& key,
 // Build the canonical block body. `m_pool_size` is the chain-wide registered
 // pool size from genesis (cfg_.m_creators); the K-committee is the size of
 // `creator_domains`/`contribs`. tx_root is always the union of K hash lists.
+//
+// `mode` and `bft_proposer_domain` are written into the block. In MD mode,
+// `bft_proposer_domain` must be empty. In BFT mode it must be the
+// deterministically-chosen proposer (the caller computes via proposer_idx).
 chain::Block build_body(
     const std::map<Hash, chain::Transaction>& tx_store,
     const chain::Chain&                       chain,
@@ -125,6 +146,8 @@ chain::Block build_body(
     const std::vector<std::string>&           creator_domains,
     const std::vector<ContribMsg>&            contribs,        // K, in selection order
     const Hash&                               delay_output,
-    uint32_t                                  m_pool_size);
+    uint32_t                                  m_pool_size,
+    chain::ConsensusMode                      mode = chain::ConsensusMode::MUTUAL_DISTRUST,
+    const std::string&                        bft_proposer_domain = "");
 
 } // namespace dhcoin::node

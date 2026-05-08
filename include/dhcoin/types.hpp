@@ -14,6 +14,28 @@ using Hash      = std::array<uint8_t, 32>;
 using PubKey    = std::array<uint8_t, 32>;
 using Signature = std::array<uint8_t, 64>;
 
+using ShardId    = uint32_t;
+using EpochIndex = uint64_t;
+
+// Stage-B sharding role of a chain. SINGLE preserves rev.7/8 behavior (one
+// chain, no shards). BEACON and SHARD are the two roles in the sharded
+// architecture: beacon holds validator pool + cross-shard receipts +
+// epoch transitions; shards hold per-account state and process user txs.
+enum class ChainRole : uint8_t {
+    SINGLE = 0,    // unsharded (default; rev.8 behavior)
+    BEACON = 1,    // trust anchor in a sharded deployment
+    SHARD  = 2,    // throughput layer in a sharded deployment
+};
+
+inline const char* to_string(ChainRole r) {
+    switch (r) {
+    case ChainRole::SINGLE: return "single";
+    case ChainRole::BEACON: return "beacon";
+    case ChainRole::SHARD:  return "shard";
+    }
+    return "?";
+}
+
 inline std::string to_hex(const uint8_t* data, size_t len) {
     std::ostringstream ss;
     ss << std::hex << std::setfill('0');

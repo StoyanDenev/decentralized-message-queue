@@ -102,4 +102,12 @@ Hash genesis_random_state(const Hash& seed) {
     return sha256(seed);
 }
 
+Hash epoch_committee_seed(const Hash& epoch_rand, ShardId shard_id) {
+    return SHA256Builder{}
+        .append(epoch_rand)
+        .append(std::string("shard-committee"))
+        .append(static_cast<uint64_t>(shard_id))
+        .finalize();
+}
+
 } // namespace dhcoin::crypto

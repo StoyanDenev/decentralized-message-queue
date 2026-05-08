@@ -34,6 +34,15 @@ struct Config {
     // init; per-node override is rejected as a misconfiguration. Constraint:
     // 1 <= k_block_sigs <= m_creators.
     uint32_t                 k_block_sigs{3};
+    // rev.8 per-height escalation. Loaded from GenesisConfig.
+    bool                     bft_enabled{true};
+    uint32_t                 bft_escalation_threshold{5};
+    // rev.9 sharding role. SINGLE = today's behavior. BEACON/SHARD activate
+    // sharded paths in Stage B2+. Loaded from GenesisConfig.
+    ChainRole                chain_role{ChainRole::SINGLE};
+    ShardId                  shard_id{0};
+    uint32_t                 initial_shard_count{1};
+    uint32_t                 epoch_blocks{1000};
     // L4 / C3 — three local timers + delay-hash iteration count.
     uint32_t                 tx_commit_ms{200};
     uint64_t                 delay_T{4'000'000};   // delay-hash iterations (web profile default)
@@ -88,6 +97,8 @@ private:
     // state_mutex_ is already held by the caller.
     void on_block_sig_locked(const BlockSigMsg& msg);
     void on_abort_claim(const AbortClaimMsg& msg);
+    void on_abort_event(uint64_t block_index, const Hash& prev_hash,
+                         const chain::AbortEvent& ev);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,
@@ -106,6 +117,20 @@ private:
     void on_delay_complete(const Hash& output);
     void start_block_sig_phase(const Hash& delay_output);
     void try_finalize_round();
+
+    // rev.8 helpers. Both compute deterministic per-round state from
+    // current_aborts_ + chain head; same answer on every node.
+    chain::ConsensusMode current_mode() const;
+    std::string          current_proposer_domain() const;     // "" in MD mode
+
+    // rev.9 (B1): epoch-relative randomness for committee selection.
+    // epoch_index = chain_.height() / epoch_blocks. epoch_rand = chain's
+    // cumulative_rand at the block that opened the epoch. With S=1 this
+    // does not change behavior visibly compared to rev.8; it only sets up
+    // the per-shard / per-epoch seed shape that Stage B2 will use across
+    // multiple chains.
+    EpochIndex current_epoch_index() const;
+    Hash       current_epoch_rand()  const;
     void handle_contrib_timeout();
     void handle_block_sig_timeout();
     void reset_round();
@@ -154,6 +179,10 @@ private:
     std::map<std::string, BlockSigMsg>                       pending_block_sigs_;
     // O3 buffer: BlockSigMsgs received before our delay-hash finishes.
     std::vector<BlockSigMsg>                                 buffered_block_sigs_;
+
+    // rev.8 mode of the current round. Set by check_if_selected when the
+    // committee is chosen (MD with full K, or BFT with reduced ceil(2K/3)).
+    chain::ConsensusMode current_round_mode_{chain::ConsensusMode::MUTUAL_DISTRUST};
 
     asio::steady_timer              contrib_timer_;
     asio::steady_timer              block_sig_timer_;

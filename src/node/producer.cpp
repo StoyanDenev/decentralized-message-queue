@@ -175,6 +175,33 @@ Hash compute_delay_seed(uint64_t block_index, const Hash& prev_hash,
     return b.finalize();
 }
 
+size_t proposer_idx(const Hash& prev_cum_rand,
+                    const std::vector<AbortEvent>& aborts,
+                    size_t committee_size) {
+    if (committee_size == 0) return 0;
+    SHA256Builder b;
+    b.append(prev_cum_rand);
+    for (auto& ae : aborts) b.append(ae.event_hash);
+    b.append(std::string("bft-proposer"));
+    Hash mix = b.finalize();
+    uint64_t v = 0;
+    for (size_t i = 0; i < 8; ++i)
+        v = (v << 8) | mix[i];
+    return static_cast<size_t>(v % committee_size);
+}
+
+size_t count_round1_aborts(const std::vector<AbortEvent>& aborts) {
+    size_t n = 0;
+    for (auto& ae : aborts) if (ae.round == 1) ++n;
+    return n;
+}
+
+size_t required_block_sigs(ConsensusMode mode, size_t committee_size) {
+    if (mode == ConsensusMode::MUTUAL_DISTRUST) return committee_size;
+    // BFT: ceil(2K/3)
+    return (2 * committee_size + 2) / 3;
+}
+
 Hash compute_block_digest(const Block& b) {
     SHA256Builder h;
     h.append(b.index);
@@ -182,6 +209,8 @@ Hash compute_block_digest(const Block& b) {
     h.append(b.tx_root);
     h.append(b.delay_seed);
     h.append(b.delay_output);
+    h.append(static_cast<uint8_t>(b.consensus_mode));
+    h.append(b.bft_proposer);
     for (auto& c : b.creators) h.append(c);
     for (auto& list : b.creator_tx_lists)
         for (auto& tx : list) h.append(tx);
@@ -239,7 +268,9 @@ Block build_body(
     const std::vector<std::string>&    creator_domains,
     const std::vector<ContribMsg>&     contribs,
     const Hash&                        delay_output,
-    uint32_t                           m_pool_size) {
+    uint32_t                           m_pool_size,
+    ConsensusMode                      mode,
+    const std::string&                 bft_proposer_domain) {
 
     Block b;
     b.index          = chain.empty() ? 1 : chain.height();
@@ -260,9 +291,11 @@ Block build_body(
     // committee member to omit. Intersection is preserved as a helper for
     // v2 / specialized chains but is not used in v1.
     (void)m_pool_size;
-    b.tx_root      = compute_tx_root(b.creator_tx_lists);
-    b.delay_seed   = compute_delay_seed(b.index, b.prev_hash, b.tx_root, b.creator_dh_inputs);
-    b.delay_output = delay_output;
+    b.tx_root        = compute_tx_root(b.creator_tx_lists);
+    b.delay_seed     = compute_delay_seed(b.index, b.prev_hash, b.tx_root, b.creator_dh_inputs);
+    b.delay_output   = delay_output;
+    b.consensus_mode = mode;
+    b.bft_proposer   = bft_proposer_domain;
 
     // cumulative_rand derives from the delay-hash output, not from any signature.
     Hash prev_rand = chain.empty() ? Hash{} : chain.head().cumulative_rand;

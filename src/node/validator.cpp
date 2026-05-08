@@ -28,7 +28,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_creator_tx_commitments(b, registry); !r.ok) return r;
     if (auto r = check_abort_certs(b, chain, registry);  !r.ok) return r;
     if (auto r = check_delay(b);                         !r.ok) return r;
-    if (auto r = check_block_sigs(b, registry);          !r.ok) return r;
+    if (auto r = check_block_sigs(b, registry, chain);   !r.ok) return r;
     if (auto r = check_cumulative_rand(b, chain);        !r.ok) return r;
     if (auto r = check_transactions(b, chain, registry); !r.ok) return r;
     if (auto r = check_timestamp(b);                     !r.ok) return r;
@@ -56,12 +56,35 @@ BlockValidator::Result BlockValidator::check_creator_selection(
     const Block& b, const NodeRegistry& registry, const Chain& chain) const {
     if (chain.empty()) return {true, ""};
 
-    Hash   prev_rand = chain.head().cumulative_rand;
+    // rev.9 (B1): committee derives from per-shard, per-epoch seed.
+    // epoch_index = b.index / epoch_blocks. epoch_rand is the rand at the
+    // block opening that epoch (or genesis-anchored rand if epoch_start=0).
     auto   nodes     = registry.sorted_nodes();
-    // m = K-committee size (b.creators.size()).
+    EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
+    uint64_t epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
+    Hash epoch_rand;
+    if (epoch_start == 0 || epoch_start > chain.height()) {
+        epoch_rand = chain.head().cumulative_rand;
+    } else {
+        epoch_rand = chain.at(epoch_start - 1).cumulative_rand;
+    }
+    Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
+    (void)epoch_index;
+    // m = K-committee size (b.creators.size()). Permitted values:
+    //   MD blocks:  m == k_block_sigs_ (full K).
+    //   BFT blocks: m == ceil(2*k_block_sigs_/3) (escalated, smaller committee).
     size_t m         = b.creators.size();
-    if (k_block_sigs_ != 0 && m != k_block_sigs_)
-        return {false, "block creators count != committee size K (genesis-pinned)"};
+    size_t k_full    = k_block_sigs_;
+    size_t k_bft     = (2 * k_full + 2) / 3;
+    if (k_full != 0) {
+        bool md_ok  = (b.consensus_mode == ConsensusMode::MUTUAL_DISTRUST) && (m == k_full);
+        bool bft_ok = (b.consensus_mode == ConsensusMode::BFT)             && (m == k_bft);
+        if (!md_ok && !bft_ok)
+            return {false, "block creators count " + std::to_string(m)
+                         + " inconsistent with consensus_mode "
+                         + std::to_string(static_cast<int>(b.consensus_mode))
+                         + " and genesis K=" + std::to_string(k_full)};
+    }
 
     // Build available pool: registry minus aborted domains in this block.
     // Mirrors node.cpp::check_if_selected — exclusion + abort-mixed rand.
@@ -140,14 +163,31 @@ BlockValidator::Result BlockValidator::check_abort_certs(
         return {true, ""};
     }
 
-    Hash prev_rand = chain.head().cumulative_rand;
+    // rev.9 (B1): epoch-relative seed for the at-event committee
+    // reconstruction (mirror check_creator_selection).
+    EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
+    uint64_t   epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
+    Hash epoch_rand;
+    if (epoch_start == 0 || epoch_start > chain.height()) {
+        epoch_rand = chain.head().cumulative_rand;
+    } else {
+        epoch_rand = chain.at(epoch_start - 1).cumulative_rand;
+    }
+    Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
     Hash prev_hash = chain.head_hash();
     auto nodes     = registry.sorted_nodes();
-    size_t m       = b.creators.size();
+    (void)epoch_index;
+
+    // Per-event committee size: at step i, BEFORE applying ae[i], the
+    // committee size is determined by the same escalation rule as
+    // node.cpp::check_if_selected: if pool < K_full and we've hit
+    // bft_escalation_threshold, committee shrinks to ceil(2K/3). Otherwise
+    // K_full. This must match what the producer used at the time.
+    size_t k_full = k_block_sigs_;
+    size_t k_bft  = (2 * k_full + 2) / 3;
 
     // Reconstruct the creator-set sequence using the same exclude+remix rule
-    // as check_creator_selection: at step i, pool = registry minus the first
-    // i aborting_nodes, rand = prev_rand mixed with the first i abort hashes.
+    // as check_creator_selection.
     std::set<std::string> excluded;
     Hash rand = prev_rand;
     for (size_t i = 0; i < b.abort_events.size(); ++i) {
@@ -159,9 +199,21 @@ BlockValidator::Result BlockValidator::check_abort_certs(
             if (excluded.count(nd.domain)) continue;
             avail.push_back(nd.domain);
         }
-        if (avail.size() < m)
+
+        // Match check_if_selected's escalation logic: at step i we have
+        // already applied i prior aborts. If avail < k_full AND escalation
+        // gate met AND avail >= k_bft, committee size at this event is
+        // k_bft; otherwise k_full.
+        size_t m_at_event = k_full;
+        if (avail.size() < k_full
+            && bft_enabled_
+            && i >= bft_escalation_threshold_
+            && avail.size() >= k_bft) {
+            m_at_event = k_bft;
+        }
+        if (avail.size() < m_at_event)
             return {false, "insufficient eligible nodes at abort_event[" + std::to_string(i) + "]"};
-        auto indices = select_m_creators(rand, avail.size(), m);
+        auto indices = select_m_creators(rand, avail.size(), m_at_event);
         std::vector<std::string> domains_at_event;
         for (auto idx : indices) domains_at_event.push_back(avail[idx]);
 
@@ -227,22 +279,68 @@ BlockValidator::Result BlockValidator::check_delay(const Block& b) const {
 }
 
 BlockValidator::Result BlockValidator::check_block_sigs(
-    const Block& b, const NodeRegistry& registry) const {
+    const Block& b, const NodeRegistry& registry, const Chain& chain) const {
     if (b.creator_block_sigs.size() != b.creators.size())
         return {false, "creator_block_sigs size != creators size"};
     if (k_block_sigs_ == 0)
         return {false, "validator k_block_sigs not configured"};
-    if (k_block_sigs_ > b.creators.size())
-        return {false, "k_block_sigs > M (genesis misconfigured)"};
+    // committee size may be smaller than k_block_sigs_ in BFT-mode blocks
+    // (escalated to ceil(2K/3)). check_creator_selection enforces the
+    // size↔mode pairing.
+
+    // rev.8 mode-eligibility: BFT mode is permitted only when bft_enabled
+    // AND total abort threshold met AND committee size matches k_bft. The
+    // committee-size check above (in check_creator_selection) already
+    // enforces the size↔mode pairing; here we enforce the abort-threshold
+    // gate so a malicious proposer can't unilaterally escalate.
+    size_t total_aborts = b.abort_events.size();
+    if (b.consensus_mode == ConsensusMode::BFT) {
+        if (!bft_enabled_)
+            return {false, "BFT block but bft_enabled=false at genesis"};
+        if (total_aborts < bft_escalation_threshold_)
+            return {false, "BFT block with insufficient aborts ("
+                         + std::to_string(total_aborts) + " < " + std::to_string(bft_escalation_threshold_) + ")"};
+    }
+
+    size_t required = required_block_sigs(b.consensus_mode, b.creators.size());
+
+    if (b.consensus_mode == ConsensusMode::MUTUAL_DISTRUST) {
+        if (!b.bft_proposer.empty())
+            return {false, "bft_proposer set in MUTUAL_DISTRUST block"};
+    } else {
+        // BFT: bft_proposer must be the deterministically-chosen committee
+        // member, and that member must have signed. Use epoch-relative +
+        // shard-salted rand to match check_creator_selection's seed.
+        EpochIndex epi = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
+        uint64_t   estart = epi * (epoch_blocks_ ? epoch_blocks_ : 1);
+        Hash erand;
+        if (estart == 0 || estart > chain.height()) {
+            erand = chain.empty() ? Hash{} : chain.head().cumulative_rand;
+        } else {
+            erand = chain.at(estart - 1).cumulative_rand;
+        }
+        Hash seed = epoch_committee_seed(erand, shard_id_);
+        size_t expected_idx = proposer_idx(seed, b.abort_events,
+                                            b.creators.size());
+        if (expected_idx >= b.creators.size())
+            return {false, "proposer index out of range"};
+        if (b.bft_proposer != b.creators[expected_idx])
+            return {false, "wrong BFT proposer: block has '" + b.bft_proposer
+                         + "', expected '" + b.creators[expected_idx] + "'"};
+        Signature zero{};
+        if (b.creator_block_sigs[expected_idx] == zero)
+            return {false, "BFT proposer did not sign"};
+    }
 
     Hash digest = compute_block_digest(b);
     Signature zero_sig{};
 
     size_t signed_count = 0;
     for (size_t i = 0; i < b.creators.size(); ++i) {
-        // Sentinel: all-zero sig means "did not sign in time". K-of-M weak
-        // BFT permits up to (M - K) such positions. False-positive rate
-        // (an Ed25519 sig happening to be all zeros) is ~2^-512, negligible.
+        // Sentinel: all-zero sig means "did not sign in time". MD requires
+        // all K to sign (no sentinels); BFT permits up to K - ceil(2K/3)
+        // sentinel positions. False-positive rate (a real Ed25519 sig
+        // happening to be all zeros) is ~2^-512, negligible.
         if (b.creator_block_sigs[i] == zero_sig) continue;
 
         auto e = registry.find(b.creators[i]);
@@ -252,9 +350,10 @@ BlockValidator::Result BlockValidator::check_block_sigs(
         ++signed_count;
     }
 
-    if (signed_count < k_block_sigs_)
+    if (signed_count < required)
         return {false, "block signatures " + std::to_string(signed_count)
-                     + " < required " + std::to_string(k_block_sigs_)};
+                     + " < required " + std::to_string(required)
+                     + " (mode=" + std::to_string(static_cast<int>(b.consensus_mode)) + ")"};
     return {true, ""};
 }
 

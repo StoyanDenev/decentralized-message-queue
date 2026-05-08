@@ -45,9 +45,23 @@ This design has three consequences worth highlighting:
 
 Transactions from both account types are signed under Ed25519. The chain validates signatures uniformly; the only difference is consensus eligibility.
 
+**Trust model — mutual distrust, not Byzantine fault tolerance.** Classic BFT protocols (Tendermint, HotStuff, PBFT) bound the adversary fraction (typically `f < N/3`) and design for an honest majority: as long as fewer than the threshold are corrupted, safety and liveness hold. DHCoin takes a different stance: **every committee member is treated as potentially adversarial, with no a-priori honest fraction assumed**. The protocol structure makes any deviation either cryptographically detectable, economically punishable, or self-defeating — independent of how many participants are honest.
+
+The mechanism rests on three properties:
+
+1. **Mutual veto via K-of-K signatures.** A block requires every committee member to sign the same digest. Any single member can refuse — they cannot unilaterally produce a block, but they also cannot unilaterally allow a malformed one. Refusal is detectable (Phase 1 absence triggers an `AbortClaimMsg` quorum, recorded as an `AbortEvent` in the next block) and economically costly (suspension, with slashing as a future v1.x extension).
+
+2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Coordinating K-way unanimous collusion is fragile precisely because defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship).
+
+3. **No predictability of consequence.** The block's randomness `R = SHA-256^T(seed)` is committed-then-revealed: every committee member's `dh_input` is part of the seed, but `R` is not computable until after Phase 1 closes (the delay-hash takes longer than the Phase 1 window). A committee member deciding whether to participate cannot compute whether participation favors them — selective abort is cryptographically defeated.
+
+The result: DHCoin does not need to know which participants are honest. It needs only that participants act in their own self-interest (collect block rewards, avoid suspension, include fee-bearing transactions). Any deviation either fails to produce a block (refusal → abort) or fails to bias outcomes (delay-hash blinds the future). This is the "mutual distrust" stance: the protocol is robust *because* every party watches every other, not because some are trusted to be honest.
+
+The trade-off vs. BFT: DHCoin gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; hybrid mode adds rotation, see §10.4). In return it gets exponentially stronger censorship resistance (`(f/N)^K` vs. BFT's leader-bottlenecked single-proposer model), unconditional fork-freedom (no fork-choice rule needed), and a clean economic story (refusing to participate is always self-punishing, regardless of adversary fraction).
+
 **Network assumptions.** We assume a partially synchronous network: messages are delivered within some known bound `Δ` during normal operation. The protocol tolerates periods of asynchrony by aborting and restarting rounds. Safety does not require synchrony — an invalid block is rejected regardless of message ordering.
 
-**Adversary model.** An adversary may corrupt up to `f` of `N` registered nodes. Corrupted nodes may deviate arbitrarily from the protocol (Byzantine faults), delay messages within `Δ`, and choose which Phase 1 contributions to publish. The adversary cannot forge Ed25519 signatures or break SHA-256, and cannot evaluate the iterated SHA-256 delay-hash faster than its inherent sequential bound.
+**Adversary model.** Concretely, an adversary may control any subset of `N` registered nodes (no fraction bound assumed for safety). Corrupted nodes may deviate arbitrarily from the protocol, delay messages within `Δ`, and choose which Phase 1 contributions to publish. The adversary cannot forge Ed25519 signatures or break SHA-256, and cannot evaluate the iterated SHA-256 delay-hash faster than its inherent sequential bound. Liveness — but not safety — degrades as adversary fraction approaches 100%.
 
 **Safety assumption.** Safety (no two valid blocks at the same height) holds unconditionally — it is enforced by the K-of-K signature requirement over the same block digest.
 
@@ -143,19 +157,27 @@ A round aborts when `K-1` distinct committee members each broadcast an `AbortCla
 Block {
     index, prev_hash, timestamp
     transactions      : []Transaction      // canonical (from, nonce, hash) order
-    creators          : []string           // K committee, selection order
-    creator_tx_lists  : [][]Hash           // K Phase 1 hash lists
-    creator_ed_sigs   : [][64]             // K Phase 1 commit sigs
-    creator_dh_inputs : [][32]             // K Phase 1 randomness contributions
+    creators          : []string           // committee, selection order
+    creator_tx_lists  : [][]Hash           // K' Phase 1 hash lists
+    creator_ed_sigs   : [][64]             // K' Phase 1 commit sigs
+    creator_dh_inputs : [][32]             // K' Phase 1 randomness contributions
     tx_root           : [32]               // root over union(creator_tx_lists)
     delay_seed        : [32]               // H(idx ‖ prev_hash ‖ tx_root ‖ dh_inputs)
     delay_output      : [32]               // R = SHA-256^T(delay_seed)
-    creator_block_sigs: [][64]             // K Phase 2 Ed25519 sigs over block_digest
+    consensus_mode    : uint8              // 0 = MUTUAL_DISTRUST (K-of-K), 1 = BFT
+    bft_proposer      : string             // empty in MD blocks
+    creator_block_sigs: [][64]             // K' Phase 2 Ed25519 sigs over block_digest
     abort_events      : []AbortEvent
     cumulative_rand   : [32]               // SHA-256(prev_rand ‖ delay_output)
     hash              : [32]
 }
 ```
+
+`K'` is the committee size for this block:
+- `K' = K` (genesis-pinned `k_block_sigs`) for MD blocks (steady state).
+- `K' = ceil(2K/3)` for BFT blocks (per-height escalation; see §10.4).
+
+In MD blocks every position in `creator_block_sigs` carries a real Ed25519 signature (K-of-K). In BFT blocks up to `K' - ceil(2K'/3)` positions may carry the all-zero `Signature{}` sentinel (proposer-led `ceil(2K'/3)`-of-K' threshold, see §10.4). `bft_proposer` is the deterministically-chosen committee member who finalized the block; in MD blocks it is empty.
 
 ---
 
@@ -360,15 +382,29 @@ The default profile sets `T_delay = 2 × tx_commit_ms`, giving the "Acceptable" 
 
 A note on terminology: this primitive resembles a "verifiable delay function" (VDF) in spirit, but lacks the succinct-verify property of true VDFs (Wesolowski/Pietrzak class-group constructions). Verification reruns all `T` SHA-256 iterations rather than checking a `O(log T)` proof. This trade is deliberate: succinct verify is a *performance* feature, not a *security* feature. The selective-abort defense depends only on **sequentiality**, which iterated SHA-256 provides without exotic cryptography or external dependencies. Verifier cost at `T = 200k` is ~2 ms with SHA-NI hardware acceleration — negligible for a full node. Solana's Proof of History uses the same primitive for an analogous purpose.
 
-### 10.4 Liveness
+### 10.4 Liveness — per-height BFT escalation
 
-**Strong mode (`K = M_pool`).** Every committee is the entire pool. A single silent creator triggers an abort. Suspension thereafter excludes the silent creator and the chain proceeds with `K-1` healthy creators if the chain operator has set `K = M_pool - 1` (rare in strong mode). In practice strong mode requires every `M_pool` to be alive.
+**Strong mode (`K = M_pool`)** is the default. Every committee is the entire pool; a single silent creator halts the round.
 
-**Hybrid mode (`K < M_pool`).** Each round selects `K` of `M_pool`. The design intent is to tolerate `M_pool − K` silent creators by rotating around them — a Phase 1 abort against a silent creator excludes them locally (§6), and once a block finalizes the abort baked in, suspension kicks in chain-wide.
+**Per-height BFT escalation (rev.8)** restores liveness without giving up strong mode's safety on most blocks. The mechanism, configured via genesis-pinned `bft_enabled` (default `true`) and `bft_escalation_threshold` (default 5):
 
-**v1 caveat.** Hybrid mode in the current implementation is structurally complete (selection, exclusion, abort certs, validator symmetry) but does not yet deliver its full liveness benefit. Phase 2 finalization for `K < M` is fundamentally racy without a designated proposer: different peers can collect different `K`-subsets of signatures and produce divergent (but each individually valid) blocks at the same height. The current implementation requires all `K` Phase 2 signatures to finalize a block, treating hybrid mode as operationally equivalent to strong mode within the committee. The genesis-pinned `K < M_pool` parameter is preserved for forward compatibility; the proposer rotation or fork-choice logic that activates hybrid liveness is a v2 deliverable.
+1. **Default state**: each round runs in **MUTUAL_DISTRUST** mode — full K-of-K Phase 2 unanimity, every block is unconditionally fork-free.
+2. **Trigger**: when an in-flight round at height `h` accumulates `bft_escalation_threshold` aborts AND the eligible pool (registry minus aborted-this-height domains) has dropped below `K`, the next round at `h` falls back to **BFT** mode.
+3. **BFT mode**: committee shrinks to `ceil(2K/3)` selected from the available pool. A deterministic **designated proposer** (chosen from the committee via `proposer_idx(prev_cum_rand, abort_events, |committee|)`) is the only node that builds a block at this height. Phase 1 still requires unanimity within the smaller committee; Phase 2 finalizes on `ceil(2K_eff/3)` sigs collected by the proposer. The block carries `consensus_mode = BFT` and `bft_proposer = <domain>`.
+4. **Reset**: after the escalated block finalizes, height `h+1` resets to MD by default.
 
-For production v1 deployments, use strong mode (`K = M_pool`).
+**Per-block trust claim:**
+
+| Block type | Safety                                  | Censorship                                |
+|-----------|-----------------------------------------|-------------------------------------------|
+| MD        | **Unconditional** (no honest-fraction assumption — see §2 trust model) | K-conjunction over committee |
+| BFT       | Conditional on `f < N/3` in this committee + economic disincentive | (1+K_eff/3)-conjunction over the smaller committee |
+
+Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
+
+**Slashing (rev.8)**: BFT-mode safety depends on `f < N/3` plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DHC) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
+
+**Opt out**: setting `bft_enabled = false` at genesis preserves the rev.7 single-mode behavior — chain halts on persistent silent committee member, by design. Suitable for consortium deployments where validator availability is governed by operator policy rather than open-stake economics.
 
 ### 10.5 Censorship vs. liveness, side by side
 
@@ -448,10 +484,13 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 | `k_block_sigs` (K) | 3 (= M_pool, strong) | Genesis-pinned |
 | `block_subsidy` | 10 (atomic) | Genesis-pinned, page reward |
 | `delay_T` | 200000 (web profile) | Genesis-pinned, iteration count |
+| `bft_enabled` | true | Genesis-pinned. Enables per-height BFT escalation (§10.4) |
+| `bft_escalation_threshold` | 5 | Genesis-pinned. Total aborts at same height before escalation |
+| `SUSPENSION_SLASH` | 10 (atomic) | Stake deducted on each round-1 abort suspension |
 | `tx_commit_ms` | 200 | Phase 1 timer |
 | `block_sig_ms` | 200 | Phase 2 timer |
 | `abort_claim_ms` | 100 | Abort claim collection window |
-| `MIN_STAKE` | 100 | Eligibility threshold |
+| `MIN_STAKE` | 1000 | Eligibility threshold |
 | `BASE_SUSPENSION_BLOCKS` | 10 | First-offense suspension |
 | `MAX_SUSPENSION_BLOCKS` | 10000 | Cap |
 | `MAX_ABORT_EXPONENT` | 10 | Backoff cap |
@@ -500,19 +539,112 @@ Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slot
 
 ## 15. Limitations and Future Work
 
-**Hybrid-mode liveness (v2).** As §10.4 notes, `K < M_pool` does not yet deliver `M_pool − K` silent-tolerance under Phase 2 timing skew. v2 will add a designated proposer per round (or fork-choice with bounded reorg) to make hybrid mode operationally tolerate creator drops.
+**Hybrid-mode liveness (v2).** As §10.4 notes, the rev.7 hybrid-mode `K < M_pool` configuration is partially superseded by rev.8's per-height BFT escalation. The escalation mechanism delivers what hybrid mode was originally trying to: chain progress when the eligible pool can't form K-of-K. Hybrid mode is preserved as a parameter but the escalation path is now the recommended liveness story.
 
 **Stake-weighted selection.** v1 selects creators uniformly from the stake-eligible pool. Stake-weighted selection (proportional to bonded stake) is a natural extension for production deployments.
 
-**Sharding / parallel execution.** Transactions execute serially in canonical order. Throughput is bounded by single-threaded validation. Parallel validation with conflict detection is future work.
+**Sharding / parallel execution.** §16 introduces the rev.9 sharding architecture and its current scaffolding state. Full multi-chain coordination (Stage B2c onward) is in progress. Parallel transaction execution within a single chain (Block-STM-style) is orthogonal and not yet implemented.
 
-**Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals. Appropriate for a financial ledger (CP, not AP).
+**Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP).
 
 **Binary wire codec (S8).** Current JSON-over-TCP is convenient but verbose. v2 will introduce a binary message codec for bandwidth efficiency.
 
+**Equivocation slashing.** Suspension slashing (§10.4) is wired and active. Equivocation slashing — full stake forfeiture when a node signs two valid blocks at the same height — is forthcoming v2.x. BFT-mode safety claims become economically meaningful once both are in place.
+
 ---
 
-## 16. Conclusion
+## 16. Sharding (rev.9, in progress)
+
+A sharded DHCoin deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the rev.8 protocol on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+
+### 17.1 Architecture
+
+```
+       ┌──────────────────────────────────────────┐
+       │  Beacon chain (rev.7 MD K-of-K)          │
+       │  cumulative_rand, validator pool,        │
+       │  cross-shard receipts, epoch transitions │
+       └──┬───────────┬──────────────┬────────────┘
+          │           │              │      epoch_seed
+          ▼           ▼              ▼
+     ┌────────┐  ┌────────┐    ┌────────┐
+     │ Shard 0│  │ Shard 1│ …  │Shard S-1│
+     │ rev.8  │  │ rev.8  │    │  rev.8  │
+     │ MD+BFT │  │ MD+BFT │    │ MD+BFT  │
+     └────────┘  └────────┘    └────────┘
+```
+
+The beacon runs MD K-of-K only (no escalation; halts on persistent silent committee member). Shards run rev.8 MD-default with per-height BFT escalation. Asymmetry rationale: the beacon is the trust anchor — strong unconditional safety on every beacon block, low volume, halt-recoverable. Shards are the throughput layer — needs liveness more than censorship in steady state.
+
+### 17.2 Reusing `cumulative_rand` for shard committees
+
+Per epoch (every `E` beacon blocks), each shard's committee is derived from the beacon's `cumulative_rand` plus a per-shard salt:
+
+```
+shard_seed = SHA-256(beacon_epoch_seed ‖ "shard-committee" ‖ shard_id)
+shard_committee[s] = select_m_creators(shard_seed, validator_pool_size, K_per_shard)
+```
+
+The same `select_m_creators` function used in single-chain mode. The salt makes shards' committees independent. The delay-hash sequentiality (§10.3) prevents adversaries from grinding their stake to land on a target shard's committee — the next epoch's seed is not computable until the current epoch finalizes.
+
+### 17.3 Account-to-shard assignment
+
+```
+shard_id(addr) = first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S
+```
+
+`genesis_salt` is `GenesisConfig.shard_address_salt`, fixed at chain creation (32 random bytes). Stable for chain lifetime. `S` may grow at epoch boundaries via a beacon governance op (forthcoming).
+
+### 17.4 Cross-shard transactions (planned)
+
+Two-phase via beacon-mediated receipts:
+
+1. User submits TRANSFER from `A_in_shard_0` to `B_in_shard_1`. Routed to shard 0.
+2. Shard 0 includes the tx in its block, debiting A's balance. Emits `CrossShardReceipt{src=0, dst=1, ...}` in `receipts_consumed`.
+3. Beacon picks up the receipt at its next block, includes in `receipts_published`.
+4. Shard 1 reads the beacon, includes the receipt in its next block, crediting B's balance.
+
+Cross-shard finality: `~3 × shard block time` (~2.7s on web profile). In-shard: `~1 × shard block time`. Atomicity is eventual consistency (debit-then-credit); atomic 2PC with timeout-revert is v3.
+
+### 17.5 Current implementation state (rev.9)
+
+The architecture is staged across multiple stages, each delivering standalone value:
+
+| Stage | What | Status |
+|---|---|---|
+| **B0** | `ChainRole {SINGLE, BEACON, SHARD}` enum threaded through `GenesisConfig`, `Node Config`, JSON I/O | ✅ done |
+| **B1** | Per-epoch + per-shard committee seed (`epoch_committee_seed(rand, shard_id)`), `current_epoch_index/rand` helpers, validator mirror | ✅ done |
+| **B2a** | `genesis-tool build-sharded` produces `(1 beacon + S shard)` genesis files with distinct hashes | ✅ done |
+| **B2b-lite** | RPC + log surface `chain_role` / `shard_id` / `epoch_index`. `tools/test_sharded_smoke.sh` boots beacon + shard side-by-side | ✅ done |
+| **B2c** | Cross-chain coordination: shards subscribe to beacon's chain, beacon tracks shard tips, gossip-based message flow | 🔄 in progress |
+| **B3** | `CrossShardReceipt` mempool, emission, consumption | ⏳ pending |
+| **B4** | `S = 4` deployment tooling, multi-shard integration test | ⏳ pending |
+| **B5** | Validator rotation across epochs, equivocation slashing | ⏳ pending |
+| **B6** | Hardening (sync, recovery, light clients, shard-count growth) | ⏳ pending |
+
+`ChainRole = SINGLE` is the default. With S=1 and SINGLE, behavior is bitwise-identical to rev.8 — sharding is opt-in at genesis.
+
+### 17.6 Censorship + safety claims under sharding
+
+DHCoin's K-conjunction censorship resistance is **per-shard, per-epoch**. An adversary capturing a single shard's K-committee for an epoch can censor that shard's transactions for the epoch. Rotation at the next epoch boundary evicts them. Operator knobs:
+
+- Larger `K_per_shard` — harder to capture.
+- Shorter `E` — less window per capture.
+- Larger `pool / S` ratio — captures need validators across multiple epochs to land enough on a target shard.
+
+Per-block trust is observable via `consensus_mode`:
+
+| Block | Safety | Censorship |
+|---|---|---|
+| Beacon | Unconditional (rev.7 MD) | K-conjunction over beacon committee |
+| Shard MD | Unconditional (rev.8 MD) | K-conjunction over shard committee |
+| Shard BFT | Conditional `f < N/3` + slashing | (1+K_eff/3)-conjunction over shard committee |
+
+Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
+
+---
+
+## 17. Conclusion
 
 DHCoin demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a sequential delay-hash (iterated SHA-256), defeating selective abort by construction rather than by economic disincentive. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
 

@@ -31,12 +31,19 @@ json GenesisConfig::to_json() const {
         });
     }
     return {
-        {"chain_id",         chain_id},
-        {"m_creators",       m_creators},
-        {"k_block_sigs",     k_block_sigs},
-        {"block_subsidy",    block_subsidy},
-        {"initial_creators", creators},
-        {"initial_balances", balances}
+        {"chain_id",                 chain_id},
+        {"m_creators",               m_creators},
+        {"k_block_sigs",             k_block_sigs},
+        {"block_subsidy",            block_subsidy},
+        {"bft_enabled",              bft_enabled},
+        {"bft_escalation_threshold", bft_escalation_threshold},
+        {"chain_role",               static_cast<uint8_t>(chain_role)},
+        {"shard_id",                 shard_id},
+        {"initial_shard_count",      initial_shard_count},
+        {"epoch_blocks",             epoch_blocks},
+        {"shard_address_salt",       to_hex(shard_address_salt)},
+        {"initial_creators",         creators},
+        {"initial_balances",         balances}
     };
 }
 
@@ -46,6 +53,15 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.m_creators    = j.value("m_creators",    uint32_t{3});
     c.k_block_sigs  = j.value("k_block_sigs",  c.m_creators);   // default to M (strong)
     c.block_subsidy = j.value("block_subsidy", uint64_t{0});
+    c.bft_enabled              = j.value("bft_enabled",              true);
+    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
+    c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
+    c.shard_id                 = j.value("shard_id",                 ShardId{0});
+    c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
+    c.epoch_blocks             = j.value("epoch_blocks",             uint32_t{1000});
+    if (j.contains("shard_address_salt")) {
+        c.shard_address_salt = from_hex_arr<32>(j["shard_address_salt"].get<std::string>());
+    }
 
     if (j.contains("initial_creators")) {
         for (auto& cj : j["initial_creators"]) {
@@ -123,10 +139,14 @@ Block make_genesis_block(const GenesisConfig& cfg) {
         }
     }
 
-    // cumulative_rand anchored to chain_id + concat(ed_pubs).
+    // cumulative_rand anchored to chain_id + role + shard_id + concat(ed_pubs).
+    // The role + shard_id make a beacon vs shard_i genesis distinguishable
+    // even when they share the same chain_id and creator set.
     SHA256Builder rb;
     rb.append(std::string("DHC-genesis-v1"));
     rb.append(cfg.chain_id);
+    rb.append(static_cast<uint8_t>(cfg.chain_role));
+    rb.append(static_cast<uint64_t>(cfg.shard_id));
     for (auto& c : cfg.initial_creators) rb.append(c.ed_pub.data(), c.ed_pub.size());
     g.cumulative_rand = rb.finalize();
 

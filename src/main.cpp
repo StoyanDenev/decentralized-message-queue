@@ -5,6 +5,7 @@
 #include <dhcoin/crypto/keys.hpp>
 #include <dhcoin/chain/genesis.hpp>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -51,6 +52,7 @@ Usage:
   dhcoin genesis-tool peer-info <domain>     Print this node's creator entry (JSON)
                                               for inclusion in a genesis config.
   dhcoin genesis-tool build <config.json>    Build a genesis from peer-info entries
+  dhcoin genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
                                               and print the genesis hash.
   dhcoin account create [--out <file>]       Generate a fresh anonymous account
                                               keypair (Ed25519). Prints address + privkey.
@@ -365,9 +367,18 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
         std::string hex = to_hex(hash);
         const char* mode = (cfg.k_block_sigs == cfg.m_creators) ? "strong" : "weak";
         std::cout << "Genesis chain_id:   " << cfg.chain_id           << "\n";
+        std::cout << "Chain role:         " << to_string(cfg.chain_role)
+                  << " (shard_id=" << cfg.shard_id
+                  << ", S=" << cfg.initial_shard_count
+                  << ", E=" << cfg.epoch_blocks << ")\n";
         std::cout << "M_creators:         " << cfg.m_creators         << "\n";
         std::cout << "K_block_sigs:       " << cfg.k_block_sigs       << "\n";
-        std::cout << "Mode:               " << mode << " BFT\n";
+        std::cout << "Mode:               " << mode << " (default: mutual-distrust K-of-K)\n";
+        std::cout << "BFT escalation:     "
+                  << (cfg.bft_enabled
+                      ? ("enabled, threshold=" + std::to_string(cfg.bft_escalation_threshold) + " round-1 aborts")
+                      : "disabled (chain halts on persistent silent committee member)")
+                  << "\n";
         std::cout << "Initial creators:   " << cfg.initial_creators.size() << "\n";
         std::cout << "Initial balances:   " << cfg.initial_balances.size() << "\n";
         std::cout << "Genesis hash:       " << hex << "\n";
@@ -380,6 +391,86 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// genesis-tool build-sharded <config.json>
+//   Stage B2a. Loads a single GenesisConfig and produces (1 + S) genesis
+//   files: one beacon (chain_role=BEACON, shard_id=0) and S shard files
+//   (chain_role=SHARD, shard_id=i for i in 0..S-1). All inherit the same
+//   creators, balances, K, M, BFT params, and shard_address_salt.
+//
+//   The beacon's hash is pinned into each shard's `genesis_hash` config
+//   slot at deploy time (operators copy it into shard nodes' config.json).
+//   Cross-chain coordination (epoch transitions, cross-shard receipts)
+//   is Stage B2b/B2c — out of scope for this minimal scaffolding step.
+static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: dhcoin genesis-tool build-sharded <genesis_config.json>\n";
+        return 1;
+    }
+    std::string path = argv[0];
+    try {
+        auto base = chain::GenesisConfig::load(path);
+        if (base.k_block_sigs == 0 || base.k_block_sigs > base.m_creators) {
+            std::cerr << "Genesis invalid: k_block_sigs=" << base.k_block_sigs
+                      << " must satisfy 1 <= K <= M=" << base.m_creators << "\n";
+            return 1;
+        }
+        if (base.initial_shard_count < 1) {
+            std::cerr << "build-sharded requires initial_shard_count >= 1 in input config\n";
+            return 1;
+        }
+
+        // Generate a fresh shard_address_salt if the input didn't supply one.
+        Hash zero_salt{};
+        if (base.shard_address_salt == zero_salt) {
+            if (RAND_bytes(base.shard_address_salt.data(), 32) != 1) {
+                std::cerr << "Failed to generate shard_address_salt\n";
+                return 1;
+            }
+        }
+
+        // Beacon genesis (role=BEACON, shard_id=0).
+        chain::GenesisConfig beacon = base;
+        beacon.chain_role = ChainRole::BEACON;
+        beacon.shard_id   = 0;
+        std::string beacon_path = path + ".beacon.json";
+        beacon.save(beacon_path);
+        Hash beacon_hash = chain::compute_genesis_hash(beacon);
+        std::ofstream(beacon_path + ".hash") << to_hex(beacon_hash) << "\n";
+
+        std::cout << "Beacon genesis:     " << beacon_path << "\n";
+        std::cout << "  chain_role:       beacon (shard_id=0, S=" << beacon.initial_shard_count
+                  << ", E=" << beacon.epoch_blocks << ")\n";
+        std::cout << "  hash:             " << to_hex(beacon_hash) << "\n";
+
+        // Shard genesis files (role=SHARD, shard_id=0..S-1).
+        for (uint32_t s = 0; s < base.initial_shard_count; ++s) {
+            chain::GenesisConfig shard = base;
+            shard.chain_role = ChainRole::SHARD;
+            shard.shard_id   = s;
+            std::string shard_path = path + ".shard" + std::to_string(s) + ".json";
+            shard.save(shard_path);
+            Hash sh = chain::compute_genesis_hash(shard);
+            std::ofstream(shard_path + ".hash") << to_hex(sh) << "\n";
+
+            std::cout << "Shard genesis:      " << shard_path << "\n";
+            std::cout << "  chain_role:       shard (shard_id=" << s
+                      << ", S=" << shard.initial_shard_count
+                      << ", E=" << shard.epoch_blocks << ")\n";
+            std::cout << "  hash:             " << to_hex(sh) << "\n";
+        }
+
+        std::cout << "\nNote: this scaffolds the genesis file structure for sharded "
+                     "deployments.\n      Cross-chain coordination (validator pool at "
+                     "beacon, epoch broadcast,\n      cross-shard receipts) is Stage "
+                     "B2b/B2c — operators must run beacon\n      and each shard as "
+                     "separate processes, with their own bootstrap_peers.\n";
+        return 0;
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // account create [--out <file>]
@@ -515,8 +606,9 @@ static int cmd_genesis_tool(int argc, char** argv) {
         return 1;
     }
     std::string sub = argv[0];
-    if (sub == "peer-info") return cmd_genesis_tool_peer_info(argc - 1, argv + 1);
-    if (sub == "build")     return cmd_genesis_tool_build    (argc - 1, argv + 1);
+    if (sub == "peer-info")     return cmd_genesis_tool_peer_info    (argc - 1, argv + 1);
+    if (sub == "build")         return cmd_genesis_tool_build         (argc - 1, argv + 1);
+    if (sub == "build-sharded") return cmd_genesis_tool_build_sharded (argc - 1, argv + 1);
     std::cerr << "Unknown genesis-tool subcommand: " << sub << "\n";
     return 1;
 }

@@ -19,6 +19,13 @@ enum class MsgType : uint8_t {
     STATUS_REQUEST   = 7,
     STATUS_RESPONSE  = 8,
     ABORT_CLAIM      = 9,
+    // rev.8 follow-on: a node that forms a K-1 abort-claim quorum locally
+    // broadcasts the assembled AbortEvent (which carries the signed claims
+    // inline) so peers that missed individual claims can adopt it and
+    // advance their abort generation in lock-step. Without this, peers
+    // that see only their own claim stay stuck waiting for a second claim
+    // that never re-broadcasts.
+    ABORT_EVENT      = 10,
 };
 
 struct Message {
@@ -46,6 +53,17 @@ inline Message make_contrib(const node::ContribMsg& c) {
 }
 inline Message make_abort_claim(const node::AbortClaimMsg& a) {
     return {MsgType::ABORT_CLAIM, a.to_json()};
+}
+inline Message make_abort_event(const chain::AbortEvent& e, uint64_t block_index,
+                                  const Hash& prev_hash) {
+    // The AbortEvent itself doesn't know which height/prev_hash it belongs
+    // to (those come from the round context). Wrap it with that context
+    // so a receiver can verify the claims inside still bind to its view.
+    return {MsgType::ABORT_EVENT, {
+        {"block_index", block_index},
+        {"prev_hash",   to_hex(prev_hash)},
+        {"event",       e.to_json()}
+    }};
 }
 inline Message make_get_chain(uint64_t from_index = 0, uint16_t count = 64) {
     return {MsgType::GET_CHAIN, {{"from", from_index}, {"count", count}}};

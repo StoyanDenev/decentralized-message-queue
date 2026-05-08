@@ -28,6 +28,15 @@ public:
     void set_k_block_sigs(uint32_t K) { k_block_sigs_ = K; }
     void set_m_pool(uint32_t M)       { m_pool_ = M; }
 
+    // rev.8 per-height BFT escalation. When `bft_enabled_` is true, validator
+    // accepts BFT-mode blocks if their abort count satisfies the threshold.
+    void set_bft_enabled(bool en)             { bft_enabled_ = en; }
+    void set_bft_escalation_threshold(uint32_t t) { bft_escalation_threshold_ = t; }
+
+    // rev.9 (B1): epoch-relative committee derivation parameters.
+    void set_epoch_blocks(uint32_t e) { epoch_blocks_ = e; }
+    void set_shard_id(ShardId s)      { shard_id_ = s; }
+
     Result validate(const chain::Block& b,
                     const chain::Chain& chain,
                     const NodeRegistry& registry) const;
@@ -39,7 +48,8 @@ private:
                                    const chain::Chain& chain) const;
     Result check_creator_tx_commitments(const chain::Block& b, const NodeRegistry& registry) const;
     Result check_delay(const chain::Block& b) const;
-    Result check_block_sigs(const chain::Block& b, const NodeRegistry& registry) const;
+    Result check_block_sigs(const chain::Block& b, const NodeRegistry& registry,
+                             const chain::Chain& chain) const;
     Result check_abort_certs(const chain::Block& b, const chain::Chain& chain,
                               const NodeRegistry& registry) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
@@ -50,6 +60,10 @@ private:
     uint64_t delay_T_{0};
     uint32_t k_block_sigs_{0};
     uint32_t m_pool_{0};
+    bool     bft_enabled_{true};
+    uint32_t bft_escalation_threshold_{5};
+    uint32_t epoch_blocks_{1000};
+    ShardId  shard_id_{0};
 };
 
 } // namespace dhcoin::node

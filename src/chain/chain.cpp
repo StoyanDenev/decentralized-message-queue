@@ -223,6 +223,20 @@ void Chain::apply_transactions(const Block& b) {
             accounts_[domain].balance += per_creator;
         accounts_[b.creators[0]].balance += remainder;
     }
+
+    // rev.8 suspension slashing. Each Phase-1 (round=1) AbortEvent baked
+    // into this block deducts SUSPENSION_SLASH from the aborted domain's
+    // staked balance. Bounded by the available stake (no negative
+    // balances). Only Phase-1 aborts count, mirroring registry.cpp's
+    // suspension policy: Phase-2 timing-skew aborts on healthy creators
+    // are not economically punished. Required for BFT-mode safety.
+    for (auto& ae : b.abort_events) {
+        if (ae.round != 1) continue;
+        auto sit = stakes_.find(ae.aborting_node);
+        if (sit == stakes_.end()) continue;
+        uint64_t deduct = std::min<uint64_t>(SUSPENSION_SLASH, sit->second.locked);
+        sit->second.locked -= deduct;
+    }
 }
 
 // ─── Fork resolution ─────────────────────────────────────────────────────────

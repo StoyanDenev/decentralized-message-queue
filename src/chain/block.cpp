@@ -123,6 +123,8 @@ std::vector<uint8_t> Block::signing_bytes() const {
     b.append(tx_root);
     b.append(delay_seed);
     b.append(delay_output);
+    b.append(static_cast<uint8_t>(consensus_mode));
+    b.append(bft_proposer);
     b.append(cumulative_rand);
     for (auto& ae : abort_events) b.append(ae.event_hash);
 
@@ -181,6 +183,8 @@ json Block::to_json() const {
     j["tx_root"]         = to_hex(tx_root);
     j["delay_seed"]      = to_hex(delay_seed);
     j["delay_output"]    = to_hex(delay_output);
+    j["consensus_mode"]  = static_cast<uint8_t>(consensus_mode);
+    j["bft_proposer"]    = bft_proposer;
 
     json jbs = json::array();
     for (auto& s : creator_block_sigs) jbs.push_back(to_hex(s));
@@ -232,6 +236,10 @@ Block Block::from_json(const json& j) {
         b.delay_seed = from_hex_arr<32>(j["delay_seed"].get<std::string>());
     if (j.contains("delay_output"))
         b.delay_output = from_hex_arr<32>(j["delay_output"].get<std::string>());
+    if (j.contains("consensus_mode"))
+        b.consensus_mode = static_cast<ConsensusMode>(j["consensus_mode"].get<uint8_t>());
+    if (j.contains("bft_proposer"))
+        b.bft_proposer = j["bft_proposer"].get<std::string>();
 
     if (j.contains("creator_block_sigs")) {
         for (auto& s : j["creator_block_sigs"])

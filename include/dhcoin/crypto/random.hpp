@@ -33,4 +33,11 @@ std::vector<size_t> select_after_abort_m(const std::vector<size_t>& indices,
 
 Hash genesis_random_state(const Hash& seed);
 
+// Stage B1: per-shard, per-epoch committee selection seed.
+//   epoch_seed = SHA-256(epoch_rand ‖ "shard-committee" ‖ shard_id)
+// epoch_rand is the chain's cumulative_rand at the block that opened the
+// current epoch (block_index = epoch_index * epoch_blocks). This is
+// deterministic across all nodes and stable for the duration of the epoch.
+Hash epoch_committee_seed(const Hash& epoch_rand, ShardId shard_id);
+
 } // namespace dhcoin::crypto

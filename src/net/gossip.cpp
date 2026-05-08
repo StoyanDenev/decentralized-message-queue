@@ -76,6 +76,14 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
         case MsgType::ABORT_CLAIM:
             if (on_abort_claim) on_abort_claim(node::AbortClaimMsg::from_json(msg.payload));
             break;
+        case MsgType::ABORT_EVENT:
+            if (on_abort_event) {
+                uint64_t bi = msg.payload.value("block_index", uint64_t{0});
+                Hash ph = from_hex_arr<32>(msg.payload.value("prev_hash", std::string{}));
+                auto ev = chain::AbortEvent::from_json(msg.payload["event"]);
+                on_abort_event(bi, ph, ev);
+            }
+            break;
         case MsgType::GET_CHAIN:
             if (on_get_chain)
                 on_get_chain(msg.payload.value("from",  uint64_t{0}),

@@ -32,6 +32,26 @@ struct GenesisConfig {
     // Rev. 4: per-block reward minted to creators alongside fees ("page reward"
     // from the original DHCoin spec). Genesis-pinned. 0 = no subsidy (fees only).
     uint64_t                        block_subsidy{0};
+
+    // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
+    // `bft_escalation_threshold` consecutive Phase-1 aborts at the same
+    // height, the next round escalates from MD K-of-K to BFT ceil(2K/3) +
+    // designated proposer. False = MD-only (rev.7 behavior; chain may halt
+    // on persistent silent committee member, by design).
+    bool                            bft_enabled{true};
+    uint32_t                        bft_escalation_threshold{5};
+
+    // Rev. 9 sharding role. SINGLE preserves rev.8 behavior (one chain,
+    // no shards). BEACON / SHARD are the two roles in the sharded
+    // architecture; they're parsed and stored at this level so a single
+    // genesis JSON can describe either an unsharded chain or one chain
+    // within a sharded deployment.
+    ChainRole                       chain_role{ChainRole::SINGLE};
+    ShardId                         shard_id{0};                    // 0 for SINGLE/BEACON
+    uint32_t                        initial_shard_count{1};         // 1 = unsharded
+    uint32_t                        epoch_blocks{1000};             // E (Stage B1)
+    Hash                            shard_address_salt{};           // CSPRNG-generated at build time
+
     std::vector<GenesisCreator>     initial_creators;
     std::vector<GenesisAllocation>  initial_balances;
 

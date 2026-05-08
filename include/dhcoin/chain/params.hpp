@@ -14,6 +14,13 @@ inline constexpr uint64_t UNSTAKE_DELAY = 1000;   // blocks past inactive_from b
 // signature serves as proof-of-possession of the registered key.
 inline constexpr size_t REGISTER_PAYLOAD_SIZE = 32;
 
+// rev.8 economic disincentive on abort suspension. Deducted from the
+// validator's stake at the moment an AbortEvent for this domain is baked
+// into a finalized block. Required for BFT-mode safety claims (BFT
+// safety conditional on f<N/3 + slashing). 100 suspensions exits a
+// minimally-staked validator (10 * 100 = 1000 = MIN_STAKE).
+inline constexpr uint64_t SUSPENSION_SLASH = 10;
+
 // ─── L4 (Consensus) timing profiles ─────────────────────────────────────────
 // Operators pick a profile at init (cluster / web / regional / global). All
 // timers are local; consensus correctness depends on K-1 quorum + the
