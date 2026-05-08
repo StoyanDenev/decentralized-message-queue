@@ -1,0 +1,252 @@
+#include <dhcoin/chain/block.hpp>
+#include <dhcoin/crypto/sha256.hpp>
+
+namespace dhcoin::chain {
+
+using namespace dhcoin::crypto;
+using json = nlohmann::json;
+
+// ─── Transaction ─────────────────────────────────────────────────────────────
+
+std::vector<uint8_t> Transaction::signing_bytes() const {
+    std::vector<uint8_t> out;
+    out.push_back(static_cast<uint8_t>(type));
+    out.insert(out.end(), from.begin(), from.end());
+    out.push_back(0);
+    out.insert(out.end(), to.begin(), to.end());
+    out.push_back(0);
+    for (int i = 7; i >= 0; --i) out.push_back((amount >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) out.push_back((fee    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) out.push_back((nonce  >> (i * 8)) & 0xFF);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+Hash Transaction::compute_hash() const {
+    auto sb = signing_bytes();
+    return sha256(sb.data(), sb.size());
+}
+
+json Transaction::to_json() const {
+    json j;
+    j["type"]    = static_cast<int>(type);
+    j["from"]    = from;
+    j["to"]      = to;
+    j["amount"]  = amount;
+    j["fee"]     = fee;
+    j["nonce"]   = nonce;
+    j["payload"] = to_hex(payload.data(), payload.size());
+    j["sig"]     = to_hex(sig);
+    j["hash"]    = to_hex(hash);
+    return j;
+}
+
+Transaction Transaction::from_json(const json& j) {
+    Transaction tx;
+    tx.type    = static_cast<TxType>(j["type"].get<int>());
+    tx.from    = j["from"].get<std::string>();
+    tx.to      = j["to"].get<std::string>();
+    tx.amount  = j["amount"].get<uint64_t>();
+    tx.fee     = j.value("fee", uint64_t{0});
+    tx.nonce   = j["nonce"].get<uint64_t>();
+    tx.payload = from_hex(j["payload"].get<std::string>());
+    tx.sig     = from_hex_arr<64>(j["sig"].get<std::string>());
+    tx.hash    = from_hex_arr<32>(j["hash"].get<std::string>());
+    return tx;
+}
+
+// ─── GenesisAlloc ────────────────────────────────────────────────────────────
+
+json GenesisAlloc::to_json() const {
+    return {
+        {"domain",  domain},
+        {"ed_pub",  to_hex(ed_pub)},
+        {"balance", balance},
+        {"stake",   stake}
+    };
+}
+
+GenesisAlloc GenesisAlloc::from_json(const json& j) {
+    GenesisAlloc a;
+    a.domain  = j["domain"].get<std::string>();
+    a.ed_pub  = from_hex_arr<32>(j.value("ed_pub", std::string(64, '0')));
+    a.balance = j.value("balance", uint64_t{0});
+    a.stake   = j.value("stake",   uint64_t{0});
+    return a;
+}
+
+// ─── AbortEvent ──────────────────────────────────────────────────────────────
+
+json AbortEvent::to_json() const {
+    json j;
+    j["round"]         = round;
+    j["aborting_node"] = aborting_node;
+    j["timestamp"]     = timestamp;
+    j["event_hash"]    = to_hex(event_hash);
+    j["claims"]        = claims_json.is_null() ? json::array() : claims_json;
+    return j;
+}
+
+AbortEvent AbortEvent::from_json(const json& j) {
+    AbortEvent ae;
+    ae.round         = j["round"].get<uint8_t>();
+    ae.aborting_node = j["aborting_node"].get<std::string>();
+    ae.timestamp     = j["timestamp"].get<int64_t>();
+    ae.event_hash    = from_hex_arr<32>(j["event_hash"].get<std::string>());
+    ae.claims_json   = j.value("claims", json::array());
+    return ae;
+}
+
+// ─── Block ───────────────────────────────────────────────────────────────────
+
+std::vector<uint8_t> Block::signing_bytes() const {
+    SHA256Builder b;
+    b.append(static_cast<uint64_t>(index));
+    b.append(prev_hash);
+    b.append(timestamp);
+
+    SHA256Builder txh;
+    for (auto& tx : transactions) {
+        auto sb = tx.signing_bytes();
+        txh.append(sb.data(), sb.size());
+    }
+    b.append(txh.finalize());
+
+    for (auto& c : creators) b.append(c);
+
+    for (auto& list : creator_tx_lists)
+        for (auto& h : list) b.append(h);
+    for (auto& s : creator_ed_sigs)
+        b.append(s.data(), s.size());
+    for (auto& h : creator_dh_inputs) b.append(h);
+
+    b.append(tx_root);
+    b.append(delay_seed);
+    b.append(delay_output);
+    b.append(cumulative_rand);
+    for (auto& ae : abort_events) b.append(ae.event_hash);
+
+    for (auto& a : initial_state) {
+        b.append(a.domain);
+        b.append(a.ed_pub.data(), a.ed_pub.size());
+        b.append(a.balance);
+        b.append(a.stake);
+    }
+
+    Hash h = b.finalize();
+    return std::vector<uint8_t>(h.begin(), h.end());
+}
+
+Hash Block::compute_hash() const {
+    auto sb = signing_bytes();
+    SHA256Builder b;
+    b.append(sb.data(), sb.size());
+    // Bind per-creator block sigs into the hash so any equivocation on them
+    // produces a different block hash.
+    for (auto& s : creator_block_sigs)
+        b.append(s.data(), s.size());
+    return b.finalize();
+}
+
+json Block::to_json() const {
+    json j;
+    j["index"]          = index;
+    j["prev_hash"]      = to_hex(prev_hash);
+    j["timestamp"]      = timestamp;
+
+    json txs = json::array();
+    for (auto& tx : transactions) txs.push_back(tx.to_json());
+    j["transactions"]   = txs;
+
+    json jc = json::array();
+    for (auto& c : creators) jc.push_back(c);
+    j["creators"]        = jc;
+
+    json jctl = json::array();
+    for (auto& list : creator_tx_lists) {
+        json one = json::array();
+        for (auto& h : list) one.push_back(to_hex(h));
+        jctl.push_back(one);
+    }
+    j["creator_tx_lists"] = jctl;
+
+    json jeds = json::array();
+    for (auto& s : creator_ed_sigs) jeds.push_back(to_hex(s));
+    j["creator_ed_sigs"]  = jeds;
+
+    json jdi = json::array();
+    for (auto& h : creator_dh_inputs) jdi.push_back(to_hex(h));
+    j["creator_dh_inputs"] = jdi;
+
+    j["tx_root"]         = to_hex(tx_root);
+    j["delay_seed"]      = to_hex(delay_seed);
+    j["delay_output"]    = to_hex(delay_output);
+
+    json jbs = json::array();
+    for (auto& s : creator_block_sigs) jbs.push_back(to_hex(s));
+    j["creator_block_sigs"] = jbs;
+
+    j["cumulative_rand"] = to_hex(cumulative_rand);
+
+    json aes = json::array();
+    for (auto& ae : abort_events) aes.push_back(ae.to_json());
+    j["abort_events"]   = aes;
+
+    json is_arr = json::array();
+    for (auto& a : initial_state) is_arr.push_back(a.to_json());
+    j["initial_state"]  = is_arr;
+
+    return j;
+}
+
+Block Block::from_json(const json& j) {
+    Block b;
+    b.index         = j["index"].get<uint64_t>();
+    b.prev_hash     = from_hex_arr<32>(j["prev_hash"].get<std::string>());
+    b.timestamp     = j["timestamp"].get<int64_t>();
+
+    for (auto& tx : j["transactions"])
+        b.transactions.push_back(Transaction::from_json(tx));
+    for (auto& c : j["creators"])
+        b.creators.push_back(c.get<std::string>());
+
+    if (j.contains("creator_tx_lists")) {
+        for (auto& one : j["creator_tx_lists"]) {
+            std::vector<Hash> list;
+            for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
+            b.creator_tx_lists.push_back(std::move(list));
+        }
+    }
+    if (j.contains("creator_ed_sigs")) {
+        for (auto& s : j["creator_ed_sigs"])
+            b.creator_ed_sigs.push_back(from_hex_arr<64>(s.get<std::string>()));
+    }
+    if (j.contains("creator_dh_inputs")) {
+        for (auto& h : j["creator_dh_inputs"])
+            b.creator_dh_inputs.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+
+    if (j.contains("tx_root"))
+        b.tx_root = from_hex_arr<32>(j["tx_root"].get<std::string>());
+    if (j.contains("delay_seed"))
+        b.delay_seed = from_hex_arr<32>(j["delay_seed"].get<std::string>());
+    if (j.contains("delay_output"))
+        b.delay_output = from_hex_arr<32>(j["delay_output"].get<std::string>());
+
+    if (j.contains("creator_block_sigs")) {
+        for (auto& s : j["creator_block_sigs"])
+            b.creator_block_sigs.push_back(from_hex_arr<64>(s.get<std::string>()));
+    }
+
+    b.cumulative_rand = from_hex_arr<32>(j["cumulative_rand"].get<std::string>());
+    for (auto& ae : j["abort_events"])
+        b.abort_events.push_back(AbortEvent::from_json(ae));
+
+    if (j.contains("initial_state"))
+        for (auto& ia : j["initial_state"])
+            b.initial_state.push_back(GenesisAlloc::from_json(ia));
+
+    return b;
+}
+
+} // namespace dhcoin::chain

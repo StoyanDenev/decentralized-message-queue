@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+*.exe
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Test artifacts (contain node_key.json with Ed25519 private keys — DO NOT COMMIT)
+test_*/
+testnode/
+*_run.out
+test_run.out
+
+# Local tooling / session state
+.claude/
+.vs/
+.vscode/
+
+# Old abandoned scaffold (separate, stale git repo at top level)
+/dhcoin/
+
+# Generated docs
+README.pdf
+WHITEPAPER.pdf
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~

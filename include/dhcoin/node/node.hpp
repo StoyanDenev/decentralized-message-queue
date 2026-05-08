@@ -1,0 +1,179 @@
+#pragma once
+#include <dhcoin/chain/chain.hpp>
+#include <dhcoin/node/registry.hpp>
+#include <dhcoin/node/validator.hpp>
+#include <dhcoin/node/producer.hpp>
+#include <dhcoin/net/gossip.hpp>
+#include <asio.hpp>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <optional>
+#include <map>
+#include <nlohmann/json.hpp>
+
+namespace dhcoin::node {
+
+struct Config {
+    std::string              domain;
+    std::string              data_dir;
+    uint16_t                 listen_port{7777};
+    uint16_t                 rpc_port{7778};
+    std::vector<std::string> bootstrap_peers;
+    std::string              key_path;
+    std::string              chain_path;
+    // Bootstrap (M12). genesis_path is the path to the GenesisConfig JSON
+    // shared by all operators of this chain. genesis_hash, if non-empty, is
+    // a hex-encoded 32-byte hash that the loaded genesis must match — node
+    // refuses to start on mismatch (eclipse defense).
+    std::string              genesis_path;
+    std::string              genesis_hash;
+    uint32_t                 m_creators{3};
+    // K-of-M Phase 2 threshold. K = M = strong BFT (unanimity). K < M = weak
+    // BFT (single non-signer tolerated). Loaded from GenesisConfig at chain
+    // init; per-node override is rejected as a misconfiguration. Constraint:
+    // 1 <= k_block_sigs <= m_creators.
+    uint32_t                 k_block_sigs{3};
+    // L4 / C3 — three local timers + delay-hash iteration count.
+    uint32_t                 tx_commit_ms{200};
+    uint64_t                 delay_T{4'000'000};   // delay-hash iterations (web profile default)
+    uint32_t                 block_sig_ms{200};
+    uint32_t                 abort_claim_ms{100};
+
+    nlohmann::json to_json() const;
+    static Config  from_json(const nlohmann::json& j);
+    static Config  load(const std::string& path);
+    void           save(const std::string& path) const;
+};
+
+// Two protocol phases (CONTRIB → BLOCK_SIG) with a local sequential
+// delay-hash between them. RUNNING_DELAY is internal — no messages flow
+// during it.
+enum class ConsensusPhase : uint8_t { IDLE, CONTRIB, RUNNING_DELAY, BLOCK_SIG };
+
+enum class SyncState : uint8_t { SYNCING, IN_SYNC };
+
+class Node {
+public:
+    explicit Node(const Config& cfg);
+    ~Node();
+
+    void run();
+    void stop();
+
+    asio::io_context& io_context_access() { return io_; }
+
+    // RPC handlers
+    nlohmann::json rpc_status()                                     const;
+    nlohmann::json rpc_peers()                                      const;
+    nlohmann::json rpc_register();
+    nlohmann::json rpc_send(const std::string& to, uint64_t amount, uint64_t fee = 0);
+    nlohmann::json rpc_balance(const std::string& domain)           const;
+    nlohmann::json rpc_stake(uint64_t amount, uint64_t fee = 0);
+    nlohmann::json rpc_unstake(uint64_t amount, uint64_t fee = 0);
+    nlohmann::json rpc_nonce(const std::string& domain)             const;
+    nlohmann::json rpc_stake_info(const std::string& domain)        const;
+
+    // Rev. 4: accept a fully-signed Transaction JSON (built externally, e.g.
+    // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
+    // Used for anonymous-account TRANSFERs that aren't authored by this node.
+    nlohmann::json rpc_submit_tx(const nlohmann::json& tx_json);
+
+private:
+    void on_block(const chain::Block& b);
+    void on_tx(const chain::Transaction& tx);
+    void on_contrib(const ContribMsg& msg);
+    void on_block_sig(const BlockSigMsg& msg);
+    // Called by start_delay_compute when replaying buffered sigs; assumes
+    // state_mutex_ is already held by the caller.
+    void on_block_sig_locked(const BlockSigMsg& msg);
+    void on_abort_claim(const AbortClaimMsg& msg);
+    void on_get_chain(uint64_t from_index, uint16_t count,
+                      std::shared_ptr<net::Peer> peer);
+    void on_chain_response(const std::vector<chain::Block>& blocks,
+                            bool has_more, std::shared_ptr<net::Peer> peer);
+    void on_status_request(std::shared_ptr<net::Peer> peer);
+    void on_status_response(uint64_t height, const std::string& genesis_hash,
+                             std::shared_ptr<net::Peer> peer);
+
+    void start_sync_if_behind();
+    void request_next_chunk();
+    bool in_sync() const;
+
+    void check_if_selected();
+    void start_contrib_phase();
+    void start_delay_compute();         // kicks off worker thread (O2)
+    void on_delay_complete(const Hash& output);
+    void start_block_sig_phase(const Hash& delay_output);
+    void try_finalize_round();
+    void handle_contrib_timeout();
+    void handle_block_sig_timeout();
+    void reset_round();
+    void apply_block_locked(const chain::Block& b);
+
+    Config                cfg_;
+    crypto::NodeKey       key_;
+    chain::Chain          chain_;
+    NodeRegistry          registry_;
+    BlockValidator        validator_;
+
+    // Mempool keyed by tx.hash (primary) and indexed by (from, nonce) for
+    // replace-by-fee: a new tx with the same (from, nonce) replaces the old
+    // iff its fee is strictly higher.
+    std::map<Hash, chain::Transaction>                       tx_store_;
+    std::map<std::pair<std::string, uint64_t>, Hash>         tx_by_account_nonce_;
+
+    net::GossipNet                  gossip_;
+    asio::io_context                io_;
+    std::vector<chain::AbortEvent>  current_aborts_;
+    std::vector<size_t>             current_creator_indices_;
+    std::vector<std::string>        current_creator_domains_;
+
+    ConsensusPhase                  phase_{ConsensusPhase::IDLE};
+
+    // Phase 1 — Contrib accumulation. Equivocation produces a second contrib
+    // from the same signer with different content; the first wins, the second
+    // is recorded as slashable evidence (S7).
+    std::map<std::string, ContribMsg>                       pending_contribs_;
+    std::map<std::string, std::pair<ContribMsg, ContribMsg>> contrib_equivocations_;
+
+    // Local delay-hash state. After K Phase-1 contribs, derive seed and start
+    // the delay worker. O1 piggyback: if a peer's verified BlockSigMsg arrives
+    // with a delay_output that matches our seed, cancel our worker and adopt
+    // their R (the verifier just reruns T iterations — same cost either way,
+    // but lets us skip the wait).
+    Hash                                                     current_tx_root_{};
+    Hash                                                     current_delay_seed_{};
+    std::atomic<bool>                                        delay_cancel_{false};
+    std::atomic<bool>                                        delay_done_{false};
+    Hash                                                     local_delay_output_{};
+    std::thread                                              delay_worker_;
+
+    // Phase 2 — BlockSig accumulation, gated to current round's delay_output.
+    Hash                                                     current_delay_output_{};
+    std::map<std::string, BlockSigMsg>                       pending_block_sigs_;
+    // O3 buffer: BlockSigMsgs received before our delay-hash finishes.
+    std::vector<BlockSigMsg>                                 buffered_block_sigs_;
+
+    asio::steady_timer              contrib_timer_;
+    asio::steady_timer              block_sig_timer_;
+
+    // S7: AbortClaim accumulation. Keyed by (round, missing_creator) so
+    // multiple competing claim sets don't conflict. M-1 matching claims
+    // (one per claimer) advance the abort.
+    std::map<std::pair<uint8_t, std::string>,
+             std::map<std::string, AbortClaimMsg>> pending_claims_;
+
+    // Sync state. peer_heights_ is a best-effort view of each peer's reported
+    // tip; max(peer_heights_) drives the SYNCING/IN_SYNC transition. The
+    // sync_peer_ pointer holds the peer we're currently chunking from (if any).
+    SyncState                                state_{SyncState::SYNCING};
+    std::map<std::string, uint64_t>          peer_heights_;
+    std::shared_ptr<net::Peer>               sync_peer_;
+
+    std::atomic<bool>               running_{false};
+    mutable std::mutex              state_mutex_;
+    std::vector<std::thread>        threads_;
+};
+
+} // namespace dhcoin::node

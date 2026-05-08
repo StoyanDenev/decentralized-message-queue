@@ -1,0 +1,113 @@
+#include <dhcoin/rpc/rpc.hpp>
+#include <iostream>
+
+namespace dhcoin::rpc {
+
+using json = nlohmann::json;
+
+// ─── Server ──────────────────────────────────────────────────────────────────
+
+RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port)
+    : io_(io)
+    , node_(node)
+    , acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
+    std::cout << "[rpc] listening on port " << port << "\n";
+}
+
+void RpcServer::start() { accept_loop(); }
+
+void RpcServer::accept_loop() {
+    auto socket = std::make_shared<asio::ip::tcp::socket>(io_);
+    acceptor_.async_accept(*socket, [this, socket](std::error_code ec) {
+        if (!ec)
+            asio::post(io_, [this, socket] { handle_session(socket); });
+        accept_loop();
+    });
+}
+
+void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
+    asio::streambuf buf;
+    std::error_code ec;
+    while (!ec) {
+        asio::read_until(*socket, buf, '\n', ec);
+        if (ec) break;
+        std::istream is(&buf);
+        std::string line;
+        std::getline(is, line);
+        if (line.empty()) continue;
+        json response;
+        try {
+            auto req = json::parse(line);
+            response["result"] = dispatch(req);
+            response["error"]  = nullptr;
+        } catch (std::exception& e) {
+            response["result"] = nullptr;
+            response["error"]  = e.what();
+        }
+        std::string reply = response.dump() + "\n";
+        asio::write(*socket, asio::buffer(reply), ec);
+    }
+}
+
+json RpcServer::dispatch(const json& req) {
+    std::string method = req.value("method", "");
+    auto params = req.value("params", json::object());
+
+    if (method == "status")   return node_.rpc_status();
+    if (method == "peers")    return node_.rpc_peers();
+    if (method == "register") return node_.rpc_register();
+    if (method == "balance")
+        return node_.rpc_balance(params.value("domain", ""));
+    if (method == "send") {
+        std::string to  = params.value("to",     "");
+        uint64_t amount = params.value("amount", uint64_t{0});
+        uint64_t fee    = params.value("fee",    uint64_t{0});
+        return node_.rpc_send(to, amount, fee);
+    }
+    if (method == "stake") {
+        uint64_t amount = params.value("amount", uint64_t{0});
+        uint64_t fee    = params.value("fee",    uint64_t{0});
+        return node_.rpc_stake(amount, fee);
+    }
+    if (method == "unstake") {
+        uint64_t amount = params.value("amount", uint64_t{0});
+        uint64_t fee    = params.value("fee",    uint64_t{0});
+        return node_.rpc_unstake(amount, fee);
+    }
+    if (method == "nonce")
+        return node_.rpc_nonce(params.value("domain", ""));
+    if (method == "stake_info")
+        return node_.rpc_stake_info(params.value("domain", ""));
+    if (method == "submit_tx")
+        return node_.rpc_submit_tx(params.value("tx", json::object()));
+    throw std::runtime_error("Unknown method: " + method);
+}
+
+// ─── Client ──────────────────────────────────────────────────────────────────
+
+json rpc_call(const std::string& host, uint16_t port,
+               const std::string& method, const json& params) {
+    asio::io_context io;
+    asio::ip::tcp::resolver resolver(io);
+    auto endpoints = resolver.resolve(host, std::to_string(port));
+
+    asio::ip::tcp::socket socket(io);
+    asio::connect(socket, endpoints);
+
+    json req = {{"method", method}, {"params", params}};
+    std::string line = req.dump() + "\n";
+    asio::write(socket, asio::buffer(line));
+
+    asio::streambuf buf;
+    asio::read_until(socket, buf, '\n');
+    std::istream is(&buf);
+    std::string resp;
+    std::getline(is, resp);
+
+    auto j = json::parse(resp);
+    if (!j["error"].is_null())
+        throw std::runtime_error(j["error"].get<std::string>());
+    return j["result"];
+}
+
+} // namespace dhcoin::rpc
