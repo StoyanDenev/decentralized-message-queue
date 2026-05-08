@@ -748,7 +748,26 @@ void Node::apply_block_locked(const chain::Block& b) {
     // node receives each block ~M times. After the first apply, b.index <
     // chain_.height() and the duplicate's prev_hash no longer matches our
     // head — used to log "invalid block: prev_hash mismatch" spam.
-    if (b.index < chain_.height()) return;
+    if (b.index < chain_.height()) {
+        // rev.8 equivocation suspect detection. If the incoming block's
+        // hash differs from the block we already have at b.index, AND it
+        // carries a non-empty bft_proposer (BFT-mode block), that proposer
+        // signed two different digests for the same height — equivocation.
+        // Log for now; full evidence-gathering, gossip, and stake-forfeit
+        // slashing is forthcoming v2.x.
+        if (!b.bft_proposer.empty()) {
+            Hash stored_hash   = chain_.at(b.index).compute_hash();
+            Hash incoming_hash = b.compute_hash();
+            if (stored_hash != incoming_hash) {
+                std::cerr << "[node] EQUIVOCATION suspect at h=" << b.index
+                          << " bft_proposer=" << b.bft_proposer
+                          << " stored=" << to_hex(stored_hash).substr(0, 16)
+                          << " incoming=" << to_hex(incoming_hash).substr(0, 16)
+                          << "\n";
+            }
+        }
+        return;
+    }
 
     auto reg = NodeRegistry::build_from_chain(chain_, b.index);
     auto res = validator_.validate(b, chain_, reg);
