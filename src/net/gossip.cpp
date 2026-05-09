@@ -92,6 +92,11 @@ static bool peer_message_allowed(const Peer& peer, MsgType type,
         return peer.chain_role() == ChainRole::BEACON;
     case MsgType::SHARD_TIP:
         return peer.chain_role() == ChainRole::SHARD;
+    case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+        // Bundles flow shard → beacon (entry) and beacon → shard
+        // (relay). Accept from either side; reject SINGLE peers.
+        return peer.chain_role() == ChainRole::BEACON
+            || peer.chain_role() == ChainRole::SHARD;
     default:
         // Intra-chain messages: source peer must be on the same chain
         // (same role, same shard_id when SHARD).
@@ -163,6 +168,14 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
             if (on_shard_tip) {
                 ShardId sid = msg.payload.value("shard_id", ShardId{0});
                 on_shard_tip(sid, chain::Block::from_json(msg.payload["tip"]));
+            }
+            break;
+        case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+            if (on_cross_shard_receipt_bundle) {
+                ShardId sid = msg.payload.value("src_shard", ShardId{0});
+                on_cross_shard_receipt_bundle(sid,
+                    chain::Block::from_json(msg.payload["src_block"]),
+                    msg);   // raw msg passed for relay re-broadcast
             }
             break;
         case MsgType::GET_CHAIN:

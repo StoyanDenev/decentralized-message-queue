@@ -47,6 +47,15 @@ enum class MsgType : uint8_t {
     // The block travels with its shard_id context (the block itself
     // doesn't carry shard_id; the message envelope does).
     SHARD_TIP             = 13,
+    // rev.9 B3.3: a shard node that produced a block carrying outbound
+    // cross_shard_receipts gossips a bundle so destination shards can
+    // pick up receipts addressed to them. Beacon nodes act as relays —
+    // they don't apply receipts, just re-broadcast bundles to their
+    // shard peers (the natural shard-A → beacon → shard-B path). The
+    // bundle carries the full source block so destination shards can
+    // independently verify the source's K-of-K signatures (Stage B3.4)
+    // before crediting any receipt.
+    CROSS_SHARD_RECEIPT_BUNDLE = 14,
 };
 
 struct Message {
@@ -114,6 +123,17 @@ inline Message make_shard_tip(ShardId shard_id, const chain::Block& tip) {
     return {MsgType::SHARD_TIP, {
         {"shard_id", shard_id},
         {"tip",      tip.to_json()}
+    }};
+}
+inline Message make_cross_shard_receipt_bundle(ShardId src_shard,
+                                                  const chain::Block& src_block) {
+    // Carry the FULL source block so destination shards can verify
+    // K-of-K sigs against the source committee they derive themselves.
+    // Receipts live inside src_block.cross_shard_receipts; recipients
+    // filter on dst_shard == my_shard_id.
+    return {MsgType::CROSS_SHARD_RECEIPT_BUNDLE, {
+        {"src_shard", src_shard},
+        {"src_block", src_block.to_json()}
     }};
 }
 inline Message make_get_chain(uint64_t from_index = 0, uint16_t count = 64) {

@@ -46,6 +46,13 @@ public:
     // Beacon validates K-of-K (or BFT) sigs against the shard committee
     // it derives from its own validator pool + shard_id salt.
     std::function<void(ShardId, const chain::Block&)> on_shard_tip;
+    // rev.9 B3.3: cross-shard receipt bundle. The third Message& arg is
+    // the raw inbound message — beacon-role handlers re-broadcast it
+    // verbatim to other peers (the shard A → beacon → shard B relay).
+    // Shard-role handlers ignore the relay arg and use src_shard +
+    // src_block to filter receipts addressed to my_shard_id.
+    std::function<void(ShardId, const chain::Block&, const Message&)>
+                                                    on_cross_shard_receipt_bundle;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,

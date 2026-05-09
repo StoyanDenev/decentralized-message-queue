@@ -139,6 +139,20 @@ private:
     // its own pool + shard_id salt. Stores validated tips in
     // latest_shard_tips_.
     void on_shard_tip(ShardId shard_id, const chain::Block& tip);
+    // rev.9 B3.3: cross-shard receipt bundle handler.
+    //   * BEACON role: relay (re-broadcast) to all peers; ignores
+    //     payload semantics. Bundle's natural path is shard → beacon
+    //     → other shard.
+    //   * SHARD role: filter receipts in src_block.cross_shard_receipts
+    //     to those addressed to my_shard_id; deduplicate against
+    //     pending_inbound_receipts_ + applied_inbound_receipts_; store
+    //     for B3.4 (producer to bake into next block; apply to credit).
+    //   * SINGLE role: drop.
+    // The raw `relay` Message is used by BEACON to re-broadcast verbatim
+    // (preserves the source's K-of-K signing intact).
+    void on_cross_shard_receipt_bundle(ShardId src_shard,
+                                          const chain::Block& src_block,
+                                          const net::Message& relay);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,
@@ -245,6 +259,16 @@ private:
     // committee derived from beacon's own validator pool + shard_id
     // salt. Used to populate BeaconBlock.shard_summaries (B3+).
     std::map<ShardId, chain::Block> latest_shard_tips_;
+
+    // rev.9 B3.3: shard-only. Inbound cross-shard receipts addressed to
+    // this shard. Populated when a CROSS_SHARD_RECEIPT_BUNDLE arrives
+    // from another shard (via beacon relay) and the bundle's receipts
+    // include entries with dst_shard == my_shard_id. Keyed by
+    // (src_shard, tx_hash) for idempotent dedup; B3.4 dequeues these
+    // when producing a destination-shard block (which carries them as
+    // applied receipts and credits `to`).
+    std::map<std::pair<ShardId, Hash>, chain::CrossShardReceipt>
+        pending_inbound_receipts_;
 
     asio::steady_timer              contrib_timer_;
     asio::steady_timer              block_sig_timer_;

@@ -222,6 +222,10 @@ Node::Node(const Config& cfg)
                                   { on_equivocation_evidence(ev); };
     gossip_.on_beacon_header  = [this](auto& b)  { on_beacon_header(b); };
     gossip_.on_shard_tip      = [this](auto sid, auto& t) { on_shard_tip(sid, t); };
+    gossip_.on_cross_shard_receipt_bundle =
+        [this](auto sid, auto& src_block, auto& relay) {
+            on_cross_shard_receipt_bundle(sid, src_block, relay);
+        };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -1030,6 +1034,51 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
               << " block=" << tip.index << " sigs=" << signed_count << "\n";
 }
 
+// rev.9 B3.3: cross-shard receipt bundle handler.
+//   * BEACON: relay (re-broadcast to all peers); does not apply.
+//   * SHARD: filter src_block.cross_shard_receipts to those addressed
+//     to this shard, dedupe against pending_inbound_receipts_, store.
+//   * SINGLE: ignore.
+// Full K-of-K verification of the source block against the source-
+// shard committee is deferred to B3.4 (where the destination producer
+// bakes verified receipts into a block and apply credits `to`). For
+// B3.3 the receipt is held in pending_inbound_receipts_ as untrusted
+// transit data — it doesn't affect any state until B3.4 verifies +
+// credits.
+void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
+                                            const chain::Block& src_block,
+                                            const net::Message& relay) {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+
+    if (cfg_.chain_role == ChainRole::BEACON) {
+        // Relay: re-broadcast to peers other than the sender. The
+        // existing GossipNet::broadcast hits all peers; loop avoidance
+        // here is best-effort (peers de-dupe at apply by tx_hash key).
+        gossip_.broadcast(relay);
+        return;
+    }
+    if (cfg_.chain_role != ChainRole::SHARD) return;
+
+    // Don't ingest our own emitted bundle.
+    if (src_shard == cfg_.shard_id) return;
+
+    size_t added = 0;
+    for (auto& r : src_block.cross_shard_receipts) {
+        if (r.dst_shard != cfg_.shard_id) continue;
+        if (r.src_shard != src_shard)     continue;     // sanity
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        if (pending_inbound_receipts_.count(key)) continue;     // already buffered
+        pending_inbound_receipts_[key] = r;
+        ++added;
+    }
+    if (added > 0) {
+        std::cout << "[node] inbound receipt bundle: src_shard=" << src_shard
+                  << " block=" << src_block.index
+                  << " accepted=" << added
+                  << " pending_total=" << pending_inbound_receipts_.size() << "\n";
+    }
+}
+
 void Node::reset_round() {
     delay_cancel_ = true;
     pending_contribs_.clear();
@@ -1184,6 +1233,15 @@ void Node::apply_block_locked(const chain::Block& b) {
     // and update latest_shard_tips_. SINGLE / BEACON roles do nothing.
     if (cfg_.chain_role == ChainRole::SHARD) {
         gossip_.broadcast(net::make_shard_tip(cfg_.shard_id, b));
+        // rev.9 B3.3: emit cross-shard receipts bundle when the block
+        // produced any outbound receipts. Beacon peers relay the
+        // bundle to other shards; destination shards filter on
+        // dst_shard == my_shard_id and queue inbound receipts for
+        // B3.4 (apply-side credit).
+        if (!b.cross_shard_receipts.empty()) {
+            gossip_.broadcast(
+                net::make_cross_shard_receipt_bundle(cfg_.shard_id, b));
+        }
     }
 
     check_if_selected();
@@ -1473,6 +1531,7 @@ json Node::rpc_status() const {
     j["mempool_size"] = tx_store_.size();
     j["beacon_headers"]    = beacon_headers_.size();    // shard-only; 0 elsewhere
     j["tracked_shard_tips"] = latest_shard_tips_.size(); // beacon-only; 0 elsewhere
+    j["pending_inbound_receipts"] = pending_inbound_receipts_.size(); // shard-only
 
     // Block-mode + tx counters across the full chain. Useful for ops
     // dashboards and test assertions ("did the chain actually escalate?").
