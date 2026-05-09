@@ -681,10 +681,15 @@ The architecture is staged across multiple stages, each delivering standalone va
 | **B1** | Per-epoch + per-shard committee seed (`epoch_committee_seed(rand, shard_id)`), `current_epoch_index/rand` helpers, validator mirror | ✅ done |
 | **B2a** | `genesis-tool build-sharded` produces `(1 beacon + S shard)` genesis files with distinct hashes | ✅ done |
 | **B2b-lite** | RPC + log surface `chain_role` / `shard_id` / `epoch_index`. `tools/test_sharded_smoke.sh` boots beacon + shard side-by-side | ✅ done |
-| **B2c** | Cross-chain coordination: shards subscribe to beacon's chain, beacon tracks shard tips, gossip-based message flow | 🔄 in progress |
+| **B2c.1** | `BEACON_HEADER` gossip message + storage skeleton | ✅ done |
+| **B2c.2** | Shard-side header validation (sequential, prev_hash chain, K-of-K sigs) | ✅ done |
+| **B2c.3** | `SHARD_TIP` gossip + beacon-side committee derivation + sig verify + tracking | ✅ done |
+| **B2c.4** | `EquivocationEvent.shard_id` + `beacon_anchor_height` cross-chain provenance | ✅ done |
+| **B2c.5** | HELLO role tagging, role-based gossip filter, `beacon_peers`/`shard_peers` config, `tools/test_zero_trust_cross_chain.sh` | ✅ done |
+| **B2c.2-full** | Shards derive committee seed from beacon-chain rand (anchored via `beacon_anchor` block field). Unlocks production-grade cross-chain validation success | 🔄 pending |
 | **B3** | `CrossShardReceipt` mempool, emission, consumption | ⏳ pending |
 | **B4** | `S = 4` deployment tooling, multi-shard integration test | ⏳ pending |
-| **B5** | Validator rotation across epochs, equivocation slashing | ⏳ pending |
+| **B5** | Validator rotation across epochs; cross-chain slashing relay (Equivocation evidence flows shard → beacon for stake forfeit) | ⏳ pending |
 | **B6** | Hardening (sync, recovery, light clients, shard-count growth) | ⏳ pending |
 
 `ChainRole = SINGLE` is the default. With S=1 and SINGLE, behavior is bitwise-identical to rev.8 — sharding is opt-in at genesis.
@@ -737,8 +742,8 @@ Status: ✅ done · 🟨 partial / in progress · ❌ not started · 🚫 delibe
 | Native tx types | ✅ ~80% | TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE |
 | Mempool / replace-by-fee | ✅ ~70% | Sequential nonce; no fee market or gas |
 | CLI / wallet | ✅ ~60% | `dhcoin {account,send,send_anon,stake,...}` |
-| **Scaling / sharding** | 🟨 ~25% | B0/B1/B2a/B2b-lite scaffolding done; B2c (cross-chain coordination) is the next ~12-day milestone |
-| Cross-shard receipts | ❌ 0% | Stage B3, follows B2c |
+| **Scaling / sharding** | 🟨 ~50% | B0/B1/B2a/B2b-lite + **B2c.1-5 structural** done; B2c.2-full (committee-seed-from-beacon-rand) + B3 (cross-shard receipts) are the next milestones |
+| Cross-shard receipts | ❌ 0% | Stage B3, follows B2c.2-full |
 | Multi-shard production tooling | ❌ 0% | Stage B4 |
 | Cross-chain validator rotation + slashing | ❌ 0% | Stage B5 |
 | State sync (snapshots, pruning) | ❌ 0% | Full chain replay only; B6 |
@@ -799,17 +804,18 @@ To ship v1 (the "narrow" ~80% scope above) the remaining work is roughly:
 
 | Milestone | Estimate |
 |---|---|
-| Stage B2c — zero-trust cross-chain coordination | ~12d |
+| Stage B2c.1-5 — cross-chain plumbing (DONE) | ✅ ~5d |
+| Stage B2c.2-full — committee seed from beacon-chain rand (anchor field) | ~2d |
 | Stage B3 — cross-shard receipts | ~5d |
 | Stage B4 — production multi-shard tooling | ~2d |
-| Stage B5 — validator rotation + cross-chain slashing | ~3d |
+| Stage B5 — validator rotation + cross-chain slashing relay | ~3d |
 | Stage B6.basic — state sync snapshots | ~5d |
 | Block explorer (minimal) | ~5d |
 | Light client primitives | ~5d |
 | Documentation / spec freeze | ~3d |
 | Whitepaper PDF generation polish | ~1d |
 
-Total: roughly **6-8 weeks** of focused work after the current state. None of this is contract execution; v1 ships as a payment + identity chain.
+Remaining: roughly **5-6 weeks** of focused work after the current state. None of this is contract execution; v1 ships as a payment + identity chain.
 
 ### 17.7 Honest framing
 
