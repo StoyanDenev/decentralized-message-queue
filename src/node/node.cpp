@@ -30,6 +30,7 @@ json Config::to_json() const {
     j["shard_peers"]     = shard_peers;
     j["key_path"]        = key_path;
     j["chain_path"]      = chain_path;
+    j["snapshot_path"]   = snapshot_path;
     j["genesis_path"]    = genesis_path;
     j["genesis_hash"]    = genesis_hash;
     j["m_creators"]              = m_creators;
@@ -58,6 +59,7 @@ Config Config::from_json(const json& j) {
     c.shard_peers     = j.value("shard_peers",     std::vector<std::string>{});
     c.key_path        = j.value("key_path",       "");
     c.chain_path      = j.value("chain_path",     "");
+    c.snapshot_path   = j.value("snapshot_path",  "");
     c.genesis_path    = j.value("genesis_path",   "");
     c.genesis_hash    = j.value("genesis_hash",   "");
     c.m_creators      = j.value("m_creators",     uint32_t{3});
@@ -167,6 +169,46 @@ Node::Node(const Config& cfg)
                               genesis_my_shard);
 
     if (chain_.empty()) {
+        // rev.9 B6.basic: prefer snapshot bootstrap when configured.
+        // Skips block-by-block replay; state is restored directly from
+        // the snapshot's accounts/stakes/registrants/dedup maps. Tail
+        // headers in the snapshot become blocks_; subsequent blocks
+        // apply normally. The snapshot's claimed head_hash is verified
+        // against compute_hash() on the tail head (rejects loudly on
+        // mismatch). Genesis bootstrap is skipped when snapshot loads
+        // successfully — no need for the original genesis to be present.
+        if (!cfg_.snapshot_path.empty()
+            && std::filesystem::exists(cfg_.snapshot_path)) {
+            try {
+                std::ifstream sf(cfg_.snapshot_path);
+                nlohmann::json sj = nlohmann::json::parse(sf);
+                chain_ = chain::Chain::restore_from_snapshot(sj);
+                // restore_from_snapshot reads constants from the
+                // snapshot itself; they should match what genesis
+                // would set, but we do not require gcfg_opt here.
+                std::cout << "[node] restored from snapshot "
+                          << cfg_.snapshot_path
+                          << " block_index=" << chain_.head().index
+                          << " head=" << to_hex(chain_.head_hash())
+                          << " accounts=" << chain_.accounts().size()
+                          << " stakes=" << chain_.stakes().size()
+                          << " registrants=" << chain_.registrants().size()
+                          << "\n";
+                // Persist as the working chain.json so subsequent
+                // restarts see a populated chain (they'll re-apply
+                // the tail headers — apply on already-applied state
+                // is a no-op for genesis-skipped paths since there's
+                // no prior state to overwrite). Note: the snapshot
+                // file remains the canonical state seed; do not
+                // delete it.
+                chain_.save(cfg_.chain_path);
+                goto chain_loaded;
+            } catch (std::exception& e) {
+                std::cerr << "[node] snapshot restore failed: " << e.what()
+                          << "; falling back to genesis bootstrap\n";
+            }
+        }
+
         // No on-disk chain: bootstrap from genesis config if provided, else
         // fall back to the legacy zeros-genesis.
         if (gcfg_opt.has_value()) {
@@ -207,6 +249,7 @@ Node::Node(const Config& cfg)
               + " does not match pinned " + cfg_.genesis_hash);
     }
 
+chain_loaded:
     registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
 
     gossip_.set_hello(cfg_.domain, cfg_.listen_port);

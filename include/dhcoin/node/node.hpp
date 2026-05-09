@@ -31,6 +31,13 @@ struct Config {
     std::vector<std::string> shard_peers;        // beacon-role: connect to shards
     std::string              key_path;
     std::string              chain_path;
+    // rev.9 B6.basic: if set and chain_path is empty/missing on
+    // startup, the node bootstraps from this snapshot (state +
+    // tail headers) instead of replaying every block from genesis.
+    // Operators stage the snapshot file separately (e.g., download
+    // from a trusted source) and point the config at it. After
+    // bootstrap, normal chain.json persistence resumes.
+    std::string              snapshot_path;
     // Bootstrap (M12). genesis_path is the path to the GenesisConfig JSON
     // shared by all operators of this chain. genesis_hash, if non-empty, is
     // a hex-encoded 32-byte hash that the loaded genesis must match — node

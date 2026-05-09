@@ -171,15 +171,29 @@ print(buf.decode().strip())
 echo "  RPC response: $RESPONSE"
 
 echo
-echo "=== 8. Wait 12s for evidence to be baked into a block + applied ==="
-sleep 12
+echo "=== 8. Poll up to 60s for evidence to be baked into a block + applied ==="
+# Budget: after slash, node1 is deregistered → pool drops below K → BFT
+# escalation kicks in (ceil(2K/3) sigs) after threshold round-1 aborts
+# (~10s @ 2s rounds). Extra slack for the second post-slash block to
+# settle, plus margin for K-of-K agreement on pending_equivocation
+# pool (different pools across producers cause round retries until
+# gossip converges).
+STAKE_POST="-"
+HEIGHT_POST="$HEIGHT_PRE"
+for attempt in $(seq 1 30); do
+  sleep 2
+  STAKE_POST=$($DHCOIN stake_info node1 --rpc-port 8771 2>/dev/null \
+                | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))")
+  HEIGHT_POST=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+                 | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
+  if [ "$STAKE_POST" = "0" ]; then
+    echo "  slashed after attempt $attempt (height=$HEIGHT_POST)"
+    break
+  fi
+done
 
 echo
 echo "=== 9. Verify ==="
-HEIGHT_POST=$($DHCOIN status --rpc-port 8771 2>/dev/null \
-               | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
-STAKE_POST=$($DHCOIN stake_info node1 --rpc-port 8771 2>/dev/null \
-              | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))")
 echo "  chain height post: $HEIGHT_POST"
 echo "  node1 stake post-slash: $STAKE_POST (expected 0)"
 
