@@ -101,6 +101,39 @@ struct EquivocationEvent {
     static EquivocationEvent from_json(const nlohmann::json& j);
 };
 
+// rev.9 B3: cross-shard receipt. Emitted by a source-shard block when
+// a TRANSFER's `to` address routes (via shard_id_for_address) to a
+// different shard. Carries the full source-shard provenance so the
+// destination shard can verify the receipt was actually produced by
+// the source's K-of-K committee:
+//   * src_block_index + src_block_hash pin the producing block.
+//   * tx_hash + (from, to, amount, fee, nonce) duplicate the originating
+//     tx fields so dst can match against src's transactions[].
+// Verification (Stage B3.4):
+//   1. dst node has src's committee (derivable from beacon-anchored
+//      pool + epoch_committee_seed for src_shard).
+//   2. dst loads the source block (via beacon's shard_summaries or a
+//      direct request); verifies K-of-K sigs against src's committee.
+//   3. tx_hash is present in src_block.transactions[] with matching
+//      fields.
+// Once verified, dst credits `to` with `amount` (sender debit + fee
+// burn already happened on src). Idempotent on (src_shard, tx_hash).
+struct CrossShardReceipt {
+    ShardId      src_shard{0};
+    ShardId      dst_shard{0};
+    uint64_t     src_block_index{0};
+    Hash         src_block_hash{};
+    Hash         tx_hash{};
+    std::string  from;
+    std::string  to;
+    uint64_t     amount{0};
+    uint64_t     fee{0};
+    uint64_t     nonce{0};
+
+    nlohmann::json    to_json() const;
+    static CrossShardReceipt from_json(const nlohmann::json& j);
+};
+
 // Carried only by block 0 (genesis). Populates account_state, stake_table, and
 // registrants_ at chain construction.
 struct GenesisAlloc {
@@ -162,6 +195,14 @@ struct Block {
     Hash                     cumulative_rand{};
     std::vector<AbortEvent>  abort_events;
     std::vector<EquivocationEvent> equivocation_events;
+
+    // rev.9 B3: cross-shard receipts emitted by this block. When a
+    // TRANSFER targets an address routed to a different shard, the
+    // sender is debited locally and a receipt records the credit owed
+    // to the destination shard. Empty for SINGLE chains and for any
+    // block that contains only same-shard transfers. Stage B3.2 wires
+    // the apply-side; B3.3-B3.4 carry receipts cross-chain and credit.
+    std::vector<CrossShardReceipt> cross_shard_receipts;
 
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.

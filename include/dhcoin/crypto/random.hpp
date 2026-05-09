@@ -40,4 +40,16 @@ Hash genesis_random_state(const Hash& seed);
 // deterministic across all nodes and stable for the duration of the epoch.
 Hash epoch_committee_seed(const Hash& epoch_rand, ShardId shard_id);
 
+// rev.9 B3: deterministic address-to-shard routing. Maps any string
+// address (registered domain or anonymous bearer wallet) to one of the
+// `shard_count` shards using a salted hash. Salt comes from the genesis
+// (GenesisConfig::shard_address_salt) and is fixed for the chain's
+// lifetime, so all nodes — beacon, every shard, every external wallet —
+// agree on which shard owns which address.
+//
+// shard_count must be > 0. shard_count == 1 returns 0 unconditionally.
+ShardId shard_id_for_address(const std::string& addr,
+                                uint32_t shard_count,
+                                const Hash& shard_address_salt);
+
 } // namespace dhcoin::crypto

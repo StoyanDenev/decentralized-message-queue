@@ -110,4 +110,20 @@ Hash epoch_committee_seed(const Hash& epoch_rand, ShardId shard_id) {
         .finalize();
 }
 
+ShardId shard_id_for_address(const std::string& addr,
+                                uint32_t shard_count,
+                                const Hash& shard_address_salt) {
+    if (shard_count <= 1) return 0;
+    Hash h = SHA256Builder{}
+        .append(shard_address_salt)
+        .append(std::string("shard-route"))
+        .append(addr)
+        .finalize();
+    // Fold first 8 bytes to uint64, then mod shard_count. Bias is
+    // negligible at S << 2^64.
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v = (v << 8) | h[i];
+    return static_cast<ShardId>(v % shard_count);
+}
+
 } // namespace dhcoin::crypto

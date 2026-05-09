@@ -125,6 +125,40 @@ EquivocationEvent EquivocationEvent::from_json(const json& j) {
     return e;
 }
 
+// ─── CrossShardReceipt ───────────────────────────────────────────────────────
+
+json CrossShardReceipt::to_json() const {
+    json j;
+    j["src_shard"]       = src_shard;
+    j["dst_shard"]       = dst_shard;
+    j["src_block_index"] = src_block_index;
+    j["src_block_hash"]  = to_hex(src_block_hash);
+    j["tx_hash"]         = to_hex(tx_hash);
+    j["from"]            = from;
+    j["to"]              = to;
+    j["amount"]          = amount;
+    j["fee"]             = fee;
+    j["nonce"]           = nonce;
+    return j;
+}
+
+CrossShardReceipt CrossShardReceipt::from_json(const json& j) {
+    CrossShardReceipt r;
+    r.src_shard       = j.value("src_shard",       uint32_t{0});
+    r.dst_shard       = j.value("dst_shard",       uint32_t{0});
+    r.src_block_index = j.value("src_block_index", uint64_t{0});
+    r.src_block_hash  = from_hex_arr<32>(j.value("src_block_hash",
+                                                    std::string(64, '0')));
+    r.tx_hash         = from_hex_arr<32>(j.value("tx_hash",
+                                                    std::string(64, '0')));
+    r.from            = j.value("from",   std::string{});
+    r.to              = j.value("to",     std::string{});
+    r.amount          = j.value("amount", uint64_t{0});
+    r.fee             = j.value("fee",    uint64_t{0});
+    r.nonce           = j.value("nonce",  uint64_t{0});
+    return r;
+}
+
 // ─── Block ───────────────────────────────────────────────────────────────────
 
 std::vector<uint8_t> Block::signing_bytes() const {
@@ -167,6 +201,23 @@ std::vector<uint8_t> Block::signing_bytes() const {
         b.append(ev.sig_b.data(), ev.sig_b.size());
         b.append(static_cast<uint64_t>(ev.shard_id));
         b.append(ev.beacon_anchor_height);
+    }
+
+    // Bind cross-shard receipts into the block hash. Any tampering with
+    // receipt fields (especially `to` or `amount`) would change the hash
+    // and break K-of-K signing on the source side, so dst-side credits
+    // remain safe even though dst doesn't re-sign receipts.
+    for (auto& r : cross_shard_receipts) {
+        b.append(static_cast<uint64_t>(r.src_shard));
+        b.append(static_cast<uint64_t>(r.dst_shard));
+        b.append(r.src_block_index);
+        b.append(r.src_block_hash);
+        b.append(r.tx_hash);
+        b.append(r.from);
+        b.append(r.to);
+        b.append(r.amount);
+        b.append(r.fee);
+        b.append(r.nonce);
     }
 
     for (auto& a : initial_state) {
@@ -241,6 +292,10 @@ json Block::to_json() const {
     for (auto& ev : equivocation_events) eqs.push_back(ev.to_json());
     j["equivocation_events"] = eqs;
 
+    json csrs = json::array();
+    for (auto& r : cross_shard_receipts) csrs.push_back(r.to_json());
+    j["cross_shard_receipts"] = csrs;
+
     json is_arr = json::array();
     for (auto& a : initial_state) is_arr.push_back(a.to_json());
     j["initial_state"]  = is_arr;
@@ -298,6 +353,11 @@ Block Block::from_json(const json& j) {
     if (j.contains("equivocation_events")) {
         for (auto& ej : j["equivocation_events"])
             b.equivocation_events.push_back(EquivocationEvent::from_json(ej));
+    }
+
+    if (j.contains("cross_shard_receipts")) {
+        for (auto& rj : j["cross_shard_receipts"])
+            b.cross_shard_receipts.push_back(CrossShardReceipt::from_json(rj));
     }
 
     if (j.contains("initial_state"))
