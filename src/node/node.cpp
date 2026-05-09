@@ -103,7 +103,7 @@ Node::Node(const Config& cfg)
     // the correct subsidy when crediting creators.
     uint64_t genesis_subsidy = 0;
     uint64_t genesis_min_stake = 1000;
-    chain::GovernanceModel genesis_gov = chain::GovernanceModel::OPEN_STAKE;
+    chain::InclusionModel genesis_inclusion = chain::InclusionModel::STAKE_INCLUSION;
     std::optional<chain::GenesisConfig> gcfg_opt;
     if (!cfg_.genesis_path.empty()) {
         auto gcfg = chain::GenesisConfig::load(cfg_.genesis_path);
@@ -120,7 +120,7 @@ Node::Node(const Config& cfg)
         cfg_.epoch_blocks            = gcfg.epoch_blocks;
         genesis_subsidy              = gcfg.block_subsidy;
         genesis_min_stake            = gcfg.min_stake;
-        genesis_gov                  = gcfg.governance_model;
+        genesis_inclusion            = gcfg.inclusion_model;
         validator_.set_k_block_sigs(cfg_.k_block_sigs);
         validator_.set_m_pool(cfg_.m_creators);
         validator_.set_bft_enabled(cfg_.bft_enabled);
@@ -156,7 +156,7 @@ Node::Node(const Config& cfg)
                       << " K=" << cfg_.k_block_sigs
                       << " subsidy=" << genesis_subsidy
                       << " mode=" << mode
-                      << " gov=" << to_string(genesis_gov)
+                      << " inclusion=" << to_string(genesis_inclusion)
                       << " min_stake=" << genesis_min_stake << "\n";
         } else {
             chain_ = chain::Chain(chain::make_genesis());

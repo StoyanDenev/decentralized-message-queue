@@ -54,9 +54,10 @@ public:
     uint64_t block_subsidy() const { return block_subsidy_; }
     void     set_block_subsidy(uint64_t s) { block_subsidy_ = s; }
 
-    // rev.8 follow-on: validator-eligibility stake threshold. OPEN_STAKE
-    // chains use 1000 (MIN_STAKE default); DOMAIN_REGISTRY chains pin 0.
-    // Registry build reads this rather than chain/params.hpp::MIN_STAKE.
+    // rev.8 follow-on: validator-eligibility stake threshold.
+    // STAKE_INCLUSION chains use 1000 (MIN_STAKE default);
+    // DOMAIN_INCLUSION chains pin 0. Registry build reads this rather
+    // than chain/params.hpp::MIN_STAKE.
     uint64_t min_stake() const { return min_stake_; }
     void     set_min_stake(uint64_t s) { min_stake_ = s; }
 

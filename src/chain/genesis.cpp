@@ -37,7 +37,7 @@ json GenesisConfig::to_json() const {
         {"block_subsidy",            block_subsidy},
         {"bft_enabled",              bft_enabled},
         {"bft_escalation_threshold", bft_escalation_threshold},
-        {"governance_model",         static_cast<uint8_t>(governance_model)},
+        {"inclusion_model",         static_cast<uint8_t>(inclusion_model)},
         {"min_stake",                min_stake},
         {"chain_role",               static_cast<uint8_t>(chain_role)},
         {"shard_id",                 shard_id},
@@ -57,7 +57,7 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.block_subsidy = j.value("block_subsidy", uint64_t{0});
     c.bft_enabled              = j.value("bft_enabled",              true);
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
-    c.governance_model         = static_cast<GovernanceModel>(j.value("governance_model", uint8_t{0}));
+    c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));
     c.min_stake                = j.value("min_stake",                uint64_t{1000});
     c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
     c.shard_id                 = j.value("shard_id",                 ShardId{0});

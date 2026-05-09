@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Smoke test for DOMAIN_REGISTRY governance mode (no stake, validators
+# Smoke test for DOMAIN_INCLUSION governance mode (no stake, validators
 # identified by domain). Verifies:
-#   1. genesis-tool prints "Governance: domain-registry (min_stake=0)".
+#   1. genesis-tool prints "Inclusion: domain-inclusion (min_stake=0)".
 #   2. Validators register with domain names that look like DNS records,
 #      pass `--stake 0` to peer-info (no stake required).
 #   3. The chain produces blocks with min_stake=0 (registration-only gate).
@@ -40,19 +40,19 @@ mkdir -p $T/n1 $T/n2 $T/n3
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
   $DHCOIN init --data-dir $T/n$n --profile web 2>&1 | tail -1
-  # NOTE: stake=0. In DOMAIN_REGISTRY mode the registry doesn't gate on stake.
+  # NOTE: stake=0. In DOMAIN_INCLUSION mode the registry doesn't gate on stake.
   $DHCOIN genesis-tool peer-info "validator$n.example.com" --data-dir $T/n$n --stake 0 > $T/p$n.json
 done
 
 echo
-echo "=== 2. Build genesis: governance_model=DOMAIN_REGISTRY, min_stake=0 ==="
+echo "=== 2. Build genesis: inclusion_model=DOMAIN_INCLUSION, min_stake=0 ==="
 cat > $T/gen.json <<EOF
 {
   "chain_id": "test-domain-registry",
   "m_creators": 3,
   "k_block_sigs": 3,
   "block_subsidy": 10,
-  "governance_model": 1,
+  "inclusion_model": 1,
   "min_stake": 0,
   "initial_creators": [
 $(cat $T/p1.json | tr -d '\n'),
@@ -62,7 +62,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 1000}]
 }
 EOF
-$DHCOIN genesis-tool build $T/gen.json 2>&1 | grep -E "Governance|min_stake|Mode|hash"
+$DHCOIN genesis-tool build $T/gen.json 2>&1 | grep -E "Inclusion|min_stake|Mode|hash"
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -116,17 +116,17 @@ echo "  heights: n1=$H1  n2=$H2  n3=$H3"
 
 PASS=true
 if [ "$H1" = "-" ] || [ "$H1" = "0" ]; then
-  echo "  FAIL: chain didn't advance under DOMAIN_REGISTRY (stake=0)"
+  echo "  FAIL: chain didn't advance under DOMAIN_INCLUSION (stake=0)"
   PASS=false
 fi
 
 # Verify min_stake = 0 was actually loaded by inspecting the log.
-GOV_LOG=$(grep "gov=domain-registry" $T/n1/log | head -1)
+GOV_LOG=$(grep "inclusion=domain-inclusion" $T/n1/log | head -1)
 if [ -z "$GOV_LOG" ]; then
-  echo "  FAIL: n1 didn't log gov=domain-registry"
+  echo "  FAIL: n1 didn't log inclusion=domain-inclusion"
   PASS=false
 else
-  echo "  PASS: n1 booted with governance=domain-registry"
+  echo "  PASS: n1 booted with inclusion=domain-inclusion"
 fi
 
 # Verify all 3 nodes converged on the same head.
@@ -143,7 +143,7 @@ fi
 
 if $PASS; then
   echo
-  echo "  PASS: DOMAIN_REGISTRY mode validated end-to-end"
+  echo "  PASS: DOMAIN_INCLUSION mode validated end-to-end"
   echo "  - validators registered with DNS-style names (validator{N}.example.com)"
   echo "  - no stake locked (--stake 0)"
   echo "  - chain progressed normally (height $H1 in 25s)"

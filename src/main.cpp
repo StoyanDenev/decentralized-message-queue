@@ -374,7 +374,7 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
         std::cout << "M_creators:         " << cfg.m_creators         << "\n";
         std::cout << "K_block_sigs:       " << cfg.k_block_sigs       << "\n";
         std::cout << "Mode:               " << mode << " (default: mutual-distrust K-of-K)\n";
-        std::cout << "Governance:         " << chain::to_string(cfg.governance_model)
+        std::cout << "Inclusion:          " << chain::to_string(cfg.inclusion_model)
                   << " (min_stake=" << cfg.min_stake << ")\n";
         std::cout << "BFT escalation:     "
                   << (cfg.bft_enabled

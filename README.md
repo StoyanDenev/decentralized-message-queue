@@ -210,16 +210,18 @@ The genesis block is signed implicitly by the operator who builds it; integrity 
 
 ## 5. Node Registry, Stake, and Suspension
 
-### 5.1 Governance models
+### 5.1 Inclusion models
 
-DHCoin supports two genesis-pinned validator-admission policies. Both use the same K-of-K mutual-distrust consensus and the same equivocation-detection mechanism; they differ only in the Sybil/disincentive layer.
+DHCoin supports two genesis-pinned validator-inclusion policies. Both deliver **identical decentralization and censorship-resistance guarantees** — they differ only in the Sybil-resistance medium and the disincentive currency.
 
-| Mode | `min_stake` | Sybil cost | Disincentive on misbehavior | Use case |
-|---|---|---|---|---|
-| **`OPEN_STAKE`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Stake forfeit (suspension slash + equivocation forfeit) | Permissionless public chain |
-| **`DOMAIN_REGISTRY`** | 0 | Domain registration cost + curatorial reputation | Deregistration (lose all future block rewards; re-entry costs a new domain) | Federated / consortium chain |
+| Mode | `min_stake` | Sybil cost | Disincentive on misbehavior |
+|---|---|---|---|
+| **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Stake forfeit (suspension slash + equivocation forfeit) |
+| **`DOMAIN_INCLUSION`** | 0 | Domain registration | Deregistration (lose all future block rewards; re-entry costs a fresh registration) |
 
-Both modes are decentralized in the architectural sense (no party controls the protocol; rules enforced by code; multiple independent operators). They differ on permissionlessness — `OPEN_STAKE` is open to any anonymous staker; `DOMAIN_REGISTRY` is open to any domain-owner but accountability is socially scoped via the public-domain identity.
+**Why the decentralization claim is mode-invariant:** DHCoin's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **unanimous collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
+
+The choice between modes is operational: which Sybil-resistance medium and disincentive currency the deployment prefers. Stake is the natural choice for chains where the native token has economic weight; domain-based inclusion is the natural choice for deployments where on-chain economics doesn't yet exist or where validator identities are intentionally public for accountability.
 
 ### 5.2 Registration
 
@@ -227,11 +229,11 @@ A node joins the eligible pool by broadcasting a REGISTER transaction whose payl
 
 Registration takes effect after a randomized 1–10 block delay derived from `(tx.hash || cumulative_rand)`. This prevents a registrant from timing entry to guarantee selection in a chosen round.
 
-In `DOMAIN_REGISTRY` chains the convention is that `tx.from` is a real DNS name (e.g., `validator1.example.com`). The protocol does not enforce DNS validity — that's an off-chain concern (operators may verify via DNSSEC TXT records pointing to the on-chain `ed_pub`). Mismatches surface as governance issues, not protocol violations.
+In `DOMAIN_INCLUSION` chains the convention is that `tx.from` is a real DNS name (e.g., `validator1.example.com`). The protocol does not enforce DNS validity — that's an off-chain concern (operators may verify via DNSSEC TXT records pointing to the on-chain `ed_pub`). Mismatches surface as governance issues, not protocol violations.
 
 ### 5.3 Stake
 
-Eligibility additionally requires `stake[domain] ≥ chain.min_stake()`. In `OPEN_STAKE` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_REGISTRY` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices. STAKE / UNSTAKE transactions still work in both modes (validators may voluntarily lock stake even in `DOMAIN_REGISTRY`); they just don't gate eligibility.
+Eligibility additionally requires `stake[domain] ≥ chain.min_stake()`. In `STAKE_INCLUSION` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_INCLUSION` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices. STAKE / UNSTAKE transactions still work in both modes (validators may voluntarily lock stake even in `DOMAIN_INCLUSION`); they just don't gate eligibility.
 
 ### 5.4 Suspension and equivocation deregistration
 
@@ -244,7 +246,7 @@ BASE = 10, MAX = 10000
 
 Only **Phase 1** aborts (`round=1` AbortEvents) count toward suspension. Phase 2 aborts can fire on a healthy creator when its block-sig arrival is delayed past the timer (timing skew); using them would inflate false-positive suspensions and harm liveness without improving censorship guarantees.
 
-A domain that **equivocates** (signs two different `block_digest`s at the same height) is permanently removed from the registry — `inactive_from` is set to the next block. Re-entry requires a fresh REGISTER (with a new Ed25519 key, and in `DOMAIN_REGISTRY` mode a new domain). In `OPEN_STAKE` mode the equivocator's stake is also fully forfeited; in `DOMAIN_REGISTRY` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
+A domain that **equivocates** (signs two different `block_digest`s at the same height) is permanently removed from the registry — `inactive_from` is set to the next block. Re-entry requires a fresh REGISTER (with a new Ed25519 key, and in `DOMAIN_INCLUSION` mode a new domain). In `STAKE_INCLUSION` mode the equivocator's stake is also fully forfeited; in `DOMAIN_INCLUSION` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
 
 ---
 
@@ -419,7 +421,7 @@ Applications (and light clients) inspect each block's `consensus_mode` and reaso
 
 **Slashing (rev.8)**: BFT-mode safety depends on `f < N/3` plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DHC) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
 
-**Opt out**: setting `bft_enabled = false` at genesis preserves the rev.7 single-mode behavior — chain halts on persistent silent committee member, by design. Suitable for consortium deployments where validator availability is governed by operator policy rather than open-stake economics.
+**Opt out**: setting `bft_enabled = false` at genesis preserves the rev.7 single-mode behavior — chain halts on persistent silent committee member, by design. Suitable for deployments that prefer unconditional safety on every block over liveness fallback.
 
 ### 10.5 Censorship vs. liveness, side by side
 
@@ -505,8 +507,8 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 | `tx_commit_ms` | 200 | Phase 1 timer |
 | `block_sig_ms` | 200 | Phase 2 timer |
 | `abort_claim_ms` | 100 | Abort claim collection window |
-| `min_stake` | 1000 (`OPEN_STAKE`) / 0 (`DOMAIN_REGISTRY`) | Genesis-pinned per chain. Eligibility threshold |
-| `governance_model` | `OPEN_STAKE` | Genesis-pinned. Either `OPEN_STAKE` or `DOMAIN_REGISTRY` |
+| `min_stake` | 1000 (`STAKE_INCLUSION`) / 0 (`DOMAIN_INCLUSION`) | Genesis-pinned per chain. Eligibility threshold |
+| `inclusion_model` | `STAKE_INCLUSION` | Genesis-pinned. Either `STAKE_INCLUSION` or `DOMAIN_INCLUSION` |
 | `BASE_SUSPENSION_BLOCKS` | 10 | First-offense suspension |
 | `MAX_SUSPENSION_BLOCKS` | 10000 | Cap |
 | `MAX_ABORT_EXPONENT` | 10 | Backoff cap |
@@ -569,8 +571,8 @@ Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slot
 
 The disincentive depends on the chain's governance model (§5.1):
 
-- **`OPEN_STAKE`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation triggers full stake forfeiture **and** registry deregistration.
-- **`DOMAIN_REGISTRY`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation deregisters the validator from the chain — they lose all future block rewards and must register a new domain to participate again.
+- **`STAKE_INCLUSION`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation triggers full stake forfeiture **and** registry deregistration.
+- **`DOMAIN_INCLUSION`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation deregisters the validator from the chain — they lose all future block rewards and must register a new domain to participate again.
 
 Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing) and the same end-to-end pipeline:
 

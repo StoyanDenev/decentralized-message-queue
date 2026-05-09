@@ -5,32 +5,41 @@
 
 namespace dhcoin::chain {
 
-// rev.8 follow-on: validator admission policy.
+// rev.8 follow-on: validator inclusion policy. Both modes preserve the
+// same decentralization property — K-of-K mutual veto + union tx_root
+// means a single honest validator in the registry, anywhere, eventually
+// gets selected and unions any censored tx into a block. Censorship
+// requires unanimous collusion of EVERY validator that ever rotates onto
+// any committee, which is structurally impossible without 100% adversary
+// capture of the registry.
 //
-//   OPEN_STAKE      — anyone with MIN_STAKE locked can be a validator.
-//                     Sybil resistance via capital lock-up. Slashing
-//                     forfeits stake. Best for permissionless public chains.
+// The two modes differ only in HOW validators are admitted to the
+// registry (Sybil-resistance mechanism + disincentive medium):
 //
-//   DOMAIN_REGISTRY — validators identify by domain (e.g., a real DNS
-//                     name like validator1.example.com). MIN_STAKE = 0;
-//                     no stake required. Sybil resistance comes from
-//                     domain registration cost + curatorial reputation.
-//                     Equivocation deregisters the validator (they lose
-//                     all future block rewards) instead of forfeiting
-//                     stake. Best for federated / consortium chains
-//                     where operators are publicly accountable.
+//   STAKE_INCLUSION  — admission via locking min_stake. Sybil cost =
+//                      capital lock-up. Disincentive on misbehavior =
+//                      stake forfeit (suspension slash + equivocation
+//                      forfeit).
 //
-// Both modes preserve the K-of-K mutual-distrust consensus, BFT escalation,
-// and equivocation detection. Only the Sybil/disincentive layer differs.
-enum class GovernanceModel : uint8_t {
-    OPEN_STAKE      = 0,
-    DOMAIN_REGISTRY = 1,
+//   DOMAIN_INCLUSION — admission via registering with a domain name
+//                      (e.g., a DNS name like validator1.example.com).
+//                      min_stake = 0. Sybil cost = domain registration.
+//                      Disincentive on misbehavior = registry
+//                      deregistration (lose all future block rewards;
+//                      re-entry costs a fresh registration).
+//
+// Both modes use the same K-of-K consensus, BFT escalation, delay-hash
+// randomness, and equivocation detection. Choice is purely about which
+// Sybil/disincentive medium suits the deployment.
+enum class InclusionModel : uint8_t {
+    STAKE_INCLUSION  = 0,
+    DOMAIN_INCLUSION = 1,
 };
 
-inline const char* to_string(GovernanceModel g) {
-    switch (g) {
-    case GovernanceModel::OPEN_STAKE:      return "open-stake";
-    case GovernanceModel::DOMAIN_REGISTRY: return "domain-registry";
+inline const char* to_string(InclusionModel m) {
+    switch (m) {
+    case InclusionModel::STAKE_INCLUSION:  return "stake-inclusion";
+    case InclusionModel::DOMAIN_INCLUSION: return "domain-inclusion";
     }
     return "?";
 }
@@ -71,14 +80,14 @@ struct GenesisConfig {
     bool                            bft_enabled{true};
     uint32_t                        bft_escalation_threshold{5};
 
-    // Rev. 8 follow-on: validator admission policy. Default is OPEN_STAKE
-    // (preserves rev.7/8 stake-based behavior). DOMAIN_REGISTRY chains
-    // pin min_stake = 0 (no stake gate); equivocation still deregisters
-    // the validator regardless of mode.
-    GovernanceModel                 governance_model{GovernanceModel::OPEN_STAKE};
+    // Rev. 8 follow-on: validator inclusion policy. Default is
+    // STAKE_INCLUSION (preserves rev.7/8 stake-based behavior).
+    // DOMAIN_INCLUSION chains pin min_stake = 0 (no stake gate);
+    // equivocation still deregisters the validator regardless of mode.
+    InclusionModel                  inclusion_model{InclusionModel::STAKE_INCLUSION};
     // Min stake threshold for validator eligibility. Default 1000 for
-    // OPEN_STAKE; DOMAIN_REGISTRY chains pin this to 0. Genesis-pinned;
-    // chain-wide constant.
+    // STAKE_INCLUSION; DOMAIN_INCLUSION chains pin this to 0.
+    // Genesis-pinned; chain-wide constant.
     uint64_t                        min_stake{1000};
 
     // Rev. 9 sharding role. SINGLE preserves rev.8 behavior (one chain,

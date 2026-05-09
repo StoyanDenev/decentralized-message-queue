@@ -47,9 +47,10 @@ NodeRegistry NodeRegistry::build_from_chain(const chain::Chain& chain, uint64_t 
         return at_index <= ar.last_block + len;
     };
 
-    // rev.8 follow-on: per-chain min_stake (default 1000 for OPEN_STAKE,
-    // 0 for DOMAIN_REGISTRY). Skip the stake gate entirely when 0 — any
-    // registered+active+non-suspended domain is eligible.
+    // rev.8 follow-on: per-chain min_stake (default 1000 for
+    // STAKE_INCLUSION, 0 for DOMAIN_INCLUSION). Skip the stake gate
+    // entirely when 0 — any registered+active+non-suspended domain is
+    // eligible.
     uint64_t threshold = chain.min_stake();
 
     NodeRegistry reg;
