@@ -1473,13 +1473,19 @@ void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
     std::lock_guard<std::mutex> lk(state_mutex_);
 
     // Reject peers on a different genesis. Their chain is not ours; they will
-    // never feed us valid blocks.
+    // never feed us valid blocks. But STILL fall through to
+    // start_sync_if_behind() — without it, a node whose only peers are
+    // cross-chain (BEACON ↔ SHARD via beacon_peers/shard_peers) would
+    // never transition to IN_SYNC and never start producing. Different-
+    // genesis peers simply don't contribute to peer_heights_ so the
+    // sync-height comparison correctly ignores them.
     if (!chain_.empty()) {
         std::string ours = to_hex(chain_.at(0).compute_hash());
         if (!genesis_hash.empty() && genesis_hash != ours) {
             std::cerr << "[node] peer " << peer->address()
                       << " on different genesis (" << genesis_hash
-                      << ", ours " << ours << "); ignoring\n";
+                      << ", ours " << ours << "); ignoring for sync\n";
+            start_sync_if_behind();
             return;
         }
     }
