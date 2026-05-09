@@ -46,6 +46,7 @@ Usage:
   dhcoin status                              Chain head, node count, next creators
   dhcoin show-block <index>                  Print block at index (full JSON)
   dhcoin chain-summary [--last N]            Compact summary of last N blocks
+  dhcoin validators                          List the current validator pool
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -274,6 +275,35 @@ static int cmd_show_block(int argc, char** argv) {
             return 1;
         }
         std::cout << result.dump(2) << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// dhcoin validators [--rpc-port N]
+//   Lists the current validator pool (registered + active + staked +
+//   not suspended) with each entry's domain, pubkey, stake, active_from.
+static int cmd_validators(int argc, char** argv) {
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        auto result = rpc::rpc_call("127.0.0.1", port, "validators");
+        if (!result.is_array() || result.empty()) {
+            std::cout << "(no eligible validators)\n";
+            return 0;
+        }
+        std::cout << std::left
+                  << std::setw(25) << "domain"
+                  << std::setw(10) << "stake"
+                  << std::setw(15) << "active_from"
+                  << "ed_pub\n";
+        for (auto& v : result) {
+            std::cout << std::setw(25) << v.value("domain", std::string{})
+                      << std::setw(10) << v.value("stake", uint64_t{0})
+                      << std::setw(15) << v.value("active_from", uint64_t{0})
+                      << v.value("ed_pub", std::string{}).substr(0, 24) << "...\n";
+        }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -700,6 +730,7 @@ int main(int argc, char** argv) {
     if (cmd == "peers")         return cmd_peers(sub_argc, sub_argv);
     if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
+    if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "balance")     return cmd_balance(sub_argc, sub_argv);
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);

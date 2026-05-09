@@ -90,6 +90,10 @@ public:
     // rev.9: chain summary — last N blocks with index, hash, mode,
     // tx_count, creators (compact). Useful for ops dashboards.
     nlohmann::json rpc_chain_summary(uint32_t last_n = 10)          const;
+    // rev.9: list current validator pool (registered + active +
+    // staked >= min_stake + not suspended). Each entry includes
+    // domain, ed_pub (hex), staked balance, active_from height.
+    nlohmann::json rpc_validators()                                 const;
     nlohmann::json rpc_register();
     nlohmann::json rpc_send(const std::string& to, uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_balance(const std::string& domain)           const;

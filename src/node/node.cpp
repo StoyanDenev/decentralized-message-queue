@@ -1466,6 +1466,22 @@ json Node::rpc_block(uint64_t index) const {
     return chain_.at(index).to_json();
 }
 
+json Node::rpc_validators() const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    json arr = json::array();
+    auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    for (auto& nd : reg.sorted_nodes()) {
+        json e;
+        e["domain"]       = nd.domain;
+        e["ed_pub"]       = to_hex(nd.pubkey);
+        e["active_from"]  = nd.active_from;
+        e["registered_at"]= nd.registered_at;
+        e["stake"]        = chain_.stake(nd.domain);
+        arr.push_back(e);
+    }
+    return arr;
+}
+
 json Node::rpc_chain_summary(uint32_t last_n) const {
     std::lock_guard<std::mutex> lk(state_mutex_);
     json arr = json::array();
