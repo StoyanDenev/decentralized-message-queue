@@ -56,6 +56,15 @@ enum class MsgType : uint8_t {
     // independently verify the source's K-of-K signatures (Stage B3.4)
     // before crediting any receipt.
     CROSS_SHARD_RECEIPT_BUNDLE = 14,
+    // rev.9 B6.basic: snapshot fetch over the network. A peer (typically
+    // a fresh node bootstrapping) sends SNAPSHOT_REQUEST; any peer
+    // willing to serve responds with SNAPSHOT_RESPONSE carrying the
+    // serialized state (Chain::serialize_state). The receiver then
+    // calls Chain::restore_from_snapshot to install state directly,
+    // skipping per-block replay. Allowed across roles — any node with
+    // chain state can serve.
+    SNAPSHOT_REQUEST  = 15,
+    SNAPSHOT_RESPONSE = 16,
 };
 
 struct Message {
@@ -124,6 +133,12 @@ inline Message make_shard_tip(ShardId shard_id, const chain::Block& tip) {
         {"shard_id", shard_id},
         {"tip",      tip.to_json()}
     }};
+}
+inline Message make_snapshot_request(uint32_t header_count = 16) {
+    return {MsgType::SNAPSHOT_REQUEST, {{"headers", header_count}}};
+}
+inline Message make_snapshot_response(const nlohmann::json& snapshot) {
+    return {MsgType::SNAPSHOT_RESPONSE, snapshot};
 }
 inline Message make_cross_shard_receipt_bundle(ShardId src_shard,
                                                   const chain::Block& src_block) {

@@ -53,6 +53,13 @@ public:
     // src_block to filter receipts addressed to my_shard_id.
     std::function<void(ShardId, const chain::Block&, const Message&)>
                                                     on_cross_shard_receipt_bundle;
+    // rev.9 B6.basic: snapshot fetch over gossip. Server-side handler
+    // builds a snapshot via Chain::serialize_state and replies via the
+    // peer pointer. Client-side handler ingests the response and
+    // restores via Chain::restore_from_snapshot.
+    std::function<void(uint32_t /*header_count*/,
+                       std::shared_ptr<Peer>)>      on_snapshot_request;
+    std::function<void(const nlohmann::json&)>      on_snapshot_response;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,

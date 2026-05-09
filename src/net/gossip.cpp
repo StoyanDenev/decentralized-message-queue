@@ -97,6 +97,12 @@ static bool peer_message_allowed(const Peer& peer, MsgType type,
         // (relay). Accept from either side; reject SINGLE peers.
         return peer.chain_role() == ChainRole::BEACON
             || peer.chain_role() == ChainRole::SHARD;
+    case MsgType::SNAPSHOT_REQUEST:
+    case MsgType::SNAPSHOT_RESPONSE:
+        // Snapshot fetch is role-agnostic: any peer with chain state
+        // can serve, any peer can request. Bootstrap clients (CLI
+        // fetchers) typically tag themselves as SINGLE.
+        return true;
     default:
         // Intra-chain messages: source peer must be on the same chain
         // (same role, same shard_id when SHARD).
@@ -176,6 +182,18 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
                 on_cross_shard_receipt_bundle(sid,
                     chain::Block::from_json(msg.payload["src_block"]),
                     msg);   // raw msg passed for relay re-broadcast
+            }
+            break;
+        case MsgType::SNAPSHOT_REQUEST:
+            if (on_snapshot_request) {
+                on_snapshot_request(
+                    msg.payload.value("headers", uint32_t{16}),
+                    peer);
+            }
+            break;
+        case MsgType::SNAPSHOT_RESPONSE:
+            if (on_snapshot_response) {
+                on_snapshot_response(msg.payload);
             }
             break;
         case MsgType::GET_CHAIN:

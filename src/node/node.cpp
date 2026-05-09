@@ -269,6 +269,9 @@ chain_loaded:
         [this](auto sid, auto& src_block, auto& relay) {
             on_cross_shard_receipt_bundle(sid, src_block, relay);
         };
+    gossip_.on_snapshot_request = [this](auto headers, auto peer) {
+        on_snapshot_request(headers, peer);
+    };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -1128,6 +1131,24 @@ void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
                   << " accepted=" << added
                   << " pending_total=" << pending_inbound_receipts_.size() << "\n";
     }
+}
+
+// rev.9 B6.basic: serve a snapshot to a requesting peer. Empty chains
+// silently skip (nothing useful to send). Otherwise build the snapshot
+// via Chain::serialize_state and reply directly to the requester.
+void Node::on_snapshot_request(uint32_t header_count,
+                                  std::shared_ptr<net::Peer> peer) {
+    nlohmann::json snap;
+    {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        if (chain_.empty()) return;     // nothing to serve
+        snap = chain_.serialize_state(header_count);
+    }
+    if (peer) peer->send(net::make_snapshot_response(snap));
+    std::cout << "[node] served snapshot to peer "
+              << (peer ? peer->address() : std::string("?"))
+              << " (block_index=" << snap.value("block_index", uint64_t{0})
+              << ")\n";
 }
 
 void Node::reset_round() {

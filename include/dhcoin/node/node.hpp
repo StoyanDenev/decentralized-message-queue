@@ -180,6 +180,11 @@ private:
     void on_cross_shard_receipt_bundle(ShardId src_shard,
                                           const chain::Block& src_block,
                                           const net::Message& relay);
+    // rev.9 B6.basic: serve a snapshot to a requesting peer. Builds via
+    // Chain::serialize_state(header_count) and sends via the peer
+    // pointer.
+    void on_snapshot_request(uint32_t header_count,
+                                std::shared_ptr<net::Peer> peer);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,

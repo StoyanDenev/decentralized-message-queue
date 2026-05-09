@@ -4,6 +4,8 @@
 #include <dhcoin/chain/params.hpp>
 #include <dhcoin/crypto/keys.hpp>
 #include <dhcoin/chain/genesis.hpp>
+#include <dhcoin/net/messages.hpp>
+#include <asio.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <filesystem>
@@ -52,6 +54,7 @@ Usage:
   dhcoin show-tx <hash>                      Look up a tx by hash (block_index + payload)
   dhcoin snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
   dhcoin snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
+  dhcoin snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -464,6 +467,98 @@ static int cmd_snapshot_create(int argc, char** argv) {
     return 0;
 }
 
+// dhcoin snapshot fetch --peer host:port --out file.json [--headers N]
+//   B6.basic: connect to a running node, send a SNAPSHOT_REQUEST over
+//   the gossip-wire protocol, write the response to a file. Pure
+//   network client; no genesis or chain config needed locally. After
+//   fetch, validates by round-tripping through restore_from_snapshot
+//   (head_hash sanity check). Operator workflow:
+//     dhcoin snapshot fetch --peer 1.2.3.4:7771 --out snap.json
+//     # ... edit config to set snapshot_path = snap.json ...
+//     dhcoin start
+static int cmd_snapshot_fetch(int argc, char** argv) {
+    std::string peer_str, out_path;
+    uint32_t header_count = 16;
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if (a == "--peer")    peer_str    = argv[i + 1];
+        if (a == "--out")     out_path    = argv[i + 1];
+        if (a == "--headers") header_count = static_cast<uint32_t>(
+                                    std::stoul(argv[i + 1]));
+    }
+    if (peer_str.empty() || out_path.empty()) {
+        std::cerr << "Usage: dhcoin snapshot fetch --peer host:port "
+                     "--out file.json [--headers N]\n";
+        return 1;
+    }
+    auto colon = peer_str.find(':');
+    if (colon == std::string::npos) {
+        std::cerr << "peer must be host:port\n";
+        return 1;
+    }
+    std::string host = peer_str.substr(0, colon);
+    uint16_t    port = static_cast<uint16_t>(std::stoi(peer_str.substr(colon + 1)));
+
+    try {
+        asio::io_context io;
+        asio::ip::tcp::resolver resolver(io);
+        auto endpoints = resolver.resolve(host, std::to_string(port));
+        asio::ip::tcp::socket socket(io);
+        asio::connect(socket, endpoints);
+
+        auto write_msg = [&](const net::Message& msg) {
+            auto buf = msg.serialize();
+            asio::write(socket, asio::buffer(buf));
+        };
+
+        // HELLO so the peer doesn't drop us. We tag ourselves as
+        // SINGLE/0 — bootstrap clients don't claim a chain identity.
+        write_msg(net::make_hello("snapshot-fetcher", 0,
+                                    ChainRole::SINGLE, 0));
+        write_msg(net::make_snapshot_request(header_count));
+
+        // Read framed messages until SNAPSHOT_RESPONSE arrives. Skip
+        // any others (peer might gossip blocks/headers in the
+        // meantime).
+        std::array<uint8_t, 4> hdr;
+        for (int spin = 0; spin < 200; ++spin) {
+            asio::read(socket, asio::buffer(hdr));
+            uint32_t len = (uint32_t(hdr[0]) << 24)
+                         | (uint32_t(hdr[1]) << 16)
+                         | (uint32_t(hdr[2]) << 8)
+                         |  uint32_t(hdr[3]);
+            if (len == 0 || len > 16 * 1024 * 1024) {
+                std::cerr << "fetch: bad frame length " << len << "\n";
+                return 1;
+            }
+            std::vector<uint8_t> body(len);
+            asio::read(socket, asio::buffer(body));
+            net::Message m = net::Message::deserialize(body.data(), body.size());
+            if (m.type != net::MsgType::SNAPSHOT_RESPONSE) continue;
+
+            // Validate by round-trip through restore_from_snapshot.
+            chain::Chain c = chain::Chain::restore_from_snapshot(m.payload);
+            std::ofstream f(out_path);
+            if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
+            f << m.payload.dump(2) << "\n";
+            std::cout << "Snapshot fetched from " << peer_str << "\n";
+            std::cout << "  block_index : " << (c.empty() ? 0 : c.head().index) << "\n";
+            std::cout << "  head_hash   : "
+                      << (c.empty() ? std::string{} : to_hex(c.head_hash())) << "\n";
+            std::cout << "  accounts    : " << c.accounts().size()    << "\n";
+            std::cout << "  stakes      : " << c.stakes().size()      << "\n";
+            std::cout << "  registrants : " << c.registrants().size() << "\n";
+            std::cout << "  written to  : " << out_path << "\n";
+            return 0;
+        }
+        std::cerr << "fetch: timed out waiting for SNAPSHOT_RESPONSE\n";
+        return 1;
+    } catch (std::exception& e) {
+        std::cerr << "fetch error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // dhcoin snapshot inspect --in file.json
 //   Round-trips a snapshot through Chain::restore_from_snapshot and
 //   prints a human-readable summary. Validates JSON format, version,
@@ -511,6 +606,7 @@ static int cmd_snapshot(int argc, char** argv) {
     std::string sub = argv[0];
     if (sub == "create")  return cmd_snapshot_create (argc - 1, argv + 1);
     if (sub == "inspect") return cmd_snapshot_inspect(argc - 1, argv + 1);
+    if (sub == "fetch")   return cmd_snapshot_fetch  (argc - 1, argv + 1);
     std::cerr << "Unknown snapshot subcommand: " << sub << "\n";
     return 1;
 }
