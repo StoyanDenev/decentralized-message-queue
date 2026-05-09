@@ -1082,11 +1082,26 @@ json Node::rpc_status() const {
     j["domain"]      = cfg_.domain;
     j["peer_count"]  = gossip_.peer_count();
     j["m_creators"]  = cfg_.m_creators;
+    j["k_block_sigs"]= cfg_.k_block_sigs;
     j["sync_state"]  = (state_ == SyncState::IN_SYNC) ? "in_sync" : "syncing";
     j["genesis"]     = chain_.empty() ? "" : to_hex(chain_.at(0).compute_hash());
     j["chain_role"]  = to_string(cfg_.chain_role);
     j["shard_id"]    = cfg_.shard_id;
     j["epoch_index"] = current_epoch_index();
+    j["mempool_size"] = tx_store_.size();
+
+    // Block-mode + tx counters across the full chain. Useful for ops
+    // dashboards and test assertions ("did the chain actually escalate?").
+    uint64_t md_blocks = 0, bft_blocks = 0, total_txs = 0;
+    for (uint64_t i = 0; i < chain_.height(); ++i) {
+        const auto& b = chain_.at(i);
+        total_txs += b.transactions.size();
+        if (b.consensus_mode == chain::ConsensusMode::BFT) ++bft_blocks;
+        else ++md_blocks;
+    }
+    j["md_block_count"]  = md_blocks;
+    j["bft_block_count"] = bft_blocks;
+    j["tx_count"]        = total_txs;
 
     auto nodes = registry_.sorted_nodes();
     if (!chain_.empty() && nodes.size() >= cfg_.m_creators) {
