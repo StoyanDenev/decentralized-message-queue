@@ -543,7 +543,7 @@ Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slot
 
 **Stake-weighted selection.** v1 selects creators uniformly from the stake-eligible pool. Stake-weighted selection (proportional to bonded stake) is a natural extension for production deployments.
 
-**Sharding / parallel execution.** §16 introduces the rev.9 sharding architecture and its current scaffolding state. Full multi-chain coordination (Stage B2c onward) is in progress. Parallel transaction execution within a single chain (Block-STM-style) is orthogonal and not yet implemented.
+**Sharding for scale.** §16 introduces the rev.9 sharding architecture and its current scaffolding state. Full multi-chain coordination (Stage B2c onward) is in progress. Single-chain TPS scaling via in-block parallel transaction execution is **not on the roadmap** — the design philosophy preferences sharding (per-shard mutual-distrust K-conjunction) over single-chain optimistic-concurrency execution. A deployment that hits a per-shard TPS ceiling adds shards rather than rewriting the apply path.
 
 **Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP).
 
