@@ -100,6 +100,12 @@ public:
     // addresses (0x-prefixed hex). Returns null if address has no
     // on-chain state.
     nlohmann::json rpc_account(const std::string& addr)             const;
+    // rev.9 B5: current epoch's committee — the K creators selected
+    // by epoch_committee_seed(epoch_rand, shard_id) over the current
+    // validator pool. Pure function of chain state; deterministic
+    // across all nodes. Each entry: {domain, ed_pub, stake,
+    // active_from}. Useful for explorers and rotation observability.
+    nlohmann::json rpc_committee()                                  const;
     // rev.9: locate a transaction by its hex-encoded hash. Scans the
     // chain (head → genesis) and returns {tx, block_index, block_hash}
     // on hit, or null when the hash isn't found in any finalized block

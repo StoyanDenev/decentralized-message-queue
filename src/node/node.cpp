@@ -1238,6 +1238,24 @@ void Node::apply_block_locked(const chain::Block& b) {
     std::cout << "[node] accepted block #" << b.index
               << " creators=" << b.creators.size() << "\n";
 
+    // rev.9 B5: epoch boundary observability. When this block opens a
+    // new epoch (height % epoch_blocks == 1, since the epoch's "rand
+    // anchor" is the block at index = epoch_index * epoch_blocks - 1
+    // and committee selection at the next round reads it), log the
+    // transition + the freshly-derived committee. Operators can use
+    // this to trace rotation.
+    if (cfg_.epoch_blocks > 0
+        && chain_.height() > 0
+        && (chain_.height() - 1) % cfg_.epoch_blocks == 0
+        && chain_.height() > 1) {
+        EpochIndex new_epoch = current_epoch_index();
+        size_t pool_size = NodeRegistry::build_from_chain(
+                                chain_, chain_.height()).size();
+        std::cout << "[node] epoch boundary: epoch_index=" << new_epoch
+                  << " pool_size=" << pool_size
+                  << " (next-round committee will derive from this height's rand)\n";
+    }
+
     // rev.9 B2c.1: beacon nodes broadcast each newly-applied block as a
     // BEACON_HEADER so peering shard nodes can light-validate it. SINGLE
     // / SHARD roles do nothing — this gossip is beacon-emitted only.
@@ -1656,6 +1674,41 @@ json Node::rpc_tx(const std::string& hash_hex) const {
         }
     }
     return nullptr;
+}
+
+json Node::rpc_committee() const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    json arr = json::array();
+    if (chain_.empty()) return arr;
+
+    auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    auto pool = reg.sorted_nodes();
+    if (pool.empty()) return arr;
+
+    // Mirror check_if_selected's seed derivation so the result matches
+    // what producers actually use this round (modulo abort_events which
+    // only enter once a round has had aborts).
+    Hash epoch_rand = current_epoch_rand();
+    Hash rand = crypto::epoch_committee_seed(epoch_rand, cfg_.shard_id);
+
+    size_t k = std::min<size_t>(cfg_.k_block_sigs, pool.size());
+    if (k == 0) return arr;
+
+    std::vector<size_t> indices;
+    try {
+        indices = crypto::select_m_creators(rand, pool.size(), k);
+    } catch (...) { return arr; }
+
+    for (size_t idx : indices) {
+        const auto& nd = pool[idx];
+        json e;
+        e["domain"]      = nd.domain;
+        e["ed_pub"]      = to_hex(nd.pubkey);
+        e["active_from"] = nd.active_from;
+        e["stake"]       = chain_.stake(nd.domain);
+        arr.push_back(e);
+    }
+    return arr;
 }
 
 json Node::rpc_validators() const {
