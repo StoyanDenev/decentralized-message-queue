@@ -316,6 +316,83 @@ const Block& Chain::resolve_fork(const Block& a, const Block& b) {
     return a; // identical
 }
 
+// ─── Snapshot ────────────────────────────────────────────────────────────────
+
+json Chain::serialize_state(uint32_t header_count) const {
+    json snap;
+    snap["version"]       = 1;
+    snap["block_index"]   = blocks_.empty() ? uint64_t{0}
+                                              : blocks_.back().index;
+    snap["head_hash"]     = blocks_.empty()
+                              ? std::string{}
+                              : to_hex(blocks_.back().compute_hash());
+
+    json accs = json::array();
+    for (auto& [d, a] : accounts_) {
+        accs.push_back({
+            {"domain",     d},
+            {"balance",    a.balance},
+            {"next_nonce", a.next_nonce},
+        });
+    }
+    snap["accounts"] = accs;
+
+    json stk = json::array();
+    for (auto& [d, s] : stakes_) {
+        stk.push_back({
+            {"domain",        d},
+            {"locked",        s.locked},
+            {"unlock_height", s.unlock_height},
+        });
+    }
+    snap["stakes"] = stk;
+
+    json regs = json::array();
+    for (auto& [d, r] : registrants_) {
+        regs.push_back({
+            {"domain",        d},
+            {"ed_pub",        to_hex(r.ed_pub)},
+            {"registered_at", r.registered_at},
+            {"active_from",   r.active_from},
+            {"inactive_from", r.inactive_from},
+        });
+    }
+    snap["registrants"] = regs;
+
+    json applied = json::array();
+    for (auto& [src, tx_hash] : applied_inbound_receipts_) {
+        applied.push_back({
+            {"src_shard", src},
+            {"tx_hash",   to_hex(tx_hash)},
+        });
+    }
+    snap["applied_inbound_receipts"] = applied;
+
+    // Genesis-pinned constants the restorer needs to apply subsequent
+    // blocks correctly (creator credit, validator-eligibility gate,
+    // address routing).
+    snap["block_subsidy"] = block_subsidy_;
+    snap["min_stake"]     = min_stake_;
+    snap["shard_count"]   = shard_count_;
+    snap["shard_salt"]    = to_hex(shard_salt_);
+    snap["shard_id"]      = my_shard_id_;
+
+    // Tail headers for chain continuity. Restorer keeps them so they
+    // can verify incoming block's prev_hash chains correctly. Default
+    // is 16 — enough for typical sync overlap.
+    json hdrs = json::array();
+    if (!blocks_.empty() && header_count > 0) {
+        size_t total = blocks_.size();
+        size_t start = (total > header_count) ? total - header_count : 0;
+        for (size_t i = start; i < total; ++i) {
+            hdrs.push_back(blocks_[i].to_json());
+        }
+    }
+    snap["headers"] = hdrs;
+
+    return snap;
+}
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 void Chain::save(const std::string& path) const {

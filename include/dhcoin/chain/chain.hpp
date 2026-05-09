@@ -93,6 +93,21 @@ public:
     static const Block& resolve_fork(const Block& a, const Block& b);
 
     void        save(const std::string& path) const;
+
+    // rev.9 B6.basic: serialize the chain's CURRENT STATE (accounts,
+    // stakes, registrants, dedup set) plus the last `header_count`
+    // blocks. Operators host this as a snapshot for fast bootstrap of
+    // new nodes (replaying from genesis to a mature chain's tip is
+    // O(N) verification work). The snapshot also includes
+    // genesis-pinned chain-wide constants (block_subsidy, min_stake,
+    // shard_count, shard_salt, my_shard_id) so a restorer doesn't need
+    // the original genesis to make sense of the state.
+    //
+    // No state root in v1 — verification is by trust-the-source +
+    // post-restore consistency check (replay the next handful of
+    // blocks and confirm head matches majority of network peers).
+    // Adding a state root is a v2 protocol change.
+    nlohmann::json serialize_state(uint32_t header_count = 16) const;
     // block_subsidy must be passed at load time so replay credits creators
     // correctly. Caller (Node) loads it from GenesisConfig before this call.
     // rev.9 B3: shard routing params must also be passed so apply-side

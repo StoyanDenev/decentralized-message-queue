@@ -133,6 +133,10 @@ public:
     //   { accepted: bool, reason: <error if rejected> }.
     // Idempotent on (equivocator, block_index) duplicates.
     nlohmann::json rpc_submit_equivocation(const nlohmann::json& ev_json);
+    // rev.9 B6.basic: snapshot of chain state (accounts, stakes,
+    // registrants, dedup, genesis-pinned constants, tail headers).
+    // Operators host the result for fast bootstrap of new nodes.
+    nlohmann::json rpc_snapshot(uint32_t header_count = 16) const;
 
 private:
     void on_block(const chain::Block& b);

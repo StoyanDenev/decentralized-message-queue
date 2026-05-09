@@ -1894,6 +1894,11 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
                        "unregistered equivocator, or duplicate)"}};
 }
 
+json Node::rpc_snapshot(uint32_t header_count) const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    return chain_.serialize_state(header_count);
+}
+
 json Node::rpc_balance(const std::string& domain) const {
     std::lock_guard<std::mutex> lk(state_mutex_);
     return {{"domain", domain}, {"balance", chain_.balance(domain)}};

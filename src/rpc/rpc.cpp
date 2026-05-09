@@ -83,6 +83,8 @@ json RpcServer::dispatch(const json& req) {
     if (method == "submit_equivocation")
         return node_.rpc_submit_equivocation(
             params.value("event", json::object()));
+    if (method == "snapshot")
+        return node_.rpc_snapshot(params.value("headers", uint32_t{16}));
     if (method == "block")
         return node_.rpc_block(params.value("index", uint64_t{0}));
     if (method == "chain_summary")

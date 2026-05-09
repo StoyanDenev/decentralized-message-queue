@@ -50,6 +50,7 @@ Usage:
   dhcoin committee                           List the current epoch's K-of-K committee
   dhcoin show-account <address>              Inspect any address (balance, nonce, registry, stake)
   dhcoin show-tx <hash>                      Look up a tx by hash (block_index + payload)
+  dhcoin snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -410,6 +411,68 @@ static int cmd_show_account(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// dhcoin snapshot create [--out file.json] [--headers N] [--rpc-port N]
+//   B6.basic: dump chain state (accounts, stakes, registrants, dedup,
+//   tail headers) to a file. Operators host this for fast-bootstrap of
+//   new nodes — restoring from a snapshot avoids replaying every block
+//   from genesis. The result is JSON; a typical snapshot for a mature
+//   chain is much smaller than the full chain.json. v1 verification
+//   model: trust the source + post-restore consistency check (replay
+//   the next handful of blocks); v2 adds state roots in the block
+//   format for cryptographic verification.
+static int cmd_snapshot_create(int argc, char** argv) {
+    std::string out_path;
+    uint32_t    header_count = 16;
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if (a == "--out")     out_path = argv[i + 1];
+        if (a == "--headers") header_count = static_cast<uint32_t>(
+                                    std::stoul(argv[i + 1]));
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"headers", header_count}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "snapshot", params);
+        std::string text = result.dump(2);
+        if (out_path.empty()) {
+            std::cout << text << "\n";
+        } else {
+            std::ofstream f(out_path);
+            if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
+            f << text << "\n";
+            std::cout << "Snapshot written to " << out_path << "\n";
+            std::cout << "  block_index : "
+                      << result.value("block_index", uint64_t{0}) << "\n";
+            std::cout << "  head_hash   : "
+                      << result.value("head_hash", std::string{}) << "\n";
+            std::cout << "  accounts    : "
+                      << result.value("accounts", json::array()).size() << "\n";
+            std::cout << "  stakes      : "
+                      << result.value("stakes", json::array()).size() << "\n";
+            std::cout << "  registrants : "
+                      << result.value("registrants", json::array()).size() << "\n";
+            std::cout << "  headers     : "
+                      << result.value("headers", json::array()).size() << "\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_snapshot(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: dhcoin snapshot create [--out file] "
+                     "[--headers N] [--rpc-port N]\n";
+        return 1;
+    }
+    std::string sub = argv[0];
+    if (sub == "create") return cmd_snapshot_create(argc - 1, argv + 1);
+    std::cerr << "Unknown snapshot subcommand: " << sub << "\n";
+    return 1;
 }
 
 // dhcoin show-tx <hash> [--rpc-port N]
@@ -836,6 +899,7 @@ int main(int argc, char** argv) {
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
+    if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
     if (cmd == "balance")     return cmd_balance(sub_argc, sub_argv);
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
