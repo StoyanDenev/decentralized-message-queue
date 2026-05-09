@@ -1,8 +1,10 @@
 # DHCoin: A Fork-Free Cryptocurrency with Two-Phase Sequential-Delay Co-Creation
 
-**Version 1, rev. 8** (rev. 9 sharding scaffolding in progress)
+**Version 1, rev. 8** (rev. 9 sharding through B6.basic complete; v1 ~95% done)
 
 > **Scope, briefly:** DHCoin is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges, no light clients yet. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what's done vs. what isn't is in [§17 Scope and Current Status](#17-scope-and-current-status).
+>
+> **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
 
 ---
 
