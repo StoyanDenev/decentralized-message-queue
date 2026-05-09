@@ -63,6 +63,31 @@ struct AbortEvent {
     static AbortEvent from_json(const nlohmann::json& j);
 };
 
+// rev.8 follow-on: full equivocation slashing. An EquivocationEvent is
+// proof that `equivocator` signed two conflicting BlockSigMsgs at the same
+// `block_index` — i.e., signed two different `block_digest`s with the same
+// Ed25519 key. When baked into a finalized block, the equivocator's full
+// staked balance is forfeited on apply (much harsher than the
+// SUSPENSION_SLASH economic disincentive — equivocation is a deliberate
+// double-sign attack, not just absence).
+//
+// The two signed messages live inline (digest_a + sig_a, digest_b + sig_b)
+// so any node can independently verify the event by checking both sigs
+// against the equivocator's registered Ed25519 key. The validator rejects
+// events where digest_a == digest_b (no equivocation), or the two sigs
+// don't both verify, or the equivocator isn't registered.
+struct EquivocationEvent {
+    std::string equivocator;          // domain whose key signed both digests
+    uint64_t    block_index{0};       // height at which equivocation occurred
+    Hash        digest_a{};
+    Signature   sig_a{};
+    Hash        digest_b{};
+    Signature   sig_b{};
+
+    nlohmann::json           to_json() const;
+    static EquivocationEvent from_json(const nlohmann::json& j);
+};
+
 // Carried only by block 0 (genesis). Populates account_state, stake_table, and
 // registrants_ at chain construction.
 struct GenesisAlloc {
@@ -123,6 +148,7 @@ struct Block {
 
     Hash                     cumulative_rand{};
     std::vector<AbortEvent>  abort_events;
+    std::vector<EquivocationEvent> equivocation_events;
 
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.

@@ -270,14 +270,16 @@ Block build_body(
     const Hash&                        delay_output,
     uint32_t                           m_pool_size,
     ConsensusMode                      mode,
-    const std::string&                 bft_proposer_domain) {
+    const std::string&                 bft_proposer_domain,
+    const std::vector<EquivocationEvent>& equivocation_events) {
 
     Block b;
-    b.index          = chain.empty() ? 1 : chain.height();
-    b.prev_hash      = chain.empty() ? Hash{} : chain.head_hash();
-    b.timestamp      = now_unix();
-    b.abort_events   = aborts;
-    b.creators       = creator_domains;
+    b.index               = chain.empty() ? 1 : chain.height();
+    b.prev_hash           = chain.empty() ? Hash{} : chain.head_hash();
+    b.timestamp           = now_unix();
+    b.abort_events        = aborts;
+    b.equivocation_events = equivocation_events;
+    b.creators            = creator_domains;
 
     // Per-creator Phase-1 evidence in selection order.
     for (auto& c : contribs) {

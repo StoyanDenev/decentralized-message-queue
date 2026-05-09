@@ -27,6 +27,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_creator_selection(b, registry, chain); !r.ok) return r;
     if (auto r = check_creator_tx_commitments(b, registry); !r.ok) return r;
     if (auto r = check_abort_certs(b, chain, registry);  !r.ok) return r;
+    if (auto r = check_equivocation_events(b, registry); !r.ok) return r;
     if (auto r = check_delay(b);                         !r.ok) return r;
     if (auto r = check_block_sigs(b, registry, chain);   !r.ok) return r;
     if (auto r = check_cumulative_rand(b, chain);        !r.ok) return r;
@@ -263,6 +264,40 @@ BlockValidator::Result BlockValidator::check_abort_certs(
         rand = SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
     }
 
+    return {true, ""};
+}
+
+// Each EquivocationEvent must contain two signatures by the same registered
+// key over two DIFFERENT block_digests at the SAME block_index. If valid,
+// this is unambiguous proof of equivocation: the equivocator's full stake
+// is forfeited at apply time (chain.cpp::apply_transactions). Validator
+// rejects events where the two digests are equal (no equivocation), the
+// equivocator isn't registered, the block_index doesn't match, or either
+// signature fails to verify.
+BlockValidator::Result BlockValidator::check_equivocation_events(
+    const Block& b, const NodeRegistry& registry) const {
+    for (size_t i = 0; i < b.equivocation_events.size(); ++i) {
+        const auto& ev = b.equivocation_events[i];
+
+        if (ev.digest_a == ev.digest_b)
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] digest_a == digest_b (not equivocation)"};
+        if (ev.sig_a == ev.sig_b)
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] sig_a == sig_b (same signature)"};
+
+        auto entry = registry.find(ev.equivocator);
+        if (!entry)
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] equivocator not in registry: " + ev.equivocator};
+
+        if (!verify(entry->pubkey, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] sig_a does not verify against equivocator's key"};
+        if (!verify(entry->pubkey, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+            return {false, "equivocation_event[" + std::to_string(i)
+                         + "] sig_b does not verify against equivocator's key"};
+    }
     return {true, ""};
 }
 

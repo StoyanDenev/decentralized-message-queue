@@ -139,6 +139,10 @@ BlockSigMsg make_block_sig(const crypto::NodeKey& key,
 // `mode` and `bft_proposer_domain` are written into the block. In MD mode,
 // `bft_proposer_domain` must be empty. In BFT mode it must be the
 // deterministically-chosen proposer (the caller computes via proposer_idx).
+//
+// `equivocation_events` (rev.8 follow-on) bakes any equivocation evidence the
+// node has assembled into this block. The validator verifies the two-sig
+// proof; on apply, each equivocator's stake is fully forfeited.
 chain::Block build_body(
     const std::map<Hash, chain::Transaction>& tx_store,
     const chain::Chain&                       chain,
@@ -148,6 +152,7 @@ chain::Block build_body(
     const Hash&                               delay_output,
     uint32_t                                  m_pool_size,
     chain::ConsensusMode                      mode = chain::ConsensusMode::MUTUAL_DISTRUST,
-    const std::string&                        bft_proposer_domain = "");
+    const std::string&                        bft_proposer_domain = "",
+    const std::vector<chain::EquivocationEvent>& equivocation_events = {});
 
 } // namespace dhcoin::node

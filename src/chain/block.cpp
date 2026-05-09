@@ -97,6 +97,30 @@ AbortEvent AbortEvent::from_json(const json& j) {
     return ae;
 }
 
+// ─── EquivocationEvent ───────────────────────────────────────────────────────
+
+json EquivocationEvent::to_json() const {
+    json j;
+    j["equivocator"] = equivocator;
+    j["block_index"] = block_index;
+    j["digest_a"]    = to_hex(digest_a);
+    j["sig_a"]       = to_hex(sig_a);
+    j["digest_b"]    = to_hex(digest_b);
+    j["sig_b"]       = to_hex(sig_b);
+    return j;
+}
+
+EquivocationEvent EquivocationEvent::from_json(const json& j) {
+    EquivocationEvent e;
+    e.equivocator = j["equivocator"].get<std::string>();
+    e.block_index = j["block_index"].get<uint64_t>();
+    e.digest_a    = from_hex_arr<32>(j["digest_a"].get<std::string>());
+    e.sig_a       = from_hex_arr<64>(j["sig_a"].get<std::string>());
+    e.digest_b    = from_hex_arr<32>(j["digest_b"].get<std::string>());
+    e.sig_b       = from_hex_arr<64>(j["sig_b"].get<std::string>());
+    return e;
+}
+
 // ─── Block ───────────────────────────────────────────────────────────────────
 
 std::vector<uint8_t> Block::signing_bytes() const {
@@ -127,6 +151,17 @@ std::vector<uint8_t> Block::signing_bytes() const {
     b.append(bft_proposer);
     b.append(cumulative_rand);
     for (auto& ae : abort_events) b.append(ae.event_hash);
+    // Bind equivocation events into the block hash so any tampering
+    // with evidence (changing equivocator, sigs, digests) changes the
+    // block hash and breaks consensus on it.
+    for (auto& ev : equivocation_events) {
+        b.append(ev.equivocator);
+        b.append(ev.block_index);
+        b.append(ev.digest_a);
+        b.append(ev.sig_a.data(), ev.sig_a.size());
+        b.append(ev.digest_b);
+        b.append(ev.sig_b.data(), ev.sig_b.size());
+    }
 
     for (auto& a : initial_state) {
         b.append(a.domain);
@@ -196,6 +231,10 @@ json Block::to_json() const {
     for (auto& ae : abort_events) aes.push_back(ae.to_json());
     j["abort_events"]   = aes;
 
+    json eqs = json::array();
+    for (auto& ev : equivocation_events) eqs.push_back(ev.to_json());
+    j["equivocation_events"] = eqs;
+
     json is_arr = json::array();
     for (auto& a : initial_state) is_arr.push_back(a.to_json());
     j["initial_state"]  = is_arr;
@@ -249,6 +288,11 @@ Block Block::from_json(const json& j) {
     b.cumulative_rand = from_hex_arr<32>(j["cumulative_rand"].get<std::string>());
     for (auto& ae : j["abort_events"])
         b.abort_events.push_back(AbortEvent::from_json(ae));
+
+    if (j.contains("equivocation_events")) {
+        for (auto& ej : j["equivocation_events"])
+            b.equivocation_events.push_back(EquivocationEvent::from_json(ej));
+    }
 
     if (j.contains("initial_state"))
         for (auto& ia : j["initial_state"])

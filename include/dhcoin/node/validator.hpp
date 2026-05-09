@@ -52,6 +52,8 @@ private:
                              const chain::Chain& chain) const;
     Result check_abort_certs(const chain::Block& b, const chain::Chain& chain,
                               const NodeRegistry& registry) const;
+    Result check_equivocation_events(const chain::Block& b,
+                                       const NodeRegistry& registry) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;

@@ -549,7 +549,12 @@ Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slot
 
 **Binary wire codec (S8).** Current JSON-over-TCP is convenient but verbose. v2 will introduce a binary message codec for bandwidth efficiency.
 
-**Equivocation slashing.** Suspension slashing (§10.4) is wired and active. Equivocation slashing — full stake forfeiture when a node signs two valid blocks at the same height — is forthcoming v2.x. BFT-mode safety claims become economically meaningful once both are in place.
+**Equivocation slashing.** Both economic disincentives are now wired in rev.8:
+
+- **Suspension slashing** (§10.4): `SUSPENSION_SLASH = 10` deducted from a validator's stake on every Phase-1 abort baked into a finalized block.
+- **Equivocation slashing**: full stake forfeiture when an `EquivocationEvent` is baked into a finalized block. The event carries two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing. Validator (`check_equivocation_events`) verifies both sigs against the equivocator's registered key and that the digests differ; on apply, the equivocator's full staked balance is zeroed.
+
+What's still pending: the **detection-and-evidence-construction pipeline** that auto-builds `EquivocationEvent`s from observed double-signing (currently a logging-only "EQUIVOCATION suspect" diagnostic in `apply_block_locked`). Once detection auto-builds evidence and gossips it for inclusion in the next block, the slashing path is fully closed-loop. The block-format / validator / apply-side pieces are in place to receive evidence today; producers just need to populate the `equivocation_events` field when they have evidence.
 
 ---
 

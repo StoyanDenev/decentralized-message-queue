@@ -237,6 +237,19 @@ void Chain::apply_transactions(const Block& b) {
         uint64_t deduct = std::min<uint64_t>(SUSPENSION_SLASH, sit->second.locked);
         sit->second.locked -= deduct;
     }
+
+    // rev.8 follow-on: full equivocation slashing. Each EquivocationEvent
+    // baked into this block (validator already verified the two-sig proof)
+    // forfeits the equivocator's ENTIRE staked balance. Equivocation is a
+    // deliberate double-sign attack — the strongest economic signal we have
+    // — so the disincentive must be maximal. After forfeit the validator's
+    // stake drops below MIN_STAKE so they're suspended from selection on
+    // the next registry build.
+    for (auto& ev : b.equivocation_events) {
+        auto sit = stakes_.find(ev.equivocator);
+        if (sit == stakes_.end()) continue;
+        sit->second.locked = 0;
+    }
 }
 
 // ─── Fork resolution ─────────────────────────────────────────────────────────
