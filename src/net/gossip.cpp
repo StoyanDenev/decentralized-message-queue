@@ -94,6 +94,12 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
                 on_beacon_header(chain::Block::from_json(msg.payload));
             }
             break;
+        case MsgType::SHARD_TIP:
+            if (on_shard_tip) {
+                ShardId sid = msg.payload.value("shard_id", ShardId{0});
+                on_shard_tip(sid, chain::Block::from_json(msg.payload["tip"]));
+            }
+            break;
         case MsgType::GET_CHAIN:
             if (on_get_chain)
                 on_get_chain(msg.payload.value("from",  uint64_t{0}),

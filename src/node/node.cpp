@@ -184,6 +184,7 @@ Node::Node(const Config& cfg)
     gossip_.on_equivocation_evidence = [this](auto& ev)
                                   { on_equivocation_evidence(ev); };
     gossip_.on_beacon_header  = [this](auto& b)  { on_beacon_header(b); };
+    gossip_.on_shard_tip      = [this](auto sid, auto& t) { on_shard_tip(sid, t); };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -853,6 +854,123 @@ void Node::on_beacon_header(const chain::Block& b) {
               << " (K-of-K=" << signed_count << ")\n";
 }
 
+// rev.9 B2c.3: beacon receives a shard's newly-applied block via gossip
+// from a peering shard node. The beacon validates under zero-trust:
+//   1. shard_id within configured range.
+//   2. Sequential index (vs prior tip we have for this shard).
+//   3. prev_hash chains to prior tip.
+//   4. consensus_mode is permitted (MD always, BFT only when bft_enabled).
+//   5. tip.creators matches the shard committee the BEACON derives from
+//      its own validator pool + epoch_committee_seed(beacon_cum_rand,
+//      shard_id), with abort_event hashes mixed in. This is the key
+//      check: the beacon doesn't trust shard claims about who's on the
+//      committee; it derives independently.
+//   6. K-of-K (MD) or ceil(2K/3) (BFT) signatures verify against the
+//      committee from step 5.
+// Validated tips populate latest_shard_tips_; beacon block production
+// (Stage B3+) reads from this for shard_summaries[].
+//
+// SINGLE / SHARD roles ignore this message.
+void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    if (cfg_.chain_role != ChainRole::BEACON) return;
+
+    // 1. Shard ID range.
+    if (cfg_.initial_shard_count > 0 && shard_id >= cfg_.initial_shard_count) return;
+
+    // 2. + 3. Sequential + prev_hash chain.
+    auto it = latest_shard_tips_.find(shard_id);
+    if (it != latest_shard_tips_.end()) {
+        if (tip.index <= it->second.index) return;          // older or dup
+        if (tip.index != it->second.index + 1) return;      // gap; sync fallback is B2c.3-full
+        if (tip.prev_hash != it->second.compute_hash()) {
+            std::cerr << "[node] shard tip prev_hash mismatch: shard=" << shard_id
+                      << " block=" << tip.index << "\n";
+            return;
+        }
+    }
+
+    // 4. consensus_mode permitted.
+    if (tip.consensus_mode == chain::ConsensusMode::BFT && !cfg_.bft_enabled) return;
+
+    // 5. Derive expected committee. Epoch is determined by shard's block index.
+    EpochIndex shard_epoch = (cfg_.epoch_blocks > 0)
+        ? (tip.index / cfg_.epoch_blocks)
+        : 0;
+    uint64_t beacon_anchor_height = shard_epoch * (cfg_.epoch_blocks ? cfg_.epoch_blocks : 1);
+    Hash beacon_rand;
+    if (beacon_anchor_height == 0 || beacon_anchor_height > chain_.height()) {
+        beacon_rand = chain_.empty() ? Hash{} : chain_.head().cumulative_rand;
+    } else {
+        beacon_rand = chain_.at(beacon_anchor_height - 1).cumulative_rand;
+    }
+
+    auto beacon_reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    auto pool_nodes = beacon_reg.sorted_nodes();
+
+    std::set<std::string> excluded;
+    for (auto& ae : tip.abort_events) excluded.insert(ae.aborting_node);
+    std::vector<std::string> avail;
+    for (auto& nd : pool_nodes) {
+        if (!excluded.count(nd.domain)) avail.push_back(nd.domain);
+    }
+
+    size_t k_full = cfg_.k_block_sigs;
+    size_t k_bft  = (2 * k_full + 2) / 3;
+    size_t expected_k = (tip.consensus_mode == chain::ConsensusMode::BFT) ? k_bft : k_full;
+    if (avail.size() < expected_k) {
+        std::cerr << "[node] shard tip: insufficient pool to derive committee for shard="
+                  << shard_id << "\n";
+        return;
+    }
+    if (tip.creators.size() != expected_k) {
+        std::cerr << "[node] shard tip: creators size (" << tip.creators.size()
+                  << ") != expected_k (" << expected_k << ")\n";
+        return;
+    }
+
+    Hash rand = crypto::epoch_committee_seed(beacon_rand, shard_id);
+    for (auto& ae : tip.abort_events) {
+        rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
+    }
+    auto indices = crypto::select_m_creators(rand, avail.size(), expected_k);
+    for (size_t i = 0; i < expected_k; ++i) {
+        if (avail[indices[i]] != tip.creators[i]) {
+            std::cerr << "[node] shard tip: creators[" << i << "] mismatch ('"
+                      << tip.creators[i] << "' vs derived '"
+                      << avail[indices[i]] << "')\n";
+            return;
+        }
+    }
+
+    // 6. Signature verification.
+    if (tip.creator_block_sigs.size() != tip.creators.size()) return;
+    Hash digest = compute_block_digest(tip);
+    Signature zero_sig{};
+    size_t signed_count = 0;
+    for (size_t i = 0; i < tip.creators.size(); ++i) {
+        if (tip.creator_block_sigs[i] == zero_sig) continue;
+        auto e = beacon_reg.find(tip.creators[i]);
+        if (!e) return;
+        if (!crypto::verify(e->pubkey, digest.data(), digest.size(),
+                              tip.creator_block_sigs[i])) {
+            std::cerr << "[node] shard tip: invalid sig from " << tip.creators[i] << "\n";
+            return;
+        }
+        ++signed_count;
+    }
+    size_t required = (tip.consensus_mode == chain::ConsensusMode::BFT) ? k_bft : k_full;
+    if (signed_count < required) {
+        std::cerr << "[node] shard tip: insufficient sigs (" << signed_count
+                  << "/" << required << ")\n";
+        return;
+    }
+
+    latest_shard_tips_[shard_id] = tip;
+    std::cout << "[node] verified shard tip: shard=" << shard_id
+              << " block=" << tip.index << " sigs=" << signed_count << "\n";
+}
+
 void Node::reset_round() {
     delay_cancel_ = true;
     pending_contribs_.clear();
@@ -990,6 +1108,12 @@ void Node::apply_block_locked(const chain::Block& b) {
     // / SHARD roles do nothing — this gossip is beacon-emitted only.
     if (cfg_.chain_role == ChainRole::BEACON) {
         gossip_.broadcast(net::make_beacon_header(b));
+    }
+    // rev.9 B2c.3: shard nodes broadcast each newly-applied block as a
+    // SHARD_TIP so peering beacon nodes can validate the committee K-of-K
+    // and update latest_shard_tips_. SINGLE / BEACON roles do nothing.
+    if (cfg_.chain_role == ChainRole::SHARD) {
+        gossip_.broadcast(net::make_shard_tip(cfg_.shard_id, b));
     }
 
     check_if_selected();
@@ -1277,7 +1401,8 @@ json Node::rpc_status() const {
     j["shard_id"]    = cfg_.shard_id;
     j["epoch_index"] = current_epoch_index();
     j["mempool_size"] = tx_store_.size();
-    j["beacon_headers"] = beacon_headers_.size();   // shard-only; 0 elsewhere
+    j["beacon_headers"]    = beacon_headers_.size();    // shard-only; 0 elsewhere
+    j["tracked_shard_tips"] = latest_shard_tips_.size(); // beacon-only; 0 elsewhere
 
     // Block-mode + tx counters across the full chain. Useful for ops
     // dashboards and test assertions ("did the chain actually escalate?").

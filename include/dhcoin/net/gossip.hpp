@@ -38,6 +38,10 @@ public:
     // shard nodes. Shards use these to maintain a verified light view
     // of the beacon chain.
     std::function<void(const chain::Block&)>        on_beacon_header;
+    // rev.9 B2c.3: shard-tip gossip from shard role to beacon nodes.
+    // Beacon validates K-of-K (or BFT) sigs against the shard committee
+    // it derives from its own validator pool + shard_id salt.
+    std::function<void(ShardId, const chain::Block&)> on_shard_tip;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,

@@ -41,6 +41,12 @@ enum class MsgType : uint8_t {
     // it derives from prior verified blocks). Bootstrapping starts
     // from the pinned beacon genesis hash in shard config.
     BEACON_HEADER         = 12,
+    // rev.9 B2c.3: shard nodes broadcast their newly-applied blocks to
+    // beacon nodes so the beacon can independently verify the shard's
+    // committee K-of-K (or BFT) signatures and track the shard's tip.
+    // The block travels with its shard_id context (the block itself
+    // doesn't carry shard_id; the message envelope does).
+    SHARD_TIP             = 13,
 };
 
 struct Message {
@@ -90,6 +96,14 @@ inline Message make_beacon_header(const chain::Block& b) {
     // shards derive validator-pool deltas from REGISTER/STAKE txs in the
     // beacon block — those need to be present.)
     return {MsgType::BEACON_HEADER, b.to_json()};
+}
+inline Message make_shard_tip(ShardId shard_id, const chain::Block& tip) {
+    // Shard tip wrapped with its shard_id so the beacon can dispatch
+    // committee derivation correctly. Block itself doesn't carry shard_id.
+    return {MsgType::SHARD_TIP, {
+        {"shard_id", shard_id},
+        {"tip",      tip.to_json()}
+    }};
 }
 inline Message make_get_chain(uint64_t from_index = 0, uint16_t count = 64) {
     return {MsgType::GET_CHAIN, {{"from", from_index}, {"count", count}}};

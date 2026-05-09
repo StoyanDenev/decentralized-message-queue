@@ -104,6 +104,11 @@ private:
     // Stores in beacon_headers_; full validation (K-of-K against pool
     // derived from prior verified headers) is B2c.2.
     void on_beacon_header(const chain::Block& b);
+    // rev.9 B2c.3: beacon-side handler for gossiped shard tips. Validates
+    // K-of-K (or BFT) sigs against the committee the beacon derives from
+    // its own pool + shard_id salt. Stores validated tips in
+    // latest_shard_tips_.
+    void on_shard_tip(ShardId shard_id, const chain::Block& tip);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,
@@ -199,10 +204,17 @@ private:
 
     // rev.9 B2c.1: shard-only. Light header chain of the beacon. Shards
     // populate this by receiving BEACON_HEADER gossip messages from
-    // beacon nodes. B2c.2 will add validation (K-of-K sigs against
-    // pool derived from prior headers) and committee derivation from
-    // this chain. For now this is just a receive buffer.
+    // beacon nodes. B2c.2 added validation (K-of-K sigs against pool
+    // derived from prior headers); B2c.2-full adds committee derivation
+    // from this chain. For now this is a verified-append receive buffer.
     std::vector<chain::Block> beacon_headers_;
+
+    // rev.9 B2c.3: beacon-only. Latest validated tip per shard. Beacon
+    // populates this by receiving SHARD_TIP gossip messages from shard
+    // nodes and verifying K-of-K (or BFT) sigs against the shard's
+    // committee derived from beacon's own validator pool + shard_id
+    // salt. Used to populate BeaconBlock.shard_summaries (B3+).
+    std::map<ShardId, chain::Block> latest_shard_tips_;
 
     asio::steady_timer              contrib_timer_;
     asio::steady_timer              block_sig_timer_;
