@@ -101,23 +101,27 @@ AbortEvent AbortEvent::from_json(const json& j) {
 
 json EquivocationEvent::to_json() const {
     json j;
-    j["equivocator"] = equivocator;
-    j["block_index"] = block_index;
-    j["digest_a"]    = to_hex(digest_a);
-    j["sig_a"]       = to_hex(sig_a);
-    j["digest_b"]    = to_hex(digest_b);
-    j["sig_b"]       = to_hex(sig_b);
+    j["equivocator"]          = equivocator;
+    j["block_index"]          = block_index;
+    j["digest_a"]             = to_hex(digest_a);
+    j["sig_a"]                = to_hex(sig_a);
+    j["digest_b"]             = to_hex(digest_b);
+    j["sig_b"]                = to_hex(sig_b);
+    j["shard_id"]             = shard_id;
+    j["beacon_anchor_height"] = beacon_anchor_height;
     return j;
 }
 
 EquivocationEvent EquivocationEvent::from_json(const json& j) {
     EquivocationEvent e;
-    e.equivocator = j["equivocator"].get<std::string>();
-    e.block_index = j["block_index"].get<uint64_t>();
-    e.digest_a    = from_hex_arr<32>(j["digest_a"].get<std::string>());
-    e.sig_a       = from_hex_arr<64>(j["sig_a"].get<std::string>());
-    e.digest_b    = from_hex_arr<32>(j["digest_b"].get<std::string>());
-    e.sig_b       = from_hex_arr<64>(j["sig_b"].get<std::string>());
+    e.equivocator          = j["equivocator"].get<std::string>();
+    e.block_index          = j["block_index"].get<uint64_t>();
+    e.digest_a             = from_hex_arr<32>(j["digest_a"].get<std::string>());
+    e.sig_a                = from_hex_arr<64>(j["sig_a"].get<std::string>());
+    e.digest_b             = from_hex_arr<32>(j["digest_b"].get<std::string>());
+    e.sig_b                = from_hex_arr<64>(j["sig_b"].get<std::string>());
+    e.shard_id             = j.value("shard_id",             uint32_t{0});
+    e.beacon_anchor_height = j.value("beacon_anchor_height", uint64_t{0});
     return e;
 }
 
@@ -161,6 +165,8 @@ std::vector<uint8_t> Block::signing_bytes() const {
         b.append(ev.sig_a.data(), ev.sig_a.size());
         b.append(ev.digest_b);
         b.append(ev.sig_b.data(), ev.sig_b.size());
+        b.append(static_cast<uint64_t>(ev.shard_id));
+        b.append(ev.beacon_anchor_height);
     }
 
     for (auto& a : initial_state) {

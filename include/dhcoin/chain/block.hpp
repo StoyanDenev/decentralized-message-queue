@@ -84,6 +84,19 @@ struct EquivocationEvent {
     Hash        digest_b{};
     Signature   sig_b{};
 
+    // rev.9 B2c.4: cross-chain provenance. When the equivocation is
+    // detected on a shard chain, these record which shard observed it
+    // and which beacon block was the anchor for that shard's epoch at
+    // detection time. Used for forensic trace + governance audits;
+    // not consumed by validator correctness checks (the two-sig proof
+    // is independently verifiable against the equivocator's
+    // beacon-registered Ed25519 key, regardless of where it was first
+    // observed).
+    //   shard_id == 0 AND beacon_anchor_height == 0 → SINGLE chain or
+    //   beacon-side detection (default). Nonzero → shard-detected.
+    uint32_t    shard_id{0};
+    uint64_t    beacon_anchor_height{0};
+
     nlohmann::json           to_json() const;
     static EquivocationEvent from_json(const nlohmann::json& j);
 };

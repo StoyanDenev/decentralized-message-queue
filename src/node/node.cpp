@@ -1030,6 +1030,17 @@ void Node::apply_block_locked(const chain::Block& b) {
                         ev.sig_a       = sig_a;
                         ev.digest_b    = digest_b;
                         ev.sig_b       = sig_b;
+                        // rev.9 B2c.4: cross-chain provenance. SHARD-role
+                        // detections record their shard_id + the latest
+                        // verified beacon header's height as the anchor.
+                        // SINGLE / BEACON detections leave them at default
+                        // (0, 0), distinguishing the source chain in the
+                        // forensic trail.
+                        if (cfg_.chain_role == ChainRole::SHARD) {
+                            ev.shard_id = cfg_.shard_id;
+                            ev.beacon_anchor_height = beacon_headers_.empty()
+                                ? 0 : beacon_headers_.back().index;
+                        }
 
                         // Add to pool if not already present.
                         bool dup = false;
