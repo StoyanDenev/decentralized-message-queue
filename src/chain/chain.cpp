@@ -393,6 +393,77 @@ json Chain::serialize_state(uint32_t header_count) const {
     return snap;
 }
 
+Chain Chain::restore_from_snapshot(const json& snap) {
+    if (!snap.is_object())
+        throw std::runtime_error("snapshot is not a JSON object");
+    int v = snap.value("version", 0);
+    if (v != 1)
+        throw std::runtime_error(
+            "unsupported snapshot version: " + std::to_string(v));
+
+    Chain c;
+    c.block_subsidy_ = snap.value("block_subsidy", uint64_t{0});
+    c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
+    c.shard_count_   = snap.value("shard_count",   uint32_t{1});
+    c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
+    c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",
+                                                      std::string(64, '0')));
+
+    if (snap.contains("accounts")) {
+        for (auto& a : snap["accounts"]) {
+            AccountState s;
+            s.balance    = a.value("balance",    uint64_t{0});
+            s.next_nonce = a.value("next_nonce", uint64_t{0});
+            c.accounts_[a.value("domain", std::string{})] = s;
+        }
+    }
+    if (snap.contains("stakes")) {
+        for (auto& s : snap["stakes"]) {
+            StakeEntry e;
+            e.locked        = s.value("locked",        uint64_t{0});
+            e.unlock_height = s.value("unlock_height", UINT64_MAX);
+            c.stakes_[s.value("domain", std::string{})] = e;
+        }
+    }
+    if (snap.contains("registrants")) {
+        for (auto& r : snap["registrants"]) {
+            RegistryEntry e;
+            e.ed_pub        = from_hex_arr<32>(r.value("ed_pub",
+                                                          std::string(64, '0')));
+            e.registered_at = r.value("registered_at", uint64_t{0});
+            e.active_from   = r.value("active_from",   uint64_t{0});
+            e.inactive_from = r.value("inactive_from", UINT64_MAX);
+            c.registrants_[r.value("domain", std::string{})] = e;
+        }
+    }
+    if (snap.contains("applied_inbound_receipts")) {
+        for (auto& a : snap["applied_inbound_receipts"]) {
+            ShardId src    = a.value("src_shard", ShardId{0});
+            Hash    txhash = from_hex_arr<32>(
+                                a.value("tx_hash", std::string(64, '0')));
+            c.applied_inbound_receipts_.insert({src, txhash});
+        }
+    }
+    if (snap.contains("headers")) {
+        for (auto& bj : snap["headers"]) {
+            c.blocks_.push_back(Block::from_json(bj));
+        }
+    }
+
+    // Sanity: the head's hash should match the snapshot's stated
+    // head_hash. Reject inconsistent snapshots loudly.
+    std::string head_hash_claim = snap.value("head_hash", std::string{});
+    if (!c.blocks_.empty() && !head_hash_claim.empty()) {
+        std::string actual = to_hex(c.blocks_.back().compute_hash());
+        if (actual != head_hash_claim)
+            throw std::runtime_error(
+                "snapshot head_hash mismatch: actual " + actual
+              + " vs claimed " + head_hash_claim);
+    }
+
+    return c;
+}
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 void Chain::save(const std::string& path) const {

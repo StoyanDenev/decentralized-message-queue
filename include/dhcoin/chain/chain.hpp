@@ -108,6 +108,17 @@ public:
     // blocks and confirm head matches majority of network peers).
     // Adding a state root is a v2 protocol change.
     nlohmann::json serialize_state(uint32_t header_count = 16) const;
+
+    // Round-trip counterpart to serialize_state. Builds an in-memory
+    // Chain populated with state directly from the snapshot — no
+    // apply_transactions replay. Tail headers from the snapshot become
+    // blocks_ so chain.height() / chain.head_hash() / chain.head() all
+    // work normally; subsequent block apply extends from the head.
+    //
+    // The returned chain is self-consistent at the snapshot's
+    // block_index. Wiring it into Node::start (as the bootstrap path
+    // when chain.json is absent) is a follow-on commit.
+    static Chain restore_from_snapshot(const nlohmann::json& snapshot);
     // block_subsidy must be passed at load time so replay credits creators
     // correctly. Caller (Node) loads it from GenesisConfig before this call.
     // rev.9 B3: shard routing params must also be passed so apply-side

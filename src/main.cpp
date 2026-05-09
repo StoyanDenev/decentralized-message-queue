@@ -51,6 +51,7 @@ Usage:
   dhcoin show-account <address>              Inspect any address (balance, nonce, registry, stake)
   dhcoin show-tx <hash>                      Look up a tx by hash (block_index + payload)
   dhcoin snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
+  dhcoin snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -463,14 +464,53 @@ static int cmd_snapshot_create(int argc, char** argv) {
     return 0;
 }
 
+// dhcoin snapshot inspect --in file.json
+//   Round-trips a snapshot through Chain::restore_from_snapshot and
+//   prints a human-readable summary. Validates JSON format, version,
+//   and head_hash consistency (rejects loudly on mismatch). Useful
+//   before staging a snapshot for fast-bootstrap of a new node.
+static int cmd_snapshot_inspect(int argc, char** argv) {
+    std::string in_path;
+    for (int i = 0; i < argc - 1; ++i)
+        if (std::string(argv[i]) == "--in") in_path = argv[i + 1];
+    if (in_path.empty()) {
+        std::cerr << "Usage: dhcoin snapshot inspect --in <file>\n";
+        return 1;
+    }
+    try {
+        std::ifstream f(in_path);
+        if (!f) { std::cerr << "Cannot open " << in_path << "\n"; return 1; }
+        json snap = json::parse(f);
+        chain::Chain c = chain::Chain::restore_from_snapshot(snap);
+        std::cout << "snapshot OK: " << in_path << "\n";
+        std::cout << "  block_index : "
+                  << (c.empty() ? 0 : c.head().index) << "\n";
+        std::cout << "  head_hash   : "
+                  << (c.empty() ? std::string{} : to_hex(c.head_hash()))
+                  << "\n";
+        std::cout << "  accounts    : " << c.accounts().size()    << "\n";
+        std::cout << "  stakes      : " << c.stakes().size()      << "\n";
+        std::cout << "  registrants : " << c.registrants().size() << "\n";
+        std::cout << "  block_subsidy: " << c.block_subsidy()     << "\n";
+        std::cout << "  min_stake   : " << c.min_stake()          << "\n";
+        std::cout << "  shard_count : " << c.shard_count()        << "\n";
+        std::cout << "  shard_id    : " << c.my_shard_id()        << "\n";
+        std::cout << "  tail headers: " << c.height()             << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
 static int cmd_snapshot(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin snapshot create [--out file] "
-                     "[--headers N] [--rpc-port N]\n";
+        std::cerr << "Usage: dhcoin snapshot {create|inspect} ...\n";
         return 1;
     }
     std::string sub = argv[0];
-    if (sub == "create") return cmd_snapshot_create(argc - 1, argv + 1);
+    if (sub == "create")  return cmd_snapshot_create (argc - 1, argv + 1);
+    if (sub == "inspect") return cmd_snapshot_inspect(argc - 1, argv + 1);
     std::cerr << "Unknown snapshot subcommand: " << sub << "\n";
     return 1;
 }
