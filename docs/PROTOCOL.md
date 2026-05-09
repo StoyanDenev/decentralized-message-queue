@@ -1,0 +1,335 @@
+# DHCoin v1 Protocol Specification
+
+This document specifies wire formats, hash inputs, and the consensus state machine at a level sufficient for an external implementer to build a compatible client. The reference implementation is in this repository; where implementation behavior diverges from this document, treat the implementation as authoritative and file an issue to reconcile.
+
+**Status:** v1 (rev. 8 + sharding through B6.basic). Frozen for the v1 series.
+
+## 1. Cryptographic primitives
+
+| Primitive | Algorithm |
+|---|---|
+| Hash | SHA-256 (NIST FIPS 180-4). 32-byte output. |
+| Signature | Ed25519 (RFC 8032). 32-byte private seed, 32-byte public key, 64-byte signature. |
+| Delay function | T iterations of SHA-256: `delay_hash(seed, T) = SHA256^T(seed)`. T is genesis-pinned. |
+
+All multi-byte integers in hash inputs are encoded **big-endian**. Variable-length strings are appended raw (no length prefix) — committee members are expected to use the same string lengths because the inputs are well-typed.
+
+## 2. Address format
+
+Two address types coexist:
+
+### 2.1 Registered domain
+A UTF-8 string. Convention: a DNS-style name (`alice.example`, `validator1.network`). No format constraint beyond not starting with `0x` and not being all hex.
+
+### 2.2 Anonymous bearer wallet
+Key-derived. Format: `0x` + 64 lowercase hex characters (66 chars total).
+```
+addr = "0x" + hex(ed25519_public_key)
+```
+
+The `is_anon_address(s)` predicate in [`include/dhcoin/types.hpp`](../include/dhcoin/types.hpp) is canonical: `len == 66 && s[0..2] == "0x" && all hex`.
+
+Bearer addresses **cannot** register, stake, or be selected as creators. They can only hold balance and send/receive `TRANSFER`.
+
+## 3. Transaction format
+
+```cpp
+struct Transaction {
+    TxType    type;           // 0=TRANSFER, 1=REGISTER, 2=DEREGISTER, 3=STAKE, 4=UNSTAKE
+    string    from;           // domain or bearer address
+    string    to;             // TRANSFER only; "" otherwise
+    uint64    amount;         // TRANSFER + STAKE
+    uint64    fee;            // every type
+    uint64    nonce;          // sequential per-account
+    bytes     payload;        // type-specific (REGISTER carries 32-byte ed_pub)
+    Signature sig;            // Ed25519 over signing_bytes()
+    Hash      hash;           // = compute_hash() = SHA256(signing_bytes() || sig)
+};
+```
+
+### 3.1 `signing_bytes()`
+SHA-256 of the concatenation:
+```
+type (1 byte) || from || to || amount (u64) || fee (u64) || nonce (u64) || payload
+```
+
+The signature `sig` is `Ed25519_sign(priv_seed, signing_bytes())`.
+
+### 3.2 `compute_hash()`
+SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
+
+### 3.3 Apply rules
+- Sequential nonce: a tx is applied only if `tx.nonce == account.next_nonce`. Mismatched nonces are silently skipped.
+- For `TRANSFER`: requires `account.balance >= amount + fee`. Sender debited `amount + fee`; receiver credited `amount`. Fee accumulates to creators.
+- **Cross-shard variant:** if `shard_id_for_address(to) != my_shard`, sender is debited but `to` is **not** credited locally. A `CrossShardReceipt` is emitted instead (see §8).
+
+## 4. Block format
+
+```cpp
+struct Block {
+    uint64                index;
+    Hash                  prev_hash;
+    int64                 timestamp;             // Unix seconds, ±5s window
+    Transaction[]         transactions;          // canonical (from, nonce, hash) order
+    string[]              creators;              // K committee members in selection order
+    Hash[][]              creator_tx_lists;      // K Phase-1 tx_hashes lists
+    Signature[]           creator_ed_sigs;       // K Phase-1 commit signatures
+    Hash[]                creator_dh_inputs;     // K Phase-1 DH contributions
+    Hash                  tx_root;               // SHA256 over union of creator_tx_lists
+    Hash                  delay_seed;            // SHA256(index || prev_hash || tx_root || dh_inputs...)
+    Hash                  delay_output;          // = delay_hash(delay_seed, T)
+    Signature[]           creator_block_sigs;    // K Phase-2 block-digest sigs
+    ConsensusMode         consensus_mode;        // 0=MUTUAL_DISTRUST (K-of-K), 1=BFT (ceil(2K/3))
+    string                bft_proposer;          // empty unless mode==BFT
+    Hash                  cumulative_rand;       // SHA256(prev.cumulative_rand || delay_output)
+    AbortEvent[]          abort_events;          // claims-quorum-certified prior round aborts
+    EquivocationEvent[]   equivocation_events;   // two-sig proofs against same height
+    CrossShardReceipt[]   cross_shard_receipts;  // outbound (this shard → others)
+    CrossShardReceipt[]   inbound_receipts;      // inbound (other shards → this shard)
+    GenesisAlloc[]        initial_state;         // genesis only (index == 0)
+};
+```
+
+### 4.1 `signing_bytes()`
+SHA-256 of, in order:
+```
+index (u64)
+prev_hash
+timestamp (i64)
+SHA256(concat(tx.signing_bytes() for tx in transactions))
+creators[i] for i in 0..K
+creator_tx_lists[i][j] for i, j
+creator_ed_sigs[i] (64 bytes) for i
+creator_dh_inputs[i] for i
+tx_root
+delay_seed
+delay_output
+consensus_mode (1 byte)
+bft_proposer
+cumulative_rand
+abort_events[i].event_hash for i
+equivocation_events[i].(equivocator, block_index, digest_a, sig_a, digest_b, sig_b, shard_id, beacon_anchor_height) for i
+cross_shard_receipts[i].(src_shard, dst_shard, src_block_index, src_block_hash, tx_hash, from, to, amount, fee, nonce) for i
+inbound_receipts[i].(src_shard, dst_shard, src_block_index, tx_hash, to, amount) for i  // narrower binding
+initial_state[i].(domain, ed_pub, balance, stake) for i  // genesis only
+```
+
+### 4.2 `compute_hash()`
+SHA-256 of `signing_bytes() || creator_block_sigs[0] || ... || creator_block_sigs[K-1]`.
+
+This binds creator signatures into the hash so signature equivocation produces a different block hash.
+
+### 4.3 `block_digest` (what creators sign in Phase 2)
+The result of `signing_bytes()` (i.e., the block content **without** `creator_block_sigs`). Each committee member signs this with their Ed25519 key.
+
+## 5. Consensus protocol
+
+### 5.1 Two phases per block
+
+**Phase 1: Contrib + DhInput.** Each committee member broadcasts a `ContribMsg`:
+```cpp
+struct ContribMsg {
+    uint64    block_index;
+    string    signer;
+    Hash      prev_hash;
+    uint64    aborts_gen;     // # of abort_events seen at this height
+    Hash[]    tx_hashes;      // sorted ascending unique
+    Hash      dh_input;       // 32 random bytes
+    Signature ed_sig;         // Ed25519 over make_contrib_commitment(...)
+};
+```
+
+`make_contrib_commitment(index, prev_hash, tx_hashes, dh_input)`:
+```
+inner_root = SHA256(concat(tx_hashes))
+commit     = SHA256(index (u64) || prev_hash || inner_root || dh_input)
+```
+
+**Phase 2: BlockSig.** After locally evaluating `delay_output = delay_hash(delay_seed, T)`, each committee member broadcasts:
+```cpp
+struct BlockSigMsg {
+    uint64    block_index;
+    string    signer;
+    Hash      delay_output;
+    Signature ed_sig;         // Ed25519 over compute_block_digest(block_with_signing_fields)
+};
+```
+
+A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **ceil(2K/3) of K** have (BFT mode after escalation).
+
+### 5.2 Committee selection
+At each round, the K-committee derives from:
+```
+epoch_index   = block_index / epoch_blocks
+epoch_rand    = chain.cumulative_rand at the block opening this epoch
+seed          = epoch_committee_seed(epoch_rand, shard_id)
+              = SHA256(epoch_rand || "shard-committee" || shard_id (u64))
+rand          = seed, then mixed with each abort_event in order:
+              = SHA256(prev_rand || abort_event.event_hash)
+indices       = select_m_creators(rand, |pool|, K)
+committee[i]  = pool[indices[i]]
+```
+
+`pool` is the list of registered+active+staked-≥-min_stake-not-suspended validators, sorted by domain string.
+
+### 5.3 BFT escalation (rev.8)
+If a round accumulates `bft_escalation_threshold` (default 5) round-1 aborts at the same height AND `bft_enabled` is true AND the available pool is < K, the next round produces a `consensus_mode = BFT` block. Required signatures drop to `ceil(2K/3)`. A `bft_proposer` is deterministically chosen as `committee[proposer_idx(seed, abort_events, K)]`. The proposer must sign; up to `K - ceil(2K/3)` other positions may carry sentinel-zero signatures.
+
+### 5.4 Abort handling
+When a member's local timer fires with insufficient contributions, they sign and broadcast an `AbortClaimMsg` naming the first missing creator. **M-1 matching claims** form a quorum certificate (`AbortEvent`) that all peers can adopt to advance the round in lockstep.
+
+## 6. Equivocation slashing (rev.8 follow-on)
+
+An `EquivocationEvent` is proof that one Ed25519 key signed two different `block_digest`s at the same height:
+```cpp
+struct EquivocationEvent {
+    string    equivocator;
+    uint64    block_index;
+    Hash      digest_a, digest_b;     // distinct
+    Signature sig_a, sig_b;           // both verify under equivocator's ed_pub
+    uint32    shard_id;               // detection origin (rev.9 B2c.4)
+    uint64    beacon_anchor_height;
+};
+```
+
+**Validation:** `digest_a != digest_b`, `sig_a != sig_b`, `equivocator` is registered, both sigs verify.
+
+**Apply:** when `EquivocationEvent` is baked into a finalized block, the equivocator's full staked balance is forfeited (locked → 0) and `inactive_from = block.index + 1`.
+
+External submission: `submit_equivocation` RPC validates the two-sig proof against the equivocator's registered key, gossips for slashing, returns `{accepted, equivocator, block_index}` or `{accepted: false, reason}`.
+
+## 7. Sharding (rev.9)
+
+### 7.1 Roles
+`ChainRole {SINGLE = 0, BEACON = 1, SHARD = 2}`. Genesis-pinned. SINGLE is the unsharded default; BEACON/SHARD activate cross-chain coordination paths. With S=1 + SINGLE the protocol is bitwise-identical to rev.8.
+
+### 7.2 Address-to-shard routing
+```
+shard_id_for_address(addr, S, salt) =
+    (S <= 1) ? 0 :
+    let h = SHA256(salt || "shard-route" || addr) in
+    big_endian_u64(h[0..8]) mod S
+```
+
+`salt` is `GenesisConfig.shard_address_salt` (32 random bytes, fixed at chain creation, present in genesis JSON).
+
+### 7.3 Cross-chain coordination (B2c)
+- **Beacon → Shard (BEACON_HEADER):** beacon nodes broadcast each newly-applied block; shards verify K-of-K against the validator pool they derive from prior verified beacon headers; store in a light header chain.
+- **Shard → Beacon (SHARD_TIP):** shard nodes broadcast newly-applied blocks; beacon validates K-of-K against the shard committee it derives from its own pool + `epoch_committee_seed(beacon_rand, shard_id)`.
+- **Zero-trust:** each side independently re-derives committees and verifies signatures — no implicit trust between chains.
+
+## 8. Cross-shard receipts (B3)
+
+When a `TRANSFER` on shard X has `shard_id_for_address(tx.to) = Y ≠ X`:
+
+1. **Source shard X's apply** debits sender (`amount + fee`); does NOT credit `to` locally.
+2. **Source producer** appends a `CrossShardReceipt` to `block.cross_shard_receipts`:
+   ```cpp
+   struct CrossShardReceipt {
+       uint32 src_shard, dst_shard;
+       uint64 src_block_index;
+       Hash   src_block_hash;          // 0 in on-chain stored receipt; filled at gossip relay
+       Hash   tx_hash;
+       string from, to;
+       uint64 amount, fee, nonce;
+   };
+   ```
+3. **Source validator** verifies receipts match the cross-shard tx subset one-for-one.
+4. **Gossip:** source emits `CROSS_SHARD_RECEIPT_BUNDLE` carrying the full source block. Beacon nodes act as a relay (re-broadcast verbatim). Destination shards filter receipts where `dst_shard == my_shard`.
+5. **Destination shard Y queues** filtered receipts in `pending_inbound_receipts_` keyed by `(src_shard, tx_hash)` for dedup.
+6. **Destination producer** dequeues + bakes into `block.inbound_receipts`. Only receipts not already in `chain.applied_inbound_receipts_` are included.
+7. **Destination apply** credits `to` for each entry, inserts `(src_shard, tx_hash)` into `applied_inbound_receipts_`. Idempotent: replayed bundles cannot double-credit.
+8. **Destination validator** checks shape + dedup: each receipt has `dst_shard == my_shard`, `src_shard != my_shard`, no in-block duplicates, not previously applied.
+
+The destination's K-of-K signing of the block is the collective on-chain attestation that the inbound set was valid. Source K-of-K verification happens at receive time on each member.
+
+## 9. Wire protocol
+
+### 9.1 Framing
+Each message is `4-byte big-endian length || JSON envelope`. Max length: 16 MB.
+
+```
+Envelope: { "type": uint8, "payload": <message-specific JSON> }
+```
+
+### 9.2 Message types
+
+| ID | Name | Direction | Payload |
+|---|---|---|---|
+| 0 | HELLO | initial handshake | `{domain, port, role, shard_id}` |
+| 1 | BLOCK | gossip | `Block` JSON |
+| 2 | TRANSACTION | gossip | `Transaction` JSON |
+| 3 | BLOCK_SIG | committee | `BlockSigMsg` JSON |
+| 4 | CONTRIB | committee | `ContribMsg` JSON |
+| 5 | GET_CHAIN | sync | `{from, count}` |
+| 6 | CHAIN_RESPONSE | sync | `{blocks, has_more}` |
+| 7 | STATUS_REQUEST | sync | `{}` |
+| 8 | STATUS_RESPONSE | sync | `{height, genesis}` |
+| 9 | ABORT_CLAIM | committee | `AbortClaimMsg` JSON |
+| 10 | ABORT_EVENT | gossip | `{block_index, prev_hash, event}` |
+| 11 | EQUIVOCATION_EVIDENCE | gossip | `EquivocationEvent` JSON |
+| 12 | BEACON_HEADER | beacon→shard | `Block` JSON |
+| 13 | SHARD_TIP | shard→beacon | `{shard_id, tip}` |
+| 14 | CROSS_SHARD_RECEIPT_BUNDLE | shard↔beacon | `{src_shard, src_block}` |
+| 15 | SNAPSHOT_REQUEST | client→peer | `{headers}` |
+| 16 | SNAPSHOT_RESPONSE | peer→client | snapshot JSON |
+
+### 9.3 Role-based filter
+Cross-role traffic is restricted by the receiving peer:
+- `BEACON_HEADER` accepted only from BEACON peers.
+- `SHARD_TIP` accepted only from SHARD peers.
+- `CROSS_SHARD_RECEIPT_BUNDLE` accepted from BEACON or SHARD.
+- `SNAPSHOT_REQUEST` / `SNAPSHOT_RESPONSE` accepted from any role.
+- All other types: same role, same shard_id (intra-chain only).
+
+## 10. RPC protocol
+
+JSON-line over TCP on the configured `rpc_port`. Each line is one JSON object: `{"method": "<name>", "params": {...}}`. Response: `{"result": ..., "error": null | "<msg>"}`.
+
+Methods (selected):
+
+| Method | Params | Returns |
+|---|---|---|
+| `status` | `{}` | head/role/epoch/peers/mempool/mode counters |
+| `peers` | `{}` | `[address, ...]` |
+| `block` | `{index}` | full block JSON or null |
+| `chain_summary` | `{last_n}` | array of compact block summaries |
+| `validators` | `{}` | array of pool entries |
+| `committee` | `{}` | current epoch's K-of-K committee |
+| `account` | `{address}` | balance + nonce + registry + stake |
+| `tx` | `{hash}` | tx + block_index + block_hash + timestamp |
+| `submit_tx` | `{tx}` | `{status: "queued", hash}` |
+| `submit_equivocation` | `{event}` | `{accepted, equivocator, block_index}` |
+| `snapshot` | `{headers}` | full state snapshot |
+
+## 11. Snapshot format (B6.basic)
+
+```json
+{
+  "version": 1,
+  "block_index": 1234,
+  "head_hash": "<hex>",
+  "accounts":     [{"domain", "balance", "next_nonce"}, ...],
+  "stakes":       [{"domain", "locked", "unlock_height"}, ...],
+  "registrants":  [{"domain", "ed_pub", "registered_at", "active_from", "inactive_from"}, ...],
+  "applied_inbound_receipts": [{"src_shard", "tx_hash"}, ...],
+  "block_subsidy": 10,
+  "min_stake":     1000,
+  "shard_count":   1,
+  "shard_salt":    "<hex>",
+  "shard_id":      0,
+  "headers":       [<Block JSON>, ...]   // last N blocks for chain continuity
+}
+```
+
+`restore_from_snapshot` validates `head_hash` against `compute_hash()` of the tail head; rejects on mismatch.
+
+## 12. Genesis
+
+Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis JSON file; nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense).
+
+## 13. Versioning
+
+This document specifies v1. Backward-incompatible changes (new block fields, modified hash inputs, new message types replacing old ones) require a version bump. New optional fields with safe defaults are non-breaking.
+
+The reference implementation tags v1 at the commit corresponding to this document's freeze.

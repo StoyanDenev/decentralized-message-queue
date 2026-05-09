@@ -6,6 +6,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 - [QUICKSTART.md](QUICKSTART.md) — 5-minute walkthrough: build, run a 3-node cluster, send transactions, snapshot create + restore.
 - [CLI-REFERENCE.md](CLI-REFERENCE.md) — every `dhcoin` subcommand at a glance, grouped by purpose.
+- [PROTOCOL.md](PROTOCOL.md) — formal v1 protocol specification: wire formats, hash inputs, consensus state machine, message types. What an external implementer needs to build a compatible client.
 
 ## Behavioral test suite
 
