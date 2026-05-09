@@ -1,6 +1,8 @@
 # DHCoin: A Fork-Free Cryptocurrency with Two-Phase Sequential-Delay Co-Creation
 
-**Version 1, rev. 7**
+**Version 1, rev. 8** (rev. 9 sharding scaffolding in progress)
+
+> **Scope, briefly:** DHCoin is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges, no light clients yet. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what's done vs. what isn't is in [§17 Scope and Current Status](#17-scope-and-current-status).
 
 ---
 
@@ -707,7 +709,120 @@ Applications choose which blocks they trust. Most blocks (steady state) are MD o
 
 ---
 
-## 17. Conclusion
+## 17. Scope and Current Status
+
+DHCoin's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is *not* trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section is an honest accounting of what's actually built, what's in progress, and what's deliberately out of scope.
+
+### 17.1 What DHCoin currently is good at
+
+These work end-to-end today, with passing integration tests:
+
+- **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root (any single non-Byzantine committee member can include any tx). Zero-trust safety (no protocol component trusts any participant).
+- **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 non-Byzantine validator remains in the registry).
+- **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519 pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
+- **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees. Native economic incentive for block production.
+- **Per-height BFT escalation.** Default mutual-distrust K-of-K; falls back to BFT `ceil(2K/3)` + designated proposer when the eligible pool can't form K-of-K and the abort threshold has been met. Per-block `consensus_mode` tag lets observers reason about per-block trust.
+
+### 17.2 Capability matrix
+
+Status: ✅ done · 🟨 partial / in progress · ❌ not started · 🚫 deliberately out of scope
+
+| Layer / Capability | Status | Notes |
+|---|---|---|
+| **Consensus / safety** | ✅ ~95% | K-of-K mutual-distrust, BFT escalation, zero-trust framing, equivocation slashing closed-loop |
+| Block production + propagation | ✅ ~90% | 2-phase Contrib + delay-hash + BlockSig; gossip mesh; sync via chunked GET_CHAIN |
+| Sybil resistance | ✅ ~95% | `STAKE_INCLUSION` + `DOMAIN_INCLUSION` |
+| Slashing + disincentives | ✅ ~85% | Suspension + equivocation, both end-to-end |
+| Identity / accounts | ✅ ~80% | Domains + anonymous bearer wallets |
+| Native tx types | ✅ ~80% | TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE |
+| Mempool / replace-by-fee | ✅ ~70% | Sequential nonce; no fee market or gas |
+| CLI / wallet | ✅ ~60% | `dhcoin {account,send,send_anon,stake,...}` |
+| **Scaling / sharding** | 🟨 ~25% | B0/B1/B2a/B2b-lite scaffolding done; B2c (cross-chain coordination) is the next ~12-day milestone |
+| Cross-shard receipts | ❌ 0% | Stage B3, follows B2c |
+| Multi-shard production tooling | ❌ 0% | Stage B4 |
+| Cross-chain validator rotation + slashing | ❌ 0% | Stage B5 |
+| State sync (snapshots, pruning) | ❌ 0% | Full chain replay only; B6 |
+| Light clients | ❌ 0% | B6, deferred |
+| **Smart-contract execution layer** | 🚫 N/A | **Not in scope.** No EVM, no WASM, no gas. The chain handles native tx types only |
+| Contract storage | 🚫 N/A | Implied by the above |
+| Off-chain storage (IPFS/Arweave-style) | 🚫 N/A | Not in scope |
+| Indexer (Graph-like) | ❌ 0% | Could be built externally |
+| Block explorer | ❌ 0% | Could be built externally |
+| SDK (JS/Python/Rust) | ❌ 0% | RPC over JSON exists; no client-side libraries |
+| Bridges to other chains | ❌ 0% | Out of scope for v1; could be retrofitted |
+| ZK / privacy | 🚫 N/A | Anonymous accounts are the privacy story; no ZK proofs |
+| Oracles | 🚫 N/A | Not in scope |
+| On-chain governance | ❌ 0% | Genesis-pinned constants; no on-chain proposals/voting |
+| Frontend hosting | 🚫 N/A | Always external (e.g., IPFS); never on-chain |
+
+### 17.3 Three honest interpretations of "% done"
+
+The percentage depends on what frame of reference you pick:
+
+- **Narrow ("fork-free L1 payment + identity chain")** → **~75–80% done.** Consensus is mature; sharding is in progress; payments + identity work end-to-end. Finish B2c-B6 sharding (~3-4 weeks), add basic state-sync snapshots (~1 week), polish CLI and add a minimal block explorer (~1 week), and v1 ships.
+- **Medium ("L1 + multi-chain scaling + DApp-execution-ready base")** → **~30-40% done.** Adds sharding completion, light clients, basic indexer, and a contract execution layer. Most of the missing work is the contract VM and supporting tooling.
+- **Wide ("full DApp hosting platform comparable to Ethereum + IPFS + Graph + tooling ecosystem")** → **~5-10% done.** The contract VM, off-chain storage, indexer, SDKs, block explorer, bridges, governance, privacy, oracles — all absent. This is years of work for a small team and most of it is deliberately not on the DHCoin roadmap.
+
+### 17.4 What DHCoin can host today
+
+If you frame it as "what kind of DApp could be built on DHCoin as it stands":
+
+- **Payment apps** — direct transfers between named domains + anonymous accounts. ✅
+- **Validator-coordinated registries** — REGISTER + STAKE patterns can be repurposed for identity directories, DNS-record registries, reputation systems. ✅ partial.
+- **Consortium settlement networks** — `DOMAIN_INCLUSION` chains where validators are publicly accountable organizations (banks, govt registries, etc.). ✅
+- **Page-reward economies** — applications using the native subsidy + fee distribution as their incentive primitive. ✅
+- **Anything stateless that fits the named-account balance model.** ✅
+
+What it can't host:
+
+- **Anything requiring computation beyond balance arithmetic** — needs a contract VM. ❌
+- **Anything requiring large state** — REGISTER carries up to 32-byte payloads; tx payloads are tiny by design. ❌
+- **Cross-application composability** — no contracts means no cross-app calls. ❌
+- **Anything depending on off-chain data** — no oracle infrastructure. ❌
+
+### 17.5 What's deliberately out of scope (and probably stays that way)
+
+These are not "TODO" items — they're outside DHCoin's design intent:
+
+- **Smart-contract VMs** (EVM, WASM). DHCoin's value proposition is censorship-resistant fork-free payments + identity, not arbitrary execution.
+- **Off-chain storage layer** (IPFS, Arweave). Application-specific; users compose externally if they want it.
+- **Bridges to other chains.** Could be built on top, not part of the core protocol.
+- **On-chain frontend hosting.** Always belongs off-chain.
+- **Oracle networks.** Application-specific; not a base-layer concern.
+- **ZK / shielded transactions.** The anonymous bearer-wallet account model is the privacy story; no zero-knowledge layer planned.
+
+A future fork or layer-2 of DHCoin could add these. The base protocol will not.
+
+### 17.6 Realistic v1 release path
+
+To ship v1 (the "narrow" ~80% scope above) the remaining work is roughly:
+
+| Milestone | Estimate |
+|---|---|
+| Stage B2c — zero-trust cross-chain coordination | ~12d |
+| Stage B3 — cross-shard receipts | ~5d |
+| Stage B4 — production multi-shard tooling | ~2d |
+| Stage B5 — validator rotation + cross-chain slashing | ~3d |
+| Stage B6.basic — state sync snapshots | ~5d |
+| Block explorer (minimal) | ~5d |
+| Light client primitives | ~5d |
+| Documentation / spec freeze | ~3d |
+| Whitepaper PDF generation polish | ~1d |
+
+Total: roughly **6-8 weeks** of focused work after the current state. None of this is contract execution; v1 ships as a payment + identity chain.
+
+### 17.7 Honest framing
+
+Calling DHCoin a "DApp hosting network" overstates what's built and what's planned. Calling it a "decentralized cryptocurrency with mutual-distrust safety" is accurate. Specific use cases that fit:
+- Inter-organization settlement where payment + identity is the whole value prop.
+- Censorship-resistant value transfer in environments where trust assumptions about validators are explicitly rejected.
+- Federated registries where domain-anchored validators provide identity and the chain provides ordering + auditability.
+
+If you need contracts, you'd build them on a different chain or build a layer-2 on top of DHCoin. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with cryptoeconomic safety — not to be everything.
+
+---
+
+## 18. Conclusion
 
 DHCoin demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a sequential delay-hash (iterated SHA-256), defeating selective abort by construction rather than by economic disincentive. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
 
