@@ -70,6 +70,11 @@ private:
                               const NodeRegistry& registry) const;
     Result check_equivocation_events(const chain::Block& b,
                                        const NodeRegistry& registry) const;
+    // rev.9 B3.2: cross_shard_receipts must match the cross-shard
+    // subset of transactions[] in order, with consistent fields.
+    // SINGLE chains expect an empty receipts list.
+    Result check_cross_shard_receipts(const chain::Block& b,
+                                        const chain::Chain& chain) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;

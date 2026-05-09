@@ -61,6 +61,19 @@ public:
     uint64_t min_stake() const { return min_stake_; }
     void     set_min_stake(uint64_t s) { min_stake_ = s; }
 
+    // rev.9 B3: shard routing parameters. Genesis-pinned and chain-wide.
+    // Set by Node from GenesisConfig before replay so apply-side
+    // cross-shard semantics are deterministic across all nodes.
+    void     set_shard_routing(uint32_t shard_count,
+                                 const Hash& salt,
+                                 ShardId my_shard_id);
+    uint32_t shard_count()     const { return shard_count_; }
+    const Hash& shard_salt()   const { return shard_salt_; }
+    ShardId  my_shard_id()     const { return my_shard_id_; }
+    // True iff `to` routes to a different shard than this chain owns.
+    // SINGLE chains (shard_count_ <= 1) return false unconditionally.
+    bool     is_cross_shard(const std::string& to) const;
+
     const std::map<std::string, AccountState>&   accounts()    const { return accounts_;    }
     const std::map<std::string, StakeEntry>&     stakes()      const { return stakes_;      }
     const std::map<std::string, RegistryEntry>&  registrants() const { return registrants_; }
@@ -72,7 +85,14 @@ public:
     void        save(const std::string& path) const;
     // block_subsidy must be passed at load time so replay credits creators
     // correctly. Caller (Node) loads it from GenesisConfig before this call.
-    static Chain load(const std::string& path, uint64_t block_subsidy = 0);
+    // rev.9 B3: shard routing params must also be passed so apply-side
+    // cross-shard semantics replay deterministically. Defaults represent
+    // SINGLE chain (shard_count=1, no cross-shard branches taken).
+    static Chain load(const std::string& path,
+                       uint64_t block_subsidy = 0,
+                       uint32_t shard_count = 1,
+                       const Hash& shard_salt = Hash{},
+                       ShardId my_shard_id = 0);
 
 private:
     std::vector<Block>                          blocks_;
@@ -81,6 +101,9 @@ private:
     std::map<std::string, RegistryEntry>        registrants_;
     uint64_t                                    block_subsidy_{0};
     uint64_t                                    min_stake_{1000};
+    uint32_t                                    shard_count_{1};
+    Hash                                        shard_salt_{};
+    ShardId                                     my_shard_id_{0};
 
     void apply_transactions(const Block& b);
 };

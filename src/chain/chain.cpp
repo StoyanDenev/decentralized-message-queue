@@ -2,6 +2,7 @@
 #include <dhcoin/chain/genesis.hpp>
 #include <dhcoin/chain/params.hpp>
 #include <dhcoin/crypto/sha256.hpp>
+#include <dhcoin/crypto/random.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
@@ -82,6 +83,20 @@ std::optional<RegistryEntry> Chain::registrant(const std::string& domain) const 
     return it->second;
 }
 
+void Chain::set_shard_routing(uint32_t shard_count,
+                                 const Hash& salt,
+                                 ShardId my_shard_id) {
+    shard_count_ = shard_count;
+    shard_salt_  = salt;
+    my_shard_id_ = my_shard_id;
+}
+
+bool Chain::is_cross_shard(const std::string& to) const {
+    if (shard_count_ <= 1) return false;
+    return crypto::shard_id_for_address(to, shard_count_, shard_salt_)
+           != my_shard_id_;
+}
+
 // ─── apply_transactions ──────────────────────────────────────────────────────
 
 void Chain::apply_transactions(const Block& b) {
@@ -132,7 +147,15 @@ void Chain::apply_transactions(const Block& b) {
             uint64_t cost = tx.amount + tx.fee;
             if (sender.balance < cost) continue;
             sender.balance -= cost;
-            accounts_[tx.to].balance += tx.amount;
+            // rev.9 B3: cross-shard TRANSFER debits sender locally; the
+            // credit is delivered to `to` via the receipt path on the
+            // destination shard (Stage B3.4). The block's
+            // cross_shard_receipts list (validator-checked) carries the
+            // outbound credit. amount + fee leave this shard's supply
+            // here; fee still accrues to creators on this side.
+            if (!is_cross_shard(tx.to)) {
+                accounts_[tx.to].balance += tx.amount;
+            }
             total_fees += tx.fee;
             sender.next_nonce++;
             break;
@@ -287,7 +310,11 @@ void Chain::save(const std::string& path) const {
     f << j.dump(2);
 }
 
-Chain Chain::load(const std::string& path, uint64_t block_subsidy) {
+Chain Chain::load(const std::string& path,
+                    uint64_t block_subsidy,
+                    uint32_t shard_count,
+                    const Hash& shard_salt,
+                    ShardId my_shard_id) {
     std::ifstream f(path);
     if (!f) {
         // No on-disk chain: return EMPTY chain so caller (Node) can decide
@@ -296,12 +323,18 @@ Chain Chain::load(const std::string& path, uint64_t block_subsidy) {
         // with a pinned genesis_hash in the operator config.
         Chain c;
         c.block_subsidy_ = block_subsidy;
+        c.shard_count_   = shard_count;
+        c.shard_salt_    = shard_salt;
+        c.my_shard_id_   = my_shard_id;
         return c;
     }
     json j = json::parse(f);
     Chain c;
     c.block_subsidy_ = block_subsidy;   // must be set before replay so creators
                                           // are credited correctly per block
+    c.shard_count_   = shard_count;
+    c.shard_salt_    = shard_salt;
+    c.my_shard_id_   = my_shard_id;
     for (auto& bj : j) {
         Block b = Block::from_json(bj);
         c.apply_transactions(b);

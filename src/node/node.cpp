@@ -151,8 +151,20 @@ Node::Node(const Config& cfg)
         gcfg_opt = std::move(gcfg);
     }
 
-    chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy);
+    Hash genesis_shard_salt{};
+    uint32_t genesis_shard_count = 1;
+    ShardId  genesis_my_shard    = 0;
+    if (gcfg_opt.has_value()) {
+        genesis_shard_salt  = gcfg_opt->shard_address_salt;
+        genesis_shard_count = gcfg_opt->initial_shard_count;
+        genesis_my_shard    = gcfg_opt->shard_id;
+    }
+    chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy,
+                                  genesis_shard_count, genesis_shard_salt,
+                                  genesis_my_shard);
     chain_.set_min_stake(genesis_min_stake);
+    chain_.set_shard_routing(genesis_shard_count, genesis_shard_salt,
+                              genesis_my_shard);
 
     if (chain_.empty()) {
         // No on-disk chain: bootstrap from genesis config if provided, else
@@ -167,6 +179,9 @@ Node::Node(const Config& cfg)
             chain_ = chain::Chain(std::move(g));
             chain_.set_block_subsidy(genesis_subsidy);
             chain_.set_min_stake(genesis_min_stake);
+            chain_.set_shard_routing(genesis_shard_count,
+                                       genesis_shard_salt,
+                                       genesis_my_shard);
             const char* mode = (cfg_.k_block_sigs == cfg_.m_creators)
                               ? "strong" : "hybrid";
             std::cout << "[node] genesis loaded from " << cfg_.genesis_path

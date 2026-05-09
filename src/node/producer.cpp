@@ -1,6 +1,7 @@
 #include <dhcoin/node/producer.hpp>
 #include <dhcoin/chain/params.hpp>
 #include <dhcoin/crypto/keys.hpp>
+#include <dhcoin/crypto/random.hpp>
 #include <dhcoin/crypto/sha256.hpp>
 #include <algorithm>
 #include <map>
@@ -360,7 +361,31 @@ Block build_body(
             uint64_t cost = tx.amount + tx.fee;
             if (sb < cost) continue;
             sb -= cost;
-            get_bal(tx.to) += tx.amount;
+            // rev.9 B3.2: cross-shard TRANSFERs are debited locally and
+            // emit a receipt for delivery to the destination shard. The
+            // local credit is suppressed (the destination shard credits
+            // `to` after verifying the receipt against this block in
+            // Stage B3.4).
+            if (chain.is_cross_shard(tx.to)) {
+                CrossShardReceipt r;
+                r.src_shard       = chain.my_shard_id();
+                r.dst_shard       = crypto::shard_id_for_address(
+                                        tx.to, chain.shard_count(), chain.shard_salt());
+                r.src_block_index = b.index;
+                // src_block_hash stays zero in the on-chain stored
+                // receipt (it would be circular — receipts are part of
+                // the block hash). Filled in by the gossip-bundle layer
+                // (B3.3) at relay time, derived from the produced block.
+                r.tx_hash = tx.hash;
+                r.from    = tx.from;
+                r.to      = tx.to;
+                r.amount  = tx.amount;
+                r.fee     = tx.fee;
+                r.nonce   = tx.nonce;
+                b.cross_shard_receipts.push_back(r);
+            } else {
+                get_bal(tx.to) += tx.amount;
+            }
             break;
         }
         case TxType::REGISTER:

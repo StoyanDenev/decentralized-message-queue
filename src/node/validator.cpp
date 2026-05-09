@@ -32,6 +32,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_block_sigs(b, registry, chain);   !r.ok) return r;
     if (auto r = check_cumulative_rand(b, chain);        !r.ok) return r;
     if (auto r = check_transactions(b, chain, registry); !r.ok) return r;
+    if (auto r = check_cross_shard_receipts(b, chain);   !r.ok) return r;
     if (auto r = check_timestamp(b);                     !r.ok) return r;
     return {true, ""};
 }
@@ -476,6 +477,45 @@ Hash BlockValidator::resolve_epoch_rand(uint64_t epoch_start,
         return chain.empty() ? Hash{} : chain.head().cumulative_rand;
     }
     return chain.at(epoch_start - 1).cumulative_rand;
+}
+
+// rev.9 B3.2: receipts must match the cross-shard subset of
+// transactions[] one-for-one in order. The producer (build_body) emits
+// a receipt for every TRANSFER whose `to` routes to another shard;
+// validators independently rederive the expected list and compare.
+// This makes receipts as trustworthy as the K-of-K-signed block:
+// tampering with a receipt's `to`/`amount`/etc. either falls out of
+// sync with the tx (caught here) or changes the block hash (breaks
+// signing).
+BlockValidator::Result BlockValidator::check_cross_shard_receipts(
+    const Block& b, const Chain& chain) const {
+
+    std::vector<const Transaction*> cross;
+    for (auto& tx : b.transactions) {
+        if (tx.type == TxType::TRANSFER && chain.is_cross_shard(tx.to))
+            cross.push_back(&tx);
+    }
+    if (cross.size() != b.cross_shard_receipts.size())
+        return {false, "cross_shard_receipts size " +
+                       std::to_string(b.cross_shard_receipts.size()) +
+                       " != cross-shard tx count " +
+                       std::to_string(cross.size())};
+
+    for (size_t i = 0; i < cross.size(); ++i) {
+        const auto& tx = *cross[i];
+        const auto& r  = b.cross_shard_receipts[i];
+        if (r.src_shard       != chain.my_shard_id())
+            return {false, "receipt[" + std::to_string(i) + "] src_shard mismatch"};
+        if (r.dst_shard       != crypto::shard_id_for_address(
+                                     tx.to, chain.shard_count(), chain.shard_salt()))
+            return {false, "receipt[" + std::to_string(i) + "] dst_shard mismatch"};
+        if (r.src_block_index != b.index)
+            return {false, "receipt[" + std::to_string(i) + "] src_block_index mismatch"};
+        if (r.tx_hash != tx.hash || r.from != tx.from || r.to != tx.to
+            || r.amount != tx.amount || r.fee != tx.fee || r.nonce != tx.nonce)
+            return {false, "receipt[" + std::to_string(i) + "] field mismatch with tx"};
+    }
+    return {true, ""};
 }
 
 BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {
