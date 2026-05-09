@@ -1466,6 +1466,40 @@ json Node::rpc_block(uint64_t index) const {
     return chain_.at(index).to_json();
 }
 
+json Node::rpc_account(const std::string& addr) const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    json j;
+    j["address"]    = addr;
+    j["balance"]    = chain_.balance(addr);
+    j["next_nonce"] = chain_.next_nonce(addr);
+
+    // Bearer-wallet anonymous addresses surface as their pubkey-derived
+    // address; show that fact for the explorer.
+    j["is_anonymous"] = is_anon_address(addr);
+
+    // If the address is a registered domain, attach registry + stake info.
+    auto reg_entry = chain_.registrant(addr);
+    if (reg_entry) {
+        json r;
+        r["ed_pub"]        = to_hex(reg_entry->ed_pub);
+        r["registered_at"] = reg_entry->registered_at;
+        r["active_from"]   = reg_entry->active_from;
+        r["inactive_from"] = reg_entry->inactive_from;
+        j["registry"]      = r;
+        j["stake"]         = chain_.stake(addr);
+    } else {
+        j["registry"] = nullptr;
+        j["stake"]    = chain_.stake(addr);    // 0 if not staked
+    }
+
+    // Aggregate visibility: has this address ever appeared on-chain?
+    bool has_state = (chain_.balance(addr) > 0)
+                  || (chain_.next_nonce(addr) > 0)
+                  || reg_entry.has_value();
+    if (!has_state) return nullptr;
+    return j;
+}
+
 json Node::rpc_validators() const {
     std::lock_guard<std::mutex> lk(state_mutex_);
     json arr = json::array();

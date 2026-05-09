@@ -94,6 +94,12 @@ public:
     // staked >= min_stake + not suspended). Each entry includes
     // domain, ed_pub (hex), staked balance, active_from height.
     nlohmann::json rpc_validators()                                 const;
+    // rev.9: aggregate account state — balance, next_nonce, plus
+    // registry status if the address is a registered domain. Works
+    // for both registered domains and anonymous bearer-wallet
+    // addresses (0x-prefixed hex). Returns null if address has no
+    // on-chain state.
+    nlohmann::json rpc_account(const std::string& addr)             const;
     nlohmann::json rpc_register();
     nlohmann::json rpc_send(const std::string& to, uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_balance(const std::string& domain)           const;

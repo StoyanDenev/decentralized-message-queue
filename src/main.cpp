@@ -47,6 +47,7 @@ Usage:
   dhcoin show-block <index>                  Print block at index (full JSON)
   dhcoin chain-summary [--last N]            Compact summary of last N blocks
   dhcoin validators                          List the current validator pool
+  dhcoin show-account <address>              Inspect any address (balance, nonce, registry, stake)
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -331,6 +332,46 @@ static int cmd_chain_summary(int argc, char** argv) {
                       << " creators=" << b.value("creators", json::array()).dump()
                       << " hash=" << b.value("hash", std::string{}).substr(0, 12)
                       << "\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// dhcoin show-account <address> [--rpc-port N]
+//   Inspect on-chain state for an arbitrary address (registered domain or
+//   anonymous bearer wallet). Prints balance, next nonce, and registry
+//   info + stake when the address is a registered validator.
+static int cmd_show_account(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: dhcoin show-account <address> [--rpc-port N]\n";
+        return 1;
+    }
+    std::string addr = argv[0];
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"address", addr}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "account", params);
+        if (result.is_null()) {
+            std::cout << "(no on-chain state for " << addr << ")\n";
+            return 0;
+        }
+        std::cout << "address      : " << result.value("address", std::string{}) << "\n";
+        std::cout << "anonymous    : " << (result.value("is_anonymous", false) ? "yes" : "no") << "\n";
+        std::cout << "balance      : " << result.value("balance", uint64_t{0}) << "\n";
+        std::cout << "next_nonce   : " << result.value("next_nonce", uint64_t{0}) << "\n";
+        std::cout << "stake        : " << result.value("stake", uint64_t{0}) << "\n";
+        if (result.contains("registry") && !result["registry"].is_null()) {
+            auto& r = result["registry"];
+            std::cout << "registry     :\n";
+            std::cout << "  ed_pub       : " << r.value("ed_pub", std::string{}) << "\n";
+            std::cout << "  registered_at: " << r.value("registered_at", uint64_t{0}) << "\n";
+            std::cout << "  active_from  : " << r.value("active_from", uint64_t{0}) << "\n";
+            std::cout << "  inactive_from: " << r.value("inactive_from", uint64_t{0}) << "\n";
+        } else {
+            std::cout << "registry     : (not registered)\n";
         }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -731,6 +772,7 @@ int main(int argc, char** argv) {
     if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
+    if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "balance")     return cmd_balance(sub_argc, sub_argv);
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
