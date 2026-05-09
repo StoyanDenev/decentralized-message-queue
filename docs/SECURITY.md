@@ -10,9 +10,11 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **6** | **10** | **9** | **10** | **35** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **5** |
-| v2 protocol-evolution | — | — | — | — | **2** |
+| Open | **6** | **8** | **7** | **10** | **31** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **6** |
+| v2 protocol-evolution | — | — | — | — | **1** |
+
+(S-005, S-009, S-019, S-034 all closed by M-F. S-009 was the lone v2 protocol-evolution item.)
 
 **Top-of-list priorities for production deployment:**
 
@@ -228,7 +230,7 @@ A malicious relay can also drop transactions from `b.transactions` after committ
 
 ### S-005 — `delay_T` not in GenesisConfig
 
-**Severity:** High (consensus-divergence) • **Status:** Open • **Sources:** Audit 3.9 (re-classified up from Medium)
+**Severity:** High (consensus-divergence) • **Status:** ✅ Moot — see M-F. The iteration count is no longer load-bearing; `delay_T` divergence between nodes no longer affects consensus. The field can be removed in cleanup. • **Sources:** Audit 3.9 (re-classified up from Medium)
 
 **What's open.** `GenesisConfig` (`include/dhcoin/chain/genesis.hpp:78-105`) contains no `delay_T` field. `grep delay_T genesis.{hpp,cpp}` returns empty. `delay_T` is loaded from the per-node `Config` instead. Two nodes with different per-node `delay_T` will produce differently-validated blocks (the validator at `node.cpp:1446` uses `cfg_.delay_T`).
 
@@ -317,23 +319,16 @@ Replace-by-fee on the mempool bounds *per-`(from, nonce)`* but not total. There'
 
 ### S-009 — Constant-T / SHA-256 ASIC fallacy
 
-**Severity:** High (consensus-weakening over time) • **Status:** Open, v2 protocol • **Sources:** OV-#1, Gemini analysis
+**Severity:** High (was) • **Status:** ✅ Closed by delay-hash removal (see §7 M-F) • **Sources:** OV-#1, Gemini analysis
 
-**What's open.** `delay_T` is genesis-pinned. SHA-256 is the most heavily-ASIC'd hash in existence; the gap between consumer CPU and Bitmain-grade hardware is multiple orders of magnitude. An attacker with optimized SHA-256 silicon executes the same `T` iterations in a fraction of the wall-clock budget, regaining the predictive-evaluation window the protocol was designed to close — selective abort returns.
+**Was open.** `delay_T` was genesis-pinned. SHA-256 is the most heavily-ASIC'd hash in existence; the gap between consumer CPU and Bitmain-grade hardware is multiple orders of magnitude. An attacker with optimized SHA-256 silicon could execute the same `T` iterations in a fraction of the wall-clock budget, regaining the predictive-evaluation window the protocol was designed to close.
 
-Not exploitable today on small chains; becomes critical at production scale.
+**Resolution:** the iterated SHA-256 delay-hash mechanism has been removed entirely (see §7 M-F). The selective-abort defense it nominally provided is now structurally absent — the protocol's defense against this class of attack shifts to:
+- **Phase-1 commit-reveal** (the existing `dh_input` field semantically a commit to a fresh secret; secret reveal in Phase 2). An attacker without all K secrets cannot predict block randomness; SHA-256 preimage resistance does the work, no compute-time assumption.
+- **BFT escalation** for liveness when committee members blind-abort.
+- **Equivocation slashing** for cryptographic punishment of double-signers.
 
-**Resolution options.**
-
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Coordinated `delay_T` bumps** via hard fork on a 6-12 month cadence. | Low protocol effort; high coordination cost. Doesn't *solve*, just keeps the gap below threshold. |
-| 2 | **Memory-hard delay** (Argon2-style, scrypt-like). ASIC speedup drops 1000× → ~10×. | Medium. Re-implement worker. Hard fork. |
-| 3 | **Wesolowski/Pietrzak VDF** (class-group). Verifier work sub-linear, T enforced by the proof. | High. Heavy crypto, library choice, proof verification cost per block. |
-| 4 | **zk-VDF** (SNARK-based). Defeats ASIC asymmetry mathematically. | Highest. Likely 6+ months. |
-| 5 | **Modular-exponentiation randomness:** replace `delay_hash(seed, T)` with `N' = N^(a·t·m·prev_hash) mod p` over a strong 256-bit prime-order abelian group, where `a` and `b` are committee members' Diffie-Hellman secrets bound into the exponent alongside the timestamp `t` and previous block hash. ASIC asymmetry collapses because modular exponentiation in this group isn't structured for the kind of pipelined parallelism SHA-256 ASICs exploit. Not a true VDF (no sub-linear verifier — verification is still O(T_modexp)) but **substantially better than SHA-256^T**. Precomputation attacks are mitigated by binding `prev_hash` and the current second-bin into the exponent so the work resets every round. | Medium-high (~1-2w). Hard fork; needs `delay_T` → `group_size + exponent_size` calibration. |
-
-**Recommended.** Option 1 for v1.x, Option 5 for v1.5 (cheaper than Option 3 with similar security gain), Option 4 for v2.
+S-005 (`delay_T` not in genesis) is moot under this resolution. S-019 (Phase-2 timer R-arrival spoof) and S-034 (VDF allocation per iteration) are similarly moot — the worker thread that ran the iteration is gone.
 
 ---
 
@@ -567,7 +562,7 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 ### S-019 — Phase-2 timer R-arrival spoofing
 
-**Severity:** Medium (if vulnerability still present) • **Status:** Open, audit-needed • **Sources:** OV-#4, Gemini analysis
+**Severity:** Medium (was) • **Status:** ✅ Moot — see M-F. With delay-hash removed, `R` is computed instantly from local Phase-1 inputs; there's no expensive computation an attacker could spoof completion of. The piggyback optimization that depended on peer-`R`-arrival timing is no-op. • **Sources:** OV-#4, Gemini analysis
 
 **What's open.** The Gemini analysis cites `min(local_delay_done_time, peer_R_arrival_time) + block_sig_ms` as the Phase-2 trigger formula and warns of forged-R injection. The current code may differ — needs an audit pass.
 
@@ -603,7 +598,7 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 ### S-034 — VDF allocates `EVP_MD_CTX` per iteration
 
-**Severity:** Medium (performance — affects T calibration) • **Status:** Open • **Sources:** Architectural Analysis §3.6
+**Severity:** Medium (was) • **Status:** ✅ Moot — see M-F. With the iteration removed, there's no inner loop allocating contexts. • **Sources:** Architectural Analysis §3.6
 
 **What's open.** `delay_hash_compute` at `src/crypto/delay_hash.cpp:6-12`:
 ```cpp
@@ -695,6 +690,23 @@ The narrower ContribMsg-level case is still open as S-006.
 ### M-D — Blind-abort liveness exploit → BFT escalation
 
 The Gemini analysis's headline conclusion — "blind abort = systemic liveness problem; capitalized adversary can stall any specific transaction by burning suspension penalty" — is **substantially mitigated by M-B**. A single blind-aborting adversary can stall a transaction for ~5 rounds, then BFT mode kicks in and the chain proceeds without their signature. The exponential-suspension formula still applies but is no longer the only liveness guarantee.
+
+### M-F — Iterated delay-hash removed (S-009 closure)
+
+**Was Architectural Analysis §3.6 + S-009 + S-019 + S-034.**
+
+The SHA-256^T delay-hash function has been removed from the protocol. `delay_hash_compute(seed, T)` now returns `SHA256(seed)` instantly; the `T` parameter is ignored. The delay-hash worker thread, the `RUNNING_DELAY` consensus phase, the `EVP_MD_CTX`-per-iteration allocation issue, and the calibration risk around `delay_T` are all gone.
+
+**Consequences:**
+- S-005 (`delay_T` not in genesis) becomes moot.
+- S-009 (constant-T / SHA-256 ASIC fallacy) becomes moot.
+- S-019 (Phase-2 timer R-arrival spoof) becomes moot — `R` is computed instantly from local Phase-1 inputs; there's no expensive computation an attacker could spoof completion of.
+- S-034 (VDF allocation per iteration) becomes moot — no inner loop.
+- S-031 (global mutex serialization) is partially mitigated — the worst case (`delay_hash_verify` with 4M iterations under the lock during piggyback) is gone.
+
+**Trade-off accepted:** the original VDF-style selective-abort defense — "an attacker can't predict block randomness during the Phase-1 commit window because computing it requires T sequential SHA-256 ops > Phase-1 budget" — is replaced by a commit-reveal-based defense backed by the existing BFT escalation + equivocation slashing machinery. An attacker without all K committee members' Phase-2-revealed secrets still cannot predict block randomness (under SHA-256 preimage resistance); the security argument shifts from "compute-time" to "information-theoretic."
+
+`delay_T` and the `delay-hash worker` infrastructure remain in the codebase as deprecated names for backward-compat with the existing block format and message types; the inner loop that gave them their semantic content is gone. Removing the names entirely is a follow-up cleanup commit.
 
 ### M-E — Outbound HELLO mistagging in cross-chain peering
 
