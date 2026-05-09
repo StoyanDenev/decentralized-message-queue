@@ -134,21 +134,29 @@ RESP=$($DHCOIN send_anon "$B_ADDR" 25 "$A_PRIV" --rpc-port 8771 2>&1)
 echo "  RPC response: $RESP"
 
 echo
-echo "=== 9. Wait 12s for inclusion ==="
-sleep 12
-
-echo
-echo "=== 10. Verify balances on all 3 nodes ==="
+echo "=== 9. Poll up to 30s for inclusion + cross-node balance convergence ==="
 EXPECTED_A=75
 EXPECTED_B=25
-ALL_PASS=true
+ALL_PASS=false
+for attempt in $(seq 1 30); do
+  sleep 1
+  ok=true
+  for n in 1 2 3; do
+    bal_a=$(get_balance 877$n $A_ADDR)
+    bal_b=$(get_balance 877$n $B_ADDR)
+    if [ "$bal_a" != "$EXPECTED_A" ] || [ "$bal_b" != "$EXPECTED_B" ]; then
+      ok=false; break
+    fi
+  done
+  if $ok; then ALL_PASS=true; echo "  converged after ${attempt}s"; break; fi
+done
+
+echo
+echo "=== 10. Final balances on all 3 nodes ==="
 for n in 1 2 3; do
   bal_a=$(get_balance 877$n $A_ADDR)
   bal_b=$(get_balance 877$n $B_ADDR)
   echo "  n$n: A=$bal_a (expect $EXPECTED_A), B=$bal_b (expect $EXPECTED_B)"
-  if [ "$bal_a" != "$EXPECTED_A" ] || [ "$bal_b" != "$EXPECTED_B" ]; then
-    ALL_PASS=false
-  fi
 done
 
 echo

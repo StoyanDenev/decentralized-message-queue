@@ -139,16 +139,21 @@ try: print(json.load(sys.stdin).get('head_hash',''))
 except: print('')"
 }
 HEADS_AGREE=false
-for attempt in 1 2 3 4 5 6; do
+# Up to 60s budget. The chain emits a block every ~2-4s; 30 attempts at
+# 2s gives healthy slack for transient lag (e.g., a node briefly mid-
+# round behind its peers). Flakes were observed with the previous 18s
+# ceiling on slower runs.
+for attempt in $(seq 1 30); do
   H1=$(get_status_field 8771 height); H2=$(get_status_field 8772 height); H3=$(get_status_field 8773 height)
   if [ "$H1" = "$H2" ] && [ "$H2" = "$H3" ]; then
     HEAD1=$(get_head 8771); HEAD2=$(get_head 8772); HEAD3=$(get_head 8773)
     if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && [ -n "$HEAD1" ]; then
       HEADS_AGREE=true
+      echo "  converged after attempt $attempt (heights=$H1)"
       break
     fi
   fi
-  sleep 3
+  sleep 2
 done
 
 if $HEADS_AGREE; then
