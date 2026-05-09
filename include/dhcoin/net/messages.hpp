@@ -57,8 +57,19 @@ struct Message {
     static Message       deserialize(const uint8_t* data, size_t len);
 };
 
-inline Message make_hello(const std::string& domain, uint16_t port) {
-    return {MsgType::HELLO, {{"domain", domain}, {"port", port}}};
+inline Message make_hello(const std::string& domain, uint16_t port,
+                            dhcoin::ChainRole role = dhcoin::ChainRole::SINGLE,
+                            ShardId shard_id = 0) {
+    // rev.9 B2c.5: HELLO carries the sender's chain identity so peers can
+    // tag connections and apply role-based message filtering. Older
+    // peers without role/shard_id fields default to SINGLE / 0 (matches
+    // the rev.7/8 behavior — single-chain everyone is SINGLE).
+    return {MsgType::HELLO, {
+        {"domain",   domain},
+        {"port",     port},
+        {"role",     static_cast<uint8_t>(role)},
+        {"shard_id", shard_id}
+    }};
 }
 inline Message make_block(const chain::Block& b) {
     return {MsgType::BLOCK, b.to_json()};

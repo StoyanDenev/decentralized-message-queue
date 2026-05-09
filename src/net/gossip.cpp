@@ -11,6 +11,11 @@ void GossipNet::set_hello(const std::string& domain, uint16_t listen_port) {
     our_port_   = listen_port;
 }
 
+void GossipNet::set_chain_identity(ChainRole role, ShardId shard_id) {
+    our_role_     = role;
+    our_shard_id_ = shard_id;
+}
+
 void GossipNet::listen(uint16_t port) {
     asio::ip::tcp::endpoint ep(asio::ip::tcp::v4(), port);
     acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_, ep);
@@ -25,7 +30,7 @@ void GossipNet::accept_loop() {
                 auto peer = std::make_shared<Peer>(std::move(socket));
                 attach(peer);
                 if (!our_domain_.empty())
-                    peer->send(make_hello(our_domain_, our_port_));
+                    peer->send(make_hello(our_domain_, our_port_, our_role_, our_shard_id_));
             }
             accept_loop();
         });
@@ -55,12 +60,72 @@ void GossipNet::attach(std::shared_ptr<Peer> peer) {
         [this](auto p) { handle_peer_closed(p); });
 }
 
+// rev.9 B2c.5b: filter rule for cross-chain gossip pollution. Each
+// message type is acceptable from a source peer iff their chain role
+// (and shard_id, where applicable) matches the rules below.
+//
+// Rules summary:
+//   HELLO: from any peer (initial handshake; pre-tag).
+//   STATUS_REQUEST/RESPONSE: from any peer (peer discovery).
+//   BEACON_HEADER: only from BEACON peers (received by SHARD).
+//   SHARD_TIP: only from SHARD peers (received by BEACON).
+//   EQUIVOCATION_EVIDENCE, ABORT_EVENT: from any peer (verifiable
+//     independently; cross-chain forensics needs to flow).
+//   Everything else (BLOCK, TRANSACTION, BLOCK_SIG, CONTRIB,
+//     ABORT_CLAIM, GET_CHAIN, CHAIN_RESPONSE): only from peers with
+//     SAME chain_role AND SAME shard_id (intra-chain consensus +
+//     mempool — must not cross chain boundaries).
+//
+// Pre-HELLO: peer->chain_role() is SINGLE/0 by default. Single-chain
+// deployments where everyone is SINGLE/0 see no filter effect (the
+// "same role, same shard_id" rule trivially holds).
+static bool peer_message_allowed(const Peer& peer, MsgType type,
+                                  ChainRole our_role, ShardId our_shard_id) {
+    switch (type) {
+    case MsgType::HELLO:
+    case MsgType::STATUS_REQUEST:
+    case MsgType::STATUS_RESPONSE:
+    case MsgType::EQUIVOCATION_EVIDENCE:
+    case MsgType::ABORT_EVENT:
+        return true;
+    case MsgType::BEACON_HEADER:
+        return peer.chain_role() == ChainRole::BEACON;
+    case MsgType::SHARD_TIP:
+        return peer.chain_role() == ChainRole::SHARD;
+    default:
+        // Intra-chain messages: source peer must be on the same chain
+        // (same role, same shard_id when SHARD).
+        if (peer.chain_role() != our_role) return false;
+        if (our_role == ChainRole::SHARD && peer.shard_id() != our_shard_id) return false;
+        return true;
+    }
+}
+
 void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
     try {
+        // rev.9 B2c.5b: enforce role-based filter for cross-chain
+        // pollution. HELLO is exempt (it's the handshake that tags the
+        // peer in the first place). For all other messages, the peer
+        // must have completed HELLO and the message type must be
+        // allowed for the peer's role.
+        if (msg.type != MsgType::HELLO && peer->hello_received()) {
+            if (!peer_message_allowed(*peer, msg.type, our_role_, our_shard_id_)) {
+                return;     // silent drop — wrong role for this msg type
+            }
+        }
+
         switch (msg.type) {
-        case MsgType::HELLO:
+        case MsgType::HELLO: {
             peer->set_domain(msg.payload.value("domain", ""));
+            // rev.9 B2c.5: tag the peer with its claimed chain identity.
+            // Older peers without these fields default to SINGLE/0, which
+            // matches the rev.7/8 single-chain behavior.
+            peer->set_chain_role(static_cast<ChainRole>(
+                msg.payload.value("role", uint8_t{0})));
+            peer->set_shard_id(msg.payload.value("shard_id", ShardId{0}));
+            peer->mark_hello_received();
             break;
+        }
         case MsgType::BLOCK:
             if (on_block) on_block(chain::Block::from_json(msg.payload));
             break;

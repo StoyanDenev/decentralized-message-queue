@@ -26,6 +26,8 @@ json Config::to_json() const {
     j["listen_port"]     = listen_port;
     j["rpc_port"]        = rpc_port;
     j["bootstrap_peers"] = bootstrap_peers;
+    j["beacon_peers"]    = beacon_peers;
+    j["shard_peers"]     = shard_peers;
     j["key_path"]        = key_path;
     j["chain_path"]      = chain_path;
     j["genesis_path"]    = genesis_path;
@@ -52,6 +54,8 @@ Config Config::from_json(const json& j) {
     c.listen_port     = j.value("listen_port",    uint16_t{7777});
     c.rpc_port        = j.value("rpc_port",       uint16_t{7778});
     c.bootstrap_peers = j.value("bootstrap_peers", std::vector<std::string>{});
+    c.beacon_peers    = j.value("beacon_peers",    std::vector<std::string>{});
+    c.shard_peers     = j.value("shard_peers",     std::vector<std::string>{});
     c.key_path        = j.value("key_path",       "");
     c.chain_path      = j.value("chain_path",     "");
     c.genesis_path    = j.value("genesis_path",   "");
@@ -174,6 +178,7 @@ Node::Node(const Config& cfg)
     registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
 
     gossip_.set_hello(cfg_.domain, cfg_.listen_port);
+    gossip_.set_chain_identity(cfg_.chain_role, cfg_.shard_id);
     gossip_.on_block         = [this](auto& b)   { on_block(b); };
     gossip_.on_tx            = [this](auto& tx)  { on_tx(tx); };
     gossip_.on_contrib       = [this](auto& c)   { on_contrib(c); };
@@ -201,13 +206,22 @@ void Node::run() {
     running_ = true;
     gossip_.listen(cfg_.listen_port);
 
-    for (auto& addr : cfg_.bootstrap_peers) {
-        auto colon = addr.rfind(':');
-        if (colon == std::string::npos) continue;
-        std::string host = addr.substr(0, colon);
-        uint16_t port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
-        gossip_.connect(host, port);
-    }
+    auto connect_addrs = [this](const std::vector<std::string>& addrs) {
+        for (auto& addr : addrs) {
+            auto colon = addr.rfind(':');
+            if (colon == std::string::npos) continue;
+            std::string host = addr.substr(0, colon);
+            uint16_t port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
+            gossip_.connect(host, port);
+        }
+    };
+    connect_addrs(cfg_.bootstrap_peers);
+    // rev.9 B2c.5c: shard-role nodes connect to beacon nodes; beacon-role
+    // nodes (optionally) connect to shard nodes. The role-based gossip
+    // filter (B2c.5b) ensures cross-chain peers don't pollute intra-chain
+    // state. SINGLE-role chains ignore both lists.
+    if (cfg_.chain_role == ChainRole::SHARD) connect_addrs(cfg_.beacon_peers);
+    if (cfg_.chain_role == ChainRole::BEACON) connect_addrs(cfg_.shard_peers);
 
     unsigned n = std::max(1u, std::thread::hardware_concurrency());
     for (unsigned i = 0; i < n; ++i)

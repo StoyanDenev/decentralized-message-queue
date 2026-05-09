@@ -20,6 +20,15 @@ struct Config {
     uint16_t                 listen_port{7777};
     uint16_t                 rpc_port{7778};
     std::vector<std::string> bootstrap_peers;
+    // rev.9 B2c.5c: cross-chain peer addresses. Populated when this node
+    // wants to participate in cross-chain coordination — typically a
+    // SHARD-role node lists beacon nodes here, and a BEACON-role node
+    // lists shard nodes. Peers are connected separately from
+    // bootstrap_peers (which is intra-chain only). The role-based
+    // gossip filter (B2c.5b) ensures messages from these peers don't
+    // pollute intra-chain consensus state.
+    std::vector<std::string> beacon_peers;       // shard-role: connect to beacons
+    std::vector<std::string> shard_peers;        // beacon-role: connect to shards
     std::string              key_path;
     std::string              chain_path;
     // Bootstrap (M12). genesis_path is the path to the GenesisConfig JSON

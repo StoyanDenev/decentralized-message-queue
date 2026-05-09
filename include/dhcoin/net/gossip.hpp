@@ -20,6 +20,10 @@ public:
     void broadcast(const Message& msg);
     void send_to_domain(const std::string& domain, const Message& msg);
     void set_hello(const std::string& domain, uint16_t listen_port);
+    // rev.9 B2c.5: this node's chain identity, included in HELLOs we
+    // send so peers can tag us. Default SINGLE/0 preserves rev.7/8
+    // behavior on chains where roles aren't used.
+    void set_chain_identity(ChainRole role, ShardId shard_id);
 
     std::vector<std::string> peer_addresses() const;
     size_t peer_count() const;
@@ -64,6 +68,8 @@ private:
     mutable std::mutex                       peers_mutex_;
     std::string                              our_domain_;
     uint16_t                                 our_port_{0};
+    ChainRole                                our_role_{ChainRole::SINGLE};
+    ShardId                                  our_shard_id_{0};
 };
 
 } // namespace dhcoin::net
