@@ -45,19 +45,38 @@ This design has three consequences worth highlighting:
 
 Transactions from both account types are signed under Ed25519. The chain validates signatures uniformly; the only difference is consensus eligibility.
 
-**Trust model — mutual distrust, not Byzantine fault tolerance.** Classic BFT protocols (Tendermint, HotStuff, PBFT) bound the adversary fraction (typically `f < N/3`) and design for an honest majority: as long as fewer than the threshold are corrupted, safety and liveness hold. DHCoin takes a different stance: **every committee member is treated as potentially adversarial, with no a-priori honest fraction assumed**. The protocol structure makes any deviation either cryptographically detectable, economically punishable, or self-defeating — independent of how many participants are honest.
+**Trust model — mutual distrust, not Byzantine fault tolerance.** Classic BFT protocols (Tendermint, HotStuff, PBFT) assume participants pursue a **common goal** — *advance the chain* — and bound the fraction that can defect from that goal (typically `f < N/3`). Safety and liveness hold as long as fewer than the threshold are corrupted; the framing is "honest majority cooperates, faulty minority is tolerated."
 
-The mechanism rests on three properties:
+DHCoin takes a fundamentally different stance: **the validators have no common goal**. Each is a self-interested actor pursuing its own block reward. They do not cooperate voluntarily; they cooperate **involuntarily and only at the moment of block propagation**, because the protocol's K-of-K and union-tx-root rules make individual defection either rewardless (you don't get the share of the block) or impotent (your refusal to include a tx is overridden by anyone else who does include it).
 
-1. **Mutual veto via K-of-K signatures.** A block requires every committee member to sign the same digest. Any single member can refuse — they cannot unilaterally produce a block, but they also cannot unilaterally allow a malformed one. Refusal is detectable (Phase 1 absence triggers an `AbortClaimMsg` quorum, recorded as an `AbortEvent` in the next block) and economically costly (suspension, with slashing as a future v1.x extension).
+This is "mutual distrust": every validator watches every other, **assumes every other is potentially adversarial**, and the protocol is robust precisely because the rules align self-interested behavior into chain progress without requiring shared intent. There is no "honest majority" assumption to hold; there is only the requirement that protocol participants want their own block reward more than they want to attack the chain.
 
-2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Coordinating K-way unanimous collusion is fragile precisely because defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship).
+### 2.1 The actual decentralization threshold
+
+DHCoin's safety + censorship-resistance properties hold **as long as at least one validator in the registry is non-Byzantine**. This is the decentralization gate:
+
+- **At least 1 honest validator anywhere in the registry → mutual-distrust environment.** The K-of-K committee rotates over time, so a single honest validator eventually appears on any committee. Their Phase 1 contribution unions any censored tx into the block (mutual inclusion). Their refusal to sign blocks committee proposes is a veto on those they reject (mutual veto). The chain stays open and uncensored.
+- **0 honest validators (100% Byzantine capture) → fully controlled adversarial network.** No protocol provides safety in this case — the attacker controls every committee member at every height and can produce any block they want. This is the universal limit beyond which no consensus protocol can function. DHCoin makes no claim here.
+
+The "honest minority" tolerance most BFT protocols celebrate (`f < N/3`) is **strictly weaker** than what DHCoin's K-of-K + union model achieves: DHCoin tolerates `f < N` (i.e., one honest in the entire registry suffices for safety + censorship resistance), at the cost of giving up `f < N/3` liveness (a single Byzantine in the *committee* can halt that round, mitigated by rotation + BFT escalation in §10.4).
+
+### 2.2 The three structural properties
+
+The mutual-distrust model rests on:
+
+1. **Mutual veto via K-of-K signatures.** A block requires every committee member to sign the same digest. Any single member can refuse — they cannot unilaterally produce a block, but they also cannot unilaterally allow a malformed one. Refusal is detectable (Phase 1 absence triggers an `AbortClaimMsg` quorum, recorded as an `AbortEvent` in the next block) and economically costly (suspension + slashing).
+
+2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship). The K-way unanimous collusion required to censor is fragile because each colluder has standing incentive to defect.
 
 3. **No predictability of consequence.** The block's randomness `R = SHA-256^T(seed)` is committed-then-revealed: every committee member's `dh_input` is part of the seed, but `R` is not computable until after Phase 1 closes (the delay-hash takes longer than the Phase 1 window). A committee member deciding whether to participate cannot compute whether participation favors them — selective abort is cryptographically defeated.
 
-The result: DHCoin does not need to know which participants are honest. It needs only that participants act in their own self-interest (collect block rewards, avoid suspension, include fee-bearing transactions). Any deviation either fails to produce a block (refusal → abort) or fails to bias outcomes (delay-hash blinds the future). This is the "mutual distrust" stance: the protocol is robust *because* every party watches every other, not because some are trusted to be honest.
+### 2.3 Trade-off vs. BFT
 
-The trade-off vs. BFT: DHCoin gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; hybrid mode adds rotation, see §10.4). In return it gets exponentially stronger censorship resistance (`(f/N)^K` vs. BFT's leader-bottlenecked single-proposer model), unconditional fork-freedom (no fork-choice rule needed), and a clean economic story (refusing to participate is always self-punishing, regardless of adversary fraction).
+DHCoin gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; rev.8 BFT escalation in §10.4 falls back to `ceil(2K/3)` after threshold aborts). In return it gets:
+- **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
+- **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
+- **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
+- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), gets slashed (equivocation → forfeit), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
 
 **Network assumptions.** We assume a partially synchronous network: messages are delivered within some known bound `Δ` during normal operation. The protocol tolerates periods of asynchrony by aborting and restarting rounds. Safety does not require synchrony — an invalid block is rejected regardless of message ordering.
 
