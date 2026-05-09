@@ -686,11 +686,14 @@ The architecture is staged across multiple stages, each delivering standalone va
 | **B2c.3** | `SHARD_TIP` gossip + beacon-side committee derivation + sig verify + tracking | ✅ done |
 | **B2c.4** | `EquivocationEvent.shard_id` + `beacon_anchor_height` cross-chain provenance | ✅ done |
 | **B2c.5** | HELLO role tagging, role-based gossip filter, `beacon_peers`/`shard_peers` config, `tools/test_zero_trust_cross_chain.sh` | ✅ done |
-| **B2c.2-full** | Shards derive committee seed from beacon-chain rand (anchored via `beacon_anchor` block field). Unlocks production-grade cross-chain validation success | 🔄 pending |
-| **B3** | `CrossShardReceipt` mempool, emission, consumption | ⏳ pending |
-| **B4** | `S = 4` deployment tooling, multi-shard integration test | ⏳ pending |
-| **B5** | Validator rotation across epochs; cross-chain slashing relay (Equivocation evidence flows shard → beacon for stake forfeit) | ⏳ pending |
-| **B6** | Hardening (sync, recovery, light clients, shard-count growth) | ⏳ pending |
+| **B2c.2-full** | Shards source committee rand from verified beacon header chain via `BlockValidator::resolve_epoch_rand` + `EpochRandProvider` callback. Production zero-trust path: both sides derive identical committees from the same beacon-anchored rand | ✅ done |
+| **B3.1** | Salted-SHA256 address routing (`crypto::shard_id_for_address`); `CrossShardReceipt` struct + JSON I/O; `Block::cross_shard_receipts` field bound into block hash | ✅ done |
+| **B3.2** | Source-shard apply suppresses local credit when `to` routes off-shard; producer emits receipt; validator verifies receipts match cross-shard tx subset one-for-one | ✅ done |
+| **B3.3** | `CROSS_SHARD_RECEIPT_BUNDLE` gossip; beacon role acts as relay; destination shard filters + dedups + queues into `pending_inbound_receipts_` | ✅ done |
+| **B3.4** | Destination shard producer bakes `inbound_receipts`; apply credits `to`; `applied_inbound_receipts_` ensures exactly-once delivery; validator dedup check | ✅ done |
+| **B4** | `tools/test_cross_shard_transfer.sh` — 1 beacon + 2 shards M=K=1, grinds bearer wallets routing to each shard, asserts cross-shard TRANSFER credits destination end-to-end. Fixes cross-chain-only IN_SYNC bug | ✅ done |
+| **B5** | Validator rotation across epochs; cross-chain slashing relay (equivocation evidence flows shard → beacon for stake forfeit). Rotation primitives are wired via B2c.2-full + epoch_committee_seed; full slashing relay test pending | 🔄 partial |
+| **B6** | Hardening (state-sync snapshots, recovery, light clients, shard-count growth) | ⏳ pending |
 
 `ChainRole = SINGLE` is the default. With S=1 and SINGLE, behavior is bitwise-identical to rev.8 — sharding is opt-in at genesis.
 
@@ -741,11 +744,11 @@ Status: ✅ done · 🟨 partial / in progress · ❌ not started · 🚫 delibe
 | Identity / accounts | ✅ ~80% | Domains + anonymous bearer wallets |
 | Native tx types | ✅ ~80% | TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE |
 | Mempool / replace-by-fee | ✅ ~70% | Sequential nonce; no fee market or gas |
-| CLI / wallet | ✅ ~60% | `dhcoin {account,send,send_anon,stake,...}` |
-| **Scaling / sharding** | 🟨 ~50% | B0/B1/B2a/B2b-lite + **B2c.1-5 structural** done; B2c.2-full (committee-seed-from-beacon-rand) + B3 (cross-shard receipts) are the next milestones |
-| Cross-shard receipts | ❌ 0% | Stage B3, follows B2c.2-full |
-| Multi-shard production tooling | ❌ 0% | Stage B4 |
-| Cross-chain validator rotation + slashing | ❌ 0% | Stage B5 |
+| CLI / wallet | ✅ ~75% | `dhcoin {account,send,send_anon,stake,show-block,chain-summary,validators,show-account,show-tx,...}` — block-explorer surface complete |
+| **Scaling / sharding** | ✅ ~85% | B0/B1/B2a/B2b-lite + B2c.1-5 + **B2c.2-full** + **B3.1-3.4 cross-shard receipt loop end-to-end** + **B4 multi-shard test harness** all done. Cross-shard TRANSFER verified behaviorally |
+| Cross-shard receipts | ✅ 100% | B3 complete (emit / relay / dst-credit / dedup) |
+| Multi-shard production tooling | ✅ ~70% | `genesis-tool build-sharded`; cross-chain peering config; behavioral test. Production-grade orchestration scripts pending |
+| Cross-chain validator rotation + slashing | 🟨 ~60% | Rotation wired via epoch-relative committee seed + B2c.2-full beacon-anchored rand. Cross-chain `EquivocationEvent` provenance fields done; full shard→beacon slashing-relay test pending (B5) |
 | State sync (snapshots, pruning) | ❌ 0% | Full chain replay only; B6 |
 | Light clients | ❌ 0% | B6, deferred |
 | **Smart-contract execution layer** | 🚫 N/A | **Not in scope.** No EVM, no WASM, no gas. The chain handles native tx types only |
@@ -764,7 +767,7 @@ Status: ✅ done · 🟨 partial / in progress · ❌ not started · 🚫 delibe
 
 The percentage depends on what frame of reference you pick:
 
-- **Narrow ("fork-free L1 payment + identity chain")** → **~75–80% done.** Consensus is mature; sharding is in progress; payments + identity work end-to-end. Finish B2c-B6 sharding (~3-4 weeks), add basic state-sync snapshots (~1 week), polish CLI and add a minimal block explorer (~1 week), and v1 ships.
+- **Narrow ("fork-free L1 payment + identity chain")** → **~88–92% done.** Consensus is mature; cross-shard transactional loop closes end-to-end and is behaviorally verified (B0-B4 done); payments + identity work end-to-end. Finish B5 (cross-chain slashing-relay test) ~1 week, add basic state-sync snapshots (~1 week), and v1 ships.
 - **Medium ("L1 + multi-chain scaling + DApp-execution-ready base")** → **~30-40% done.** Adds sharding completion, light clients, basic indexer, and a contract execution layer. Most of the missing work is the contract VM and supporting tooling.
 - **Wide ("full DApp hosting platform comparable to Ethereum + IPFS + Graph + tooling ecosystem")** → **~5-10% done.** The contract VM, off-chain storage, indexer, SDKs, block explorer, bridges, governance, privacy, oracles — all absent. This is years of work for a small team and most of it is deliberately not on the DHCoin roadmap.
 
@@ -804,18 +807,19 @@ To ship v1 (the "narrow" ~80% scope above) the remaining work is roughly:
 
 | Milestone | Estimate |
 |---|---|
-| Stage B2c.1-5 — cross-chain plumbing (DONE) | ✅ ~5d |
-| Stage B2c.2-full — committee seed from beacon-chain rand (anchor field) | ~2d |
-| Stage B3 — cross-shard receipts | ~5d |
-| Stage B4 — production multi-shard tooling | ~2d |
-| Stage B5 — validator rotation + cross-chain slashing relay | ~3d |
+| Stage B2c.1-5 — cross-chain plumbing | ✅ DONE |
+| Stage B2c.2-full — beacon-anchored committee rand | ✅ DONE |
+| Stage B3 — cross-shard receipts (emit / relay / credit / dedup) | ✅ DONE |
+| Stage B4 — multi-shard test harness; cross-chain-only IN_SYNC fix | ✅ DONE |
+| Stage B5 — cross-chain slashing-relay test (rotation primitives done) | ~1d |
 | Stage B6.basic — state sync snapshots | ~5d |
-| Block explorer (minimal) | ~5d |
+| Block-explorer CLI primitives (`status`/`peers`/`show-block`/`chain-summary`/`validators`/`show-account`/`show-tx`) | ✅ DONE |
 | Light client primitives | ~5d |
+| Deterministic-inbound-pool via Phase-1 contrib union (B3 hardening) | ~2d |
 | Documentation / spec freeze | ~3d |
 | Whitepaper PDF generation polish | ~1d |
 
-Remaining: roughly **5-6 weeks** of focused work after the current state. None of this is contract execution; v1 ships as a payment + identity chain.
+Remaining: roughly **2-3 weeks** of focused work after the current state. The cross-shard transactional loop is functionally complete and behaviorally verified; what's left is mostly hardening, state-sync, and polish. None of this is contract execution; v1 ships as a payment + identity chain.
 
 ### 17.7 Honest framing
 
