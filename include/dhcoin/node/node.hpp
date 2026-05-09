@@ -123,6 +123,16 @@ public:
     // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
     // Used for anonymous-account TRANSFERs that aren't authored by this node.
     nlohmann::json rpc_submit_tx(const nlohmann::json& tx_json);
+    // rev.9 B5: external submission of equivocation evidence. Forensics
+    // tools and governance scripts can submit EquivocationEvent JSON
+    // assembled off-chain (e.g., from log scraping that observed two
+    // conflicting BFT blocks signed by the same proposer). The node
+    // validates the two-sig proof against the equivocator's registered
+    // key, then queues for inclusion + gossip — the same path internal
+    // detection (apply_block_locked) takes. Returns
+    //   { accepted: bool, reason: <error if rejected> }.
+    // Idempotent on (equivocator, block_index) duplicates.
+    nlohmann::json rpc_submit_equivocation(const nlohmann::json& ev_json);
 
 private:
     void on_block(const chain::Block& b);

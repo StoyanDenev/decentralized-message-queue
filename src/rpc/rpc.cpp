@@ -80,6 +80,9 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_stake_info(params.value("domain", ""));
     if (method == "submit_tx")
         return node_.rpc_submit_tx(params.value("tx", json::object()));
+    if (method == "submit_equivocation")
+        return node_.rpc_submit_equivocation(
+            params.value("event", json::object()));
     if (method == "block")
         return node_.rpc_block(params.value("index", uint64_t{0}));
     if (method == "chain_summary")

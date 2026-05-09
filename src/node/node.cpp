@@ -1863,6 +1863,37 @@ json Node::rpc_submit_tx(const json& tx_json) {
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
 }
 
+json Node::rpc_submit_equivocation(const json& ev_json) {
+    auto ev = chain::EquivocationEvent::from_json(ev_json);
+
+    // Reuse the gossip handler's validation + dedup + acceptance path:
+    //   - rejects digest_a == digest_b
+    //   - rejects sig_a == sig_b
+    //   - rejects unregistered equivocator
+    //   - verifies BOTH sigs against equivocator's pubkey
+    //   - dedupes against pending pool
+    // The handler grabs state_mutex_ itself.
+    on_equivocation_evidence(ev);
+
+    // Re-grab to inspect post-handler state for the response.
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    bool present = false;
+    for (auto& e : pending_equivocation_evidence_) {
+        if (e.equivocator == ev.equivocator
+            && e.block_index == ev.block_index) { present = true; break; }
+    }
+    if (present) {
+        // Gossip so peers can also slash. The handler doesn't broadcast
+        // (it processes inbound), so we do it here on the submission path.
+        gossip_.broadcast(net::make_equivocation_evidence(ev));
+        return {{"accepted", true}, {"equivocator", ev.equivocator},
+                {"block_index", ev.block_index}};
+    }
+    return {{"accepted", false},
+            {"reason", "evidence rejected (invalid sigs, "
+                       "unregistered equivocator, or duplicate)"}};
+}
+
 json Node::rpc_balance(const std::string& domain) const {
     std::lock_guard<std::mutex> lk(state_mutex_);
     return {{"domain", domain}, {"balance", chain_.balance(domain)}};
