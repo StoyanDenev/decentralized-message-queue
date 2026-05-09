@@ -3,6 +3,8 @@
 #include <dhcoin/chain/chain.hpp>
 #include <dhcoin/node/registry.hpp>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 
 namespace dhcoin::node {
@@ -37,6 +39,20 @@ public:
     void set_epoch_blocks(uint32_t e) { epoch_blocks_ = e; }
     void set_shard_id(ShardId s)      { shard_id_ = s; }
 
+    // rev.9 B2c.2-full: when the validator runs on a SHARD chain, the
+    // committee-selection rand must come from the BEACON's chain, not the
+    // shard's own. The Node installs this provider so the validator can
+    // resolve the cumulative_rand of the beacon block at the requested
+    // epoch_start_height. Returning nullopt means "no beacon header
+    // available at that height yet" — the validator falls back to the
+    // local chain (early-bootstrap path; shard registry mirrors beacon at
+    // genesis, so behavior is identical until headers begin to land).
+    using EpochRandProvider =
+        std::function<std::optional<Hash>(uint64_t epoch_start_height)>;
+    void set_external_epoch_rand_provider(EpochRandProvider p) {
+        external_epoch_rand_ = std::move(p);
+    }
+
     Result validate(const chain::Block& b,
                     const chain::Chain& chain,
                     const NodeRegistry& registry) const;
@@ -59,6 +75,13 @@ private:
                                const NodeRegistry& registry) const;
     Result check_timestamp(const chain::Block& b) const;
 
+    // Resolve the rand source at `epoch_start_height` for committee
+    // selection. Consults the external provider first; on miss, falls
+    // back to chain.at(epoch_start - 1).cumulative_rand or chain.head()
+    // if epoch_start sits outside the chain.
+    Hash resolve_epoch_rand(uint64_t epoch_start,
+                              const chain::Chain& chain) const;
+
     uint64_t delay_T_{0};
     uint32_t k_block_sigs_{0};
     uint32_t m_pool_{0};
@@ -66,6 +89,7 @@ private:
     uint32_t bft_escalation_threshold_{5};
     uint32_t epoch_blocks_{1000};
     ShardId  shard_id_{0};
+    EpochRandProvider external_epoch_rand_{};
 };
 
 } // namespace dhcoin::node

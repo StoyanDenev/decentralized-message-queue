@@ -63,12 +63,7 @@ BlockValidator::Result BlockValidator::check_creator_selection(
     auto   nodes     = registry.sorted_nodes();
     EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     uint64_t epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
-    Hash epoch_rand;
-    if (epoch_start == 0 || epoch_start > chain.height()) {
-        epoch_rand = chain.head().cumulative_rand;
-    } else {
-        epoch_rand = chain.at(epoch_start - 1).cumulative_rand;
-    }
+    Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
     Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
     (void)epoch_index;
     // m = K-committee size (b.creators.size()). Permitted values:
@@ -168,12 +163,7 @@ BlockValidator::Result BlockValidator::check_abort_certs(
     // reconstruction (mirror check_creator_selection).
     EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     uint64_t   epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
-    Hash epoch_rand;
-    if (epoch_start == 0 || epoch_start > chain.height()) {
-        epoch_rand = chain.head().cumulative_rand;
-    } else {
-        epoch_rand = chain.at(epoch_start - 1).cumulative_rand;
-    }
+    Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
     Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
     Hash prev_hash = chain.head_hash();
     auto nodes     = registry.sorted_nodes();
@@ -348,12 +338,7 @@ BlockValidator::Result BlockValidator::check_block_sigs(
         // shard-salted rand to match check_creator_selection's seed.
         EpochIndex epi = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
         uint64_t   estart = epi * (epoch_blocks_ ? epoch_blocks_ : 1);
-        Hash erand;
-        if (estart == 0 || estart > chain.height()) {
-            erand = chain.empty() ? Hash{} : chain.head().cumulative_rand;
-        } else {
-            erand = chain.at(estart - 1).cumulative_rand;
-        }
+        Hash erand = resolve_epoch_rand(estart, chain);
         Hash seed = epoch_committee_seed(erand, shard_id_);
         size_t expected_idx = proposer_idx(seed, b.abort_events,
                                             b.creators.size());
@@ -470,6 +455,27 @@ BlockValidator::Result BlockValidator::check_transactions(
         }
     }
     return {true, ""};
+}
+
+// rev.9 B2c.2-full: resolve the epoch rand for committee selection.
+// Order of preference:
+//   1. External provider (installed by Node when role==SHARD): the
+//      cumulative_rand of the BEACON's block at epoch_start_height.
+//      This is the production zero-trust path — both shard and beacon
+//      derive committees from the same beacon-anchored rand.
+//   2. Fallback to the local chain (SINGLE/BEACON role, or shard
+//      bootstrap before beacon headers reach the requested height).
+Hash BlockValidator::resolve_epoch_rand(uint64_t epoch_start,
+                                          const Chain& chain) const {
+    if (external_epoch_rand_) {
+        if (auto v = external_epoch_rand_(epoch_start); v.has_value()) {
+            return *v;
+        }
+    }
+    if (epoch_start == 0 || epoch_start > chain.height()) {
+        return chain.empty() ? Hash{} : chain.head().cumulative_rand;
+    }
+    return chain.at(epoch_start - 1).cumulative_rand;
 }
 
 BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {

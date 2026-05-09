@@ -131,6 +131,23 @@ Node::Node(const Config& cfg)
         validator_.set_bft_escalation_threshold(cfg_.bft_escalation_threshold);
         validator_.set_epoch_blocks(cfg_.epoch_blocks);
         validator_.set_shard_id(cfg_.shard_id);
+
+        // rev.9 B2c.2-full: SHARD chains source committee rand from the
+        // beacon's chain (zero-trust: both sides derive the same committee
+        // from the same beacon-anchored rand). Provider returns nullopt
+        // when beacon headers haven't reached the requested height yet —
+        // validator falls back to local chain (early bootstrap; shard
+        // registry mirrors beacon at genesis, so behavior is identical
+        // until headers begin to land).
+        if (cfg_.chain_role == ChainRole::SHARD) {
+            validator_.set_external_epoch_rand_provider(
+                [this](uint64_t epoch_start_height) -> std::optional<Hash> {
+                    if (epoch_start_height == 0) return std::nullopt;
+                    if (epoch_start_height > beacon_headers_.size())
+                        return std::nullopt;
+                    return beacon_headers_[epoch_start_height - 1].cumulative_rand;
+                });
+        }
         gcfg_opt = std::move(gcfg);
     }
 
@@ -448,6 +465,19 @@ Hash Node::current_epoch_rand() const {
     if (chain_.empty()) return Hash{};
     if (cfg_.epoch_blocks == 0) return chain_.head().cumulative_rand;
     uint64_t epoch_start = current_epoch_index() * cfg_.epoch_blocks;
+
+    // rev.9 B2c.2-full: SHARD producers source rand from beacon headers,
+    // not their own chain — both sides of the cross-chain relationship
+    // (this shard producing, beacon validating tips) must derive the
+    // same committee. Bootstrap fallback (no header yet) → local chain;
+    // shard registry mirrors beacon at genesis so it produces a valid
+    // committee until the first beacon header lands.
+    if (cfg_.chain_role == ChainRole::SHARD
+        && epoch_start > 0
+        && epoch_start <= beacon_headers_.size()) {
+        return beacon_headers_[epoch_start - 1].cumulative_rand;
+    }
+
     if (epoch_start == 0)        return chain_.head().cumulative_rand;
     if (epoch_start > chain_.height()) return chain_.head().cumulative_rand;
     return chain_.at(epoch_start - 1).cumulative_rand;
