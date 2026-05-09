@@ -129,15 +129,32 @@ else
   echo "  PASS: n1 booted with inclusion=domain-inclusion"
 fi
 
-# Verify all 3 nodes converged on the same head.
-HEAD1=$($DHCOIN status --rpc-port 8771 2>/dev/null | python -c "import sys,json; print(json.load(sys.stdin).get('head_hash',''))")
-HEAD2=$($DHCOIN status --rpc-port 8772 2>/dev/null | python -c "import sys,json; print(json.load(sys.stdin).get('head_hash',''))")
-HEAD3=$($DHCOIN status --rpc-port 8773 2>/dev/null | python -c "import sys,json; print(json.load(sys.stdin).get('head_hash',''))")
+# Verify all 3 nodes converged on the same head. Block production uses
+# 2s timers so a node can be ~1 block behind transiently. Poll heights
+# until all 3 are equal (indicating no in-flight finalization), then
+# read heads. Time-bounded to avoid hangs.
+get_head() {
+  $DHCOIN status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('head_hash',''))
+except: print('')"
+}
+HEADS_AGREE=false
+for attempt in 1 2 3 4 5 6; do
+  H1=$(get_status_field 8771 height); H2=$(get_status_field 8772 height); H3=$(get_status_field 8773 height)
+  if [ "$H1" = "$H2" ] && [ "$H2" = "$H3" ]; then
+    HEAD1=$(get_head 8771); HEAD2=$(get_head 8772); HEAD3=$(get_head 8773)
+    if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && [ -n "$HEAD1" ]; then
+      HEADS_AGREE=true
+      break
+    fi
+  fi
+  sleep 3
+done
 
-if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && [ -n "$HEAD1" ]; then
+if $HEADS_AGREE; then
   echo "  PASS: all 3 validators agree on head_hash (consensus works without stake)"
 else
-  echo "  FAIL: head_hash mismatch (n1=$HEAD1, n2=$HEAD2, n3=$HEAD3)"
+  echo "  FAIL: head_hash mismatch after retries (n1=$HEAD1, n2=$HEAD2, n3=$HEAD3)"
   PASS=false
 fi
 

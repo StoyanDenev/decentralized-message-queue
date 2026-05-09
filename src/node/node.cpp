@@ -766,27 +766,91 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
               << ev.equivocator << " at h=" << ev.block_index << "\n";
 }
 
-// rev.9 B2c.1: shard receives a beacon block via gossip from a peering
-// beacon node. For this skeleton we only store the block sequentially in
-// beacon_headers_ — no validation yet. B2c.2 will add full K-of-K
-// verification against the validator pool the shard derives from prior
-// verified headers, and use the cumulative_rand at epoch boundaries to
-// drive committee selection. SINGLE / BEACON roles ignore this message.
+// rev.9 B2c.2: shard receives a beacon block via gossip from a peering
+// beacon node and validates it under zero-trust assumptions:
+//   1. Sequential index (gap detection requires BEACON_HEADER_REQUEST;
+//      out-of-order arrivals are dropped — caller will retry via gossip).
+//   2. prev_hash chains to the previously-validated header (or to the
+//      shard's pinned beacon-genesis-hash for the first header — the
+//      beacon-genesis pinning is a B2c.5 follow-on; B2c.2 trusts the
+//      first header's prev_hash if no prior context).
+//   3. consensus_mode is MD (beacon doesn't escalate to BFT — beacons
+//      always run K-of-K).
+//   4. Each non-zero entry in creator_block_sigs verifies against the
+//      corresponding creator's Ed25519 key, and signed_count == K.
+//      The shard derives the validator pool from chain_.registrants()
+//      since shard genesis shares initial_creators with beacon (via
+//      genesis-tool build-sharded). This is correct at genesis time;
+//      tracking pool deltas from beacon REGISTER/STAKE txs is B2c.2-full.
+//
+// SINGLE / BEACON roles ignore this message.
 void Node::on_beacon_header(const chain::Block& b) {
     std::lock_guard<std::mutex> lk(state_mutex_);
     if (cfg_.chain_role != ChainRole::SHARD) return;
 
-    // Skip if we already have this height. (Strictly we should also
-    // check b.compute_hash() against the stored block; that's covered
-    // by the validation logic in B2c.2.)
-    if (!beacon_headers_.empty() && b.index <= beacon_headers_.back().index) {
+    // 1. Sequential index check.
+    uint64_t expected_index = beacon_headers_.empty()
+        ? 1
+        : beacon_headers_.back().index + 1;
+    if (b.index != expected_index) return;     // dup or gap; sync fallback is B2c.2-full
+
+    // 2. prev_hash chain check (skipped for first header; beacon-genesis
+    //    pinning is B2c.5).
+    if (!beacon_headers_.empty()) {
+        if (b.prev_hash != beacon_headers_.back().compute_hash()) {
+            std::cerr << "[node] beacon header prev_hash mismatch at h=" << b.index << "\n";
+            return;
+        }
+    }
+
+    // 3. Beacon must run MD (K-of-K, no escalation).
+    if (b.consensus_mode != chain::ConsensusMode::MUTUAL_DISTRUST) {
+        std::cerr << "[node] beacon header at h=" << b.index
+                  << " has unexpected consensus_mode (beacons run MD only)\n";
         return;
     }
-    // Sequential append only (gap detection / sync fallback is B2c.2).
-    if (!beacon_headers_.empty() && b.index != beacon_headers_.back().index + 1) {
+
+    // 4. K-of-K signature verification. The shard's registry mirrors the
+    //    beacon's at genesis time (build-sharded shares initial_creators).
+    //    For B2c.2-minimal we use the shard's local registry as the pool.
+    auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    if (b.creator_block_sigs.size() != b.creators.size()) {
+        std::cerr << "[node] beacon header: creator_block_sigs size mismatch\n";
         return;
     }
+
+    Hash digest = compute_block_digest(b);
+    Signature zero_sig{};
+    size_t signed_count = 0;
+    for (size_t i = 0; i < b.creators.size(); ++i) {
+        if (b.creator_block_sigs[i] == zero_sig) continue;
+        auto e = reg.find(b.creators[i]);
+        if (!e) {
+            std::cerr << "[node] beacon header at h=" << b.index
+                      << ": creator '" << b.creators[i]
+                      << "' not in shard's tracked beacon pool\n";
+            return;
+        }
+        if (!crypto::verify(e->pubkey, digest.data(), digest.size(),
+                              b.creator_block_sigs[i])) {
+            std::cerr << "[node] beacon header at h=" << b.index
+                      << ": invalid sig from " << b.creators[i] << "\n";
+            return;
+        }
+        ++signed_count;
+    }
+    // K-of-K beacon: every committee member must have signed (no zero
+    // sentinels permitted in MD mode).
+    if (signed_count != b.creators.size()) {
+        std::cerr << "[node] beacon header at h=" << b.index
+                  << ": incomplete K-of-K (signed=" << signed_count
+                  << ", required=" << b.creators.size() << ")\n";
+        return;
+    }
+
     beacon_headers_.push_back(b);
+    std::cout << "[node] verified beacon header #" << b.index
+              << " (K-of-K=" << signed_count << ")\n";
 }
 
 void Node::reset_round() {
