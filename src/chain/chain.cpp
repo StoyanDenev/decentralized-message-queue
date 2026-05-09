@@ -303,8 +303,29 @@ void Chain::apply_transactions(const Block& b) {
 }
 
 // ─── Fork resolution ─────────────────────────────────────────────────────────
-
+//
+// rev.9 follow-on (addressing S-029): when two blocks compete at the same
+// height (e.g., BFT-mode multi-proposer or honest mempool divergence per
+// S-030), prefer the one with the heaviest signature set — the block that
+// more committee members ratified is the more legitimate one. More
+// signatures = more honest participation = more trustworthy.
+//
+// Order of preference:
+//   1. Heaviest sig count (more non-zero `creator_block_sigs` entries).
+//   2. Fewer abort_events (less round-1 disruption).
+//   3. Smallest block hash (deterministic tiebreaker).
 const Block& Chain::resolve_fork(const Block& a, const Block& b) {
+    auto sig_count = [](const Block& blk) {
+        Signature zero{};
+        size_t n = 0;
+        for (auto& s : blk.creator_block_sigs)
+            if (s != zero) ++n;
+        return n;
+    };
+
+    size_t na = sig_count(a), nb = sig_count(b);
+    if (na != nb) return na > nb ? a : b;       // heaviest sig set wins
+
     if (a.abort_events.size() != b.abort_events.size())
         return a.abort_events.size() < b.abort_events.size() ? a : b;
 

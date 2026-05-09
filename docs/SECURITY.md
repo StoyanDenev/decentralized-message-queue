@@ -8,21 +8,23 @@
 
 ## 1. Executive summary
 
-| | Critical | High | Medium | Low | Total |
+| | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **4** | **8** | **8** | **9** | **29** |
-| Mitigated since rev.7 | — | — | — | — | **4** |
+| Open | **6** | **10** | **9** | **10** | **35** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **5** |
 | v2 protocol-evolution | — | — | — | — | **2** |
 
 **Top-of-list priorities for production deployment:**
 
+- **S-030** Block body not authenticated by `block_digest` — committee K-of-K signatures don't bind the actual transaction payloads, enabling silent post-consensus censorship and cross-node state divergence
+- **S-031** Single global `state_mutex_` serializes all state, I/O, VDF verification, and disk writes — node freezes under any real load, deadlock risk
 - **S-001** RPC authentication missing (any network client controls the node)
 - **S-002** Mempool accepts unverified signatures (DoS via sig-forgery flood)
 - **S-003** Block timestamp window ±5s contradicts README ±30s (chain stalls under NTP drift)
 - **S-004** Private keys written to stdout / unencrypted files
 - **S-005** `delay_T` not in GenesisConfig (consensus divergence between misconfigured nodes)
 
-The cheapest cluster of wins (S-001-localhost-only, S-002, S-005, S-007, S-008, S-013, S-014, S-023) is roughly **2 days** of focused work and closes the practical attack surface meaningfully.
+The cheapest cluster of wins (S-001-localhost-only, S-002, S-005, S-007, S-008, S-013, S-014, S-023, S-034) is roughly **2-3 days** of focused work and closes the practical attack surface meaningfully. **S-030 and S-031 are protocol/architecture-level and need real engineering** (not 1-line fixes); they're the bar for "production-ready" rather than "demo-ready."
 
 ---
 
@@ -61,6 +63,12 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-027 | 🟢 Low | Info leakage in logs / verbose error messages | many | docs / runtime flag |
 | S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:30-47` | trivial |
 | S-029 | 🟢 Low | BFT-mode multi-proposer fork-choice undefined | `node/node.cpp::on_block` | bounded reorg |
+| S-030 | 🔴 Crit | Block body not authenticated by `block_digest` | `node/producer.cpp:206-221` | architectural |
+| S-031 | 🔴 Crit | Single global mutex serializes state + I/O + VDF | `node/node.cpp` (42 sites) | re-architecture |
+| S-032 | 🟠 High | O(N) registry rebuild on every operation | `node/registry.cpp::build_from_chain` | incremental state machine |
+| S-033 | 🟠 High | No cryptographic state commitment (no state root, no light clients) | `chain/block.hpp` | v2 block format |
+| S-034 | 🟡 Med | VDF allocates `EVP_MD_CTX` per iteration (~1000× slowdown) | `crypto/delay_hash.cpp:6-12` | ~30 LOC |
+| S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
 
 ---
 
@@ -154,6 +162,68 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 
 ---
 
+### S-030 — Block body not authenticated by `block_digest`
+
+**Severity:** Critical (consensus integrity) • **Status:** Open • **Sources:** Architectural Analysis §2.3
+
+**What's open.** `compute_block_digest` at `src/node/producer.cpp:206-221` is the hash that all K committee members sign in Phase 2. It includes `tx_root`, `creators`, `creator_tx_lists`, `creator_ed_sigs`, `creator_dh_inputs`, `delay_seed`, `delay_output`, etc. — but **NOT `b.transactions`** (the actual transaction payloads).
+
+The validator's only constraint linking `b.transactions` to anything is `compute_tx_root(b.creator_tx_lists) == b.tx_root` at `validator.cpp:143-145`. The validator NEVER checks that the resolved `b.transactions` matches the union of `creator_tx_lists` (or any specific reordering / completeness rule).
+
+**Why this is a real vulnerability.** Each committee member runs `build_body` locally with their own `tx_store_`. If members have differing mempools, they produce different `b.transactions` lists but the same `block_digest` (since the digest doesn't depend on `b.transactions`, only on the `tx_root` hash of `creator_tx_lists`). All K members sign the same digest. **Multiple physically-distinct blocks now share the same K-of-K signature set.**
+
+When these blocks gossip, different nodes accept different `b.transactions` based on which copy arrived first. State divergence follows — two honest nodes apply different transaction sets at the same height. The "fork-free" property is a property of the *digest*, not of the *applied state*.
+
+A malicious relay can also drop transactions from `b.transactions` after committee signing; the dropped block still K-of-K-verifies because the digest doesn't include the txs.
+
+**Impact.** The censorship-resistance claim ("a tx is included if any single committee member proposed it") is unenforced — a malicious relay or a member with a divergent mempool can effectively censor specific txs while keeping the protocol's signature checks happy. State divergence between honest nodes follows.
+
+**Resolution options.**
+
+| # | Option | Cost |
+|---|---|---|
+| 1 | **Include `b.transactions` (or a Merkle root over them) in `block_digest`.** Block format change — adds binding from sigs to actual delivered payloads. | High. Block hash changes break wire compatibility → hard fork. ~1d code + protocol bump. |
+| 2 | **Validator re-resolves union and checks completeness.** `validator.cpp` recomputes `selected_hashes = union(creator_tx_lists)`; verifies that for every hash in the union, either it has a tx in `b.transactions` OR it was filterable at apply time (insufficient balance / wrong nonce). | Medium. ~50-100 LOC in validator. No protocol change but validator-level break. |
+| 3 | **Add a `tx_set_hash = SHA256(canonical(b.transactions))` field to the block** and include it in `block_digest`. Validator checks the field matches the actual `b.transactions`. | Medium. Block field addition; protocol-compatible if old nodes ignore unknown fields. |
+
+**Recommended.** Option 3 for v1.x (minimal protocol disruption + maximum safety). Option 1 is the "right" answer for v2 alongside other block-format changes.
+
+---
+
+### S-031 — Single global mutex serializes everything
+
+**Severity:** Critical (architectural) • **Status:** Open • **Sources:** Architectural Analysis §3.1
+
+**What's open.** `Node` is a god-object protected by one `std::mutex state_mutex_`. 42 references in `node.cpp`. Every critical operation holds this lock:
+- All consensus state mutation
+- Block application + the synchronous `chain_.save()` that follows (writes the entire chain JSON to disk — `node.cpp:1300`)
+- VDF verification on the piggyback path: `delay_hash_verify` (4M SHA-256 iterations) is called under the lock at `node.cpp:1446`
+- Every RPC handler
+- Every gossip dispatch handler
+- `delay_worker_.join()` is called under the lock at `node.cpp:490` (also from `stop()`)
+
+**Why this is architectural collapse, not just a performance nit.**
+- VDF verification under the lock means the entire node freezes for ~T_delay seconds whenever a peer's `BlockSigMsg` arrives during `RUNNING_DELAY` and triggers piggyback verification. No peer messages, no RPC, no timers fire during this window.
+- `delay_worker_.join()` under the lock can deadlock if the worker is still hashing. ASIO threads block waiting for the worker; the worker can't be cancelled until the next iteration; with a small ASIO thread pool, the node can become entirely unresponsive.
+- `chain_.save()` under the lock means every block apply pauses the node for as long as it takes to JSON-serialize and disk-flush the entire chain. On a 100k-block chain, that's seconds per block.
+- The protocol's spec describes timers, parallel workers, and async I/O. The implementation funnels all of it through one critical section.
+
+**Impact.** Under any non-trivial load (gossip flood, large mempool, sync requests, multi-shard activity), the node is effectively single-threaded with arbitrary stall durations. Combined with no rate limiting (S-014), this is trivially exploitable for local DoS.
+
+**Resolution options.**
+
+| # | Option | Cost |
+|---|---|---|
+| 1 | **Hot-path triage.** Move expensive ops (`delay_hash_verify`, `chain_.save()`, `build_from_chain`) out of the lock. Acquire briefly to read inputs; release; do the work; re-acquire briefly to commit results. | Medium. ~2-3d. Requires careful audit of every site to ensure the inputs aren't mutated during the unlocked section (or to use seqlocks / RCU patterns). |
+| 2 | **Sharded locks** by subsystem: `chain_mutex_`, `mempool_mutex_`, `consensus_mutex_`, `peer_mutex_`. Each protects a smaller piece of state. | Medium-high. ~1w. Lock-ordering discipline becomes critical to avoid deadlocks. |
+| 3 | **Single-writer thread + message-passing**, à la actor model. The consensus thread owns all state; other threads (gossip, RPC, timers) post messages. No locks needed. | High. ~2-3w. Cleanest architecture but big rewrite. |
+| 4 | **Async I/O for `chain_.save()`** — write to a separate thread or use a WAL pattern. Independent of the broader locking question, removes the worst single offender. | Low. ~1d. Still leaves VDF-under-lock and worker-join-under-lock. |
+| 5 | **One-file-per-block storage.** Replace monolithic `chain.json` with `chain/blocks/{index}.json` (one file per block, append-only, never rewritten) plus `chain/state.json` (incrementally updated). `chain_.save()` becomes `O(1)` instead of `O(N)`. Old block files are prunable based on operator policy. Future extension: random-sample replication across peers (BitTorrent-style page distribution). | Low-medium (~1-2d). Mostly a save/load refactor; no protocol change. Compounds with Option 4 to fully eliminate `chain_.save()` as a global-mutex offender. |
+
+**Recommended.** Options 5 + 4 immediately (kills the worst offender entirely), then Option 1 for v1.x. Option 3 is the v2 architecture.
+
+---
+
 ## 4. High findings (open)
 
 ### S-005 — `delay_T` not in GenesisConfig
@@ -215,11 +285,22 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 
 ---
 
-### S-008 — Unbounded mempool growth
+### S-008 — Unbounded memory across multiple buffers
 
-**Severity:** High • **Status:** Open • **Sources:** Audit 2.6
+**Severity:** High • **Status:** Open • **Sources:** Audit 2.6, Architectural Analysis §3.4
 
-**What's open.** `tx_store_` and `tx_by_account_nonce_` have no size cap. Replace-by-fee bounds *per-`(from, nonce)`* but not total. Combined with S-002 (no sig verification), this is a memory-exhaustion DoS.
+**What's open.** No size cap on multiple unbounded queues:
+
+| Buffer | Risk |
+|---|---|
+| `tx_store_` (mempool) | OOM under tx flood (compounds with S-002) |
+| `pending_inbound_receipts_` | OOM from cross-shard receipt bundles |
+| `pending_contribs_` / `pending_block_sigs_` | OOM from consensus message spam |
+| BlockSigMsg pre-verify buffer (`buffered_block_sigs_`) | Covered separately by S-013 |
+| `peer_heights_` map | Never pruned, grows with peer churn |
+| Active peer connections | No accept-rate cap |
+
+Replace-by-fee on the mempool bounds *per-`(from, nonce)`* but not total. There's no backpressure anywhere — when a queue fills, the system can't shed load or slow producers.
 
 **Resolution options.**
 
@@ -228,8 +309,9 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | 1 | **Hard cap on `tx_store_.size()`** (e.g., 10,000 or 100 MB total). On full, evict lowest-fee. | 1-2d. |
 | 2 | **Minimum fee threshold** rejected at `on_tx` / `submit_tx`. Threshold rises with mempool pressure. | 2-3d (fee-market dynamics). |
 | 3 | **Per-sender quota** (max N pending txs per `(from)`). | Subset of #1. |
+| 4 | **Protocol-derived minimum fee.** Enforce `tx.fee >= block_subsidy / 1024` (or similar protocol-derived constant pegged to the per-block reward). Eliminates zero-fee spam without operator tuning, scales naturally with chain economics — as the chain grows the fee floor follows. | Trivial. ~10 LOC in validator + producer. |
 
-**Recommended.** Option 1 + Option 3 for v1.x. Fee market is v2.
+**Recommended.** Options 1 + 3 + 4. The three together close mempool spam from every angle: bound (size cap), spread (per-sender quota), and floor (price-per-message).
 
 ---
 
@@ -249,8 +331,9 @@ Not exploitable today on small chains; becomes critical at production scale.
 | 2 | **Memory-hard delay** (Argon2-style, scrypt-like). ASIC speedup drops 1000× → ~10×. | Medium. Re-implement worker. Hard fork. |
 | 3 | **Wesolowski/Pietrzak VDF** (class-group). Verifier work sub-linear, T enforced by the proof. | High. Heavy crypto, library choice, proof verification cost per block. |
 | 4 | **zk-VDF** (SNARK-based). Defeats ASIC asymmetry mathematically. | Highest. Likely 6+ months. |
+| 5 | **Modular-exponentiation randomness:** replace `delay_hash(seed, T)` with `N' = N^(a·t·m·prev_hash) mod p` over a strong 256-bit prime-order abelian group, where `a` and `b` are committee members' Diffie-Hellman secrets bound into the exponent alongside the timestamp `t` and previous block hash. ASIC asymmetry collapses because modular exponentiation in this group isn't structured for the kind of pipelined parallelism SHA-256 ASICs exploit. Not a true VDF (no sub-linear verifier — verification is still O(T_modexp)) but **substantially better than SHA-256^T**. Precomputation attacks are mitigated by binding `prev_hash` and the current second-bin into the exponent so the work resets every round. | Medium-high (~1-2w). Hard fork; needs `delay_T` → `group_size + exponent_size` calibration. |
 
-**Recommended.** Option 1 for v1.x, Option 2 for v1.5, Option 4 for v2.
+**Recommended.** Option 1 for v1.x, Option 5 for v1.5 (cheaper than Option 3 with similar security gain), Option 4 for v2.
 
 ---
 
@@ -269,8 +352,9 @@ Not exploitable today on small chains; becomes critical at production scale.
 | 1 | **Operator guidance doc** with a calculator: given `block_subsidy`, target attack cost, expected market cap, derive recommended `min_stake`. | Trivial. |
 | 2 | **Stake-weighted committee selection** (proportional representation). Genesis → chain spec change. | Medium-high. Fairness analysis required. |
 | 3 | **Use DOMAIN_INCLUSION** for any chain that doesn't have strong stake-pricing economics. | Free; just a genesis choice. |
+| 4 | **Add `IP_INCLUSION` as a third inclusion model.** Sybil resistance comes from IPv4-address scarcity instead of stake or DNS — peerlist bloat through mass-produced identities becomes a non-issue when IP itself is the scarce resource. Weaker than DOMAIN_INCLUSION (NAT, IPv4 exhaustion, VPN abuse) but cheaper to operate. Useful for permissionless local networks or testnet-style deployments where DNS is overhead. | ~100 LOC. Pure config addition. New `Inclusion::IP_INCLUSION` enum + IP-of-peer recorded as registry pubkey-equivalent. |
 
-**Recommended.** Options 1 + 3.
+**Recommended.** Options 1 + 3 for production chains. Option 4 for testnets and special-purpose deployments.
 
 ---
 
@@ -309,8 +393,68 @@ Not exploitable today on small chains; becomes critical at production scale.
 | 1 | **Post-restore consistency check.** Fetch next ~10 blocks from peers and replay; on mismatch, roll back to genesis-replay. | ~50 LOC. |
 | 2 | **Multi-source consensus.** Receiver fetches snapshots from N peers, accepts only if M agree on every entry. | Medium. Parallel fetcher. |
 | 3 | **State Merkle root in Block.** Each block commits to `SHA256(canonical_state)`. Snapshot includes state; receiver verifies against the root in the snapshot's tail head. v2 protocol change. | High. Block format change → hard fork. Also enables light clients. |
+| 4 | **Total-supply check on snapshot restore.** Cross-references S-033's Option 4: if the chain commits `total_supply` per block, a snapshot includes the expected supply and the receiver verifies that `Σ(snapshot.accounts.balance) + Σ(snapshot.stakes.locked) == snapshot.total_supply`. Catches inflate-Alice attacks (the most natural snapshot-tampering vector) for free. | Low. Pairs with S-033's Option 4. ~10 additional LOC in `Chain::restore_from_snapshot`. |
 
-**Recommended.** Option 1 for v1.x. Option 3 for v2.
+**Recommended.** Option 1 + Option 4 immediately (these compound — Option 1 catches divergence after restore, Option 4 catches tampering at restore). Option 3 for v2.
+
+---
+
+### S-032 — O(N) registry rebuild on every operation
+
+**Severity:** High (scalability ceiling) • **Status:** Open • **Sources:** Architectural Analysis §3.2
+
+**What's open.** `NodeRegistry::build_from_chain(chain, at_index)` iterates every block from genesis to `at_index` to compute the validator pool. It is called at:
+- `node.cpp:253` — initial construction
+- `node.cpp:934` — beacon header handler (every BEACON_HEADER message)
+- `node.cpp:1025` — shard tip handler (every SHARD_TIP message)
+- `node.cpp:1247` — block apply (per block)
+- `node.cpp:1273` — post-apply rebuild
+- `node.cpp:1316` — epoch boundary log
+- `node.cpp:1748` — `rpc_validators`
+- `node.cpp:1781` — `rpc_committee`
+
+That's **8 call sites**, several of which fire per block or per gossip message. At 100k blocks, every BEACON_HEADER triggers a 100k-block scan. State is a derived view of the log; recomputing the view from scratch on every access treats the chain as the database.
+
+**Impact.** The chain becomes unusable beyond a relatively small height. Sharding amplifies this — every shard tip the beacon receives triggers a full beacon-history scan. Compounds with S-031 (held under the global lock).
+
+**Resolution options.**
+
+| # | Option | Cost |
+|---|---|---|
+| 1 | **Cache `registry_` on Chain** and update incrementally on apply. `Chain::apply_transactions` already touches REGISTER/STAKE/UNSTAKE/DEREGISTER — extend it to also update a member registry view. RPC handlers and beacon/shard handlers read the cache. | Medium. ~1d. The hard part is invariant: cache must always reflect the head's state. |
+| 2 | **Persist the registry alongside the chain** (in chain.json or a sidecar). Skip the rebuild on load. | Trivial complement to #1. |
+| 3 | **Memoize per-height** with eviction. Less efficient than incremental but easier to retrofit. | Low. |
+
+**Recommended.** Option 1 + Option 2. ~1-2d total. This is the prerequisite for any chain growth beyond hobbyist scale.
+
+---
+
+### S-033 — No cryptographic state commitment
+
+**Severity:** High (architectural omission) • **Status:** Open • **Sources:** Architectural Analysis §3.3, related to S-012
+
+**What's open.** `Block` contains no state root. `Chain` stores state in three `std::map`s (`accounts_`, `stakes_`, `registrants_`) plus `applied_inbound_receipts_` set, with no Merkle structure. Block hash binds creator signatures + `tx_root`, but not state-after-apply.
+
+S-012 captures the snapshot-bootstrap consequence; this entry captures the broader architectural omission.
+
+**Architectural consequences.**
+- **No light clients.** A light client cannot verify any account balance or any transaction's effect without the full chain and full state.
+- **No trustless fast sync.** A new node either replays from genesis (O(N)) or trusts a snapshot source (S-012).
+- **No state fraud proofs.** If a validator applies a block incorrectly, there is no compact proof of fraud — other nodes can only say "my state differs" and replay to find divergence.
+- **No detection of consensus-invisible state corruption.** Two nodes can have identical block hashes but different account maps if any state mutation isn't bound to the block hash. Since state isn't bound at all, this is the default failure mode under S-030.
+
+This is a fundamental omission for any L1 claiming to be a "base layer."
+
+**Resolution options.**
+
+| # | Option | Cost |
+|---|---|---|
+| 1 | **Add a `state_root` field to Block.** Each block commits to `SHA256(canonical(accounts_ ⊎ stakes_ ⊎ registrants_ ⊎ applied_inbound_receipts_))`. Validator checks state matches root after apply. | High. Block format change → hard fork. Canonical state encoding (sort + serialize) must be stable. ~1w. |
+| 2 | **Sparse Merkle tree per state map.** Enables proof-of-inclusion ("Alice has balance X at height H") for individual accounts. Foundation for light clients. | Highest. ~2-4w. SMT library + per-tx state-update proofs + per-block root computation. |
+| 3 | **Patricia Merkle trie** (Ethereum-style). Simultaneously supports inclusion + non-inclusion + range proofs. | Same as #2 in scope. |
+| 4 | **Total-supply invariant per block.** Each block commits a `total_supply` field = sum of all account balances + all stakes + emitted-but-unburned. Validator checks `total_supply[N] == total_supply[N-1] + block_subsidy[N] - burned_fees[N]`. Catches whole classes of state tampering (most directly the inflate-Alice's-balance attack against snapshots — S-012) without restructuring state into a Merkle tree. **Not a substitute for state_root** — doesn't enable light clients or per-account proofs — but a cheap aggregate sanity check. | Low. ~50 LOC across `Block`, `apply_transactions`, validator, and snapshot. No protocol-breaking change if the new field is treated as optional in old format. |
+
+**Recommended.** Option 4 now as a cheap interim defense (closes most snapshot-tampering attacks). Option 1 for v2.0 (full state_root). Options 2/3 for the version after that.
 
 ---
 
@@ -434,8 +578,9 @@ Not exploitable today on small chains; becomes critical at production scale.
 | 0 | **Audit first.** Determine whether the formula is still in the consensus event loop. | Free. Required first step. |
 | 1 | **Cryptographically pre-validate `R`** before allowing it to influence the timer. | Low. |
 | 2 | **Local-clock only.** Drop `peer_R_arrival_time`. Timer = `local_delay_done_time + block_sig_ms`. | Trivial. Loses the latency optimization. |
+| 4 | **Bind `cumulative_rand` + current epoch's timestamp into the timer-trigger condition.** The Phase-2 timer fires only when an arrived `R` produces a `block_digest` whose creator-sig verifies against the *current* `cumulative_rand` AND the current second-bin. Adversaries can't prefabricate a future-`R` because `cumulative_rand` only crystallizes per round; binding the timestamp forces brute-force attempts to restart every second. | Low. ~50 LOC. Defeats forged-R injection without losing the latency optimization. |
 
-**Recommended.** Option 0 → Option 1. ~1 day.
+**Recommended.** Option 0 → Option 4 (best of both worlds — keeps the optimization, defeats spoofing). ~1 day total.
 
 ---
 
@@ -456,7 +601,64 @@ Not exploitable today on small chains; becomes critical at production scale.
 
 ---
 
+### S-034 — VDF allocates `EVP_MD_CTX` per iteration
+
+**Severity:** Medium (performance — affects T calibration) • **Status:** Open • **Sources:** Architectural Analysis §3.6
+
+**What's open.** `delay_hash_compute` at `src/crypto/delay_hash.cpp:6-12`:
+```cpp
+Hash delay_hash_compute(const Hash& seed, uint64_t T) {
+    Hash cur = seed;
+    for (uint64_t i = 0; i < T; ++i) {
+        cur = sha256(cur);   // each call: new SHA256Builder, new EVP_MD_CTX
+    }
+    return cur;
+}
+```
+
+Each `sha256(cur)` constructs a `SHA256Builder` — which `new`s an `Impl` and calls `EVP_MD_CTX_new()` (heap allocation + OpenSSL context setup) — appends, finalizes, then destroys it. For T = 4,000,000, that's 4 million heap allocations and 4 million `EVP_DigestInit_ex` calls. The actual SHA-256 work is a tiny fraction of the wall-clock cost.
+
+A reusable `EVP_MD_CTX` inside the inner loop, calling `EVP_DigestInit_ex` once and reusing it via `EVP_MD_CTX_reset`, is a roughly **100×-1000× speedup**.
+
+**Why this matters beyond performance.** `delay_T` is calibrated to a specific consumer-CPU wall-clock target (`T_delay ≥ 2 × T_phase1`). The current implementation's wall-clock cost is dominated by allocation/setup overhead, not SHA-256 work. **A more efficient implementation would dramatically reduce the wall-clock cost**, breaking the calibration unless `T` is bumped proportionally. So this is also a security-relevant calibration risk: if some node operators run an optimized build and others don't, the network desynchronizes.
+
+Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on the piggyback path.
+
+**Resolution options.**
+
+| # | Option | Cost |
+|---|---|---|
+| 1 | **Reuse `EVP_MD_CTX`** inside the loop with `EVP_MD_CTX_reset` between iterations. | ~30 LOC. Requires bumping `delay_T` ~100-1000× to maintain the same wall-clock target. |
+| 2 | **Direct SHA-256 block compression.** Skip OpenSSL's EVP layer entirely; call the SHA-256 transform on a 32-byte block in a tight loop. | Medium. ~50 LOC + understanding the transform interface. Fastest possible CPU implementation. |
+| 3 | **Bench-and-recalibrate** before fix. Document the new per-iteration cost; coordinate a `delay_T` bump alongside the optimization. | 1d benchmark. |
+
+**Recommended.** Options 1 + 3 together. The fix without recalibration would silently weaken the protocol's selective-abort defense (S-009 already weakens it; this would compound).
+
+---
+
 ## 6. Low findings (open)
+
+### S-035 — No unit tests, no CI, no deterministic simulation framework
+
+**Severity:** Operational • **Status:** Open • **Sources:** Architectural Analysis §4.1, §4.2
+
+**What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/dhcoin.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
+
+**Why this is operational, not a vulnerability.** A bug-free codebase doesn't strictly need unit tests, but their absence makes regression-prevention impossible. Edge cases (`ContribMsg` with invalid `aborts_gen`, delay-worker exception handling, two same-height blocks in different orders, equivocation under network partition) require targeted unit tests; the integration scripts can't drive them.
+
+**Resolution options.**
+
+| # | Option | Cost |
+|---|---|---|
+| 1 | **Add gtest/Catch2** for crypto, serialization, state transitions, validator rules. CMake + Linux CI. | 1-2w to seed + ongoing per-feature. |
+| 2 | **Deterministic simulation framework** — virtual clock + virtual network + scriptable Byzantine actors. | 3-4w. Substantial but the right tool for testing consensus. |
+| 3 | **Path portability** — replace Windows-specific test paths with platform-agnostic ones; add Linux/Mac CI. | 1d. |
+
+**Recommended.** Option 3 immediately (gets the existing tests running on Linux/Mac CI). Option 1 incrementally (add unit tests for new code; backfill gradually). Option 2 is v1.x quality work.
+
+---
+
+### S-021 through S-029 (quick-fix summary)
 
 | ID | Title | Quick fix |
 |---|---|---|
@@ -468,13 +670,13 @@ Not exploitable today on small chains; becomes critical at production scale.
 | S-026 | No connection timeout / keepalive | 30s timeout on idle peer connections. Add periodic keepalive. ~1d. |
 | S-027 | Info leakage in logs / error messages reveal state | Configurable log levels; redact in production builds. |
 | S-028 | Hex parsing only accepts lowercase | `is_anon_address` is canonical; downstream parsers should accept either case. Trivial. |
-| S-029 | BFT-mode multi-proposer fork-choice undefined | Status quo (first-seen-wins) + slashing handles it. Heaviest-sig-set tiebreak if needed. |
+| S-029 | BFT-mode multi-proposer fork-choice undefined | Status quo (first-seen-wins) + slashing handles it. **Better:** primary fork-choice = heaviest sig set (more committee members ratified), tiebreaker = longest descendant chain. ~30 LOC in `apply_block_locked`. **Implemented in `Chain::resolve_fork`** as of this commit series. |
 
 ---
 
-## 7. Mitigated since rev.7 audit baseline
+## 7. Mitigated since rev.7 audit baseline (or in this session)
 
-These rev.7-era findings have been addressed in current code. Listed for completeness so a reader of the prior audit knows what's done.
+These findings have been addressed in current code. Listed for completeness so a reader of prior audits knows what's done.
 
 ### M-A — Block-level equivocation closed-loop (was Audit 2.4 partial)
 
@@ -494,6 +696,12 @@ The narrower ContribMsg-level case is still open as S-006.
 
 The Gemini analysis's headline conclusion — "blind abort = systemic liveness problem; capitalized adversary can stall any specific transaction by burning suspension penalty" — is **substantially mitigated by M-B**. A single blind-aborting adversary can stall a transaction for ~5 rounds, then BFT mode kicks in and the chain proceeds without their signature. The exponential-suspension formula still applies but is no longer the only liveness guarantee.
 
+### M-E — Outbound HELLO mistagging in cross-chain peering
+
+**Was Architectural Analysis §3.5.** Outbound `GossipNet::connect()` at `gossip.cpp:45` was sending `make_hello(domain, port)` — the 2-arg overload defaulting `role = SINGLE, shard_id = 0`. Inbound (accept-loop) at `gossip.cpp:33` correctly sent `make_hello(domain, port, our_role_, our_shard_id_)`. The mismatch silently broke `SHARD_TIP` and `BEACON_HEADER` propagation for outbound-initiated cross-chain peering: the receiving end's role-based gossip filter (`peer_message_allowed`) dropped messages from peers it had stamped as SINGLE.
+
+**Fixed in this session.** `gossip.cpp:45` now passes the full 4-argument form. All 8 regression tests pass.
+
 ---
 
 ## 8. Auditor-retracted findings (historical)
@@ -510,12 +718,15 @@ These corrections are accepted; no current code review changed the verdict.
 
 ## 9. Cheapest path to "production-ready security posture"
 
-If you fix only the items in this cluster, you close the bulk of practical attack surface:
+Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track B** is the architectural lift required for production (S-030 / S-031 / S-032 / S-033) — these are not 1-LOC fixes and represent the gap between "demo-ready" and "production-ready."
+
+### Track A — localized fixes (~4-6 days)
 
 | ID | Title | Cost | Cumulative |
 |---|---|---|---|
 | S-001 (option 1) | Bind RPC to localhost by default | trivial | 5 min |
 | S-003 | Widen timestamp window to ±30s | trivial | 6 min |
+| S-025 | Delete dead `compute_tx_root_intersection` | 5 min | 11 min |
 | S-005 | Pin `delay_T` in GenesisConfig | 1d | 1d |
 | S-002 | Verify sig in `on_tx` | 1-2d | 2-3d |
 | S-007 | Saturating add in subsidy distribution | half-day | 2.5-3.5d |
@@ -524,9 +735,38 @@ If you fix only the items in this cluster, you close the bulk of practical attac
 | S-014 | RPC + gossip rate limiting | ~50 LOC | 3.5-5.5d |
 | S-020 | Hybrid Fisher-Yates committee selection | ~30 LOC | 3.5-5.5d |
 | S-023 | RPC pre-check balance | ~1h | 3.5-5.5d |
-| S-025 | Delete dead `compute_tx_root_intersection` | 5 min | 3.5-5.5d |
+| S-034 | Reuse `EVP_MD_CTX` in delay-hash loop + recalibrate `delay_T` | 1d | 4.5-6.5d |
 
-**Total: ~4-6 focused days** to take the codebase from "rev.7 audit-flagged" to "high-bar v1 deployable" on every issue except the two genuine v2 protocol-evolution items (S-009 constant-T, S-012 trustless snapshot).
+### Track B — architectural lift (~3-4 weeks)
+
+| ID | Title | Cost |
+|---|---|---|
+| S-030 | Bind `b.transactions` (or its hash) into `block_digest` (Option 3 — add `tx_set_hash` field) | ~1w including protocol-bump + tests |
+| S-031 | Move `chain_.save()` etc. out of `state_mutex_`'s critical section + one-file-per-block storage | ~1w combined |
+| S-032 | Cache `registry_` on Chain; update incrementally on apply | 1-2d |
+| S-033 | `total_supply` invariant as v1.x interim; full state_root for v2 | 1d interim / ~1w v2 |
+
+### Track C — Additional design enhancements (independent cluster, ~3-5 days)
+
+These don't fix existing findings but raise the design quality. Optional but recommended.
+
+| Source | Title | Cost |
+|---|---|---|
+| Economics | Protocol-derived minimum fee (`fee >= subsidy / 1024`) — fixes S-008 mempool-spam from a different angle | ~10 LOC |
+| Identity | `IP_INCLUSION` as third inclusion model — closes S-010 for testnet-class chains | ~100 LOC |
+| Consensus | Heaviest-sig-set fork-choice for S-029 BFT mode | ~30 LOC (✅ done) |
+| Consensus | Bind `cumulative_rand + t` into Phase-2 timer for S-019 | ~50 LOC |
+| Supply | `total_supply` invariant per block (S-033 cheap interim + S-012 snapshot tampering defense) | ~50 LOC |
+
+### v2 protocol-evolution
+
+| ID | Title |
+|---|---|
+| S-009 | SHA-256 delay → memory-hard or VDF |
+| S-033 (deeper) | Sparse Merkle tree for state, enabling light clients + state proofs |
+| S-012 (deeper) | Trustless snapshot via state_root verification |
+
+**Total to ship a "high-bar v1":** Track A + Track B = roughly **5-6 focused weeks** of engineering. v2 is a separate roadmap.
 
 ---
 

@@ -42,7 +42,15 @@ void GossipNet::connect(const std::string& host, uint16_t port) {
             std::cout << "[gossip] connected to " << host << ":" << port << "\n";
             attach(peer);
             if (!our_domain_.empty())
-                peer->send(make_hello(our_domain_, our_port_));
+                // rev.9 fix: outbound HELLO must carry our role + shard_id so
+                // the receiver tags us correctly. Pre-fix this called the
+                // 2-arg overload which defaulted role=SINGLE, shard_id=0,
+                // breaking SHARD_TIP / BEACON_HEADER routing for outbound-
+                // initiated cross-chain peering (the receiver's role-based
+                // gossip filter dropped these messages from the mistagged
+                // peer).
+                peer->send(make_hello(our_domain_, our_port_,
+                                       our_role_, our_shard_id_));
         },
         [host, port](const std::string& err) {
             std::cerr << "[gossip] connect to " << host << ":" << port
