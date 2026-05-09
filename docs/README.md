@@ -7,7 +7,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 - [QUICKSTART.md](QUICKSTART.md) — 5-minute walkthrough: build, run a 3-node cluster, send transactions, snapshot create + restore.
 - [CLI-REFERENCE.md](CLI-REFERENCE.md) — every `dhcoin` subcommand at a glance, grouped by purpose.
 - [PROTOCOL.md](PROTOCOL.md) — formal v1 protocol specification: wire formats, hash inputs, consensus state machine, message types. What an external implementer needs to build a compatible client.
-- [OPEN-VULNERABILITIES.md](OPEN-VULNERABILITIES.md) — known attack surface that v1 ships with, plus ranked resolution options per item. What a security reviewer should look at.
+- [SECURITY.md](SECURITY.md) — canonical security posture. 29 open findings (4 Critical / 8 High / 8 Medium / 9 Low) with severity, code evidence, ranked resolution options, and effort estimates. Reconciles the rev.7 audit and the prior `OPEN-VULNERABILITIES.md` against current code. What a security reviewer should look at.
 
 ## Behavioral test suite
 
