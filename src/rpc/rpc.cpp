@@ -80,6 +80,10 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_stake_info(params.value("domain", ""));
     if (method == "submit_tx")
         return node_.rpc_submit_tx(params.value("tx", json::object()));
+    if (method == "block")
+        return node_.rpc_block(params.value("index", uint64_t{0}));
+    if (method == "chain_summary")
+        return node_.rpc_chain_summary(params.value("last_n", uint32_t{10}));
     throw std::runtime_error("Unknown method: " + method);
 }
 

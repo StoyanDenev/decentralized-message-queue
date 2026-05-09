@@ -84,6 +84,12 @@ public:
     // RPC handlers
     nlohmann::json rpc_status()                                     const;
     nlohmann::json rpc_peers()                                      const;
+    // rev.9: block explorer primitive. Returns the full block at the
+    // given index (block 0 = genesis). Returns null if out of range.
+    nlohmann::json rpc_block(uint64_t index)                        const;
+    // rev.9: chain summary — last N blocks with index, hash, mode,
+    // tx_count, creators (compact). Useful for ops dashboards.
+    nlohmann::json rpc_chain_summary(uint32_t last_n = 10)          const;
     nlohmann::json rpc_register();
     nlohmann::json rpc_send(const std::string& to, uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_balance(const std::string& domain)           const;

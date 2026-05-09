@@ -8,6 +8,7 @@
 #include <openssl/rand.h>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +44,8 @@ Usage:
   dhcoin start [--config <path>]             Start node (sync + participate in consensus)
   dhcoin send <to_domain> <amount>           Submit TRANSFER transaction
   dhcoin status                              Chain head, node count, next creators
+  dhcoin show-block <index>                  Print block at index (full JSON)
+  dhcoin chain-summary [--last N]            Compact summary of last N blocks
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -249,6 +252,58 @@ static int cmd_status(int argc, char** argv) {
         std::cout << result.dump(2) << "\n";
     } catch (std::exception& e) {
         std::cerr << "Error (is the node running?): " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// dhcoin show-block <index> [--rpc-port N]
+//   Prints the full block at the given index from a running node.
+static int cmd_show_block(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: dhcoin show-block <index> [--rpc-port N]\n";
+        return 1;
+    }
+    uint64_t index = std::stoull(argv[0]);
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"index", index}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "block", params);
+        if (result.is_null()) {
+            std::cerr << "Block " << index << " out of range (chain.height too low)\n";
+            return 1;
+        }
+        std::cout << result.dump(2) << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// dhcoin chain-summary [--last N] [--rpc-port N]
+//   Prints a compact summary of the last N blocks (default 10).
+static int cmd_chain_summary(int argc, char** argv) {
+    uint32_t last_n = 10;
+    for (int i = 0; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--last") {
+            last_n = static_cast<uint32_t>(std::stoul(argv[i + 1]));
+        }
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"last_n", last_n}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "chain_summary", params);
+        for (auto& b : result) {
+            std::cout << "#" << std::setw(6) << std::left << b.value("index", uint64_t{0})
+                      << " mode=" << b.value("consensus_mode", 0)
+                      << " txs=" << std::setw(3) << std::left << b.value("tx_count", 0)
+                      << " creators=" << b.value("creators", json::array()).dump()
+                      << " hash=" << b.value("hash", std::string{}).substr(0, 12)
+                      << "\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
     return 0;
@@ -641,8 +696,10 @@ int main(int argc, char** argv) {
     if (cmd == "start")       return cmd_start(sub_argc, sub_argv);
     if (cmd == "register")    return cmd_register(sub_argc, sub_argv);
     if (cmd == "send")        return cmd_send(sub_argc, sub_argv);
-    if (cmd == "status")      return cmd_status(sub_argc, sub_argv);
-    if (cmd == "peers")       return cmd_peers(sub_argc, sub_argv);
+    if (cmd == "status")        return cmd_status(sub_argc, sub_argv);
+    if (cmd == "peers")         return cmd_peers(sub_argc, sub_argv);
+    if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
+    if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "balance")     return cmd_balance(sub_argc, sub_argv);
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);

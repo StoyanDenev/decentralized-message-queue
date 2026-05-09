@@ -1460,6 +1460,34 @@ json Node::rpc_peers() const {
     return json(addrs);
 }
 
+json Node::rpc_block(uint64_t index) const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    if (index >= chain_.height()) return nullptr;
+    return chain_.at(index).to_json();
+}
+
+json Node::rpc_chain_summary(uint32_t last_n) const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    json arr = json::array();
+    uint64_t total = chain_.height();
+    if (total == 0) return arr;
+    uint64_t start = (total > last_n) ? total - last_n : 0;
+    for (uint64_t i = start; i < total; ++i) {
+        const auto& b = chain_.at(i);
+        json e;
+        e["index"]          = b.index;
+        e["hash"]           = to_hex(b.compute_hash());
+        e["prev_hash"]      = to_hex(b.prev_hash);
+        e["timestamp"]      = b.timestamp;
+        e["consensus_mode"] = static_cast<uint8_t>(b.consensus_mode);
+        e["bft_proposer"]   = b.bft_proposer;
+        e["tx_count"]       = b.transactions.size();
+        e["creators"]       = b.creators;
+        arr.push_back(e);
+    }
+    return arr;
+}
+
 json Node::rpc_send(const std::string& to, uint64_t amount, uint64_t fee) {
     std::lock_guard<std::mutex> lk(state_mutex_);
     chain::Transaction tx;
