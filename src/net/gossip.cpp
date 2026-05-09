@@ -84,6 +84,11 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
                 on_abort_event(bi, ph, ev);
             }
             break;
+        case MsgType::EQUIVOCATION_EVIDENCE:
+            if (on_equivocation_evidence) {
+                on_equivocation_evidence(chain::EquivocationEvent::from_json(msg.payload));
+            }
+            break;
         case MsgType::GET_CHAIN:
             if (on_get_chain)
                 on_get_chain(msg.payload.value("from",  uint64_t{0}),

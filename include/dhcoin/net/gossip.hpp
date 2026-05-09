@@ -32,6 +32,8 @@ public:
     std::function<void(const node::AbortClaimMsg&)> on_abort_claim;
     std::function<void(uint64_t /*block_index*/, const Hash& /*prev_hash*/,
                        const chain::AbortEvent&)>   on_abort_event;
+    std::function<void(const chain::EquivocationEvent&)>
+                                                    on_equivocation_evidence;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,

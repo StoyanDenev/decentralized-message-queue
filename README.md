@@ -549,12 +549,22 @@ Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slot
 
 **Binary wire codec (S8).** Current JSON-over-TCP is convenient but verbose. v2 will introduce a binary message codec for bandwidth efficiency.
 
-**Equivocation slashing.** Both economic disincentives are now wired in rev.8:
+**Equivocation slashing — fully closed-loop in rev.8:**
 
-- **Suspension slashing** (§10.4): `SUSPENSION_SLASH = 10` deducted from a validator's stake on every Phase-1 abort baked into a finalized block.
-- **Equivocation slashing**: full stake forfeiture when an `EquivocationEvent` is baked into a finalized block. The event carries two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing. Validator (`check_equivocation_events`) verifies both sigs against the equivocator's registered key and that the digests differ; on apply, the equivocator's full staked balance is zeroed.
+- **Suspension slashing** (§10.4): `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort baked into a finalized block.
+- **Equivocation slashing**: full stake forfeiture when an `EquivocationEvent` is baked into a finalized block. The event carries two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing.
 
-What's still pending: the **detection-and-evidence-construction pipeline** that auto-builds `EquivocationEvent`s from observed double-signing (currently a logging-only "EQUIVOCATION suspect" diagnostic in `apply_block_locked`). Once detection auto-builds evidence and gossips it for inclusion in the next block, the slashing path is fully closed-loop. The block-format / validator / apply-side pieces are in place to receive evidence today; producers just need to populate the `equivocation_events` field when they have evidence.
+The full pipeline:
+
+1. **Detection** (`apply_block_locked`): when a duplicate-height BFT block with a different hash arrives, the assembler computes both blocks' digests, extracts the proposer's signatures from each block's `creator_block_sigs`, and constructs an `EquivocationEvent`.
+2. **Gossip** (`EQUIVOCATION_EVIDENCE`, msg type 11): the event is broadcast so peers can validate independently and pool the evidence.
+3. **Pool** (`Node::pending_equivocation_evidence_`): each node maintains a pool of unbaked evidence. Peers receiving gossiped evidence validate the two-sig proof against the equivocator's registered key before adding.
+4. **Production** (`build_body`): producers include the evidence pool in `block.equivocation_events` when building the next block.
+5. **Validator** (`check_equivocation_events`): rejects malformed events (digests equal, sigs equal, equivocator not in registry, sigs don't verify against the registered key).
+6. **Slashing** (`apply_transactions`): each `EquivocationEvent` zeroes the equivocator's `stakes_[X].locked`. Validator's stake-below-MIN_STAKE filter then removes them from selection on the next registry build.
+7. **Dedup**: after a block bakes evidence, that equivocator's entries are removed from the pending pool (no double-baking).
+
+BFT-mode safety claims (conditional on `f < N/3` plus economic disincentive) are now economically meaningful end-to-end.
 
 ---
 

@@ -99,6 +99,7 @@ private:
     void on_abort_claim(const AbortClaimMsg& msg);
     void on_abort_event(uint64_t block_index, const Hash& prev_hash,
                          const chain::AbortEvent& ev);
+    void on_equivocation_evidence(const chain::EquivocationEvent& ev);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,
@@ -183,6 +184,14 @@ private:
     // rev.8 mode of the current round. Set by check_if_selected when the
     // committee is chosen (MD with full K, or BFT with reduced ceil(2K/3)).
     chain::ConsensusMode current_round_mode_{chain::ConsensusMode::MUTUAL_DISTRUST};
+
+    // rev.8 follow-on: equivocation evidence pool. Populated by
+    // apply_block_locked when a duplicate-height BFT block with a
+    // different hash is observed (the bft_proposer signed two block
+    // digests). Drained into the next produced block's
+    // equivocation_events; entries deduped by equivocator after a block
+    // baking the proof is applied (slashing zeros their stake).
+    std::vector<chain::EquivocationEvent> pending_equivocation_evidence_;
 
     asio::steady_timer              contrib_timer_;
     asio::steady_timer              block_sig_timer_;

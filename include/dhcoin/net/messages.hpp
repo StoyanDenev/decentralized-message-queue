@@ -26,6 +26,12 @@ enum class MsgType : uint8_t {
     // that see only their own claim stay stuck waiting for a second claim
     // that never re-broadcasts.
     ABORT_EVENT      = 10,
+    // rev.8 follow-on: a node that detects equivocation (a BFT proposer
+    // signed two different block_digests at the same height) gossips the
+    // assembled EquivocationEvent so peers can slash the equivocator on
+    // the next finalized block. Evidence is verifiable independently:
+    // both Ed25519 sigs over distinct digests by the same registered key.
+    EQUIVOCATION_EVIDENCE = 11,
 };
 
 struct Message {
@@ -64,6 +70,9 @@ inline Message make_abort_event(const chain::AbortEvent& e, uint64_t block_index
         {"prev_hash",   to_hex(prev_hash)},
         {"event",       e.to_json()}
     }};
+}
+inline Message make_equivocation_evidence(const chain::EquivocationEvent& ev) {
+    return {MsgType::EQUIVOCATION_EVIDENCE, ev.to_json()};
 }
 inline Message make_get_chain(uint64_t from_index = 0, uint16_t count = 64) {
     return {MsgType::GET_CHAIN, {{"from", from_index}, {"count", count}}};

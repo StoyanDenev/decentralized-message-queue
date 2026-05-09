@@ -173,6 +173,8 @@ Node::Node(const Config& cfg)
     gossip_.on_abort_claim   = [this](auto& a)   { on_abort_claim(a); };
     gossip_.on_abort_event   = [this](auto bi, auto& ph, auto& e)
                                   { on_abort_event(bi, ph, e); };
+    gossip_.on_equivocation_evidence = [this](auto& ev)
+                                  { on_equivocation_evidence(ev); };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -460,7 +462,8 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
     chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
                                          current_creator_domains_,
                                          ordered_contribs, delay_output,
-                                         cfg_.m_creators, mode, proposer);
+                                         cfg_.m_creators, mode, proposer,
+                                         pending_equivocation_evidence_);
     Hash digest = compute_block_digest(tentative);
 
     BlockSigMsg my_sig = make_block_sig(key_, cfg_.domain,
@@ -528,7 +531,8 @@ void Node::try_finalize_round() {
                                     current_creator_domains_,
                                     ordered_contribs,
                                     current_delay_output_,
-                                    cfg_.m_creators, mode, proposer);
+                                    cfg_.m_creators, mode, proposer,
+                                    pending_equivocation_evidence_);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     apply_block_locked(body);
@@ -726,6 +730,33 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
     check_if_selected();
 }
 
+// rev.8 follow-on: peer-gossiped equivocation evidence. Validate the
+// two-signature proof against the equivocator's registered key. If valid
+// and not already pooled, accept into pending_equivocation_evidence_ for
+// inclusion in the next block we produce.
+void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+
+    if (ev.digest_a == ev.digest_b) return;
+    if (ev.sig_a == ev.sig_b)       return;
+
+    auto entry = registry_.find(ev.equivocator);
+    if (!entry) return;
+
+    if (!crypto::verify(entry->pubkey, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+        return;
+    if (!crypto::verify(entry->pubkey, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+        return;
+
+    for (auto& e : pending_equivocation_evidence_) {
+        if (e.equivocator == ev.equivocator && e.block_index == ev.block_index)
+            return; // dup
+    }
+    pending_equivocation_evidence_.push_back(ev);
+    std::cout << "[node] adopted gossiped equivocation evidence: equivocator="
+              << ev.equivocator << " at h=" << ev.block_index << "\n";
+}
+
 void Node::reset_round() {
     delay_cancel_ = true;
     pending_contribs_.clear();
@@ -749,21 +780,60 @@ void Node::apply_block_locked(const chain::Block& b) {
     // chain_.height() and the duplicate's prev_hash no longer matches our
     // head — used to log "invalid block: prev_hash mismatch" spam.
     if (b.index < chain_.height()) {
-        // rev.8 equivocation suspect detection. If the incoming block's
-        // hash differs from the block we already have at b.index, AND it
-        // carries a non-empty bft_proposer (BFT-mode block), that proposer
-        // signed two different digests for the same height — equivocation.
-        // Log for now; full evidence-gathering, gossip, and stake-forfeit
-        // slashing is forthcoming v2.x.
+        // rev.8 equivocation detection + evidence assembly. If the
+        // incoming block's hash differs from the block we already have at
+        // b.index, AND it carries a non-empty bft_proposer (BFT-mode
+        // block), that proposer signed two different digests for the
+        // same height — equivocation. Extract proof: digest_a/sig_a from
+        // the stored block, digest_b/sig_b from the incoming block, both
+        // by the same proposer key. Push to evidence pool, gossip.
         if (!b.bft_proposer.empty()) {
-            Hash stored_hash   = chain_.at(b.index).compute_hash();
+            const auto& stored = chain_.at(b.index);
+            Hash stored_hash   = stored.compute_hash();
             Hash incoming_hash = b.compute_hash();
-            if (stored_hash != incoming_hash) {
-                std::cerr << "[node] EQUIVOCATION suspect at h=" << b.index
-                          << " bft_proposer=" << b.bft_proposer
-                          << " stored=" << to_hex(stored_hash).substr(0, 16)
-                          << " incoming=" << to_hex(incoming_hash).substr(0, 16)
-                          << "\n";
+            if (stored_hash != incoming_hash
+                && stored.bft_proposer == b.bft_proposer
+                && !stored.bft_proposer.empty()) {
+
+                auto sit = std::find(stored.creators.begin(),
+                                       stored.creators.end(),
+                                       stored.bft_proposer);
+                auto bit = std::find(b.creators.begin(),
+                                       b.creators.end(),
+                                       b.bft_proposer);
+                if (sit != stored.creators.end() && bit != b.creators.end()) {
+                    size_t sidx = sit - stored.creators.begin();
+                    size_t bidx = bit - b.creators.begin();
+                    Hash digest_a = compute_block_digest(stored);
+                    Hash digest_b = compute_block_digest(b);
+                    Signature sig_a = stored.creator_block_sigs[sidx];
+                    Signature sig_b = b.creator_block_sigs[bidx];
+                    if (digest_a != digest_b && sig_a != sig_b) {
+                        chain::EquivocationEvent ev;
+                        ev.equivocator = stored.bft_proposer;
+                        ev.block_index = b.index;
+                        ev.digest_a    = digest_a;
+                        ev.sig_a       = sig_a;
+                        ev.digest_b    = digest_b;
+                        ev.sig_b       = sig_b;
+
+                        // Add to pool if not already present.
+                        bool dup = false;
+                        for (auto& e : pending_equivocation_evidence_) {
+                            if (e.equivocator == ev.equivocator
+                                && e.block_index == ev.block_index) {
+                                dup = true; break;
+                            }
+                        }
+                        if (!dup) {
+                            pending_equivocation_evidence_.push_back(ev);
+                            gossip_.broadcast(net::make_equivocation_evidence(ev));
+                            std::cerr << "[node] EQUIVOCATION evidence built at h="
+                                      << b.index << " equivocator=" << ev.equivocator
+                                      << " (gossiped; will be baked into next block)\n";
+                        }
+                    }
+                }
             }
         }
         return;
@@ -800,6 +870,20 @@ void Node::apply_block_locked(const chain::Block& b) {
     contrib_timer_.cancel();
     block_sig_timer_.cancel();
     reset_round();
+
+    // Drop equivocation evidence that was just baked into this block
+    // (slashing already applied to the equivocator's stake in
+    // apply_transactions). Match by equivocator since once they're
+    // slashed to 0 stake they're suspended from selection anyway.
+    for (auto& ev : b.equivocation_events) {
+        pending_equivocation_evidence_.erase(
+            std::remove_if(pending_equivocation_evidence_.begin(),
+                            pending_equivocation_evidence_.end(),
+                [&](const chain::EquivocationEvent& e) {
+                    return e.equivocator == ev.equivocator;
+                }),
+            pending_equivocation_evidence_.end());
+    }
     chain_.save(cfg_.chain_path);
 
     std::cout << "[node] accepted block #" << b.index
@@ -942,7 +1026,8 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
                                          current_creator_domains_,
                                          ordered_contribs,
                                          current_delay_output_,
-                                         cfg_.m_creators, mode_local, proposer_local);
+                                         cfg_.m_creators, mode_local, proposer_local,
+                                         pending_equivocation_evidence_);
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(entry->pubkey, digest.data(), digest.size(), msg.ed_sig)) {
