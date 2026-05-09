@@ -100,6 +100,11 @@ public:
     // addresses (0x-prefixed hex). Returns null if address has no
     // on-chain state.
     nlohmann::json rpc_account(const std::string& addr)             const;
+    // rev.9: locate a transaction by its hex-encoded hash. Scans the
+    // chain (head → genesis) and returns {tx, block_index, block_hash}
+    // on hit, or null when the hash isn't found in any finalized block
+    // (it may still be in the mempool, or simply unknown).
+    nlohmann::json rpc_tx(const std::string& hash_hex)              const;
     nlohmann::json rpc_register();
     nlohmann::json rpc_send(const std::string& to, uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_balance(const std::string& domain)           const;

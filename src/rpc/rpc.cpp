@@ -88,6 +88,8 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_validators();
     if (method == "account")
         return node_.rpc_account(params.value("address", std::string{}));
+    if (method == "tx")
+        return node_.rpc_tx(params.value("hash", std::string{}));
     throw std::runtime_error("Unknown method: " + method);
 }
 

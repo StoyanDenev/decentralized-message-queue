@@ -48,6 +48,7 @@ Usage:
   dhcoin chain-summary [--last N]            Compact summary of last N blocks
   dhcoin validators                          List the current validator pool
   dhcoin show-account <address>              Inspect any address (balance, nonce, registry, stake)
+  dhcoin show-tx <hash>                      Look up a tx by hash (block_index + payload)
   dhcoin peers                               List connected peers
   dhcoin balance [<domain>]                  Show domain balance
   dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
@@ -373,6 +374,35 @@ static int cmd_show_account(int argc, char** argv) {
         } else {
             std::cout << "registry     : (not registered)\n";
         }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// dhcoin show-tx <hash> [--rpc-port N]
+//   Look up a transaction by its hex-encoded hash. Reports the tx
+//   payload, the block it landed in, and the block's timestamp.
+static int cmd_show_tx(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: dhcoin show-tx <hash> [--rpc-port N]\n";
+        return 1;
+    }
+    std::string hash_hex = argv[0];
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"hash", hash_hex}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "tx", params);
+        if (result.is_null()) {
+            std::cout << "(tx " << hash_hex.substr(0, 16) << "... not found in any finalized block)\n";
+            return 0;
+        }
+        std::cout << "block_index : " << result.value("block_index", uint64_t{0}) << "\n";
+        std::cout << "block_hash  : " << result.value("block_hash", std::string{}) << "\n";
+        std::cout << "timestamp   : " << result.value("timestamp", int64_t{0}) << "\n";
+        std::cout << "transaction :\n";
+        std::cout << result["tx"].dump(2) << "\n";
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -773,6 +803,7 @@ int main(int argc, char** argv) {
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
+    if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "balance")     return cmd_balance(sub_argc, sub_argv);
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);

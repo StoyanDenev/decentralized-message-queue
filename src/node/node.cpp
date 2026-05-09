@@ -1500,6 +1500,34 @@ json Node::rpc_account(const std::string& addr) const {
     return j;
 }
 
+json Node::rpc_tx(const std::string& hash_hex) const {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    if (hash_hex.size() != 64) return nullptr;
+    Hash target;
+    try {
+        target = from_hex_arr<32>(hash_hex);
+    } catch (...) { return nullptr; }
+
+    // Scan tip → genesis (recent blocks first; explorer queries skew
+    // toward fresh transactions). Linear in chain height; fine for the
+    // current single-chain volume — a hash-keyed index lives in B6.
+    uint64_t total = chain_.height();
+    for (uint64_t i = total; i > 0; --i) {
+        const auto& b = chain_.at(i - 1);
+        for (const auto& tx : b.transactions) {
+            if (tx.hash == target) {
+                json out;
+                out["tx"]          = tx.to_json();
+                out["block_index"] = b.index;
+                out["block_hash"]  = to_hex(b.compute_hash());
+                out["timestamp"]   = b.timestamp;
+                return out;
+            }
+        }
+    }
+    return nullptr;
+}
+
 json Node::rpc_validators() const {
     std::lock_guard<std::mutex> lk(state_mutex_);
     json arr = json::array();
