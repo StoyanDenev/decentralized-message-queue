@@ -102,6 +102,8 @@ Node::Node(const Config& cfg)
     // (M, K, block_subsidy). Load it FIRST so chain replay during load uses
     // the correct subsidy when crediting creators.
     uint64_t genesis_subsidy = 0;
+    uint64_t genesis_min_stake = 1000;
+    chain::GovernanceModel genesis_gov = chain::GovernanceModel::OPEN_STAKE;
     std::optional<chain::GenesisConfig> gcfg_opt;
     if (!cfg_.genesis_path.empty()) {
         auto gcfg = chain::GenesisConfig::load(cfg_.genesis_path);
@@ -117,6 +119,8 @@ Node::Node(const Config& cfg)
         cfg_.initial_shard_count     = gcfg.initial_shard_count;
         cfg_.epoch_blocks            = gcfg.epoch_blocks;
         genesis_subsidy              = gcfg.block_subsidy;
+        genesis_min_stake            = gcfg.min_stake;
+        genesis_gov                  = gcfg.governance_model;
         validator_.set_k_block_sigs(cfg_.k_block_sigs);
         validator_.set_m_pool(cfg_.m_creators);
         validator_.set_bft_enabled(cfg_.bft_enabled);
@@ -127,6 +131,7 @@ Node::Node(const Config& cfg)
     }
 
     chain_ = chain::Chain::load(cfg_.chain_path, genesis_subsidy);
+    chain_.set_min_stake(genesis_min_stake);
 
     if (chain_.empty()) {
         // No on-disk chain: bootstrap from genesis config if provided, else
@@ -140,6 +145,7 @@ Node::Node(const Config& cfg)
                   + " but loaded genesis hashes to " + actual_hash);
             chain_ = chain::Chain(std::move(g));
             chain_.set_block_subsidy(genesis_subsidy);
+            chain_.set_min_stake(genesis_min_stake);
             const char* mode = (cfg_.k_block_sigs == cfg_.m_creators)
                               ? "strong" : "hybrid";
             std::cout << "[node] genesis loaded from " << cfg_.genesis_path
@@ -149,7 +155,9 @@ Node::Node(const Config& cfg)
                       << " M=" << cfg_.m_creators
                       << " K=" << cfg_.k_block_sigs
                       << " subsidy=" << genesis_subsidy
-                      << " mode=" << mode << "\n";
+                      << " mode=" << mode
+                      << " gov=" << to_string(genesis_gov)
+                      << " min_stake=" << genesis_min_stake << "\n";
         } else {
             chain_ = chain::Chain(chain::make_genesis());
             std::cerr << "[node] WARNING: no genesis_path configured; "

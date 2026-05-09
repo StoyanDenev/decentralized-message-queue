@@ -238,17 +238,26 @@ void Chain::apply_transactions(const Block& b) {
         sit->second.locked -= deduct;
     }
 
-    // rev.8 follow-on: full equivocation slashing. Each EquivocationEvent
-    // baked into this block (validator already verified the two-sig proof)
-    // forfeits the equivocator's ENTIRE staked balance. Equivocation is a
-    // deliberate double-sign attack — the strongest economic signal we have
-    // — so the disincentive must be maximal. After forfeit the validator's
-    // stake drops below MIN_STAKE so they're suspended from selection on
-    // the next registry build.
+    // rev.8 follow-on: full equivocation slashing + deregistration. Each
+    // EquivocationEvent baked into this block (validator already verified
+    // the two-sig proof) (a) forfeits the equivocator's ENTIRE staked
+    // balance — strongest economic signal in OPEN_STAKE mode — and
+    // (b) marks the equivocator's registry entry inactive_from = next
+    // block, removing them from selection regardless of stake.
+    //
+    // The dual mechanism unifies OPEN_STAKE and DOMAIN_REGISTRY modes:
+    //   - OPEN_STAKE: stake → 0 makes them ineligible (below min_stake);
+    //     deregistration is redundant but harmless.
+    //   - DOMAIN_REGISTRY: stake is already 0 (no stake), so the
+    //     deregistration is what actually removes them. The equivocator
+    //     must register a new domain to participate again.
     for (auto& ev : b.equivocation_events) {
         auto sit = stakes_.find(ev.equivocator);
-        if (sit == stakes_.end()) continue;
-        sit->second.locked = 0;
+        if (sit != stakes_.end()) sit->second.locked = 0;
+        auto rit = registrants_.find(ev.equivocator);
+        if (rit != registrants_.end()) {
+            rit->second.inactive_from = b.index + 1;
+        }
     }
 }
 

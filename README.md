@@ -210,26 +210,41 @@ The genesis block is signed implicitly by the operator who builds it; integrity 
 
 ## 5. Node Registry, Stake, and Suspension
 
-### 5.1 Registration
+### 5.1 Governance models
+
+DHCoin supports two genesis-pinned validator-admission policies. Both use the same K-of-K mutual-distrust consensus and the same equivocation-detection mechanism; they differ only in the Sybil/disincentive layer.
+
+| Mode | `min_stake` | Sybil cost | Disincentive on misbehavior | Use case |
+|---|---|---|---|---|
+| **`OPEN_STAKE`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Stake forfeit (suspension slash + equivocation forfeit) | Permissionless public chain |
+| **`DOMAIN_REGISTRY`** | 0 | Domain registration cost + curatorial reputation | Deregistration (lose all future block rewards; re-entry costs a new domain) | Federated / consortium chain |
+
+Both modes are decentralized in the architectural sense (no party controls the protocol; rules enforced by code; multiple independent operators). They differ on permissionlessness — `OPEN_STAKE` is open to any anonymous staker; `DOMAIN_REGISTRY` is open to any domain-owner but accountability is socially scoped via the public-domain identity.
+
+### 5.2 Registration
 
 A node joins the eligible pool by broadcasting a REGISTER transaction whose payload is its 32-byte Ed25519 public key. The transaction is itself signed with the corresponding private key, proving possession.
 
 Registration takes effect after a randomized 1–10 block delay derived from `(tx.hash || cumulative_rand)`. This prevents a registrant from timing entry to guarantee selection in a chosen round.
 
-### 5.2 Stake
+In `DOMAIN_REGISTRY` chains the convention is that `tx.from` is a real DNS name (e.g., `validator1.example.com`). The protocol does not enforce DNS validity — that's an off-chain concern (operators may verify via DNSSEC TXT records pointing to the on-chain `ed_pub`). Mismatches surface as governance issues, not protocol violations.
 
-Eligibility additionally requires `stake[domain] ≥ MIN_STAKE`. Stake is locked on a STAKE transaction and released after an unlock window on UNSTAKE. The chain enforces `stake_table[domain]` updates atomically during block application.
+### 5.3 Stake
 
-### 5.3 Suspension
+Eligibility additionally requires `stake[domain] ≥ chain.min_stake()`. In `OPEN_STAKE` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_REGISTRY` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices. STAKE / UNSTAKE transactions still work in both modes (validators may voluntarily lock stake even in `DOMAIN_REGISTRY`); they just don't gate eligibility.
 
-A registered, staked domain is **suspended** from selection if it has any Phase 1 abort against it in chain history; the suspension window grows exponentially with repeat offenses:
+### 5.4 Suspension and equivocation deregistration
+
+A registered, eligible domain is **suspended** from selection if it has any Phase 1 abort against it in chain history; the suspension window grows exponentially with repeat offenses:
 
 ```
 suspension_blocks(count) = min(BASE × 2^(count-1), MAX)
 BASE = 10, MAX = 10000
 ```
 
-Only **Phase 1** aborts (`round=1` AbortEvents) count toward suspension. Phase 2 aborts can fire on a healthy creator when its block-sig arrival is delayed past the timer (timing skew); using them would inflate false-positive suspensions and harm liveness without improving censorship guarantees. Phase 1 absence is the reliable "creator is unresponsive" signal.
+Only **Phase 1** aborts (`round=1` AbortEvents) count toward suspension. Phase 2 aborts can fire on a healthy creator when its block-sig arrival is delayed past the timer (timing skew); using them would inflate false-positive suspensions and harm liveness without improving censorship guarantees.
+
+A domain that **equivocates** (signs two different `block_digest`s at the same height) is permanently removed from the registry — `inactive_from` is set to the next block. Re-entry requires a fresh REGISTER (with a new Ed25519 key, and in `DOMAIN_REGISTRY` mode a new domain). In `OPEN_STAKE` mode the equivocator's stake is also fully forfeited; in `DOMAIN_REGISTRY` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
 
 ---
 
@@ -490,7 +505,8 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 | `tx_commit_ms` | 200 | Phase 1 timer |
 | `block_sig_ms` | 200 | Phase 2 timer |
 | `abort_claim_ms` | 100 | Abort claim collection window |
-| `MIN_STAKE` | 1000 | Eligibility threshold |
+| `min_stake` | 1000 (`OPEN_STAKE`) / 0 (`DOMAIN_REGISTRY`) | Genesis-pinned per chain. Eligibility threshold |
+| `governance_model` | `OPEN_STAKE` | Genesis-pinned. Either `OPEN_STAKE` or `DOMAIN_REGISTRY` |
 | `BASE_SUSPENSION_BLOCKS` | 10 | First-offense suspension |
 | `MAX_SUSPENSION_BLOCKS` | 10000 | Cap |
 | `MAX_ABORT_EXPONENT` | 10 | Backoff cap |
@@ -549,10 +565,14 @@ Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slot
 
 **Binary wire codec (S8).** Current JSON-over-TCP is convenient but verbose. v2 will introduce a binary message codec for bandwidth efficiency.
 
-**Equivocation slashing — fully closed-loop in rev.8:**
+**Equivocation handling — fully closed-loop in rev.8:**
 
-- **Suspension slashing** (§10.4): `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort baked into a finalized block.
-- **Equivocation slashing**: full stake forfeiture when an `EquivocationEvent` is baked into a finalized block. The event carries two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing.
+The disincentive depends on the chain's governance model (§5.1):
+
+- **`OPEN_STAKE`** chains: `SUSPENSION_SLASH = 10` deducted on every Phase-1 abort. Equivocation triggers full stake forfeiture **and** registry deregistration.
+- **`DOMAIN_REGISTRY`** chains: `SUSPENSION_SLASH` is a no-op (no stake to deduct). Equivocation deregisters the validator from the chain — they lose all future block rewards and must register a new domain to participate again.
+
+Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing) and the same end-to-end pipeline:
 
 The full pipeline:
 

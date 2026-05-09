@@ -5,6 +5,36 @@
 
 namespace dhcoin::chain {
 
+// rev.8 follow-on: validator admission policy.
+//
+//   OPEN_STAKE      — anyone with MIN_STAKE locked can be a validator.
+//                     Sybil resistance via capital lock-up. Slashing
+//                     forfeits stake. Best for permissionless public chains.
+//
+//   DOMAIN_REGISTRY — validators identify by domain (e.g., a real DNS
+//                     name like validator1.example.com). MIN_STAKE = 0;
+//                     no stake required. Sybil resistance comes from
+//                     domain registration cost + curatorial reputation.
+//                     Equivocation deregisters the validator (they lose
+//                     all future block rewards) instead of forfeiting
+//                     stake. Best for federated / consortium chains
+//                     where operators are publicly accountable.
+//
+// Both modes preserve the K-of-K mutual-distrust consensus, BFT escalation,
+// and equivocation detection. Only the Sybil/disincentive layer differs.
+enum class GovernanceModel : uint8_t {
+    OPEN_STAKE      = 0,
+    DOMAIN_REGISTRY = 1,
+};
+
+inline const char* to_string(GovernanceModel g) {
+    switch (g) {
+    case GovernanceModel::OPEN_STAKE:      return "open-stake";
+    case GovernanceModel::DOMAIN_REGISTRY: return "domain-registry";
+    }
+    return "?";
+}
+
 // ─── Genesis configuration ──────────────────────────────────────────────────
 // A GenesisConfig fully specifies a chain's initial state. Operators distribute
 // the JSON form before bootstrap; everyone confirms the derived genesis hash
@@ -40,6 +70,16 @@ struct GenesisConfig {
     // on persistent silent committee member, by design).
     bool                            bft_enabled{true};
     uint32_t                        bft_escalation_threshold{5};
+
+    // Rev. 8 follow-on: validator admission policy. Default is OPEN_STAKE
+    // (preserves rev.7/8 stake-based behavior). DOMAIN_REGISTRY chains
+    // pin min_stake = 0 (no stake gate); equivocation still deregisters
+    // the validator regardless of mode.
+    GovernanceModel                 governance_model{GovernanceModel::OPEN_STAKE};
+    // Min stake threshold for validator eligibility. Default 1000 for
+    // OPEN_STAKE; DOMAIN_REGISTRY chains pin this to 0. Genesis-pinned;
+    // chain-wide constant.
+    uint64_t                        min_stake{1000};
 
     // Rev. 9 sharding role. SINGLE preserves rev.8 behavior (one chain,
     // no shards). BEACON / SHARD are the two roles in the sharded
