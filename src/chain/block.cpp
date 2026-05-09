@@ -220,6 +220,20 @@ std::vector<uint8_t> Block::signing_bytes() const {
         b.append(r.nonce);
     }
 
+    // rev.9 B3.4: bind inbound receipts (this block credits them) so
+    // the destination committee's K-of-K signing certifies the exact
+    // set credited. Source K-of-K verification happens at receive time
+    // (each producer ratifies independently); the destination block's
+    // signing is the committee's collective attestation.
+    for (auto& r : inbound_receipts) {
+        b.append(static_cast<uint64_t>(r.src_shard));
+        b.append(static_cast<uint64_t>(r.dst_shard));
+        b.append(r.src_block_index);
+        b.append(r.tx_hash);
+        b.append(r.to);
+        b.append(r.amount);
+    }
+
     for (auto& a : initial_state) {
         b.append(a.domain);
         b.append(a.ed_pub.data(), a.ed_pub.size());
@@ -296,6 +310,10 @@ json Block::to_json() const {
     for (auto& r : cross_shard_receipts) csrs.push_back(r.to_json());
     j["cross_shard_receipts"] = csrs;
 
+    json ibrs = json::array();
+    for (auto& r : inbound_receipts) ibrs.push_back(r.to_json());
+    j["inbound_receipts"] = ibrs;
+
     json is_arr = json::array();
     for (auto& a : initial_state) is_arr.push_back(a.to_json());
     j["initial_state"]  = is_arr;
@@ -358,6 +376,11 @@ Block Block::from_json(const json& j) {
     if (j.contains("cross_shard_receipts")) {
         for (auto& rj : j["cross_shard_receipts"])
             b.cross_shard_receipts.push_back(CrossShardReceipt::from_json(rj));
+    }
+
+    if (j.contains("inbound_receipts")) {
+        for (auto& rj : j["inbound_receipts"])
+            b.inbound_receipts.push_back(CrossShardReceipt::from_json(rj));
     }
 
     if (j.contains("initial_state"))

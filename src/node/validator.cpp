@@ -33,6 +33,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_cumulative_rand(b, chain);        !r.ok) return r;
     if (auto r = check_transactions(b, chain, registry); !r.ok) return r;
     if (auto r = check_cross_shard_receipts(b, chain);   !r.ok) return r;
+    if (auto r = check_inbound_receipts(b, chain);       !r.ok) return r;
     if (auto r = check_timestamp(b);                     !r.ok) return r;
     return {true, ""};
 }
@@ -514,6 +515,43 @@ BlockValidator::Result BlockValidator::check_cross_shard_receipts(
         if (r.tx_hash != tx.hash || r.from != tx.from || r.to != tx.to
             || r.amount != tx.amount || r.fee != tx.fee || r.nonce != tx.nonce)
             return {false, "receipt[" + std::to_string(i) + "] field mismatch with tx"};
+    }
+    return {true, ""};
+}
+
+// rev.9 B3.4: inbound_receipts checks. Source-side K-of-K verification
+// happens at receive time (each producer ratifies the bundle when
+// storing in pending_inbound_receipts_); the destination committee's
+// K-of-K signing of THIS block is the collective on-chain attestation
+// that the inbound set was valid at production time. The validator's
+// job here is shape + dedup, not source-block reverification.
+BlockValidator::Result BlockValidator::check_inbound_receipts(
+    const Block& b, const Chain& chain) const {
+
+    // SINGLE / BEACON chains never apply inbound receipts.
+    if (chain.shard_count() <= 1) {
+        if (!b.inbound_receipts.empty())
+            return {false, "inbound_receipts non-empty on non-shard chain"};
+        return {true, ""};
+    }
+
+    std::set<std::pair<ShardId, Hash>> seen;
+    for (size_t i = 0; i < b.inbound_receipts.size(); ++i) {
+        const auto& r = b.inbound_receipts[i];
+        if (r.dst_shard != chain.my_shard_id())
+            return {false, "inbound_receipts[" + std::to_string(i)
+                         + "] dst_shard " + std::to_string(r.dst_shard)
+                         + " != my_shard_id " + std::to_string(chain.my_shard_id())};
+        if (r.src_shard == chain.my_shard_id())
+            return {false, "inbound_receipts[" + std::to_string(i)
+                         + "] src_shard equals own shard_id"};
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        if (!seen.insert(key).second)
+            return {false, "inbound_receipts[" + std::to_string(i)
+                         + "] duplicate (src_shard, tx_hash) within block"};
+        if (chain.inbound_receipt_applied(r.src_shard, r.tx_hash))
+            return {false, "inbound_receipts[" + std::to_string(i)
+                         + "] already credited in earlier block"};
     }
     return {true, ""};
 }

@@ -153,6 +153,11 @@ chain::Block build_body(
     uint32_t                                  m_pool_size,
     chain::ConsensusMode                      mode = chain::ConsensusMode::MUTUAL_DISTRUST,
     const std::string&                        bft_proposer_domain = "",
-    const std::vector<chain::EquivocationEvent>& equivocation_events = {});
+    const std::vector<chain::EquivocationEvent>& equivocation_events = {},
+    // rev.9 B3.4: inbound cross-shard receipts available to bake into
+    // this block. Producer dedupes against the chain's
+    // inbound_receipt_applied() set and includes those addressed to
+    // this shard. SINGLE / BEACON producers should pass empty.
+    const std::vector<chain::CrossShardReceipt>& inbound_receipts = {});
 
 } // namespace dhcoin::node

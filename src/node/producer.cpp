@@ -272,7 +272,8 @@ Block build_body(
     uint32_t                           m_pool_size,
     ConsensusMode                      mode,
     const std::string&                 bft_proposer_domain,
-    const std::vector<EquivocationEvent>& equivocation_events) {
+    const std::vector<EquivocationEvent>& equivocation_events,
+    const std::vector<CrossShardReceipt>& inbound_receipts) {
 
     Block b;
     b.index               = chain.empty() ? 1 : chain.height();
@@ -415,6 +416,16 @@ Block build_body(
         }
         nn++;
         b.transactions.push_back(tx);
+    }
+
+    // rev.9 B3.4: bake inbound receipts addressed to this shard. Skip
+    // any receipt already credited (replayed bundle) or addressed to a
+    // different shard (defensive — Node should pre-filter, but the
+    // chain check is canonical).
+    for (auto& r : inbound_receipts) {
+        if (r.dst_shard != chain.my_shard_id()) continue;
+        if (chain.inbound_receipt_applied(r.src_shard, r.tx_hash)) continue;
+        b.inbound_receipts.push_back(r);
     }
 
     return b;

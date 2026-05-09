@@ -97,6 +97,11 @@ bool Chain::is_cross_shard(const std::string& to) const {
            != my_shard_id_;
 }
 
+bool Chain::inbound_receipt_applied(ShardId src_shard,
+                                       const Hash& tx_hash) const {
+    return applied_inbound_receipts_.count({src_shard, tx_hash}) > 0;
+}
+
 // ─── apply_transactions ──────────────────────────────────────────────────────
 
 void Chain::apply_transactions(const Block& b) {
@@ -282,6 +287,18 @@ void Chain::apply_transactions(const Block& b) {
         if (rit != registrants_.end()) {
             rit->second.inactive_from = b.index + 1;
         }
+    }
+
+    // rev.9 B3.4: deliver inbound cross-shard receipts. Each entry
+    // credits `to` with `amount` (sender debit + fee already happened
+    // on the source shard). Idempotent on (src_shard, tx_hash); a
+    // duplicate would be rejected by the validator before reaching
+    // here, but the guard makes apply safe under chain replay.
+    for (auto& r : b.inbound_receipts) {
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        if (applied_inbound_receipts_.count(key)) continue;
+        accounts_[r.to].balance += r.amount;
+        applied_inbound_receipts_.insert(key);
     }
 }
 

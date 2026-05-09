@@ -204,6 +204,15 @@ struct Block {
     // the apply-side; B3.3-B3.4 carry receipts cross-chain and credit.
     std::vector<CrossShardReceipt> cross_shard_receipts;
 
+    // rev.9 B3.4: inbound receipts applied by this block. When this
+    // shard's producer assembles a block, it dequeues receipts whose
+    // dst_shard == my_shard_id from pending_inbound_receipts_ and
+    // bakes them in here. Apply credits each receipt's `to` address
+    // with `amount`; (src_shard, tx_hash) is recorded in the chain's
+    // applied set so a receipt is delivered exactly once even under
+    // duplicate-bundle gossip. Empty for SINGLE chains.
+    std::vector<CrossShardReceipt> inbound_receipts;
+
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.
     std::vector<GenesisAlloc> initial_state;

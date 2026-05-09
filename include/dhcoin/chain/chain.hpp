@@ -1,9 +1,11 @@
 #pragma once
 #include <dhcoin/chain/block.hpp>
 #include <map>
+#include <set>
 #include <string>
 #include <optional>
 #include <cstdint>
+#include <utility>
 
 namespace dhcoin::chain {
 
@@ -74,6 +76,14 @@ public:
     // SINGLE chains (shard_count_ <= 1) return false unconditionally.
     bool     is_cross_shard(const std::string& to) const;
 
+    // rev.9 B3.4: idempotency check for inbound receipts. True if
+    // (src_shard, tx_hash) has already been credited by a previously-
+    // applied block on this chain. Producer + validator both consult
+    // this to ensure each cross-shard transfer credits the destination
+    // exactly once, even if the same bundle is gossiped repeatedly.
+    bool     inbound_receipt_applied(ShardId src_shard,
+                                       const Hash& tx_hash) const;
+
     const std::map<std::string, AccountState>&   accounts()    const { return accounts_;    }
     const std::map<std::string, StakeEntry>&     stakes()      const { return stakes_;      }
     const std::map<std::string, RegistryEntry>&  registrants() const { return registrants_; }
@@ -104,6 +114,10 @@ private:
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};
     ShardId                                     my_shard_id_{0};
+    // rev.9 B3.4: dedup tracking for delivered inbound receipts.
+    // Populated during apply (also during replay via load), consulted
+    // by producer + validator to guarantee exactly-once credit.
+    std::set<std::pair<ShardId, Hash>>           applied_inbound_receipts_;
 
     void apply_transactions(const Block& b);
 };

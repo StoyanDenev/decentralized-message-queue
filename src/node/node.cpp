@@ -532,11 +532,15 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
     }
     auto mode     = current_mode();
     auto proposer = current_proposer_domain();
+    std::vector<chain::CrossShardReceipt> inbound_snapshot;
+    inbound_snapshot.reserve(pending_inbound_receipts_.size());
+    for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
     chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
                                          current_creator_domains_,
                                          ordered_contribs, delay_output,
                                          cfg_.m_creators, mode, proposer,
-                                         pending_equivocation_evidence_);
+                                         pending_equivocation_evidence_,
+                                         inbound_snapshot);
     Hash digest = compute_block_digest(tentative);
 
     BlockSigMsg my_sig = make_block_sig(key_, cfg_.domain,
@@ -600,12 +604,16 @@ void Node::try_finalize_round() {
         if (ordered_block_sigs[pidx] == zero_sig) return;
     }
 
+    std::vector<chain::CrossShardReceipt> inbound_snapshot;
+    inbound_snapshot.reserve(pending_inbound_receipts_.size());
+    for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
     chain::Block body = build_body(tx_store_, chain_, current_aborts_,
                                     current_creator_domains_,
                                     ordered_contribs,
                                     current_delay_output_,
                                     cfg_.m_creators, mode, proposer,
-                                    pending_equivocation_evidence_);
+                                    pending_equivocation_evidence_,
+                                    inbound_snapshot);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     apply_block_locked(body);
@@ -1217,6 +1225,14 @@ void Node::apply_block_locked(const chain::Block& b) {
                 }),
             pending_equivocation_evidence_.end());
     }
+    // rev.9 B3.4: prune inbound receipts that this block credited.
+    // Apply (above) already inserted into chain.applied_inbound_receipts_;
+    // here we drop the matching pending entries so the producer doesn't
+    // re-propose them next round. The on-chain dedup set is canonical;
+    // pending is just a fast path for inclusion.
+    for (auto& r : b.inbound_receipts) {
+        pending_inbound_receipts_.erase({r.src_shard, r.tx_hash});
+    }
     chain_.save(cfg_.chain_path);
 
     std::cout << "[node] accepted block #" << b.index
@@ -1377,12 +1393,16 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
     }
     auto mode_local     = current_mode();
     auto proposer_local = current_proposer_domain();
+    std::vector<chain::CrossShardReceipt> inbound_snapshot;
+    inbound_snapshot.reserve(pending_inbound_receipts_.size());
+    for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
     chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
                                          current_creator_domains_,
                                          ordered_contribs,
                                          current_delay_output_,
                                          cfg_.m_creators, mode_local, proposer_local,
-                                         pending_equivocation_evidence_);
+                                         pending_equivocation_evidence_,
+                                         inbound_snapshot);
     Hash digest = compute_block_digest(tentative);
 
     if (!crypto::verify(entry->pubkey, digest.data(), digest.size(), msg.ed_sig)) {

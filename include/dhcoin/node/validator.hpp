@@ -75,6 +75,13 @@ private:
     // SINGLE chains expect an empty receipts list.
     Result check_cross_shard_receipts(const chain::Block& b,
                                         const chain::Chain& chain) const;
+    // rev.9 B3.4: inbound_receipts (this block credits them) shape +
+    // dedup checks. Each entry must have dst_shard == this chain's
+    // shard_id, src_shard != this chain's shard_id, tx_hash unique
+    // within the block, and not previously applied. SINGLE / BEACON
+    // chains expect an empty list.
+    Result check_inbound_receipts(const chain::Block& b,
+                                    const chain::Chain& chain) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;
