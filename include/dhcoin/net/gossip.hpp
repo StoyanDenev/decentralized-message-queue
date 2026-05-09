@@ -34,6 +34,10 @@ public:
                        const chain::AbortEvent&)>   on_abort_event;
     std::function<void(const chain::EquivocationEvent&)>
                                                     on_equivocation_evidence;
+    // rev.9 B2c.1: beacon-block-as-header gossip from beacon role to
+    // shard nodes. Shards use these to maintain a verified light view
+    // of the beacon chain.
+    std::function<void(const chain::Block&)>        on_beacon_header;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,

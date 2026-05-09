@@ -32,6 +32,15 @@ enum class MsgType : uint8_t {
     // the next finalized block. Evidence is verifiable independently:
     // both Ed25519 sigs over distinct digests by the same registered key.
     EQUIVOCATION_EVIDENCE = 11,
+    // rev.9 B2c.1: beacon nodes broadcast their newly-applied blocks to
+    // shard nodes so each shard can independently maintain a verified
+    // light header chain of the beacon. From this header chain shards
+    // derive their own validator pool + committee under zero-trust
+    // (no claim from the beacon is implicitly trusted; each shard
+    // verifies the beacon block's K-of-K signatures against the pool
+    // it derives from prior verified blocks). Bootstrapping starts
+    // from the pinned beacon genesis hash in shard config.
+    BEACON_HEADER         = 12,
 };
 
 struct Message {
@@ -73,6 +82,14 @@ inline Message make_abort_event(const chain::AbortEvent& e, uint64_t block_index
 }
 inline Message make_equivocation_evidence(const chain::EquivocationEvent& ev) {
     return {MsgType::EQUIVOCATION_EVIDENCE, ev.to_json()};
+}
+inline Message make_beacon_header(const chain::Block& b) {
+    // Beacon blocks travel as full Block JSON. Shards verify K-of-K sigs
+    // and use cumulative_rand + applied tx state to derive validator pool.
+    // (We send full Block rather than a stripped-down "header" because
+    // shards derive validator-pool deltas from REGISTER/STAKE txs in the
+    // beacon block — those need to be present.)
+    return {MsgType::BEACON_HEADER, b.to_json()};
 }
 inline Message make_get_chain(uint64_t from_index = 0, uint16_t count = 64) {
     return {MsgType::GET_CHAIN, {{"from", from_index}, {"count", count}}};

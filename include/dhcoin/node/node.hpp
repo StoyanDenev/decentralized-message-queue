@@ -100,6 +100,10 @@ private:
     void on_abort_event(uint64_t block_index, const Hash& prev_hash,
                          const chain::AbortEvent& ev);
     void on_equivocation_evidence(const chain::EquivocationEvent& ev);
+    // rev.9 B2c.1: shard-side handler for gossiped beacon headers.
+    // Stores in beacon_headers_; full validation (K-of-K against pool
+    // derived from prior verified headers) is B2c.2.
+    void on_beacon_header(const chain::Block& b);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,
@@ -192,6 +196,13 @@ private:
     // equivocation_events; entries deduped by equivocator after a block
     // baking the proof is applied (slashing zeros their stake).
     std::vector<chain::EquivocationEvent> pending_equivocation_evidence_;
+
+    // rev.9 B2c.1: shard-only. Light header chain of the beacon. Shards
+    // populate this by receiving BEACON_HEADER gossip messages from
+    // beacon nodes. B2c.2 will add validation (K-of-K sigs against
+    // pool derived from prior headers) and committee derivation from
+    // this chain. For now this is just a receive buffer.
+    std::vector<chain::Block> beacon_headers_;
 
     asio::steady_timer              contrib_timer_;
     asio::steady_timer              block_sig_timer_;

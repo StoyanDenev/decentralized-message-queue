@@ -183,6 +183,7 @@ Node::Node(const Config& cfg)
                                   { on_abort_event(bi, ph, e); };
     gossip_.on_equivocation_evidence = [this](auto& ev)
                                   { on_equivocation_evidence(ev); };
+    gossip_.on_beacon_header  = [this](auto& b)  { on_beacon_header(b); };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -765,6 +766,29 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
               << ev.equivocator << " at h=" << ev.block_index << "\n";
 }
 
+// rev.9 B2c.1: shard receives a beacon block via gossip from a peering
+// beacon node. For this skeleton we only store the block sequentially in
+// beacon_headers_ — no validation yet. B2c.2 will add full K-of-K
+// verification against the validator pool the shard derives from prior
+// verified headers, and use the cumulative_rand at epoch boundaries to
+// drive committee selection. SINGLE / BEACON roles ignore this message.
+void Node::on_beacon_header(const chain::Block& b) {
+    std::lock_guard<std::mutex> lk(state_mutex_);
+    if (cfg_.chain_role != ChainRole::SHARD) return;
+
+    // Skip if we already have this height. (Strictly we should also
+    // check b.compute_hash() against the stored block; that's covered
+    // by the validation logic in B2c.2.)
+    if (!beacon_headers_.empty() && b.index <= beacon_headers_.back().index) {
+        return;
+    }
+    // Sequential append only (gap detection / sync fallback is B2c.2).
+    if (!beacon_headers_.empty() && b.index != beacon_headers_.back().index + 1) {
+        return;
+    }
+    beacon_headers_.push_back(b);
+}
+
 void Node::reset_round() {
     delay_cancel_ = true;
     pending_contribs_.clear();
@@ -896,6 +920,13 @@ void Node::apply_block_locked(const chain::Block& b) {
 
     std::cout << "[node] accepted block #" << b.index
               << " creators=" << b.creators.size() << "\n";
+
+    // rev.9 B2c.1: beacon nodes broadcast each newly-applied block as a
+    // BEACON_HEADER so peering shard nodes can light-validate it. SINGLE
+    // / SHARD roles do nothing — this gossip is beacon-emitted only.
+    if (cfg_.chain_role == ChainRole::BEACON) {
+        gossip_.broadcast(net::make_beacon_header(b));
+    }
 
     check_if_selected();
 }
@@ -1182,6 +1213,7 @@ json Node::rpc_status() const {
     j["shard_id"]    = cfg_.shard_id;
     j["epoch_index"] = current_epoch_index();
     j["mempool_size"] = tx_store_.size();
+    j["beacon_headers"] = beacon_headers_.size();   // shard-only; 0 elsewhere
 
     // Block-mode + tx counters across the full chain. Useful for ops
     // dashboards and test assertions ("did the chain actually escalate?").
