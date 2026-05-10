@@ -66,7 +66,7 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile cluster_test 2>&1 | tail -1
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
   $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 

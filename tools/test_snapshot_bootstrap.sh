@@ -41,7 +41,7 @@ mkdir -p $T/donor1 $T/donor2 $T/donor3 $T/receiver
 
 echo "=== 1. Init donor (M=K=3) + receiver data dirs ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/donor$n --profile cluster_test 2>&1 | tail -1
+  $DETERM init --data-dir $T/donor$n --profile single_test 2>&1 | tail -1
   $DETERM genesis-tool peer-info donor$n --data-dir $T/donor$n --stake 1000 \
     > $T/p$n.json
 done
@@ -135,7 +135,7 @@ sleep 2
 
 echo
 echo "=== 6. Configure receiver: snapshot_path set, no genesis ==="
-$DETERM init --data-dir $T/receiver --profile cluster_test 2>&1 | tail -1
+$DETERM init --data-dir $T/receiver --profile single_test 2>&1 | tail -1
 python -c "
 import json
 with open('$T/receiver/config.json') as f: c = json.load(f)

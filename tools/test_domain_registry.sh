@@ -39,7 +39,7 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile cluster_test 2>&1 | tail -1
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
   # NOTE: stake=0. In DOMAIN_INCLUSION mode the registry doesn't gate on stake.
   $DETERM genesis-tool peer-info "validator$n.example.com" --data-dir $T/n$n --stake 0 > $T/p$n.json
 done

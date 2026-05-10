@@ -39,7 +39,7 @@ static void usage() {
     std::cout << R"(Determ — fork-free DH-consensus cryptocurrency
 
 Usage:
-  determ init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|cluster_test|web_test|regional_test|global_test|tactical_test]
+  determ init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|single_test|cluster_test|web_test|regional_test|global_test|tactical_test]
                                               [--genesis <config.json>]
                                               Generate node keys and config
   determ register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
@@ -112,16 +112,17 @@ static int cmd_init(int argc, char** argv) {
     if      (profile == "cluster")        tp = chain::PROFILE_CLUSTER;
     else if (profile == "regional")       tp = chain::PROFILE_REGIONAL;
     else if (profile == "global")         tp = chain::PROFILE_GLOBAL;
+    else if (profile == "tactical")       tp = chain::PROFILE_TACTICAL;
+    else if (profile == "single_test")    tp = chain::PROFILE_SINGLE_TEST;
     else if (profile == "cluster_test")   tp = chain::PROFILE_CLUSTER_TEST;
     else if (profile == "web_test")       tp = chain::PROFILE_WEB_TEST;
     else if (profile == "regional_test")  tp = chain::PROFILE_REGIONAL_TEST;
     else if (profile == "global_test")    tp = chain::PROFILE_GLOBAL_TEST;
-    else if (profile == "tactical")       tp = chain::PROFILE_TACTICAL;
     else if (profile == "tactical_test")  tp = chain::PROFILE_TACTICAL_TEST;
     else if (profile != "web") {
         std::cerr << "Unknown --profile " << profile
                   << " (expected: cluster|web|regional|global|tactical|"
-                  << "cluster_test|web_test|regional_test|global_test|tactical_test)\n";
+                  << "single_test|cluster_test|web_test|regional_test|global_test|tactical_test)\n";
         return 1;
     }
     cfg.tx_commit_ms   = tp.tx_commit_ms;
@@ -888,6 +889,7 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
             else if (profile_name == "regional")       tp = chain::PROFILE_REGIONAL;
             else if (profile_name == "global")         tp = chain::PROFILE_GLOBAL;
             else if (profile_name == "tactical")       tp = chain::PROFILE_TACTICAL;
+            else if (profile_name == "single_test")    tp = chain::PROFILE_SINGLE_TEST;
             else if (profile_name == "cluster_test")   tp = chain::PROFILE_CLUSTER_TEST;
             else if (profile_name == "web_test")       tp = chain::PROFILE_WEB_TEST;
             else if (profile_name == "regional_test")  tp = chain::PROFILE_REGIONAL_TEST;

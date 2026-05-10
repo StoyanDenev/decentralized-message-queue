@@ -80,29 +80,49 @@ inline constexpr TimingProfile PROFILE_TACTICAL {
     20, 20, 10, 3, 3, ChainRole::SHARD, ShardingMode::EXTENDED
 };
 
-// Test profiles — sub-30ms rounds for fast CI execution. Timer values pulled
-// out as named constants so they can be tuned in one place if a loaded test
-// runner triggers spurious aborts.
+// Test profiles — sub-30ms rounds for fast CI execution. Each `*_test`
+// profile mirrors its production counterpart's (chain_role, sharding_mode,
+// M, K) posture exactly. The only difference is the round-timer triple, so
+// CI exercises the same code paths a production deployment would.
+//
+// Test-runner tunable: if a loaded CI host triggers spurious aborts on
+// these timers, bump TEST_*_MS in this file (one-place change) rather
+// than per-test overrides.
 inline constexpr uint32_t TEST_TX_COMMIT_MS   = 5;
 inline constexpr uint32_t TEST_BLOCK_SIG_MS   = 5;
 inline constexpr uint32_t TEST_ABORT_CLAIM_MS = 3;
 
-inline constexpr TimingProfile PROFILE_CLUSTER_TEST {
+// SINGLE+NONE single-chain test profile. Used by tests that deploy one
+// chain (no beacon/shard split). No production counterpart — single-chain
+// deployments are inherently a degenerate of the sharding model — but
+// having a dedicated test profile keeps the single-chain regression suite
+// independent of any sharding wiring.
+inline constexpr TimingProfile PROFILE_SINGLE_TEST {
     TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 3,
     ChainRole::SINGLE, ShardingMode::NONE
 };
-inline constexpr TimingProfile PROFILE_WEB_TEST {
+
+// `cluster_test` mirrors prod `cluster`: BEACON + CURRENT, M=K=3 strong.
+inline constexpr TimingProfile PROFILE_CLUSTER_TEST {
     TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 3,
+    ChainRole::BEACON, ShardingMode::CURRENT
+};
+// `web_test` mirrors prod `web`: SHARD + EXTENDED, M=3 K=2 hybrid.
+inline constexpr TimingProfile PROFILE_WEB_TEST {
+    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 2,
     ChainRole::SHARD, ShardingMode::EXTENDED
 };
+// `regional_test` mirrors prod `regional`: SHARD + CURRENT, M=5 K=4 hybrid.
 inline constexpr TimingProfile PROFILE_REGIONAL_TEST {
-    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 3,
+    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 5, 4,
     ChainRole::SHARD, ShardingMode::CURRENT
 };
+// `global_test` mirrors prod `global`: BEACON + EXTENDED, M=7 K=5 hybrid.
 inline constexpr TimingProfile PROFILE_GLOBAL_TEST {
-    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 3,
-    ChainRole::SHARD, ShardingMode::EXTENDED
+    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 7, 5,
+    ChainRole::BEACON, ShardingMode::EXTENDED
 };
+// `tactical_test` mirrors prod `tactical`: SHARD + EXTENDED, M=K=3 strong.
 inline constexpr TimingProfile PROFILE_TACTICAL_TEST {
     TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 3,
     ChainRole::SHARD, ShardingMode::EXTENDED

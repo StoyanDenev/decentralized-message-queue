@@ -42,7 +42,7 @@ echo "=== 1. Init validator node + 2 spectator nodes (M=K=3) ==="
 # We need M >= 3 so a slashed validator drops below the K threshold and
 # the chain can continue on the others. Validators node1, node2, node3.
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile cluster_test 2>&1 | tail -1
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
   $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
     > $T/p$n.json
 done
