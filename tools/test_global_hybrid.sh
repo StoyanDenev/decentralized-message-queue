@@ -53,12 +53,12 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 2. Build BEACON genesis (M=K=3 strong; EXTENDED needs initial_shard_count=3) ==="
+echo "=== 2. Build BEACON genesis (M=K=2 for cold-start reliability; EXTENDED needs initial_shard_count=3) ==="
 cat > $T/gen.json <<EOF
 {
   "chain_id": "test-global-hybrid",
-  "m_creators": 3,
-  "k_block_sigs": 3,
+  "m_creators": 2,
+  "k_block_sigs": 2,
   "block_subsidy": 10,
   "chain_role": 1,
   "initial_shard_count": 3,
@@ -96,6 +96,12 @@ with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)
 configure_node 1 7771 8771 '["127.0.0.1:7772","127.0.0.1:7773"]'
 configure_node 2 7772 8772 '["127.0.0.1:7771","127.0.0.1:7773"]'
 configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
+
+# R2: BEACON+EXTENDED requires a shard_manifest at startup. Empty manifest
+# is fine — no SHARD_TIPs will arrive in this test (no shards running).
+for n in 1 2 3; do
+  echo '{"shards": []}' > $T/n$n/shard_manifest.json
+done
 
 echo
 echo "=== 4. Start 3 nodes ==="

@@ -30,6 +30,7 @@ json Config::to_json() const {
     j["key_path"]        = key_path;
     j["chain_path"]      = chain_path;
     j["snapshot_path"]   = snapshot_path;
+    j["shard_manifest_path"] = shard_manifest_path;
     j["genesis_path"]    = genesis_path;
     j["genesis_hash"]    = genesis_hash;
     j["m_creators"]              = m_creators;
@@ -61,6 +62,7 @@ Config Config::from_json(const json& j) {
     c.key_path        = j.value("key_path",       "");
     c.chain_path      = j.value("chain_path",     "");
     c.snapshot_path   = j.value("snapshot_path",  "");
+    c.shard_manifest_path = j.value("shard_manifest_path", "");
     c.genesis_path    = j.value("genesis_path",   "");
     c.genesis_hash    = j.value("genesis_hash",   "");
     c.m_creators      = j.value("m_creators",     uint32_t{3});
@@ -226,6 +228,83 @@ Node::Node(const Config& cfg)
                     return beacon_headers_[epoch_start_height - 1].cumulative_rand;
                 });
         }
+
+        // R2: BEACON-role nodes optionally load a shard manifest to learn
+        // per-shard committee_region. Required under EXTENDED (where region
+        // enforcement matters); optional under CURRENT (where every shard
+        // has committee_region == "" anyway). Manifest path defaults to
+        // <data_dir>/shard_manifest.json if cfg_.shard_manifest_path is empty.
+        if (cfg_.chain_role == ChainRole::BEACON) {
+            std::string mpath = cfg_.shard_manifest_path;
+            if (mpath.empty() && !cfg_.data_dir.empty())
+                mpath = cfg_.data_dir + "/shard_manifest.json";
+            bool extended =
+                (cfg_.sharding_mode == ShardingMode::EXTENDED);
+            std::ifstream mf(mpath);
+            if (!mf) {
+                if (extended) {
+                    throw std::runtime_error(
+                        "beacon (EXTENDED) requires shard_manifest at '"
+                        + mpath + "' — file not found. Set "
+                        "shard_manifest_path in config.json or pass "
+                        "--shard-manifest <path>");
+                }
+                // CURRENT / NONE: silent skip (region filter is a no-op anyway).
+            } else {
+                json mj;
+                try { mj = json::parse(mf); }
+                catch (std::exception& e) {
+                    throw std::runtime_error(
+                        std::string("shard_manifest parse error: ") + e.what());
+                }
+                if (!mj.is_object() || !mj.contains("shards")
+                    || !mj["shards"].is_array()) {
+                    throw std::runtime_error(
+                        "shard_manifest: expected {\"shards\": [...]}");
+                }
+                std::set<ShardId> seen;
+                for (auto& entry : mj["shards"]) {
+                    if (!entry.is_object()) {
+                        throw std::runtime_error(
+                            "shard_manifest: each entry must be an object");
+                    }
+                    ShardId sid = entry.value("shard_id", ShardId{0});
+                    std::string region = entry.value("committee_region", "");
+                    // Normalize + validate region (same rules as
+                    // genesis-load + REGISTER apply elsewhere).
+                    for (auto& c : region) {
+                        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+                    }
+                    if (region.size() > 32) {
+                        throw std::runtime_error(
+                            "shard_manifest: region too long (shard_id="
+                            + std::to_string(sid) + ", "
+                            + std::to_string(region.size()) + " > 32 bytes)");
+                    }
+                    for (char c : region) {
+                        bool ok = (c >= 'a' && c <= 'z')
+                               || (c >= '0' && c <= '9')
+                               || c == '-' || c == '_';
+                        if (!ok) {
+                            throw std::runtime_error(
+                                "shard_manifest: region for shard_id="
+                                + std::to_string(sid)
+                                + " contains forbidden character (charset is [a-z0-9-_])");
+                        }
+                    }
+                    if (!seen.insert(sid).second) {
+                        throw std::runtime_error(
+                            "shard_manifest: duplicate shard_id="
+                            + std::to_string(sid));
+                    }
+                    shard_committee_regions_[sid] = region;
+                }
+                std::cout << "[node] loaded shard_manifest with "
+                          << shard_committee_regions_.size() << " entries from "
+                          << mpath << "\n";
+            }
+        }
+
         gcfg_opt = std::move(gcfg);
     }
 
@@ -1119,7 +1198,16 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     }
 
     auto beacon_reg = NodeRegistry::build_from_chain(chain_, chain_.height());
-    auto pool_nodes = beacon_reg.sorted_nodes();
+    // R2: filter pool by this shard's committee_region (from manifest).
+    // Missing entry / empty manifest yields region == "" which
+    // eligible_in_region treats as "full pool" — preserves CURRENT-mode
+    // backward-compat where every shard is global.
+    std::string shard_region;
+    {
+        auto it = shard_committee_regions_.find(shard_id);
+        if (it != shard_committee_regions_.end()) shard_region = it->second;
+    }
+    auto pool_nodes = beacon_reg.eligible_in_region(shard_region);
 
     std::set<std::string> excluded;
     for (auto& ae : tip.abort_events) excluded.insert(ae.aborting_node);

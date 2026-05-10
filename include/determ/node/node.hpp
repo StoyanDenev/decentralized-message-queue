@@ -44,6 +44,14 @@ struct Config {
     // refuses to start on mismatch (eclipse defense).
     std::string              genesis_path;
     std::string              genesis_hash;
+    // R2: beacon-role nodes load a shard manifest at startup to learn each
+    // shard's committee_region. The manifest is required for BEACON-role
+    // nodes whose chain runs under sharding_mode=EXTENDED (otherwise
+    // on_shard_tip can't validate the region-filtered committee). Under
+    // CURRENT or NONE the field is meaningful but optional (degenerate:
+    // every shard has committee_region == "" so the filter is a no-op).
+    // Empty string means "use default path {data_dir}/shard_manifest.json".
+    std::string              shard_manifest_path;
     uint32_t                 m_creators{3};
     // K-of-M Phase 2 threshold. K = M = strong BFT (unanimity). K < M = weak
     // BFT (single non-signer tolerated). Loaded from GenesisConfig at chain
@@ -315,6 +323,13 @@ private:
     // committee derived from beacon's own validator pool + shard_id
     // salt. Used to populate BeaconBlock.shard_summaries (B3+).
     std::map<ShardId, chain::Block> latest_shard_tips_;
+
+    // R2: beacon-only. Per-shard committee_region loaded from the
+    // shard manifest at startup. Used by on_shard_tip to filter the
+    // pool before deriving the expected committee. Absent shard_id
+    // means committee_region == "" (global pool — backward-compat
+    // with CURRENT-mode chains that have no regional grouping).
+    std::map<ShardId, std::string>  shard_committee_regions_;
 
     // rev.9 B3.3: shard-only. Inbound cross-shard receipts addressed to
     // this shard. Populated when a CROSS_SHARD_RECEIPT_BUNDLE arrives

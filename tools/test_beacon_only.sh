@@ -55,6 +55,8 @@ done
 
 echo
 echo "=== 2. Build BEACON genesis (chain_role=1, M=K=2 — see header comment) ==="
+# bft_escalation_threshold=1 so any startup hiccup recovers within one
+# abort cycle rather than waiting for 5 cumulative aborts (the default).
 cat > $T/gen.json <<EOF
 {
   "chain_id": "test-beacon-only",
@@ -63,6 +65,8 @@ cat > $T/gen.json <<EOF
   "block_subsidy": 10,
   "chain_role": 1,
   "initial_shard_count": 1,
+  "bft_enabled": true,
+  "bft_escalation_threshold": 1,
   "initial_creators": [
 $(cat $T/p1.json | tr -d '\n'),
 $(cat $T/p2.json | tr -d '\n'),
