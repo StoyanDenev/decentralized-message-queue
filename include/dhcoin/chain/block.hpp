@@ -175,7 +175,8 @@ struct Block {
     std::vector<std::string>          creators;            // K domain names, selection order
     std::vector<std::vector<Hash>>    creator_tx_lists;    // K (Phase 1 tx_hashes lists)
     std::vector<Signature>            creator_ed_sigs;     // K (Phase 1 Ed25519 over commit)
-    std::vector<Hash>                 creator_dh_inputs;   // K (Phase 1 DH contributions)
+    std::vector<Hash>                 creator_dh_inputs;   // K (Phase 1 commits = SHA256(secret_i || pubkey_i))
+    std::vector<Hash>                 creator_dh_secrets;  // K (Phase 2 revealed secrets)
 
     Hash                     tx_root{};
     Hash                     delay_seed{};

@@ -26,6 +26,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_creators_registered(b, registry); !r.ok) return r;
     if (auto r = check_creator_selection(b, registry, chain); !r.ok) return r;
     if (auto r = check_creator_tx_commitments(b, registry); !r.ok) return r;
+    if (auto r = check_creator_dh_secrets(b, registry);  !r.ok) return r;
     if (auto r = check_abort_certs(b, chain, registry);  !r.ok) return r;
     if (auto r = check_equivocation_events(b, registry); !r.ok) return r;
     if (auto r = check_delay(b);                         !r.ok) return r;
@@ -293,15 +294,48 @@ BlockValidator::Result BlockValidator::check_equivocation_events(
     return {true, ""};
 }
 
+// rev.9 S-009: each creator_dh_secrets[i] must hash with creators[i]'s
+// pubkey to creator_dh_inputs[i] (the Phase-1 commit). This is the
+// commit-reveal step that closes selective-abort defense:
+//   commit_i = SHA256(secret_i || pubkey_i)
+// is signed in Phase 1 (by creator_ed_sigs[i]), so any post-Phase-1
+// substitution of secret_i would fail this check.
+BlockValidator::Result BlockValidator::check_creator_dh_secrets(
+    const Block& b, const NodeRegistry& registry) const {
+    if (b.creator_dh_secrets.size() != b.creators.size())
+        return {false, "creator_dh_secrets size != creators size"};
+    for (size_t i = 0; i < b.creators.size(); ++i) {
+        auto e = registry.find(b.creators[i]);
+        if (!e) return {false, "creator not found: " + b.creators[i]};
+        Hash expected = SHA256Builder{}
+            .append(b.creator_dh_secrets[i])
+            .append(e->pubkey.data(), e->pubkey.size())
+            .finalize();
+        if (expected != b.creator_dh_inputs[i])
+            return {false, "creator_dh_secret[" + std::to_string(i)
+                         + "] does not match commit"};
+    }
+    return {true, ""};
+}
+
 BlockValidator::Result BlockValidator::check_delay(const Block& b) const {
     Hash expected_seed = compute_delay_seed(b.index, b.prev_hash, b.tx_root,
                                               b.creator_dh_inputs);
     if (expected_seed != b.delay_seed)
         return {false, "delay_seed mismatch"};
-    if (delay_T_ == 0)
-        return {false, "validator delay_T not configured"};
-    if (!delay_hash_verify(b.delay_seed, delay_T_, b.delay_output))
-        return {false, "delay_output invalid"};
+
+    // rev.9 S-009: delay_output = SHA256(delay_seed || ordered_secrets).
+    // The selective-abort defense relies on each creator_dh_secrets[i]
+    // being the preimage of creator_dh_inputs[i] (= SHA256(secret||pubkey)),
+    // verified in check_creator_dh_secrets. Block hash binds delay_output
+    // and creator_dh_secrets via signing_bytes; sigs over block_digest
+    // don't directly cover delay_output but commit-reveal binds it
+    // uniquely (any tampering breaks the SHA256 commit-reveal check).
+    if (b.creator_dh_secrets.size() != b.creators.size())
+        return {false, "creator_dh_secrets size != creators size"};
+    Hash expected_output = compute_block_rand(b.delay_seed, b.creator_dh_secrets);
+    if (expected_output != b.delay_output)
+        return {false, "delay_output mismatch (commit-reveal)"};
     return {true, ""};
 }
 

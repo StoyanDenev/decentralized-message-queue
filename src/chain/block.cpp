@@ -181,6 +181,7 @@ std::vector<uint8_t> Block::signing_bytes() const {
     for (auto& s : creator_ed_sigs)
         b.append(s.data(), s.size());
     for (auto& h : creator_dh_inputs) b.append(h);
+    for (auto& h : creator_dh_secrets) b.append(h);
 
     b.append(tx_root);
     b.append(delay_seed);
@@ -286,6 +287,10 @@ json Block::to_json() const {
     for (auto& h : creator_dh_inputs) jdi.push_back(to_hex(h));
     j["creator_dh_inputs"] = jdi;
 
+    json jds = json::array();
+    for (auto& h : creator_dh_secrets) jds.push_back(to_hex(h));
+    j["creator_dh_secrets"] = jds;
+
     j["tx_root"]         = to_hex(tx_root);
     j["delay_seed"]      = to_hex(delay_seed);
     j["delay_output"]    = to_hex(delay_output);
@@ -346,6 +351,10 @@ Block Block::from_json(const json& j) {
     if (j.contains("creator_dh_inputs")) {
         for (auto& h : j["creator_dh_inputs"])
             b.creator_dh_inputs.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("creator_dh_secrets")) {
+        for (auto& h : j["creator_dh_secrets"])
+            b.creator_dh_secrets.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
 
     if (j.contains("tx_root"))

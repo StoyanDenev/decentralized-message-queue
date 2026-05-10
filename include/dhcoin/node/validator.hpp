@@ -63,6 +63,7 @@ private:
     Result check_creator_selection(const chain::Block& b, const NodeRegistry& registry,
                                    const chain::Chain& chain) const;
     Result check_creator_tx_commitments(const chain::Block& b, const NodeRegistry& registry) const;
+    Result check_creator_dh_secrets(const chain::Block& b, const NodeRegistry& registry) const;
     Result check_delay(const chain::Block& b) const;
     Result check_block_sigs(const chain::Block& b, const NodeRegistry& registry,
                              const chain::Chain& chain) const;

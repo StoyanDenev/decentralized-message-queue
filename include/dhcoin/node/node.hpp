@@ -260,6 +260,18 @@ private:
     Hash                                                     local_delay_output_{};
     std::thread                                              delay_worker_;
 
+    // rev.9 S-009: this node's fresh Phase-1 secret for the current
+    // round. Generated in start_contrib_phase, committed via
+    // SHA256(secret || pubkey) as ContribMsg.dh_input, revealed in
+    // Phase-2 BlockSigMsg.dh_secret. Reset on each round.
+    Hash                                                     current_round_secret_{};
+    // rev.9 S-009: peers' revealed secrets, gathered in Phase 2 via
+    // BlockSigMsg.dh_secret. Indexed by signer (committee member's
+    // domain). Verified against commit in pending_contribs_[signer].
+    // dh_input on receipt; aggregated at finalize into block.
+    // creator_dh_secrets in committee selection order.
+    std::map<std::string, Hash>                              pending_secrets_;
+
     // Phase 2 — BlockSig accumulation, gated to current round's delay_output.
     Hash                                                     current_delay_output_{};
     std::map<std::string, BlockSigMsg>                       pending_block_sigs_;

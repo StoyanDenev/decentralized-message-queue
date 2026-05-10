@@ -442,14 +442,27 @@ void Node::start_contrib_phase() {
     snap.reserve(tx_store_.size());
     for (auto& [h, _] : tx_store_) snap.push_back(h);
 
-    Hash dh_input{};
-    if (RAND_bytes(dh_input.data(), 32) != 1)
-        throw std::runtime_error("RAND_bytes failed for dh_input");
+    // rev.9 S-009: generate a fresh Phase-1 secret. The contribmsg's
+    // dh_input is now SHA256(secret || my_pubkey) — a commit, not the
+    // raw secret. The secret is held locally until Phase 2, when it's
+    // revealed in our BlockSigMsg.dh_secret. Selective-abort defense
+    // shifts to SHA-256 preimage resistance: an attacker cannot
+    // extract any honest member's secret from its commit during
+    // Phase 1, so they cannot precompute the eventual delay_output
+    // (which depends on all K secrets).
+    Hash my_secret{};
+    if (RAND_bytes(my_secret.data(), 32) != 1)
+        throw std::runtime_error("RAND_bytes failed for dh_secret");
+    current_round_secret_ = my_secret;
+    Hash my_commit = crypto::SHA256Builder{}
+        .append(my_secret)
+        .append(key_.pub.data(), key_.pub.size())
+        .finalize();
 
     ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
                                           block_index, prev_hash,
                                           current_aborts_.size(),
-                                          snap, dh_input);
+                                          snap, my_commit);
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 
@@ -591,8 +604,10 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
 
     BlockSigMsg my_sig = make_block_sig(key_, cfg_.domain,
                                          tentative.index,
-                                         delay_output, digest);
+                                         delay_output, digest,
+                                         current_round_secret_);
     pending_block_sigs_[cfg_.domain] = my_sig;
+    pending_secrets_[cfg_.domain]    = current_round_secret_;
     gossip_.broadcast(net::make_block_sig(my_sig));
 
     block_sig_timer_.expires_after(std::chrono::milliseconds(cfg_.block_sig_ms));
@@ -653,13 +668,27 @@ void Node::try_finalize_round() {
     std::vector<chain::CrossShardReceipt> inbound_snapshot;
     inbound_snapshot.reserve(pending_inbound_receipts_.size());
     for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
+
+    // rev.9 S-009: gather K revealed secrets in committee selection order.
+    // build_body uses these to populate creator_dh_secrets and recompute
+    // delay_output via compute_block_rand. We require all K secrets here
+    // (in MD mode); in BFT mode missing positions are filled with zero
+    // sentinels, but the proposer's secret (and all signers' secrets)
+    // must be present so the delay_output binds.
+    std::vector<Hash> ordered_secrets(current_creator_domains_.size(), Hash{});
+    for (size_t i = 0; i < current_creator_domains_.size(); ++i) {
+        auto sit = pending_secrets_.find(current_creator_domains_[i]);
+        if (sit != pending_secrets_.end()) ordered_secrets[i] = sit->second;
+    }
+
     chain::Block body = build_body(tx_store_, chain_, current_aborts_,
                                     current_creator_domains_,
                                     ordered_contribs,
                                     current_delay_output_,
                                     cfg_.m_creators, mode, proposer,
                                     pending_equivocation_evidence_,
-                                    inbound_snapshot);
+                                    inbound_snapshot,
+                                    ordered_secrets);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
     apply_block_locked(body);
@@ -1158,6 +1187,8 @@ void Node::reset_round() {
     pending_block_sigs_.clear();
     buffered_block_sigs_.clear();
     pending_claims_.clear();
+    pending_secrets_.clear();
+    current_round_secret_ = Hash{};
     current_tx_root_     = Hash{};
     current_delay_seed_  = Hash{};
     current_delay_output_= Hash{};
@@ -1492,7 +1523,26 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
         return;
     }
 
+    // rev.9 S-009: verify the revealed secret against the signer's
+    // Phase-1 commit (carried in pending_contribs_[signer].dh_input).
+    auto cit = pending_contribs_.find(msg.signer);
+    if (cit == pending_contribs_.end()) {
+        // No commit yet — buffer for later (the contrib may be in flight).
+        buffered_block_sigs_.push_back(msg);
+        return;
+    }
+    Hash expected_commit = crypto::SHA256Builder{}
+        .append(msg.dh_secret)
+        .append(entry->pubkey.data(), entry->pubkey.size())
+        .finalize();
+    if (expected_commit != cit->second.dh_input) {
+        std::cerr << "[node] BlockSig dh_secret/commit mismatch from "
+                  << msg.signer << "\n";
+        return;
+    }
+
     pending_block_sigs_[msg.signer] = msg;
+    pending_secrets_[msg.signer]    = msg.dh_secret;
 
     // Eager-finalize ONLY when we have all M sigs (the fast happy-path shared
     // by both modes). Finalizing on just K (when K<M) would race: different

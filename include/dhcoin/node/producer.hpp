@@ -59,12 +59,26 @@ AbortClaimMsg make_abort_claim(const crypto::NodeKey& key,
                                 const std::string& missing_creator);
 
 // ─── Phase 2 — BlockSig (after local delay-hash completes) ───────────────────
-// Each committee member publishes the delay-hash output and an Ed25519 sig
-// over the block digest. K parallel Ed25519 sigs authenticate the block.
+// Each committee member publishes the revealed Phase-1 secret and an
+// Ed25519 sig over the block digest. K parallel Ed25519 sigs authenticate
+// the block; each peer's revealed secret is bound to that peer's Phase-1
+// commit (carried as ContribMsg.dh_input = SHA256(secret || pubkey)).
+//
+// rev.9 S-009 closure: dh_secret is the commit-reveal mechanism that
+// replaces the SHA-256^T delay function. The selective-abort defense
+// shifts from compute-time (T iterations of SHA-256) to information-
+// theoretic (SHA-256 preimage resistance — an attacker cannot extract
+// any honest member's secret from its commit).
+//
+// delay_output = SHA256(delay_seed || ordered_secrets) is recomputed by
+// every node at finalize time; it's no longer in compute_block_digest
+// (so members can sign at Phase-2 entry without waiting for K-1 peer
+// secrets to gather first).
 struct BlockSigMsg {
     uint64_t              block_index{0};
     std::string           signer;
     Hash                  delay_output{};
+    Hash                  dh_secret{};   // rev.9 S-009: revealed secret
     Signature             ed_sig{};      // Ed25519 over block_digest
 
     nlohmann::json    to_json() const;
@@ -101,6 +115,13 @@ Hash compute_delay_seed(uint64_t block_index, const Hash& prev_hash,
 // produces an unverifiable sig.
 Hash compute_block_digest(const chain::Block& b);
 
+// rev.9 S-009: post-Phase-2 randomness output. delay_output is computed
+// from delay_seed (Phase-1 inputs commitment) plus the K revealed
+// secrets. ordered_secrets[i] must correspond to creators[i] (same
+// committee selection order as creator_dh_inputs).
+Hash compute_block_rand(const Hash& delay_seed,
+                          const std::vector<Hash>& ordered_secrets);
+
 // rev.8 BFT-mode designated proposer. Deterministic from
 // (prev_cumulative_rand ‖ abort_event_hashes) so the proposer rotates across
 // abort retries within the same height. Only used when consensus_mode == BFT.
@@ -130,7 +151,8 @@ BlockSigMsg make_block_sig(const crypto::NodeKey& key,
                             const std::string& domain,
                             uint64_t block_index,
                             const Hash& delay_output,
-                            const Hash& block_digest);
+                            const Hash& block_digest,
+                            const Hash& dh_secret);
 
 // Build the canonical block body. `m_pool_size` is the chain-wide registered
 // pool size from genesis (cfg_.m_creators); the K-committee is the size of
@@ -158,6 +180,12 @@ chain::Block build_body(
     // this block. Producer dedupes against the chain's
     // inbound_receipt_applied() set and includes those addressed to
     // this shard. SINGLE / BEACON producers should pass empty.
-    const std::vector<chain::CrossShardReceipt>& inbound_receipts = {});
+    const std::vector<chain::CrossShardReceipt>& inbound_receipts = {},
+    // rev.9 S-009: ordered Phase-2 secret reveals (one per committee
+    // member, same order as creator_domains). Empty when called for a
+    // pre-Phase-2 tentative digest computation; populated at finalize
+    // when K BlockSigMsgs have arrived. delay_output is recomputed
+    // from these (compute_block_rand) when non-empty.
+    const std::vector<Hash>&                  ordered_secrets = {});
 
 } // namespace dhcoin::node

@@ -103,6 +103,7 @@ json BlockSigMsg::to_json() const {
         {"block_index",  block_index},
         {"signer",       signer},
         {"delay_output", to_hex(delay_output)},
+        {"dh_secret",    to_hex(dh_secret)},
         {"ed_sig",       to_hex(ed_sig)}
     };
 }
@@ -112,6 +113,9 @@ BlockSigMsg BlockSigMsg::from_json(const json& j) {
     m.block_index  = j["block_index"].get<uint64_t>();
     m.signer       = j["signer"].get<std::string>();
     m.delay_output = from_hex_arr<32>(j["delay_output"].get<std::string>());
+    // rev.9 S-009: dh_secret defaulted to zero for old-format messages.
+    if (j.contains("dh_secret"))
+        m.dh_secret = from_hex_arr<32>(j["dh_secret"].get<std::string>());
     m.ed_sig       = from_hex_arr<64>(j["ed_sig"].get<std::string>());
     return m;
 }
@@ -203,13 +207,22 @@ size_t required_block_sigs(ConsensusMode mode, size_t committee_size) {
     return (2 * committee_size + 2) / 3;
 }
 
+// rev.9 S-009 closure: block_digest excludes delay_output. The delay
+// output is determined by Phase-2-revealed secrets which arrive after
+// digest signing — we cannot include them in the digest without a
+// chicken-and-egg waiting protocol. Safety holds because delay_output
+// is recomputed by every node from delay_seed (Phase-1 inputs, signed)
+// + creator_dh_secrets (each verifiable against the signed commit in
+// creator_dh_inputs[i]). The validator's recomputation rejects any
+// tampered delay_output. The block hash (via Block::signing_bytes)
+// still binds delay_output and creator_dh_secrets so block identity
+// is unique.
 Hash compute_block_digest(const Block& b) {
     SHA256Builder h;
     h.append(b.index);
     h.append(b.prev_hash);
     h.append(b.tx_root);
     h.append(b.delay_seed);
-    h.append(b.delay_output);
     h.append(static_cast<uint8_t>(b.consensus_mode));
     h.append(b.bft_proposer);
     for (auto& c : b.creators) h.append(c);
@@ -217,6 +230,17 @@ Hash compute_block_digest(const Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
+    return h.finalize();
+}
+
+// rev.9 S-009: post-Phase-2 randomness output. Computed once K secrets
+// gather. ordered_secrets[i] must correspond to creators[i] (same
+// committee selection order as creator_dh_inputs).
+Hash compute_block_rand(const Hash& delay_seed,
+                          const std::vector<Hash>& ordered_secrets) {
+    SHA256Builder h;
+    h.append(delay_seed);
+    for (auto& s : ordered_secrets) h.append(s);
     return h.finalize();
 }
 
@@ -251,11 +275,13 @@ BlockSigMsg make_block_sig(const NodeKey& key,
                             const std::string& domain,
                             uint64_t block_index,
                             const Hash& delay_output,
-                            const Hash& block_digest) {
+                            const Hash& block_digest,
+                            const Hash& dh_secret) {
     BlockSigMsg m;
     m.block_index  = block_index;
     m.signer       = domain;
     m.delay_output = delay_output;
+    m.dh_secret    = dh_secret;
     m.ed_sig       = sign(key, block_digest.data(), block_digest.size());
     return m;
 }
@@ -273,7 +299,8 @@ Block build_body(
     ConsensusMode                      mode,
     const std::string&                 bft_proposer_domain,
     const std::vector<EquivocationEvent>& equivocation_events,
-    const std::vector<CrossShardReceipt>& inbound_receipts) {
+    const std::vector<CrossShardReceipt>& inbound_receipts,
+    const std::vector<Hash>&              ordered_secrets) {
 
     Block b;
     b.index               = chain.empty() ? 1 : chain.height();
@@ -290,6 +317,17 @@ Block build_body(
         b.creator_dh_inputs.push_back(c.dh_input);
     }
 
+    // rev.9 S-009: when ordered_secrets is provided, the block is being
+    // built for finalization (try_finalize_round) — populate
+    // creator_dh_secrets and recompute delay_output as
+    // SHA256(delay_seed || ordered_secrets). When empty, the block is
+    // being built for a Phase-2 candidate digest sign (delay_output
+    // isn't in the digest, so its value at this stage is irrelevant —
+    // we still set it to the caller-provided value for compatibility,
+    // but signers don't bind it).
+    if (!ordered_secrets.empty())
+        b.creator_dh_secrets = ordered_secrets;
+
     // tx_root = union of K-committee tx_hashes lists. Same rule for both
     // K=M_pool (strong) and K<M_pool (hybrid). Censorship requires every
     // committee member to omit. Intersection is preserved as a helper for
@@ -297,15 +335,23 @@ Block build_body(
     (void)m_pool_size;
     b.tx_root        = compute_tx_root(b.creator_tx_lists);
     b.delay_seed     = compute_delay_seed(b.index, b.prev_hash, b.tx_root, b.creator_dh_inputs);
-    b.delay_output   = delay_output;
+    // rev.9 S-009: if secrets supplied (finalize path), derive delay_output
+    // from them. Otherwise (Phase-2 candidate digest), leave delay_output as
+    // caller-provided — block_digest excludes delay_output anyway.
+    b.delay_output   = ordered_secrets.empty()
+                        ? delay_output
+                        : compute_block_rand(b.delay_seed, ordered_secrets);
     b.consensus_mode = mode;
     b.bft_proposer   = bft_proposer_domain;
 
-    // cumulative_rand derives from the delay-hash output, not from any signature.
+    // cumulative_rand derives from the actual block delay_output (which
+    // is the commit-reveal output when secrets are populated, else the
+    // caller-provided value). Using b.delay_output keeps the validator
+    // and producer in sync regardless of which path set it.
     Hash prev_rand = chain.empty() ? Hash{} : chain.head().cumulative_rand;
     b.cumulative_rand = SHA256Builder{}
         .append(prev_rand)
-        .append(delay_output)
+        .append(b.delay_output)
         .finalize();
 
     // Resolve hashes to actual txs. The canonical set is the union of K
