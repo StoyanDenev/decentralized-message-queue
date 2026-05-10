@@ -740,6 +740,25 @@ Under `EXTENDED` sharding each shard's genesis pins a `committee_region`. Valida
 - **`EXTENDED`** for deployments where in-shard latency matters (interactive payments, regional consortiums) and operators are explicit about regional trust assumptions.
 - **`NONE`** for tests and single-chain demos.
 
+**Region taxonomy.** The protocol enforces only that `region` and `committee_region` strings are ASCII-lowercase, charset `[a-z0-9-_]`, max 32 bytes. Operators are free to use any labels within that charset. A recommended geographic taxonomy:
+
+- `us-east`, `us-west` — North America
+- `eu-west`, `eu-central` — Europe
+- `apac-east`, `apac-south` — Asia-Pacific
+- `sa-east` — South America
+
+Closed deployments (consortium, enterprise) commonly use custom labels (`bank-cluster-1`, `branch-tokyo`, etc.). The genesis hash includes `committee_region`, so two shards with the same `shard_id` but different region claims have distinct chain identities.
+
+**`num_shards >= 3` invariant.** A deployment that pins `sharding_mode = EXTENDED` must declare `initial_shard_count >= 3` in genesis. Smaller deployments would expose cascading-merge undefined behavior under the v1 under-quorum recovery mechanism (S-038 mitigation; see `docs/SECURITY.md`). The invariant is enforced both at `genesis-tool build-sharded` time and at node startup.
+
+**REGISTER tx region field.** A validator joining an `EXTENDED` chain declares its region in the REGISTER tx payload:
+
+```
+REGISTER payload = [pubkey: 32B] [region_len: u8] [region: utf8 bytes]
+```
+
+Legacy payload (`region_len = 0`, no trailing bytes) is wire-compatible — it means "global pool", which is the implicit default for non-`EXTENDED` chains. New `EXTENDED` deployments set the region explicitly. The tx's own Ed25519 signature binds the region into the tx hash via `Transaction::signing_bytes()`.
+
 `shard_id_for_address` is unchanged: `first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S`. Account-region affinity is application-level — addresses can be ground for a target shard if locality matters.
 
 ### 17.6 Censorship + safety claims under sharding
@@ -837,4 +856,3 @@ The protocol is intentionally minimal: two consensus message types per block, on
 5. Hanke, T., Movahedi, M., Williams, D. "DFINITY Technology Overview Series, Consensus System." 2018.
 6. Yakovenko, A. "Solana: A new architecture for a high performance blockchain." 2018.
 7. Boneh, D., Bonneau, J., Bünz, B., Fisch, B. "Verifiable Delay Functions." CRYPTO 2018. (Theoretical context for sequential-delay primitives. Determ's iterated SHA-256 satisfies the sequentiality requirement without the succinct-verify property of true VDFs.)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         

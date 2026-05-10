@@ -41,7 +41,7 @@ struct Transaction {
     uint64    amount;         // TRANSFER + STAKE
     uint64    fee;            // every type
     uint64    nonce;          // sequential per-account
-    bytes     payload;        // type-specific (REGISTER carries 32-byte ed_pub)
+    bytes     payload;        // type-specific (see §3.5 for REGISTER, §3.4 for TRANSFER)
     Signature sig;            // Ed25519 over signing_bytes()
     Hash      hash;           // = compute_hash() = SHA256(signing_bytes() || sig)
 };
@@ -88,6 +88,20 @@ SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
 | **JSON text** | Quick prototyping, human-readable memos. | Verbose; rarely fits non-trivial structures within 32 bytes. Discouraged for production. |
 
 For multi-app interoperability, a fixed-prefix tag (e.g. the first byte being a registered application identifier, the rest being that app's encoding) is the recommended convention. The protocol enforces nothing here — it is purely a coordination mechanism between applications sharing the chain.
+
+### 3.5 REGISTER payload
+
+```
+REGISTER payload = [pubkey: 32 bytes] [region_len: u8] [region: utf8 bytes]
+```
+
+- `pubkey`: the Ed25519 public key being registered. The tx's own `sig` (over `signing_bytes()`) is signed by the corresponding private key, serving as proof-of-possession.
+- `region_len`: u8 byte counting the trailing region string. `0` means no region tag (the global pool / legacy backward-compat path).
+- `region`: opaque ASCII-lowercase string, charset `[a-z0-9-_]`, at most 32 bytes. Normalized to lowercase before storage and hashing, so case-mixed payloads round-trip stable.
+
+Legacy REGISTER payloads (32 bytes exactly, just the pubkey) are wire-compatible — the trailing `region_len` byte is absent and the validator treats it as `region_len = 0`. A REGISTER tx with `payload.size() > 32 + 1 + 32` is rejected.
+
+The region is mirrored from the REGISTER tx into the registry. `eligible_in_region(R)` (§5.2) reads it during committee selection.
 
 ## 4. Block format
 
@@ -195,11 +209,16 @@ seed          = epoch_committee_seed(epoch_rand, shard_id)
               = SHA256(epoch_rand || "shard-committee" || shard_id (u64))
 rand          = seed, then mixed with each abort_event in order:
               = SHA256(prev_rand || abort_event.event_hash)
+pool          = eligible_in_region(chain.committee_region)
 indices       = select_m_creators(rand, |pool|, K)
 committee[i]  = pool[indices[i]]
 ```
 
-`pool` is the list of registered+active+staked-≥-min_stake-not-suspended validators, sorted by domain string.
+`pool` is the list of registered+active+staked-≥-min_stake-not-suspended validators, sorted by domain string, then filtered by region. `eligible_in_region(R)` returns:
+- The full eligible pool when `R == ""` (default — global committee, used by `ShardingMode::NONE` and `CURRENT`).
+- Only validators whose registered `region` matches `R` when `R != ""` (used by `ShardingMode::EXTENDED` per-shard).
+
+Region matching is exact-string after ASCII-lowercase normalization. The chain's `committee_region` is pinned in `GenesisConfig` and bound into the genesis hash, so two shards with the same `shard_id` but different region claims have distinct chain identities. Validators with no region tag (`region == ""`) are eligible only for chains whose `committee_region == ""`.
 
 ### 5.3 BFT escalation (rev.8)
 If a round accumulates `bft_escalation_threshold` (default 5) round-1 aborts at the same height AND `bft_enabled` is true AND the available pool is < K, the next round produces a `consensus_mode = BFT` block. Required signatures drop to `ceil(2K/3)`. A `bft_proposer` is deterministically chosen as `committee[proposer_idx(seed, abort_events, K)]`. The proposer must sign; up to `K - ceil(2K/3)` other positions may carry sentinel-zero signatures.
