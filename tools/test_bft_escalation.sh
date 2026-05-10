@@ -129,8 +129,12 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 5. Warm-up 20s with all 3 alive (expect MD blocks only) ==="
-sleep 20
+echo "=== 5. Warm-up: poll until chain advances (>= 3 blocks) ==="
+for _ in $(seq 1 30); do
+  H_PRE=$(get_height 8771)
+  if [ "$H_PRE" != "-" ] && [ "$H_PRE" -ge 3 ] 2>/dev/null; then break; fi
+  sleep 0.2
+done
 H_PRE=$(get_height 8771)
 read MD_PRE BFT_PRE <<< "$(count_bft_blocks 1)"
 echo "  pre-kill: height=$H_PRE  MD-blocks=$MD_PRE  BFT-blocks=$BFT_PRE"
@@ -145,12 +149,15 @@ echo "  node3 killed; with threshold=2 the chain should produce BFT blocks"
 echo "  after 2 round-1 aborts at the same height."
 
 echo
-echo "=== 7. Wait 60s for escalation ==="
-for i in 1 2 3 4 5 6; do
-  sleep 10
-  H_NOW=$(get_height 8771)
+echo "=== 7. Poll up to 30s for escalation (break early on first BFT block) ==="
+for i in $(seq 1 60); do
+  sleep 0.5
   read MD_NOW BFT_NOW <<< "$(count_bft_blocks 1)"
-  echo "  [t=$((20 + i*10))s] height=$H_NOW  MD-blocks=$MD_NOW  BFT-blocks=$BFT_NOW"
+  if [ "$BFT_NOW" -gt 0 ]; then
+    H_NOW=$(get_height 8771)
+    echo "  BFT block seen after ${i}*0.5s: height=$H_NOW  MD=$MD_NOW  BFT=$BFT_NOW"
+    break
+  fi
 done
 
 H_FINAL=$(get_height 8771)

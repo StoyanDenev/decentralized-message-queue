@@ -100,7 +100,15 @@ NODE_PIDS[1]=$!; sleep 0.3
 $DHCOIN start --config $T/donor3/config.json > $T/donor3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
-sleep 20
+# Poll until donor chain produces a few blocks (need state to snapshot).
+for _ in $(seq 1 50); do
+  DONOR_H=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+             | python -c "import sys,json
+try: print(json.load(sys.stdin).get('height',0))
+except: print(0)")
+  if [ "$DONOR_H" -ge 5 ] 2>/dev/null; then break; fi
+  sleep 0.2
+done
 DONOR_H=$($DHCOIN status --rpc-port 8771 2>/dev/null \
            | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  donor chain height: $DONOR_H"
@@ -153,7 +161,16 @@ echo
 echo "=== 7. Start receiver ==="
 NODE_PIDS=("")
 $DHCOIN start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
-NODE_PIDS[0]=$!; sleep 5
+NODE_PIDS[0]=$!; sleep 0.3
+# Poll until receiver finishes loading the snapshot (head_hash populated).
+for _ in $(seq 1 50); do
+  RH=$($DHCOIN status --rpc-port 8799 2>/dev/null \
+        | python -c "import sys,json
+try: print(json.load(sys.stdin).get('head_hash',''))
+except: print('')")
+  if [ -n "$RH" ]; then break; fi
+  sleep 0.2
+done
 
 echo
 echo "=== 8. Verify receiver bootstrapped from snapshot ==="

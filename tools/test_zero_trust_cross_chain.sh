@@ -152,8 +152,16 @@ $DHCOIN start --config $T/shard/n2/config.json > $T/shard/n2/log 2>&1 &
 NODE_PIDS[3]=$!; sleep 0.3
 
 echo
-echo "=== 5. Wait 30s for both chains to produce blocks + cross-chain to flow ==="
-sleep 30
+echo "=== 5. Poll until both chains produce blocks + cross-chain gossip flows ==="
+for _ in $(seq 1 80); do
+  BH=$(get_status_field 8771 height); SH=$(get_status_field 8781 height)
+  if [ "$BH" != "-" ] && [ "$SH" != "-" ] && [ "$BH" -ge 5 ] 2>/dev/null && [ "$SH" -ge 5 ] 2>/dev/null; then
+    SR=$(grep "beacon header at h=" $T/shard/n1/log 2>/dev/null | wc -l | tr -d ' ')
+    BR=$(grep "shard tip:" $T/beacon/n1/log 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$SR" -gt 0 ] && [ "$BR" -gt 0 ]; then break; fi
+  fi
+  sleep 0.2
+done
 
 BEACON_H=$(get_status_field 8771 height)
 BEACON_TIPS=$(get_status_field 8771 tracked_shard_tips)

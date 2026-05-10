@@ -166,8 +166,14 @@ $DHCOIN start --config $T/shard/n2/config.json > $T/shard/n2/log 2>&1 &
 NODE_PIDS[3]=$!; sleep 0.3
 
 echo
-echo "=== 6. Wait 30s for both chains to produce blocks independently ==="
-sleep 30
+echo "=== 6. Poll until both chains produce blocks (height >= 3 each) ==="
+for _ in $(seq 1 60); do
+  BH=$(get_status_field 8771 height); SH=$(get_status_field 8781 height)
+  if [ "$BH" != "-" ] && [ "$SH" != "-" ] && [ "$BH" -ge 3 ] 2>/dev/null && [ "$SH" -ge 3 ] 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
 
 BEACON_HEIGHT=$(get_status_field 8771 height)
 BEACON_ROLE=$(get_status_field 8771 chain_role)

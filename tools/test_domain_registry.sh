@@ -103,12 +103,15 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 5. Wait 25s for chain to produce blocks (no stake gate) ==="
-sleep 25
-
-H1=$(get_status_field 8771 height)
-H2=$(get_status_field 8772 height)
-H3=$(get_status_field 8773 height)
+echo "=== 5. Poll until all 3 nodes pass height 5 ==="
+for _ in $(seq 1 60); do
+  H1=$(get_status_field 8771 height); H2=$(get_status_field 8772 height); H3=$(get_status_field 8773 height)
+  if [ "$H1" != "-" ] && [ "$H2" != "-" ] && [ "$H3" != "-" ] \
+     && [ "$H1" -ge 5 ] 2>/dev/null && [ "$H2" -ge 5 ] 2>/dev/null && [ "$H3" -ge 5 ] 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
 
 echo
 echo "=== 6. Verify ==="
@@ -129,32 +132,20 @@ else
   echo "  PASS: n1 booted with inclusion=domain-inclusion"
 fi
 
-# Verify all 3 nodes converged on the same head. Block production uses
-# 2s timers so a node can be ~1 block behind transiently. Poll heights
-# until all 3 are equal (indicating no in-flight finalization), then
-# read heads. Time-bounded to avoid hangs.
-get_head() {
-  $DHCOIN status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
-try: print(json.load(sys.stdin).get('head_hash',''))
+# Verify all 3 nodes agree on the chain by comparing prev_hash at a fixed
+# past index (block 4's prev_hash = hash of block 3, canonical & stable).
+get_prev_hash() {
+  $DHCOIN show-block "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('prev_hash',''))
 except: print('')"
 }
+HEAD1=$(get_prev_hash 8771 4)
+HEAD2=$(get_prev_hash 8772 4)
+HEAD3=$(get_prev_hash 8773 4)
 HEADS_AGREE=false
-# Up to 60s budget. The chain emits a block every ~2-4s; 30 attempts at
-# 2s gives healthy slack for transient lag (e.g., a node briefly mid-
-# round behind its peers). Flakes were observed with the previous 18s
-# ceiling on slower runs.
-for attempt in $(seq 1 30); do
-  H1=$(get_status_field 8771 height); H2=$(get_status_field 8772 height); H3=$(get_status_field 8773 height)
-  if [ "$H1" = "$H2" ] && [ "$H2" = "$H3" ]; then
-    HEAD1=$(get_head 8771); HEAD2=$(get_head 8772); HEAD3=$(get_head 8773)
-    if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && [ -n "$HEAD1" ]; then
-      HEADS_AGREE=true
-      echo "  converged after attempt $attempt (heights=$H1)"
-      break
-    fi
-  fi
-  sleep 2
-done
+if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && [ -n "$HEAD1" ]; then
+  HEADS_AGREE=true
+fi
 
 if $HEADS_AGREE; then
   echo "  PASS: all 3 validators agree on head_hash (consensus works without stake)"

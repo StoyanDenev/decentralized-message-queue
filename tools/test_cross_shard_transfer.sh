@@ -217,8 +217,15 @@ $DHCOIN start --config $T/shard1/config.json > $T/shard1/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 echo
-echo "=== 6. Wait 15s for chains to start producing ==="
-sleep 15
+echo "=== 6. Poll until chains start producing blocks ==="
+for _ in $(seq 1 60); do
+  BH=$(get_status_field 8771 height); S0=$(get_status_field 8781 height); S1=$(get_status_field 8782 height)
+  if [ "$BH" != "-" ] && [ "$S0" != "-" ] && [ "$S1" != "-" ] \
+     && [ "$BH" -ge 2 ] 2>/dev/null && [ "$S0" -ge 2 ] 2>/dev/null && [ "$S1" -ge 2 ] 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
 
 BEACON_H=$(get_status_field 8771 height)
 SHARD0_H=$(get_status_field 8781 height)
@@ -235,8 +242,12 @@ echo "=== 7. TRANSFER 50 from A (shard 0) to B (shard 1) via send_anon ==="
 $DHCOIN send_anon "$B_ADDR" 50 "$A_PRIV" --rpc-port 8781
 
 echo
-echo "=== 8. Wait 25s for cross-shard credit to land ==="
-sleep 25
+echo "=== 8. Poll up to 30s for cross-shard credit to land ==="
+for _ in $(seq 1 150); do
+  B_BAL_NOW=$(get_account_balance 8782 "$B_ADDR")
+  if [ "$B_BAL_NOW" = "50" ]; then break; fi
+  sleep 0.2
+done
 
 echo
 echo "=== 9. Verify ==="

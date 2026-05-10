@@ -121,8 +121,12 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 7. Wait 25s for sync + a few blocks ==="
-sleep 25
+echo "=== 7. Poll until chain advances (height >= 3) ==="
+for _ in $(seq 1 30); do
+  H=$(get_height 8771)
+  if [ "$H" != "-" ] && [ "$H" -ge 3 ] 2>/dev/null; then break; fi
+  sleep 0.2
+done
 
 echo "  heights: n1=$(get_height 8771) n2=$(get_height 8772) n3=$(get_height 8773)"
 echo "  A balance @ n1: $(get_balance 8771 $A_ADDR)  (expected: 100, from genesis)"

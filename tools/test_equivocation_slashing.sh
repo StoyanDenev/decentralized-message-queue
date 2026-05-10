@@ -104,8 +104,15 @@ $DHCOIN start --config $T/n3/config.json > $T/n3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 echo
-echo "=== 5. Wait 15s for chain to advance + grab a block_index for evidence ==="
-sleep 15
+echo "=== 5. Poll until chain advances (height >= 3) ==="
+for _ in $(seq 1 50); do
+  HEIGHT_PRE=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+                | python -c "import sys,json
+try: print(json.load(sys.stdin).get('height',0))
+except: print(0)")
+  if [ "$HEIGHT_PRE" -ge 3 ] 2>/dev/null; then break; fi
+  sleep 0.2
+done
 HEIGHT_PRE=$($DHCOIN status --rpc-port 8771 2>/dev/null \
               | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  chain height pre-submission: $HEIGHT_PRE"
@@ -180,8 +187,8 @@ echo "=== 8. Poll up to 60s for evidence to be baked into a block + applied ==="
 # gossip converges).
 STAKE_POST="-"
 HEIGHT_POST="$HEIGHT_PRE"
-for attempt in $(seq 1 30); do
-  sleep 2
+for attempt in $(seq 1 120); do
+  sleep 0.5
   STAKE_POST=$($DHCOIN stake_info node1 --rpc-port 8771 2>/dev/null \
                 | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))")
   HEIGHT_POST=$($DHCOIN status --rpc-port 8771 2>/dev/null \
