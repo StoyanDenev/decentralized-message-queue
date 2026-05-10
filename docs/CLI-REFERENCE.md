@@ -9,7 +9,7 @@ All `dhcoin` subcommands. Run `dhcoin --help` for the canonical built-in help.
 | `dhcoin init [--data-dir D] [--profile P]` | Generate config + Ed25519 keypair in a fresh data dir |
 | `dhcoin start --config FILE` | Run the node daemon (foreground) |
 
-Profiles: `web` (default), `mobile`, `desktop` (delay-hash iteration counts differ).
+Profiles: `cluster` (LAN), `web` (default), `regional`, `global` — differ in round timer durations (`tx_commit_ms`, `block_sig_ms`, `abort_claim_ms`).
 
 ## Inspection (block-explorer)
 

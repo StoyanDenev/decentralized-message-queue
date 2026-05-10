@@ -10,11 +10,11 @@
 
 ## Abstract
 
-DHCoin is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase, K-of-K unanimous co-creation protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals and a freshly-generated DH input under an Ed25519 signature, and a **BlockSig phase** in which each committee member, after locally evaluating a sequential **delay-hash** (T iterations of SHA-256) over the joint Phase 1 commitments, signs the resulting block digest. A block is final when all K committee Ed25519 signatures are present.
+DHCoin is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase, K-of-K unanimous co-creation protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
 
 Two design choices distinguish DHCoin from prior fork-free systems:
 
-1. **Sequentially-blinded selective abort.** The block's randomness is `R = delay_hash(seed, T)` — T iterations of SHA-256, where the seed binds every committee member's Phase 1 commitment. A committee member deciding whether to publish their Phase 1 contribution cannot pre-compute `R` because SHA-256 is inherently sequential and `T` exceeds the Phase 1 window. Selective abort — the canonical attack on aggregate-signature randomness beacons — is cryptographically defeated, not just economically discouraged.
+1. **Commit-reveal selective-abort defense.** The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` is committed-then-revealed: in Phase 1 every committee member commits to a 32-byte secret via `SHA256(secret ‖ pubkey)`; in Phase 2 they reveal. A committee member deciding whether to publish their Phase 1 commitment cannot predict `R` because the other K−1 secrets are still uniformly random under SHA-256 preimage resistance. Selective abort — the canonical attack on aggregate-signature randomness beacons — is cryptographically defeated, not just economically discouraged.
 
 2. **Union transaction set within the committee.** A transaction is included in block `n` if at least one committee member contributes it in Phase 1. Censorship requires every committee member to collude — a `K`-conjunction property that scales exponentially in `K`.
 
@@ -28,7 +28,7 @@ Most blockchain consensus protocols separate block proposal from finalization. A
 
 DHCoin takes a different approach: a small committee of `K` creators co-produces every block, and each block carries `K` independently-signed authenticators. A valid block requires all `K` signatures over the same digest. There is no proposer to censor and no quorum threshold to game — the only way to prevent block production is to make at least one committee member silent, which the protocol detects and reroutes around.
 
-The protocol's randomness is supplied by a **sequential delay-hash** — T iterations of SHA-256 — rather than an aggregate signature or a randomness beacon. The delay-hash's sequentiality is what defeats selective abort: at the moment a committee member decides whether to contribute, the resulting randomness is not yet computable, because evaluating the delay-hash takes longer than the Phase 1 window.
+The protocol's randomness is supplied by a **commit-reveal protocol** rather than an aggregate signature or a randomness beacon. Phase 1 seals each member's contribution to `R` under a SHA-256 commitment; Phase 2 reveals. At the moment a committee member decides whether to contribute, the K−1 other secrets are still uniformly random — preimage resistance makes `R` unpredictable until reveals gather, defeating selective abort.
 
 This design has three consequences worth highlighting:
 
@@ -36,7 +36,7 @@ This design has three consequences worth highlighting:
 
 2. **Censorship resistance is structural.** Each committee member independently proposes transactions in Phase 1. The block's transaction root is the union of all committee proposals. A transaction is excluded only if every one of the `K` committee members colludes — probability `(f/N)^K` for adversarial fraction `f/N`.
 
-3. **Randomness is unbiasable.** The delay-hash binds every committee member's Phase 1 commitment into the seed. Once Phase 1 closes, the randomness is determined; before Phase 1 closes, no one — including the committee — can predict it because evaluating the delay-hash takes longer than the Phase 1 window.
+3. **Randomness is unbiasable.** Each member's Phase 1 commitment is sealed before any reveals; the K-of-K finalization gate ensures all K secrets are revealed together (or none, in which case the round aborts). No member can adapt their secret to the Phase-1 commitments of others — they were chosen first.
 
 ---
 
@@ -79,7 +79,7 @@ The mutual-distrust model rests on:
 
 2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship). The K-way unanimous collusion required to censor is fragile because each colluder has standing incentive to defect.
 
-3. **No predictability of consequence.** The block's randomness `R = SHA-256^T(seed)` is committed-then-revealed: every committee member's `dh_input` is part of the seed, but `R` is not computable until after Phase 1 closes (the delay-hash takes longer than the Phase 1 window). A committee member deciding whether to participate cannot compute whether participation favors them — selective abort is cryptographically defeated.
+3. **No predictability of consequence.** The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` is computed only once K Phase-2 reveals gather. In Phase 1, each member only sees others' commitments `SHA256(secret_j ‖ pubkey_j)`; under SHA-256 preimage resistance the underlying secrets remain uniformly random. A committee member deciding whether to participate cannot compute whether participation favors them — selective abort is cryptographically defeated.
 
 ### 2.3 Trade-off vs. BFT
 
@@ -91,7 +91,7 @@ DHCoin gives up `f < N/3` Byzantine *liveness* tolerance — a single silent com
 
 **Network assumptions.** We assume a partially synchronous network: messages are delivered within some known bound `Δ` during normal operation. The protocol tolerates periods of asynchrony by aborting and restarting rounds. Safety does not require synchrony — an invalid block is rejected regardless of message ordering.
 
-**Adversary model.** Concretely, an adversary may control any subset of `N` registered nodes (no fraction bound assumed for safety). Corrupted nodes may deviate arbitrarily from the protocol, delay messages within `Δ`, and choose which Phase 1 contributions to publish. The adversary cannot forge Ed25519 signatures or break SHA-256, and cannot evaluate the iterated SHA-256 delay-hash faster than its inherent sequential bound. Liveness — but not safety — degrades as adversary fraction approaches 100%.
+**Adversary model.** Concretely, an adversary may control any subset of `N` registered nodes (no fraction bound assumed for safety). Corrupted nodes may deviate arbitrarily from the protocol, delay messages within `Δ`, and choose which Phase 1 contributions to publish. The adversary cannot forge Ed25519 signatures or break SHA-256 (preimage or collision resistance). Liveness — but not safety — degrades as adversary fraction approaches 100%.
 
 **Safety assumption.** Safety (no two valid blocks at the same height) holds unconditionally — it is enforced by the K-of-K signature requirement over the same block digest.
 
@@ -145,7 +145,7 @@ ContribMsg {
     signer      : string
     prev_hash   : [32]
     tx_hashes   : []Hash       // sorted ascending unique
-    dh_input    : [32]         // freshly-generated, contributes to delay-hash seed
+    dh_input    : [32]         // SHA256(secret_i ‖ pubkey_i) — Phase-1 commitment to the per-round secret
     aborts_gen  : uint64       // current_aborts.size() at sender
     ed_sig      : [64]         // Ed25519 over (idx ‖ prev_hash ‖ H(tx_hashes) ‖ dh_input)
 }
@@ -157,7 +157,8 @@ ContribMsg {
 BlockSigMsg {
     block_index : uint64
     signer      : string
-    delay_output: [32]
+    delay_output: [32]         // SHA256(delay_seed) at this stage; final R recomputed once K secrets gather
+    dh_secret   : [32]         // Phase-2 reveal — must satisfy SHA256(dh_secret ‖ signer.pubkey) == sender's Phase-1 dh_input
     ed_sig      : [64]         // Ed25519 over block_digest
 }
 ```
@@ -190,10 +191,11 @@ Block {
     creators          : []string           // committee, selection order
     creator_tx_lists  : [][]Hash           // K' Phase 1 hash lists
     creator_ed_sigs   : [][64]             // K' Phase 1 commit sigs
-    creator_dh_inputs : [][32]             // K' Phase 1 randomness contributions
+    creator_dh_inputs : [][32]             // K' Phase 1 commitments to per-round secrets
+    creator_dh_secrets: [][32]             // K' Phase 2 revealed secrets (each verified against the matching dh_input)
     tx_root           : [32]               // root over union(creator_tx_lists)
     delay_seed        : [32]               // H(idx ‖ prev_hash ‖ tx_root ‖ dh_inputs)
-    delay_output      : [32]               // R = SHA-256^T(delay_seed)
+    delay_output      : [32]               // R = SHA256(delay_seed ‖ ordered_dh_secrets)
     consensus_mode    : uint8              // 0 = MUTUAL_DISTRUST (K-of-K), 1 = BFT
     bft_proposer      : string             // empty in MD blocks
     creator_block_sigs: [][64]             // K' Phase 2 Ed25519 sigs over block_digest
@@ -221,7 +223,6 @@ GenesisConfig {
     m_creators          : uint64    // M_pool: registered creator pool size
     k_block_sigs        : uint64    // K: committee size per round, 1 ≤ K ≤ M_pool
     block_subsidy       : uint64    // page reward in atomic units
-    delay_T             : uint64    // delay-hash iteration count (chain-wide)
     initial_creators    : []GenesisCreator
     initial_balances    : []GenesisAlloc
 }
@@ -305,14 +306,14 @@ committee  = [available[i] : i in indices]
 When a node finds itself in the round's committee (and the chain is in-sync), it:
 
 1. Snapshots its mempool: `tx_hashes = sorted(keys(tx_store))`.
-2. Generates a fresh `dh_input` from a CSPRNG.
+2. Generates a fresh 32-byte secret `s_i` from a CSPRNG and computes the commitment `dh_input = SHA256(s_i ‖ pubkey_i)`. The secret is held locally until Phase 2.
 3. Computes the commit: `H(idx ‖ prev_hash ‖ H(tx_hashes) ‖ dh_input)`.
 4. Signs the commit under its Ed25519 key.
 5. Broadcasts `ContribMsg`.
 
-Receiving nodes verify the signature and the message gen, store the contrib, and proceed to local delay-hash when all `K` committee contribs are present.
+Receiving nodes verify the signature and store the contrib. When all `K` committee contribs are present, the round transitions immediately into Phase 2.
 
-### 7.2 Local delay-hash
+### 7.2 Phase 1 → Phase 2 transition
 
 Once `K` valid contribs are accumulated, every node (regardless of whether it is a committee member) derives:
 
@@ -321,28 +322,21 @@ tx_root    = root(union(creator_tx_lists))           // union of K hash lists
 delay_seed = H(idx ‖ prev_hash ‖ tx_root ‖ dh_inputs[K])
 ```
 
-The delay-hash is computed in a worker thread:
-
-```
-R = delay_hash(delay_seed, T) = SHA-256^T(delay_seed)
-```
-
-`T` is the chain-wide iteration count fixed in `GenesisConfig`. SHA-256 is inherently sequential — extra cores do not parallelize it. Verification reruns the same `T` iterations (~2 ms at `T = 200k` with SHA-NI hardware acceleration), so no separate proof field is needed.
+The transition is immediate (no wall-clock delay). Selective-abort defense comes from the commit-reveal binding: in Phase 1 each member's secret is sealed under `SHA256(secret ‖ pubkey)`, so when a member decides whether to publish their commitment they cannot predict the eventual `R` — the K−1 other secrets remain uniformly random under SHA-256 preimage resistance.
 
 ### 7.3 Latency optimizations
 
-- **O1 piggyback.** The first node to finish its delay-hash broadcasts `BlockSigMsg`. Other nodes verify the embedded `delay_output` against their own derived seed (one rerun of `T` SHA-256 iterations); on success they cancel their in-flight worker and adopt the verified `R`. Wall-clock delay-hash cost across the cluster collapses to the fastest single node.
-- **O2 async worker.** Delay-hash runs on a dedicated thread; the consensus thread continues handling gossip, mempool, and chain state.
-- **O3 buffer-and-replay.** `BlockSigMsg`s arriving before local delay-hash completes are buffered and replayed once the result (own or verified peer) is available.
-- **O4 Delay-driven Phase 2 timer.** Phase 2 timer fires from `min(local_delay_done_time, peer_R_arrival_time) + block_sig_ms`, not from a fixed wall-clock budget.
-- **O5 round pipelining.** Round `n+1`'s Phase 1 starts immediately after applying block `n` locally; previous-round gossip propagation continues in parallel.
-- **O7 own-Contrib pre-publish.** A creator's own Phase 1 contribution can be assembled and broadcast as soon as `prev_hash` is known, eliminating own-side latency from the Phase 1 budget.
+- **Buffer-and-replay.** `BlockSigMsg`s that arrive before this node has assembled its own K Phase-1 contribs are buffered and replayed once the round transitions into Phase 2.
+- **Round pipelining.** Round `n+1`'s Phase 1 starts immediately after applying block `n` locally; previous-round gossip propagation continues in parallel.
+- **Own-Contrib pre-publish.** A creator's own Phase 1 contribution can be assembled and broadcast as soon as `prev_hash` is known, eliminating own-side latency from the Phase 1 budget.
 
-### 7.4 Phase 2 — BlockSig
+### 7.4 Phase 2 — BlockSig (reveal)
 
-Each committee member, having computed (or verified-from-peer) `R`, signs `block_digest = H(idx ‖ prev_hash ‖ tx_root ‖ delay_seed ‖ delay_output)` under its Ed25519 key and broadcasts `BlockSigMsg`.
+Each committee member signs `block_digest` under its Ed25519 key and broadcasts `BlockSigMsg` carrying the **revealed** `dh_secret`. Other members verify `SHA256(dh_secret ‖ signer.pubkey) == sender's Phase-1 dh_input`, rejecting on mismatch.
 
-When all `K` BlockSig messages are present, any node assembles the canonical block body (transactions resolved deterministically from `union(creator_tx_lists)` and the local mempool, sorted by `(from, nonce, hash)`) and applies it.
+`block_digest` is the SHA-256 of `idx ‖ prev_hash ‖ tx_root ‖ delay_seed ‖ consensus_mode ‖ bft_proposer ‖ creators[] ‖ creator_tx_lists ‖ creator_ed_sigs ‖ creator_dh_inputs`. Note it **excludes** `delay_output` and `creator_dh_secrets` so members can sign at Phase-2 entry without waiting for the K reveals to gather; the final `delay_output = SHA256(delay_seed ‖ ordered_secrets)` and the secrets themselves are bound into the block hash via `signing_bytes()` instead.
+
+When all `K` BlockSig messages are present (and all K secrets verify), any node assembles the canonical block body (transactions resolved deterministically from `union(creator_tx_lists)` and the local mempool, sorted by `(from, nonce, hash)`) and applies it.
 
 ### 7.5 Abort
 
@@ -361,14 +355,15 @@ A node receiving a block verifies:
 3. Each `creator_ed_sigs[i]` is a valid Ed25519 signature over the Phase 1 commit, by `creators[i]`'s registered key.
 4. `tx_root` equals `root(union(creator_tx_lists))`.
 5. `delay_seed` equals `H(idx ‖ prev_hash ‖ tx_root ‖ creator_dh_inputs)`.
-6. `delay_hash_verify(delay_seed, T, delay_output)` succeeds — i.e., re-running `T` SHA-256 iterations on `delay_seed` yields `delay_output`.
-7. Each `creator_block_sigs[i]` is a valid Ed25519 signature over `block_digest` by `creators[i]`'s registered key.
-8. Each `AbortEvent` carries a valid `K-1` quorum of signed `AbortClaimMsg`s, with claimers drawn from the at-event committee (reconstructed by the same exclude-mixed rule).
-9. Transactions are valid against the running balance/nonce model in canonical order.
-10. `cumulative_rand` equals `H(prev.cumulative_rand ‖ delay_output)`.
-11. `timestamp` is within `±30 s` of the local clock.
+6. For each `i`, `SHA256(creator_dh_secrets[i] ‖ creators[i].pubkey)` equals `creator_dh_inputs[i]` (Phase-2 reveal verifies against the Phase-1 commitment).
+7. `delay_output` equals `SHA256(delay_seed ‖ creator_dh_secrets[0..K])`.
+8. Each `creator_block_sigs[i]` is a valid Ed25519 signature over `block_digest` by `creators[i]`'s registered key.
+9. Each `AbortEvent` carries a valid `K-1` quorum of signed `AbortClaimMsg`s, with claimers drawn from the at-event committee (reconstructed by the same exclude-mixed rule).
+10. Transactions are valid against the running balance/nonce model in canonical order.
+11. `cumulative_rand` equals `H(prev.cumulative_rand ‖ delay_output)`.
+12. `timestamp` is within `±30 s` of the local clock.
 
-Steps 2, 3, 6, and 7 together guarantee fork-freedom: producing two valid blocks at the same height would require the same committee to sign two different digests, which any honest committee member refuses; or differing committees, which would each fail step 2 against the deterministic selection.
+Steps 2, 3, 7, and 8 together guarantee fork-freedom: producing two valid blocks at the same height would require the same committee to sign two different digests, which any honest committee member refuses; or differing committees, which would each fail step 2 against the deterministic selection.
 
 ---
 
@@ -407,15 +402,15 @@ P(tx censored in round n) ≈ (f/N)^K
 
 With `K = 3` and `f/N = 0.10`: `P ≈ 10⁻³` per round. Since the committee rotates per round, persistent censorship is exponentially unlikely.
 
-### 10.3 Selective abort defense (sequential delay-hash)
+### 10.3 Selective abort defense (commit-reveal)
 
 A naive aggregate-signature randomness beacon (e.g., the rev.1 BLS design) is vulnerable to **selective abort**: a committee member could compute the resulting `R` from a candidate Phase 1 set, decide whether `R` favors them, and choose whether to publish their share — biasing future selection.
 
-DHCoin defeats this with a sequential delay-hash binding:
+DHCoin defeats this with a Phase-1/Phase-2 commit-reveal binding:
 
-- The seed includes every `dh_input` from every committee member.
-- A committee member deciding whether to publish their contribution would need to compute `R = SHA-256^T(seed)` for each candidate `dh_input` to evaluate the choice.
-- SHA-256 chains are inherently sequential: arbitrary parallelism does not speed up a single chain. An attacker with extra cores cannot evaluate `R` faster than a single CPU executing `T` iterations in series.
+- In Phase 1, each member commits to their secret via `dh_input = SHA256(secret_i ‖ pubkey_i)` — a one-way commitment under SHA-256 preimage resistance.
+- The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` depends on **all K** revealed secrets. While a member is deciding whether to publish their Phase-1 commitment, the K−1 other secrets are still uniformly random; under SHA-256 preimage resistance, no candidate `R` can be tested.
+- Phase-2 reveals are bound to Phase-1 commitments: a malicious member cannot substitute a different secret post-hoc, since the block validator rejects unless `SHA256(reveal ‖ pubkey) == matching dh_input`.
 - `T` is set so `T_delay ≥ 2 × T_phase_1`. Within the Phase 1 window, an attacker can complete fewer than 0.5 candidate evaluations on average — far less than 1 useful trial.
 
 | `T_delay / T_phase_1` | Grinding attempts per round | Selective-abort feasibility |
@@ -427,7 +422,7 @@ DHCoin defeats this with a sequential delay-hash binding:
 
 The default profile sets `T_delay = 2 × tx_commit_ms`, giving the "Acceptable" row above.
 
-A note on terminology: this primitive resembles a "verifiable delay function" (VDF) in spirit, but lacks the succinct-verify property of true VDFs (Wesolowski/Pietrzak class-group constructions). Verification reruns all `T` SHA-256 iterations rather than checking a `O(log T)` proof. This trade is deliberate: succinct verify is a *performance* feature, not a *security* feature. The selective-abort defense depends only on **sequentiality**, which iterated SHA-256 provides without exotic cryptography or external dependencies. Verifier cost at `T = 200k` is ~2 ms with SHA-NI hardware acceleration — negligible for a full node. Solana's Proof of History uses the same primitive for an analogous purpose.
+A note on history: earlier revisions of DHCoin used an iterated-SHA-256 delay function (`R = SHA256^T(seed)`) for selective-abort defense, on the premise that SHA-256's inherent sequentiality prevented an attacker from grinding candidates within the Phase 1 window. That premise broke down under the SHA-256 ASIC threat model (rev.9 S-009): an adversary with optimized SHA-256 silicon can complete `T` iterations in a fraction of the wall-clock budget, regaining the predictive-evaluation window. The commit-reveal binding above replaces the time-bound argument with a structural one — preimage resistance is independent of compute speed.
 
 ### 10.4 Liveness — per-height BFT escalation
 
@@ -496,7 +491,7 @@ This separation provides:
 | HELLO | 0 | peer → peer | Announce domain and listen port |
 | BLOCK | 1 | broadcast | Complete finalized block |
 | TX | 2 | broadcast | Unconfirmed transaction |
-| BLOCK_SIG | 3 | broadcast | Phase 2: signed block digest + delay-hash output |
+| BLOCK_SIG | 3 | broadcast | Phase 2: signed block digest + revealed dh_secret |
 | CONTRIB | 4 | broadcast | Phase 1: TxCommit + DhInput + Ed25519 sig |
 | ABORT_CLAIM | 5 | broadcast | S7 Phase-1/2 abort claim (signed) |
 | GET_CHAIN | 6 | peer → peer | Request chain sync from index |
@@ -530,7 +525,6 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 | `m_creators` (M_pool) | 3 (web profile) | Genesis-pinned |
 | `k_block_sigs` (K) | 3 (= M_pool, strong) | Genesis-pinned |
 | `block_subsidy` | 10 (atomic) | Genesis-pinned, page reward |
-| `delay_T` | 200000 (web profile) | Genesis-pinned, iteration count |
 | `bft_enabled` | true | Genesis-pinned. Enables per-height BFT escalation (§10.4) |
 | `bft_escalation_threshold` | 5 | Genesis-pinned. Total aborts at same height before escalation |
 | `SUSPENSION_SLASH` | 10 (atomic) | Stake deducted on each round-1 abort suspension |
@@ -546,14 +540,14 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 
 ### 13.1 Timing profiles
 
-| Profile | tx_commit_ms | T_delay (wall) | block_sig_ms | abort_claim_ms | target block time |
-|---|---|---|---|---|---|
-| cluster (LAN) | 50 | 100 | 50 | 25 | ~225 ms |
-| web (default) | 200 | 400 | 200 | 100 | ~900 ms |
-| regional | 300 | 600 | 300 | 150 | ~1.4 s |
-| global | 600 | 1200 | 600 | 300 | ~2.7 s |
+| Profile | tx_commit_ms | block_sig_ms | abort_claim_ms | target block time |
+|---|---|---|---|---|
+| cluster (LAN) | 50 | 50 | 25 | ~125 ms |
+| web (default) | 200 | 200 | 100 | ~500 ms |
+| regional | 300 | 300 | 150 | ~750 ms |
+| global | 600 | 600 | 300 | ~1.5 s |
 
-`T_delay ≈ 2 × tx_commit_ms` per profile maintains the selective-abort safety factor. With O1 piggyback active, real-world block time approaches `T_phase_1 + fastest_node_T_delay + 2 × RTT`.
+Block time approaches `T_phase_1 + T_phase_2 + 2 × RTT` once the round transitions immediately at K-of-K Phase-1 arrival.
 
 ---
 
@@ -577,11 +571,11 @@ VRF sortition + BA* over ~3.7 s. Tolerates `f < N/3` Byzantine. DHCoin's per-rou
 
 ### 14.5 Dfinity / Internet Computer
 
-Threshold BLS beacon + ranked leader model. DHCoin has no leader; all `K` committee members are co-equal. DHCoin uses an iterated-SHA-256 delay-hash (not threshold BLS) for randomness, which avoids the selective-abort vulnerability inherent to aggregate-signature beacons.
+Threshold BLS beacon + ranked leader model. DHCoin has no leader; all `K` committee members are co-equal. DHCoin uses a commit-reveal randomness protocol (not threshold BLS) for per-block `R`, which avoids the selective-abort vulnerability inherent to aggregate-signature beacons without depending on the heavy threshold-BLS toolchain.
 
 ### 14.6 Solana
 
-Iterated-SHA-256 PoH for sequencing + Tower BFT for finality lagging by ~32 slots. DHCoin uses the same primitive (iterated SHA-256) but for per-block randomness rather than continuous sequencing, and achieves single-slot finality.
+Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality lagging by ~32 slots. DHCoin's randomness uses commit-reveal rather than iterated SHA-256; finality is per-slot K-of-K signatures rather than tower-vote accumulation.
 
 ---
 
@@ -652,7 +646,7 @@ shard_seed = SHA-256(beacon_epoch_seed ‖ "shard-committee" ‖ shard_id)
 shard_committee[s] = select_m_creators(shard_seed, validator_pool_size, K_per_shard)
 ```
 
-The same `select_m_creators` function used in single-chain mode. The salt makes shards' committees independent. The delay-hash sequentiality (§10.3) prevents adversaries from grinding their stake to land on a target shard's committee — the next epoch's seed is not computable until the current epoch finalizes.
+The same `select_m_creators` function used in single-chain mode. The salt makes shards' committees independent. The commit-reveal seed binding (§10.3) prevents adversaries from grinding stake placement: the K committed secrets that determine the next epoch's seed are not revealed until the current epoch's blocks finalize.
 
 ### 17.3 Account-to-shard assignment
 
@@ -741,7 +735,7 @@ Status: ✅ done · 🟨 partial / in progress · ❌ not started · 🚫 delibe
 | Layer / Capability | Status | Notes |
 |---|---|---|
 | **Consensus / safety** | ✅ ~95% | K-of-K mutual-distrust, BFT escalation, zero-trust framing, equivocation slashing closed-loop |
-| Block production + propagation | ✅ ~90% | 2-phase Contrib + delay-hash + BlockSig; gossip mesh; sync via chunked GET_CHAIN |
+| Block production + propagation | ✅ ~90% | 2-phase Contrib + commit-reveal + BlockSig; gossip mesh; sync via chunked GET_CHAIN |
 | Sybil resistance | ✅ ~95% | `STAKE_INCLUSION` + `DOMAIN_INCLUSION` |
 | Slashing + disincentives | ✅ ~85% | Suspension + equivocation, both end-to-end |
 | Identity / accounts | ✅ ~80% | Domains + anonymous bearer wallets |
@@ -838,7 +832,7 @@ If you need contracts, you'd build them on a different chain or build a layer-2 
 
 ## 18. Conclusion
 
-DHCoin demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a sequential delay-hash (iterated SHA-256), defeating selective abort by construction rather than by economic disincentive. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
+DHCoin demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by construction rather than by economic disincentive or wall-clock delay. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
 
 The two-tier identity model — registered domains for consensus, anonymous accounts for transfers — preserves both governance auditability and end-user fungibility under one unified Ed25519 signature scheme.
 

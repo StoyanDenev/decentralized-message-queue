@@ -10,7 +10,7 @@ This document specifies wire formats, hash inputs, and the consensus state machi
 |---|---|
 | Hash | SHA-256 (NIST FIPS 180-4). 32-byte output. |
 | Signature | Ed25519 (RFC 8032). 32-byte private seed, 32-byte public key, 64-byte signature. |
-| Delay function | T iterations of SHA-256: `delay_hash(seed, T) = SHA256^T(seed)`. T is genesis-pinned. |
+| Block randomness | Commit-reveal: each committee member commits to a fresh secret in Phase 1 (`SHA256(secret ‖ pubkey)`) and reveals in Phase 2. The block's `delay_output = SHA256(delay_seed ‖ ordered_secrets)`. |
 
 All multi-byte integers in hash inputs are encoded **big-endian**. Variable-length strings are appended raw (no length prefix) — committee members are expected to use the same string lengths because the inputs are well-typed.
 
@@ -74,10 +74,11 @@ struct Block {
     string[]              creators;              // K committee members in selection order
     Hash[][]              creator_tx_lists;      // K Phase-1 tx_hashes lists
     Signature[]           creator_ed_sigs;       // K Phase-1 commit signatures
-    Hash[]                creator_dh_inputs;     // K Phase-1 DH contributions
+    Hash[]                creator_dh_inputs;     // K Phase-1 commitments to per-round secrets
+    Hash[]                creator_dh_secrets;    // K Phase-2 revealed secrets
     Hash                  tx_root;               // SHA256 over union of creator_tx_lists
     Hash                  delay_seed;            // SHA256(index || prev_hash || tx_root || dh_inputs...)
-    Hash                  delay_output;          // = delay_hash(delay_seed, T)
+    Hash                  delay_output;          // SHA256(delay_seed || ordered_dh_secrets)
     Signature[]           creator_block_sigs;    // K Phase-2 block-digest sigs
     ConsensusMode         consensus_mode;        // 0=MUTUAL_DISTRUST (K-of-K), 1=BFT (ceil(2K/3))
     string                bft_proposer;          // empty unless mode==BFT
@@ -101,6 +102,7 @@ creators[i] for i in 0..K
 creator_tx_lists[i][j] for i, j
 creator_ed_sigs[i] (64 bytes) for i
 creator_dh_inputs[i] for i
+creator_dh_secrets[i] for i
 tx_root
 delay_seed
 delay_output
@@ -120,13 +122,13 @@ SHA-256 of `signing_bytes() || creator_block_sigs[0] || ... || creator_block_sig
 This binds creator signatures into the hash so signature equivocation produces a different block hash.
 
 ### 4.3 `block_digest` (what creators sign in Phase 2)
-The result of `signing_bytes()` (i.e., the block content **without** `creator_block_sigs`). Each committee member signs this with their Ed25519 key.
+SHA-256 over `index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]`. **Excludes** `delay_output` and `creator_dh_secrets` so committee members can sign immediately at Phase-2 entry without waiting for the K revealed secrets to gather. The final `delay_output` and `creator_dh_secrets` are bound into the block hash via `signing_bytes()` (§4.1).
 
 ## 5. Consensus protocol
 
 ### 5.1 Two phases per block
 
-**Phase 1: Contrib + DhInput.** Each committee member broadcasts a `ContribMsg`:
+**Phase 1: Contrib + DhInput.** Each committee member generates a fresh 32-byte secret `s_i`, computes the commitment `dh_input = SHA256(s_i ‖ pubkey_i)`, and broadcasts a `ContribMsg`:
 ```cpp
 struct ContribMsg {
     uint64    block_index;
@@ -134,7 +136,7 @@ struct ContribMsg {
     Hash      prev_hash;
     uint64    aborts_gen;     // # of abort_events seen at this height
     Hash[]    tx_hashes;      // sorted ascending unique
-    Hash      dh_input;       // 32 random bytes
+    Hash      dh_input;       // SHA256(secret || pubkey) — Phase-1 commitment
     Signature ed_sig;         // Ed25519 over make_contrib_commitment(...)
 };
 ```
@@ -145,17 +147,18 @@ inner_root = SHA256(concat(tx_hashes))
 commit     = SHA256(index (u64) || prev_hash || inner_root || dh_input)
 ```
 
-**Phase 2: BlockSig.** After locally evaluating `delay_output = delay_hash(delay_seed, T)`, each committee member broadcasts:
+**Phase 2: BlockSig.** Once K Phase-1 messages have arrived (sealing the dh_input commitments), each member computes the placeholder `delay_seed = SHA256(index ‖ prev_hash ‖ tx_root ‖ ordered_dh_inputs)`, signs `compute_block_digest(...)`, and broadcasts:
 ```cpp
 struct BlockSigMsg {
     uint64    block_index;
     string    signer;
-    Hash      delay_output;
-    Signature ed_sig;         // Ed25519 over compute_block_digest(block_with_signing_fields)
+    Hash      delay_output;   // SHA256(delay_seed) at this stage
+    Hash      dh_secret;      // the 32-byte secret revealed (Phase-2 reveal)
+    Signature ed_sig;         // Ed25519 over compute_block_digest(...)
 };
 ```
 
-A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **ceil(2K/3) of K** have (BFT mode after escalation).
+Each receiver verifies that `SHA256(dh_secret ‖ signer.pubkey) == dh_input`. Once K reveals gather, the block's final `delay_output = SHA256(delay_seed ‖ ordered_dh_secrets)` is computed and the block can be finalized. A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **ceil(2K/3) of K** have (BFT mode after escalation).
 
 ### 5.2 Committee selection
 At each round, the K-committee derives from:
