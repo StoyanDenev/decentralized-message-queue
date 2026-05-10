@@ -10,23 +10,22 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **6** | **8** | **7** | **10** | **31** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **6** |
-| v2 protocol-evolution | — | — | — | — | **1** |
+| Open | **6** | **7** | **4** | **10** | **27** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **11** |
+| v2 protocol-evolution | — | — | — | — | **0** |
 
-(S-005, S-009, S-019, S-034 all closed by M-F. S-009 was the lone v2 protocol-evolution item.)
+(S-005, S-009, S-015, S-019, S-034 all closed by M-F: the iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — were removed in commits `14bf3d6` and `1b9b086`.)
 
 **Top-of-list priorities for production deployment:**
 
 - **S-030** Block body not authenticated by `block_digest` — committee K-of-K signatures don't bind the actual transaction payloads, enabling silent post-consensus censorship and cross-node state divergence
-- **S-031** Single global `state_mutex_` serializes all state, I/O, VDF verification, and disk writes — node freezes under any real load, deadlock risk
+- **S-031** Single global `state_mutex_` serializes all state, I/O, and disk writes — node freezes under any real load, deadlock risk
 - **S-001** RPC authentication missing (any network client controls the node)
 - **S-002** Mempool accepts unverified signatures (DoS via sig-forgery flood)
 - **S-003** Block timestamp window ±5s contradicts README ±30s (chain stalls under NTP drift)
 - **S-004** Private keys written to stdout / unencrypted files
-- **S-005** `delay_T` not in GenesisConfig (consensus divergence between misconfigured nodes)
 
-The cheapest cluster of wins (S-001-localhost-only, S-002, S-005, S-007, S-008, S-013, S-014, S-023, S-034) is roughly **2-3 days** of focused work and closes the practical attack surface meaningfully. **S-030 and S-031 are protocol/architecture-level and need real engineering** (not 1-line fixes); they're the bar for "production-ready" rather than "demo-ready."
+The cheapest cluster of wins (S-001-localhost-only, S-002, S-007, S-008, S-013, S-014, S-023) is roughly **2-3 days** of focused work and closes the practical attack surface meaningfully. **S-030 and S-031 are protocol/architecture-level and need real engineering** (not 1-line fixes); they're the bar for "production-ready" rather than "demo-ready."
 
 ---
 
@@ -40,21 +39,21 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-002 | 🔴 Crit | Mempool accepts unverified-sig transactions | `node/node.cpp:1353-1371` | 1-2d |
 | S-003 | 🔴 Crit | Block timestamp window ±5s vs README ±30s | `node/validator.cpp:559-564` | 1d |
 | S-004 | 🔴 Crit | Plaintext private key in `account create` output | `main.cpp:cmd_account_create` | 2d |
-| S-005 | 🟠 High | `delay_T` not in GenesisConfig | `chain/genesis.{hpp,cpp}` | 1d |
+| S-005 | ✅ Closed | `delay_T` not in GenesisConfig — field removed entirely (commit `1b9b086`) | n/a | done |
 | S-006 | 🟠 High | ContribMsg cross-generation equivocation undetected | `node/node.cpp:1342` | low-med |
 | S-007 | 🟠 High | Integer overflow in subsidy distribution | `chain/chain.cpp:245-253` | 1d |
 | S-008 | 🟠 High | Unbounded mempool growth | `node/node.cpp:1353` | 1-2d |
-| S-009 | 🟠 High | Constant-T / SHA-256 ASIC fallacy | `crypto/delay_hash.cpp` | v2 protocol |
+| S-009 | ✅ Closed | Constant-T / SHA-256 ASIC fallacy — replaced by commit-reveal (commit `14bf3d6`); delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-010 | 🟠 High | Sybil via under-priced MIN_STAKE | `chain/params.hpp` | docs / DOMAIN_INCLUSION |
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
 | S-012 | 🟠 High | Snapshot bootstrap is "trust the source" | `chain/chain.cpp::restore_from_snapshot` | 50 LOC now / v2 root |
 | S-013 | 🟡 Med | BlockSigMsg buffer flood OOM | `net/gossip.cpp` (buffered_block_sigs_) | ~20 LOC |
 | S-014 | 🟡 Med | No rate limiting on gossip + RPC | `net/gossip.cpp`, `rpc/rpc.cpp` | ~50 LOC + per-IP buckets |
-| S-015 | 🟡 Med | Delay-worker thread join blocks consensus path | `node/node.cpp:490` | 1-2d |
+| S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
 | S-017 | 🟡 Med | Producer/chain validation logic mismatch (UNSTAKE) | `node/producer.cpp` vs `chain/chain.cpp` | 2-3d |
 | S-018 | 🟡 Med | JSON parsing without schema validation | all `from_json` | 2-3d |
-| S-019 | 🟡 Med | Phase-2 timer R-arrival spoofing | (audit needed) | 1d audit + fix |
+| S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
 | S-020 | 🟡 Med | Rejection sampling O(K²) at K/N→1 | `crypto/random.cpp::select_m_creators` | ~30 LOC |
 | S-021 | 🟢 Low | Chain file integrity not cryptographically verified | `chain/chain.cpp::load` | 1d |
 | S-022 | 🟢 Low | 16 MB message limit too permissive (modulo snapshots) | `net/peer.cpp:38` | nuanced |
@@ -69,7 +68,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-031 | 🔴 Crit | Single global mutex serializes state + I/O + VDF | `node/node.cpp` (42 sites) | re-architecture |
 | S-032 | 🟠 High | O(N) registry rebuild on every operation | `node/registry.cpp::build_from_chain` | incremental state machine |
 | S-033 | 🟠 High | No cryptographic state commitment (no state root, no light clients) | `chain/block.hpp` | v2 block format |
-| S-034 | 🟡 Med | VDF allocates `EVP_MD_CTX` per iteration (~1000× slowdown) | `crypto/delay_hash.cpp:6-12` | ~30 LOC |
+| S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
 
 ---
@@ -695,18 +694,18 @@ The Gemini analysis's headline conclusion — "blind abort = systemic liveness p
 
 **Was Architectural Analysis §3.6 + S-009 + S-019 + S-034.**
 
-The SHA-256^T delay-hash function has been removed from the protocol. `delay_hash_compute(seed, T)` now returns `SHA256(seed)` instantly; the `T` parameter is ignored. The delay-hash worker thread, the `RUNNING_DELAY` consensus phase, the `EVP_MD_CTX`-per-iteration allocation issue, and the calibration risk around `delay_T` are all gone.
+The SHA-256^T delay-hash function has been removed from the protocol. The selective-abort defense is now a Phase-1/Phase-2 commit-reveal protocol: each committee member's `ContribMsg.dh_input = SHA256(secret_i ‖ pubkey_i)` is a Phase-1 commitment to a per-round 32-byte secret; `BlockSigMsg.dh_secret` reveals it in Phase 2; validators enforce the bind. The block's randomness `delay_output = SHA256(delay_seed ‖ ordered_secrets)` is computed once K reveals gather (commit `14bf3d6`).
 
 **Consequences:**
-- S-005 (`delay_T` not in genesis) becomes moot.
-- S-009 (constant-T / SHA-256 ASIC fallacy) becomes moot.
-- S-019 (Phase-2 timer R-arrival spoof) becomes moot — `R` is computed instantly from local Phase-1 inputs; there's no expensive computation an attacker could spoof completion of.
-- S-034 (VDF allocation per iteration) becomes moot — no inner loop.
+- S-005 (`delay_T` not in genesis) is closed: the `delay_T` field has been removed entirely from `GenesisConfig`, `Node Config`, `TimingProfile`, and the validator (commit `1b9b086`). There's no parameter left to misconfigure.
+- S-009 (constant-T / SHA-256 ASIC fallacy) is closed: the defense is now information-theoretic (preimage resistance), not time-bound. ASIC asymmetry no longer matters.
+- S-019 (Phase-2 timer R-arrival spoof) is closed: `R` is computed inline once K Phase-1 contribs gather; there's no expensive computation an attacker could spoof completion of.
+- S-034 (VDF `EVP_MD_CTX` allocation) is closed: no inner loop.
 - S-031 (global mutex serialization) is partially mitigated — the worst case (`delay_hash_verify` with 4M iterations under the lock during piggyback) is gone.
 
 **Trade-off accepted:** the original VDF-style selective-abort defense — "an attacker can't predict block randomness during the Phase-1 commit window because computing it requires T sequential SHA-256 ops > Phase-1 budget" — is replaced by a commit-reveal-based defense backed by the existing BFT escalation + equivocation slashing machinery. An attacker without all K committee members' Phase-2-revealed secrets still cannot predict block randomness (under SHA-256 preimage resistance); the security argument shifts from "compute-time" to "information-theoretic."
 
-`delay_T` and the `delay-hash worker` infrastructure remain in the codebase as deprecated names for backward-compat with the existing block format and message types; the inner loop that gave them their semantic content is gone. Removing the names entirely is a follow-up cleanup commit.
+**Cleanup landed.** `crypto/delay_hash.{hpp,cpp}` files are deleted. The `RUNNING_DELAY` consensus phase, the `delay_worker_` thread + `delay_cancel_` / `delay_done_` flags, the validator's `delay_T_` field + `set_delay_T`, and the test scripts' `c['delay_T'] = 200000` config writes are all gone (commit `1b9b086`). The M=K=1 single-validator chain recursion that the worker thread's `asio::post` used to break is now broken by an inline `asio::post` inside `enter_block_sig_phase`.
 
 ### M-E — Outbound HELLO mistagging in cross-chain peering
 
