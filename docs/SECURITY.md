@@ -13,8 +13,9 @@
 | Open | **6** | **7** | **4** | **10** | **27** |
 | Mitigated since rev.7 / in-session | — | — | — | — | **11** |
 | v2 protocol-evolution | — | — | — | — | **0** |
+| Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
-(S-005, S-009, S-015, S-019, S-034 all closed by M-F: the iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — were removed in commits `14bf3d6` and `1b9b086`.)
+(S-005, S-009, S-015, S-019, S-034 all closed by M-F: the iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — were removed in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
 **Top-of-list priorities for production deployment:**
 
@@ -665,6 +666,56 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 | S-027 | Info leakage in logs / error messages reveal state | Configurable log levels; redact in production builds. |
 | S-028 | Hex parsing only accepts lowercase | `is_anon_address` is canonical; downstream parsers should accept either case. Trivial. |
 | S-029 | BFT-mode multi-proposer fork-choice undefined | Status quo (first-seen-wins) + slashing handles it. **Better:** primary fork-choice = heaviest sig set (more committee members ratified), tiebreaker = longest descendant chain. ~30 LOC in `apply_block_locked`. **Implemented in `Chain::resolve_fork`** as of this commit series. |
+
+---
+
+## 6.5. Regional sharding posture (informational, `EXTENDED` mode only)
+
+These are not bugs — they are **inherent trade-offs** an operator accepts when choosing `sharding_mode = EXTENDED` over `CURRENT`. Each is documented so deployment specs can name the threat model explicitly. Operators choosing `CURRENT` or `NONE` are unaffected.
+
+### T-001 — Regional capture (informational)
+
+**Posture.** Under `EXTENDED` sharding, a shard's K-committee is restricted to validators whose registered region matches the shard's `committee_region`. Censorship resistance becomes **regional** rather than global: capturing every validator in region `R` lets that adversary produce blocks for shards pinned to `R` without input from other regions.
+
+**What changes vs. global sharding.**
+- Censor-probability per round shifts from `(f_global / N_global)^K` to `(f_in_R / N_in_R)^K`. The numerator and denominator both shrink; capture is easier in proportion to how concentrated the regional pool is.
+- A captured region cannot corrupt cross-shard credits because destination shards re-derive the source committee from their own beacon view and reject signatures from unknown validators.
+
+**Mitigation guidance.**
+- Deployments that prioritize global censorship resistance should use `CURRENT`, not `EXTENDED`.
+- Deployments that use `EXTENDED` should disclose the regional trust assumption in their deployment spec (which shard maps to which region, what jurisdictions cover which validators).
+
+### T-002 — Jurisdictional / regulatory risk (informational)
+
+**Posture.** If region `R` corresponds geographically to a single jurisdiction, a government order to all validators in that jurisdiction can force censorship or transaction reversal on shards pinned to `R`. The beacon and shards in other regions are unaffected; cross-shard receipts from compelled shards are still validated by destination committees per the protocol.
+
+**Mitigation guidance.**
+- Choose region boundaries that span multiple jurisdictions where possible (`eu-west` rather than `de-frankfurt`).
+- Use the recommended geographic taxonomy from `README.md §17.5` to avoid jurisdiction-aligned regions for cross-border deployments.
+- For consortium chains where regional alignment with a regulator is desirable (e.g., a national banking settlement layer), this is a feature, not a bug.
+
+### T-003 — Network partition during `EXTENDED` deployment (informational)
+
+**Posture.** A region losing connectivity to the rest of the network stalls cross-shard receipts for shards pinned to that region: those shards continue producing blocks internally, but their `SHARD_TIP` messages don't reach the beacon, and outbound `CROSS_SHARD_RECEIPT_BUNDLE` messages don't reach other regions.
+
+**Effects:**
+- In-shard transactions in the partitioned region continue to finalize.
+- Cross-shard transactions from / to the partitioned region stall until connectivity restores.
+- After the partition heals, queued receipts flow through normally (idempotency via `applied_inbound_receipts_` dedup catches anything that gets re-delivered).
+- No global stall — other regions' shards keep operating normally.
+
+**Mitigation guidance.**
+- Operators of `EXTENDED` deployments should monitor cross-region connectivity (e.g., heartbeat metrics between regional beacon peers).
+- Applications that span regions should expect cross-region tx latency to spike during partitions; design for eventual consistency.
+
+### T-004 — Stake concentration feedback loop (informational)
+
+**Posture.** Validators earn block subsidy + transaction fees from the shards they're on. If one region has materially higher transaction volume, validators concentrate there for fee revenue. Over time, that region's stake share grows; other regions thin out. A thin region becomes more vulnerable to T-001 (regional capture) and may eventually trigger under-quorum recovery (R4 — pending).
+
+**Mitigation guidance.**
+- Operators monitoring `EXTENDED` deployments should watch per-region validator counts and stake totals.
+- Possible interventions: rebalance shard regions at epoch boundaries, cap per-region validator counts at registration, redistribute economic activity (genesis allocations, dApp routing).
+- The S-038 invariant (`num_shards >= 3` under `EXTENDED`) bounds the worst case — even a fully-concentrated single region can't drive cascading merges across the whole deployment.
 
 ---
 
