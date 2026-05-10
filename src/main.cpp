@@ -39,7 +39,7 @@ static void usage() {
     std::cout << R"(DHCoin — fork-free DH-consensus cryptocurrency
 
 Usage:
-  dhcoin init [--data-dir <dir>] [--profile cluster|web|regional|global]
+  dhcoin init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|cluster_test|web_test|regional_test|global_test|tactical_test]
                                               [--genesis <config.json>]
                                               Generate node keys and config
   dhcoin register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
@@ -109,12 +109,19 @@ static int cmd_init(int argc, char** argv) {
     cfg.rpc_port    = 7778;
 
     chain::TimingProfile tp = chain::PROFILE_WEB;
-    if      (profile == "cluster")  tp = chain::PROFILE_CLUSTER;
-    else if (profile == "regional") tp = chain::PROFILE_REGIONAL;
-    else if (profile == "global")   tp = chain::PROFILE_GLOBAL;
+    if      (profile == "cluster")        tp = chain::PROFILE_CLUSTER;
+    else if (profile == "regional")       tp = chain::PROFILE_REGIONAL;
+    else if (profile == "global")         tp = chain::PROFILE_GLOBAL;
+    else if (profile == "cluster_test")   tp = chain::PROFILE_CLUSTER_TEST;
+    else if (profile == "web_test")       tp = chain::PROFILE_WEB_TEST;
+    else if (profile == "regional_test")  tp = chain::PROFILE_REGIONAL_TEST;
+    else if (profile == "global_test")    tp = chain::PROFILE_GLOBAL_TEST;
+    else if (profile == "tactical")       tp = chain::PROFILE_TACTICAL;
+    else if (profile == "tactical_test")  tp = chain::PROFILE_TACTICAL_TEST;
     else if (profile != "web") {
         std::cerr << "Unknown --profile " << profile
-                  << " (expected: cluster|web|regional|global)\n";
+                  << " (expected: cluster|web|regional|global|tactical|"
+                  << "cluster_test|web_test|regional_test|global_test|tactical_test)\n";
         return 1;
     }
     cfg.tx_commit_ms   = tp.tx_commit_ms;
@@ -699,8 +706,10 @@ static int cmd_nonce(int argc, char** argv) {
 }
 
 // genesis-tool peer-info <domain>
-//   Loads the node's local key, generates a BLS PoP, and prints the JSON entry
-//   the operator should send to whoever is assembling the genesis config.
+//   Loads the node's local Ed25519 key and prints the JSON entry the operator
+//   should send to whoever is assembling the genesis config. Possession of the
+//   private key is proved later at REGISTER time (the on-chain REGISTER tx is
+//   signed by the same key), so no separate proof-of-possession is emitted here.
 static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     if (argc < 1) {
         std::cerr << "Usage: dhcoin genesis-tool peer-info <domain> [--data-dir <dir>] [--stake <n>]\n";
@@ -733,7 +742,7 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
 
 // genesis-tool build <config.json>
 //   Loads a GenesisConfig (with all initial_creators + initial_balances),
-//   verifies each PoP, prints the resulting genesis hash, and writes
+//   validates K/M bounds, prints the resulting genesis hash, and writes
 //   <config>.hash next to the file for convenient distribution.
 static int cmd_genesis_tool_build(int argc, char** argv) {
     if (argc < 1) {

@@ -36,6 +36,26 @@ inline const char* to_string(ChainRole r) {
     return "?";
 }
 
+// Sharding posture for the deployment. Carried in TimingProfile so a profile
+// fully specifies "what kind of deployment am I in." NONE = no sharding at all
+// (single chain). CURRENT = rev.9 B0-B6 sharding without regional grouping
+// or under-quorum merge. EXTENDED = regional grouping + under-quorum merge
+// (R1-R7 active plan).
+enum class ShardingMode : uint8_t {
+    NONE     = 0,
+    CURRENT  = 1,
+    EXTENDED = 2,
+};
+
+inline const char* to_string(ShardingMode m) {
+    switch (m) {
+    case ShardingMode::NONE:     return "none";
+    case ShardingMode::CURRENT:  return "current";
+    case ShardingMode::EXTENDED: return "extended";
+    }
+    return "?";
+}
+
 inline std::string to_hex(const uint8_t* data, size_t len) {
     std::ostringstream ss;
     ss << std::hex << std::setfill('0');

@@ -17,6 +17,8 @@ test_run.out
 .claude/
 .vs/
 .vscode/
+CLAUDE.md
+plan.md
 
 # Old abandoned scaffold (separate, stale git repo at top level)
 /dhcoin/

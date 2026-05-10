@@ -1,10 +1,12 @@
-# DHCoin: A Fork-Free Cryptocurrency with Two-Phase Sequential-Delay Co-Creation
+# DHCoin: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
 
-**Version 1, rev. 8** (rev. 9 sharding through B6.basic complete; v1 ~95% done)
+**Version 2**
 
-> **Scope, briefly:** DHCoin is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges, no light clients yet. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what's done vs. what isn't is in [§17 Scope and Current Status](#17-scope-and-current-status).
+> **Scope, briefly:** DHCoin is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
 > **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
+>
+> **What's new in v2:** sharding gains a `ShardingMode` switch — `CURRENT` keeps the v1 1-beacon-S-shards topology, while `EXTENDED` enables latency-grouped regional shard committees that drop in-shard block time to cluster-profile (~125-250 ms) on the public internet. Each profile (cluster / web / regional / global, plus sub-30 ms `_test` variants for CI) pins both a `chain_role` and a `sharding_mode`; there are no separate CLI overrides for either. Selective-abort defense is now commit-reveal (information-theoretic — no wall-clock delay function, no `delay_T` parameter to calibrate).
 
 ---
 
@@ -83,7 +85,7 @@ The mutual-distrust model rests on:
 
 ### 2.3 Trade-off vs. BFT
 
-DHCoin gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; rev.8 BFT escalation in §10.4 falls back to `ceil(2K/3)` after threshold aborts). In return it gets:
+DHCoin gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; BFT escalation in §10.4 falls back to `ceil(2K/3)` after threshold aborts). In return it gets:
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
 - **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
@@ -198,10 +200,14 @@ Block {
     delay_output      : [32]               // R = SHA256(delay_seed ‖ ordered_dh_secrets)
     consensus_mode    : uint8              // 0 = MUTUAL_DISTRUST (K-of-K), 1 = BFT
     bft_proposer      : string             // empty in MD blocks
-    creator_block_sigs: [][64]             // K' Phase 2 Ed25519 sigs over block_digest
-    abort_events      : []AbortEvent
-    cumulative_rand   : [32]               // SHA-256(prev_rand ‖ delay_output)
-    hash              : [32]
+    creator_block_sigs : [][64]            // K' Phase 2 Ed25519 sigs over block_digest
+    abort_events       : []AbortEvent
+    equivocation_events: []EquivocationEvent  // baked evidence; apply slashes equivocator's stake (§15)
+    cross_shard_receipts: []CrossShardReceipt // outbound receipts for off-shard `to` (§16.4)
+    inbound_receipts   : []CrossShardReceipt  // inbound receipts credited by this block; exactly-once on (src_shard, tx_hash)
+    initial_state      : []GenesisAlloc       // genesis only (index == 0); seeds account / stake / registry tables
+    cumulative_rand    : [32]               // SHA-256(prev_rand ‖ delay_output)
+    hash               : [32]
 }
 ```
 
@@ -210,6 +216,24 @@ Block {
 - `K' = ceil(2K/3)` for BFT blocks (per-height escalation; see §10.4).
 
 In MD blocks every position in `creator_block_sigs` carries a real Ed25519 signature (K-of-K). In BFT blocks up to `K' - ceil(2K'/3)` positions may carry the all-zero `Signature{}` sentinel (proposer-led `ceil(2K'/3)`-of-K' threshold, see §10.4). `bft_proposer` is the deterministically-chosen committee member who finalized the block; in MD blocks it is empty.
+
+### 3.7.1 Block hash composition
+
+`block.hash = SHA-256(signing_bytes ‖ creator_block_sigs)` where `signing_bytes` is the SHA-256 of the following ordered sequence (per `Block::signing_bytes` in `src/chain/block.cpp`):
+
+```
+index ‖ prev_hash ‖ timestamp ‖
+SHA-256(transactions[].signing_bytes()) ‖
+creators[] ‖ creator_tx_lists[] ‖ creator_ed_sigs[] ‖
+creator_dh_inputs[] ‖ creator_dh_secrets[] ‖
+tx_root ‖ delay_seed ‖ delay_output ‖
+consensus_mode ‖ bft_proposer ‖ cumulative_rand ‖
+abort_events[].event_hash ‖
+equivocation_events[] ‖ cross_shard_receipts[] ‖ inbound_receipts[] ‖
+initial_state[]
+```
+
+This is broader than `block_digest` (§7.4), which is what committee members sign in Phase 2. `block_digest` excludes `delay_output` and `creator_dh_secrets` so members can sign at Phase-2 entry without waiting for the K reveals to gather; `signing_bytes` includes them so the final block identity uniquely binds the post-reveal randomness output.
 
 ---
 
@@ -404,7 +428,7 @@ With `K = 3` and `f/N = 0.10`: `P ≈ 10⁻³` per round. Since the committee ro
 
 ### 10.3 Selective abort defense (commit-reveal)
 
-A naive aggregate-signature randomness beacon (e.g., the rev.1 BLS design) is vulnerable to **selective abort**: a committee member could compute the resulting `R` from a candidate Phase 1 set, decide whether `R` favors them, and choose whether to publish their share — biasing future selection.
+A naive aggregate-signature randomness beacon (e.g., a BLS-based randomness beacon) is vulnerable to **selective abort**: a committee member could compute the resulting `R` from a candidate Phase 1 set, decide whether `R` favors them, and choose whether to publish their share — biasing future selection.
 
 DHCoin defeats this with a Phase-1/Phase-2 commit-reveal binding:
 
@@ -422,13 +446,13 @@ DHCoin defeats this with a Phase-1/Phase-2 commit-reveal binding:
 
 The default profile sets `T_delay = 2 × tx_commit_ms`, giving the "Acceptable" row above.
 
-A note on history: earlier revisions of DHCoin used an iterated-SHA-256 delay function (`R = SHA256^T(seed)`) for selective-abort defense, on the premise that SHA-256's inherent sequentiality prevented an attacker from grinding candidates within the Phase 1 window. That premise broke down under the SHA-256 ASIC threat model (rev.9 S-009): an adversary with optimized SHA-256 silicon can complete `T` iterations in a fraction of the wall-clock budget, regaining the predictive-evaluation window. The commit-reveal binding above replaces the time-bound argument with a structural one — preimage resistance is independent of compute speed.
+An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an alternative selective-abort defense — sequential SHA-256 cannot be parallelized, so an attacker grinding candidates during Phase 1 would be bounded by `T`. The construction was rejected because SHA-256 is the most heavily-ASIC'd hash in existence: an attacker with optimized silicon completes `T` iterations in a fraction of the wall-clock budget, regaining the predictive-evaluation window. Commit-reveal replaces the time-bound argument with a structural one — preimage resistance is independent of compute speed.
 
 ### 10.4 Liveness — per-height BFT escalation
 
 **Strong mode (`K = M_pool`)** is the default. Every committee is the entire pool; a single silent creator halts the round.
 
-**Per-height BFT escalation (rev.8)** restores liveness without giving up strong mode's safety on most blocks. The mechanism, configured via genesis-pinned `bft_enabled` (default `true`) and `bft_escalation_threshold` (default 5):
+**Per-height BFT escalation** restores liveness without giving up strong mode's safety on most blocks. The mechanism, configured via genesis-pinned `bft_enabled` (default `true`) and `bft_escalation_threshold` (default 5):
 
 1. **Default state**: each round runs in **MUTUAL_DISTRUST** mode — full K-of-K Phase 2 unanimity, every block is unconditionally fork-free.
 2. **Trigger**: when an in-flight round at height `h` accumulates `bft_escalation_threshold` aborts AND the eligible pool (registry minus aborted-this-height domains) has dropped below `K`, the next round at `h` falls back to **BFT** mode.
@@ -444,16 +468,16 @@ A note on history: earlier revisions of DHCoin used an iterated-SHA-256 delay fu
 
 Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
 
-**Slashing (rev.8)**: BFT-mode safety depends on `f < N/3` plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DHC) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
+**Slashing**: BFT-mode safety depends on `f < N/3` plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DHC) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
 
-**Opt out**: setting `bft_enabled = false` at genesis preserves the rev.7 single-mode behavior — chain halts on persistent silent committee member, by design. Suitable for deployments that prefer unconditional safety on every block over liveness fallback.
+**Opt out**: setting `bft_enabled = false` at genesis disables escalation — the chain halts on a persistent silent committee member, by design. Suitable for deployments that prefer unconditional safety on every block over liveness fallback.
 
 ### 10.5 Censorship vs. liveness, side by side
 
-| Mode | K | Censorship requires | Liveness requires (v1) |
+| Mode | K | Censorship requires | Liveness requires |
 |---|---|---|---|
-| Strong | M_pool | All M_pool collude | All M_pool live |
-| Hybrid | K < M_pool | All K committee collude | All K committee live (v1); M_pool − K silent tolerated (v2) |
+| Strong | M_pool | All M_pool collude | All M_pool live (BFT escalation falls back to ceil(2K/3) on persistent abort) |
+| Hybrid | K < M_pool | All K committee collude | All K committee live; BFT escalation tolerates K-effective drop |
 
 ---
 
@@ -488,15 +512,23 @@ This separation provides:
 
 | Type | ID | Direction | Purpose |
 |---|---|---|---|
-| HELLO | 0 | peer → peer | Announce domain and listen port |
+| HELLO | 0 | peer → peer | Announce domain, port, chain role, shard_id |
 | BLOCK | 1 | broadcast | Complete finalized block |
-| TX | 2 | broadcast | Unconfirmed transaction |
+| TRANSACTION | 2 | broadcast | Unconfirmed transaction |
 | BLOCK_SIG | 3 | broadcast | Phase 2: signed block digest + revealed dh_secret |
 | CONTRIB | 4 | broadcast | Phase 1: TxCommit + DhInput + Ed25519 sig |
-| ABORT_CLAIM | 5 | broadcast | S7 Phase-1/2 abort claim (signed) |
-| GET_CHAIN | 6 | peer → peer | Request chain sync from index |
-| CHAIN_RESPONSE | 7 | peer → peer | Chain sync chunk |
-| STATUS_REQUEST/RESPONSE | 8/9 | peer → peer | Sync state probe |
+| GET_CHAIN | 5 | peer → peer | Request chain sync from index |
+| CHAIN_RESPONSE | 6 | peer → peer | Chain sync chunk |
+| STATUS_REQUEST | 7 | peer → peer | Sync state probe |
+| STATUS_RESPONSE | 8 | peer → peer | Sync state response (height, genesis hash) |
+| ABORT_CLAIM | 9 | broadcast | S7 Phase-1/2 abort claim (signed) |
+| ABORT_EVENT | 10 | broadcast | Assembled K-1-claim quorum |
+| EQUIVOCATION_EVIDENCE | 11 | broadcast | Two conflicting BlockSig sigs at same height |
+| BEACON_HEADER | 12 | beacon → shard | Beacon block for shard-side header-chain |
+| SHARD_TIP | 13 | shard → beacon | Shard block for beacon-side committee verify |
+| CROSS_SHARD_RECEIPT_BUNDLE | 14 | broadcast (relay via beacon) | Source-shard block carrying outbound receipts |
+| SNAPSHOT_REQUEST | 15 | peer → peer | Bootstrap snapshot fetch |
+| SNAPSHOT_RESPONSE | 16 | peer → peer | Serialized chain state for fast-bootstrap |
 
 ### 12.2 Wire Format
 
@@ -522,9 +554,9 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `m_creators` (M_pool) | 3 (web profile) | Genesis-pinned |
-| `k_block_sigs` (K) | 3 (= M_pool, strong) | Genesis-pinned |
-| `block_subsidy` | 10 (atomic) | Genesis-pinned, page reward |
+| `m_creators` (M_pool) | 3 (web profile) | Genesis-pinned. Per-profile M in §13.1 |
+| `k_block_sigs` (K) | 2 (web profile, hybrid K<M) | Genesis-pinned. Only `cluster` is strong (K=M); `web`/`regional`/`global` are hybrid. Per-profile K in §13.1 |
+| `block_subsidy` | 10 (atomic, by genesis convention) | Genesis-pinned, page reward. No code-level default — operator sets it in `GenesisConfig`; `tools/test_*.sh` use 10 |
 | `bft_enabled` | true | Genesis-pinned. Enables per-height BFT escalation (§10.4) |
 | `bft_escalation_threshold` | 5 | Genesis-pinned. Total aborts at same height before escalation |
 | `SUSPENSION_SLASH` | 10 (atomic) | Stake deducted on each round-1 abort suspension |
@@ -540,14 +572,30 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 
 ### 13.1 Timing profiles
 
-| Profile | tx_commit_ms | block_sig_ms | abort_claim_ms | target block time |
-|---|---|---|---|---|
-| cluster (LAN) | 50 | 50 | 25 | ~125 ms |
-| web (default) | 200 | 200 | 100 | ~500 ms |
-| regional | 300 | 300 | 150 | ~750 ms |
-| global | 600 | 600 | 300 | ~1.5 s |
+A profile is a **complete deployment archetype**: timing, committee size, chain role, and sharding mode are all pinned together. To change role or sharding mode, pick a different profile — there is no separate CLI override.
 
-Block time approaches `T_phase_1 + T_phase_2 + 2 × RTT` once the round transitions immediately at K-of-K Phase-1 arrival.
+| Profile | M | K | tx_commit_ms | block_sig_ms | abort_claim_ms | role | sharding_mode | target block time |
+|---|---|---|---|---|---|---|---|---|
+| `cluster` | 3 | 3 (strong) | 50 | 50 | 25 | BEACON | CURRENT | ~125 ms |
+| `web` (default) | 3 | 2 (hybrid) | 200 | 200 | 100 | SHARD | EXTENDED | ~500 ms |
+| `regional` | 5 | 4 (hybrid) | 300 | 300 | 150 | SHARD | CURRENT | ~750 ms |
+| `global` | 7 | 5 (hybrid) | 600 | 600 | 300 | BEACON | EXTENDED | ~1.5 s |
+
+**Test variants** — sub-30 ms rounds for fast CI execution (`tx_commit_ms = block_sig_ms = 5`, `abort_claim_ms = 3`). Pick when running integration tests:
+
+| Profile | M | K | role | sharding_mode |
+|---|---|---|---|---|
+| `cluster_test` | 3 | 3 | SINGLE | NONE |
+| `web_test` | 3 | 3 | SHARD | EXTENDED |
+| `regional_test` | 3 | 3 | SHARD | CURRENT |
+| `global_test` | 3 | 3 | SHARD | EXTENDED |
+
+`ShardingMode` values:
+- **`NONE`** — single-chain deployment, no sharding (test-only).
+- **`CURRENT`** — 1 beacon + S shard chains, account routing by salted-SHA256 modulus, committees drawn from the global validator pool.
+- **`EXTENDED`** — same as `CURRENT` plus per-shard `committee_region`: each shard's K-committee is restricted to validators tagged with that region, dropping intra-shard RTT and per-shard block time. Cross-shard tx still pays the wider beacon round-trip (B3 receipts).
+
+Block time approaches `T_phase_1 + T_phase_2 + 2 × max RTT in committee` once the round transitions immediately at K-of-K Phase-1 arrival. Under `EXTENDED` sharding the relevant RTT is intra-region, not global.
 
 ---
 
@@ -559,7 +607,7 @@ PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. DHCoin 
 
 ### 14.2 Ethereum (Gasper)
 
-PoS with 2/3+ attester finality over ~12.8 minutes. DHCoin finalizes per block (~900 ms web profile). Ethereum tolerates per-validator faults; DHCoin's K-of-K does not, but achieves stronger censorship resistance through union tx set.
+PoS with 2/3+ attester finality over ~12.8 minutes. DHCoin finalizes per block (~500 ms web profile). Ethereum tolerates per-validator faults; DHCoin's K-of-K does not, but achieves stronger censorship resistance through union tx set.
 
 ### 14.3 Tendermint / Cosmos
 
@@ -581,17 +629,19 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 ## 15. Limitations and Future Work
 
-**Hybrid-mode liveness (v2).** As §10.4 notes, the rev.7 hybrid-mode `K < M_pool` configuration is partially superseded by rev.8's per-height BFT escalation. The escalation mechanism delivers what hybrid mode was originally trying to: chain progress when the eligible pool can't form K-of-K. Hybrid mode is preserved as a parameter but the escalation path is now the recommended liveness story.
+**Hybrid-mode liveness.** A `K < M_pool` configuration tolerates `M_pool − K` silent creators only via per-height BFT escalation; the genesis-pinned `K<M` parameter is preserved for future fork-choice variants but the escalation path is the canonical liveness story.
 
-**Stake-weighted selection.** v1 selects creators uniformly from the stake-eligible pool. Stake-weighted selection (proportional to bonded stake) is a natural extension for production deployments.
+**Stake-weighted selection.** Creators are selected uniformly from the stake-eligible pool. Stake-weighted selection (proportional to bonded stake) is a natural extension for production deployments.
 
-**Sharding for scale.** §16 introduces the rev.9 sharding architecture and its current scaffolding state. Full multi-chain coordination (Stage B2c onward) is in progress. Single-chain TPS scaling via in-block parallel transaction execution is **not on the roadmap** — the design philosophy preferences sharding (per-shard mutual-distrust K-conjunction) over single-chain optimistic-concurrency execution. A deployment that hits a per-shard TPS ceiling adds shards rather than rewriting the apply path.
+**Sharding for scale.** Single-chain TPS scaling via in-block parallel transaction execution is **not on the roadmap** — the design philosophy preferences sharding (per-shard mutual-distrust K-conjunction) over single-chain optimistic-concurrency execution. A deployment that hits a per-shard TPS ceiling adds shards rather than rewriting the apply path. Under `EXTENDED` sharding the throughput axis aligns with regional locality: most user traffic stays in-shard at intra-region RTT.
 
-**Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP).
+**Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP). Under `EXTENDED` sharding a region losing connectivity to the rest of the world stalls cross-shard receipts; in-shard production continues.
 
-**Binary wire codec (S8).** Current JSON-over-TCP is convenient but verbose. v2 will introduce a binary message codec for bandwidth efficiency.
+**Binary wire codec.** Current JSON-over-TCP is convenient but verbose. A future revision will introduce a binary message codec for bandwidth efficiency.
 
-**Equivocation handling — fully closed-loop in rev.8:**
+**Light clients.** Header-only sync for external observers is on the roadmap. The shard-side beacon-header light chain already lays the groundwork — external clients can do the same.
+
+**Equivocation handling — fully closed-loop:**
 
 The disincentive depends on the chain's governance model (§5.1):
 
@@ -614,28 +664,35 @@ BFT-mode safety claims (conditional on `f < N/3` plus economic disincentive) are
 
 ---
 
-## 16. Sharding (rev.9, in progress)
+## 16. Sharding
 
-A sharded DHCoin deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the rev.8 protocol on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+A sharded DHCoin deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+
+The `ShardingMode` axis (pinned per profile) selects the topology:
+
+- **`NONE`** — single chain, no shards. Test/demo deployments.
+- **`CURRENT`** — beacon plus `S` shards; each shard's K-committee drawn from the **global** pool.
+- **`EXTENDED`** — beacon plus `S` shards; each shard's K-committee restricted to validators tagged with that shard's `committee_region`. Per-shard block time bounded by intra-region RTT, not global.
 
 ### 17.1 Architecture
 
 ```
        ┌──────────────────────────────────────────┐
-       │  Beacon chain (rev.7 MD K-of-K)          │
+       │  Beacon chain (MD K-of-K, no escalation) │
        │  cumulative_rand, validator pool,        │
        │  cross-shard receipts, epoch transitions │
        └──┬───────────┬──────────────┬────────────┘
           │           │              │      epoch_seed
           ▼           ▼              ▼
-     ┌────────┐  ┌────────┐    ┌────────┐
+     ┌────────┐  ┌────────┐    ┌─────────┐
      │ Shard 0│  │ Shard 1│ …  │Shard S-1│
-     │ rev.8  │  │ rev.8  │    │  rev.8  │
      │ MD+BFT │  │ MD+BFT │    │ MD+BFT  │
-     └────────┘  └────────┘    └────────┘
+     └────────┘  └────────┘    └─────────┘
 ```
 
-The beacon runs MD K-of-K only (no escalation; halts on persistent silent committee member). Shards run rev.8 MD-default with per-height BFT escalation. Asymmetry rationale: the beacon is the trust anchor — strong unconditional safety on every beacon block, low volume, halt-recoverable. Shards are the throughput layer — needs liveness more than censorship in steady state.
+The beacon runs MD K-of-K only (no escalation; halts on persistent silent committee member). Shards run MD-default with per-height BFT escalation. Asymmetry rationale: the beacon is the trust anchor — strong unconditional safety on every beacon block, low volume, halt-recoverable. Shards are the throughput layer — needs liveness more than censorship in steady state.
+
+Under `EXTENDED` sharding each shard additionally pins a `committee_region` (operator-defined string, e.g. `"us-east"`, `"eu-west"`). Validators self-declare their region at REGISTER time; the committee for shard `s` is drawn only from validators tagged with `s.committee_region`. The trade is that per-shard censorship resistance becomes regional rather than global — see §17.6.
 
 ### 17.2 Reusing `cumulative_rand` for shard committees
 
@@ -656,43 +713,34 @@ shard_id(addr) = first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S
 
 `genesis_salt` is `GenesisConfig.shard_address_salt`, fixed at chain creation (32 random bytes). Stable for chain lifetime. `S` may grow at epoch boundaries via a beacon governance op (forthcoming).
 
-### 17.4 Cross-shard transactions (planned)
+### 17.4 Cross-shard transactions
 
 Two-phase via beacon-mediated receipts:
 
 1. User submits TRANSFER from `A_in_shard_0` to `B_in_shard_1`. Routed to shard 0.
-2. Shard 0 includes the tx in its block, debiting A's balance. Emits `CrossShardReceipt{src=0, dst=1, ...}` in `receipts_consumed`.
-3. Beacon picks up the receipt at its next block, includes in `receipts_published`.
-4. Shard 1 reads the beacon, includes the receipt in its next block, crediting B's balance.
+2. Shard 0 includes the tx in its block, debiting A's balance. Emits `CrossShardReceipt{src=0, dst=1, ...}` in `cross_shard_receipts`.
+3. Beacon relays via `CROSS_SHARD_RECEIPT_BUNDLE` gossip; destination shard filters by `dst_shard`, dedups by `(src_shard, tx_hash)`, and queues for inclusion.
+4. Shard 1 bakes the receipt in its next block as `inbound_receipts`, crediting B's balance.
 
-Cross-shard finality: `~3 × shard block time` (~2.7s on web profile). In-shard: `~1 × shard block time`. Atomicity is eventual consistency (debit-then-credit); atomic 2PC with timeout-revert is v3.
+Cross-shard finality: `~3 × shard block time`. In-shard: `~1 × shard block time`. Atomicity is eventual consistency (debit-then-credit); atomic 2PC with timeout-revert is on the v3 roadmap.
 
-### 17.5 Current implementation state (rev.9)
+### 17.5 Regional sharding (`EXTENDED` mode)
 
-The architecture is staged across multiple stages, each delivering standalone value:
+Under `EXTENDED` sharding each shard's genesis pins a `committee_region`. Validators self-declare a `region` at REGISTER time (UTF-8 string, ≤32 bytes — opaque to the protocol). The committee for shard `s` is drawn deterministically from the registry subset matching `s.committee_region`.
 
-| Stage | What | Status |
-|---|---|---|
-| **B0** | `ChainRole {SINGLE, BEACON, SHARD}` enum threaded through `GenesisConfig`, `Node Config`, JSON I/O | ✅ done |
-| **B1** | Per-epoch + per-shard committee seed (`epoch_committee_seed(rand, shard_id)`), `current_epoch_index/rand` helpers, validator mirror | ✅ done |
-| **B2a** | `genesis-tool build-sharded` produces `(1 beacon + S shard)` genesis files with distinct hashes | ✅ done |
-| **B2b-lite** | RPC + log surface `chain_role` / `shard_id` / `epoch_index`. `tools/test_sharded_smoke.sh` boots beacon + shard side-by-side | ✅ done |
-| **B2c.1** | `BEACON_HEADER` gossip message + storage skeleton | ✅ done |
-| **B2c.2** | Shard-side header validation (sequential, prev_hash chain, K-of-K sigs) | ✅ done |
-| **B2c.3** | `SHARD_TIP` gossip + beacon-side committee derivation + sig verify + tracking | ✅ done |
-| **B2c.4** | `EquivocationEvent.shard_id` + `beacon_anchor_height` cross-chain provenance | ✅ done |
-| **B2c.5** | HELLO role tagging, role-based gossip filter, `beacon_peers`/`shard_peers` config, `tools/test_zero_trust_cross_chain.sh` | ✅ done |
-| **B2c.2-full** | Shards source committee rand from verified beacon header chain via `BlockValidator::resolve_epoch_rand` + `EpochRandProvider` callback. Production zero-trust path: both sides derive identical committees from the same beacon-anchored rand | ✅ done |
-| **B3.1** | Salted-SHA256 address routing (`crypto::shard_id_for_address`); `CrossShardReceipt` struct + JSON I/O; `Block::cross_shard_receipts` field bound into block hash | ✅ done |
-| **B3.2** | Source-shard apply suppresses local credit when `to` routes off-shard; producer emits receipt; validator verifies receipts match cross-shard tx subset one-for-one | ✅ done |
-| **B3.3** | `CROSS_SHARD_RECEIPT_BUNDLE` gossip; beacon role acts as relay; destination shard filters + dedups + queues into `pending_inbound_receipts_` | ✅ done |
-| **B3.4** | Destination shard producer bakes `inbound_receipts`; apply credits `to`; `applied_inbound_receipts_` ensures exactly-once delivery; validator dedup check | ✅ done |
-| **B4** | `tools/test_cross_shard_transfer.sh` — 1 beacon + 2 shards M=K=1, grinds bearer wallets routing to each shard, asserts cross-shard TRANSFER credits destination end-to-end. Fixes cross-chain-only IN_SYNC bug | ✅ done |
-| **B5** | Validator rotation across epochs (epoch_committee_seed + B2c.2-full beacon-anchored rand); cross-chain slashing primitives (`submit_equivocation` RPC + `dhcoin committee` CLI + epoch-boundary log); closed-loop slashing test (`tools/test_equivocation_slashing.sh`) — synthesizes evidence, RPC accepts, evidence baked into block, equivocator's stake forfeited | ✅ done |
-| **B6.basic** | State-sync snapshots: `Chain::serialize_state` + `restore_from_snapshot` + `dhcoin snapshot {create,inspect,fetch}` + `Config::snapshot_path` for fast-bootstrap. `SNAPSHOT_REQUEST`/`SNAPSHOT_RESPONSE` over gossip wire; `tools/test_snapshot_bootstrap.sh` proves donor → snapshot → receiver round-trip with no genesis required | ✅ done |
-| **B6.advanced** | Light clients (header-only sync), block pruning, shard-count growth | ⏳ pending |
+**Why this exists.** Per-block finality is bounded by `2 × max RTT in committee` (§13.1). Globally-distributed K-committees inherit transcontinental RTT (~150 ms one-way → ~500 ms+ blocks). Regional committees collapse this to intra-region RTT (~5-15 ms → ~125-250 ms blocks).
 
-`ChainRole = SINGLE` is the default. With S=1 and SINGLE, behavior is bitwise-identical to rev.8 — sharding is opt-in at genesis.
+**The trade.** Per-shard censorship resistance becomes regional rather than global: capturing one region captures that region's shards. Two compensating mechanisms keep the protocol model coherent:
+
+- **Beacon stays global.** The trust anchor still draws from the unified pool. Cross-shard receipts still pay the global beacon RTT, so cross-region txs gain no fast-path through regional capture.
+- **Misclaimed regions self-correct.** A `us-east`-tagged validator with poor connectivity to other us-east members causes its rounds to abort, triggering suspension. Operators don't need to attest the claim cryptographically — economic disincentive does the policing.
+
+**When to use which mode:**
+- **`CURRENT`** for deployments where global censorship resistance is the priority and ~500 ms blocks are acceptable.
+- **`EXTENDED`** for deployments where in-shard latency matters (interactive payments, regional consortiums) and operators are explicit about regional trust assumptions.
+- **`NONE`** for tests and single-chain demos.
+
+`shard_id_for_address` is unchanged: `first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S`. Account-region affinity is application-level — addresses can be ground for a target shard if locality matters.
 
 ### 17.6 Censorship + safety claims under sharding
 
@@ -702,131 +750,71 @@ DHCoin's K-conjunction censorship resistance is **per-shard, per-epoch**. An adv
 - Shorter `E` — less window per capture.
 - Larger `pool / S` ratio — captures need validators across multiple epochs to land enough on a target shard.
 
+**Under `EXTENDED` sharding the per-shard threat model is regional.** Capture probability becomes `(f_in_R / N_in_R)^K`, not `(f_global / N_global)^K`. If a single jurisdiction can compel all validators in region `R`, it can produce blocks for shards pinned to `R` without input from other regions. Document the regional trust assumption explicitly in your deployment spec; a regional capture does not propagate to other regions' shards because each shard's committee is independent.
+
 Per-block trust is observable via `consensus_mode`:
 
 | Block | Safety | Censorship |
 |---|---|---|
-| Beacon | Unconditional (rev.7 MD) | K-conjunction over beacon committee |
-| Shard MD | Unconditional (rev.8 MD) | K-conjunction over shard committee |
+| Beacon | Unconditional (MD-only, no escalation) | K-conjunction over beacon committee |
+| Shard MD | Unconditional (MD steady-state) | K-conjunction over shard committee |
 | Shard BFT | Conditional `f < N/3` + slashing | (1+K_eff/3)-conjunction over shard committee |
 
 Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
 
 ---
 
-## 17. Scope and Current Status
+## 17. Scope
 
-DHCoin's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is *not* trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section is an honest accounting of what's actually built, what's in progress, and what's deliberately out of scope.
+DHCoin's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
 
-### 17.1 What DHCoin currently is good at
+### 17.1 What DHCoin is built for
 
-These work end-to-end today, with passing integration tests:
-
-- **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root (any single non-Byzantine committee member can include any tx). Zero-trust safety (no protocol component trusts any participant).
+- **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root — any single non-Byzantine committee member can include any tx. Zero-trust safety (no protocol component trusts any participant).
 - **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 non-Byzantine validator remains in the registry).
-- **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519 pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
-- **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees. Native economic incentive for block production.
+- **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519-pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
+- **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees.
 - **Per-height BFT escalation.** Default mutual-distrust K-of-K; falls back to BFT `ceil(2K/3)` + designated proposer when the eligible pool can't form K-of-K and the abort threshold has been met. Per-block `consensus_mode` tag lets observers reason about per-block trust.
+- **Sharded scaling.** Beacon + S shards with cross-shard receipts. `EXTENDED` sharding mode adds latency-grouped regional shard committees for sub-second in-shard finality on the public internet (§17.5).
 
-### 17.2 Capability matrix
+### 17.2 Suitable use cases
 
-Status: ✅ done · 🟨 partial / in progress · ❌ not started · 🚫 deliberately out of scope
+- **Payment applications** — direct transfers between named domains and anonymous accounts.
+- **Inter-organization settlement networks** — `DOMAIN_INCLUSION` chains where validators are publicly accountable organizations (banks, government registries, etc.).
+- **Validator-coordinated registries** — REGISTER + STAKE patterns repurposed for identity directories, DNS-record registries, reputation systems.
+- **Page-reward economies** — applications using the native subsidy + fee distribution as the incentive primitive.
+- **Anything stateless that fits the named-account balance model.**
 
-| Layer / Capability | Status | Notes |
-|---|---|---|
-| **Consensus / safety** | ✅ ~95% | K-of-K mutual-distrust, BFT escalation, zero-trust framing, equivocation slashing closed-loop |
-| Block production + propagation | ✅ ~90% | 2-phase Contrib + commit-reveal + BlockSig; gossip mesh; sync via chunked GET_CHAIN |
-| Sybil resistance | ✅ ~95% | `STAKE_INCLUSION` + `DOMAIN_INCLUSION` |
-| Slashing + disincentives | ✅ ~85% | Suspension + equivocation, both end-to-end |
-| Identity / accounts | ✅ ~80% | Domains + anonymous bearer wallets |
-| Native tx types | ✅ ~80% | TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE |
-| Mempool / replace-by-fee | ✅ ~70% | Sequential nonce; no fee market or gas |
-| CLI / wallet | ✅ ~85% | `dhcoin {account,send,send_anon,stake,show-block,chain-summary,validators,committee,show-account,show-tx,snapshot {create,inspect,fetch},submit_equivocation}` — block-explorer + governance + snapshot surface |
-| **Scaling / sharding** | ✅ ~90% | B0/B1/B2a/B2b-lite + B2c.1-5 + B2c.2-full + B3.1-3.4 cross-shard receipt loop end-to-end + B4 multi-shard test harness all done. Cross-shard TRANSFER verified behaviorally |
-| Cross-shard receipts | ✅ 100% | B3 complete (emit / relay / dst-credit / dedup) |
-| Multi-shard production tooling | ✅ ~70% | `genesis-tool build-sharded`; cross-chain peering config; behavioral test. Production-grade orchestration scripts pending |
-| Cross-chain validator rotation + slashing | ✅ 100% | Rotation via epoch_committee_seed + B2c.2-full beacon-anchored rand. `submit_equivocation` RPC for forensics submission; closed-loop slashing test verifies evidence → bake → stake forfeit |
-| State sync (snapshots) | ✅ 100% | B6.basic: snapshot create/inspect/fetch + restore-on-bootstrap. Receiver fast-boots from snapshot via gossip wire — no genesis or full replay needed. Block pruning + state roots remain v2 |
-| Light clients | ❌ 0% | B6.advanced — header-only sync, deferred to v1.1 |
-| **Smart-contract execution layer** | 🚫 N/A | **Not in scope.** No EVM, no WASM, no gas. The chain handles native tx types only |
-| Contract storage | 🚫 N/A | Implied by the above |
-| Off-chain storage (IPFS/Arweave-style) | 🚫 N/A | Not in scope |
-| Indexer (Graph-like) | ❌ 0% | Could be built externally |
-| Block explorer | ❌ 0% | Could be built externally |
-| SDK (JS/Python/Rust) | ❌ 0% | RPC over JSON exists; no client-side libraries |
-| Bridges to other chains | ❌ 0% | Out of scope for v1; could be retrofitted |
-| ZK / privacy | 🚫 N/A | Anonymous accounts are the privacy story; no ZK proofs |
-| Oracles | 🚫 N/A | Not in scope |
-| On-chain governance | ❌ 0% | Genesis-pinned constants; no on-chain proposals/voting |
-| Frontend hosting | 🚫 N/A | Always external (e.g., IPFS); never on-chain |
+### 17.3 What DHCoin does not host
 
-### 17.3 Three honest interpretations of "% done"
+- **Computation beyond balance arithmetic** — needs a contract VM that DHCoin doesn't provide.
+- **Large on-chain state** — tx payloads are tiny by design.
+- **Cross-application composability** — no contracts means no cross-app calls.
+- **Off-chain data dependencies** — no oracle infrastructure.
 
-The percentage depends on what frame of reference you pick:
+### 17.4 Deliberately out of scope
 
-- **Narrow ("fork-free L1 payment + identity chain")** → **~95% done.** Consensus mature; cross-shard transactional loop end-to-end + behaviorally verified (B0-B4); equivocation slashing closed-loop with forensics RPC (B5); state-sync snapshots over gossip wire (B6.basic). Eight regression tests reliable. Finish light client primitives (~1 week) and docs polish (~3d) and v1 ships.
-- **Medium ("L1 + multi-chain scaling + DApp-execution-ready base")** → **~30-40% done.** Adds sharding completion, light clients, basic indexer, and a contract execution layer. Most of the missing work is the contract VM and supporting tooling.
-- **Wide ("full DApp hosting platform comparable to Ethereum + IPFS + Graph + tooling ecosystem")** → **~5-10% done.** The contract VM, off-chain storage, indexer, SDKs, block explorer, bridges, governance, privacy, oracles — all absent. This is years of work for a small team and most of it is deliberately not on the DHCoin roadmap.
+These are not roadmap items — they're outside the design intent:
 
-### 17.4 What DHCoin can host today
-
-If you frame it as "what kind of DApp could be built on DHCoin as it stands":
-
-- **Payment apps** — direct transfers between named domains + anonymous accounts. ✅
-- **Validator-coordinated registries** — REGISTER + STAKE patterns can be repurposed for identity directories, DNS-record registries, reputation systems. ✅ partial.
-- **Consortium settlement networks** — `DOMAIN_INCLUSION` chains where validators are publicly accountable organizations (banks, govt registries, etc.). ✅
-- **Page-reward economies** — applications using the native subsidy + fee distribution as their incentive primitive. ✅
-- **Anything stateless that fits the named-account balance model.** ✅
-
-What it can't host:
-
-- **Anything requiring computation beyond balance arithmetic** — needs a contract VM. ❌
-- **Anything requiring large state** — REGISTER carries up to 32-byte payloads; tx payloads are tiny by design. ❌
-- **Cross-application composability** — no contracts means no cross-app calls. ❌
-- **Anything depending on off-chain data** — no oracle infrastructure. ❌
-
-### 17.5 What's deliberately out of scope (and probably stays that way)
-
-These are not "TODO" items — they're outside DHCoin's design intent:
-
-- **Smart-contract VMs** (EVM, WASM). DHCoin's value proposition is censorship-resistant fork-free payments + identity, not arbitrary execution.
-- **Off-chain storage layer** (IPFS, Arweave). Application-specific; users compose externally if they want it.
+- **Smart-contract VMs** (EVM, WASM). The value proposition is censorship-resistant fork-free payments + identity, not arbitrary execution.
+- **Off-chain storage layer** (IPFS, Arweave). Application-specific; compose externally.
 - **Bridges to other chains.** Could be built on top, not part of the core protocol.
-- **On-chain frontend hosting.** Always belongs off-chain.
-- **Oracle networks.** Application-specific; not a base-layer concern.
+- **On-chain frontend hosting.** Belongs off-chain.
+- **Oracle networks.** Application-specific.
 - **ZK / shielded transactions.** The anonymous bearer-wallet account model is the privacy story; no zero-knowledge layer planned.
 
-A future fork or layer-2 of DHCoin could add these. The base protocol will not.
+A future fork or layer-2 could add these. The base protocol does not.
 
-### 17.6 Realistic v1 release path
+### 17.5 Honest framing
 
-To ship v1 (the "narrow" ~80% scope above) the remaining work is roughly:
+Calling DHCoin a "DApp hosting network" misrepresents what it is. Calling it a "decentralized cryptocurrency with mutual-distrust safety" is accurate. Specific fits:
 
-| Milestone | Estimate |
-|---|---|
-| Stage B2c.1-5 — cross-chain plumbing | ✅ DONE |
-| Stage B2c.2-full — beacon-anchored committee rand | ✅ DONE |
-| Stage B3 — cross-shard receipts (emit / relay / credit / dedup) | ✅ DONE |
-| Stage B4 — multi-shard test harness; cross-chain-only IN_SYNC fix | ✅ DONE |
-| Stage B5 — equivocation slashing closed-loop + `submit_equivocation` RPC + observability | ✅ DONE |
-| Stage B6.basic — state-sync snapshots (create/inspect/fetch/restore) | ✅ DONE |
-| Block-explorer + governance CLI primitives | ✅ DONE |
-| **8 regression tests reliable** (poll-and-retry hardening) | ✅ DONE |
-| Light client primitives (header-only sync) | ~5d |
-| Deterministic-inbound-pool via Phase-1 contrib union (B3 hardening) | ~2d |
-| Documentation / spec freeze | ~3d |
-| Whitepaper PDF generation polish | ~1d |
-
-Remaining: roughly **1-2 weeks** of focused work. The full v1 protocol (consensus + identity + payments + sharding + cross-shard transfers + slashing + state-sync) is now complete and verified. What's left is observability for external clients (light clients), one round-tripping hardening, and docs polish. None of this is contract execution; v1 ships as a payment + identity chain.
-
-### 17.7 Honest framing
-
-Calling DHCoin a "DApp hosting network" overstates what's built and what's planned. Calling it a "decentralized cryptocurrency with mutual-distrust safety" is accurate. Specific use cases that fit:
-- Inter-organization settlement where payment + identity is the whole value prop.
+- Inter-organization settlement where payment + identity is the whole value proposition.
 - Censorship-resistant value transfer in environments where trust assumptions about validators are explicitly rejected.
 - Federated registries where domain-anchored validators provide identity and the chain provides ordering + auditability.
+- Regional payment networks (`EXTENDED` sharding) where in-shard sub-second finality matters and operators are explicit about regional trust assumptions.
 
-If you need contracts, you'd build them on a different chain or build a layer-2 on top of DHCoin. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with cryptoeconomic safety — not to be everything.
+If you need contracts, build them on a different chain or build a layer-2 on top of DHCoin. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with cryptoeconomic safety — not to be everything.
 
 ---
 
