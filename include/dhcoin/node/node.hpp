@@ -59,9 +59,8 @@ struct Config {
     ShardId                  shard_id{0};
     uint32_t                 initial_shard_count{1};
     uint32_t                 epoch_blocks{1000};
-    // L4 / C3 — three local timers + delay-hash iteration count.
+    // L4 / C3 — three local round timers.
     uint32_t                 tx_commit_ms{200};
-    uint64_t                 delay_T{4'000'000};   // delay-hash iterations (web profile default)
     uint32_t                 block_sig_ms{200};
     uint32_t                 abort_claim_ms{100};
 
@@ -71,10 +70,10 @@ struct Config {
     void           save(const std::string& path) const;
 };
 
-// Two protocol phases (CONTRIB → BLOCK_SIG) with a local sequential
-// delay-hash between them. RUNNING_DELAY is internal — no messages flow
-// during it.
-enum class ConsensusPhase : uint8_t { IDLE, CONTRIB, RUNNING_DELAY, BLOCK_SIG };
+// Two protocol phases (CONTRIB → BLOCK_SIG). The transition is a local
+// state change once K Phase-1 commits arrive; commit-reveal does the
+// selective-abort defense rather than a wall-clock delay (rev.9 S-009).
+enum class ConsensusPhase : uint8_t { IDLE, CONTRIB, BLOCK_SIG };
 
 enum class SyncState : uint8_t { SYNCING, IN_SYNC };
 
@@ -199,8 +198,7 @@ private:
 
     void check_if_selected();
     void start_contrib_phase();
-    void start_delay_compute();         // kicks off worker thread (O2)
-    void on_delay_complete(const Hash& output);
+    void enter_block_sig_phase();
     void start_block_sig_phase(const Hash& delay_output);
     void try_finalize_round();
 
@@ -248,17 +246,12 @@ private:
     std::map<std::string, ContribMsg>                       pending_contribs_;
     std::map<std::string, std::pair<ContribMsg, ContribMsg>> contrib_equivocations_;
 
-    // Local delay-hash state. After K Phase-1 contribs, derive seed and start
-    // the delay worker. O1 piggyback: if a peer's verified BlockSigMsg arrives
-    // with a delay_output that matches our seed, cancel our worker and adopt
-    // their R (the verifier just reruns T iterations — same cost either way,
-    // but lets us skip the wait).
+    // Per-round canonical inputs. tx_root + delay_seed are derived from
+    // the K Phase-1 contribs and used as the seed for the commit-reveal
+    // randomness (S-009 rev.9). No worker thread, no wall-clock delay —
+    // the transition Phase-1 → Phase-2 is immediate.
     Hash                                                     current_tx_root_{};
     Hash                                                     current_delay_seed_{};
-    std::atomic<bool>                                        delay_cancel_{false};
-    std::atomic<bool>                                        delay_done_{false};
-    Hash                                                     local_delay_output_{};
-    std::thread                                              delay_worker_;
 
     // rev.9 S-009: this node's fresh Phase-1 secret for the current
     // round. Generated in start_contrib_phase, committed via
@@ -275,7 +268,9 @@ private:
     // Phase 2 — BlockSig accumulation, gated to current round's delay_output.
     Hash                                                     current_delay_output_{};
     std::map<std::string, BlockSigMsg>                       pending_block_sigs_;
-    // O3 buffer: BlockSigMsgs received before our delay-hash finishes.
+    // Buffer for BlockSigMsgs that arrive before this node has assembled
+    // its own K Phase-1 contribs. Drained when the round transitions into
+    // Phase-2.
     std::vector<BlockSigMsg>                                 buffered_block_sigs_;
 
     // rev.8 mode of the current round. Set by check_if_selected when the

@@ -83,7 +83,6 @@ c['chain_path'] = '$TABS/n$n/chain.json'
 c['key_path'] = '$TABS/n$n/node_key.json'
 c['data_dir'] = '$TABS/n$n'
 c['tx_commit_ms'] = 2000
-c['delay_T'] = 200000
 c['block_sig_ms'] = 2000
 c['abort_claim_ms'] = 1000
 with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)

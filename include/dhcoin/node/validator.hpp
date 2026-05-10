@@ -18,11 +18,6 @@ public:
         std::string error;
     };
 
-    // delay_T is the iteration count the chain agreed on (genesis-pinned per
-    // profile). The validator must reject blocks that don't carry an output
-    // matching this T.
-    void set_delay_T(uint64_t T) { delay_T_ = T; }
-
     // K = committee size per round (genesis-pinned). When K = M_pool every
     // registered creator is on every committee (strong mode). When K < M_pool,
     // the committee rotates through the eligible pool (hybrid mode; v2
@@ -95,7 +90,6 @@ private:
     Hash resolve_epoch_rand(uint64_t epoch_start,
                               const chain::Chain& chain) const;
 
-    uint64_t delay_T_{0};
     uint32_t k_block_sigs_{0};
     uint32_t m_pool_{0};
     bool     bft_enabled_{true};

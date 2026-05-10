@@ -4,7 +4,6 @@
 #include <dhcoin/crypto/sha256.hpp>
 #include <dhcoin/crypto/random.hpp>
 #include <dhcoin/crypto/keys.hpp>
-#include <dhcoin/crypto/delay_hash.hpp>
 #include <algorithm>
 #include <chrono>
 #include <map>

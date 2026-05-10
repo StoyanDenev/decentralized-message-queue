@@ -118,7 +118,6 @@ static int cmd_init(int argc, char** argv) {
         return 1;
     }
     cfg.tx_commit_ms   = tp.tx_commit_ms;
-    cfg.delay_T        = tp.delay_T;
     cfg.block_sig_ms   = tp.block_sig_ms;
     cfg.abort_claim_ms = tp.abort_claim_ms;
     cfg.m_creators     = tp.m_creators;

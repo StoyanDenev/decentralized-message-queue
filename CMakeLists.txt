@@ -36,8 +36,6 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(json)
 
 # ── dhcoin executable ───────────────────────────────────────────────────────
-# BLS dropped in v1 rev. 2 — protocol uses Ed25519 + class-group VDF.
-# chiavdf integration is pending (placeholder VDF implementation in src/crypto/vdf.cpp).
 add_definitions(-DASIO_STANDALONE -DASIO_NO_DEPRECATED)
 
 if(WIN32)

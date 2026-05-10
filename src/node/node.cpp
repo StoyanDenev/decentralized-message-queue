@@ -3,7 +3,6 @@
 #include <dhcoin/chain/params.hpp>
 #include <dhcoin/crypto/random.hpp>
 #include <dhcoin/crypto/sha256.hpp>
-#include <dhcoin/crypto/delay_hash.hpp>
 #include <set>
 #include <openssl/rand.h>
 #include <filesystem>
@@ -42,7 +41,6 @@ json Config::to_json() const {
     j["initial_shard_count"]     = initial_shard_count;
     j["epoch_blocks"]            = epoch_blocks;
     j["tx_commit_ms"]    = tx_commit_ms;
-    j["delay_T"]         = delay_T;
     j["block_sig_ms"]    = block_sig_ms;
     j["abort_claim_ms"]  = abort_claim_ms;
     return j;
@@ -71,7 +69,6 @@ Config Config::from_json(const json& j) {
     c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
     c.epoch_blocks             = j.value("epoch_blocks",             uint32_t{1000});
     c.tx_commit_ms    = j.value("tx_commit_ms",   uint32_t{200});
-    c.delay_T         = j.value("delay_T",        uint64_t{4'000'000});
     c.block_sig_ms    = j.value("block_sig_ms",   uint32_t{200});
     c.abort_claim_ms  = j.value("abort_claim_ms", uint32_t{200});
     return c;
@@ -98,7 +95,6 @@ Node::Node(const Config& cfg)
     , contrib_timer_(io_)
     , block_sig_timer_(io_) {
 
-    validator_.set_delay_T(cfg.delay_T);
     validator_.set_k_block_sigs(cfg.k_block_sigs);
     validator_.set_m_pool(cfg.m_creators);
 
@@ -332,8 +328,6 @@ void Node::run() {
 
 void Node::stop() {
     if (running_.exchange(false)) {
-        delay_cancel_ = true;
-        if (delay_worker_.joinable()) delay_worker_.join();
         io_.stop();
         for (auto& t : threads_) if (t.joinable()) t.join();
         chain_.save(cfg_.chain_path);
@@ -474,15 +468,22 @@ void Node::start_contrib_phase() {
     });
 
     if (pending_contribs_.size() == current_creator_domains_.size())
-        start_delay_compute();
+        enter_block_sig_phase();
 }
 
-// Transition Phase 1 → local delay-hash compute. Derive tx_root and seed,
-// kick off worker thread (O2). When the delay finishes (or a peer's R
-// arrives via O1 piggyback), we transition to Phase 2.
-void Node::start_delay_compute() {
+// Transition Phase 1 → Phase 2 once K Phase-1 contribs have arrived.
+// Derive tx_root + delay_seed (from the K commits) and a placeholder
+// delay_output = SHA256(delay_seed). The block's final delay_output is
+// recomputed from the revealed Phase-2 secrets via compute_block_rand
+// (rev.9 S-009 commit-reveal); this placeholder only matters as a
+// per-round identifier in BlockSigMsg.
+//
+// The actual phase change + sig broadcast is deferred via asio::post.
+// This breaks the synchronous call chain on M=K=1 chains where
+// finalize_round → apply_block → check_if_selected → start_contrib
+// would otherwise recurse without bound.
+void Node::enter_block_sig_phase() {
     if (phase_ != ConsensusPhase::CONTRIB) return;
-    phase_ = ConsensusPhase::RUNNING_DELAY;
     contrib_timer_.cancel();
 
     std::vector<std::vector<Hash>> ordered_lists;
@@ -498,36 +499,17 @@ void Node::start_delay_compute() {
         chain_.empty() ? Hash{} : chain_.head_hash(),
         current_tx_root_, ordered_dh_inputs);
 
-    delay_cancel_ = false;
-    delay_done_   = false;
-    if (delay_worker_.joinable()) delay_worker_.join();
+    Hash placeholder = crypto::sha256(current_delay_seed_);
+    asio::post(io_, [this, placeholder] {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        if (phase_ != ConsensusPhase::CONTRIB) return;
+        start_block_sig_phase(placeholder);
 
-    Hash     seed = current_delay_seed_;
-    uint64_t T    = cfg_.delay_T;
-    delay_worker_ = std::thread([this, seed, T] {
-        // O2: delay-hash on a worker thread, never blocks consensus.
-        Hash output = crypto::delay_hash_compute(seed, T);
-        if (delay_cancel_) return;
-        asio::post(io_, [this, output] {
-            std::lock_guard<std::mutex> lk(state_mutex_);
-            on_delay_complete(output);
-        });
+        // Replay any block_sigs that arrived before this transition.
+        auto buffered = std::move(buffered_block_sigs_);
+        buffered_block_sigs_.clear();
+        for (auto& m : buffered) on_block_sig_locked(m);
     });
-
-    // O3: replay any block_sigs that arrived early. Caller is on_contrib
-    // which holds state_mutex_, so use the *_locked variant to avoid the
-    // recursive-lock crash.
-    auto buffered = std::move(buffered_block_sigs_);
-    buffered_block_sigs_.clear();
-    for (auto& m : buffered) on_block_sig_locked(m);
-}
-
-void Node::on_delay_complete(const Hash& output) {
-    if (phase_ != ConsensusPhase::RUNNING_DELAY) return;
-    if (delay_done_) return;
-    delay_done_ = true;
-    local_delay_output_ = output;
-    start_block_sig_phase(output);
 }
 
 chain::ConsensusMode Node::current_mode() const {
@@ -1181,7 +1163,6 @@ void Node::on_snapshot_request(uint32_t header_count,
 }
 
 void Node::reset_round() {
-    delay_cancel_ = true;
     pending_contribs_.clear();
     contrib_equivocations_.clear();
     pending_block_sigs_.clear();
@@ -1192,7 +1173,6 @@ void Node::reset_round() {
     current_tx_root_     = Hash{};
     current_delay_seed_  = Hash{};
     current_delay_output_= Hash{};
-    delay_done_ = false;
     phase_ = ConsensusPhase::IDLE;
 }
 
@@ -1418,7 +1398,7 @@ void Node::on_contrib(const ContribMsg& msg) {
     // Note: we do NOT filter by current_creator_domains_ here. A contrib may
     // arrive before this node has entered IN_SYNC and computed its creator
     // set; rejecting would lose the message permanently (no retransmit).
-    // Instead, we accept any signer that's in the registry. start_delay_compute
+    // Instead, we accept any signer that's in the registry. enter_block_sig_phase
     // looks up pending_contribs_[d] for each selected creator at use time.
     auto entry = registry_.find(msg.signer);
     if (!entry) return;
@@ -1437,8 +1417,8 @@ void Node::on_contrib(const ContribMsg& msg) {
     // (planned for a future rev). For now, if we're still in CONTRIB phase
     // and receive a duplicate from a signer we already have, ignore the new
     // one (keep the earlier-arrived view). If we're past CONTRIB (in
-    // RUNNING_DELAY/BLOCK_SIG), the round is locked-in and stale messages
-    // shouldn't reach here anyway.
+    // BLOCK_SIG), the round is locked-in and stale messages shouldn't reach
+    // here anyway.
     auto existing = pending_contribs_.find(msg.signer);
     if (existing != pending_contribs_.end()) return;
 
@@ -1446,7 +1426,7 @@ void Node::on_contrib(const ContribMsg& msg) {
 
     if (phase_ == ConsensusPhase::CONTRIB &&
         pending_contribs_.size() == current_creator_domains_.size())
-        start_delay_compute();
+        enter_block_sig_phase();
 }
 
 void Node::on_block_sig(const BlockSigMsg& msg) {
@@ -1456,8 +1436,8 @@ void Node::on_block_sig(const BlockSigMsg& msg) {
 
 void Node::on_block_sig_locked(const BlockSigMsg& msg) {
     // Caller must hold state_mutex_. Used both from gossip dispatch (via
-    // on_block_sig wrapper) and from start_delay_compute when replaying
-    // buffered O3 messages.
+    // on_block_sig wrapper) and from enter_block_sig_phase when replaying
+    // buffered messages.
     uint64_t expected_index = chain_.height();
     if (msg.block_index != expected_index) return;
 
@@ -1468,25 +1448,10 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
     auto entry = registry_.find(msg.signer);
     if (!entry) return;
 
-    // O3: if we haven't reached BLOCK_SIG yet, buffer for replay.
+    // If we haven't reached BLOCK_SIG yet, buffer for replay.
     if (phase_ != ConsensusPhase::BLOCK_SIG) {
-        // O1 piggyback opportunity: if we're currently RUNNING_DELAY and this
-        // sig carries a delay_output that verifies against our seed, adopt
-        // it and short-circuit the local compute.
-        if (phase_ == ConsensusPhase::RUNNING_DELAY && !delay_done_) {
-            if (crypto::delay_hash_verify(current_delay_seed_, cfg_.delay_T,
-                                            msg.delay_output)) {
-                delay_cancel_ = true;
-                delay_done_   = true;
-                local_delay_output_ = msg.delay_output;
-                start_block_sig_phase(msg.delay_output);
-                // fall through to validate this sig under the now-active phase
-            }
-        }
-        if (phase_ != ConsensusPhase::BLOCK_SIG) {
-            buffered_block_sigs_.push_back(msg);
-            return;
-        }
+        buffered_block_sigs_.push_back(msg);
+        return;
     }
 
     // delay_output must match the round's canonical output.
