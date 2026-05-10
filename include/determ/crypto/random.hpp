@@ -1,11 +1,11 @@
 #pragma once
-#include <dhcoin/types.hpp>
+#include <determ/types.hpp>
 #include <utility>
 #include <string>
 #include <cstdint>
 #include <vector>
 
-namespace dhcoin::crypto {
+namespace determ::crypto {
 
 // dh_output = SHA256(share_a || share_b)
 Hash compute_dh_output(const Hash& share_a, const Hash& share_b);
@@ -52,4 +52,4 @@ ShardId shard_id_for_address(const std::string& addr,
                                 uint32_t shard_count,
                                 const Hash& shard_address_salt);
 
-} // namespace dhcoin::crypto
+} // namespace determ::crypto

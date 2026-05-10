@@ -1,6 +1,6 @@
-# DHCoin Quickstart
+# Determ Quickstart
 
-A 5-minute walkthrough of the full DHCoin v1 operator workflow: build, run a 3-node cluster, send a transaction, take a snapshot, and bootstrap a fresh node from that snapshot. Cross-shard transfers + equivocation slashing are exercised by the regression tests in `tools/`.
+A 5-minute walkthrough of the full Determ v1 operator workflow: build, run a 3-node cluster, send a transaction, take a snapshot, and bootstrap a fresh node from that snapshot. Cross-shard transfers + equivocation slashing are exercised by the regression tests in `tools/`.
 
 ## 1. Build
 
@@ -9,7 +9,7 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-Single binary: `build/Release/dhcoin.exe` (Windows) or `build/dhcoin` (Linux/Mac).
+Single binary: `build/Release/determ.exe` (Windows) or `build/determ` (Linux/Mac).
 
 ## 2. Run the regression suite
 
@@ -29,14 +29,14 @@ All 8 should print `PASS:`.
 ## 3. Run a 3-node single chain by hand
 
 ```bash
-DHCOIN=$(pwd)/build/Release/dhcoin.exe
+DETERM=$(pwd)/build/Release/determ.exe
 T=$(pwd)/quickstart
 rm -rf $T && mkdir -p $T
 
 # 3 data dirs + per-node Ed25519 keypairs.
 for n in 1 2 3; do
-  $DHCOIN init --data-dir $T/n$n --profile web
-  $DHCOIN genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
+  $DETERM init --data-dir $T/n$n --profile web
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
     > $T/p$n.json
 done
 
@@ -55,7 +55,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 999}]
 }
 EOF
-$DHCOIN genesis-tool build $T/gen.json
+$DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 
 # Wire each node's config (3-mesh, ports 7771-7773 / 8771-8773).
@@ -77,12 +77,12 @@ with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)
 done
 
 # Start all three.
-$DHCOIN start --config $T/n1/config.json > $T/n1/log 2>&1 &
-$DHCOIN start --config $T/n2/config.json > $T/n2/log 2>&1 &
-$DHCOIN start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
 
 sleep 15
-$DHCOIN status --rpc-port 8771   # height should be > 1
+$DETERM status --rpc-port 8771   # height should be > 1
 ```
 
 Stop the cluster with `kill %1 %2 %3` when done.
@@ -90,19 +90,19 @@ Stop the cluster with `kill %1 %2 %3` when done.
 ## 4. Inspect the chain
 
 ```bash
-$DHCOIN status --rpc-port 8771                 # head, role, epoch, mempool, ...
-$DHCOIN chain-summary --rpc-port 8771 --last 5 # recent blocks compact
-$DHCOIN show-block 5 --rpc-port 8771           # full block JSON
-$DHCOIN validators --rpc-port 8771             # registered validator pool
-$DHCOIN committee --rpc-port 8771              # current epoch's K committee
-$DHCOIN show-account treasury --rpc-port 8771  # account state (balance + nonce)
+$DETERM status --rpc-port 8771                 # head, role, epoch, mempool, ...
+$DETERM chain-summary --rpc-port 8771 --last 5 # recent blocks compact
+$DETERM show-block 5 --rpc-port 8771           # full block JSON
+$DETERM validators --rpc-port 8771             # registered validator pool
+$DETERM committee --rpc-port 8771              # current epoch's K committee
+$DETERM show-account treasury --rpc-port 8771  # account state (balance + nonce)
 ```
 
 ## 5. Send a TRANSFER from a bearer wallet
 
 ```bash
 # Generate a bearer wallet (random Ed25519 key + 0x-prefixed address).
-$DHCOIN account create --out $T/alice.json
+$DETERM account create --out $T/alice.json
 ALICE_ADDR=$(python -c "import json; print(json.load(open('$T/alice.json'))['address'])")
 ALICE_PRIV=$(python -c "import json; print(json.load(open('$T/alice.json'))['privkey'])")
 
@@ -111,7 +111,7 @@ ALICE_PRIV=$(python -c "import json; print(json.load(open('$T/alice.json'))['pri
 # initial_balances above. Real flow: pre-fund Alice in genesis, OR
 # transfer from a node1 (creators receive subsidy + fees). For this
 # quickstart, transfer from node1 (which has accumulated subsidy):
-$DHCOIN send node1 100 --rpc-port 8771   # not directly — node1's own
+$DETERM send node1 100 --rpc-port 8771   # not directly — node1's own
                                           # priv key is in $T/n1/node_key.json
                                           # CLI authoring TRANSFERs from
                                           # registered domains is a node-
@@ -120,25 +120,25 @@ $DHCOIN send node1 100 --rpc-port 8771   # not directly — node1's own
 # Easier: from a bearer wallet that you pre-funded in initial_balances.
 # Set initial_balances = [{"domain": "$ALICE_ADDR", "balance": 100}, ...]
 # in genesis BEFORE step 3, then send_anon works:
-$DHCOIN send_anon "$BOB_ADDR" 25 "$ALICE_PRIV" --rpc-port 8771
+$DETERM send_anon "$BOB_ADDR" 25 "$ALICE_PRIV" --rpc-port 8771
 ```
 
 ## 6. Snapshot create + fetch + restore
 
 ```bash
 # Operator dumps the running chain's state.
-$DHCOIN snapshot create --out $T/snap.json --rpc-port 8771
+$DETERM snapshot create --out $T/snap.json --rpc-port 8771
 
 # Verify the file.
-$DHCOIN snapshot inspect --in $T/snap.json
+$DETERM snapshot inspect --in $T/snap.json
 
 # Fetch the same snapshot from a remote peer over the gossip wire
 # (no genesis or chain config locally — pure network client).
-$DHCOIN snapshot fetch --peer 127.0.0.1:7771 --out $T/snap2.json
+$DETERM snapshot fetch --peer 127.0.0.1:7771 --out $T/snap2.json
 
 # Bootstrap a brand-new node from the snapshot (no genesis required).
 mkdir -p $T/receiver
-$DHCOIN init --data-dir $T/receiver
+$DETERM init --data-dir $T/receiver
 python -c "
 import json
 with open('$T/receiver/config.json') as f: c = json.load(f)
@@ -151,10 +151,10 @@ c['key_path']      = '$T/receiver/node_key.json'
 c['data_dir']      = '$T/receiver'
 with open('$T/receiver/config.json','w') as f: json.dump(c,f,indent=2)
 "
-$DHCOIN start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
+$DETERM start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
 sleep 5
 grep "restored from snapshot" $T/receiver/log
-$DHCOIN status --rpc-port 8799   # head_hash matches snapshot
+$DETERM status --rpc-port 8799   # head_hash matches snapshot
 ```
 
 ## 7. Cross-shard deployment (optional)

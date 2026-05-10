@@ -1,9 +1,9 @@
-#include <dhcoin/crypto/sha256.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <openssl/evp.h>
 #include <stdexcept>
 #include <cstring>
 
-namespace dhcoin::crypto {
+namespace determ::crypto {
 
 struct SHA256Builder::Impl {
     EVP_MD_CTX* ctx;
@@ -54,4 +54,4 @@ Hash sha256(const Hash& a, const std::string& s) {
     return SHA256Builder{}.append(a).append(s).finalize();
 }
 
-} // namespace dhcoin::crypto
+} // namespace determ::crypto

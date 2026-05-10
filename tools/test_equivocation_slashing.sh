@@ -18,7 +18,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DHCOIN=C:/sauromatae/build/Release/dhcoin.exe
+DETERM=C:/sauromatae/build/Release/determ.exe
 T=test_equiv_slash
 TABS=C:/sauromatae/$T
 
@@ -42,8 +42,8 @@ echo "=== 1. Init validator node + 2 spectator nodes (M=K=3) ==="
 # We need M >= 3 so a slashed validator drops below the K threshold and
 # the chain can continue on the others. Validators node1, node2, node3.
 for n in 1 2 3; do
-  $DHCOIN init --data-dir $T/n$n --profile web 2>&1 | tail -1
-  $DHCOIN genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
+  $DETERM init --data-dir $T/n$n --profile cluster_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
     > $T/p$n.json
 done
 
@@ -63,7 +63,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$DHCOIN genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GEN_HASH=$(cat $T/gen.json.hash)
 
 echo
@@ -95,29 +95,29 @@ configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
-$DHCOIN start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DHCOIN start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DHCOIN start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 echo
 echo "=== 5. Poll until chain advances (height >= 3) ==="
 for _ in $(seq 1 50); do
-  HEIGHT_PRE=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+  HEIGHT_PRE=$($DETERM status --rpc-port 8771 2>/dev/null \
                 | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
   if [ "$HEIGHT_PRE" -ge 3 ] 2>/dev/null; then break; fi
   sleep 0.2
 done
-HEIGHT_PRE=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+HEIGHT_PRE=$($DETERM status --rpc-port 8771 2>/dev/null \
               | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  chain height pre-submission: $HEIGHT_PRE"
 
 # node1's stake before slash.
-STAKE_PRE=$($DHCOIN stake_info node1 --rpc-port 8771 2>/dev/null \
+STAKE_PRE=$($DETERM stake_info node1 --rpc-port 8771 2>/dev/null \
              | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))")
 echo "  node1 stake pre-slash: $STAKE_PRE (expected 1000)"
 
@@ -188,9 +188,9 @@ STAKE_POST="-"
 HEIGHT_POST="$HEIGHT_PRE"
 for attempt in $(seq 1 120); do
   sleep 0.5
-  STAKE_POST=$($DHCOIN stake_info node1 --rpc-port 8771 2>/dev/null \
+  STAKE_POST=$($DETERM stake_info node1 --rpc-port 8771 2>/dev/null \
                 | python -c "import sys,json; print(json.load(sys.stdin).get('locked','-'))")
-  HEIGHT_POST=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+  HEIGHT_POST=$($DETERM status --rpc-port 8771 2>/dev/null \
                  | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
   if [ "$STAKE_POST" = "0" ]; then
     echo "  slashed after attempt $attempt (height=$HEIGHT_POST)"
@@ -208,7 +208,7 @@ echo "  node1 stake post-slash: $STAKE_POST (expected 0)"
 # event is the slashing block.
 EQUIV_BLOCK=""
 for ((i = HEIGHT_PRE; i <= HEIGHT_POST; i++)); do
-  HAS_EV=$($DHCOIN show-block $i --rpc-port 8771 2>/dev/null \
+  HAS_EV=$($DETERM show-block $i --rpc-port 8771 2>/dev/null \
             | python -c "import sys,json
 b = json.load(sys.stdin)
 print('y' if b.get('equivocation_events') else 'n')" 2>/dev/null)

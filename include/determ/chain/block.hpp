@@ -1,12 +1,12 @@
 #pragma once
-#include <dhcoin/types.hpp>
-#include <dhcoin/crypto/keys.hpp>
+#include <determ/types.hpp>
+#include <determ/crypto/keys.hpp>
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <nlohmann/json.hpp>
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
 // Consensus mode for a block. Per-height escalation: shards default to
 // MUTUAL_DISTRUST and escalate to BFT after `bft_escalation_threshold`
@@ -18,11 +18,17 @@ enum class ConsensusMode : uint8_t {
 };
 
 enum class TxType : uint8_t {
-    TRANSFER   = 0,
-    REGISTER   = 1,
-    DEREGISTER = 2,
-    STAKE      = 3,
-    UNSTAKE    = 4,
+    TRANSFER       = 0,
+    REGISTER       = 1,
+    DEREGISTER     = 2,
+    STAKE          = 3,
+    UNSTAKE        = 4,
+    // rev.9 R1: reserved for v2 epoch-boundary region rebalancing
+    // (Resolved decision #1 in plan.md, Path A). NO apply path in
+    // v1.x — validator unconditionally rejects with a clear "reserved
+    // for future use" error. Locks the wire-format slot so v2 can
+    // ship without a tx-format break.
+    REGION_CHANGE  = 5,
 };
 
 struct Transaction {
@@ -44,9 +50,9 @@ struct Transaction {
 };
 
 // Forward declaration — full struct lives in node/producer.hpp.
-} // namespace dhcoin::chain
-namespace dhcoin::node { struct AbortClaimMsg; }
-namespace dhcoin::chain {
+} // namespace determ::chain
+namespace determ::node { struct AbortClaimMsg; }
+namespace determ::chain {
 
 struct AbortEvent {
     uint8_t     round{0};
@@ -141,6 +147,10 @@ struct GenesisAlloc {
     PubKey      ed_pub{};
     uint64_t    balance{0};
     uint64_t    stake{0};
+    // rev.9 R1: region tag for the seeded creator. Empty = no region
+    // (legacy / global pool). Mirrors the per-validator region carried
+    // in REGISTER tx payloads.
+    std::string region{};
 
     nlohmann::json     to_json() const;
     static GenesisAlloc from_json(const nlohmann::json& j);
@@ -225,4 +235,4 @@ struct Block {
     static Block   from_json(const nlohmann::json& j);
 };
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

@@ -1,12 +1,12 @@
 #pragma once
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/node/producer.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/node/producer.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <stdexcept>
 
-namespace dhcoin::net {
+namespace determ::net {
 
 enum class MsgType : uint8_t {
     HELLO            = 0,
@@ -67,26 +67,62 @@ enum class MsgType : uint8_t {
     SNAPSHOT_RESPONSE = 16,
 };
 
+// A3 / S8: per-pair wire-version negotiation.
+//   v0 = JSON-over-TCP (legacy, default).
+//   v1 = binary envelope (see src/net/binary_codec.cpp for layout).
+// Highest version this build understands. HELLO advertises this; both sides
+// negotiate down to min(ours, theirs). Default per-peer until HELLO arrives
+// is kWireVersionLegacy (0) so we stay compatible with pre-A3 peers.
+inline constexpr uint8_t kWireVersionLegacy  = 0;
+inline constexpr uint8_t kWireVersionBinary  = 1;
+inline constexpr uint8_t kWireVersionMax     = kWireVersionBinary;
+
 struct Message {
     MsgType        type{MsgType::HELLO};
     nlohmann::json payload;
 
+    // Serialize using the JSON envelope (legacy / wire-version 0). Kept as
+    // the default to preserve byte-for-byte compatibility with older peers.
     std::vector<uint8_t> serialize() const;
+
+    // Serialize using the binary envelope (wire-version 1). HELLO is
+    // rejected — HELLOs are always JSON because they happen pre-negotiation.
+    std::vector<uint8_t> serialize_binary() const;
+
+    // Format-detecting deserializer: reads the body's first byte and
+    // dispatches to the JSON or binary path as appropriate. This is what
+    // the read side calls — it does not require pre-knowledge of the
+    // peer's wire-version.
     static Message       deserialize(const uint8_t* data, size_t len);
 };
 
+// Format-detection helper exported for tests / diagnostics. True iff the
+// body starts with the binary envelope magic byte + version.
+bool is_binary_envelope(const uint8_t* data, size_t len);
+
+// Codec primitives — implemented in binary_codec.cpp.
+std::vector<uint8_t> encode_binary(const Message& m);
+Message              decode_binary(const uint8_t* data, size_t len);
+
 inline Message make_hello(const std::string& domain, uint16_t port,
-                            dhcoin::ChainRole role = dhcoin::ChainRole::SINGLE,
-                            ShardId shard_id = 0) {
+                            determ::ChainRole role = determ::ChainRole::SINGLE,
+                            ShardId shard_id = 0,
+                            uint8_t wire_version = kWireVersionMax) {
     // rev.9 B2c.5: HELLO carries the sender's chain identity so peers can
     // tag connections and apply role-based message filtering. Older
     // peers without role/shard_id fields default to SINGLE / 0 (matches
     // the rev.7/8 behavior — single-chain everyone is SINGLE).
+    //
+    // A3 / S8: HELLO additionally carries `wire_version` — the highest
+    // wire format the sender understands. Each side negotiates down to
+    // min(ours, theirs) on receipt. Pre-A3 peers omit the field; the
+    // receiver defaults their version to 0 (legacy JSON) in that case.
     return {MsgType::HELLO, {
-        {"domain",   domain},
-        {"port",     port},
-        {"role",     static_cast<uint8_t>(role)},
-        {"shard_id", shard_id}
+        {"domain",       domain},
+        {"port",         port},
+        {"role",         static_cast<uint8_t>(role)},
+        {"shard_id",     shard_id},
+        {"wire_version", wire_version}
     }};
 }
 inline Message make_block(const chain::Block& b) {
@@ -161,4 +197,4 @@ inline Message make_status_response(uint64_t height, const std::string& genesis_
     return {MsgType::STATUS_RESPONSE, {{"height", height}, {"genesis", genesis_hash}}};
 }
 
-} // namespace dhcoin::net
+} // namespace determ::net

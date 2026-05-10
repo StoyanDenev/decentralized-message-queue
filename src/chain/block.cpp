@@ -1,9 +1,9 @@
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/crypto/sha256.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/crypto/sha256.hpp>
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
-using namespace dhcoin::crypto;
+using namespace determ::crypto;
 using json = nlohmann::json;
 
 // ─── Transaction ─────────────────────────────────────────────────────────────
@@ -62,7 +62,8 @@ json GenesisAlloc::to_json() const {
         {"domain",  domain},
         {"ed_pub",  to_hex(ed_pub)},
         {"balance", balance},
-        {"stake",   stake}
+        {"stake",   stake},
+        {"region",  region}
     };
 }
 
@@ -72,6 +73,8 @@ GenesisAlloc GenesisAlloc::from_json(const json& j) {
     a.ed_pub  = from_hex_arr<32>(j.value("ed_pub", std::string(64, '0')));
     a.balance = j.value("balance", uint64_t{0});
     a.stake   = j.value("stake",   uint64_t{0});
+    // rev.9 R1: region absent on legacy genesis blocks → empty string.
+    a.region  = j.value("region",  std::string{});
     return a;
 }
 
@@ -240,6 +243,13 @@ std::vector<uint8_t> Block::signing_bytes() const {
         b.append(a.ed_pub.data(), a.ed_pub.size());
         b.append(a.balance);
         b.append(a.stake);
+        // rev.9 R1: bind region into the genesis block hash ONLY when
+        // non-empty. Empty region preserves byte-identical signing
+        // bytes with pre-R1 genesis blocks (backward-compat invariant).
+        if (!a.region.empty()) {
+            b.append(static_cast<uint8_t>(a.region.size()));
+            b.append(a.region);
+        }
     }
 
     Hash h = b.finalize();
@@ -399,4 +409,4 @@ Block Block::from_json(const json& j) {
     return b;
 }
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

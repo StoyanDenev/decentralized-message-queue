@@ -1,8 +1,8 @@
 #pragma once
-#include <dhcoin/types.hpp>
+#include <determ/types.hpp>
 #include <chrono>
 
-namespace dhcoin::crypto {
+namespace determ::crypto {
 
 class SHA256Builder {
 public:
@@ -33,4 +33,4 @@ Hash sha256(const Hash& a, const std::string& s);
 inline Hash sha256(const std::vector<uint8_t>& v) { return sha256(v.data(), v.size()); }
 inline Hash sha256(const Hash& h)                  { return sha256(h.data(), 32); }
 
-} // namespace dhcoin::crypto
+} // namespace determ::crypto

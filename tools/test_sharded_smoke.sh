@@ -21,7 +21,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DHCOIN=build/Release/dhcoin.exe
+DETERM=build/Release/determ.exe
 T=test_sharded
 
 declare -a NODE_PIDS
@@ -38,7 +38,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $DHCOIN status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -52,16 +52,16 @@ mkdir -p $T/beacon/n1 $T/beacon/n2 $T/shard/n1 $T/shard/n2
 echo "=== 1. Init nodes (separate data dirs per chain) ==="
 for chain in beacon shard; do
   for n in 1 2; do
-    $DHCOIN init --data-dir $T/$chain/n$n --profile web 2>&1 | tail -1
+    $DETERM init --data-dir $T/$chain/n$n --profile regional_test 2>&1 | tail -1
   done
 done
 
 echo
 echo "=== 2. Generate peer-info entries (one creator pair per chain) ==="
-$DHCOIN genesis-tool peer-info node1 --data-dir $T/beacon/n1 --stake 1000 > $T/beacon_p1.json
-$DHCOIN genesis-tool peer-info node2 --data-dir $T/beacon/n2 --stake 1000 > $T/beacon_p2.json
-$DHCOIN genesis-tool peer-info node1 --data-dir $T/shard/n1 --stake 1000  > $T/shard_p1.json
-$DHCOIN genesis-tool peer-info node2 --data-dir $T/shard/n2 --stake 1000  > $T/shard_p2.json
+$DETERM genesis-tool peer-info node1 --data-dir $T/beacon/n1 --stake 1000 > $T/beacon_p1.json
+$DETERM genesis-tool peer-info node2 --data-dir $T/beacon/n2 --stake 1000 > $T/beacon_p2.json
+$DETERM genesis-tool peer-info node1 --data-dir $T/shard/n1 --stake 1000  > $T/shard_p1.json
+$DETERM genesis-tool peer-info node2 --data-dir $T/shard/n2 --stake 1000  > $T/shard_p2.json
 
 echo
 echo "=== 3. Build genesis with build-sharded (S=1: one beacon + one shard) ==="
@@ -84,7 +84,7 @@ $(cat $T/beacon_p2.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 1000}]
 }
 EOF
-$DHCOIN genesis-tool build-sharded $T/beacon_gen.json
+$DETERM genesis-tool build-sharded $T/beacon_gen.json
 
 # Shard uses its own peer-info because the keys are in different data dirs
 # (the shard's nodes have their own keys). In a real deployment this is
@@ -105,7 +105,7 @@ $(cat $T/shard_p2.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 1000}]
 }
 EOF
-$DHCOIN genesis-tool build-sharded $T/shard_gen.json
+$DETERM genesis-tool build-sharded $T/shard_gen.json
 
 BEACON_GEN="$T/beacon_gen.json.beacon.json"
 BEACON_HASH=$(cat $T/beacon_gen.json.beacon.json.hash)
@@ -155,13 +155,13 @@ configure_node shard 2 node2 7782 8782 '["127.0.0.1:7781"]' "$SHARD_GEN" "$SHARD
 echo
 echo "=== 5. Start 4 nodes (2 beacon + 2 shard, separate networks) ==="
 NODE_PIDS=("" "" "" "")
-$DHCOIN start --config $T/beacon/n1/config.json > $T/beacon/n1/log 2>&1 &
+$DETERM start --config $T/beacon/n1/config.json > $T/beacon/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DHCOIN start --config $T/beacon/n2/config.json > $T/beacon/n2/log 2>&1 &
+$DETERM start --config $T/beacon/n2/config.json > $T/beacon/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DHCOIN start --config $T/shard/n1/config.json > $T/shard/n1/log 2>&1 &
+$DETERM start --config $T/shard/n1/config.json > $T/shard/n1/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
-$DHCOIN start --config $T/shard/n2/config.json > $T/shard/n2/log 2>&1 &
+$DETERM start --config $T/shard/n2/config.json > $T/shard/n2/log 2>&1 &
 NODE_PIDS[3]=$!; sleep 0.3
 
 echo

@@ -1,7 +1,7 @@
-#include <dhcoin/rpc/rpc.hpp>
+#include <determ/rpc/rpc.hpp>
 #include <iostream>
 
-namespace dhcoin::rpc {
+namespace determ::rpc {
 
 using json = nlohmann::json;
 
@@ -127,4 +127,4 @@ json rpc_call(const std::string& host, uint16_t port,
     return j["result"];
 }
 
-} // namespace dhcoin::rpc
+} // namespace determ::rpc

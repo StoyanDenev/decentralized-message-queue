@@ -1,10 +1,10 @@
-#include <dhcoin/node/node.hpp>
-#include <dhcoin/rpc/rpc.hpp>
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/chain/params.hpp>
-#include <dhcoin/crypto/keys.hpp>
-#include <dhcoin/chain/genesis.hpp>
-#include <dhcoin/net/messages.hpp>
+#include <determ/node/node.hpp>
+#include <determ/rpc/rpc.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/keys.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/net/messages.hpp>
 #include <asio.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -17,17 +17,17 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-using namespace dhcoin;
+using namespace determ;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 static std::string default_data_dir() {
 #ifdef _WIN32
     const char* appdata = std::getenv("APPDATA");
-    return appdata ? std::string(appdata) + "\\dhcoin" : ".dhcoin";
+    return appdata ? std::string(appdata) + "\\determ" : ".determ";
 #else
     const char* home = std::getenv("HOME");
-    return home ? std::string(home) + "/.dhcoin" : ".dhcoin";
+    return home ? std::string(home) + "/.determ" : ".determ";
 #endif
 }
 
@@ -36,40 +36,40 @@ static std::string config_path(const std::string& data_dir) {
 }
 
 static void usage() {
-    std::cout << R"(DHCoin — fork-free DH-consensus cryptocurrency
+    std::cout << R"(Determ — fork-free DH-consensus cryptocurrency
 
 Usage:
-  dhcoin init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|cluster_test|web_test|regional_test|global_test|tactical_test]
+  determ init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|cluster_test|web_test|regional_test|global_test|tactical_test]
                                               [--genesis <config.json>]
                                               Generate node keys and config
-  dhcoin register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
-  dhcoin start [--config <path>]             Start node (sync + participate in consensus)
-  dhcoin send <to_domain> <amount>           Submit TRANSFER transaction
-  dhcoin status                              Chain head, node count, next creators
-  dhcoin show-block <index>                  Print block at index (full JSON)
-  dhcoin chain-summary [--last N]            Compact summary of last N blocks
-  dhcoin validators                          List the current validator pool
-  dhcoin committee                           List the current epoch's K-of-K committee
-  dhcoin show-account <address>              Inspect any address (balance, nonce, registry, stake)
-  dhcoin show-tx <hash>                      Look up a tx by hash (block_index + payload)
-  dhcoin snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
-  dhcoin snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
-  dhcoin snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
-  dhcoin peers                               List connected peers
-  dhcoin balance [<domain>]                  Show domain balance
-  dhcoin stake <amount> [--fee <n>]          Lock <amount> as registration stake
-  dhcoin unstake <amount> [--fee <n>]        Release stake (after deregister + delay)
-  dhcoin nonce [<domain>]                    Show next account nonce
-  dhcoin stake_info [<domain>]               Show locked stake and unlock height
-  dhcoin genesis-tool peer-info <domain>     Print this node's creator entry (JSON)
+  determ register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
+  determ start [--config <path>]             Start node (sync + participate in consensus)
+  determ send <to_domain> <amount>           Submit TRANSFER transaction
+  determ status                              Chain head, node count, next creators
+  determ show-block <index>                  Print block at index (full JSON)
+  determ chain-summary [--last N]            Compact summary of last N blocks
+  determ validators                          List the current validator pool
+  determ committee                           List the current epoch's K-of-K committee
+  determ show-account <address>              Inspect any address (balance, nonce, registry, stake)
+  determ show-tx <hash>                      Look up a tx by hash (block_index + payload)
+  determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
+  determ snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
+  determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
+  determ peers                               List connected peers
+  determ balance [<domain>]                  Show domain balance
+  determ stake <amount> [--fee <n>]          Lock <amount> as registration stake
+  determ unstake <amount> [--fee <n>]        Release stake (after deregister + delay)
+  determ nonce [<domain>]                    Show next account nonce
+  determ stake_info [<domain>]               Show locked stake and unlock height
+  determ genesis-tool peer-info <domain>     Print this node's creator entry (JSON)
                                               for inclusion in a genesis config.
-  dhcoin genesis-tool build <config.json>    Build a genesis from peer-info entries
-  dhcoin genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
+  determ genesis-tool build <config.json>    Build a genesis from peer-info entries
+  determ genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
                                               and print the genesis hash.
-  dhcoin account create [--out <file>]       Generate a fresh anonymous account
+  determ account create [--out <file>]       Generate a fresh anonymous account
                                               keypair (Ed25519). Prints address + privkey.
-  dhcoin account address <privkey_hex>       Derive the account address from a hex privkey.
-  dhcoin send_anon <to> <amount> <privkey_hex>
+  determ account address <privkey_hex>       Derive the account address from a hex privkey.
+  determ send_anon <to> <amount> <privkey_hex>
                                               Sign a TRANSFER from the anon account
                                               corresponding to <privkey_hex> and submit
                                               via the daemon's submit_tx RPC.
@@ -129,6 +129,13 @@ static int cmd_init(int argc, char** argv) {
     cfg.abort_claim_ms = tp.abort_claim_ms;
     cfg.m_creators     = tp.m_creators;
     cfg.k_block_sigs   = tp.k_block_sigs;
+    // A6: pin chain_role + sharding_mode from the chosen profile so
+    // cmd_start can hand them to the validator without re-resolving the
+    // profile. Genesis remains the source of truth at runtime — Node's
+    // ctor cross-checks gcfg.chain_role against cfg_.chain_role and
+    // gates loadtime on cfg_.sharding_mode (see node.cpp).
+    cfg.chain_role     = tp.chain_role;
+    cfg.sharding_mode  = tp.sharding_mode;
 
     if (!genesis_path.empty()) {
         cfg.genesis_path = genesis_path;
@@ -151,7 +158,7 @@ static int cmd_init(int argc, char** argv) {
               << ", K=" << cfg.k_block_sigs
               << ", mode=" << mode << ")\n";
     std::cout << "Edit the config to set your domain and bootstrap peers, then run:\n";
-    std::cout << "  dhcoin start\n";
+    std::cout << "  determ start\n";
     return 0;
 }
 
@@ -175,7 +182,7 @@ static int cmd_start(int argc, char** argv) {
         }
         if (cfg.chain_path.empty()) cfg.chain_path = cfg.data_dir + "/chain.json";
 
-        std::cout << "[dhcoin] Loading node domain=" << cfg.domain
+        std::cout << "[determ] Loading node domain=" << cfg.domain
                   << " genesis_path=" << cfg.genesis_path << "\n" << std::flush;
 
         node::Node node(cfg);
@@ -183,16 +190,16 @@ static int cmd_start(int argc, char** argv) {
         rpc::RpcServer rpc_server(node.io_context_access(), node, cfg.rpc_port);
         rpc_server.start();
 
-        std::cout << "[dhcoin] Starting node domain=" << cfg.domain
+        std::cout << "[determ] Starting node domain=" << cfg.domain
                   << " port=" << cfg.listen_port << "\n" << std::flush;
         node.run(); // blocks
         return 0;
     } catch (std::exception& e) {
-        std::cerr << "[dhcoin] FATAL: " << e.what() << std::endl;
+        std::cerr << "[determ] FATAL: " << e.what() << std::endl;
         std::cerr.flush();
         return 1;
     } catch (...) {
-        std::cerr << "[dhcoin] FATAL: unknown exception" << std::endl;
+        std::cerr << "[determ] FATAL: unknown exception" << std::endl;
         std::cerr.flush();
         return 1;
     }
@@ -234,7 +241,7 @@ static int submit_tx_with_retry(uint16_t port,
 }
 
 static int cmd_register(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: dhcoin register <domain>\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ register <domain>\n"; return 1; }
     std::string domain   = argv[0];
     uint16_t    rpc_port = get_rpc_port(argc, argv);
     try {
@@ -249,7 +256,7 @@ static int cmd_register(int argc, char** argv) {
 }
 
 static int cmd_send(int argc, char** argv) {
-    if (argc < 2) { std::cerr << "Usage: dhcoin send <to_domain> <amount> [--fee <n>]\n"; return 1; }
+    if (argc < 2) { std::cerr << "Usage: determ send <to_domain> <amount> [--fee <n>]\n"; return 1; }
     std::string to     = argv[0];
     uint64_t    amount = std::stoull(argv[1]);
     uint64_t    fee    = 0;
@@ -272,11 +279,11 @@ static int cmd_status(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin show-block <index> [--rpc-port N]
+// determ show-block <index> [--rpc-port N]
 //   Prints the full block at the given index from a running node.
 static int cmd_show_block(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin show-block <index> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-block <index> [--rpc-port N]\n";
         return 1;
     }
     uint64_t index = std::stoull(argv[0]);
@@ -296,7 +303,7 @@ static int cmd_show_block(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin validators [--rpc-port N]
+// determ validators [--rpc-port N]
 //   Lists the current validator pool (registered + active + staked +
 //   not suspended) with each entry's domain, pubkey, stake, active_from.
 static int cmd_validators(int argc, char** argv) {
@@ -325,7 +332,7 @@ static int cmd_validators(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin chain-summary [--last N] [--rpc-port N]
+// determ chain-summary [--last N] [--rpc-port N]
 //   Prints a compact summary of the last N blocks (default 10).
 static int cmd_chain_summary(int argc, char** argv) {
     uint32_t last_n = 10;
@@ -338,13 +345,27 @@ static int cmd_chain_summary(int argc, char** argv) {
     try {
         json params = {{"last_n", last_n}};
         auto result = rpc::rpc_call("127.0.0.1", port, "chain_summary", params);
-        for (auto& b : result) {
+        // A1: chain_summary now returns an object {blocks: [...], total_supply,
+        // genesis_total, expected_total, accumulated_*}. Backward-compat note:
+        // an array result (legacy server) is still accepted as the blocks list.
+        json blocks = result.is_array() ? result : result.value("blocks", json::array());
+        for (auto& b : blocks) {
             std::cout << "#" << std::setw(6) << std::left << b.value("index", uint64_t{0})
                       << " mode=" << b.value("consensus_mode", 0)
                       << " txs=" << std::setw(3) << std::left << b.value("tx_count", 0)
                       << " creators=" << b.value("creators", json::array()).dump()
                       << " hash=" << b.value("hash", std::string{}).substr(0, 12)
                       << "\n";
+        }
+        if (result.is_object()) {
+            std::cout << "height=" << result.value("height", uint64_t{0})
+                      << " total_supply=" << result.value("total_supply", uint64_t{0})
+                      << " genesis_total=" << result.value("genesis_total", uint64_t{0})
+                      << " (subsidy=+" << result.value("accumulated_subsidy", uint64_t{0})
+                      << " inbound=+" << result.value("accumulated_inbound", uint64_t{0})
+                      << " slashed=-" << result.value("accumulated_slashed", uint64_t{0})
+                      << " outbound=-" << result.value("accumulated_outbound", uint64_t{0})
+                      << ")\n";
         }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -353,7 +374,7 @@ static int cmd_chain_summary(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin committee [--rpc-port N]
+// determ committee [--rpc-port N]
 //   Print the current epoch's K-of-K committee (the creators producing
 //   blocks right now). Pure function of chain state — deterministic
 //   across all nodes on the same chain at the same height.
@@ -383,13 +404,13 @@ static int cmd_committee(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin show-account <address> [--rpc-port N]
+// determ show-account <address> [--rpc-port N]
 //   Inspect on-chain state for an arbitrary address (registered domain or
 //   anonymous bearer wallet). Prints balance, next nonce, and registry
 //   info + stake when the address is a registered validator.
 static int cmd_show_account(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin show-account <address> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-account <address> [--rpc-port N]\n";
         return 1;
     }
     std::string addr = argv[0];
@@ -423,7 +444,7 @@ static int cmd_show_account(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin snapshot create [--out file.json] [--headers N] [--rpc-port N]
+// determ snapshot create [--out file.json] [--headers N] [--rpc-port N]
 //   B6.basic: dump chain state (accounts, stakes, registrants, dedup,
 //   tail headers) to a file. Operators host this for fast-bootstrap of
 //   new nodes — restoring from a snapshot avoids replaying every block
@@ -473,15 +494,15 @@ static int cmd_snapshot_create(int argc, char** argv) {
     return 0;
 }
 
-// dhcoin snapshot fetch --peer host:port --out file.json [--headers N]
+// determ snapshot fetch --peer host:port --out file.json [--headers N]
 //   B6.basic: connect to a running node, send a SNAPSHOT_REQUEST over
 //   the gossip-wire protocol, write the response to a file. Pure
 //   network client; no genesis or chain config needed locally. After
 //   fetch, validates by round-tripping through restore_from_snapshot
 //   (head_hash sanity check). Operator workflow:
-//     dhcoin snapshot fetch --peer 1.2.3.4:7771 --out snap.json
+//     determ snapshot fetch --peer 1.2.3.4:7771 --out snap.json
 //     # ... edit config to set snapshot_path = snap.json ...
-//     dhcoin start
+//     determ start
 static int cmd_snapshot_fetch(int argc, char** argv) {
     std::string peer_str, out_path;
     uint32_t header_count = 16;
@@ -493,7 +514,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
                                     std::stoul(argv[i + 1]));
     }
     if (peer_str.empty() || out_path.empty()) {
-        std::cerr << "Usage: dhcoin snapshot fetch --peer host:port "
+        std::cerr << "Usage: determ snapshot fetch --peer host:port "
                      "--out file.json [--headers N]\n";
         return 1;
     }
@@ -565,7 +586,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
     }
 }
 
-// dhcoin snapshot inspect --in file.json
+// determ snapshot inspect --in file.json
 //   Round-trips a snapshot through Chain::restore_from_snapshot and
 //   prints a human-readable summary. Validates JSON format, version,
 //   and head_hash consistency (rejects loudly on mismatch). Useful
@@ -575,7 +596,7 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
     for (int i = 0; i < argc - 1; ++i)
         if (std::string(argv[i]) == "--in") in_path = argv[i + 1];
     if (in_path.empty()) {
-        std::cerr << "Usage: dhcoin snapshot inspect --in <file>\n";
+        std::cerr << "Usage: determ snapshot inspect --in <file>\n";
         return 1;
     }
     try {
@@ -606,7 +627,7 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
 
 static int cmd_snapshot(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin snapshot {create|inspect} ...\n";
+        std::cerr << "Usage: determ snapshot {create|inspect} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -617,12 +638,12 @@ static int cmd_snapshot(int argc, char** argv) {
     return 1;
 }
 
-// dhcoin show-tx <hash> [--rpc-port N]
+// determ show-tx <hash> [--rpc-port N]
 //   Look up a transaction by its hex-encoded hash. Reports the tx
 //   payload, the block it landed in, and the block's timestamp.
 static int cmd_show_tx(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin show-tx <hash> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-tx <hash> [--rpc-port N]\n";
         return 1;
     }
     std::string hash_hex = argv[0];
@@ -673,7 +694,7 @@ static int cmd_balance(int argc, char** argv) {
 }
 
 static int cmd_stake(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: dhcoin stake <amount> [--fee <n>]\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ stake <amount> [--fee <n>]\n"; return 1; }
     uint64_t amount = std::stoull(argv[0]);
     uint64_t fee    = 0;
     uint16_t port   = get_rpc_port(argc, argv);
@@ -683,7 +704,7 @@ static int cmd_stake(int argc, char** argv) {
 }
 
 static int cmd_unstake(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: dhcoin unstake <amount> [--fee <n>]\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ unstake <amount> [--fee <n>]\n"; return 1; }
     uint64_t amount = std::stoull(argv[0]);
     uint64_t fee    = 0;
     uint16_t port   = get_rpc_port(argc, argv);
@@ -712,7 +733,7 @@ static int cmd_nonce(int argc, char** argv) {
 //   signed by the same key), so no separate proof-of-possession is emitted here.
 static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin genesis-tool peer-info <domain> [--data-dir <dir>] [--stake <n>]\n";
+        std::cerr << "Usage: determ genesis-tool peer-info <domain> [--data-dir <dir>] [--stake <n>]\n";
         return 1;
     }
     std::string domain   = argv[0];
@@ -726,7 +747,7 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     std::string kpath = data_dir + "/node_key.json";
     if (!fs::exists(kpath)) {
         std::cerr << "Key not found at " << kpath
-                  << " (run 'dhcoin init --data-dir " << data_dir << "' first)\n";
+                  << " (run 'determ init --data-dir " << data_dir << "' first)\n";
         return 1;
     }
     auto key = crypto::load_node_key(kpath);
@@ -746,7 +767,7 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
 //   <config>.hash next to the file for convenient distribution.
 static int cmd_genesis_tool_build(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin genesis-tool build <genesis_config.json>\n";
+        std::cerr << "Usage: determ genesis-tool build <genesis_config.json>\n";
         return 1;
     }
     std::string path = argv[0];
@@ -801,10 +822,21 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
 //   is Stage B2b/B2c — out of scope for this minimal scaffolding step.
 static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin genesis-tool build-sharded <genesis_config.json>\n";
+        std::cerr << "Usage: determ genesis-tool build-sharded "
+                     "<genesis_config.json> [--profile <name>]\n";
         return 1;
     }
     std::string path = argv[0];
+    // A6: optional --profile pins the deployment's sharding_mode at
+    // build time so we can reject mode-incompatible configs early.
+    // When omitted, sharding_mode is INFERRED from the input JSON
+    // (non-empty committee_region or any non-empty shard_regions[i]
+    // implies EXTENDED; otherwise CURRENT). Inference keeps existing
+    // build-sharded callers byte-compatible.
+    std::string profile_name;
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--profile") profile_name = argv[i + 1];
+    }
     try {
         auto base = chain::GenesisConfig::load(path);
         if (base.k_block_sigs == 0 || base.k_block_sigs > base.m_creators) {
@@ -814,6 +846,116 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
         }
         if (base.initial_shard_count < 1) {
             std::cerr << "build-sharded requires initial_shard_count >= 1 in input config\n";
+            return 1;
+        }
+
+        // A6: reload the raw JSON so we can read shard_regions (a
+        // top-level array, length S, one entry per shard). It is not
+        // a field on GenesisConfig itself — per-shard regions are a
+        // build-time input only; each shard genesis carries its own
+        // committee_region (set below per shard once shard_regions is
+        // wired by R3). For now we use shard_regions ONLY to detect
+        // EXTENDED intent for the mode-consistency checks.
+        std::ifstream raw_in(path);
+        nlohmann::json raw;
+        if (raw_in) raw = nlohmann::json::parse(raw_in, nullptr, false);
+        std::vector<std::string> shard_regions;
+        bool any_shard_region = false;
+        if (raw.is_object() && raw.contains("shard_regions")
+            && raw["shard_regions"].is_array()) {
+            for (auto& sr : raw["shard_regions"]) {
+                std::string s = sr.is_string() ? sr.get<std::string>()
+                                                : std::string{};
+                shard_regions.push_back(s);
+                if (!s.empty()) any_shard_region = true;
+            }
+        }
+        bool any_creator_region = false;
+        for (auto& c : base.initial_creators) {
+            if (!c.region.empty()) { any_creator_region = true; break; }
+        }
+        bool extended_signaled = !base.committee_region.empty()
+                                || any_shard_region
+                                || any_creator_region;
+
+        // Resolve the effective sharding_mode for build-time checks.
+        ShardingMode mode;
+        if (!profile_name.empty()) {
+            chain::TimingProfile tp = chain::PROFILE_WEB;
+            bool ok = true;
+            if      (profile_name == "cluster")        tp = chain::PROFILE_CLUSTER;
+            else if (profile_name == "web")            tp = chain::PROFILE_WEB;
+            else if (profile_name == "regional")       tp = chain::PROFILE_REGIONAL;
+            else if (profile_name == "global")         tp = chain::PROFILE_GLOBAL;
+            else if (profile_name == "tactical")       tp = chain::PROFILE_TACTICAL;
+            else if (profile_name == "cluster_test")   tp = chain::PROFILE_CLUSTER_TEST;
+            else if (profile_name == "web_test")       tp = chain::PROFILE_WEB_TEST;
+            else if (profile_name == "regional_test")  tp = chain::PROFILE_REGIONAL_TEST;
+            else if (profile_name == "global_test")    tp = chain::PROFILE_GLOBAL_TEST;
+            else if (profile_name == "tactical_test")  tp = chain::PROFILE_TACTICAL_TEST;
+            else ok = false;
+            if (!ok) {
+                std::cerr << "Unknown --profile " << profile_name << "\n";
+                return 1;
+            }
+            mode = tp.sharding_mode;
+        } else {
+            mode = extended_signaled ? ShardingMode::EXTENDED
+                                     : ShardingMode::CURRENT;
+        }
+
+        // A6 mismatch gate: a non-EXTENDED build refuses any region
+        // input. Region tags are a no-op (CURRENT silently tolerates,
+        // NONE rejects) under non-EXTENDED runtime; baking them into
+        // the genesis is therefore an operator error worth catching
+        // before the chain ships.
+        if (mode != ShardingMode::EXTENDED) {
+            if (!base.committee_region.empty()) {
+                std::cerr << "build-sharded: sharding_mode="
+                          << to_string(mode)
+                          << " rejects non-empty committee_region "
+                             "(got '" << base.committee_region
+                          << "') — regional committees require "
+                             "sharding_mode=extended\n";
+                return 1;
+            }
+            if (any_shard_region) {
+                std::cerr << "build-sharded: sharding_mode="
+                          << to_string(mode)
+                          << " rejects non-empty shard_regions[] — "
+                             "per-shard regions require "
+                             "sharding_mode=extended\n";
+                return 1;
+            }
+            if (any_creator_region) {
+                std::cerr << "build-sharded: sharding_mode="
+                          << to_string(mode)
+                          << " rejects non-empty initial_creators[].region — "
+                             "creator region tags require "
+                             "sharding_mode=extended\n";
+                return 1;
+            }
+        }
+
+        // A6 / S-038 mitigation: an EXTENDED deployment with fewer
+        // than 3 shards is degenerate (the under-quorum merge mechanism
+        // that justifies EXTENDED needs at least 3 shards for the
+        // modular fold to be meaningful). Hard error.
+        if (mode == ShardingMode::EXTENDED && base.initial_shard_count < 3) {
+            std::cerr << "build-sharded: sharding_mode=extended requires "
+                         "initial_shard_count >= 3 (got "
+                      << base.initial_shard_count
+                      << ", minimum 3) — S-038 mitigation\n";
+            return 1;
+        }
+
+        // If shard_regions is present, its length must match S.
+        if (!shard_regions.empty()
+            && shard_regions.size() != base.initial_shard_count) {
+            std::cerr << "build-sharded: shard_regions length "
+                      << shard_regions.size()
+                      << " != initial_shard_count "
+                      << base.initial_shard_count << "\n";
             return 1;
         }
 
@@ -845,6 +987,16 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
             chain::GenesisConfig shard = base;
             shard.chain_role = ChainRole::SHARD;
             shard.shard_id   = s;
+            // A6: when shard_regions is supplied (EXTENDED only — gated
+            // above), the per-shard committee_region overrides the
+            // base.committee_region. Empty entry leaves the base value
+            // (= "" under EXTENDED defaults to global pool for that
+            // shard, which is allowed). Pre-A6 callers omit
+            // shard_regions and inherit base.committee_region (which
+            // must be "" under non-EXTENDED).
+            if (!shard_regions.empty()) {
+                shard.committee_region = shard_regions[s];
+            }
             std::string shard_path = path + ".shard" + std::to_string(s) + ".json";
             shard.save(shard_path);
             Hash sh = chain::compute_genesis_hash(shard);
@@ -901,11 +1053,10 @@ static int cmd_account_create(int argc, char** argv) {
 // account address <privkey_hex>
 //   Derives the account address from a privkey hex string (offline, no daemon needed).
 static int cmd_account_address(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: dhcoin account address <privkey_hex>\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ account address <privkey_hex>\n"; return 1; }
     crypto::NodeKey key;
     key.priv_seed = from_hex_arr<32>(argv[0]);
 
-    // Re-derive pubkey from priv_seed (Ed25519: pub = clamp(seed) over G).
     EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
         EVP_PKEY_ED25519, nullptr, key.priv_seed.data(), 32);
     if (!pkey) { std::cerr << "invalid privkey\n"; return 1; }
@@ -919,7 +1070,7 @@ static int cmd_account_address(int argc, char** argv) {
 
 static int cmd_account(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin account {create|address} ...\n";
+        std::cerr << "Usage: determ account {create|address} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -930,11 +1081,9 @@ static int cmd_account(int argc, char** argv) {
 }
 
 // send_anon <to> <amount> <privkey_hex> [--fee <n>] [--rpc-port <p>]
-//   Build a TRANSFER from the anon account owning <privkey_hex>, sign it,
-//   submit via daemon's submit_tx RPC.
 static int cmd_send_anon(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: dhcoin send_anon <to> <amount> <privkey_hex> "
+        std::cerr << "Usage: determ send_anon <to> <amount> <privkey_hex> "
                      "[--fee <n>] [--rpc-port <p>]\n";
         return 1;
     }
@@ -954,7 +1103,6 @@ static int cmd_send_anon(int argc, char** argv) {
         return 1;
     }
 
-    // Derive pubkey.
     EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
         EVP_PKEY_ED25519, nullptr, key.priv_seed.data(), 32);
     if (!pkey) { std::cerr << "invalid privkey for Ed25519\n"; return 1; }
@@ -964,7 +1112,6 @@ static int cmd_send_anon(int argc, char** argv) {
 
     std::string from_addr = make_anon_address(key.pub);
 
-    // Query nonce via RPC.
     uint64_t nonce = 0;
     try {
         auto r = rpc::rpc_call("127.0.0.1", port, "nonce", {{"domain", from_addr}});
@@ -974,7 +1121,6 @@ static int cmd_send_anon(int argc, char** argv) {
         return 1;
     }
 
-    // Build, sign, hash.
     chain::Transaction tx;
     tx.type    = chain::TxType::TRANSFER;
     tx.from    = from_addr;
@@ -998,7 +1144,7 @@ static int cmd_send_anon(int argc, char** argv) {
 
 static int cmd_genesis_tool(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: dhcoin genesis-tool {peer-info|build} ...\n";
+        std::cerr << "Usage: determ genesis-tool {peer-info|build|build-sharded} ...\n";
         return 1;
     }
     std::string sub = argv[0];

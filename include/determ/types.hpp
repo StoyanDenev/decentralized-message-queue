@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <chrono>
 
-namespace dhcoin {
+namespace determ {
 
 using Hash      = std::array<uint8_t, 32>;
 using PubKey    = std::array<uint8_t, 32>;
@@ -121,4 +121,4 @@ inline std::string make_anon_address(const PubKey& pk) {
     return "0x" + to_hex(pk);
 }
 
-} // namespace dhcoin
+} // namespace determ

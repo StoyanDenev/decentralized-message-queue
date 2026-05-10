@@ -1,18 +1,19 @@
-#include <dhcoin/chain/chain.hpp>
-#include <dhcoin/chain/genesis.hpp>
-#include <dhcoin/chain/params.hpp>
-#include <dhcoin/crypto/sha256.hpp>
-#include <dhcoin/crypto/random.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/sha256.hpp>
+#include <determ/crypto/random.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
+#include <cstdio>
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
-using dhcoin::crypto::sha256;
+using determ::crypto::sha256;
 
 // Registration / deregistration randomized delay window. Kept in sync with
 // node/registry.hpp REGISTRATION_DELAY_WINDOW; we duplicate the constant here
@@ -104,14 +105,28 @@ bool Chain::inbound_receipt_applied(ShardId src_shard,
 
 // ─── apply_transactions ──────────────────────────────────────────────────────
 
+uint64_t Chain::live_total_supply() const {
+    uint64_t s = 0;
+    for (auto& [_, a] : accounts_) s += a.balance;
+    for (auto& [_, st] : stakes_)  s += st.locked;
+    return s;
+}
+
 void Chain::apply_transactions(const Block& b) {
     // Genesis: install the initial state directly. No tx semantics, no fees.
     // The validator already accepts index-0 blocks unconditionally; here we
     // just translate `initial_state` into accounts_/stakes_/registrants_.
     if (b.index == 0) {
+        // A1: GENESIS_TOTAL = Σ initial_balance + Σ initial_stake
+        // (+ Zeroth pool / pseudo-account balances + initial unspent_subsidy
+        // — those state structures don't exist yet at v1.x; their
+        // contribution is 0. Once E1 lands, the pool's initial balance is
+        // added here too; the invariant formula is unchanged.)
+        uint64_t gtotal = 0;
         for (auto& a : b.initial_state) {
             accounts_[a.domain].balance = a.balance;
             // accounts_[a.domain].next_nonce = 0  (default)
+            gtotal += a.balance;
 
             PubKey zero_ed{};
             if (a.ed_pub != zero_ed) {
@@ -120,18 +135,30 @@ void Chain::apply_transactions(const Block& b) {
                 re.registered_at = 0;
                 re.active_from   = 0;
                 re.inactive_from = UINT64_MAX;
+                re.region        = a.region; // rev.9 R1
                 registrants_[a.domain] = re;
             }
             if (a.stake > 0) {
                 stakes_[a.domain].locked        = a.stake;
                 stakes_[a.domain].unlock_height = UINT64_MAX;
+                gtotal += a.stake;
             }
         }
+        genesis_total_       = gtotal;
+        accumulated_subsidy_ = 0;
+        accumulated_slashed_ = 0;
+        accumulated_inbound_ = 0;
+        accumulated_outbound_= 0;
+        // Genesis-time invariant trivially holds (live == genesis_total).
         return;
     }
 
-    uint64_t total_fees = 0;
-    uint64_t height     = b.index;
+    uint64_t total_fees    = 0;
+    uint64_t height        = b.index;
+    // A1: per-block running deltas for the unitary-balance counters.
+    uint64_t block_outbound = 0;   // cross-shard TRANSFER amount that left this shard
+    uint64_t block_inbound  = 0;   // cross-shard receipt amount credited here
+    uint64_t block_slashed  = 0;   // suspension + equivocation forfeit
 
     auto charge_fee = [&](AccountState& acct, uint64_t fee) {
         if (acct.balance < fee) return false;
@@ -160,6 +187,10 @@ void Chain::apply_transactions(const Block& b) {
             // here; fee still accrues to creators on this side.
             if (!is_cross_shard(tx.to)) {
                 accounts_[tx.to].balance += tx.amount;
+            } else {
+                // A1: amount has left this shard's accounted supply.
+                // Fee stays here (accrues to creators below).
+                block_outbound += tx.amount;
             }
             total_fees += tx.fee;
             sender.next_nonce++;
@@ -167,7 +198,21 @@ void Chain::apply_transactions(const Block& b) {
         }
 
         case TxType::REGISTER: {
-            if (tx.payload.size() != REGISTER_PAYLOAD_SIZE) continue;
+            // rev.9 R1 wire format:
+            //   [pubkey: 32B][region_len: u8][region: utf8]
+            // Legacy (pre-R1) payload of just the 32-byte pubkey is
+            // accepted: region defaults to empty (= global pool).
+            // Validator already enforced normalization + size bounds;
+            // apply only re-extracts the region for storage.
+            if (tx.payload.size() < REGISTER_PAYLOAD_PUBKEY_SIZE) continue;
+            std::string region;
+            if (tx.payload.size() > REGISTER_PAYLOAD_PUBKEY_SIZE) {
+                size_t rlen = tx.payload[REGISTER_PAYLOAD_PUBKEY_SIZE];
+                if (tx.payload.size() != REGISTER_PAYLOAD_PUBKEY_SIZE + 1 + rlen) continue;
+                region.assign(reinterpret_cast<const char*>(
+                                  tx.payload.data() + REGISTER_PAYLOAD_PUBKEY_SIZE + 1),
+                              rlen);
+            }
             if (!charge_fee(sender, tx.fee)) continue;
 
             RegistryEntry e;
@@ -175,6 +220,7 @@ void Chain::apply_transactions(const Block& b) {
             e.registered_at = height;
             e.active_from   = height + derive_delay(b.cumulative_rand, tx.hash);
             e.inactive_from = UINT64_MAX;
+            e.region        = std::move(region);
             registrants_[tx.from] = e;
 
             // Stake_table entry exists even with 0 locked; ensures unlock_height
@@ -237,6 +283,12 @@ void Chain::apply_transactions(const Block& b) {
             sender.next_nonce++;
             break;
         }
+        // rev.9 R1: REGION_CHANGE is rejected by the validator; an
+        // unrecognized type at apply is a defensive no-op (skip the
+        // tx, do not touch state, do not advance nonce — this matches
+        // the validator's reject path and keeps replay deterministic
+        // even if a malformed block somehow slips through).
+        default: continue;
         }
     }
 
@@ -264,6 +316,7 @@ void Chain::apply_transactions(const Block& b) {
         if (sit == stakes_.end()) continue;
         uint64_t deduct = std::min<uint64_t>(SUSPENSION_SLASH, sit->second.locked);
         sit->second.locked -= deduct;
+        block_slashed     += deduct;   // A1
     }
 
     // rev.8 follow-on: full equivocation slashing + deregistration. Each
@@ -282,7 +335,10 @@ void Chain::apply_transactions(const Block& b) {
     //                       participate again.
     for (auto& ev : b.equivocation_events) {
         auto sit = stakes_.find(ev.equivocator);
-        if (sit != stakes_.end()) sit->second.locked = 0;
+        if (sit != stakes_.end()) {
+            block_slashed     += sit->second.locked;  // A1: full forfeit
+            sit->second.locked = 0;
+        }
         auto rit = registrants_.find(ev.equivocator);
         if (rit != registrants_.end()) {
             rit->second.inactive_from = b.index + 1;
@@ -299,6 +355,43 @@ void Chain::apply_transactions(const Block& b) {
         if (applied_inbound_receipts_.count(key)) continue;
         accounts_[r.to].balance += r.amount;
         applied_inbound_receipts_.insert(key);
+        block_inbound += r.amount;     // A1
+    }
+
+    // A1: book the per-block deltas, then assert the unitary-balance
+    // invariant. block_subsidy_ is minted to creators iff the distribution
+    // branch above actually paid them out (creators non-empty AND
+    // total_distributed > 0). Match that gate exactly so the counter
+    // tracks reality, not intent.
+    if ((total_fees + block_subsidy_) > 0 && !b.creators.empty()) {
+        accumulated_subsidy_ += block_subsidy_;
+    }
+    accumulated_inbound_  += block_inbound;
+    accumulated_outbound_ += block_outbound;
+    accumulated_slashed_  += block_slashed;
+
+    uint64_t expected = expected_total();
+    uint64_t actual   = live_total_supply();
+    if (actual != expected) {
+        // Hot-path string formatting only fires on bug, never in steady
+        // state. Throwing surfaces the bug to the apply-path caller (Node /
+        // validator / load) loudly rather than silently corrupting state.
+        char buf[256];
+        int64_t delta = (int64_t)actual - (int64_t)expected;
+        std::snprintf(buf, sizeof(buf),
+            "unitary-balance invariant violated at block %llu: "
+            "expected=%llu actual=%llu delta=%lld "
+            "(genesis=%llu +subsidy=%llu +inbound=%llu -slashed=%llu -outbound=%llu)",
+            (unsigned long long)b.index,
+            (unsigned long long)expected,
+            (unsigned long long)actual,
+            (long long)delta,
+            (unsigned long long)genesis_total_,
+            (unsigned long long)accumulated_subsidy_,
+            (unsigned long long)accumulated_inbound_,
+            (unsigned long long)accumulated_slashed_,
+            (unsigned long long)accumulated_outbound_);
+        throw std::runtime_error(buf);
     }
 }
 
@@ -376,6 +469,9 @@ json Chain::serialize_state(uint32_t header_count) const {
             {"registered_at", r.registered_at},
             {"active_from",   r.active_from},
             {"inactive_from", r.inactive_from},
+            // rev.9 R1: include region in snapshots so a restored chain
+            // preserves region-based eligibility.
+            {"region",        r.region},
         });
     }
     snap["registrants"] = regs;
@@ -397,6 +493,16 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
     snap["shard_id"]      = my_shard_id_;
+
+    // A1: persist the unitary-balance counters so a snapshot-bootstrapped
+    // chain can keep asserting from the first post-restore block. Without
+    // these, expected_total() would be 0 on a restored chain and the very
+    // first apply would trip the invariant.
+    snap["genesis_total"]        = genesis_total_;
+    snap["accumulated_subsidy"]  = accumulated_subsidy_;
+    snap["accumulated_slashed"]  = accumulated_slashed_;
+    snap["accumulated_inbound"]  = accumulated_inbound_;
+    snap["accumulated_outbound"] = accumulated_outbound_;
 
     // Tail headers for chain continuity. Restorer keeps them so they
     // can verify incoming block's prev_hash chains correctly. Default
@@ -429,6 +535,20 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
     c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",
                                                       std::string(64, '0')));
+    // A1: restore unitary-balance counters. Older snapshots (pre-A1)
+    // omit these fields; the value() defaults give a graceful degraded
+    // state (genesis_total = live sum, no historic deltas) so old
+    // snapshots still load. The invariant on subsequent blocks will be
+    // checked using whatever genesis_total ends up loaded — for legacy
+    // snapshots that's the live total at restore time, which trivially
+    // satisfies the invariant immediately and tracks all subsequent
+    // mutations correctly.
+    c.accumulated_subsidy_  = snap.value("accumulated_subsidy",  uint64_t{0});
+    c.accumulated_slashed_  = snap.value("accumulated_slashed",  uint64_t{0});
+    c.accumulated_inbound_  = snap.value("accumulated_inbound",  uint64_t{0});
+    c.accumulated_outbound_ = snap.value("accumulated_outbound", uint64_t{0});
+    // genesis_total deferred until after accounts/stakes load so legacy
+    // snapshots (without the field) can fall back to live sum.
 
     if (snap.contains("accounts")) {
         for (auto& a : snap["accounts"]) {
@@ -454,6 +574,9 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             e.registered_at = r.value("registered_at", uint64_t{0});
             e.active_from   = r.value("active_from",   uint64_t{0});
             e.inactive_from = r.value("inactive_from", UINT64_MAX);
+            // rev.9 R1: optional region tag in snapshots. Absent =
+            // empty (legacy snapshot, pre-R1 behavior preserved).
+            e.region        = r.value("region",        std::string{});
             c.registrants_[r.value("domain", std::string{})] = e;
         }
     }
@@ -480,6 +603,21 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             throw std::runtime_error(
                 "snapshot head_hash mismatch: actual " + actual
               + " vs claimed " + head_hash_claim);
+    }
+
+    // A1: pick up genesis_total from snapshot if present; otherwise back-
+    // solve from the loaded state so the invariant is satisfied at
+    // restore time (live = genesis + subsidy + inbound - slashed - outbound).
+    if (snap.contains("genesis_total")) {
+        c.genesis_total_ = snap.value("genesis_total", uint64_t{0});
+    } else {
+        uint64_t live = c.live_total_supply();
+        uint64_t deltas_pos = c.accumulated_subsidy_ + c.accumulated_inbound_;
+        uint64_t deltas_neg = c.accumulated_slashed_ + c.accumulated_outbound_;
+        // Solve: genesis = live + deltas_neg - deltas_pos. Wraparound is
+        // impossible on a well-formed snapshot since live - deltas_pos +
+        // deltas_neg should yield a valid uint64 by construction.
+        c.genesis_total_ = live + deltas_neg - deltas_pos;
     }
 
     return c;
@@ -529,4 +667,4 @@ Chain Chain::load(const std::string& path,
     return c;
 }
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

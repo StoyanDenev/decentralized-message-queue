@@ -1,9 +1,9 @@
-#include <dhcoin/crypto/random.hpp>
-#include <dhcoin/crypto/sha256.hpp>
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <algorithm>
 #include <stdexcept>
 
-namespace dhcoin::crypto {
+namespace determ::crypto {
 
 Hash compute_dh_output(const Hash& share_a, const Hash& share_b) {
     return sha256(share_a, share_b);
@@ -126,4 +126,4 @@ ShardId shard_id_for_address(const std::string& addr,
     return static_cast<ShardId>(v % shard_count);
 }
 
-} // namespace dhcoin::crypto
+} // namespace determ::crypto

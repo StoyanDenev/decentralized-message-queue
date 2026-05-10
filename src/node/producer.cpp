@@ -1,17 +1,17 @@
-#include <dhcoin/node/producer.hpp>
-#include <dhcoin/chain/params.hpp>
-#include <dhcoin/crypto/keys.hpp>
-#include <dhcoin/crypto/random.hpp>
-#include <dhcoin/crypto/sha256.hpp>
+#include <determ/node/producer.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/keys.hpp>
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <algorithm>
 #include <map>
 #include <set>
 #include <stdexcept>
 
-namespace dhcoin::node {
+namespace determ::node {
 
-using namespace dhcoin::crypto;
-using namespace dhcoin::chain;
+using namespace determ::crypto;
+using namespace determ::chain;
 using json = nlohmann::json;
 
 // ─── ContribMsg JSON ─────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ Hash make_abort_claim_message(uint64_t block_index, uint8_t round,
                                const Hash& prev_hash,
                                const std::string& missing_creator) {
     SHA256Builder b;
-    b.append(std::string("DHC-AbortClaim-v1"));
+    b.append(std::string("DTM-AbortClaim-v1"));
     b.append(block_index);
     b.append(round);
     b.append(prev_hash);
@@ -477,4 +477,4 @@ Block build_body(
     return b;
 }
 
-} // namespace dhcoin::node
+} // namespace determ::node

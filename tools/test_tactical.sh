@@ -5,7 +5,7 @@
 # cadence. Models the unmanned-mobile-unit (drone, robot) deployment shape.
 #
 # Asserts:
-#   1. dhcoin init --profile tactical_test produces a valid config.
+#   1. determ init --profile tactical_test produces a valid config.
 #   2. Three nodes peered at tactical-test timing finalize their first 5
 #      blocks within the test-grade ceiling (~250 ms total at 50 ms/block).
 #   3. Status RPC reports chain_role = SHARD and sharding_mode = EXTENDED.
@@ -14,7 +14,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DHCOIN=build/Release/dhcoin.exe
+DETERM=build/Release/determ.exe
 T=test_tactical
 
 declare -a NODE_PIDS
@@ -31,7 +31,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $DHCOIN status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -41,14 +41,14 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes with tactical_test profile (SHARD + EXTENDED, K=3) ==="
 for n in 1 2 3; do
-  $DHCOIN init --data-dir $T/n$n --profile tactical_test 2>&1 | tail -1
+  $DETERM init --data-dir $T/n$n --profile tactical_test 2>&1 | tail -1
 done
 
 echo
 echo "=== 2. Generate peer-info entries ==="
-$DHCOIN genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
-$DHCOIN genesis-tool peer-info node2 --data-dir $T/n2 --stake 1000 > $T/p2.json
-$DHCOIN genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
+$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$DETERM genesis-tool peer-info node2 --data-dir $T/n2 --stake 1000 > $T/p2.json
+$DETERM genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
 
 echo
 echo "=== 3. Build genesis (M=3, K=3 strong, tactical timing) ==="
@@ -69,7 +69,7 @@ $(cat $T/p3.json | tr -d '\n')
   "shard_regions": ["us-east", "us-east", "us-east"]
 }
 EOF
-$DHCOIN genesis-tool build-sharded $T/gen.json
+$DETERM genesis-tool build-sharded $T/gen.json
 GEN_HASH=$(cat $T/gen.json.shard0.json.hash)
 echo "  Shard0 genesis hash: $GEN_HASH"
 
@@ -78,7 +78,7 @@ echo "=== 4. Start nodes peered at distinct ports ==="
 for n in 1 2 3; do
   port=$((7777 + (n-1)*10))
   rpc=$((7778 + (n-1)*10))
-  $DHCOIN start --data-dir $T/n$n --listen-port $port --rpc-port $rpc \
+  $DETERM start --data-dir $T/n$n --listen-port $port --rpc-port $rpc \
     --genesis $T/gen.json.shard0.json --peer 127.0.0.1:7777 \
     --peer 127.0.0.1:7787 --peer 127.0.0.1:7797 \
     > $T/n$n.log 2>&1 &

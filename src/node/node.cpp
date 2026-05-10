@@ -1,8 +1,8 @@
-#include <dhcoin/node/node.hpp>
-#include <dhcoin/chain/genesis.hpp>
-#include <dhcoin/chain/params.hpp>
-#include <dhcoin/crypto/random.hpp>
-#include <dhcoin/crypto/sha256.hpp>
+#include <determ/node/node.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <set>
 #include <openssl/rand.h>
 #include <filesystem>
@@ -11,7 +11,7 @@
 #include <sstream>
 #include <algorithm>
 
-namespace dhcoin::node {
+namespace determ::node {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -37,12 +37,15 @@ json Config::to_json() const {
     j["bft_enabled"]             = bft_enabled;
     j["bft_escalation_threshold"]= bft_escalation_threshold;
     j["chain_role"]              = static_cast<uint8_t>(chain_role);
+    j["sharding_mode"]           = static_cast<uint8_t>(sharding_mode);
     j["shard_id"]                = shard_id;
     j["initial_shard_count"]     = initial_shard_count;
     j["epoch_blocks"]            = epoch_blocks;
     j["tx_commit_ms"]    = tx_commit_ms;
     j["block_sig_ms"]    = block_sig_ms;
     j["abort_claim_ms"]  = abort_claim_ms;
+    j["region"]          = region;
+    j["committee_region"]= committee_region;
     return j;
 }
 
@@ -65,12 +68,22 @@ Config Config::from_json(const json& j) {
     c.bft_enabled              = j.value("bft_enabled",              true);
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
     c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
+    // A6: sharding_mode persisted alongside chain_role. Default
+    // CURRENT preserves byte-identical behavior for pre-A6 configs that
+    // lack the field — those were necessarily running CURRENT semantics
+    // (rev.9 sharding) since EXTENDED requires R1+R2 plumbing that
+    // didn't exist when those configs were written.
+    c.sharding_mode            = static_cast<ShardingMode>(j.value("sharding_mode", uint8_t{1}));
     c.shard_id                 = j.value("shard_id",                 ShardId{0});
     c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
     c.epoch_blocks             = j.value("epoch_blocks",             uint32_t{1000});
     c.tx_commit_ms    = j.value("tx_commit_ms",   uint32_t{200});
     c.block_sig_ms    = j.value("block_sig_ms",   uint32_t{200});
     c.abort_claim_ms  = j.value("abort_claim_ms", uint32_t{200});
+    // rev.9 R1: optional region tags. Empty defaults preserve byte-
+    // identical behavior with pre-R1 configs.
+    c.region          = j.value("region",          std::string{});
+    c.committee_region= j.value("committee_region",std::string{});
     return c;
 }
 
@@ -120,6 +133,10 @@ Node::Node(const Config& cfg)
         cfg_.shard_id                = gcfg.shard_id;
         cfg_.initial_shard_count     = gcfg.initial_shard_count;
         cfg_.epoch_blocks            = gcfg.epoch_blocks;
+        // rev.9 R2: genesis is the source of truth for committee_region.
+        // The cfg_ copy is what check_if_selected reads; the validator
+        // mirror is set immediately below.
+        cfg_.committee_region        = gcfg.committee_region;
         genesis_subsidy              = gcfg.block_subsidy;
         genesis_min_stake            = gcfg.min_stake;
         genesis_inclusion            = gcfg.inclusion_model;
@@ -129,6 +146,69 @@ Node::Node(const Config& cfg)
         validator_.set_bft_escalation_threshold(cfg_.bft_escalation_threshold);
         validator_.set_epoch_blocks(cfg_.epoch_blocks);
         validator_.set_shard_id(cfg_.shard_id);
+        validator_.set_committee_region(cfg_.committee_region);
+        validator_.set_sharding_mode(cfg_.sharding_mode);
+
+        // A6 startup gate: enforce that the operator-selected sharding
+        // mode is consistent with the genesis being loaded. Defense in
+        // depth — genesis-tool already rejects most of these at build
+        // time, but a node can be pointed at any genesis file at start
+        // time. Mismatch here means the operator picked the wrong
+        // profile for this chain (or the genesis was tampered with);
+        // refusing to start is the safe response.
+        switch (cfg_.sharding_mode) {
+        case ShardingMode::NONE:
+            if (gcfg.chain_role != ChainRole::SINGLE) {
+                throw std::runtime_error(
+                    "sharding_mode=none requires chain_role=single, "
+                    "but genesis declares chain_role="
+                    + std::string(to_string(gcfg.chain_role)));
+            }
+            if (!gcfg.committee_region.empty()) {
+                throw std::runtime_error(
+                    "sharding_mode=none rejects non-empty "
+                    "committee_region (got '" + gcfg.committee_region
+                    + "') — region is meaningless in single-chain "
+                      "deployments");
+            }
+            for (auto& gc : gcfg.initial_creators) {
+                if (!gc.region.empty()) {
+                    throw std::runtime_error(
+                        "sharding_mode=none rejects per-creator region "
+                        "tag (creator '" + gc.domain + "' has region='"
+                        + gc.region + "')");
+                }
+            }
+            break;
+        case ShardingMode::CURRENT:
+            // CURRENT accepts BEACON/SHARD/SINGLE chain_role. The
+            // committee_region must be empty (no regional grouping in
+            // CURRENT — that's exactly what EXTENDED is for). Per-
+            // creator region is tolerated silently for forward compat
+            // with chains that ship region tags but don't yet use them.
+            if (!gcfg.committee_region.empty()) {
+                throw std::runtime_error(
+                    "sharding_mode=current rejects non-empty "
+                    "committee_region (got '" + gcfg.committee_region
+                    + "') — regional committees require "
+                      "sharding_mode=extended");
+            }
+            break;
+        case ShardingMode::EXTENDED:
+            // EXTENDED requires the S-038 invariant: a regional shard
+            // deployment with fewer than 3 shards is degenerate (the
+            // under-quorum merge mechanism that justifies the EXTENDED
+            // mode needs at least 3 shards to make a meaningful
+            // modular fold). Re-checked here as defense in depth on
+            // top of the genesis-tool guard.
+            if (gcfg.initial_shard_count < 3) {
+                throw std::runtime_error(
+                    "sharding_mode=extended requires initial_shard_count "
+                    ">= 3 (got " + std::to_string(gcfg.initial_shard_count)
+                    + ") — S-038 mitigation");
+            }
+            break;
+        }
 
         // rev.9 B2c.2-full: SHARD chains source committee rand from the
         // beacon's chain (zero-trust: both sides derive the same committee
@@ -355,7 +435,12 @@ void Node::check_if_selected() {
     if (!in_sync())                       return;
     if (phase_ != ConsensusPhase::IDLE)   return;
 
-    auto nodes = registry_.sorted_nodes();
+    // rev.9 R2: filter the eligible pool by this chain's
+    // committee_region BEFORE running select_m_creators. Empty region
+    // (the default) yields the full pool — pre-R2 behavior preserved
+    // exactly. Non-empty restricts the pool to validators whose
+    // self-declared region matches.
+    auto nodes = registry_.eligible_in_region(cfg_.committee_region);
     size_t k_target = cfg_.k_block_sigs;       // committee size per round (MD)
 
     // Build the available pool: registry minus any domains already aborted in
@@ -1669,7 +1754,9 @@ json Node::rpc_status() const {
     j["bft_block_count"] = bft_blocks;
     j["tx_count"]        = total_txs;
 
-    auto nodes = registry_.sorted_nodes();
+    // rev.9 R2: status preview of "next_creators" must mirror the same
+    // region-filtered pool that check_if_selected operates on.
+    auto nodes = registry_.eligible_in_region(cfg_.committee_region);
     if (!chain_.empty() && nodes.size() >= cfg_.m_creators) {
         Hash rand = chain_.head().cumulative_rand;
         try {
@@ -1761,7 +1848,9 @@ json Node::rpc_committee() const {
     if (chain_.empty()) return arr;
 
     auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
-    auto pool = reg.sorted_nodes();
+    // rev.9 R2: rpc_committee must mirror check_if_selected's pool so
+    // the displayed committee matches what producers actually run.
+    auto pool = reg.eligible_in_region(cfg_.committee_region);
     if (pool.empty()) return arr;
 
     // Mirror check_if_selected's seed derivation so the result matches
@@ -1801,6 +1890,7 @@ json Node::rpc_validators() const {
         e["active_from"]  = nd.active_from;
         e["registered_at"]= nd.registered_at;
         e["stake"]        = chain_.stake(nd.domain);
+        e["region"]       = nd.region; // rev.9 R1
         arr.push_back(e);
     }
     return arr;
@@ -1810,22 +1900,40 @@ json Node::rpc_chain_summary(uint32_t last_n) const {
     std::lock_guard<std::mutex> lk(state_mutex_);
     json arr = json::array();
     uint64_t total = chain_.height();
-    if (total == 0) return arr;
-    uint64_t start = (total > last_n) ? total - last_n : 0;
-    for (uint64_t i = start; i < total; ++i) {
-        const auto& b = chain_.at(i);
-        json e;
-        e["index"]          = b.index;
-        e["hash"]           = to_hex(b.compute_hash());
-        e["prev_hash"]      = to_hex(b.prev_hash);
-        e["timestamp"]      = b.timestamp;
-        e["consensus_mode"] = static_cast<uint8_t>(b.consensus_mode);
-        e["bft_proposer"]   = b.bft_proposer;
-        e["tx_count"]       = b.transactions.size();
-        e["creators"]       = b.creators;
-        arr.push_back(e);
+    if (total > 0) {
+        uint64_t start = (total > last_n) ? total - last_n : 0;
+        for (uint64_t i = start; i < total; ++i) {
+            const auto& b = chain_.at(i);
+            json e;
+            e["index"]          = b.index;
+            e["hash"]           = to_hex(b.compute_hash());
+            e["prev_hash"]      = to_hex(b.prev_hash);
+            e["timestamp"]      = b.timestamp;
+            e["consensus_mode"] = static_cast<uint8_t>(b.consensus_mode);
+            e["bft_proposer"]   = b.bft_proposer;
+            e["tx_count"]       = b.transactions.size();
+            e["creators"]       = b.creators;
+            arr.push_back(e);
+        }
     }
-    return arr;
+    // A1: surface the unitary-balance invariant. `total_supply` is the
+    // live walk over accounts.balance + stakes.locked; the four delta
+    // counters break down how it diverges from genesis_total. Useful as
+    // a single-RPC sanity probe in regression tests: total_supply must
+    // equal expected_total at the head of every applied block, and
+    // total_supply == genesis_total + accumulated_subsidy + accumulated_inbound
+    //   - accumulated_slashed - accumulated_outbound is the same equality.
+    json out;
+    out["blocks"]               = arr;
+    out["height"]               = total;
+    out["total_supply"]         = chain_.live_total_supply();
+    out["genesis_total"]        = chain_.genesis_total();
+    out["expected_total"]       = chain_.expected_total();
+    out["accumulated_subsidy"]  = chain_.accumulated_subsidy();
+    out["accumulated_slashed"]  = chain_.accumulated_slashed();
+    out["accumulated_inbound"]  = chain_.accumulated_inbound();
+    out["accumulated_outbound"] = chain_.accumulated_outbound();
+    return out;
 }
 
 json Node::rpc_send(const std::string& to, uint64_t amount, uint64_t fee) {
@@ -1986,10 +2094,20 @@ json Node::rpc_balance(const std::string& domain) const {
 json Node::rpc_register() {
     std::lock_guard<std::mutex> lk(state_mutex_);
 
-    // Payload: just the Ed25519 pubkey (32 B). The tx's own Ed25519 sig
-    // (verified at validator) proves possession of the key — no separate PoP.
-    std::vector<uint8_t> payload(chain::REGISTER_PAYLOAD_SIZE);
-    std::copy(key_.pub.begin(), key_.pub.end(), payload.begin());
+    // Payload (rev.9 R1): [pubkey: 32B][region_len: u8][region: utf8].
+    // When cfg_.region is empty we emit only the 32-byte pubkey
+    // (legacy / wire-compat path; old REGISTER txs replay byte-identical).
+    // The tx's own Ed25519 sig (verified at validator) proves possession
+    // of the key — no separate PoP. signing_bytes() includes the full
+    // payload, so the region binds into the tx hash automatically.
+    std::vector<uint8_t> payload;
+    payload.reserve(chain::REGISTER_PAYLOAD_PUBKEY_SIZE
+                    + (cfg_.region.empty() ? 0 : 1 + cfg_.region.size()));
+    payload.insert(payload.end(), key_.pub.begin(), key_.pub.end());
+    if (!cfg_.region.empty()) {
+        payload.push_back(static_cast<uint8_t>(cfg_.region.size()));
+        payload.insert(payload.end(), cfg_.region.begin(), cfg_.region.end());
+    }
 
     chain::Transaction tx;
     tx.type    = chain::TxType::REGISTER;
@@ -2010,4 +2128,4 @@ json Node::rpc_register() {
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
 }
 
-} // namespace dhcoin::node
+} // namespace determ::node

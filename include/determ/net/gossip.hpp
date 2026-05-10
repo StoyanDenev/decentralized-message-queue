@@ -1,7 +1,7 @@
 #pragma once
-#include <dhcoin/net/peer.hpp>
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/node/producer.hpp>
+#include <determ/net/peer.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/node/producer.hpp>
 #include <asio.hpp>
 #include <functional>
 #include <memory>
@@ -9,7 +9,7 @@
 #include <mutex>
 #include <string>
 
-namespace dhcoin::net {
+namespace determ::net {
 
 class GossipNet {
 public:
@@ -86,4 +86,4 @@ private:
     ShardId                                  our_shard_id_{0};
 };
 
-} // namespace dhcoin::net
+} // namespace determ::net

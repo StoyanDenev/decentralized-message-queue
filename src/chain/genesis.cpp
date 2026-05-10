@@ -1,16 +1,42 @@
-#include <dhcoin/chain/genesis.hpp>
-#include <dhcoin/chain/params.hpp>
-#include <dhcoin/crypto/sha256.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
-using namespace dhcoin::crypto;
+using namespace determ::crypto;
+
+// rev.9 R1: region tag normalization. Used at every parse boundary
+// (genesis JSON load, REGISTER tx apply / validate). ASCII tolower;
+// then enforce charset [a-z0-9-_] and size <= 32 bytes. Empty string
+// is always valid (= global pool). Throws on charset / size violation.
+static std::string normalize_region(const std::string& in,
+                                     const char* ctx) {
+    if (in.size() > 32) {
+        throw std::runtime_error(std::string("genesis: ") + ctx
+            + " region exceeds 32 bytes");
+    }
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char c : in) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c - 'A' + 'a');
+        bool ok = (c >= 'a' && c <= 'z')
+               || (c >= '0' && c <= '9')
+               || c == '-' || c == '_';
+        if (!ok) {
+            throw std::runtime_error(std::string("genesis: ") + ctx
+                + " region has invalid char (allowed [a-z0-9-_])");
+        }
+        out.push_back(static_cast<char>(c));
+    }
+    return out;
+}
 
 // ─── GenesisConfig JSON ──────────────────────────────────────────────────────
 
@@ -20,7 +46,8 @@ json GenesisConfig::to_json() const {
         creators.push_back({
             {"domain",        c.domain},
             {"ed_pub",        to_hex(c.ed_pub)},
-            {"initial_stake", c.initial_stake}
+            {"initial_stake", c.initial_stake},
+            {"region",        c.region}
         });
     }
     json balances = json::array();
@@ -44,6 +71,7 @@ json GenesisConfig::to_json() const {
         {"initial_shard_count",      initial_shard_count},
         {"epoch_blocks",             epoch_blocks},
         {"shard_address_salt",       to_hex(shard_address_salt)},
+        {"committee_region",         committee_region},
         {"initial_creators",         creators},
         {"initial_balances",         balances}
     };
@@ -66,6 +94,11 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     if (j.contains("shard_address_salt")) {
         c.shard_address_salt = from_hex_arr<32>(j["shard_address_salt"].get<std::string>());
     }
+    // rev.9 R1: committee_region is normalized at load. Empty (or absent
+    // for legacy genesis files) preserves byte-identical hashing.
+    c.committee_region = normalize_region(j.value("committee_region",
+                                                    std::string{}),
+                                            "committee_region");
 
     if (j.contains("initial_creators")) {
         for (auto& cj : j["initial_creators"]) {
@@ -73,6 +106,9 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
             gc.domain        = cj["domain"].get<std::string>();
             gc.ed_pub        = from_hex_arr<32>(cj["ed_pub"].get<std::string>());
             gc.initial_stake = cj.value("initial_stake", uint64_t{0});
+            gc.region        = normalize_region(cj.value("region",
+                                                           std::string{}),
+                                                  "initial_creator.region");
             c.initial_creators.push_back(gc);
         }
     }
@@ -127,6 +163,9 @@ Block make_genesis_block(const GenesisConfig& cfg) {
         a.domain  = c.domain;
         a.ed_pub  = c.ed_pub;
         a.stake   = c.initial_stake;
+        // rev.9 R1: propagate region into the genesis-installed registry
+        // entry. Empty preserves pre-R1 behavior.
+        a.region  = c.region;
         // balance defaults to 0; explicit balances come from initial_balances.
         g.initial_state.push_back(a);
     }
@@ -146,11 +185,22 @@ Block make_genesis_block(const GenesisConfig& cfg) {
     // cumulative_rand anchored to chain_id + role + shard_id + concat(ed_pubs).
     // The role + shard_id make a beacon vs shard_i genesis distinguishable
     // even when they share the same chain_id and creator set.
+    //
+    // rev.9 R1: committee_region is length-prefixed (u8 length + bytes)
+    // and mixed in after shard_id ONLY when non-empty. The empty-region
+    // path skips the mix entirely so legacy / unsharded / global-pool
+    // genesis files remain byte-identical (backward-compat invariant).
+    // Two shards differing only in non-empty committee_region get
+    // distinct genesis hashes via the length-prefix encoding.
     SHA256Builder rb;
-    rb.append(std::string("DHC-genesis-v1"));
+    rb.append(std::string("DTM-genesis-v1"));
     rb.append(cfg.chain_id);
     rb.append(static_cast<uint8_t>(cfg.chain_role));
     rb.append(static_cast<uint64_t>(cfg.shard_id));
+    if (!cfg.committee_region.empty()) {
+        rb.append(static_cast<uint8_t>(cfg.committee_region.size()));
+        rb.append(cfg.committee_region);
+    }
     for (auto& c : cfg.initial_creators) rb.append(c.ed_pub.data(), c.ed_pub.size());
     g.cumulative_rand = rb.finalize();
 
@@ -181,4 +231,4 @@ Block make_genesis(const std::string& /*seed*/) {
     return g;
 }
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

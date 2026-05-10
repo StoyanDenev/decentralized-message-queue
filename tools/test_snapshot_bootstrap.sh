@@ -19,7 +19,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DHCOIN=C:/sauromatae/build/Release/dhcoin.exe
+DETERM=C:/sauromatae/build/Release/determ.exe
 T=test_snap_boot
 TABS=C:/sauromatae/$T
 
@@ -41,8 +41,8 @@ mkdir -p $T/donor1 $T/donor2 $T/donor3 $T/receiver
 
 echo "=== 1. Init donor (M=K=3) + receiver data dirs ==="
 for n in 1 2 3; do
-  $DHCOIN init --data-dir $T/donor$n --profile web 2>&1 | tail -1
-  $DHCOIN genesis-tool peer-info donor$n --data-dir $T/donor$n --stake 1000 \
+  $DETERM init --data-dir $T/donor$n --profile cluster_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info donor$n --data-dir $T/donor$n --stake 1000 \
     > $T/p$n.json
 done
 
@@ -60,7 +60,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 999}]
 }
 EOF
-$DHCOIN genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 echo
@@ -92,29 +92,29 @@ configure_donor 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 3. Start 3 donors + wait for chain to advance ==="
 NODE_PIDS=("" "" "" "")
-$DHCOIN start --config $T/donor1/config.json > $T/donor1/log 2>&1 &
+$DETERM start --config $T/donor1/config.json > $T/donor1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DHCOIN start --config $T/donor2/config.json > $T/donor2/log 2>&1 &
+$DETERM start --config $T/donor2/config.json > $T/donor2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DHCOIN start --config $T/donor3/config.json > $T/donor3/log 2>&1 &
+$DETERM start --config $T/donor3/config.json > $T/donor3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 # Poll until donor chain produces a few blocks (need state to snapshot).
 for _ in $(seq 1 50); do
-  DONOR_H=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+  DONOR_H=$($DETERM status --rpc-port 8771 2>/dev/null \
              | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
   if [ "$DONOR_H" -ge 5 ] 2>/dev/null; then break; fi
   sleep 0.2
 done
-DONOR_H=$($DHCOIN status --rpc-port 8771 2>/dev/null \
+DONOR_H=$($DETERM status --rpc-port 8771 2>/dev/null \
            | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  donor chain height: $DONOR_H"
 
 echo
 echo "=== 4. Create snapshot from donor1 ==="
-$DHCOIN snapshot create --out $T/snap.json --rpc-port 8771 2>&1
+$DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1
 SNAP_H=$(python -c "import json; print(json.load(open('$T/snap.json'))['block_index'])")
 SNAP_HEAD=$(python -c "import json; print(json.load(open('$T/snap.json'))['head_hash'])")
 SNAP_ACCTS=$(python -c "import json; print(len(json.load(open('$T/snap.json'))['accounts']))")
@@ -135,7 +135,7 @@ sleep 2
 
 echo
 echo "=== 6. Configure receiver: snapshot_path set, no genesis ==="
-$DHCOIN init --data-dir $T/receiver --profile web 2>&1 | tail -1
+$DETERM init --data-dir $T/receiver --profile cluster_test 2>&1 | tail -1
 python -c "
 import json
 with open('$T/receiver/config.json') as f: c = json.load(f)
@@ -158,11 +158,11 @@ with open('$T/receiver/config.json','w') as f: json.dump(c,f,indent=2)
 echo
 echo "=== 7. Start receiver ==="
 NODE_PIDS=("")
-$DHCOIN start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
+$DETERM start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
 # Poll until receiver finishes loading the snapshot (head_hash populated).
 for _ in $(seq 1 50); do
-  RH=$($DHCOIN status --rpc-port 8799 2>/dev/null \
+  RH=$($DETERM status --rpc-port 8799 2>/dev/null \
         | python -c "import sys,json
 try: print(json.load(sys.stdin).get('head_hash',''))
 except: print('')")
@@ -172,9 +172,9 @@ done
 
 echo
 echo "=== 8. Verify receiver bootstrapped from snapshot ==="
-RECV_H=$($DHCOIN status --rpc-port 8799 2>/dev/null \
+RECV_H=$($DETERM status --rpc-port 8799 2>/dev/null \
           | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
-RECV_HEAD=$($DHCOIN status --rpc-port 8799 2>/dev/null \
+RECV_HEAD=$($DETERM status --rpc-port 8799 2>/dev/null \
              | python -c "import sys,json; print(json.load(sys.stdin)['head_hash'])")
 echo "  receiver chain height: $RECV_H (expected $((SNAP_H + 1)) — height = block_count)"
 echo "  receiver head_hash:    ${RECV_HEAD:0:24}..."

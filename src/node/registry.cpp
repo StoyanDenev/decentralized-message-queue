@@ -1,10 +1,10 @@
-#include <dhcoin/node/registry.hpp>
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/chain/params.hpp>
+#include <determ/node/registry.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>
 #include <algorithm>
 #include <map>
 
-namespace dhcoin::node {
+namespace determ::node {
 
 std::vector<NodeEntry> NodeRegistry::sorted_nodes() const {
     return nodes_;
@@ -65,6 +65,7 @@ NodeRegistry NodeRegistry::build_from_chain(const chain::Chain& chain, uint64_t 
         e.pubkey        = r.ed_pub;
         e.registered_at = r.registered_at;
         e.active_from   = r.active_from;
+        e.region        = r.region; // rev.9 R1
 
         auto it = std::lower_bound(reg.nodes_.begin(), reg.nodes_.end(), e,
             [](const NodeEntry& a, const NodeEntry& b) { return a.domain < b.domain; });
@@ -73,4 +74,21 @@ NodeRegistry NodeRegistry::build_from_chain(const chain::Chain& chain, uint64_t 
     return reg;
 }
 
-} // namespace dhcoin::node
+// rev.9 R1: region-filtered eligible pool.
+//   region == "" → full pool (backward-compat path; behavior identical to
+//                  sorted_nodes()). All pre-R1 callers see no change.
+//   region != "" → strict equality on the (already-normalized) region tag.
+// The pool is already sorted by domain (build_from_chain inserts in order),
+// so the returned subset preserves deterministic creator-selection ordering.
+std::vector<NodeEntry> NodeRegistry::eligible_in_region(
+    const std::string& region) const {
+    if (region.empty()) return nodes_;
+    std::vector<NodeEntry> out;
+    out.reserve(nodes_.size());
+    for (auto& e : nodes_) {
+        if (e.region == region) out.push_back(e);
+    }
+    return out;
+}
+
+} // namespace determ::node

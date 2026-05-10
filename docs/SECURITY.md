@@ -1,4 +1,4 @@
-# DHCoin Security Posture
+# Determ Security Posture
 
 **Doc status:** Canonical. Reconciles the rev.7 [SECURITY_AUDIT.md](https://github.com/) findings with the in-tree [OPEN-VULNERABILITIES.md](OPEN-VULNERABILITIES.md) (now superseded by this file) against current code at rev.8 + rev.9 sharding through B6.basic.
 
@@ -231,7 +231,7 @@ A malicious relay can also drop transactions from `b.transactions` after committ
 
 **Severity:** High (consensus-divergence) • **Status:** ✅ Moot — see M-F. The iteration count is no longer load-bearing; `delay_T` divergence between nodes no longer affects consensus. The field can be removed in cleanup. • **Sources:** Audit 3.9 (re-classified up from Medium)
 
-**What's open.** `GenesisConfig` (`include/dhcoin/chain/genesis.hpp:78-105`) contains no `delay_T` field. `grep delay_T genesis.{hpp,cpp}` returns empty. `delay_T` is loaded from the per-node `Config` instead. Two nodes with different per-node `delay_T` will produce differently-validated blocks (the validator at `node.cpp:1446` uses `cfg_.delay_T`).
+**What's open.** `GenesisConfig` (`include/determ/chain/genesis.hpp:78-105`) contains no `delay_T` field. `grep delay_T genesis.{hpp,cpp}` returns empty. `delay_T` is loaded from the per-node `Config` instead. Two nodes with different per-node `delay_T` will produce differently-validated blocks (the validator at `node.cpp:1446` uses `cfg_.delay_T`).
 
 **Impact.** Consensus divergence between misconfigured nodes. The PROTOCOL.md claim that `delay_T` is "genesis-pinned" is **not enforced by code**.
 
@@ -636,7 +636,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 **Severity:** Operational • **Status:** Open • **Sources:** Architectural Analysis §4.1, §4.2
 
-**What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/dhcoin.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
+**What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/determ.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
 
 **Why this is operational, not a vulnerability.** A bug-free codebase doesn't strictly need unit tests, but their absence makes regression-prevention impossible. Edge cases (`ContribMsg` with invalid `aborts_gen`, delay-worker exception handling, two same-height blocks in different orders, equivocation under network partition) require targeted unit tests; the integration scripts can't drive them.
 
@@ -660,7 +660,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 | S-022 | 16 MB message limit too permissive — but snapshots use it | Per-message-type limits: 1 MB for CONTRIB/BLOCK_SIG; 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. |
 | S-023 | RPC `send`/`stake` skip balance check | Pre-check balance before queueing. ~1h. |
 | S-024 | Deregistration timing predictability (1-10 block grind window) | Acceptable per auditor's own re-classification. v2 could mix in a future block hash. |
-| S-025 | `compute_tx_root_intersection` is dead code | Delete it or guard under `#ifdef DHCOIN_INTERSECTION_MODE`. 5 minutes. |
+| S-025 | `compute_tx_root_intersection` is dead code | Delete it or guard under `#ifdef DETERM_INTERSECTION_MODE`. 5 minutes. |
 | S-026 | No connection timeout / keepalive | 30s timeout on idle peer connections. Add periodic keepalive. ~1d. |
 | S-027 | Info leakage in logs / error messages reveal state | Configurable log levels; redact in production builds. |
 | S-028 | Hex parsing only accepts lowercase | `is_anon_address` is canonical; downstream parsers should accept either case. Trivial. |
@@ -684,7 +684,7 @@ The narrower ContribMsg-level case is still open as S-006.
 
 ### M-C — Linear-time sync barrier → snapshot bootstrap (was Gemini "fatal architectural flaw")
 
-**B6.basic added** `Chain::serialize_state` + `restore_from_snapshot` + `dhcoin snapshot {create,inspect,fetch}` + `Config::snapshot_path` for fast-bootstrap. Receiver skips per-block replay; restores state directly. The cryptographic-zero-trust version still requires a state Merkle root in the block format (deferred to v2 — see S-012). Verified in [`tools/test_snapshot_bootstrap.sh`](../tools/test_snapshot_bootstrap.sh).
+**B6.basic added** `Chain::serialize_state` + `restore_from_snapshot` + `determ snapshot {create,inspect,fetch}` + `Config::snapshot_path` for fast-bootstrap. Receiver skips per-block replay; restores state directly. The cryptographic-zero-trust version still requires a state Merkle root in the block format (deferred to v2 — see S-012). Verified in [`tools/test_snapshot_bootstrap.sh`](../tools/test_snapshot_bootstrap.sh).
 
 ### M-D — Blind-abort liveness exploit → BFT escalation
 

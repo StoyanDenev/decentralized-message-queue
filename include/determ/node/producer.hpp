@@ -1,13 +1,13 @@
 #pragma once
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/chain/chain.hpp>
-#include <dhcoin/crypto/keys.hpp>
-#include <dhcoin/types.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/crypto/keys.hpp>
+#include <determ/types.hpp>
 #include <map>
 #include <string>
 #include <vector>
 
-namespace dhcoin::node {
+namespace determ::node {
 
 // ─── Phase 1 — TxCommit + DhInput (combined) ─────────────────────────────────
 // Each committee member broadcasts their proposed tx_hashes plus a fresh
@@ -188,4 +188,4 @@ chain::Block build_body(
     // from these (compute_block_rand) when non-empty.
     const std::vector<Hash>&                  ordered_secrets = {});
 
-} // namespace dhcoin::node
+} // namespace determ::node

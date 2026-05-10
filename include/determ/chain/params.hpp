@@ -1,12 +1,12 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include "dhcoin/types.hpp"
+#include "determ/types.hpp"
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
-using ChainRole    = ::dhcoin::ChainRole;
-using ShardingMode = ::dhcoin::ShardingMode;
+using ChainRole    = ::determ::ChainRole;
+using ShardingMode = ::determ::ShardingMode;
 
 // ─── L1 (Identity) parameters ───────────────────────────────────────────────
 // Chain-wide constants. A domain is eligible for creator selection only while
@@ -15,9 +15,25 @@ using ShardingMode = ::dhcoin::ShardingMode;
 inline constexpr uint64_t MIN_STAKE     = 1000;
 inline constexpr uint64_t UNSTAKE_DELAY = 1000;   // blocks past inactive_from before stake unlocks
 
-// REGISTER tx payload: just the Ed25519 pubkey (32 B). The tx's own Ed25519
-// signature serves as proof-of-possession of the registered key.
-inline constexpr size_t REGISTER_PAYLOAD_SIZE = 32;
+// REGISTER tx payload (rev.9 R1):
+//   [pubkey: 32B][region_len: u8][region: utf8 bytes]
+// Legacy payload (just the 32-B pubkey) is wire-compatible — region_len
+// defaults to 0 (empty region = global pool) and the trailing bytes
+// are absent. The tx's own Ed25519 signature serves as proof-of-
+// possession of the registered key, and binds the region into the tx
+// hash via Transaction::signing_bytes() (which already includes the
+// full payload).
+inline constexpr size_t REGISTER_PAYLOAD_PUBKEY_SIZE = 32;
+inline constexpr size_t REGISTER_REGION_MAX          = 32;
+// Minimum payload size: pubkey only (legacy / empty-region). Maximum:
+// pubkey + region_len byte + 32 region bytes.
+inline constexpr size_t REGISTER_PAYLOAD_MIN_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE;
+inline constexpr size_t REGISTER_PAYLOAD_MAX_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE + 1
+                                                       + REGISTER_REGION_MAX;
+// Backward-compat alias — pre-R1 callers used REGISTER_PAYLOAD_SIZE for
+// the fixed 32-byte pubkey-only payload. Still valid as an exact size
+// for region-less REGISTER txs.
+inline constexpr size_t REGISTER_PAYLOAD_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE;
 
 // rev.8 economic disincentive on abort suspension. Deducted from the
 // validator's stake at the moment an AbortEvent for this domain is baked
@@ -92,4 +108,4 @@ inline constexpr TimingProfile PROFILE_TACTICAL_TEST {
     ChainRole::SHARD, ShardingMode::EXTENDED
 };
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

@@ -1,10 +1,10 @@
 #pragma once
-#include <dhcoin/node/node.hpp>
+#include <determ/node/node.hpp>
 #include <asio.hpp>
 #include <functional>
 #include <memory>
 
-namespace dhcoin::rpc {
+namespace determ::rpc {
 
 // Minimal line-oriented JSON-RPC server.
 // Client sends: {"method": "...", "params": {...}}\n
@@ -29,4 +29,4 @@ nlohmann::json rpc_call(const std::string& host, uint16_t port,
                          const std::string& method,
                          const nlohmann::json& params = {});
 
-} // namespace dhcoin::rpc
+} // namespace determ::rpc

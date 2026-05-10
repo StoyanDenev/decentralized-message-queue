@@ -1,5 +1,5 @@
 #pragma once
-#include <dhcoin/chain/block.hpp>
+#include <determ/chain/block.hpp>
 #include <map>
 #include <set>
 #include <string>
@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <utility>
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
 struct AccountState {
     uint64_t balance{0};
@@ -30,6 +30,11 @@ struct RegistryEntry {
     // UINT64_MAX while still in the active set; set by DEREGISTER to
     // inclusion_height + 1 + (rand % REGISTRATION_DELAY_WINDOW).
     uint64_t  inactive_from{UINT64_MAX};
+    // rev.9 R1: validator-declared region tag. Empty = no region claim
+    // (treated as "global pool member" — eligible for any committee_region
+    // == "" shard but not for region-pinned shards). Normalized lowercase
+    // ASCII, charset [a-z0-9-_], <= 32 bytes (validator enforces).
+    std::string region{};
 };
 
 class Chain {
@@ -88,6 +93,41 @@ public:
     const std::map<std::string, StakeEntry>&     stakes()      const { return stakes_;      }
     const std::map<std::string, RegistryEntry>&  registrants() const { return registrants_; }
 
+    // ─── Unitary-balance invariant (A1) ────────────────────────────────────
+    // GENESIS_TOTAL is fixed at genesis-apply time as the sum of all
+    // initial balances + initial stakes (+ Zeroth pool / pseudo-account
+    // balances once those state structures land — currently 0). Total
+    // supply on a live chain drifts predictably:
+    //
+    //   expected = genesis_total
+    //            + accumulated_subsidy   (block_subsidy minted per block)
+    //            - accumulated_slashed   (suspension + equivocation forfeit)
+    //            + accumulated_inbound   (cross-shard receipts credited here)
+    //            - accumulated_outbound  (cross-shard transfers debited here,
+    //                                       credit delivered on dst shard)
+    //
+    // After every block apply we assert
+    //   Σ accounts.balance + Σ stakes.locked == expected_total()
+    // The walk is a uint64 sum over two small maps; no allocation, no
+    // string formatting unless the assertion fires (then we throw with a
+    // diagnostic). Always-on, cheap.
+    uint64_t genesis_total() const { return genesis_total_; }
+    uint64_t accumulated_subsidy()  const { return accumulated_subsidy_; }
+    uint64_t accumulated_slashed()  const { return accumulated_slashed_; }
+    uint64_t accumulated_inbound()  const { return accumulated_inbound_; }
+    uint64_t accumulated_outbound() const { return accumulated_outbound_; }
+    // expected_total = the value the live sum must equal post-apply.
+    uint64_t expected_total() const {
+        return genesis_total_
+             + accumulated_subsidy_
+             + accumulated_inbound_
+             - accumulated_slashed_
+             - accumulated_outbound_;
+    }
+    // Live sum across accounts.balance + stakes.locked. O(N) over two
+    // maps — used by the post-apply assertion and by RPC.
+    uint64_t live_total_supply() const;
+
     // Fewest-fallbacks fork resolution: given two chains sharing a common prefix,
     // return the canonical tip (the better block at the diverging height).
     static const Block& resolve_fork(const Block& a, const Block& b);
@@ -145,7 +185,17 @@ private:
     // by producer + validator to guarantee exactly-once credit.
     std::set<std::pair<ShardId, Hash>>           applied_inbound_receipts_;
 
+    // A1: unitary-balance invariant counters. genesis_total_ is set once
+    // by the index-0 apply branch (or by snapshot restore). The others
+    // are running totals updated per non-genesis block. See expected_total()
+    // for how they combine. All zero on a freshly default-constructed Chain.
+    uint64_t                                    genesis_total_{0};
+    uint64_t                                    accumulated_subsidy_{0};
+    uint64_t                                    accumulated_slashed_{0};
+    uint64_t                                    accumulated_inbound_{0};
+    uint64_t                                    accumulated_outbound_{0};
+
     void apply_transactions(const Block& b);
 };
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

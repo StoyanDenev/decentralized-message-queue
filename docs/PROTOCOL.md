@@ -1,4 +1,4 @@
-# DHCoin v1 Protocol Specification
+# Determ v1 Protocol Specification
 
 This document specifies wire formats, hash inputs, and the consensus state machine at a level sufficient for an external implementer to build a compatible client. The reference implementation is in this repository; where implementation behavior diverges from this document, treat the implementation as authoritative and file an issue to reconcile.
 
@@ -27,7 +27,7 @@ Key-derived. Format: `0x` + 64 lowercase hex characters (66 chars total).
 addr = "0x" + hex(ed25519_public_key)
 ```
 
-The `is_anon_address(s)` predicate in [`include/dhcoin/types.hpp`](../include/dhcoin/types.hpp) is canonical: `len == 66 && s[0..2] == "0x" && all hex`.
+The `is_anon_address(s)` predicate in [`include/determ/types.hpp`](../include/determ/types.hpp) is canonical: `len == 66 && s[0..2] == "0x" && all hex`.
 
 Bearer addresses **cannot** register, stake, or be selected as creators. They can only hold balance and send/receive `TRANSFER`.
 
@@ -62,6 +62,32 @@ SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
 - Sequential nonce: a tx is applied only if `tx.nonce == account.next_nonce`. Mismatched nonces are silently skipped.
 - For `TRANSFER`: requires `account.balance >= amount + fee`. Sender debited `amount + fee`; receiver credited `amount`. Fee accumulates to creators.
 - **Cross-shard variant:** if `shard_id_for_address(to) != my_shard`, sender is debited but `to` is **not** credited locally. A `CrossShardReceipt` is emitted instead (see §8).
+
+### 3.4 TRANSFER payload (general-purpose tokenization slot)
+
+`TRANSFER` MAY carry an optional `payload` of up to **32 bytes**. Empty payload (the historical default) is unchanged and byte-identical on the wire. A payload larger than 32 bytes is rejected by the validator with the error message `TRANSFER payload exceeds 32-byte cap (got <N> bytes)`.
+
+**Protocol guarantees (integrity only):**
+- The payload bytes are part of `signing_bytes()` (§3.1) and are therefore covered by the sender's Ed25519 signature.
+- The tx hash binds the payload (`compute_hash()` is taken over `signing_bytes() || sig`), so the block hash transitively binds it.
+- The chain stores the payload verbatim in the tx record; it is retrievable via `show-tx`.
+- The payload does not affect balances, fees, nonces, or the supply invariant (§A1). It is opaque to the apply path.
+
+**Protocol non-guarantees (semantics are application-level):**
+- The protocol does not parse, validate, or interpret the payload bytes. Two applications using the same payload schema can interoperate; conflicts between independent application schemas at the same byte are an application-layer concern.
+- There is no on-chain registry of payload schemas or tag namespaces.
+
+**Recommended encodings (non-normative).** Applications choose any encoding that fits within 32 bytes. Common options:
+
+| Encoding | When to use | Trade-off |
+|----------|-------------|-----------|
+| **Raw bytes** | Single fixed-purpose deployment (one app). | Simplest. Zero overhead. No room for future extension. |
+| **Fixed-prefix tagging** (e.g. 1–4 byte ASCII tag + payload) | Multi-application coexistence on the same chain. | One byte of namespace separation. Compact. Easy to grep. Recommended default. |
+| **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) | Structured records (object pointers, Ricardian-contract refs, indexed memos). Pairs with downstream features (e.g. A8 directory entries). | Self-describing, deterministic encoding profile available, broad library support. Best general-purpose choice when the 32-byte budget allows. |
+| **MessagePack** | Same use-cases as CBOR. | Slightly more compact than CBOR for short objects; less canonical-encoding tooling. |
+| **JSON text** | Quick prototyping, human-readable memos. | Verbose; rarely fits non-trivial structures within 32 bytes. Discouraged for production. |
+
+For multi-app interoperability, a fixed-prefix tag (e.g. the first byte being a registered application identifier, the rest being that app's encoding) is the recommended convention. The protocol enforces nothing here — it is purely a coordination mechanism between applications sharing the chain.
 
 ## 4. Block format
 
@@ -260,6 +286,19 @@ Envelope: { "type": uint8, "payload": <message-specific JSON> }
 | ID | Name | Direction | Payload |
 |---|---|---|---|
 | 0 | HELLO | initial handshake | `{domain, port, role, shard_id}` |
+| 1 | BLOCK | gossip | `Block` JSON |
+| 2 | TRANSACTION | gossip | `Transaction` JSON |
+| 3 | BLOCK_SIG | committee | `BlockSigMsg` JSON |
+| 4 | CONTRIB | committee | `ContribMsg` JSON |
+| 5 | GET_CHAIN | sync | `{from, count}` |
+| 6 | CHAIN_RESPONSE | sync | `{blocks, has_more}` |
+| 7 | STATUS_REQUEST | sync | `{}` |
+| 8 | STATUS_RESPONSE | sync | `{height, genesis}` |
+| 9 | ABORT_CLAIM | committee | `AbortClaimMsg` JSON |
+| 10 | ABORT_EVENT | gossip | `{block_index, prev_hash, event}` |
+| 11 | EQUIVOCATION_EVIDENCE | gossip | `EquivocationEvent` JSON |
+| 12 | BEACON_HEADER | beacon→shard | `Block` JSON |
+| 13 | SHARD_TIP | shard→beacon | `{shard_id, tip}` |
 | 1 | BLOCK | gossip | `Block` JSON |
 | 2 | TRANSACTION | gossip | `Transaction` JSON |
 | 3 | BLOCK_SIG | committee | `BlockSigMsg` JSON |

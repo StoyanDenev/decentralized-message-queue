@@ -1,13 +1,13 @@
 #pragma once
-#include <dhcoin/chain/block.hpp>
-#include <dhcoin/chain/chain.hpp>
-#include <dhcoin/node/registry.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/node/registry.hpp>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 
-namespace dhcoin::node {
+namespace determ::node {
 
 class BlockValidator {
 public:
@@ -33,6 +33,24 @@ public:
     // rev.9 (B1): epoch-relative committee derivation parameters.
     void set_epoch_blocks(uint32_t e) { epoch_blocks_ = e; }
     void set_shard_id(ShardId s)      { shard_id_ = s; }
+
+    // rev.9 R2: this chain's committee_region (mirrored from genesis).
+    // Empty = global pool — check_creator_selection / check_abort_certs
+    // see the full registry pool (pre-R2 behavior). Non-empty restricts
+    // the eligible pool via NodeRegistry::eligible_in_region(region_).
+    void set_committee_region(const std::string& r) { committee_region_ = r; }
+
+    // A6: deployment-wide sharding mode (mirrored from the operator's
+    // selected TimingProfile). Drives mode-incompatible-tx gates in
+    // check_transactions:
+    //   NONE     — REGISTER with non-empty region rejected; only
+    //              SINGLE chain_role accepted at startup; MERGE_EVENT
+    //              (R7, not yet defined) rejected.
+    //   CURRENT  — REGISTER region tolerated but ignored (pre-R1
+    //              backward compat); MERGE_EVENT rejected.
+    //   EXTENDED — REGISTER region accepted (R1); MERGE_EVENT accepted
+    //              (R7 will install the apply path).
+    void set_sharding_mode(ShardingMode m) { sharding_mode_ = m; }
 
     // rev.9 B2c.2-full: when the validator runs on a SHARD chain, the
     // committee-selection rand must come from the BEACON's chain, not the
@@ -96,7 +114,13 @@ private:
     uint32_t bft_escalation_threshold_{5};
     uint32_t epoch_blocks_{1000};
     ShardId  shard_id_{0};
+    // rev.9 R2: committee region pin for this chain (empty = global).
+    std::string committee_region_{};
+    // A6: sharding mode mirrored from the operator's selected
+    // TimingProfile. Default CURRENT preserves legacy behavior for any
+    // call site that constructs BlockValidator without an explicit setter.
+    ShardingMode sharding_mode_{ShardingMode::CURRENT};
     EpochRandProvider external_epoch_rand_{};
 };
 
-} // namespace dhcoin::node
+} // namespace determ::node

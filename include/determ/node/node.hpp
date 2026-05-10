@@ -1,9 +1,9 @@
 #pragma once
-#include <dhcoin/chain/chain.hpp>
-#include <dhcoin/node/registry.hpp>
-#include <dhcoin/node/validator.hpp>
-#include <dhcoin/node/producer.hpp>
-#include <dhcoin/net/gossip.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/node/registry.hpp>
+#include <determ/node/validator.hpp>
+#include <determ/node/producer.hpp>
+#include <determ/net/gossip.hpp>
 #include <asio.hpp>
 #include <thread>
 #include <atomic>
@@ -12,7 +12,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 
-namespace dhcoin::node {
+namespace determ::node {
 
 struct Config {
     std::string              domain;
@@ -56,9 +56,26 @@ struct Config {
     // rev.9 sharding role. SINGLE = today's behavior. BEACON/SHARD activate
     // sharded paths in Stage B2+. Loaded from GenesisConfig.
     ChainRole                chain_role{ChainRole::SINGLE};
+    // A6: sharding mode mirrored from the operator's selected
+    // TimingProfile. Persisted in node config so cmd_start can hand it
+    // to the validator without re-resolving the profile (the named
+    // profile is a cmd_init concern only). Default CURRENT preserves
+    // pre-A6 behavior for legacy node configs (chain_role=BEACON|SHARD
+    // historically meant "rev.9 current sharding").
+    ShardingMode             sharding_mode{ShardingMode::CURRENT};
     ShardId                  shard_id{0};
     uint32_t                 initial_shard_count{1};
     uint32_t                 epoch_blocks{1000};
+    // rev.9 R1: this validator's self-declared region tag included in the
+    // REGISTER tx payload. Empty = global pool (backward-compat).
+    // Normalized + charset-checked at validator. Operators set this in
+    // node config so the registration matches the shard's
+    // committee_region.
+    std::string              region{};
+    // rev.9 R1: this chain's committee_region (mirrored from the loaded
+    // genesis). Empty = global pool. Used by check_if_selected to
+    // filter the eligible pool before drawing K.
+    std::string              committee_region{};
     // L4 / C3 — three local round timers.
     uint32_t                 tx_commit_ms{200};
     uint32_t                 block_sig_ms{200};
@@ -330,4 +347,4 @@ private:
     std::vector<std::thread>        threads_;
 };
 
-} // namespace dhcoin::node
+} // namespace determ::node

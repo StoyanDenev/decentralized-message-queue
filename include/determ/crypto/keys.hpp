@@ -1,8 +1,8 @@
 #pragma once
-#include <dhcoin/types.hpp>
+#include <determ/types.hpp>
 #include <string>
 
-namespace dhcoin::crypto {
+namespace determ::crypto {
 
 struct NodeKey {
     PubKey                  pub{};        // Ed25519 public key
@@ -22,4 +22,4 @@ inline bool verify(const PubKey& pub, const std::vector<uint8_t>& v, const Signa
     return verify(pub, v.data(), v.size(), sig);
 }
 
-} // namespace dhcoin::crypto
+} // namespace determ::crypto

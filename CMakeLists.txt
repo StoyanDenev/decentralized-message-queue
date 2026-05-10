@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(dhcoin CXX C)
+project(determ CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,7 +35,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
-# ── dhcoin executable ───────────────────────────────────────────────────────
+# ── determ executable ───────────────────────────────────────────────────────
 add_definitions(-DASIO_STANDALONE -DASIO_NO_DEPRECATED)
 
 if(WIN32)
@@ -44,24 +44,24 @@ endif()
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
-add_executable(dhcoin ${SOURCES})
+add_executable(determ ${SOURCES})
 
-target_include_directories(dhcoin PRIVATE
+target_include_directories(determ PRIVATE
   include
   ${asio_SOURCE_DIR}/asio/include
   ${openssl_SOURCE_DIR}/include
 )
 
-target_link_libraries(dhcoin PRIVATE
+target_link_libraries(determ PRIVATE
   ssl
   crypto
   nlohmann_json::nlohmann_json
 )
 
 if(WIN32)
-  target_link_libraries(dhcoin PRIVATE ws2_32 wsock32 crypt32)
+  target_link_libraries(determ PRIVATE ws2_32 wsock32 crypt32)
 endif()
 
 if(UNIX)
-  target_link_libraries(dhcoin PRIVATE pthread)
+  target_link_libraries(determ PRIVATE pthread)
 endif()

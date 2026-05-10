@@ -1,9 +1,9 @@
 #pragma once
-#include <dhcoin/chain/block.hpp>
+#include <determ/chain/block.hpp>
 #include <string>
 #include <vector>
 
-namespace dhcoin::chain {
+namespace determ::chain {
 
 // rev.8 follow-on: validator inclusion policy. Both modes preserve the
 // same decentralization property — K-of-K mutual veto + union tx_root
@@ -53,6 +53,11 @@ struct GenesisCreator {
     std::string domain;
     PubKey      ed_pub{};         // Ed25519 pubkey
     uint64_t    initial_stake{0}; // staked at genesis; counts toward MIN_STAKE
+    // rev.9 R1: optional region tag, declared at genesis for the initial
+    // creator set (mirrors what later REGISTER txs carry). Empty string =
+    // global pool (backward-compat: existing genesis files unchanged).
+    // Normalized to lowercase ASCII; charset [a-z0-9-_], max 32 bytes.
+    std::string region{};
 };
 
 struct GenesisAllocation {
@@ -69,7 +74,7 @@ struct GenesisConfig {
     // Constraint: 1 <= k_block_sigs <= m_creators. Default = m_creators (strong).
     uint32_t                        k_block_sigs{3};
     // Rev. 4: per-block reward minted to creators alongside fees ("page reward"
-    // from the original DHCoin spec). Genesis-pinned. 0 = no subsidy (fees only).
+    // from the original Determ spec). Genesis-pinned. 0 = no subsidy (fees only).
     uint64_t                        block_subsidy{0};
 
     // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
@@ -101,6 +106,15 @@ struct GenesisConfig {
     uint32_t                        epoch_blocks{1000};             // E (Stage B1)
     Hash                            shard_address_salt{};           // CSPRNG-generated at build time
 
+    // rev.9 R1: per-shard committee region pin. Empty = global pool
+    // (backward-compat — existing deployments hash-stable). Non-empty
+    // restricts this chain's K-committee selection to validators
+    // tagged with the same region. Normalized to lowercase ASCII;
+    // charset [a-z0-9-_], max 32 bytes. Mixed into compute_genesis_hash
+    // so two shards differing only in committee_region have distinct
+    // genesis hashes.
+    std::string                     committee_region{};
+
     std::vector<GenesisCreator>     initial_creators;
     std::vector<GenesisAllocation>  initial_balances;
 
@@ -119,6 +133,6 @@ Block make_genesis_block(const GenesisConfig& cfg);
 Hash compute_genesis_hash(const GenesisConfig& cfg);
 
 // Legacy zeros-genesis: kept for tests / no-config fallback.
-Block make_genesis(const std::string& seed = "dhcoin-genesis-2026");
+Block make_genesis(const std::string& seed = "determ-genesis-2026");
 
-} // namespace dhcoin::chain
+} // namespace determ::chain

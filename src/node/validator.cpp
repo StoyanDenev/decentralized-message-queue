@@ -1,18 +1,18 @@
-#include <dhcoin/node/validator.hpp>
-#include <dhcoin/node/producer.hpp>
-#include <dhcoin/chain/params.hpp>
-#include <dhcoin/crypto/sha256.hpp>
-#include <dhcoin/crypto/random.hpp>
-#include <dhcoin/crypto/keys.hpp>
+#include <determ/node/validator.hpp>
+#include <determ/node/producer.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/sha256.hpp>
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/keys.hpp>
 #include <algorithm>
 #include <chrono>
 #include <map>
 #include <set>
 
-namespace dhcoin::node {
+namespace determ::node {
 
-using namespace dhcoin::crypto;
-using namespace dhcoin::chain;
+using namespace determ::crypto;
+using namespace determ::chain;
 
 BlockValidator::Result BlockValidator::validate(const Block& b,
                                                 const Chain& chain,
@@ -62,7 +62,11 @@ BlockValidator::Result BlockValidator::check_creator_selection(
     // rev.9 (B1): committee derives from per-shard, per-epoch seed.
     // epoch_index = b.index / epoch_blocks. epoch_rand is the rand at the
     // block opening that epoch (or genesis-anchored rand if epoch_start=0).
-    auto   nodes     = registry.sorted_nodes();
+    //
+    // rev.9 R2: filter the eligible pool by this chain's
+    // committee_region. Empty region (default) yields the full pool —
+    // identical to pre-R2 sorted_nodes() output.
+    auto   nodes     = registry.eligible_in_region(committee_region_);
     EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     uint64_t epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
     Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
@@ -168,7 +172,10 @@ BlockValidator::Result BlockValidator::check_abort_certs(
     Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
     Hash prev_rand = epoch_committee_seed(epoch_rand, shard_id_);
     Hash prev_hash = chain.head_hash();
-    auto nodes     = registry.sorted_nodes();
+    // rev.9 R2: same region filter as check_creator_selection — must
+    // mirror exactly so abort-cert reconstruction sees the same pool
+    // the producer committed to.
+    auto nodes     = registry.eligible_in_region(committee_region_);
     (void)epoch_index;
 
     // Per-event committee size: at step i, BEFORE applying ae[i], the
@@ -448,9 +455,61 @@ BlockValidator::Result BlockValidator::check_transactions(
         if (tx.type == TxType::REGISTER) {
             if (from_anon)
                 return {false, "REGISTER from anonymous account is not allowed"};
-            if (tx.payload.size() != REGISTER_PAYLOAD_SIZE)
-                return {false, "REGISTER payload size != 32"};
+            // rev.9 R1 wire format:
+            //   [pubkey: 32B][region_len: u8][region: utf8 bytes]
+            // Legacy 32-B pubkey-only payload is accepted (region absent
+            // = empty pool tag). Larger payloads must declare a length
+            // that exactly accounts for the trailing region bytes, with
+            // region_len <= 32 and region matching the normalized
+            // ASCII charset [a-z0-9-_]. Validation here mirrors what
+            // genesis-load enforces, so REGISTER region is hash-stable
+            // across both wire ingress paths.
+            if (tx.payload.size() < REGISTER_PAYLOAD_PUBKEY_SIZE)
+                return {false, "REGISTER payload size < 32"};
+            if (tx.payload.size() > REGISTER_PAYLOAD_MAX_SIZE)
+                return {false, "REGISTER payload size > "
+                              + std::to_string(REGISTER_PAYLOAD_MAX_SIZE)};
+            if (tx.payload.size() == REGISTER_PAYLOAD_PUBKEY_SIZE + 1)
+                return {false, "REGISTER payload truncated (region_len without bytes)"};
+            if (tx.payload.size() > REGISTER_PAYLOAD_PUBKEY_SIZE) {
+                size_t rlen = tx.payload[REGISTER_PAYLOAD_PUBKEY_SIZE];
+                if (rlen > REGISTER_REGION_MAX)
+                    return {false, "REGISTER region length > 32"};
+                if (tx.payload.size() != REGISTER_PAYLOAD_PUBKEY_SIZE + 1 + rlen)
+                    return {false, "REGISTER payload size != 32 + 1 + region_len"};
+                // Charset enforcement: lowercase ASCII alphanumeric +
+                // '-' + '_'. Reject if any byte falls outside; this is
+                // strict equality (no implicit tolower at validate time
+                // — RPC paths normalize before signing so the on-wire
+                // bytes are already canonical).
+                for (size_t i = 0; i < rlen; ++i) {
+                    unsigned char c = tx.payload[REGISTER_PAYLOAD_PUBKEY_SIZE + 1 + i];
+                    bool ok = (c >= 'a' && c <= 'z')
+                           || (c >= '0' && c <= '9')
+                           || c == '-' || c == '_';
+                    if (!ok)
+                        return {false, "REGISTER region has invalid char "
+                                       "(allowed [a-z0-9-_])"};
+                }
+                // A6 gate: REGISTER tx with a non-empty region tag is
+                // only meaningful under EXTENDED. NONE rejects loudly
+                // (single-chain deployment has no concept of region).
+                // CURRENT silently tolerates the tag (backward-compat
+                // for chains that may carry a region from a future
+                // mode-switch); the registry stores it but
+                // check_creator_selection ignores region under CURRENT.
+                if (rlen > 0 && sharding_mode_ == ShardingMode::NONE) {
+                    return {false, "REGISTER carries non-empty region under "
+                                   "sharding_mode=none (region is meaningless "
+                                   "in single-chain deployments)"};
+                }
+            }
             std::copy_n(tx.payload.begin(), 32, pk.begin());
+        } else if (tx.type == TxType::REGION_CHANGE) {
+            // rev.9 R1: REGION_CHANGE is reserved for v2. Reject
+            // unconditionally with a clear error so wire-format slot is
+            // locked but no apply path runs.
+            return {false, "REGION_CHANGE tx type is reserved for future use"};
         } else if (from_anon) {
             // Only TRANSFER is allowed from anonymous accounts.
             if (tx.type != TxType::TRANSFER)
@@ -476,6 +535,16 @@ BlockValidator::Result BlockValidator::check_transactions(
 
         switch (tx.type) {
         case TxType::TRANSFER:
+            // A4: TRANSFER may carry an optional application-defined
+            // payload (memo, contract reference, off-chain pointer,
+            // ...). Protocol guarantees integrity only — payload bytes
+            // are signed (Transaction::signing_bytes binds payload) and
+            // included in the block hash. Semantics are application-
+            // level; see docs/PROTOCOL.md §3.
+            if (tx.payload.size() > 32)
+                return {false, "TRANSFER payload exceeds 32-byte cap (got "
+                             + std::to_string(tx.payload.size()) + " bytes)"};
+            break;
         case TxType::REGISTER:
             break;
         case TxType::DEREGISTER:
@@ -487,6 +556,26 @@ BlockValidator::Result BlockValidator::check_transactions(
             if (tx.payload.size() != 8)
                 return {false, "STAKE/UNSTAKE payload must be 8 bytes"};
             break;
+        case TxType::REGION_CHANGE:
+            // Defensive: the early branch above already rejects
+            // REGION_CHANGE before reaching this switch. Keeping the
+            // case present silences -Wswitch and documents the slot.
+            return {false, "REGION_CHANGE tx type is reserved for future use"};
+        // A6 + R7 placeholder:
+        //   case TxType::MERGE_EVENT:
+        //       if (sharding_mode_ != ShardingMode::EXTENDED) {
+        //           return {false, "MERGE_EVENT tx requires "
+        //                          "sharding_mode=extended"};
+        //       }
+        //       break;
+        // TODO(R7): when the under-quorum merge mechanism lands and
+        // adds TxType::MERGE_EVENT to chain/block.hpp, uncomment the
+        // case above so the validator gates merge txs to EXTENDED mode
+        // only. The enum value itself is intentionally not added here
+        // (R7 territory). Until then, a wire decoder that accepts the
+        // new variant under a CURRENT/NONE chain will fall out of the
+        // switch and trigger the compiler's -Wswitch warning, which is
+        // the correct breakage signal.
         }
     }
     return {true, ""};
@@ -596,4 +685,4 @@ BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {
     return {true, ""};
 }
 
-} // namespace dhcoin::node
+} // namespace determ::node

@@ -1,11 +1,11 @@
 #pragma once
-#include <dhcoin/types.hpp>
-#include <dhcoin/chain/chain.hpp>
+#include <determ/types.hpp>
+#include <determ/chain/chain.hpp>
 #include <string>
 #include <vector>
 #include <optional>
 
-namespace dhcoin::node {
+namespace determ::node {
 
 // A REGISTER tx in block N activates at block N + 1..DELAY_WINDOW (random).
 // A DEREGISTER tx in block N takes effect at block N + 1..DELAY_WINDOW (random).
@@ -23,6 +23,10 @@ struct NodeEntry {
     PubKey      pubkey{};      // Ed25519 — for tx and consensus sig verification
     uint64_t    registered_at{0};
     uint64_t    active_from{0};
+    // rev.9 R1: validator's self-declared region tag, mirrored from
+    // RegistryEntry.region. Empty = no region claim. Used by
+    // eligible_in_region() to filter the pool for region-pinned shards.
+    std::string region{};
 };
 
 class NodeRegistry {
@@ -34,6 +38,14 @@ public:
     std::optional<NodeEntry> find(const std::string& domain) const;
     size_t                   size() const { return nodes_.size(); }
     bool                     contains(const std::string& domain) const;
+
+    // rev.9 R1: region-filtered eligible pool. When `region` is empty,
+    // returns the full pool (sorted_nodes() identity — preserves the
+    // pre-R1 backward-compat path). When `region` is non-empty, returns
+    // only entries whose declared region exactly matches. The filter is
+    // a strict equality on the already-normalized strings; both sides
+    // are tolower+charset-validated at parse boundaries.
+    std::vector<NodeEntry>   eligible_in_region(const std::string& region) const;
 
     // Build the eligible set as of `at_index`. Reads chain.registrants() and
     // chain.stakes() incrementally maintained by Chain::apply_transactions.
@@ -47,4 +59,4 @@ private:
     std::vector<NodeEntry> nodes_; // kept sorted by domain
 };
 
-} // namespace dhcoin::node
+} // namespace determ::node

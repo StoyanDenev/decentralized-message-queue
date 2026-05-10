@@ -21,7 +21,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DHCOIN=build/Release/dhcoin.exe
+DETERM=build/Release/determ.exe
 T=test_ztcc
 
 declare -a NODE_PIDS
@@ -38,7 +38,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $DHCOIN status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -49,8 +49,8 @@ mkdir -p $T/beacon/n1 $T/beacon/n2 $T/shard/n1 $T/shard/n2
 echo "=== 1. Init nodes (beacon + shard, separate data dirs) ==="
 for chain in beacon shard; do
   for n in 1 2; do
-    $DHCOIN init --data-dir $T/$chain/n$n --profile web 2>&1 | tail -1
-    $DHCOIN genesis-tool peer-info "${chain}_n${n}" --data-dir $T/$chain/n$n --stake 1000 > $T/${chain}_p${n}.json
+    $DETERM init --data-dir $T/$chain/n$n --profile regional_test 2>&1 | tail -1
+    $DETERM genesis-tool peer-info "${chain}_n${n}" --data-dir $T/$chain/n$n --stake 1000 > $T/${chain}_p${n}.json
   done
 done
 
@@ -94,8 +94,8 @@ $(cat $T/shard_p2.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 1000}]
 }
 EOF
-$DHCOIN genesis-tool build $T/beacon_gen.json | tail -1
-$DHCOIN genesis-tool build $T/shard_gen.json | tail -1
+$DETERM genesis-tool build $T/beacon_gen.json | tail -1
+$DETERM genesis-tool build $T/shard_gen.json | tail -1
 
 BEACON_HASH=$(cat $T/beacon_gen.json.hash)
 SHARD_HASH=$(cat $T/shard_gen.json.hash)
@@ -141,13 +141,13 @@ configure_node shard 2 7782 8782 '["127.0.0.1:7781"]' '["127.0.0.1:7771","127.0.
 echo
 echo "=== 4. Start 4 nodes (2 beacon + 2 shard, peered cross-chain) ==="
 NODE_PIDS=("" "" "" "")
-$DHCOIN start --config $T/beacon/n1/config.json > $T/beacon/n1/log 2>&1 &
+$DETERM start --config $T/beacon/n1/config.json > $T/beacon/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DHCOIN start --config $T/beacon/n2/config.json > $T/beacon/n2/log 2>&1 &
+$DETERM start --config $T/beacon/n2/config.json > $T/beacon/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DHCOIN start --config $T/shard/n1/config.json > $T/shard/n1/log 2>&1 &
+$DETERM start --config $T/shard/n1/config.json > $T/shard/n1/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
-$DHCOIN start --config $T/shard/n2/config.json > $T/shard/n2/log 2>&1 &
+$DETERM start --config $T/shard/n2/config.json > $T/shard/n2/log 2>&1 &
 NODE_PIDS[3]=$!; sleep 0.3
 
 echo

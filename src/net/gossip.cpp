@@ -1,8 +1,8 @@
-#include <dhcoin/net/gossip.hpp>
+#include <determ/net/gossip.hpp>
 #include <iostream>
 #include <algorithm>
 
-namespace dhcoin::net {
+namespace determ::net {
 
 GossipNet::GossipNet(asio::io_context& io) : io_(io) {}
 
@@ -142,6 +142,15 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
             peer->set_chain_role(static_cast<ChainRole>(
                 msg.payload.value("role", uint8_t{0})));
             peer->set_shard_id(msg.payload.value("shard_id", ShardId{0}));
+            // A3 / S8: negotiate wire-version down to min(ours, theirs).
+            // Pre-A3 peers omit the field — `value(..., 0)` defaults them
+            // to legacy JSON, matching today's behavior. Subsequent
+            // outbound messages on this peer use the negotiated codec.
+            uint8_t their_v = msg.payload.value("wire_version",
+                                                kWireVersionLegacy);
+            uint8_t negotiated = their_v < kWireVersionMax
+                               ? their_v : kWireVersionMax;
+            peer->set_wire_version(negotiated);
             peer->mark_hello_received();
             break;
         }
@@ -273,4 +282,4 @@ size_t GossipNet::peer_count() const {
     return peers_.size();
 }
 
-} // namespace dhcoin::net
+} // namespace determ::net

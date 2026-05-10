@@ -1,7 +1,7 @@
-#include <dhcoin/net/peer.hpp>
+#include <determ/net/peer.hpp>
 #include <iostream>
 
-namespace dhcoin::net {
+namespace determ::net {
 
 Peer::Peer(asio::ip::tcp::socket socket)
     : socket_(std::move(socket)) {
@@ -64,7 +64,23 @@ void Peer::read_body(uint32_t len) {
 }
 
 void Peer::send(const Message& msg) {
-    auto bytes = msg.serialize();
+    // A3 / S8: pick the wire format based on the per-peer negotiated
+    // version. HELLO is always JSON regardless — both sides need to be
+    // able to parse it pre-negotiation, and the JSON encoding is also
+    // what carries the `wire_version` advertisement field.
+    std::vector<uint8_t> bytes;
+    if (wire_version_ >= kWireVersionBinary && msg.type != MsgType::HELLO) {
+        try {
+            bytes = msg.serialize_binary();
+        } catch (...) {
+            // Fallback to JSON if binary encoding rejects this message
+            // (e.g. encoder doesn't yet support a particular type). Keeps
+            // the connection alive; caller still gets the message through.
+            bytes = msg.serialize();
+        }
+    } else {
+        bytes = msg.serialize();
+    }
     std::lock_guard<std::mutex> lock(write_mutex_);
     bool idle = write_queue_.empty();
     write_queue_.push_back(std::move(bytes));
@@ -109,4 +125,4 @@ void async_connect(asio::io_context& io,
         });
 }
 
-} // namespace dhcoin::net
+} // namespace determ::net
