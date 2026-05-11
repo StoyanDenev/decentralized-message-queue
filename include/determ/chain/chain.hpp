@@ -86,6 +86,14 @@ public:
     uint64_t min_stake() const { return min_stake_; }
     void     set_min_stake(uint64_t s) { min_stake_ = s; }
 
+    // A5 Phase 3: promoted from static constants in params.hpp so the
+    // governance whitelist can mutate them at run-time. Default values
+    // match the pre-A5 constants: SUSPENSION_SLASH=10, UNSTAKE_DELAY=1000.
+    uint64_t suspension_slash() const { return suspension_slash_; }
+    void     set_suspension_slash(uint64_t s) { suspension_slash_ = s; }
+    uint64_t unstake_delay()    const { return unstake_delay_; }
+    void     set_unstake_delay(uint64_t d)    { unstake_delay_ = d; }
+
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.
     // At the start of each apply_transactions(b), pending entries with
@@ -241,6 +249,9 @@ private:
     uint8_t                                     subsidy_mode_{0};
     uint32_t                                    lottery_jackpot_multiplier_{0};
     uint64_t                                    min_stake_{1000};
+    // A5 Phase 3: instance-state promotion of params.hpp constants.
+    uint64_t                                    suspension_slash_{10};
+    uint64_t                                    unstake_delay_{1000};
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};
     ShardId                                     my_shard_id_{0};

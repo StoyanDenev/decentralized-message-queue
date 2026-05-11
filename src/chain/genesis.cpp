@@ -72,6 +72,8 @@ json GenesisConfig::to_json() const {
         {"bft_escalation_threshold", bft_escalation_threshold},
         {"inclusion_model",         static_cast<uint8_t>(inclusion_model)},
         {"min_stake",                min_stake},
+        {"suspension_slash",         suspension_slash},
+        {"unstake_delay",            unstake_delay},
         {"chain_role",               static_cast<uint8_t>(chain_role)},
         {"shard_id",                 shard_id},
         {"initial_shard_count",      initial_shard_count},
@@ -114,6 +116,8 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
     c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));
     c.min_stake                = j.value("min_stake",                uint64_t{1000});
+    c.suspension_slash         = j.value("suspension_slash",         uint64_t{10});
+    c.unstake_delay            = j.value("unstake_delay",            uint64_t{1000});
     c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
     c.shard_id                 = j.value("shard_id",                 ShardId{0});
     c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
@@ -311,6 +315,13 @@ Block make_genesis_block(const GenesisConfig& cfg) {
         for (auto& k : cfg.param_keyholders)
             rb.append(k.data(), k.size());
         rb.append(static_cast<uint64_t>(cfg.param_threshold));
+    }
+    // A5 Phase 3: include suspension_slash / unstake_delay in the hash
+    // only when they diverge from the pre-A5 defaults. Pre-A5 genesis
+    // files retain byte-identical hashes (forward-compat-safe).
+    if (cfg.suspension_slash != 10 || cfg.unstake_delay != 1000) {
+        rb.append(cfg.suspension_slash);
+        rb.append(cfg.unstake_delay);
     }
     g.cumulative_rand = rb.finalize();
 

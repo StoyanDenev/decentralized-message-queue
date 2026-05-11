@@ -120,6 +120,8 @@ Node::Node(const Config& cfg)
     // the correct subsidy when crediting creators.
     uint64_t genesis_subsidy = 0;
     uint64_t genesis_min_stake = 1000;
+    uint64_t genesis_suspension_slash = 10;
+    uint64_t genesis_unstake_delay    = 1000;
     chain::InclusionModel genesis_inclusion = chain::InclusionModel::STAKE_INCLUSION;
     std::optional<chain::GenesisConfig> gcfg_opt;
     if (!cfg_.genesis_path.empty()) {
@@ -141,6 +143,8 @@ Node::Node(const Config& cfg)
         cfg_.committee_region        = gcfg.committee_region;
         genesis_subsidy              = gcfg.block_subsidy;
         genesis_min_stake            = gcfg.min_stake;
+        genesis_suspension_slash     = gcfg.suspension_slash;
+        genesis_unstake_delay        = gcfg.unstake_delay;
         genesis_inclusion            = gcfg.inclusion_model;
         validator_.set_k_block_sigs(cfg_.k_block_sigs);
         validator_.set_m_pool(cfg_.m_creators);
@@ -367,6 +371,8 @@ Node::Node(const Config& cfg)
                                   genesis_shard_count, genesis_shard_salt,
                                   genesis_my_shard);
     chain_.set_min_stake(genesis_min_stake);
+    chain_.set_suspension_slash(genesis_suspension_slash);
+    chain_.set_unstake_delay(genesis_unstake_delay);
     chain_.set_shard_routing(genesis_shard_count, genesis_shard_salt,
                               genesis_my_shard);
 
@@ -426,6 +432,8 @@ Node::Node(const Config& cfg)
             chain_.set_subsidy_mode(gcfg_opt->subsidy_mode);
             chain_.set_lottery_jackpot_multiplier(gcfg_opt->lottery_jackpot_multiplier);
             chain_.set_min_stake(genesis_min_stake);
+            chain_.set_suspension_slash(genesis_suspension_slash);
+            chain_.set_unstake_delay(genesis_unstake_delay);
             chain_.set_shard_routing(genesis_shard_count,
                                        genesis_shard_salt,
                                        genesis_my_shard);

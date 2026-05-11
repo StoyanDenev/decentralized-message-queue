@@ -124,8 +124,17 @@ struct GenesisConfig {
     InclusionModel                  inclusion_model{InclusionModel::STAKE_INCLUSION};
     // Min stake threshold for validator eligibility. Default 1000 for
     // STAKE_INCLUSION; DOMAIN_INCLUSION chains pin this to 0.
-    // Genesis-pinned; chain-wide constant.
+    // Genesis-pinned (mutable post-genesis only via A5 PARAM_CHANGE).
     uint64_t                        min_stake{1000};
+
+    // A5 Phase 3: economic policy fields promoted from static constants
+    // in params.hpp to genesis-pinned, governance-mutable parameters.
+    // Defaults preserve pre-A5 behavior. Backward-compat: pre-Phase-3
+    // genesis files omit these and pick up the defaults silently;
+    // genesis-hash mix only includes them when they differ from the
+    // default so existing chain identities remain stable.
+    uint64_t                        suspension_slash{10};
+    uint64_t                        unstake_delay{1000};
 
     // Rev. 9 sharding role. SINGLE preserves rev.8 behavior (one chain,
     // no shards). BEACON / SHARD are the two roles in the sharded

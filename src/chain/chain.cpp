@@ -125,22 +125,23 @@ void Chain::activate_pending_params(uint64_t current_height) {
     while (it != pending_param_changes_.end() && it->first <= current_height) {
         for (auto& [name, value] : it->second) {
             // Numeric (uint64 LE) parameters that live on Chain.
-            if (name == "MIN_STAKE") {
-                if (value.size() == 8) {
-                    uint64_t v = 0;
-                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
-                    min_stake_ = v;
-                }
-            }
+            auto parse_u64 = [&](uint64_t& dst) {
+                if (value.size() != 8) return false;
+                uint64_t v = 0;
+                for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                dst = v;
+                return true;
+            };
+            if (name == "MIN_STAKE")            { parse_u64(min_stake_); }
+            else if (name == "SUSPENSION_SLASH") { parse_u64(suspension_slash_); }
+            else if (name == "UNSTAKE_DELAY")    { parse_u64(unstake_delay_); }
             // Names that don't have chain-instance storage but DO live
-            // on the validator are forwarded to the Node-installed hook,
-            // which mirrors them onto the validator: bft_escalation_threshold,
-            // param_keyholders, param_threshold, and the timing fields
-            // tx_commit_ms / block_sig_ms / abort_claim_ms / SUSPENSION_SLASH
-            // / UNSTAKE_DELAY (these last four are currently static
-            // constants in params.hpp; making them per-Chain instance
-            // state is Phase 3 work — the hook receives the value so
-            // the Node can choose what to do).
+            // on the validator are forwarded to the Node-installed hook
+            // (bft_escalation_threshold, param_keyholders, param_threshold).
+            // Timing fields (tx_commit_ms, block_sig_ms, abort_claim_ms)
+            // are still params.hpp constants; promoting them to per-Chain
+            // instance state is a follow-on — the hook receives the value
+            // so the Node may wire them later.
             if (param_changed_hook_) param_changed_hook_(name, value);
         }
         it = pending_param_changes_.erase(it);
@@ -322,7 +323,7 @@ void Chain::apply_transactions(const Block& b) {
 
             auto sit = stakes_.find(tx.from);
             if (sit != stakes_.end())
-                sit->second.unlock_height = inactive_from + UNSTAKE_DELAY;
+                sit->second.unlock_height = inactive_from + unstake_delay_;
 
             sender.next_nonce++;
             break;
@@ -465,7 +466,7 @@ void Chain::apply_transactions(const Block& b) {
         if (ae.round != 1) continue;
         auto sit = stakes_.find(ae.aborting_node);
         if (sit == stakes_.end()) continue;
-        uint64_t deduct = std::min<uint64_t>(SUSPENSION_SLASH, sit->second.locked);
+        uint64_t deduct = std::min<uint64_t>(suspension_slash_, sit->second.locked);
         sit->second.locked -= deduct;
         block_slashed     += deduct;   // A1
     }
@@ -646,6 +647,10 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["subsidy_mode"]                 = subsidy_mode_;
     snap["lottery_jackpot_multiplier"]   = lottery_jackpot_multiplier_;
     snap["min_stake"]     = min_stake_;
+    // A5 Phase 3: per-Chain values promoted from params.hpp constants.
+    // Snapshot fields preserve pre-A5 defaults when absent.
+    snap["suspension_slash"] = suspension_slash_;
+    snap["unstake_delay"]    = unstake_delay_;
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
     snap["shard_id"]      = my_shard_id_;
@@ -710,6 +715,8 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     c.lottery_jackpot_multiplier_ =
         snap.value("lottery_jackpot_multiplier", uint32_t{0});
     c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
+    c.suspension_slash_ = snap.value("suspension_slash", uint64_t{10});
+    c.unstake_delay_    = snap.value("unstake_delay",    uint64_t{1000});
     c.shard_count_   = snap.value("shard_count",   uint32_t{1});
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
     c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",

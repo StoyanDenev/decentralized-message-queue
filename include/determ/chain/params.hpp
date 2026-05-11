@@ -12,6 +12,11 @@ using ShardingMode = ::determ::ShardingMode;
 // Chain-wide constants. A domain is eligible for creator selection only while
 // stake_table[domain].locked >= MIN_STAKE.
 
+// A5 Phase 3: MIN_STAKE / UNSTAKE_DELAY / SUSPENSION_SLASH are promoted
+// to per-Chain instance state (Chain::min_stake_, Chain::unstake_delay_,
+// Chain::suspension_slash_) so the governance whitelist can mutate them
+// via PARAM_CHANGE. These constants remain as build-time defaults; the
+// genesis loader uses them when the corresponding field is absent.
 inline constexpr uint64_t MIN_STAKE     = 1000;
 inline constexpr uint64_t UNSTAKE_DELAY = 1000;   // blocks past inactive_from before stake unlocks
 
