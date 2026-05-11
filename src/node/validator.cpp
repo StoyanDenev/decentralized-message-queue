@@ -691,10 +691,20 @@ BlockValidator::Result BlockValidator::check_transactions(
             break;
         }
         case TxType::MERGE_EVENT: {
-            // R4 Phase 1+2+4: gate + decode + region charset check.
-            // Witness-window historical validation (S-036 mitigation)
-            // ships alongside the apply-side merge state machine in
-            // a follow-on.
+            // R4 Phase 1+2+4+6: gate + decode + region charset check +
+            // S-036 partial witness-window bounds. The full historical
+            // witness-window check (verify each beacon block in
+            // [evidence_window_start, +merge_threshold_blocks) contains
+            // no SHARD_TIP_S AND eligible_in_region < 2K) requires
+            // on-chain SHARD_TIP records — a separate work item.
+            // This commit ships the internal-consistency bounds that
+            // can be checked without that record:
+            //   * BEGIN: evidence window must end at or before the
+            //     containing block's height (window is in the past).
+            //   * BEGIN: evidence_window_start must be on-chain history
+            //     (start >= 0, start + threshold <= current).
+            //   * effective_height must be >= block.index + grace
+            //     (committees observe the transition before it fires).
             if (sharding_mode_ != ShardingMode::EXTENDED) {
                 return {false, "MERGE_EVENT tx requires "
                                "sharding_mode=extended"};
@@ -715,6 +725,27 @@ BlockValidator::Result BlockValidator::check_transactions(
                 if (!ok) {
                     return {false, "MERGE_EVENT merging_shard_region "
                                    "violates charset [a-z0-9-_]"};
+                }
+            }
+            // R4 Phase 6: bounds checks. Read thresholds from Chain.
+            uint64_t grace     = chain.merge_grace_blocks();
+            uint64_t threshold = chain.merge_threshold_blocks();
+            if (ev->effective_height < b.index + grace) {
+                return {false, "MERGE_EVENT effective_height "
+                             + std::to_string(ev->effective_height)
+                             + " is too soon (need >= "
+                             + std::to_string(b.index + grace) + ")"};
+            }
+            if (ev->event_type == MergeEvent::BEGIN) {
+                // Evidence window must lie entirely in committed
+                // history. Reject obviously-forged windows (future
+                // start, or window extending past the containing
+                // block).
+                if (threshold > 0
+                    && ev->evidence_window_start + threshold > b.index) {
+                    return {false, "MERGE_EVENT BEGIN evidence window "
+                                   "extends past block height "
+                                 + std::to_string(b.index)};
                 }
             }
             // Modular arithmetic check (partner == (shard+1) mod

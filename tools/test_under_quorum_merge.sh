@@ -141,7 +141,13 @@ H_BEFORE=$($DETERM status --rpc-port 8771 2>/dev/null \
 echo "  height before MERGE_BEGIN: $H_BEFORE"
 
 PRIV1=$(python -c "import json; print(json.load(open('$T/n1/node_key.json'))['priv_seed'])")
-EFF=$((H_BEFORE + 5))
+# Bounds checks (R4 Phase 6) require:
+#   effective_height >= block.index + merge_grace_blocks (genesis grace=2)
+#   evidence_window_start + merge_threshold_blocks (5) <= block.index
+# Use evidence_window_start=0 (always valid) and effective_height with
+# plenty of slack so the tx lands in a block where index is in the
+# valid window.
+EFF=$((H_BEFORE + 20))
 
 echo
 echo "=== 6. Submit MERGE_BEGIN(shard=0, partner=1, region=us-east) at h=$EFF ==="
@@ -151,7 +157,7 @@ $DETERM submit-merge-event \
   --event begin \
   --shard-id 0 --partner-id 1 \
   --effective-height "$EFF" \
-  --evidence-window-start "$((H_BEFORE - 5))" \
+  --evidence-window-start 0 \
   --refugee-region us-east \
   --fee 0 \
   --rpc-port 8771 2>&1 | tail -4
@@ -196,12 +202,15 @@ echo "  first entry: $MERGE_FIRST"
 
 echo
 echo "=== 9. Submit MERGE_END(shard=0, partner=1) and verify state clears ==="
+H_AFTER_BEGIN=$($DETERM status --rpc-port 8771 2>/dev/null \
+                | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
+END_EFF=$((H_AFTER_BEGIN + 20))
 $DETERM submit-merge-event \
   --priv "$PRIV1" \
   --from node1 \
   --event end \
   --shard-id 0 --partner-id 1 \
-  --effective-height "$((EFF + 5))" \
+  --effective-height "$END_EFF" \
   --evidence-window-start 0 \
   --fee 0 \
   --rpc-port 8771 2>&1 | tail -4
@@ -211,7 +220,7 @@ for _ in $(seq 1 60); do
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
-  if [ "$H" -gt $((H_BEFORE + 10)) ] 2>/dev/null; then break; fi
+  if [ "$H" -gt "$((H_AFTER_BEGIN + 3))" ] 2>/dev/null; then break; fi
   sleep 0.5
 done
 
