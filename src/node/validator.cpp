@@ -662,38 +662,24 @@ BlockValidator::Result BlockValidator::check_transactions(
             break;
         }
         case TxType::MERGE_EVENT: {
-            // R4 Phase 1: gate + canonical-payload shape check.
+            // R4 Phase 1+2: gate + decode via canonical helper.
             // Witness-window historical validation (S-036 mitigation)
-            // ships in Phase 2 alongside the apply-side merge state
-            // machine. This phase locks the wire-format slot and the
-            // mode-incompatibility checks.
+            // ships alongside the apply-side merge state machine in
+            // a follow-on; this stage enforces shape + obvious
+            // structural impossibilities.
             if (sharding_mode_ != ShardingMode::EXTENDED) {
                 return {false, "MERGE_EVENT tx requires "
                                "sharding_mode=extended"};
             }
-            const auto& p = tx.payload;
-            // Expected canonical payload (fixed-size):
-            //   [event_type: u8][shard_id: u32 LE][partner_id: u32 LE]
-            //   [effective_height: u64 LE][evidence_window_start: u64 LE]
-            // Total = 1 + 4 + 4 + 8 + 8 = 25 bytes.
-            if (p.size() != 25)
-                return {false, "MERGE_EVENT payload size != 25 (got "
-                             + std::to_string(p.size()) + ")"};
-            uint8_t event_type = p[0];
-            if (event_type > 1)
-                return {false, "MERGE_EVENT event_type must be 0 (BEGIN) "
-                               "or 1 (END)"};
-            uint32_t shard_id_field = 0, partner_id_field = 0;
-            for (int i = 0; i < 4; ++i) {
-                shard_id_field   |= uint32_t(p[1 + i]) << (8 * i);
-                partner_id_field |= uint32_t(p[5 + i]) << (8 * i);
+            auto ev = MergeEvent::decode(tx.payload);
+            if (!ev) {
+                return {false, "MERGE_EVENT payload malformed "
+                               "(expected 25 bytes, event_type in {0,1})"};
             }
-            // partner must be the modular-next shard. The validator
-            // doesn't know num_shards here (only Chain does); the
-            // partner != shard rejection catches the obvious malformed
-            // case. Full modular-arithmetic check defers to apply.
-            if (partner_id_field == shard_id_field)
+            if (ev->partner_id == ev->shard_id)
                 return {false, "MERGE_EVENT partner_id equals shard_id"};
+            // Modular arithmetic check (partner == (shard+1) mod
+            // num_shards) requires Chain access — defer to apply.
             break;
         }
         }

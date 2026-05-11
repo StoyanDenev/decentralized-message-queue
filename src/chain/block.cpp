@@ -128,6 +128,43 @@ EquivocationEvent EquivocationEvent::from_json(const json& j) {
     return e;
 }
 
+// ─── MergeEvent ──────────────────────────────────────────────────────────────
+
+std::vector<uint8_t> MergeEvent::encode() const {
+    std::vector<uint8_t> out;
+    out.reserve(25);
+    out.push_back(event_type);
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((shard_id   >> (8 * i)) & 0xff));
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<uint8_t>((partner_id >> (8 * i)) & 0xff));
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<uint8_t>((effective_height       >> (8 * i)) & 0xff));
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<uint8_t>((evidence_window_start  >> (8 * i)) & 0xff));
+    return out;
+}
+
+std::optional<MergeEvent> MergeEvent::decode(const std::vector<uint8_t>& p) {
+    if (p.size() != 25) return std::nullopt;
+    if (p[0] > 1)       return std::nullopt;
+    MergeEvent ev;
+    ev.event_type = p[0];
+    ev.shard_id = 0;
+    ev.partner_id = 0;
+    for (int i = 0; i < 4; ++i) {
+        ev.shard_id   |= uint32_t(p[1 + i]) << (8 * i);
+        ev.partner_id |= uint32_t(p[5 + i]) << (8 * i);
+    }
+    ev.effective_height = 0;
+    ev.evidence_window_start = 0;
+    for (int i = 0; i < 8; ++i) {
+        ev.effective_height      |= uint64_t(p[9  + i]) << (8 * i);
+        ev.evidence_window_start |= uint64_t(p[17 + i]) << (8 * i);
+    }
+    return ev;
+}
+
 // ─── CrossShardReceipt ───────────────────────────────────────────────────────
 
 json CrossShardReceipt::to_json() const {

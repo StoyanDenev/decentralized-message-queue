@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <optional>
 #include <nlohmann/json.hpp>
 
 namespace determ::chain {
@@ -155,6 +156,25 @@ struct EquivocationEvent {
 //      fields.
 // Once verified, dst credits `to` with `amount` (sender debit + fee
 // burn already happened on src). Idempotent on (src_shard, tx_hash).
+// R4: canonical MERGE_EVENT payload. Encoded/decoded by free helpers
+// below; the apply path + validator both use these to avoid duplicate
+// byte-counting logic.
+struct MergeEvent {
+    enum Type : uint8_t { BEGIN = 0, END = 1 };
+    uint8_t  event_type{BEGIN};
+    uint32_t shard_id{0};
+    uint32_t partner_id{0};
+    uint64_t effective_height{0};
+    uint64_t evidence_window_start{0};   // BEGIN only; 0 for END
+
+    // Canonical 25-byte serialization. signing_bytes-style: order +
+    // endianness fixed, no version byte (locked by TxType::MERGE_EVENT).
+    std::vector<uint8_t> encode() const;
+    // Decode the canonical form. Returns std::nullopt on size mismatch
+    // or invalid event_type. Used by Apply + Validator.
+    static std::optional<MergeEvent> decode(const std::vector<uint8_t>& p);
+};
+
 struct CrossShardReceipt {
     ShardId      src_shard{0};
     ShardId      dst_shard{0};

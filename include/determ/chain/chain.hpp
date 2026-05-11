@@ -103,6 +103,24 @@ public:
     uint32_t merge_grace_blocks()     const { return merge_grace_blocks_; }
     void     set_merge_grace_blocks(uint32_t n)     { merge_grace_blocks_ = n; }
 
+    // R4 Phase 2: per-shard merge state. The map keys are shard_ids
+    // currently in the MERGED state; the value is the partner shard
+    // they're absorbing into. Absence from the map = NOT MERGED. The
+    // map mutates only when a MERGE_EVENT applies (BEGIN inserts,
+    // END erases). Read by check_creator_selection (Phase 3) for the
+    // eligibility stress branch.
+    using MergeStateMap = std::map<ShardId, ShardId>;
+    const MergeStateMap& merge_state() const { return merge_state_; }
+    // Returns true if shard s is currently merged with another. The
+    // partner is written to out_partner on hit. Read by validator /
+    // producer paths during EXTENDED-mode block production.
+    bool is_shard_merged(ShardId s, ShardId* out_partner = nullptr) const {
+        auto it = merge_state_.find(s);
+        if (it == merge_state_.end()) return false;
+        if (out_partner) *out_partner = it->second;
+        return true;
+    }
+
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.
     // At the start of each apply_transactions(b), pending entries with
@@ -265,6 +283,10 @@ private:
     uint32_t                                    merge_threshold_blocks_{100};
     uint32_t                                    revert_threshold_blocks_{200};
     uint32_t                                    merge_grace_blocks_{10};
+    // R4 Phase 2: per-shard merge state. key = shard_id currently
+    // absorbed into a partner; value = partner shard. Mutated only
+    // by MERGE_EVENT apply (BEGIN inserts, END erases).
+    MergeStateMap                               merge_state_{};
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};
     ShardId                                     my_shard_id_{0};

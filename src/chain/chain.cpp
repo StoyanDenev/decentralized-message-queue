@@ -398,17 +398,41 @@ void Chain::apply_transactions(const Block& b) {
             sender.next_nonce++;
             break;
         }
-        // R4 MERGE_EVENT (Phase 1): validator has already shape-checked
-        // the canonical 25-byte payload + mode-gated. Apply consumes
-        // the fee + nonce so the sender's tx stream stays
-        // deterministic; the actual merge state machine (eligibility
-        // stress branch, partner_subset_hash, witness-window historical
-        // validation) ships in subsequent phases. Until then, a valid
-        // MERGE_EVENT is recorded by its presence in the canonical
-        // block stream — operators / replayers can observe it; the
-        // chain doesn't yet transition committee state on it.
+        // R4 MERGE_EVENT (Phase 2): validator shape-checked the
+        // canonical 25-byte payload + mode-gated. Apply consumes the
+        // fee + nonce, then mutates merge_state_ on BEGIN/END.
+        //
+        // BEGIN: inserts (shard_id → partner_id) into the map. Skipped
+        //        if shard_id is already merged (idempotent on duplicate
+        //        BEGIN — a future commit hardens this with explicit
+        //        rejection on duplicate at validate time).
+        // END:   erases shard_id from the map. Skipped if shard_id
+        //        wasn't in the map (defensive — a duplicate END is a
+        //        no-op).
+        //
+        // Modular-partner check (partner == (shard+1) mod num_shards)
+        // executes here because Chain knows shard_count_. Failure
+        // skips the mutation but consumes fee/nonce — the validator
+        // accepts the tx as shape-valid; the apply-time predicate
+        // catches the cross-num-shards invariant.
+        //
+        // The actual committee stress branch + partner_subset_hash
+        // + witness-window validation are downstream (R4 Phase 3+).
         case TxType::MERGE_EVENT: {
             if (!charge_fee(sender, tx.fee)) continue;
+            auto ev = MergeEvent::decode(tx.payload);
+            if (ev && shard_count_ > 1
+                && ev->partner_id == ((ev->shard_id + 1) % shard_count_)) {
+                if (ev->event_type == MergeEvent::BEGIN) {
+                    merge_state_.insert({ev->shard_id, ev->partner_id});
+                } else {  // END
+                    auto it = merge_state_.find(ev->shard_id);
+                    if (it != merge_state_.end()
+                        && it->second == ev->partner_id) {
+                        merge_state_.erase(it);
+                    }
+                }
+            }
             sender.next_nonce++;
             break;
         }
@@ -682,6 +706,14 @@ json Chain::serialize_state(uint32_t header_count) const {
     // A5 Phase 2: persist pending PARAM_CHANGE entries so a snapshot-
     // bootstrapped chain activates them at the same heights an originally-
     // replayed chain would.
+    // R4 Phase 2: persist merge state so a snapshot-bootstrapped node
+    // resumes mid-merge correctly.
+    json merge_arr = json::array();
+    for (auto& [s, p] : merge_state_) {
+        merge_arr.push_back({{"shard_id", s}, {"partner_id", p}});
+    }
+    snap["merge_state"] = merge_arr;
+
     json pending = json::array();
     for (auto& [eff, entries] : pending_param_changes_) {
         json bucket = json::array();
@@ -786,6 +818,13 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             Hash    txhash = from_hex_arr<32>(
                                 a.value("tx_hash", std::string(64, '0')));
             c.applied_inbound_receipts_.insert({src, txhash});
+        }
+    }
+    if (snap.contains("merge_state")) {
+        for (auto& m : snap["merge_state"]) {
+            ShardId s = m.value("shard_id",   ShardId{0});
+            ShardId p = m.value("partner_id", ShardId{0});
+            c.merge_state_.insert({s, p});
         }
     }
     if (snap.contains("pending_param_changes")) {
