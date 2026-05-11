@@ -27,14 +27,14 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA7 | [CrossShardReceipts.md](CrossShardReceipts.md) | Cross-shard atomicity: no double-credit, A1 invariant composes | ✓ |
 | FA8 | [RegionalSharding.md](RegionalSharding.md) | Regional pinning preserves FA1/FA4/FA5/FA6/FA7 | ✓ |
 
-Future (FB-track):
+FB-track (TLA+ machine-checkable):
 
 | # | File | Status |
 |---|---|---|
-| FB1 | Consensus.tla — TLC-checkable consensus spec | Planned |
-| FB2 | Sharding.tla — multi-shard receipt flow | Planned |
-| FB3 | Receipts.tla — receipt dedup state machine | Planned |
-| FB4 | CHECK-RESULTS.md — model-check transcripts | Planned |
+| FB1 | [tla/Consensus.tla](tla/Consensus.tla) — K-of-K consensus state machine | ✓ spec, model-check pending TLC install |
+| FB2 | [tla/Sharding.tla](tla/Sharding.tla) — multi-shard receipt flow | ✓ spec, model-check pending TLC install |
+| FB3 | [tla/Receipts.tla](tla/Receipts.tla) — receipt dedup state machine | ✓ spec, model-check pending TLC install |
+| FB4 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
 
 ---
 
