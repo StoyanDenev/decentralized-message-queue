@@ -294,7 +294,20 @@ void Chain::apply_transactions(const Block& b) {
 
     // Distribute fees + block subsidy equally among creators; dust goes
     // to creator[0]. Block subsidy is genesis-pinned; 0 = no subsidy.
-    uint64_t total_distributed = total_fees + block_subsidy_;
+    //
+    // E4 finite subsidy fund: subsidy_pool_initial_ == 0 keeps the
+    // historical perpetual-subsidy behavior. When set, total cumulative
+    // subsidy is hard-capped at the pool value; this block's effective
+    // subsidy = min(block_subsidy_, remaining). Once the pool drains,
+    // subsidy_this_block == 0 and the chain runs on transaction fees
+    // alone.
+    uint64_t subsidy_this_block = block_subsidy_;
+    if (subsidy_pool_initial_ != 0) {
+        uint64_t remaining = subsidy_pool_initial_ > accumulated_subsidy_
+            ? subsidy_pool_initial_ - accumulated_subsidy_ : 0;
+        subsidy_this_block = std::min(block_subsidy_, remaining);
+    }
+    uint64_t total_distributed = total_fees + subsidy_this_block;
     if (total_distributed > 0 && !b.creators.empty()) {
         size_t   m           = b.creators.size();
         uint64_t per_creator = total_distributed / m;
@@ -359,12 +372,14 @@ void Chain::apply_transactions(const Block& b) {
     }
 
     // A1: book the per-block deltas, then assert the unitary-balance
-    // invariant. block_subsidy_ is minted to creators iff the distribution
-    // branch above actually paid them out (creators non-empty AND
-    // total_distributed > 0). Match that gate exactly so the counter
-    // tracks reality, not intent.
-    if ((total_fees + block_subsidy_) > 0 && !b.creators.empty()) {
-        accumulated_subsidy_ += block_subsidy_;
+    // invariant. subsidy_this_block is minted to creators iff the
+    // distribution branch above actually paid them out (creators non-
+    // empty AND total_distributed > 0). Tracking the *actually-paid*
+    // amount (not block_subsidy_ literal) is what makes E4's finite-
+    // pool path A1-consistent: once the pool drains, subsidy_this_block
+    // == 0 and no new mint happens, so the invariant still holds.
+    if (total_distributed > 0 && !b.creators.empty()) {
+        accumulated_subsidy_ += subsidy_this_block;
     }
     accumulated_inbound_  += block_inbound;
     accumulated_outbound_ += block_outbound;
@@ -488,7 +503,8 @@ json Chain::serialize_state(uint32_t header_count) const {
     // Genesis-pinned constants the restorer needs to apply subsequent
     // blocks correctly (creator credit, validator-eligibility gate,
     // address routing).
-    snap["block_subsidy"] = block_subsidy_;
+    snap["block_subsidy"]        = block_subsidy_;
+    snap["subsidy_pool_initial"] = subsidy_pool_initial_;
     snap["min_stake"]     = min_stake_;
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
@@ -530,6 +546,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
 
     Chain c;
     c.block_subsidy_ = snap.value("block_subsidy", uint64_t{0});
+    c.subsidy_pool_initial_ = snap.value("subsidy_pool_initial", uint64_t{0});
     c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
     c.shard_count_   = snap.value("shard_count",   uint32_t{1});
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});

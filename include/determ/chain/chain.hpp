@@ -60,6 +60,17 @@ public:
     // after loading GenesisConfig; chain-wide constant.
     uint64_t block_subsidy() const { return block_subsidy_; }
     void     set_block_subsidy(uint64_t s) { block_subsidy_ = s; }
+    // E4: finite subsidy fund. 0 = unlimited; non-zero = hard cap on
+    // total cumulative subsidy ever paid. Genesis-pinned via
+    // GenesisConfig.subsidy_pool_initial.
+    uint64_t subsidy_pool_initial() const { return subsidy_pool_initial_; }
+    void     set_subsidy_pool_initial(uint64_t v) { subsidy_pool_initial_ = v; }
+    uint64_t subsidy_paid()          const { return accumulated_subsidy_; }
+    uint64_t subsidy_pool_remaining() const {
+        if (subsidy_pool_initial_ == 0) return UINT64_MAX;
+        return subsidy_pool_initial_ > accumulated_subsidy_
+            ? subsidy_pool_initial_ - accumulated_subsidy_ : 0;
+    }
 
     // rev.8 follow-on: validator-eligibility stake threshold.
     // STAKE_INCLUSION chains use 1000 (MIN_STAKE default);
@@ -176,6 +187,12 @@ private:
     std::map<std::string, StakeEntry>           stakes_;
     std::map<std::string, RegistryEntry>        registrants_;
     uint64_t                                    block_subsidy_{0};
+    // E4: optional finite subsidy fund. 0 = unlimited / perpetual subsidy
+    // (the historical pre-E4 default, backward-compatible). Non-zero =
+    // a hard cap on total subsidy ever paid. Once `accumulated_subsidy_`
+    // reaches this cap, subsequent blocks pay only transaction fees;
+    // chain remains live, validators are rewarded purely from fees.
+    uint64_t                                    subsidy_pool_initial_{0};
     uint64_t                                    min_stake_{1000};
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};

@@ -76,6 +76,15 @@ struct GenesisConfig {
     // Rev. 4: per-block reward minted to creators alongside fees ("page reward"
     // from the original Determ spec). Genesis-pinned. 0 = no subsidy (fees only).
     uint64_t                        block_subsidy{0};
+    // E4: optional cap on total cumulative subsidy ever paid. 0 (default)
+    // preserves the historical perpetual-subsidy behavior — chain mints
+    // `block_subsidy` per block forever. Non-zero installs a finite
+    // self-terminating subsidy fund: once cumulative paid subsidy reaches
+    // this value, subsequent blocks distribute only transaction fees.
+    // Pairs with A1 unitary-balance invariant — accumulated_subsidy_
+    // tracks the actually-paid amount, so the invariant holds across
+    // the exhaustion transition.
+    uint64_t                        subsidy_pool_initial{0};
 
     // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
     // `bft_escalation_threshold` consecutive Phase-1 aborts at the same

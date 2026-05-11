@@ -62,6 +62,7 @@ json GenesisConfig::to_json() const {
         {"m_creators",               m_creators},
         {"k_block_sigs",             k_block_sigs},
         {"block_subsidy",            block_subsidy},
+        {"subsidy_pool_initial",     subsidy_pool_initial},
         {"bft_enabled",              bft_enabled},
         {"bft_escalation_threshold", bft_escalation_threshold},
         {"inclusion_model",         static_cast<uint8_t>(inclusion_model)},
@@ -83,6 +84,7 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.m_creators    = j.value("m_creators",    uint32_t{3});
     c.k_block_sigs  = j.value("k_block_sigs",  c.m_creators);   // default to M (strong)
     c.block_subsidy = j.value("block_subsidy", uint64_t{0});
+    c.subsidy_pool_initial = j.value("subsidy_pool_initial", uint64_t{0});
     c.bft_enabled              = j.value("bft_enabled",              true);
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
     c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));
