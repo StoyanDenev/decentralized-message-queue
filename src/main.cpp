@@ -1288,6 +1288,102 @@ static int cmd_submit_param_change(int argc, char** argv) {
     return 0;
 }
 
+// R4: build, sign, and submit a MERGE_EVENT tx.
+//   determ submit-merge-event \
+//     --priv <sender_priv_hex> --from <sender_domain> \
+//     --event {begin|end} \
+//     --shard-id <N> --partner-id <N> \
+//     --effective-height <N> --evidence-window-start <N> \
+//     [--refugee-region <region>] \
+//     [--fee <N>] [--rpc-port <P>]
+//
+// Builds a canonical MergeEvent payload, wraps it in a Transaction
+// from a registered domain, and submits via submit_tx RPC. Operator-
+// driven for v1.x; auto-detection on the beacon (eligible_in_region
+// < 2K observation window) is Phase 6 work.
+static int cmd_submit_merge_event(int argc, char** argv) {
+    std::string priv_hex, from_domain, event_str, refugee_region;
+    uint32_t shard_id = 0, partner_id = 0;
+    uint64_t effective_height = 0, evidence_window_start = 0;
+    uint64_t fee  = 0;
+    uint16_t port = get_rpc_port(argc, argv);
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv")              priv_hex = argv[i + 1];
+        else if (a == "--from")              from_domain = argv[i + 1];
+        else if (a == "--event")             event_str = argv[i + 1];
+        else if (a == "--shard-id")          shard_id   = static_cast<uint32_t>(std::stoul(argv[i + 1]));
+        else if (a == "--partner-id")        partner_id = static_cast<uint32_t>(std::stoul(argv[i + 1]));
+        else if (a == "--effective-height")  effective_height       = std::stoull(argv[i + 1]);
+        else if (a == "--evidence-window-start")
+                                              evidence_window_start = std::stoull(argv[i + 1]);
+        else if (a == "--refugee-region")    refugee_region = argv[i + 1];
+        else if (a == "--fee")               fee  = std::stoull(argv[i + 1]);
+    }
+    if (priv_hex.empty() || from_domain.empty() || event_str.empty()) {
+        std::cerr << "Usage: determ submit-merge-event "
+                     "--priv <hex> --from <domain> --event {begin|end} "
+                     "--shard-id <N> --partner-id <N> "
+                     "--effective-height <N> --evidence-window-start <N> "
+                     "[--refugee-region <region>] "
+                     "[--fee <N>] [--rpc-port <P>]\n";
+        return 1;
+    }
+    chain::MergeEvent ev;
+    if      (event_str == "begin") ev.event_type = chain::MergeEvent::BEGIN;
+    else if (event_str == "end")   ev.event_type = chain::MergeEvent::END;
+    else {
+        std::cerr << "--event must be 'begin' or 'end'\n"; return 1;
+    }
+    ev.shard_id              = shard_id;
+    ev.partner_id            = partner_id;
+    ev.effective_height      = effective_height;
+    ev.evidence_window_start = evidence_window_start;
+    ev.merging_shard_region  = refugee_region;
+    std::vector<uint8_t> payload = ev.encode();
+
+    crypto::NodeKey sender;
+    try { sender.priv_seed = from_hex_arr<32>(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
+    }
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
+    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
+    size_t pub_len = 32;
+    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
+    EVP_PKEY_free(pkey);
+
+    uint64_t nonce = 0;
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "nonce",
+                                  {{"domain", from_domain}});
+        nonce = r.value("next_nonce", uint64_t{0});
+    } catch (std::exception& e) {
+        std::cerr << "nonce query failed: " << e.what() << "\n"; return 1;
+    }
+
+    chain::Transaction tx;
+    tx.type    = chain::TxType::MERGE_EVENT;
+    tx.from    = from_domain;
+    tx.to      = from_domain;   // ignored for MERGE_EVENT
+    tx.amount  = 0;
+    tx.fee     = fee;
+    tx.nonce   = nonce;
+    tx.payload = payload;
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(sender, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "submit_tx", {{"tx", tx.to_json()}});
+        std::cout << r.dump(2) << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "submit_tx failed: " << e.what() << "\n"; return 1;
+    }
+    return 0;
+}
+
 static int cmd_genesis_tool(int argc, char** argv) {
     if (argc < 1) {
         std::cerr << "Usage: determ genesis-tool {peer-info|build|build-sharded} ...\n";
@@ -1342,6 +1438,7 @@ int main(int argc, char** argv) {
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);
     if (cmd == "stake_info")    return cmd_stake_info(sub_argc, sub_argv);
     if (cmd == "submit-param-change") return cmd_submit_param_change(sub_argc, sub_argv);
+    if (cmd == "submit-merge-event")  return cmd_submit_merge_event(sub_argc, sub_argv);
     if (cmd == "genesis-tool")  return cmd_genesis_tool(sub_argc, sub_argv);
     if (cmd == "account")       return cmd_account(sub_argc, sub_argv);
     if (cmd == "send_anon")     return cmd_send_anon(sub_argc, sub_argv);
