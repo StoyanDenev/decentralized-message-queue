@@ -65,3 +65,23 @@ endif()
 if(UNIX)
   target_link_libraries(determ PRIVATE pthread)
 endif()
+
+# ── determ-wallet executable (A2 Phase 1: shamir + skeleton) ────────────────
+# Separate binary so wallet secret material never shares address space with
+# the networked `determ` daemon. Phase 2 will add libopaque + libsodium for
+# the OPAQUE-guarded recovery flow (declared via FetchContent there).
+file(GLOB_RECURSE WALLET_SOURCES "wallet/*.cpp")
+add_executable(determ-wallet ${WALLET_SOURCES})
+target_include_directories(determ-wallet PRIVATE
+  wallet
+  ${openssl_SOURCE_DIR}/include
+)
+target_link_libraries(determ-wallet PRIVATE
+  crypto
+)
+if(WIN32)
+  target_link_libraries(determ-wallet PRIVATE ws2_32 crypt32)
+endif()
+if(UNIX)
+  target_link_libraries(determ-wallet PRIVATE pthread)
+endif()
