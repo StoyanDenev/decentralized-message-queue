@@ -157,6 +157,47 @@ Node::Node(const Config& cfg)
         validator_.set_param_keyholders(gcfg.param_keyholders);
         validator_.set_param_threshold(gcfg.param_threshold);
 
+        // A5 Phase 2: install Chain → Validator parameter-changed hook.
+        // When a staged PARAM_CHANGE activates at a block boundary, the
+        // chain calls back for each (name, value) pair so the validator
+        // state mirrors any field that lives outside the chain's own
+        // instance state. Chain-local fields (MIN_STAKE → min_stake_)
+        // already updated themselves; here we only handle the validator-
+        // side fields.
+        chain_.set_param_changed_hook(
+            [this](const std::string& name,
+                     const std::vector<uint8_t>& value) {
+                if (name == "bft_escalation_threshold" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    validator_.set_bft_escalation_threshold(static_cast<uint32_t>(v));
+                } else if (name == "param_threshold" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    validator_.set_param_threshold(static_cast<uint32_t>(v));
+                } else if (name == "param_keyholders") {
+                    // Wire format: [count: u8] count × { ed_pub: 32B }
+                    if (!value.empty()) {
+                        uint8_t n = value[0];
+                        if (value.size() == size_t(1) + size_t(n) * 32) {
+                            std::vector<PubKey> ks;
+                            ks.reserve(n);
+                            for (uint8_t i = 0; i < n; ++i) {
+                                PubKey pk{};
+                                std::copy_n(value.begin() + 1 + i * 32, 32,
+                                            pk.begin());
+                                ks.push_back(pk);
+                            }
+                            validator_.set_param_keyholders(std::move(ks));
+                        }
+                    }
+                }
+                // MIN_STAKE / UNSTAKE_DELAY / SUSPENSION_SLASH / timing
+                // fields are not mirrored to the validator (they're chain-
+                // local or static-constant; the chain already updated
+                // its own min_stake_, and the others are Phase 3 work).
+            });
+
         // A6 startup gate: enforce that the operator-selected sharding
         // mode is consistent with the genesis being loaded. Defense in
         // depth — genesis-tool already rejects most of these at build

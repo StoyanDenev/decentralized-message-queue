@@ -6,6 +6,8 @@
 #include <optional>
 #include <cstdint>
 #include <utility>
+#include <vector>
+#include <functional>
 
 namespace determ::chain {
 
@@ -83,6 +85,39 @@ public:
     // than chain/params.hpp::MIN_STAKE.
     uint64_t min_stake() const { return min_stake_; }
     void     set_min_stake(uint64_t s) { min_stake_ = s; }
+
+    // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
+    // tx stages a (name, value) pair to activate at `effective_height`.
+    // At the start of each apply_transactions(b), pending entries with
+    // effective_height <= b.index are activated — i.e., the named chain
+    // state field is mutated, after which the block applies under the
+    // new value. Activation is deterministic across replays because the
+    // pending map and apply order are baked into the canonical block
+    // stream + chain snapshot.
+    //
+    // The optional ParamChangedHook is invoked once per activated param
+    // so the Node can mirror governance-relevant fields (param_keyholders,
+    // param_threshold, bft_escalation_threshold) back to the validator.
+    // Chain-internal fields (min_stake_) update locally and need no
+    // outside notification.
+    using ParamChangedHook =
+        std::function<void(const std::string& name,
+                             const std::vector<uint8_t>& value)>;
+    void set_param_changed_hook(ParamChangedHook h) {
+        param_changed_hook_ = std::move(h);
+    }
+
+    // Stages a parameter change for activation. Called from apply path
+    // when a valid PARAM_CHANGE tx is applied; safe to call from outside
+    // (e.g., a tool replaying a chain that already accepted the tx).
+    void stage_param_change(uint64_t effective_height,
+                             std::string name,
+                             std::vector<uint8_t> value);
+
+    // Read-only view for diagnostics / RPC.
+    const std::map<uint64_t,
+                   std::vector<std::pair<std::string, std::vector<uint8_t>>>>&
+    pending_param_changes() const { return pending_param_changes_; }
 
     // rev.9 B3: shard routing parameters. Genesis-pinned and chain-wide.
     // Set by Node from GenesisConfig before replay so apply-side
@@ -223,6 +258,20 @@ private:
     uint64_t                                    accumulated_slashed_{0};
     uint64_t                                    accumulated_inbound_{0};
     uint64_t                                    accumulated_outbound_{0};
+
+    // A5 Phase 2: staged governance parameter changes keyed by
+    // activation height. Ordered map ensures deterministic activation
+    // even when two PARAM_CHANGE txs (in different blocks) target the
+    // same effective_height — the vector preserves apply order.
+    std::map<uint64_t,
+             std::vector<std::pair<std::string, std::vector<uint8_t>>>>
+                                                pending_param_changes_;
+    ParamChangedHook                            param_changed_hook_{};
+
+    // Activate pending entries with eff_height <= current. Called at
+    // the start of every apply_transactions(b) before tx replay so the
+    // block sees the new values.
+    void activate_pending_params(uint64_t current_height);
 
     void apply_transactions(const Block& b);
 };

@@ -103,6 +103,50 @@ bool Chain::inbound_receipt_applied(ShardId src_shard,
     return applied_inbound_receipts_.count({src_shard, tx_hash}) > 0;
 }
 
+// A5 Phase 2: stage a PARAM_CHANGE for activation at `effective_height`.
+// Multiple changes can land at the same height; we preserve apply order
+// (vector push_back) so replay is deterministic.
+void Chain::stage_param_change(uint64_t effective_height,
+                                  std::string name,
+                                  std::vector<uint8_t> value) {
+    pending_param_changes_[effective_height].emplace_back(
+        std::move(name), std::move(value));
+}
+
+// Activate all staged changes with eff_height <= current_height. Called
+// at the start of apply_transactions so the new values are in effect
+// before the block's txs replay. Decoding is per-parameter; unknown
+// names are activated as no-ops (validator already enforces the
+// whitelist, so unknowns indicate a future-version chain — fail-soft
+// at apply, fail-loud at validate). All ranges processed iterate in
+// ascending key order via std::map.
+void Chain::activate_pending_params(uint64_t current_height) {
+    auto it = pending_param_changes_.begin();
+    while (it != pending_param_changes_.end() && it->first <= current_height) {
+        for (auto& [name, value] : it->second) {
+            // Numeric (uint64 LE) parameters that live on Chain.
+            if (name == "MIN_STAKE") {
+                if (value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    min_stake_ = v;
+                }
+            }
+            // Names that don't have chain-instance storage but DO live
+            // on the validator are forwarded to the Node-installed hook,
+            // which mirrors them onto the validator: bft_escalation_threshold,
+            // param_keyholders, param_threshold, and the timing fields
+            // tx_commit_ms / block_sig_ms / abort_claim_ms / SUSPENSION_SLASH
+            // / UNSTAKE_DELAY (these last four are currently static
+            // constants in params.hpp; making them per-Chain instance
+            // state is Phase 3 work — the hook receives the value so
+            // the Node can choose what to do).
+            if (param_changed_hook_) param_changed_hook_(name, value);
+        }
+        it = pending_param_changes_.erase(it);
+    }
+}
+
 // ─── apply_transactions ──────────────────────────────────────────────────────
 
 uint64_t Chain::live_total_supply() const {
@@ -113,6 +157,12 @@ uint64_t Chain::live_total_supply() const {
 }
 
 void Chain::apply_transactions(const Block& b) {
+    // A5 Phase 2: activate any staged governance parameter changes whose
+    // effective_height <= this block's index BEFORE replaying the block.
+    // The new values are visible to all tx handlers and to the post-apply
+    // invariant checks below.
+    if (b.index > 0) activate_pending_params(b.index);
+
     // Genesis: install the initial state directly. No tx semantics, no fees.
     // The validator already accepts index-0 blocks unconditionally; here we
     // just translate `initial_state` into accounts_/stakes_/registrants_.
@@ -313,18 +363,37 @@ void Chain::apply_transactions(const Block& b) {
             sender.next_nonce++;
             break;
         }
-        // A5 PARAM_CHANGE: apply-time scaffold. Validator has already
-        // verified mode, payload shape, whitelist, and multisig
-        // threshold. The fee is consumed and the nonce advances so the
-        // sender's tx stream stays deterministic; staging the actual
-        // parameter mutation at `effective_height` is a follow-on
-        // (requires Chain to expose a pending_param_changes_ map +
-        // validator-state refresh hook at the boundary). Until then,
-        // a valid PARAM_CHANGE is recorded by its presence in the
-        // canonical block stream — operators / replayers can observe
-        // it; chain-wide constants are not yet mutated mid-chain.
+        // A5 PARAM_CHANGE: validator has already verified payload shape,
+        // whitelist, and multisig threshold. Re-parse just the (name,
+        // value, effective_height) header here and stage the change.
+        // Signatures aren't re-checked at apply time (deterministic
+        // replay assumption — they were verified at validate time).
         case TxType::PARAM_CHANGE: {
             if (!charge_fee(sender, tx.fee)) continue;
+            const auto& p = tx.payload;
+            size_t off = 0;
+            // Defensive shape checks — apply-side reject = treat as
+            // malformed and skip without staging, but fee is already
+            // consumed (paid for inclusion + multisig verification).
+            if (p.size() >= 1) {
+                size_t nlen = p[off++];
+                if (p.size() >= off + nlen + 2) {
+                    std::string name(p.begin() + off, p.begin() + off + nlen);
+                    off += nlen;
+                    uint16_t vlen = uint16_t(p[off]) | (uint16_t(p[off+1]) << 8);
+                    off += 2;
+                    if (p.size() >= off + vlen + 8) {
+                        std::vector<uint8_t> value(p.begin() + off,
+                                                     p.begin() + off + vlen);
+                        off += vlen;
+                        uint64_t eff = 0;
+                        for (int i = 0; i < 8; ++i)
+                            eff |= uint64_t(p[off + i]) << (8 * i);
+                        stage_param_change(eff, std::move(name),
+                                              std::move(value));
+                    }
+                }
+            }
             sender.next_nonce++;
             break;
         }
@@ -591,6 +660,25 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["accumulated_inbound"]  = accumulated_inbound_;
     snap["accumulated_outbound"] = accumulated_outbound_;
 
+    // A5 Phase 2: persist pending PARAM_CHANGE entries so a snapshot-
+    // bootstrapped chain activates them at the same heights an originally-
+    // replayed chain would.
+    json pending = json::array();
+    for (auto& [eff, entries] : pending_param_changes_) {
+        json bucket = json::array();
+        for (auto& [name, value] : entries) {
+            bucket.push_back({
+                {"name",  name},
+                {"value", to_hex(value.data(), value.size())},
+            });
+        }
+        pending.push_back({
+            {"effective_height", eff},
+            {"entries",          bucket},
+        });
+    }
+    snap["pending_param_changes"] = pending;
+
     // Tail headers for chain continuity. Restorer keeps them so they
     // can verify incoming block's prev_hash chains correctly. Default
     // is 16 — enough for typical sync overlap.
@@ -677,6 +765,18 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             Hash    txhash = from_hex_arr<32>(
                                 a.value("tx_hash", std::string(64, '0')));
             c.applied_inbound_receipts_.insert({src, txhash});
+        }
+    }
+    if (snap.contains("pending_param_changes")) {
+        for (auto& b : snap["pending_param_changes"]) {
+            uint64_t eff = b.value("effective_height", uint64_t{0});
+            for (auto& e : b.value("entries", json::array())) {
+                std::string name = e.value("name", std::string{});
+                std::vector<uint8_t> value = from_hex(
+                    e.value("value", std::string{}));
+                c.pending_param_changes_[eff].emplace_back(
+                    std::move(name), std::move(value));
+            }
         }
     }
     if (snap.contains("headers")) {
