@@ -26,6 +26,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA6 | [EquivocationSlashing.md](EquivocationSlashing.md) | Slashing soundness: honest never slashed for equivocation | ✓ |
 | FA7 | [CrossShardReceipts.md](CrossShardReceipts.md) | Cross-shard atomicity: no double-credit, A1 invariant composes | ✓ |
 | FA8 | [RegionalSharding.md](RegionalSharding.md) | Regional pinning preserves FA1/FA4/FA5/FA6/FA7 | ✓ |
+| FA9 | [UnderQuorumMerge.md](UnderQuorumMerge.md) | R4 under-quorum merge preserves FA1/FA7 across BEGIN/END | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
