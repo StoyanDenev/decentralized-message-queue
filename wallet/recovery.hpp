@@ -48,6 +48,11 @@ struct RecoverySetup {
     std::vector<uint8_t>                  guardian_x;       // x-coordinates 1..N
     std::vector<envelope::Envelope>       envelopes;         // size = share_count
     std::vector<uint8_t>                  pubkey_checksum;   // 32 bytes if present
+    // A2 Phase 7: per-guardian OPAQUE registration records. Empty when
+    // scheme == "shamir-aead-passphrase" (Phase 3 behavior).
+    // Populated when scheme == "shamir-aead-opaque-*"; index i holds
+    // the bytes the guardian would store from opaque_register(pw, i).
+    std::vector<std::vector<uint8_t>>     opaque_records;
 };
 
 // Build a fresh recovery setup. Splits `secret` into N shares with
@@ -56,11 +61,34 @@ struct RecoverySetup {
 // envelope's AAD so a share decrypted under guardian_i's salt cannot
 // be replayed as guardian_j's share. The returned RecoverySetup is
 // self-contained (no on-chain state).
+//
+// Phase 3 (legacy): PBKDF2 directly off the password. Scheme tag
+// "shamir-aead-passphrase".
 RecoverySetup create(const std::vector<uint8_t>& secret,
                        const std::string& password,
                        uint8_t threshold,
                        uint8_t share_count,
                        const std::vector<uint8_t>& pubkey_checksum = {});
+
+// A2 Phase 7: alternative create() that derives each envelope's
+// unwrap key via the OPAQUE adapter instead of PBKDF2 directly. Per
+// guardian:
+//   1. opaque_adapter::register_password(pw, gid) → (record, export_key)
+//   2. Treat export_key as the password input to envelope::encrypt
+//      (the AEAD layer still wraps the share; the OPAQUE adapter
+//      replaces the password→key derivation).
+// The OPAQUE registration record for each guardian is stored in
+// setup.opaque_records[i] and persisted alongside the envelope.
+//
+// Scheme tag: "shamir-aead-opaque-" + adapter::suite_name(). When
+// Phase 6 swaps the stub for real libopaque, existing recovery
+// setups created under the stub remain identifiable by their suite
+// tag — the recover() path errors on suite mismatch.
+RecoverySetup create_opaque(const std::vector<uint8_t>& secret,
+                              const std::string& password,
+                              uint8_t threshold,
+                              uint8_t share_count,
+                              const std::vector<uint8_t>& pubkey_checksum = {});
 
 // Reconstruct the secret from a recovery setup using >= threshold
 // envelopes. The caller supplies which guardian indices to attempt
@@ -68,6 +96,9 @@ RecoverySetup create(const std::vector<uint8_t>& secret,
 // envelope's stored salt. Returns std::nullopt if fewer than
 // `threshold` envelopes decrypt successfully OR if reconstruction
 // yields a secret that fails the pubkey_checksum gate (when present).
+//
+// Dispatch: if setup.scheme starts with "shamir-aead-opaque-", routes
+// through the OPAQUE adapter; otherwise uses the Phase 3 PBKDF2 path.
 std::optional<std::vector<uint8_t>>
 recover(const RecoverySetup& setup,
           const std::string& password,

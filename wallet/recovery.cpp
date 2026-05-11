@@ -1,4 +1,5 @@
 #include "recovery.hpp"
+#include "opaque_adapter.hpp"
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <nlohmann/json.hpp>
@@ -100,6 +101,54 @@ RecoverySetup create(const std::vector<uint8_t>& secret,
     return setup;
 }
 
+RecoverySetup create_opaque(const std::vector<uint8_t>& secret,
+                              const std::string& password,
+                              uint8_t threshold,
+                              uint8_t share_count,
+                              const std::vector<uint8_t>& pubkey_checksum) {
+    if (secret.empty())
+        throw std::invalid_argument("recovery: secret must be non-empty");
+    auto shares = shamir::split(secret, threshold, share_count);
+
+    RecoverySetup setup;
+    setup.version         = 1;
+    setup.scheme          = std::string("shamir-aead-opaque-")
+                              + opaque_adapter::suite_name();
+    setup.threshold       = threshold;
+    setup.share_count     = share_count;
+    setup.secret_len      = secret.size();
+    setup.guardian_x.reserve(share_count);
+    setup.envelopes.reserve(share_count);
+    setup.opaque_records.reserve(share_count);
+    setup.pubkey_checksum = pubkey_checksum;
+
+    for (uint8_t i = 0; i < share_count; ++i) {
+        setup.guardian_x.push_back(shares[i].x);
+        auto reg = opaque_adapter::register_password(password, i);
+        if (!reg) throw std::runtime_error(
+            "recovery: opaque_adapter::register_password failed");
+        // Use export_key as the AEAD layer's "password" — envelope::encrypt
+        // runs PBKDF2 over it, which is cheap on a 32-byte uniform key.
+        // The OPAQUE adapter's export_key is what protects against
+        // offline password grind; PBKDF2 here is just key-derivation
+        // hygiene (per-envelope salt for AES-GCM).
+        std::string pw_str(reg->export_key.begin(), reg->export_key.end());
+        auto aad = make_aad(i, setup.version);
+        auto env = envelope::encrypt(shares[i].y, pw_str, aad);
+        setup.envelopes.push_back(std::move(env));
+        setup.opaque_records.push_back(std::move(reg->record));
+    }
+    return setup;
+}
+
+namespace {
+bool scheme_is_opaque(const std::string& scheme) {
+    static const std::string prefix = "shamir-aead-opaque-";
+    return scheme.size() >= prefix.size()
+        && scheme.compare(0, prefix.size(), prefix) == 0;
+}
+} // namespace
+
 std::optional<std::vector<uint8_t>>
 recover(const RecoverySetup& setup,
           const std::string& password,
@@ -108,12 +157,34 @@ recover(const RecoverySetup& setup,
     if (setup.guardian_x.size() != setup.share_count) return std::nullopt;
     if (guardian_indices.size() < setup.threshold)   return std::nullopt;
 
+    const bool opaque_path = scheme_is_opaque(setup.scheme);
+    if (opaque_path) {
+        if (setup.opaque_records.size() != setup.share_count) return std::nullopt;
+        // Suite tag must match the currently-linked adapter — refuses
+        // setups created against a different OPAQUE suite (e.g., stub
+        // vs real libopaque).
+        std::string expected = std::string("shamir-aead-opaque-")
+                                  + opaque_adapter::suite_name();
+        if (setup.scheme != expected) return std::nullopt;
+    }
+
     std::vector<shamir::Share> shares;
     shares.reserve(guardian_indices.size());
     for (uint8_t gid : guardian_indices) {
         if (gid >= setup.share_count) return std::nullopt;
         auto aad = make_aad(gid, setup.version);
-        auto y_opt = envelope::decrypt(setup.envelopes[gid], password, aad);
+
+        std::string env_password;
+        if (opaque_path) {
+            auto k = opaque_adapter::authenticate_password(
+                       password, setup.opaque_records[gid], gid);
+            if (!k) continue;        // adapter rejected authentication
+            env_password.assign(k->begin(), k->end());
+        } else {
+            env_password = password;
+        }
+        auto y_opt = envelope::decrypt(setup.envelopes[gid],
+                                          env_password, aad);
         if (!y_opt) continue;          // wrong password or tampered slot
         shamir::Share s;
         s.x = setup.guardian_x[gid];
@@ -142,6 +213,8 @@ recover(const RecoverySetup& setup,
 std::string to_json(const RecoverySetup& setup) {
     json envs = json::array();
     for (auto& env : setup.envelopes) envs.push_back(envelope::serialize(env));
+    json opaque_recs = json::array();
+    for (auto& r : setup.opaque_records) opaque_recs.push_back(to_hex(r));
     return json{
         {"version",         setup.version},
         {"scheme",          setup.scheme},
@@ -150,6 +223,7 @@ std::string to_json(const RecoverySetup& setup) {
         {"secret_len",      setup.secret_len},
         {"guardian_x",      setup.guardian_x},
         {"envelopes",       envs},
+        {"opaque_records",  opaque_recs},
         {"pubkey_checksum", to_hex(setup.pubkey_checksum)}
     }.dump(2);
 }
@@ -174,6 +248,11 @@ std::optional<RecoverySetup> from_json(const std::string& blob) {
         }
         std::string ck_hex = j.value("pubkey_checksum", std::string{});
         if (!ck_hex.empty()) s.pubkey_checksum = from_hex(ck_hex);
+        if (j.contains("opaque_records")) {
+            for (auto& rh : j["opaque_records"]) {
+                s.opaque_records.push_back(from_hex(rh.get<std::string>()));
+            }
+        }
         return s;
     } catch (std::exception&) {
         return std::nullopt;

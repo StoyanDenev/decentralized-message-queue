@@ -234,21 +234,26 @@ int cmd_envelope(int argc, char** argv) {
 }
 
 int cmd_create_recovery(int argc, char** argv) {
-    std::string seed_hex, password, out_path;
+    std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--seed"     && i + 1 < argc) seed_hex    = argv[++i];
         else if (a == "--password" && i + 1 < argc) password    = argv[++i];
         else if (a == "--out"      && i + 1 < argc) out_path    = argv[++i];
+        else if (a == "--scheme"   && i + 1 < argc) scheme      = argv[++i];
         else if (a == "-t"         && i + 1 < argc) threshold   = std::stoi(argv[++i]);
         else if (a == "-n"         && i + 1 < argc) share_count = std::stoi(argv[++i]);
     }
     if (seed_hex.empty() || password.empty() || out_path.empty()
         || threshold <= 0 || share_count <= 0) {
         std::cerr << "Usage: determ-wallet create-recovery "
-                     "--seed <hex> --password <str> -t T -n N --out <file>\n";
+                     "--seed <hex> --password <str> -t T -n N --out <file> "
+                     "[--scheme {passphrase|opaque}]\n";
         return 1;
+    }
+    if (scheme != "passphrase" && scheme != "opaque") {
+        std::cerr << "--scheme must be 'passphrase' or 'opaque'\n"; return 1;
     }
     std::vector<uint8_t> seed;
     try { seed = from_hex(seed_hex); }
@@ -260,10 +265,15 @@ int cmd_create_recovery(int argc, char** argv) {
     }
     auto checksum = recovery::seed_pubkey_checksum(seed);   // empty if seed != 32B
     try {
-        auto setup = recovery::create(seed, password,
-                                          static_cast<uint8_t>(threshold),
-                                          static_cast<uint8_t>(share_count),
-                                          checksum);
+        auto setup = (scheme == "opaque")
+            ? recovery::create_opaque(seed, password,
+                                        static_cast<uint8_t>(threshold),
+                                        static_cast<uint8_t>(share_count),
+                                        checksum)
+            : recovery::create       (seed, password,
+                                        static_cast<uint8_t>(threshold),
+                                        static_cast<uint8_t>(share_count),
+                                        checksum);
         std::ofstream f(out_path);
         if (!f) { std::cerr << "Cannot open --out for write: " << out_path << "\n"; return 1; }
         f << recovery::to_json(setup);
@@ -421,6 +431,7 @@ void print_usage() {
         "                    --password <str> [--aad <hex>]\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
+        "                  [--scheme {passphrase|opaque}]\n"
         "  recover --in <file> --password <str>       Reconstruct the secret\n"
         "          [--guardians <i,j,k,...>]\n"
         "  oprf-smoke                                 Verify libsodium primitives wired\n"
