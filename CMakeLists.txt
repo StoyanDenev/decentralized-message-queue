@@ -66,10 +66,23 @@ if(UNIX)
   target_link_libraries(determ PRIVATE pthread)
 endif()
 
-# ── determ-wallet executable (A2 Phase 1: shamir + skeleton) ────────────────
+# ── libsodium (A2 Phase 4: provides ristretto255 + Argon2id for libopaque) ──
+# Vendored via the CMake-friendly jedisct1/libsodium-cmake fork. Builds
+# cleanly on Windows MSVC + Unix without autotools. libopaque (the next
+# Phase 5 task) layers on top and gets its own CMake shim then.
+set(SODIUM_DISABLE_TESTS         ON CACHE BOOL "" FORCE)
+set(SODIUM_MINIMAL                OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  sodium
+  GIT_REPOSITORY https://github.com/robinlinden/libsodium-cmake.git
+  GIT_TAG        master
+)
+FetchContent_MakeAvailable(sodium)
+
+# ── determ-wallet executable (A2 Phases 1-4) ────────────────────────────────
 # Separate binary so wallet secret material never shares address space with
-# the networked `determ` daemon. Phase 2 will add libopaque + libsodium for
-# the OPAQUE-guarded recovery flow (declared via FetchContent there).
+# the networked `determ` daemon. Phase 5 will add libopaque on top of
+# libsodium with an in-tree CMake shim (libopaque upstream is autotools).
 file(GLOB_RECURSE WALLET_SOURCES "wallet/*.cpp")
 add_executable(determ-wallet ${WALLET_SOURCES})
 target_include_directories(determ-wallet PRIVATE
@@ -78,6 +91,7 @@ target_include_directories(determ-wallet PRIVATE
 )
 target_link_libraries(determ-wallet PRIVATE
   crypto
+  sodium
   nlohmann_json::nlohmann_json
 )
 if(WIN32)
