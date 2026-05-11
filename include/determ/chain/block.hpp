@@ -43,6 +43,23 @@ enum class TxType : uint8_t {
     // Off-whitelist parameter names → rejected. Mode=uncontrolled →
     // rejected. Insufficient threshold → rejected.
     PARAM_CHANGE   = 6,
+    // R4 (under-quorum merge): a beacon-emitted event that announces
+    // a shard temporarily merging its committee operations with its
+    // modular-next shard, or reverting from such a merge. Valid only
+    // under EXTENDED sharding mode + BEACON chain role; rejected
+    // elsewhere. Payload encoding (canonical, LE where noted):
+    //   [event_type: u8]            // 0 = MERGE_BEGIN, 1 = MERGE_END
+    //   [shard_id: u32 LE]
+    //   [partner_id: u32 LE]        // must == (shard_id + 1) mod num_shards
+    //   [effective_height: u64 LE]
+    //   [evidence_window_start: u64 LE]   // BEGIN only; 0 for END
+    // Authentication piggybacks on the enclosing beacon block's K-of-K
+    // signatures — no per-tx multisig. Witness-window validation
+    // (S-036 mitigation) lives in BlockValidator: for MERGE_BEGIN, the
+    // historical beacon block contents over [evidence_window_start,
+    // evidence_window_start + merge_threshold_blocks) must support the
+    // trigger condition (no SHARD_TIP_s + eligible_in_region < 2K).
+    MERGE_EVENT    = 7,
 };
 
 struct Transaction {

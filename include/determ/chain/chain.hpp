@@ -94,6 +94,15 @@ public:
     uint64_t unstake_delay()    const { return unstake_delay_; }
     void     set_unstake_delay(uint64_t d)    { unstake_delay_ = d; }
 
+    // R4 Phase 1: under-quorum merge thresholds. Read by the upcoming
+    // beacon-side trigger detection logic (Phase 2).
+    uint32_t merge_threshold_blocks() const { return merge_threshold_blocks_; }
+    void     set_merge_threshold_blocks(uint32_t n) { merge_threshold_blocks_ = n; }
+    uint32_t revert_threshold_blocks() const { return revert_threshold_blocks_; }
+    void     set_revert_threshold_blocks(uint32_t n) { revert_threshold_blocks_ = n; }
+    uint32_t merge_grace_blocks()     const { return merge_grace_blocks_; }
+    void     set_merge_grace_blocks(uint32_t n)     { merge_grace_blocks_ = n; }
+
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.
     // At the start of each apply_transactions(b), pending entries with
@@ -252,6 +261,10 @@ private:
     // A5 Phase 3: instance-state promotion of params.hpp constants.
     uint64_t                                    suspension_slash_{10};
     uint64_t                                    unstake_delay_{1000};
+    // R4 Phase 1: merge thresholds (defaults match GenesisConfig).
+    uint32_t                                    merge_threshold_blocks_{100};
+    uint32_t                                    revert_threshold_blocks_{200};
+    uint32_t                                    merge_grace_blocks_{10};
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};
     ShardId                                     my_shard_id_{0};

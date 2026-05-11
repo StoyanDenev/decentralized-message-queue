@@ -74,6 +74,9 @@ json GenesisConfig::to_json() const {
         {"min_stake",                min_stake},
         {"suspension_slash",         suspension_slash},
         {"unstake_delay",            unstake_delay},
+        {"merge_threshold_blocks",   merge_threshold_blocks},
+        {"revert_threshold_blocks",  revert_threshold_blocks},
+        {"merge_grace_blocks",       merge_grace_blocks},
         {"chain_role",               static_cast<uint8_t>(chain_role)},
         {"shard_id",                 shard_id},
         {"initial_shard_count",      initial_shard_count},
@@ -118,6 +121,9 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.min_stake                = j.value("min_stake",                uint64_t{1000});
     c.suspension_slash         = j.value("suspension_slash",         uint64_t{10});
     c.unstake_delay            = j.value("unstake_delay",            uint64_t{1000});
+    c.merge_threshold_blocks   = j.value("merge_threshold_blocks",   uint32_t{100});
+    c.revert_threshold_blocks  = j.value("revert_threshold_blocks",  uint32_t{200});
+    c.merge_grace_blocks       = j.value("merge_grace_blocks",       uint32_t{10});
     c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
     c.shard_id                 = j.value("shard_id",                 ShardId{0});
     c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
@@ -322,6 +328,15 @@ Block make_genesis_block(const GenesisConfig& cfg) {
     if (cfg.suspension_slash != 10 || cfg.unstake_delay != 1000) {
         rb.append(cfg.suspension_slash);
         rb.append(cfg.unstake_delay);
+    }
+    // R4: under-quorum merge thresholds mixed only when non-default,
+    // preserving pre-R4 genesis hashes.
+    if (cfg.merge_threshold_blocks  != 100
+        || cfg.revert_threshold_blocks != 200
+        || cfg.merge_grace_blocks   != 10) {
+        rb.append(static_cast<uint64_t>(cfg.merge_threshold_blocks));
+        rb.append(static_cast<uint64_t>(cfg.revert_threshold_blocks));
+        rb.append(static_cast<uint64_t>(cfg.merge_grace_blocks));
     }
     g.cumulative_rand = rb.finalize();
 

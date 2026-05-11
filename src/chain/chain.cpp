@@ -398,6 +398,20 @@ void Chain::apply_transactions(const Block& b) {
             sender.next_nonce++;
             break;
         }
+        // R4 MERGE_EVENT (Phase 1): validator has already shape-checked
+        // the canonical 25-byte payload + mode-gated. Apply consumes
+        // the fee + nonce so the sender's tx stream stays
+        // deterministic; the actual merge state machine (eligibility
+        // stress branch, partner_subset_hash, witness-window historical
+        // validation) ships in subsequent phases. Until then, a valid
+        // MERGE_EVENT is recorded by its presence in the canonical
+        // block stream — operators / replayers can observe it; the
+        // chain doesn't yet transition committee state on it.
+        case TxType::MERGE_EVENT: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            sender.next_nonce++;
+            break;
+        }
         // rev.9 R1: REGION_CHANGE is rejected by the validator; an
         // unrecognized type at apply is a defensive no-op (skip the
         // tx, do not touch state, do not advance nonce — this matches

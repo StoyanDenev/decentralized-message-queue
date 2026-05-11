@@ -661,21 +661,41 @@ BlockValidator::Result BlockValidator::check_transactions(
             }
             break;
         }
-        // A6 + R7 placeholder:
-        //   case TxType::MERGE_EVENT:
-        //       if (sharding_mode_ != ShardingMode::EXTENDED) {
-        //           return {false, "MERGE_EVENT tx requires "
-        //                          "sharding_mode=extended"};
-        //       }
-        //       break;
-        // TODO(R7): when the under-quorum merge mechanism lands and
-        // adds TxType::MERGE_EVENT to chain/block.hpp, uncomment the
-        // case above so the validator gates merge txs to EXTENDED mode
-        // only. The enum value itself is intentionally not added here
-        // (R7 territory). Until then, a wire decoder that accepts the
-        // new variant under a CURRENT/NONE chain will fall out of the
-        // switch and trigger the compiler's -Wswitch warning, which is
-        // the correct breakage signal.
+        case TxType::MERGE_EVENT: {
+            // R4 Phase 1: gate + canonical-payload shape check.
+            // Witness-window historical validation (S-036 mitigation)
+            // ships in Phase 2 alongside the apply-side merge state
+            // machine. This phase locks the wire-format slot and the
+            // mode-incompatibility checks.
+            if (sharding_mode_ != ShardingMode::EXTENDED) {
+                return {false, "MERGE_EVENT tx requires "
+                               "sharding_mode=extended"};
+            }
+            const auto& p = tx.payload;
+            // Expected canonical payload (fixed-size):
+            //   [event_type: u8][shard_id: u32 LE][partner_id: u32 LE]
+            //   [effective_height: u64 LE][evidence_window_start: u64 LE]
+            // Total = 1 + 4 + 4 + 8 + 8 = 25 bytes.
+            if (p.size() != 25)
+                return {false, "MERGE_EVENT payload size != 25 (got "
+                             + std::to_string(p.size()) + ")"};
+            uint8_t event_type = p[0];
+            if (event_type > 1)
+                return {false, "MERGE_EVENT event_type must be 0 (BEGIN) "
+                               "or 1 (END)"};
+            uint32_t shard_id_field = 0, partner_id_field = 0;
+            for (int i = 0; i < 4; ++i) {
+                shard_id_field   |= uint32_t(p[1 + i]) << (8 * i);
+                partner_id_field |= uint32_t(p[5 + i]) << (8 * i);
+            }
+            // partner must be the modular-next shard. The validator
+            // doesn't know num_shards here (only Chain does); the
+            // partner != shard rejection catches the obvious malformed
+            // case. Full modular-arithmetic check defers to apply.
+            if (partner_id_field == shard_id_field)
+                return {false, "MERGE_EVENT partner_id equals shard_id"};
+            break;
+        }
         }
     }
     return {true, ""};

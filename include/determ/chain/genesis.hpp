@@ -136,6 +136,22 @@ struct GenesisConfig {
     uint64_t                        suspension_slash{10};
     uint64_t                        unstake_delay{1000};
 
+    // R4: under-quorum merge thresholds. Backward-compat: pre-R4 genesis
+    // files omit these and pick up defaults silently. Genesis-hash mix
+    // skips them when they equal defaults.
+    //   merge_threshold_blocks: consecutive beacon-blocks of
+    //     eligible_in_region(S) < 2K + no SHARD_TIP_S before MERGE_BEGIN
+    //     fires (~2.5 min on the web profile at default).
+    //   revert_threshold_blocks: 2:1 hysteresis on the way back. Default
+    //     200 (~5 min). Higher than merge threshold to bias toward
+    //     stability — once merged, do not flap.
+    //   merge_grace_blocks: gap between block.height and the BEGIN's
+    //     effective_height. Lets shard committees observe the upcoming
+    //     transition before it takes effect.
+    uint32_t                        merge_threshold_blocks{100};
+    uint32_t                        revert_threshold_blocks{200};
+    uint32_t                        merge_grace_blocks{10};
+
     // Rev. 9 sharding role. SINGLE preserves rev.8 behavior (one chain,
     // no shards). BEACON / SHARD are the two roles in the sharded
     // architecture; they're parsed and stored at this level so a single

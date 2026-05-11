@@ -122,6 +122,9 @@ Node::Node(const Config& cfg)
     uint64_t genesis_min_stake = 1000;
     uint64_t genesis_suspension_slash = 10;
     uint64_t genesis_unstake_delay    = 1000;
+    uint32_t genesis_merge_threshold  = 100;
+    uint32_t genesis_revert_threshold = 200;
+    uint32_t genesis_merge_grace      = 10;
     chain::InclusionModel genesis_inclusion = chain::InclusionModel::STAKE_INCLUSION;
     std::optional<chain::GenesisConfig> gcfg_opt;
     if (!cfg_.genesis_path.empty()) {
@@ -145,6 +148,9 @@ Node::Node(const Config& cfg)
         genesis_min_stake            = gcfg.min_stake;
         genesis_suspension_slash     = gcfg.suspension_slash;
         genesis_unstake_delay        = gcfg.unstake_delay;
+        genesis_merge_threshold      = gcfg.merge_threshold_blocks;
+        genesis_revert_threshold     = gcfg.revert_threshold_blocks;
+        genesis_merge_grace          = gcfg.merge_grace_blocks;
         genesis_inclusion            = gcfg.inclusion_model;
         validator_.set_k_block_sigs(cfg_.k_block_sigs);
         validator_.set_m_pool(cfg_.m_creators);
@@ -393,6 +399,9 @@ Node::Node(const Config& cfg)
     chain_.set_min_stake(genesis_min_stake);
     chain_.set_suspension_slash(genesis_suspension_slash);
     chain_.set_unstake_delay(genesis_unstake_delay);
+    chain_.set_merge_threshold_blocks(genesis_merge_threshold);
+    chain_.set_revert_threshold_blocks(genesis_revert_threshold);
+    chain_.set_merge_grace_blocks(genesis_merge_grace);
     chain_.set_shard_routing(genesis_shard_count, genesis_shard_salt,
                               genesis_my_shard);
 
@@ -454,6 +463,9 @@ Node::Node(const Config& cfg)
             chain_.set_min_stake(genesis_min_stake);
             chain_.set_suspension_slash(genesis_suspension_slash);
             chain_.set_unstake_delay(genesis_unstake_delay);
+            chain_.set_merge_threshold_blocks(genesis_merge_threshold);
+            chain_.set_revert_threshold_blocks(genesis_revert_threshold);
+            chain_.set_merge_grace_blocks(genesis_merge_grace);
             chain_.set_shard_routing(genesis_shard_count,
                                        genesis_shard_salt,
                                        genesis_my_shard);
