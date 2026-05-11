@@ -7,11 +7,22 @@ using json = nlohmann::json;
 
 // ─── Server ──────────────────────────────────────────────────────────────────
 
-RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port)
+// S-001 mitigation: localhost_only binds to 127.0.0.1 only.
+// asio::ip::address_v4::loopback() returns the loopback address — equivalent
+// to make_address("127.0.0.1") but avoids the string-parsing path.
+RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
+                       bool localhost_only)
     : io_(io)
     , node_(node)
-    , acceptor_(io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
-    std::cout << "[rpc] listening on port " << port << "\n";
+    , acceptor_(io, asio::ip::tcp::endpoint(
+                       localhost_only
+                           ? asio::ip::tcp::endpoint(
+                                 asio::ip::address_v4::loopback(), port).address()
+                           : asio::ip::address(asio::ip::address_v4::any()),
+                       port)) {
+    std::cout << "[rpc] listening on "
+              << (localhost_only ? "127.0.0.1" : "0.0.0.0")
+              << ":" << port << "\n";
 }
 
 void RpcServer::start() { accept_loop(); }

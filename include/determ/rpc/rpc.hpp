@@ -11,7 +11,13 @@ namespace determ::rpc {
 // Server replies: {"result": ..., "error": null}\n
 class RpcServer {
 public:
-    RpcServer(asio::io_context& io, node::Node& node, uint16_t port);
+    // S-001 mitigation: when localhost_only is true (the new default),
+    // the acceptor binds to 127.0.0.1 only. External clients cannot
+    // reach the RPC port even if firewall rules would allow them.
+    // Pre-mitigation default (tcp::v4() any-interface bind) is reached
+    // only by explicitly setting rpc_localhost_only=false in config.
+    RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
+                bool localhost_only = true);
     void start();
 
 private:

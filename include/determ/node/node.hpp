@@ -19,6 +19,13 @@ struct Config {
     std::string              data_dir;
     uint16_t                 listen_port{7777};
     uint16_t                 rpc_port{7778};
+    // S-001 mitigation: when true (default), the RPC server binds to
+    // 127.0.0.1 only — external network clients cannot connect.
+    // Operators with a real authentication story (mTLS / reverse proxy
+    // with auth / VPN) can flip this to false to expose RPC on all
+    // interfaces. The unauthenticated all-interfaces default that
+    // S-001 documented is no longer reachable through config silence.
+    bool                     rpc_localhost_only{true};
     std::vector<std::string> bootstrap_peers;
     // rev.9 B2c.5c: cross-chain peer addresses. Populated when this node
     // wants to participate in cross-chain coordination — typically a

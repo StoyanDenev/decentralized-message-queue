@@ -24,6 +24,7 @@ json Config::to_json() const {
     j["data_dir"]        = data_dir;
     j["listen_port"]     = listen_port;
     j["rpc_port"]        = rpc_port;
+    j["rpc_localhost_only"] = rpc_localhost_only;
     j["bootstrap_peers"] = bootstrap_peers;
     j["beacon_peers"]    = beacon_peers;
     j["shard_peers"]     = shard_peers;
@@ -56,6 +57,9 @@ Config Config::from_json(const json& j) {
     c.data_dir        = j.value("data_dir",       "");
     c.listen_port     = j.value("listen_port",    uint16_t{7777});
     c.rpc_port        = j.value("rpc_port",       uint16_t{7778});
+    // S-001: default to localhost-only. Absent field in legacy configs
+    // gets the secure default; operators must opt-in to all-interfaces.
+    c.rpc_localhost_only = j.value("rpc_localhost_only", true);
     c.bootstrap_peers = j.value("bootstrap_peers", std::vector<std::string>{});
     c.beacon_peers    = j.value("beacon_peers",    std::vector<std::string>{});
     c.shard_peers     = j.value("shard_peers",     std::vector<std::string>{});

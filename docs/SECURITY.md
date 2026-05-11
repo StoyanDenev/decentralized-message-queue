@@ -78,9 +78,18 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 
 ### S-001 — RPC authentication missing
 
-**Severity:** Critical • **Status:** Open • **Sources:** Audit 1.1, OV-#10
+**Severity:** Critical • **Status:** Partially mitigated (localhost-only default landed in-session) • **Sources:** Audit 1.1, OV-#10
 
-**What's open.** The RPC server (`src/rpc/rpc.cpp:13`) constructs its acceptor with `tcp::v4()` — bound to all IPv4 interfaces, port-only. Dispatch (`rpc.cpp:52-89`) executes `submit_tx`, `register`, `stake`, `unstake`, `submit_equivocation`, `snapshot`, `account` query, and so on with no authentication, no TLS, no rate limit, and no localhost-only restriction by default.
+**What landed in-session.** Config field `rpc_localhost_only` defaults to `true`; the RPC acceptor now binds to `127.0.0.1` rather than `tcp::v4()` (any-interface) unless the operator explicitly sets the field to `false`. Legacy configs without the field get the secure default. External network clients can no longer reach the RPC port via the unauthenticated path that S-001 originally documented. Verified end-to-end in `tools/test_rpc_localhost_only.sh` (5/5 PASS).
+
+**What's still open.** A localhost-only bind closes the network-reachable attack surface but does NOT add authentication for clients that ARE on the loopback (any user / process on the host can still hit the RPC). Production deployments wanting multi-tenant host safety need:
+- An auth-token middleware (HMAC over request body + monotonic counter)
+- OR a reverse proxy with HTTP-level auth wrapping the JSON-line transport
+- OR mTLS termination at the wallet/operator boundary
+
+These are documented under the "Resolution options" table below; the localhost-only default closes the cheapest critical path (network-reachable RPC) while leaving the broader authentication question to operator policy.
+
+**Original finding text** (preserved for audit-trail continuity). The RPC server (`src/rpc/rpc.cpp:13`) constructs its acceptor with `tcp::v4()` — bound to all IPv4 interfaces, port-only. Dispatch (`rpc.cpp:52-89`) executes `submit_tx`, `register`, `stake`, `unstake`, `submit_equivocation`, `snapshot`, `account` query, and so on with no authentication, no TLS, no rate limit, and no localhost-only restriction by default.
 
 **Impact.** Any network-reachable client can:
 - Submit transactions debiting the node's domain balance (with the node's own key implicitly via `rpc_send`)
