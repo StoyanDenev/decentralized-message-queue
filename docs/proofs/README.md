@@ -29,6 +29,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA9 | [UnderQuorumMerge.md](UnderQuorumMerge.md) | R4 under-quorum merge preserves FA1/FA7 across BEGIN/END | ✓ |
 | FA10 | [Governance.md](Governance.md) | A5 PARAM_CHANGE soundness: no unauthorized mutation, off-whitelist immunity | ✓ |
 | FA11 | [EconomicSoundness.md](EconomicSoundness.md) | A1 unitary supply invariant + E1/E3/E4 preservation | ✓ |
+| FA12 | [WalletRecovery.md](WalletRecovery.md) | A2 wallet recovery: Shamir ITS + AEAD + OPAQUE composition | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
@@ -114,5 +115,7 @@ Per-property bounds:
 | FA6 false-positive slash | 2⁻¹²⁸ | 2⁻⁶⁸ |
 | FA7 receipt fabrication | K · 2⁻¹²⁸ | 2⁻⁶² for K ≤ 64 |
 | FA10 unauthorized PARAM_CHANGE | 2⁻¹²⁸·(N−1) for N keyholders | 2⁻⁴⁵² for N = 5 |
+| FA12 wallet recovery (real OPAQUE) | Q · 2⁻⁶⁰ + N · 2⁻¹²⁸ | 2⁻⁴⁴ with 60-bit pw, Q = 2¹⁶ |
+| FA12 wallet recovery (stub adapter) | offline-grindable | NOT for production |
 
 Under Grover (PQ), each `2⁻¹²⁸` degrades to `2⁻⁶⁴`. The protocol remains operationally secure but tighter PQ-signature migration is recommended.
