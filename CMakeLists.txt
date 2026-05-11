@@ -68,8 +68,7 @@ endif()
 
 # ── libsodium (A2 Phase 4: provides ristretto255 + Argon2id for libopaque) ──
 # Vendored via the CMake-friendly jedisct1/libsodium-cmake fork. Builds
-# cleanly on Windows MSVC + Unix without autotools. libopaque (the next
-# Phase 5 task) layers on top and gets its own CMake shim then.
+# cleanly on Windows MSVC + Unix without autotools.
 set(SODIUM_DISABLE_TESTS         ON CACHE BOOL "" FORCE)
 set(SODIUM_MINIMAL                OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
@@ -78,6 +77,50 @@ FetchContent_Declare(
   GIT_TAG        master
 )
 FetchContent_MakeAvailable(sodium)
+
+# ── liboprf (A2 Phase 6: OPRF + threshold OPRF — libopaque dependency) ──────
+# Off by default. Set -DDETERM_VENDOR_OPRF=ON to enable.
+#
+# Status: integration scaffolding shipped (FetchContent + arpa/inet.h
+# portability shim under wallet/oprf_shim/), but the actual upstream
+# C source uses C99 VLAs pervasively which MSVC does not support.
+# Phase 6 completion requires patching ~15-20 VLA sites in oprf.c +
+# toprf.c (oprf.h + toprf.h headers also contain VLA function prototypes
+# that cascade into every consumer's compile errors). On Unix this
+# vendor would build cleanly; on Windows MSVC it's multi-day porting
+# work. Keeping the integration declaration in-tree so a future cycle
+# can pick up where this commit left off.
+option(DETERM_VENDOR_OPRF "Vendor liboprf for the wallet's OPAQUE adapter" OFF)
+if(DETERM_VENDOR_OPRF)
+  FetchContent_Declare(
+    oprf
+    GIT_REPOSITORY https://github.com/stef/liboprf.git
+    GIT_TAG        master
+  )
+  FetchContent_GetProperties(oprf)
+  if(NOT oprf_POPULATED)
+    FetchContent_Populate(oprf)
+  endif()
+  add_library(oprf STATIC
+    ${oprf_SOURCE_DIR}/src/oprf.c
+    ${oprf_SOURCE_DIR}/src/utils.c
+    # toprf.c omitted: pervasive VLAs unsupported by MSVC.
+  )
+  target_include_directories(oprf PUBLIC
+    ${oprf_SOURCE_DIR}/src
+  )
+  if(WIN32)
+    target_include_directories(oprf BEFORE PUBLIC
+      ${CMAKE_SOURCE_DIR}/wallet/oprf_shim
+    )
+    target_link_libraries(oprf PUBLIC ws2_32)
+    target_compile_definitions(oprf PRIVATE
+      _CRT_SECURE_NO_WARNINGS
+      _CRT_NONSTDC_NO_DEPRECATE
+    )
+  endif()
+  target_link_libraries(oprf PUBLIC sodium)
+endif()
 
 # ── determ-wallet executable (A2 Phases 1-4) ────────────────────────────────
 # Separate binary so wallet secret material never shares address space with
