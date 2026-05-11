@@ -132,7 +132,7 @@ EquivocationEvent EquivocationEvent::from_json(const json& j) {
 
 std::vector<uint8_t> MergeEvent::encode() const {
     std::vector<uint8_t> out;
-    out.reserve(25);
+    out.reserve(26 + merging_shard_region.size());
     out.push_back(event_type);
     for (int i = 0; i < 4; ++i)
         out.push_back(static_cast<uint8_t>((shard_id   >> (8 * i)) & 0xff));
@@ -142,12 +142,18 @@ std::vector<uint8_t> MergeEvent::encode() const {
         out.push_back(static_cast<uint8_t>((effective_height       >> (8 * i)) & 0xff));
     for (int i = 0; i < 8; ++i)
         out.push_back(static_cast<uint8_t>((evidence_window_start  >> (8 * i)) & 0xff));
+    out.push_back(static_cast<uint8_t>(merging_shard_region.size()));
+    out.insert(out.end(),
+                 merging_shard_region.begin(), merging_shard_region.end());
     return out;
 }
 
 std::optional<MergeEvent> MergeEvent::decode(const std::vector<uint8_t>& p) {
-    if (p.size() != 25) return std::nullopt;
-    if (p[0] > 1)       return std::nullopt;
+    if (p.size() < 26) return std::nullopt;
+    if (p[0] > 1)      return std::nullopt;
+    size_t rlen = p[25];
+    if (rlen > 32)     return std::nullopt;
+    if (p.size() != 26 + rlen) return std::nullopt;
     MergeEvent ev;
     ev.event_type = p[0];
     ev.shard_id = 0;
@@ -162,6 +168,8 @@ std::optional<MergeEvent> MergeEvent::decode(const std::vector<uint8_t>& p) {
         ev.effective_height      |= uint64_t(p[9  + i]) << (8 * i);
         ev.evidence_window_start |= uint64_t(p[17 + i]) << (8 * i);
     }
+    ev.merging_shard_region.assign(
+        reinterpret_cast<const char*>(p.data() + 26), rlen);
     return ev;
 }
 

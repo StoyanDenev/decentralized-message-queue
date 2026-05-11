@@ -103,13 +103,18 @@ public:
     uint32_t merge_grace_blocks()     const { return merge_grace_blocks_; }
     void     set_merge_grace_blocks(uint32_t n)     { merge_grace_blocks_ = n; }
 
-    // R4 Phase 2: per-shard merge state. The map keys are shard_ids
-    // currently in the MERGED state; the value is the partner shard
-    // they're absorbing into. Absence from the map = NOT MERGED. The
-    // map mutates only when a MERGE_EVENT applies (BEGIN inserts,
-    // END erases). Read by check_creator_selection (Phase 3) for the
-    // eligibility stress branch.
-    using MergeStateMap = std::map<ShardId, ShardId>;
+    // R4 Phase 2+4: per-shard merge state. Keys are shard_ids currently
+    // in the MERGED (refugee) state; values are (partner_id,
+    // refugee_region). Absence from the map = NOT MERGED. Mutates only
+    // when a MERGE_EVENT applies. The refugee_region is read at
+    // committee-selection time by the partner shard to extend its
+    // eligible pool (Phase 4 stress branch) without needing the global
+    // shard manifest on every shard.
+    struct MergePartnerInfo {
+        ShardId     partner_id{0};
+        std::string refugee_region{};   // empty = global pool
+    };
+    using MergeStateMap = std::map<ShardId, MergePartnerInfo>;
     const MergeStateMap& merge_state() const { return merge_state_; }
     // Returns true if shard s is currently merged with another. The
     // partner is written to out_partner on hit. Read by validator /
@@ -117,17 +122,18 @@ public:
     bool is_shard_merged(ShardId s, ShardId* out_partner = nullptr) const {
         auto it = merge_state_.find(s);
         if (it == merge_state_.end()) return false;
-        if (out_partner) *out_partner = it->second;
+        if (out_partner) *out_partner = it->second.partner_id;
         return true;
     }
-    // Inverse lookup: shard_ids whose merge partner is `partner`. Used
-    // by Phase 3's eligibility stress branch — partner T extends its
-    // committee pool with validators from every refugee shard that
-    // currently points at T.
-    std::vector<ShardId> shards_absorbed_by(ShardId partner) const {
-        std::vector<ShardId> out;
-        for (auto& [s, p] : merge_state_)
-            if (p == partner) out.push_back(s);
+    // Inverse lookup: (shard_id, refugee_region) pairs whose merge
+    // partner is `partner`. The Phase 4 stress branch extends the
+    // committee pool with validators tagged with each refugee region.
+    std::vector<std::pair<ShardId, std::string>>
+    shards_absorbed_by(ShardId partner) const {
+        std::vector<std::pair<ShardId, std::string>> out;
+        for (auto& [s, info] : merge_state_)
+            if (info.partner_id == partner)
+                out.emplace_back(s, info.refugee_region);
         return out;
     }
 

@@ -424,11 +424,14 @@ void Chain::apply_transactions(const Block& b) {
             if (ev && shard_count_ > 1
                 && ev->partner_id == ((ev->shard_id + 1) % shard_count_)) {
                 if (ev->event_type == MergeEvent::BEGIN) {
-                    merge_state_.insert({ev->shard_id, ev->partner_id});
+                    MergePartnerInfo info;
+                    info.partner_id     = ev->partner_id;
+                    info.refugee_region = ev->merging_shard_region;
+                    merge_state_.insert({ev->shard_id, std::move(info)});
                 } else {  // END
                     auto it = merge_state_.find(ev->shard_id);
                     if (it != merge_state_.end()
-                        && it->second == ev->partner_id) {
+                        && it->second.partner_id == ev->partner_id) {
                         merge_state_.erase(it);
                     }
                 }
@@ -709,8 +712,12 @@ json Chain::serialize_state(uint32_t header_count) const {
     // R4 Phase 2: persist merge state so a snapshot-bootstrapped node
     // resumes mid-merge correctly.
     json merge_arr = json::array();
-    for (auto& [s, p] : merge_state_) {
-        merge_arr.push_back({{"shard_id", s}, {"partner_id", p}});
+    for (auto& [s, info] : merge_state_) {
+        merge_arr.push_back({
+            {"shard_id",       s},
+            {"partner_id",     info.partner_id},
+            {"refugee_region", info.refugee_region},
+        });
     }
     snap["merge_state"] = merge_arr;
 
@@ -823,8 +830,11 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     if (snap.contains("merge_state")) {
         for (auto& m : snap["merge_state"]) {
             ShardId s = m.value("shard_id",   ShardId{0});
-            ShardId p = m.value("partner_id", ShardId{0});
-            c.merge_state_.insert({s, p});
+            Chain::MergePartnerInfo info;
+            info.partner_id     = m.value("partner_id", ShardId{0});
+            info.refugee_region = m.value("refugee_region",
+                                            std::string{});
+            c.merge_state_.insert({s, std::move(info)});
         }
     }
     if (snap.contains("pending_param_changes")) {

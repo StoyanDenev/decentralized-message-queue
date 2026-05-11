@@ -610,6 +610,23 @@ void Node::check_if_selected() {
     // exactly. Non-empty restricts the pool to validators whose
     // self-declared region matches.
     auto nodes = registry_.eligible_in_region(cfg_.committee_region);
+    // R4 Phase 4: under-quorum stress branch. When this shard absorbs
+    // refugees from another shard (per Chain::merge_state_), extend
+    // the eligible pool with validators tagged with each refugee's
+    // region. The validator (check_creator_selection) mirrors this
+    // logic so what we propose here remains acceptable to others.
+    for (auto& [refugee_shard, refugee_region] :
+         chain_.shards_absorbed_by(cfg_.shard_id)) {
+        (void)refugee_shard;
+        if (refugee_region.empty() || refugee_region == cfg_.committee_region)
+            continue;
+        auto refugees = registry_.eligible_in_region(refugee_region);
+        for (auto& r : refugees) {
+            bool dup = false;
+            for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
+            if (!dup) nodes.push_back(r);
+        }
+    }
     size_t k_target = cfg_.k_block_sigs;       // committee size per round (MD)
 
     // Build the available pool: registry minus any domains already aborted in

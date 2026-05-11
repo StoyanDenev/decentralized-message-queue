@@ -67,6 +67,22 @@ BlockValidator::Result BlockValidator::check_creator_selection(
     // committee_region. Empty region (default) yields the full pool —
     // identical to pre-R2 sorted_nodes() output.
     auto   nodes     = registry.eligible_in_region(committee_region_);
+    // R4 Phase 4: under-quorum stress branch. If this shard currently
+    // absorbs refugee shards (per Chain::merge_state_), extend the
+    // eligible pool with validators from each refugee region. Refugees
+    // signing this committee's block are accepted as creators here.
+    for (auto& [refugee_shard, refugee_region] :
+         chain.shards_absorbed_by(shard_id_)) {
+        (void)refugee_shard;
+        if (refugee_region.empty() || refugee_region == committee_region_)
+            continue;
+        auto refugees = registry.eligible_in_region(refugee_region);
+        for (auto& r : refugees) {
+            bool dup = false;
+            for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
+            if (!dup) nodes.push_back(r);
+        }
+    }
     EpochIndex epoch_index = epoch_blocks_ ? (b.index / epoch_blocks_) : 0;
     uint64_t epoch_start = epoch_index * (epoch_blocks_ ? epoch_blocks_ : 1);
     Hash epoch_rand = resolve_epoch_rand(epoch_start, chain);
@@ -176,6 +192,19 @@ BlockValidator::Result BlockValidator::check_abort_certs(
     // mirror exactly so abort-cert reconstruction sees the same pool
     // the producer committed to.
     auto nodes     = registry.eligible_in_region(committee_region_);
+    // R4 Phase 4: same stress-branch extension as check_creator_selection.
+    for (auto& [refugee_shard, refugee_region] :
+         chain.shards_absorbed_by(shard_id_)) {
+        (void)refugee_shard;
+        if (refugee_region.empty() || refugee_region == committee_region_)
+            continue;
+        auto refugees = registry.eligible_in_region(refugee_region);
+        for (auto& r : refugees) {
+            bool dup = false;
+            for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
+            if (!dup) nodes.push_back(r);
+        }
+    }
     (void)epoch_index;
 
     // Per-event committee size: at step i, BEFORE applying ae[i], the
@@ -662,11 +691,10 @@ BlockValidator::Result BlockValidator::check_transactions(
             break;
         }
         case TxType::MERGE_EVENT: {
-            // R4 Phase 1+2: gate + decode via canonical helper.
+            // R4 Phase 1+2+4: gate + decode + region charset check.
             // Witness-window historical validation (S-036 mitigation)
             // ships alongside the apply-side merge state machine in
-            // a follow-on; this stage enforces shape + obvious
-            // structural impossibilities.
+            // a follow-on.
             if (sharding_mode_ != ShardingMode::EXTENDED) {
                 return {false, "MERGE_EVENT tx requires "
                                "sharding_mode=extended"};
@@ -674,10 +702,21 @@ BlockValidator::Result BlockValidator::check_transactions(
             auto ev = MergeEvent::decode(tx.payload);
             if (!ev) {
                 return {false, "MERGE_EVENT payload malformed "
-                               "(expected 25 bytes, event_type in {0,1})"};
+                               "(canonical encoding required)"};
             }
             if (ev->partner_id == ev->shard_id)
                 return {false, "MERGE_EVENT partner_id equals shard_id"};
+            // Region charset rule: [a-z0-9-_], <= 32 bytes. Empty is
+            // valid (refugee shard runs in CURRENT / global pool).
+            for (unsigned char c : ev->merging_shard_region) {
+                bool ok = (c >= 'a' && c <= 'z')
+                       || (c >= '0' && c <= '9')
+                       || c == '-' || c == '_';
+                if (!ok) {
+                    return {false, "MERGE_EVENT merging_shard_region "
+                                   "violates charset [a-z0-9-_]"};
+                }
+            }
             // Modular arithmetic check (partner == (shard+1) mod
             // num_shards) requires Chain access — defer to apply.
             break;

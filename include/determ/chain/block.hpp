@@ -159,19 +159,41 @@ struct EquivocationEvent {
 // R4: canonical MERGE_EVENT payload. Encoded/decoded by free helpers
 // below; the apply path + validator both use these to avoid duplicate
 // byte-counting logic.
+//
+// Wire format (variable size = 26 + region_len):
+//   [event_type: u8]            // 0 = BEGIN, 1 = END
+//   [shard_id: u32 LE]
+//   [partner_id: u32 LE]
+//   [effective_height: u64 LE]
+//   [evidence_window_start: u64 LE]
+//   [merging_shard_region_len: u8]
+//   [merging_shard_region: utf8 bytes, len bytes]
+//
+// merging_shard_region is the refugee shard's committee_region tag.
+// It lets the partner shard's producer + validator extend their
+// eligible pool with refugee validators (Phase 4 stress branch) WITHOUT
+// requiring shards to load the global shard manifest. The region is
+// normalized to lowercase ASCII at validate time and constrained to
+// the same [a-z0-9-_], <= 32 bytes rule used elsewhere.
+//
+// Empty region (region_len == 0) is valid when refugee shard runs in
+// CURRENT mode or uses the global pool. END events have region empty
+// since the partner stops absorbing.
 struct MergeEvent {
     enum Type : uint8_t { BEGIN = 0, END = 1 };
-    uint8_t  event_type{BEGIN};
-    uint32_t shard_id{0};
-    uint32_t partner_id{0};
-    uint64_t effective_height{0};
-    uint64_t evidence_window_start{0};   // BEGIN only; 0 for END
+    uint8_t      event_type{BEGIN};
+    uint32_t     shard_id{0};
+    uint32_t     partner_id{0};
+    uint64_t     effective_height{0};
+    uint64_t     evidence_window_start{0};   // BEGIN only; 0 for END
+    std::string  merging_shard_region{};     // refugee shard's region
 
-    // Canonical 25-byte serialization. signing_bytes-style: order +
-    // endianness fixed, no version byte (locked by TxType::MERGE_EVENT).
+    // Canonical serialization. signing_bytes-style: order + endianness
+    // fixed, no version byte (locked by TxType::MERGE_EVENT).
     std::vector<uint8_t> encode() const;
-    // Decode the canonical form. Returns std::nullopt on size mismatch
-    // or invalid event_type. Used by Apply + Validator.
+    // Decode the canonical form. Returns std::nullopt on size mismatch,
+    // invalid event_type, or region_len exceeding 32. Used by Apply
+    // + Validator.
     static std::optional<MergeEvent> decode(const std::vector<uint8_t>& p);
 };
 
