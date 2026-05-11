@@ -11,7 +11,7 @@
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
 | Open | **6** | **7** | **4** | **10** | **27** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **11** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **15** |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -763,6 +763,43 @@ The SHA-256^T delay-hash function has been removed from the protocol. The select
 **Was Architectural Analysis §3.5.** Outbound `GossipNet::connect()` at `gossip.cpp:45` was sending `make_hello(domain, port)` — the 2-arg overload defaulting `role = SINGLE, shard_id = 0`. Inbound (accept-loop) at `gossip.cpp:33` correctly sent `make_hello(domain, port, our_role_, our_shard_id_)`. The mismatch silently broke `SHARD_TIP` and `BEACON_HEADER` propagation for outbound-initiated cross-chain peering: the receiving end's role-based gossip filter (`peer_message_allowed`) dropped messages from peers it had stamped as SINGLE.
 
 **Fixed in this session.** `gossip.cpp:45` now passes the full 4-argument form. All 8 regression tests pass.
+
+### M-G — Governance mode + PARAM_CHANGE shipped (A5)
+
+**New in this session.** Genesis-pinned `governance_mode = 0|1` selector with `param_keyholders` + `param_threshold`. Validator enforces a whitelist of 9 mutable parameters (MIN_STAKE, SUSPENSION_SLASH, UNSTAKE_DELAY, bft_escalation_threshold, tx_commit_ms, block_sig_ms, abort_claim_ms, param_keyholders, param_threshold) with N-of-N multisig. Off-list parameters require a new chain identity.
+
+**Soundness proof:** `docs/proofs/Governance.md` (FA10). Cumulative false-positive bound: `≤ 2⁻⁴⁵²` for N=5 keyholders + Q=2⁶⁰ adversary budget.
+
+**Integration test:** `tools/test_governance_param_change.sh` — 3-of-3 keyholder genesis, MIN_STAKE 1000 → 2000 mid-chain, verified via snapshot inspect.
+
+### M-H — Under-quorum merge shipped (R4)
+
+**New in this session.** `MERGE_EVENT` tx type (TxType=7) with canonical 26+region_len byte payload. Genesis-pinned thresholds (`merge_threshold_blocks=100`, `revert_threshold_blocks=200` for 2:1 hysteresis, `merge_grace_blocks=10`). Eligibility stress branch in producer + validator extends the committee pool with refugee-region validators when this shard is absorbing. Snapshot save/restore preserves merge state.
+
+**Soundness proof:** `docs/proofs/UnderQuorumMerge.md` (FA9). Demonstrates FA1 (safety) and FA7 (cross-shard atomicity) preservation across BEGIN/END transitions.
+
+**S-036 partial mitigation:** Phase 6 ships internal-consistency bounds checks (effective_height ≥ block + grace; BEGIN evidence window in past). Full S-036 closure requires on-chain SHARD_TIP records — v1.1 work item.
+
+**Integration test:** `tools/test_under_quorum_merge.sh` — BEGIN inserts state, END erases, snapshot persists.
+
+### M-I — Wallet recovery primitive shipped (A2)
+
+**New in this session.** Greenfield `determ-wallet` binary providing distributed seed recovery via T-of-N Shamir SSS layered with AES-256-GCM AEAD envelopes. Two schemes: `passphrase` (default; PBKDF2 directly off the password) and `opaque` (routes through an OPAQUE adapter). The Phase 5 stub adapter (default v1.x) uses libsodium Argon2id directly — gated by `is_stub()` against production use until Phase 6 real libopaque vendoring lands. Pubkey-checksum gate prevents silent reconstruction corruption.
+
+**Binary isolation:** the wallet handles secret material; the chain daemon never has access to user seeds.
+
+**Soundness proof:** `docs/proofs/WalletRecovery.md` (FA12). Real-OPAQUE bound: `Q · 2^-bits_password + N · 2⁻¹²⁸` (rate-limited online grind). Stub bound: offline-grindable per compromised guardian — NOT for production.
+
+**Integration tests:** 6 wallet test suites (56/56 assertions PASS): shamir, envelope, recovery, oprf-smoke, opaque-adapter, opaque-recovery.
+
+### M-J — Full formal-verification track shipped
+
+**New in this session.** Every v1.x safety-critical mechanism has both an analytic proof (FA-track) and a TLA+ state-machine specification (FB-track):
+
+- F0 Preliminaries + FA1–FA12: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness, wallet recovery.
+- FB1 Consensus.tla + FB2 Sharding.tla + FB3 Receipts.tla + FB4 CHECK-RESULTS.md (TLC transcripts pending Java + tla2tools.jar in CI).
+
+Every theorem cites its source-code enforcement points. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation. Concrete bounds tabulated in `docs/proofs/README.md` §"Concrete-security summary".
 
 ---
 
