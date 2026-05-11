@@ -35,7 +35,9 @@ Bearer addresses **cannot** register, stake, or be selected as creators. They ca
 
 ```cpp
 struct Transaction {
-    TxType    type;           // 0=TRANSFER, 1=REGISTER, 2=DEREGISTER, 3=STAKE, 4=UNSTAKE
+    TxType    type;           // 0=TRANSFER, 1=REGISTER, 2=DEREGISTER, 3=STAKE,
+                              // 4=UNSTAKE, 5=REGION_CHANGE (reserved), 6=PARAM_CHANGE (§13),
+                              // 7=MERGE_EVENT (§14)
     string    from;           // domain or bearer address
     string    to;             // TRANSFER only; "" otherwise
     uint64    amount;         // TRANSFER + STAKE
@@ -389,7 +391,115 @@ Methods (selected):
 
 Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis JSON file; nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense).
 
-## 13. Versioning
+## 13. Governance (A5)
+
+Two genesis-pinned modes:
+
+```
+governance_mode: u8     // 0 = uncontrolled (default), 1 = governed
+param_keyholders: [PubKey ...]
+param_threshold: u32    // signature count required for PARAM_CHANGE; default = len(keyholders)
+```
+
+Genesis-hash mix appends the three fields only when non-default — pre-A5 genesis files remain byte-identical.
+
+### `PARAM_CHANGE` tx (TxType = 6)
+
+Canonical payload encoding:
+```
+[name_len: u8][name: utf8]
+[value_len: u16 LE][value: bytes]
+[effective_height: u64 LE]
+[sig_count: u8]
+sig_count × { [keyholder_index: u16 LE][ed_sig: 64B] }
+```
+
+Each `(keyholder_index, ed_sig)` is an Ed25519 signature over the canonical signing message:
+```
+[name_len: u8][name][value_len: u16 LE][value][effective_height: u64 LE]
+```
+
+Validator gates (in order):
+1. `governance_mode == 1`.
+2. Payload shape parsable.
+3. `name ∈ {MIN_STAKE, SUSPENSION_SLASH, UNSTAKE_DELAY, bft_escalation_threshold, tx_commit_ms, block_sig_ms, abort_claim_ms, param_keyholders, param_threshold}`.
+4. ≥ `param_threshold` distinct keyholder signatures verify.
+
+Apply path: `Chain::stage_param_change(effective_height, name, value)` inserts into pending map. At start of every subsequent `apply_transactions(b)`, `activate_pending_params(b.index)` walks pending entries with `eff_height ≤ b.index` and writes to chain state (or fires a Node-side hook for validator-state fields).
+
+Soundness proof: `docs/proofs/Governance.md` (FA10).
+
+## 14. Under-quorum merge (R4)
+
+Two genesis-pinned thresholds + a grace period:
+
+```
+merge_threshold_blocks:  u32   // default 100 — observe < 2K + no SHARD_TIP_S
+revert_threshold_blocks: u32   // default 200 — 2:1 hysteresis on revert
+merge_grace_blocks:      u32   // default 10  — effective_height must exceed block.index + grace
+```
+
+### `MERGE_EVENT` tx (TxType = 7)
+
+Canonical payload (variable = 26 + region_len bytes):
+```
+[event_type: u8]            // 0 = MERGE_BEGIN, 1 = MERGE_END
+[shard_id: u32 LE]
+[partner_id: u32 LE]
+[effective_height: u64 LE]
+[evidence_window_start: u64 LE]
+[merging_shard_region_len: u8]
+[merging_shard_region: utf8 bytes]
+```
+
+Validator gates (in order):
+1. `sharding_mode == EXTENDED`.
+2. Payload size matches `26 + region_len`.
+3. `event_type ∈ {0, 1}`, `partner_id ≠ shard_id`.
+4. Region charset `[a-z0-9-_]`, ≤ 32 bytes.
+5. `effective_height ≥ block.index + merge_grace_blocks`.
+6. For BEGIN: `evidence_window_start + merge_threshold_blocks ≤ block.index`.
+
+Apply path:
+- BEGIN: insert `(shard_id → {partner_id, refugee_region})` into `Chain::merge_state_` iff `partner_id == (shard_id + 1) mod shard_count_`.
+- END: erase the matching entry.
+
+Committee eligibility stress branch: when `Chain::shards_absorbed_by(my_shard)` is non-empty, producer + validator extend their eligible pool with validators tagged in each refugee region.
+
+Authentication piggybacks on the enclosing beacon block's K-of-K signatures — no per-tx multisig. Auto-detection (beacon observes trigger condition and emits MERGE_BEGIN automatically) is a v1.1 work item; v1.x is operator-driven via `determ submit-merge-event`.
+
+Soundness proof: `docs/proofs/UnderQuorumMerge.md` (FA9).
+
+## 15. Wallet recovery (A2)
+
+Pure client-side feature; no chain protocol changes. The `determ-wallet` binary handles the user's Ed25519 seed offline:
+
+```
+seed → Shamir SSS (T-of-N, GF(2^8)) → per-share AEAD envelope
+                                      ↑
+                              keyed by passphrase (Phase 3, default)
+                                      OR
+                              keyed by OPAQUE adapter export_key (Phase 7)
+```
+
+Recovery setup JSON (canonical, persisted to disk):
+```
+{ "version": 1,
+  "scheme": "shamir-aead-passphrase" | "shamir-aead-opaque-<suite>",
+  "threshold": T, "share_count": N, "secret_len": 32,
+  "guardian_x": [<u8>, ...],
+  "envelopes": ["DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>", ...],
+  "opaque_records": ["<hex>", ...],   // only when scheme starts "shamir-aead-opaque-"
+  "pubkey_checksum": "<sha256(ed25519_pubkey(seed))>" }
+```
+
+Envelope: AES-256-GCM, 12-byte nonce, 16-byte tag, AAD binds `DWR1‖guardian_id‖version`.
+
+OPAQUE adapter (Phase 5 stub today; Phase 6 real libopaque pending Windows MSVC porting): `register_password(pw, gid) → (record, export_key)`; `authenticate_password(pw, record, gid) → export_key`. The `export_key` becomes the AEAD password for that guardian's envelope. The `is_stub()` flag gates production use until Phase 6.1 lands.
+
+Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for real OPAQUE: `Q · 2^-bits_password + N · 2^-128` (rate-limited online grind only). For the Phase 5 stub: offline-grindable, NOT for production.
+
+## 16. Versioning
 
 This document specifies v1. Backward-incompatible changes (new block fields, modified hash inputs, new message types replacing old ones) require a version bump. New optional fields with safe defaults are non-breaking.
 
