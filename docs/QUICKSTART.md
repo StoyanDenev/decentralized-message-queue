@@ -161,7 +161,7 @@ $DETERM status --rpc-port 8799   # head_hash matches snapshot
 
 For a beacon + S-shard deployment, see `tools/test_cross_shard_transfer.sh` — it spins up 1 beacon + 2 shards (M=K=1), grinds bearer wallets that route to each shard, and asserts a TRANSFER from shard 0 → shard 1 credits the destination.
 
-## 8. Submit equivocation evidence (governance)
+## 8. Submit equivocation evidence (forensics)
 
 ```bash
 # Synthesize off-chain via Python (Ed25519 signing) — see
@@ -180,8 +180,95 @@ print(s.recv(4096).decode().strip())
 
 The next finalized block bakes the evidence; on apply, the equivocator's stake is fully forfeited and they're deregistered from the validator pool.
 
+## 9. Governance: change a chain-wide parameter (A5)
+
+Deploy a chain with `governance_mode = 1` and N founder keyholders. Then any time a quorum of keyholders agrees, they can change a whitelisted parameter mid-chain:
+
+```bash
+# Build genesis with 3 founder keyholders (use existing validator keys)
+PK1=$(python -c "import json; print(json.load(open('n1/node_key.json'))['pubkey'])")
+PK2=$(python -c "import json; print(json.load(open('n2/node_key.json'))['pubkey'])")
+PK3=$(python -c "import json; print(json.load(open('n3/node_key.json'))['pubkey'])")
+
+# In your genesis JSON:
+#   "governance_mode": 1,
+#   "param_threshold": 3,
+#   "param_keyholders": ["<PK1>", "<PK2>", "<PK3>"]
+
+# Sign + submit a PARAM_CHANGE: MIN_STAKE = 2000 (8-byte LE)
+PRIV1=$(python -c "import json; print(json.load(open('n1/node_key.json'))['priv_seed'])")
+PRIV2=$(python -c "import json; print(json.load(open('n2/node_key.json'))['priv_seed'])")
+PRIV3=$(python -c "import json; print(json.load(open('n3/node_key.json'))['priv_seed'])")
+
+$DETERM submit-param-change \
+  --priv "$PRIV1" --from node1 \
+  --name MIN_STAKE --value-hex "d007000000000000" \
+  --effective-height 50 --fee 0 \
+  --keyholder-sig "0:$PRIV1" \
+  --keyholder-sig "1:$PRIV2" \
+  --keyholder-sig "2:$PRIV3" \
+  --rpc-port 8771
+```
+
+After block 50 finalizes, `snapshot inspect` shows `min_stake: 2000`. Whitelist of mutable parameters: see `docs/PROTOCOL.md` §13. Off-list parameters (committee size K, sharding mode) require a new chain genesis.
+
+## 10. Wallet recovery (A2)
+
+The `determ-wallet` binary is separate from the chain daemon. Generate a recovery setup for any 32-byte secret (typically your Ed25519 seed):
+
+```bash
+# Split a seed into 3-of-5 shares with passphrase protection
+SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+./build/Release/determ-wallet create-recovery \
+  --seed $SEED --password "my-recovery-passphrase" \
+  -t 3 -n 5 --out wallet_backup.json
+
+# Distribute wallet_backup.json's envelopes to 5 different locations
+# (cloud storage, hardware token, trusted peers, paper backup, etc.)
+
+# Recover any time using >=3 of the 5 guardians:
+./build/Release/determ-wallet recover \
+  --in wallet_backup.json \
+  --password "my-recovery-passphrase" \
+  --guardians 0,2,4
+# → 0123456789abcdef...
+```
+
+For under-quorum compromise resistance against guardians, use `--scheme opaque`. The Phase 5 stub adapter (default today) is offline-grindable from any single compromised guardian; the wallet's `is_stub()` flag reports this and `docs/proofs/WalletRecovery.md` (FA12) documents the bound degradation. Production deployments should wait for Phase 6.1 to land real libopaque integration.
+
+## 11. Under-quorum merge (R4, EXTENDED mode only)
+
+When a regional shard's validator pool drops below 2K, the protocol can absorb it into the modular-next shard's committee. v1.x is operator-driven; v1.1 will auto-detect on the beacon.
+
+```bash
+# Operator initiates a merge of shard 0 into shard 1 at height 30:
+$DETERM submit-merge-event \
+  --priv "$PRIV1" --from node1 \
+  --event begin \
+  --shard-id 0 --partner-id 1 \
+  --refugee-region us-east \
+  --effective-height 30 \
+  --evidence-window-start 0 \
+  --rpc-port 8771
+
+# When the regional pool recovers, end the merge:
+$DETERM submit-merge-event \
+  --priv "$PRIV1" --from node1 \
+  --event end \
+  --shard-id 0 --partner-id 1 \
+  --effective-height 60 \
+  --evidence-window-start 0 \
+  --rpc-port 8771
+```
+
+See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN/END transitions.
+
 ## What's next
 
-- See `README.md` §16 for the sharding architecture and stage-by-stage status.
-- See `README.md` §15 for explicit non-goals (no smart contracts, no bridges, no oracles).
-- See `tools/` for behavioral tests of every protocol feature.
+- `README.md` §16/§17 — sharding architecture; §17.5/§17.7 regional + under-quorum merge.
+- `README.md` §18 — governance mode (A5).
+- `README.md` §18.5 — wallet recovery (A2).
+- `README.md` §19 — formal verification (FA-track + FB-track).
+- `README.md` §17 — explicit non-goals (no smart contracts, no bridges, no oracles).
+- `tools/` — behavioral tests of every protocol feature (24 regression suites).
+- `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12, plus FB1–FB4 TLA+ specs).
