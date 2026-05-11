@@ -78,6 +78,7 @@ target_include_directories(determ-wallet PRIVATE
 )
 target_link_libraries(determ-wallet PRIVATE
   crypto
+  nlohmann_json::nlohmann_json
 )
 if(WIN32)
   target_link_libraries(determ-wallet PRIVATE ws2_32 crypt32)

@@ -19,9 +19,11 @@
 
 #include "shamir.hpp"
 #include "envelope.hpp"
+#include "recovery.hpp"
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <cstring>
@@ -229,6 +231,96 @@ int cmd_envelope(int argc, char** argv) {
     return 1;
 }
 
+int cmd_create_recovery(int argc, char** argv) {
+    std::string seed_hex, password, out_path;
+    int threshold = 0, share_count = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--seed"     && i + 1 < argc) seed_hex    = argv[++i];
+        else if (a == "--password" && i + 1 < argc) password    = argv[++i];
+        else if (a == "--out"      && i + 1 < argc) out_path    = argv[++i];
+        else if (a == "-t"         && i + 1 < argc) threshold   = std::stoi(argv[++i]);
+        else if (a == "-n"         && i + 1 < argc) share_count = std::stoi(argv[++i]);
+    }
+    if (seed_hex.empty() || password.empty() || out_path.empty()
+        || threshold <= 0 || share_count <= 0) {
+        std::cerr << "Usage: determ-wallet create-recovery "
+                     "--seed <hex> --password <str> -t T -n N --out <file>\n";
+        return 1;
+    }
+    std::vector<uint8_t> seed;
+    try { seed = from_hex(seed_hex); }
+    catch (std::exception& e) {
+        std::cerr << "Invalid --seed hex: " << e.what() << "\n"; return 1;
+    }
+    if (seed.empty()) {
+        std::cerr << "--seed must be non-empty\n"; return 1;
+    }
+    auto checksum = recovery::seed_pubkey_checksum(seed);   // empty if seed != 32B
+    try {
+        auto setup = recovery::create(seed, password,
+                                          static_cast<uint8_t>(threshold),
+                                          static_cast<uint8_t>(share_count),
+                                          checksum);
+        std::ofstream f(out_path);
+        if (!f) { std::cerr << "Cannot open --out for write: " << out_path << "\n"; return 1; }
+        f << recovery::to_json(setup);
+        std::cout << "wrote " << out_path << "\n";
+        std::cout << "  scheme:        " << setup.scheme       << "\n";
+        std::cout << "  threshold:     " << int(setup.threshold)   << " of "
+                  << int(setup.share_count) << "\n";
+        std::cout << "  secret bytes:  " << setup.secret_len   << "\n";
+        std::cout << "  checksum:      " << to_hex(checksum)   << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "create-recovery error: " << e.what() << "\n"; return 1;
+    }
+    return 0;
+}
+
+int cmd_recover(int argc, char** argv) {
+    std::string in_path, password, guardians_csv;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"        && i + 1 < argc) in_path        = argv[++i];
+        else if (a == "--password"  && i + 1 < argc) password       = argv[++i];
+        else if (a == "--guardians" && i + 1 < argc) guardians_csv  = argv[++i];
+    }
+    if (in_path.empty() || password.empty()) {
+        std::cerr << "Usage: determ-wallet recover --in <file> --password <str> "
+                     "[--guardians <csv of 0..N-1 indices>]\n";
+        return 1;
+    }
+    std::ifstream f(in_path);
+    if (!f) { std::cerr << "Cannot open --in: " << in_path << "\n"; return 1; }
+    std::string blob((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    auto setup_opt = recovery::from_json(blob);
+    if (!setup_opt) {
+        std::cerr << "recover: failed to parse recovery setup\n"; return 1;
+    }
+    std::vector<uint8_t> guardian_indices;
+    if (guardians_csv.empty()) {
+        for (uint8_t i = 0; i < setup_opt->share_count; ++i)
+            guardian_indices.push_back(i);
+    } else {
+        std::stringstream ss(guardians_csv);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            if (item.empty()) continue;
+            guardian_indices.push_back(static_cast<uint8_t>(std::stoul(item)));
+        }
+    }
+    auto secret = recovery::recover(*setup_opt, password, guardian_indices);
+    if (!secret) {
+        std::cerr << "recover: reconstruction failed "
+                     "(wrong password, insufficient envelopes decrypted, "
+                     "or pubkey checksum mismatch)\n";
+        return 2;
+    }
+    std::cout << to_hex(*secret) << "\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -240,10 +332,15 @@ void print_usage() {
         "                    --password <str> [--aad <hex>] [--iters <N>]\n"
         "  envelope decrypt --envelope <blob>         Unwrap an envelope\n"
         "                    --password <str> [--aad <hex>]\n"
+        "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
+        "                  -t T -n N --out <file>\n"
+        "  recover --in <file> --password <str>       Reconstruct the secret\n"
+        "          [--guardians <i,j,k,...>]\n"
         "  version                                    Print version banner\n"
         "\n"
-        "Pending (Phase 3):\n"
-        "  create-recovery, recover                   OPAQUE-guarded threshold flow\n";
+        "Pending (Phase 4):\n"
+        "  OPAQUE per-guardian AKE replaces passphrase-only authentication\n"
+        "  for create-recovery / recover (libopaque + libsodium integration).\n";
 }
 
 } // namespace
@@ -251,11 +348,14 @@ void print_usage() {
 int main(int argc, char** argv) {
     if (argc < 2) { print_usage(); return 1; }
     std::string cmd = argv[1];
-    if (cmd == "shamir")   return cmd_shamir  (argc - 2, argv + 2);
-    if (cmd == "envelope") return cmd_envelope(argc - 2, argv + 2);
+    if (cmd == "shamir")          return cmd_shamir         (argc - 2, argv + 2);
+    if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
+    if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
+    if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "version") {
-        std::cout << "determ-wallet v1.x Phase 2 (Shamir + AEAD envelope "
-                     "shipped; OPAQUE recovery pending)\n";
+        std::cout << "determ-wallet v1.x Phase 3 (Shamir + AEAD envelope + "
+                     "passphrase-only recovery; OPAQUE per-guardian flow "
+                     "pending Phase 4)\n";
         return 0;
     }
     if (cmd == "help" || cmd == "--help" || cmd == "-h") {
