@@ -65,6 +65,7 @@ json GenesisConfig::to_json() const {
         {"subsidy_pool_initial",     subsidy_pool_initial},
         {"subsidy_mode",             subsidy_mode},
         {"lottery_jackpot_multiplier", lottery_jackpot_multiplier},
+        {"zeroth_pool_initial",      zeroth_pool_initial},
         {"bft_enabled",              bft_enabled},
         {"bft_escalation_threshold", bft_escalation_threshold},
         {"inclusion_model",         static_cast<uint8_t>(inclusion_model)},
@@ -90,6 +91,7 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.subsidy_mode  = j.value("subsidy_mode",  uint8_t{0});
     c.lottery_jackpot_multiplier = j.value("lottery_jackpot_multiplier",
                                             uint32_t{0});
+    c.zeroth_pool_initial = j.value("zeroth_pool_initial", uint64_t{0});
     // E3 validation: under LOTTERY, multiplier must be >= 2 (M=1 is just FLAT;
     // M=0 would divide-by-zero).
     if (c.subsidy_mode == 1 && c.lottery_jackpot_multiplier < 2) {
@@ -198,6 +200,28 @@ Block make_genesis_block(const GenesisConfig& cfg) {
             GenesisAlloc a;
             a.domain  = alloc.domain;
             a.balance = alloc.balance;
+            g.initial_state.push_back(a);
+        }
+    }
+
+    // E1: seed the Zeroth pool pseudo-account when zeroth_pool_initial > 0.
+    // The pool address is the canonical all-zero anon address. The pool's
+    // balance feeds NEF (Negative Entry Fee) distributions on subsequent
+    // REGISTER applies. Counts toward A1's genesis_total_ via the normal
+    // initial_state[] path — no separate accounting needed.
+    if (cfg.zeroth_pool_initial > 0) {
+        bool merged = false;
+        for (auto& a : g.initial_state) {
+            if (a.domain == ZEROTH_ADDRESS) {
+                a.balance += cfg.zeroth_pool_initial;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) {
+            GenesisAlloc a;
+            a.domain  = ZEROTH_ADDRESS;
+            a.balance = cfg.zeroth_pool_initial;
             g.initial_state.push_back(a);
         }
     }

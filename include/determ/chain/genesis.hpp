@@ -97,6 +97,17 @@ struct GenesisConfig {
     // remaining pool; once drained, lottery silently stops paying.
     uint8_t                         subsidy_mode{0};                 // 0=FLAT, 1=LOTTERY
     uint32_t                        lottery_jackpot_multiplier{0};   // required when LOTTERY, ignored when FLAT
+    // E1: optional Negative Entry Fee (NEF). When > 0, a pseudo-account at
+    // the all-zero anon address (0x0000…0000) is credited with this balance
+    // at genesis. On each REGISTER tx applied, half the current pool balance
+    // is transferred from the pool to the new registrant — bootstrap-time
+    // reward for early registrants. Pool drains geometrically (halves per
+    // registration), asymptotes to 0. Pool exhaustion does NOT block
+    // future REGISTERs; NEF just degrades to 0. 0 (default) preserves
+    // historical behavior (no pool, no NEF). The pool counts toward A1's
+    // genesis_total_; NEF is a balance transfer (pool -> new domain),
+    // not a mint, so the unitary invariant holds trivially.
+    uint64_t                        zeroth_pool_initial{0};
 
     // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
     // `bft_escalation_threshold` consecutive Phase-1 aborts at the same

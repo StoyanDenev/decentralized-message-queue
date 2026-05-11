@@ -215,6 +215,14 @@ void Chain::apply_transactions(const Block& b) {
             }
             if (!charge_fee(sender, tx.fee)) continue;
 
+            // E1: detect first-time registration BEFORE we touch
+            // registrants_[tx.from] (operator[] would create an entry,
+            // making it indistinguishable from a re-registration). NEF
+            // fires only when this is genuinely new — re-registrations
+            // (e.g., key rotation, region update) do not drain the pool.
+            const bool first_time_register =
+                (registrants_.find(tx.from) == registrants_.end());
+
             RegistryEntry e;
             std::copy_n(tx.payload.begin(), 32, e.ed_pub.begin());
             e.registered_at = height;
@@ -227,6 +235,28 @@ void Chain::apply_transactions(const Block& b) {
             // tracking is consistent. Locked is moved by STAKE/UNSTAKE.
             auto& st = stakes_[tx.from];
             st.unlock_height = UINT64_MAX;
+
+            // E1 Negative Entry Fee. On the FIRST registration of a domain
+            // (not re-registrations / key rotations), if the Zeroth pool has
+            // a non-zero balance, half of it is transferred to the new
+            // registrant. Geometric exhaustion: pool halves per first-time
+            // REGISTER, asymptotes to 0. Pool-empty case (balance==0 ⇒
+            // nef==0) is a silent no-op. The pool address is canonical and
+            // not synthesizable, so no key can ever drain it via TRANSFER —
+            // only this REGISTER hook touches it. A1 invariant trivially
+            // holds: nef is balance transfer (pool -> new domain), not
+            // a mint or burn.
+            if (first_time_register) {
+                auto pool_it = accounts_.find(ZEROTH_ADDRESS);
+                if (pool_it != accounts_.end() && pool_it->second.balance > 0
+                    && tx.from != ZEROTH_ADDRESS) {
+                    uint64_t nef = pool_it->second.balance / 2;
+                    if (nef > 0) {
+                        pool_it->second.balance       -= nef;
+                        accounts_[tx.from].balance    += nef;
+                    }
+                }
+            }
 
             sender.next_nonce++;
             break;

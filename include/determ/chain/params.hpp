@@ -15,6 +15,15 @@ using ShardingMode = ::determ::ShardingMode;
 inline constexpr uint64_t MIN_STAKE     = 1000;
 inline constexpr uint64_t UNSTAKE_DELAY = 1000;   // blocks past inactive_from before stake unlocks
 
+// E1: Zeroth pool pseudo-account address. Anon-style format (0x + 64 hex
+// chars), but encodes an all-zero pubkey — a low-order point on
+// curve25519 that has no usable Ed25519 private key. Any tx claiming
+// `from == ZEROTH_ADDRESS` must produce a valid Ed25519 sig over an
+// all-zero pubkey, which is computationally infeasible; the validator
+// rejects such txs as an explicit guard regardless.
+inline constexpr const char* ZEROTH_ADDRESS =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
+
 // REGISTER tx payload (rev.9 R1):
 //   [pubkey: 32B][region_len: u8][region: utf8 bytes]
 // Legacy payload (just the 32-B pubkey) is wire-compatible — region_len

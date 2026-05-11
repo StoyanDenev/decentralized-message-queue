@@ -451,6 +451,14 @@ BlockValidator::Result BlockValidator::check_transactions(
         //     comes from the tx payload (since they're not yet registered).
         const bool from_anon = is_anon_address(tx.from);
 
+        // E1: explicit guard against any tx claiming `from` is the Zeroth
+        // pool. The all-zero anon address encodes a low-order curve point
+        // with no usable private key — signature verification should
+        // fail anyway, but this fail-fast check is cheaper and unambiguous.
+        if (tx.from == ZEROTH_ADDRESS)
+            return {false, "Zeroth pool is a pseudo-account; no tx may "
+                          "originate from " + std::string(ZEROTH_ADDRESS)};
+
         PubKey pk{};
         if (tx.type == TxType::REGISTER) {
             if (from_anon)
