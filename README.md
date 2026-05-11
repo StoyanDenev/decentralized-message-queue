@@ -781,6 +781,19 @@ Per-block trust is observable via `consensus_mode`:
 
 Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
 
+### 17.7 Under-quorum merge
+
+When a shard's regional pool drops below `2K`, that shard temporarily merges committee operations with its modular-next neighbor (`partner_id = (shard_id + 1) mod num_shards`). Mechanism:
+
+- **Trigger.** A `MERGE_EVENT` tx (type 7) baked into a beacon block carries `(event_type ∈ {BEGIN, END}, shard_id, partner_id, effective_height, evidence_window_start, merging_shard_region)`.
+- **Eligibility stress branch.** Partner T extends its committee pool with validators tagged with the refugee shard's region. Producer (`Node::check_if_selected`) and validator (`BlockValidator::check_creator_selection`) mirror the extension exactly.
+- **Auto-revert.** A symmetric `MERGE_END` event reverts the partner to its native pool. Default thresholds: `merge_threshold_blocks = 100`, `revert_threshold_blocks = 200` (2:1 hysteresis to bias toward stability).
+- **Grace period.** `effective_height >= block.index + merge_grace_blocks` so committees observe the transition before it takes effect.
+
+Operator surface: `determ submit-merge-event --event {begin|end} --shard-id N --partner-id N --effective-height N --refugee-region R --priv <hex> --from <domain>`. Auto-detection on the beacon (observe `eligible_in_region < 2K` over the threshold window) is a v1.1 work item; v1.x ships the operator-driven path.
+
+Safety preservation is proven in `docs/proofs/UnderQuorumMerge.md` (FA9).
+
 ---
 
 ## 17. Scope
@@ -837,7 +850,48 @@ If you need contracts, build them on a different chain or build a layer-2 on top
 
 ---
 
-## 18. Conclusion
+## 18. Governance
+
+Determ supports two genesis-pinned governance modes:
+
+- **`governance_mode = 0` (uncontrolled, default).** Consensus constants are immutable post-genesis. Changing any of them requires a new chain identity. Suitable for permissionless deployments and chains that want a single, stable parameter set forever.
+- **`governance_mode = 1` (governed).** An N-of-N founder keyholder set may emit `PARAM_CHANGE` transactions mutating a whitelisted parameter set mid-chain. Suitable for consortium and enterprise deployments where parameter tuning is operationally necessary.
+
+The whitelist (validator-enforced):
+
+```
+MIN_STAKE, SUSPENSION_SLASH, UNSTAKE_DELAY,
+bft_escalation_threshold,
+param_keyholders, param_threshold,
+tx_commit_ms, block_sig_ms, abort_claim_ms
+```
+
+Off-list parameters (committee size K, sharding mode, chain identity, crypto primitives) are not mutable. Changing them requires a new chain.
+
+The PARAM_CHANGE payload carries `(name, value, effective_height)` plus signatures from `>= param_threshold` distinct keyholders over the canonical signing message. The validator rejects mode-incompatible, off-whitelist, or threshold-failing transactions outright. The apply path stages the change; activation fires at `effective_height` via `Chain::activate_pending_params(h)`.
+
+Operator surface: `determ submit-param-change --priv <sender_hex> --from <sender_domain> --name <NAME> --value-hex <hex> --effective-height N --keyholder-sig <idx>:<priv_hex> [more...]`. Offline-signed; the CLI bundles the multisig + tx wrap.
+
+Soundness is proven in `docs/proofs/Governance.md` (FA10).
+
+---
+
+## 19. Formal verification
+
+Determ's safety-critical mechanisms are covered by per-property analytic proofs and machine-checkable TLA+ specifications. The full set lives in [`docs/proofs/`](docs/proofs/README.md):
+
+| Layer | Coverage |
+|---|---|
+| **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA11: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness. |
+| **FB-track** (TLA+ specs) | Consensus.tla, Sharding.tla, Receipts.tla + CHECK-RESULTS.md. Model-check transcripts pending TLC installation in CI; specs ready for local validation. |
+
+Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V14 from F0), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
+
+Concrete-security bounds: every property holds with probability `≥ 1 − Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. Under Grover (post-quantum), bounds degrade to `Q · 2⁻⁶⁴` for Ed25519 — operationally secure but a PQ-signature migration (Dilithium / Falcon) would restore classical bounds.
+
+---
+
+## 20. Conclusion
 
 Determ demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by construction rather than by economic disincentive or wall-clock delay. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
 
