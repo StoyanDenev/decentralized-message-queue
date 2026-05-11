@@ -28,6 +28,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA8 | [RegionalSharding.md](RegionalSharding.md) | Regional pinning preserves FA1/FA4/FA5/FA6/FA7 | ✓ |
 | FA9 | [UnderQuorumMerge.md](UnderQuorumMerge.md) | R4 under-quorum merge preserves FA1/FA7 across BEGIN/END | ✓ |
 | FA10 | [Governance.md](Governance.md) | A5 PARAM_CHANGE soundness: no unauthorized mutation, off-whitelist immunity | ✓ |
+| FA11 | [EconomicSoundness.md](EconomicSoundness.md) | A1 unitary supply invariant + E1/E3/E4 preservation | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
