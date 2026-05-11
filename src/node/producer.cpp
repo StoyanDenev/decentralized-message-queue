@@ -217,6 +217,18 @@ size_t required_block_sigs(ConsensusMode mode, size_t committee_size) {
 // tampered delay_output. The block hash (via Block::signing_bytes)
 // still binds delay_output and creator_dh_secrets so block identity
 // is unique.
+// S-030 D2 (block-digest field-coverage gap): the K-of-K committee
+// signature target excludes evidence and receipt lists, leaving a
+// one-block window where two valid K-of-K-signed block instances
+// can differ in those fields behind the same digest. See
+// docs/proofs/S030-D2-Analysis.md for the full analysis and why a
+// naive digest extension does not work (gossip-async views).
+//
+// Status: a Phase-1-side view reconciliation mechanism (ContribMsg
+// includes a hash of each member's evidence-pool view; assembly
+// reconciles at Phase 1→2 transition; canonical reconciliation feeds
+// the digest) is the correct fix. Tracked as a v2 work item; not in
+// this v1.x release.
 Hash compute_block_digest(const Block& b) {
     SHA256Builder h;
     h.append(b.index);
