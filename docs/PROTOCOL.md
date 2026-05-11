@@ -499,6 +499,13 @@ OPAQUE adapter (Phase 5 stub today; Phase 6 real libopaque pending Windows MSVC 
 
 Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for real OPAQUE: `Q · 2^-bits_password + N · 2^-128` (rate-limited online grind only). For the Phase 5 stub: offline-grindable, NOT for production.
 
+### Cross-references
+
+- [`WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) — standalone academic-style technical paper covering the same material at a higher level.
+- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 analytic, FB1–FB4 TLA+).
+- [`QUICKSTART.md`](QUICKSTART.md) — operator-facing recipes for the wire formats specified here.
+- [`CLI-REFERENCE.md`](CLI-REFERENCE.md) — command-line surface for transactions described in §3.
+
 ## 16. Versioning
 
 This document specifies v1. Backward-incompatible changes (new block fields, modified hash inputs, new message types replacing old ones) require a version bump. New optional fields with safe defaults are non-breaking.

@@ -265,6 +265,7 @@ See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN
 
 ## What's next
 
+- [`docs/WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) — standalone academic-style technical paper covering every v1.x mechanism (consensus, sharding, governance, recovery, formal verification, comparison to related work).
 - `README.md` §16/§17 — sharding architecture; §17.5/§17.7 regional + under-quorum merge.
 - `README.md` §18 — governance mode (A5).
 - `README.md` §18.5 — wallet recovery (A2).

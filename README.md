@@ -6,6 +6,8 @@
 >
 > **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
 >
+> **For protocol researchers / auditors:** see [`docs/WHITEPAPER-v1.x.md`](docs/WHITEPAPER-v1.x.md) for the standalone academic-style technical paper, and [`docs/proofs/`](docs/proofs/README.md) for the formal-verification track (F0 + FA1–FA12 analytic proofs, FB1–FB4 TLA+ specs).
+>
 > **What's new in v2:** sharding gains a `ShardingMode` switch — `CURRENT` keeps the v1 1-beacon-S-shards topology, while `EXTENDED` enables latency-grouped regional shard committees that drop in-shard block time to cluster-profile (~125-250 ms) on the public internet. Each profile (cluster / web / regional / global, plus sub-30 ms `_test` variants for CI) pins both a `chain_role` and a `sharding_mode`; there are no separate CLI overrides for either. Selective-abort defense is now commit-reveal (information-theoretic — no wall-clock delay function, no `delay_T` parameter to calibrate).
 
 ---

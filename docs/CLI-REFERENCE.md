@@ -2,6 +2,8 @@
 
 All `determ` subcommands. Run `determ --help` for the canonical built-in help.
 
+**See also:** [`QUICKSTART.md`](QUICKSTART.md) for hands-on recipes, [`PROTOCOL.md`](PROTOCOL.md) for wire formats, [`WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) for the standalone technical paper.
+
 ## Node lifecycle
 
 | Command | Purpose |
