@@ -876,13 +876,77 @@ Soundness is proven in `docs/proofs/Governance.md` (FA10).
 
 ---
 
+## 18.5. Wallet recovery (A2)
+
+A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `determ-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing, AEAD envelopes, and an OPAQUE adapter — solving key loss without weakening on-chain trust.
+
+**Threat model.** The wallet's recovery flow protects against:
+
+- Loss of any (N − T) of N guardians (threshold reconstruction survives partial unavailability).
+- Compromise of any (T − 1) guardians (information-theoretic: zero bits of the seed leak below threshold).
+- Tampering with any individual envelope (AEAD detects single-bit modifications with probability ≥ 1 − 2⁻¹²⁸).
+- Offline password grind against an isolated record (real OPAQUE only; the Phase 5 stub adapter is gated against production use).
+
+**Layered design.** Each layer addresses a distinct threat:
+
+1. **Shamir SSS over GF(2⁸)** — splits the Ed25519 seed into N shares; any T reconstruct, any T − 1 reveal nothing.
+2. **AEAD envelope (AES-256-GCM)** — wraps each share with a per-envelope salt + nonce; AAD binds guardian index + scheme version.
+3. **OPAQUE adapter (interface)** — under the `opaque` scheme, each envelope's unwrap key is the export key from an OPAQUE registration/authentication round with the corresponding guardian. Under the `passphrase` scheme (default in v1.x while libopaque vendoring is pending), keys are PBKDF2-derived from the user's password directly.
+
+**Wire format.** A recovery setup is a single self-contained JSON document:
+
+```json
+{
+  "version": 1,
+  "scheme": "shamir-aead-opaque-stub-argon2id-v1",
+  "threshold": 3,
+  "share_count": 5,
+  "secret_len": 32,
+  "guardian_x": [1, 2, 3, 4, 5],
+  "envelopes": ["DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>", ...],
+  "opaque_records": ["<hex>", ...],
+  "pubkey_checksum": "<sha256(ed25519_pubkey(seed))>"
+}
+```
+
+The setup is fully portable — it carries everything needed for threshold reconstruction (modulo the user knowing the password and having access to ≥ T envelopes).
+
+**Operator surface:**
+
+```
+determ-wallet shamir split <hex> -t T -n N         Split secret into N shares
+determ-wallet shamir combine <share> ...           Reconstruct from >=T shares
+determ-wallet envelope encrypt --plaintext <hex>   AEAD-wrap arbitrary data
+                                --password <str>
+determ-wallet envelope decrypt --envelope <blob>   Unwrap an envelope
+                                --password <str>
+determ-wallet create-recovery --seed <hex>         Persist a T-of-N recovery setup
+                              --password <str>
+                              -t T -n N --out <file>
+                              [--scheme {passphrase|opaque}]
+determ-wallet recover --in <file>                  Reconstruct the seed
+                      --password <str>
+                      [--guardians <i,j,k,...>]
+determ-wallet opaque-handshake --mode {register|authenticate}
+                                --password <str>
+                                --guardian-id <0..255>
+                                [--record <hex>]
+determ-wallet oprf-smoke                           Verify libsodium primitives wired
+```
+
+**Phase status.** v1.x ships Phases 1–5 + 7 (greenfield wallet binary, all crypto layers wired against libsodium, OPAQUE adapter interface locked, recovery flow routed through the adapter). Phase 6 (vendor real libopaque + liboprf to replace the stub adapter implementation) is multi-cycle Windows MSVC porting work; the wallet's `is_stub()` flag gates production deployment until that lands. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis covering both stub and real-OPAQUE bounds.
+
+**Binary isolation.** `determ-wallet` is a separate executable from the `determ` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
+
+---
+
 ## 19. Formal verification
 
 Determ's safety-critical mechanisms are covered by per-property analytic proofs and machine-checkable TLA+ specifications. The full set lives in [`docs/proofs/`](docs/proofs/README.md):
 
 | Layer | Coverage |
 |---|---|
-| **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA11: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness. |
+| **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA12: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness, wallet recovery. |
 | **FB-track** (TLA+ specs) | Consensus.tla, Sharding.tla, Receipts.tla + CHECK-RESULTS.md. Model-check transcripts pending TLC installation in CI; specs ready for local validation. |
 
 Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V14 from F0), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
