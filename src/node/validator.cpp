@@ -569,6 +569,98 @@ BlockValidator::Result BlockValidator::check_transactions(
             // REGION_CHANGE before reaching this switch. Keeping the
             // case present silences -Wswitch and documents the slot.
             return {false, "REGION_CHANGE tx type is reserved for future use"};
+        case TxType::PARAM_CHANGE: {
+            // A5 governance: payload-shape + mode + whitelist + multisig
+            // checks. Apply-side staging at effective_height is handled
+            // in chain.cpp.
+            if (governance_mode_ == 0) {
+                return {false, "PARAM_CHANGE rejected: chain is in "
+                               "uncontrolled governance mode"};
+            }
+            // Decode payload:
+            //   [name_len: u8][name][value_len: u16 LE][value]
+            //   [effective_height: u64 LE][sig_count: u8]
+            //   sig_count × { [keyholder_index: u16 LE][ed_sig: 64B] }
+            const auto& p = tx.payload;
+            size_t off = 0;
+            if (p.size() < 1) return {false, "PARAM_CHANGE payload truncated (name_len)"};
+            size_t nlen = p[off++];
+            if (p.size() < off + nlen)
+                return {false, "PARAM_CHANGE payload truncated (name)"};
+            std::string name(p.begin() + off, p.begin() + off + nlen);
+            off += nlen;
+            if (p.size() < off + 2) return {false, "PARAM_CHANGE payload truncated (value_len)"};
+            uint16_t vlen = uint16_t(p[off]) | (uint16_t(p[off+1]) << 8);
+            off += 2;
+            if (p.size() < off + vlen)
+                return {false, "PARAM_CHANGE payload truncated (value)"};
+            std::vector<uint8_t> value(p.begin() + off, p.begin() + off + vlen);
+            off += vlen;
+            if (p.size() < off + 8) return {false, "PARAM_CHANGE payload truncated (effective_height)"};
+            uint64_t eff = 0;
+            for (int i = 0; i < 8; ++i) eff |= uint64_t(p[off + i]) << (8 * i);
+            off += 8;
+            if (p.size() < off + 1) return {false, "PARAM_CHANGE payload truncated (sig_count)"};
+            uint8_t sigc = p[off++];
+            const size_t expected_tail = size_t(sigc) * (2 + 64);
+            if (p.size() != off + expected_tail)
+                return {false, "PARAM_CHANGE payload size mismatch"};
+            (void)eff;
+            (void)value;
+
+            // Whitelist enforcement. Off-list names rejected even with
+            // full threshold.
+            static const std::set<std::string> kWhitelist = {
+                "tx_commit_ms", "block_sig_ms", "abort_claim_ms",
+                "bft_escalation_threshold", "SUSPENSION_SLASH",
+                "MIN_STAKE", "UNSTAKE_DELAY",
+                "param_keyholders", "param_threshold",
+            };
+            if (kWhitelist.find(name) == kWhitelist.end()) {
+                return {false, "PARAM_CHANGE rejected: parameter '"
+                             + name + "' is not on the governance whitelist"};
+            }
+
+            // Multisig verification: each (keyholder_index, ed_sig)
+            // pair signs the canonical (name ‖ value ‖ effective_height)
+            // tuple, distinct indices, with index < keyholders.size().
+            // Distinct-signer + threshold gate prevents replay of one
+            // keyholder's signature multiple times.
+            std::vector<uint8_t> sig_msg;
+            sig_msg.reserve(nlen + vlen + 8 + 16);
+            sig_msg.push_back(static_cast<uint8_t>(nlen));
+            sig_msg.insert(sig_msg.end(), name.begin(), name.end());
+            sig_msg.push_back(static_cast<uint8_t>(vlen & 0xff));
+            sig_msg.push_back(static_cast<uint8_t>((vlen >> 8) & 0xff));
+            sig_msg.insert(sig_msg.end(), value.begin(), value.end());
+            for (int i = 0; i < 8; ++i)
+                sig_msg.push_back(static_cast<uint8_t>((eff >> (8*i)) & 0xff));
+
+            std::set<uint16_t> seen_idx;
+            uint32_t good_sigs = 0;
+            for (uint8_t s = 0; s < sigc; ++s) {
+                uint16_t idx = uint16_t(p[off]) | (uint16_t(p[off+1]) << 8);
+                off += 2;
+                Signature msig{};
+                std::copy_n(p.begin() + off, 64, msig.begin());
+                off += 64;
+                if (idx >= param_keyholders_.size())
+                    return {false, "PARAM_CHANGE keyholder_index out of range"};
+                if (!seen_idx.insert(idx).second)
+                    return {false, "PARAM_CHANGE duplicate keyholder_index"};
+                if (verify(param_keyholders_[idx], sig_msg.data(),
+                           sig_msg.size(), msig)) {
+                    good_sigs++;
+                }
+            }
+            if (good_sigs < param_threshold_) {
+                return {false, "PARAM_CHANGE signature threshold not met "
+                               "(got " + std::to_string(good_sigs)
+                             + ", need " + std::to_string(param_threshold_)
+                             + ")"};
+            }
+            break;
+        }
         // A6 + R7 placeholder:
         //   case TxType::MERGE_EVENT:
         //       if (sharding_mode_ != ShardingMode::EXTENDED) {

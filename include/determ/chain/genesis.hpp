@@ -147,6 +147,29 @@ struct GenesisConfig {
     // genesis hashes.
     std::string                     committee_region{};
 
+    // A5: governance mode. 0 = uncontrolled (consensus constants are
+    // genesis-pinned and immutable forever; current behavior — preserves
+    // byte-identical hashes for existing genesis files). 1 = governed
+    // (N-of-N keyholder multisig may emit PARAM_CHANGE txs to mutate a
+    // whitelisted parameter set mid-chain).
+    //
+    // Under governed mode, `param_keyholders` lists the deployment's
+    // founder Ed25519 pubkeys (set at genesis-build time, immutable
+    // except via PARAM_CHANGE referencing `param_keyholders` itself).
+    // `param_threshold` is the signature count required to ratify a
+    // PARAM_CHANGE; default = param_keyholders.size() (N-of-N).
+    //
+    // Whitelist of mutable parameter names (validator-enforced; off-list
+    // names rejected even with full N-of-N): `tx_commit_ms`,
+    // `block_sig_ms`, `abort_claim_ms`, `bft_escalation_threshold`,
+    // `SUSPENSION_SLASH`, `MIN_STAKE`, `UNSTAKE_DELAY`,
+    // `param_keyholders`, `param_threshold`. Off-list parameters
+    // (committee size K, consensus mode, sharding mode, chain identity,
+    // crypto primitives) require a new genesis = new chain.
+    uint8_t                         governance_mode{0};
+    std::vector<PubKey>             param_keyholders;
+    uint32_t                        param_threshold{0};
+
     std::vector<GenesisCreator>     initial_creators;
     std::vector<GenesisAllocation>  initial_balances;
 

@@ -29,6 +29,20 @@ enum class TxType : uint8_t {
     // for future use" error. Locks the wire-format slot so v2 can
     // ship without a tx-format break.
     REGION_CHANGE  = 5,
+    // A5: governance parameter-change tx. Valid only under
+    // `governance_mode = governed` (genesis-pinned). Carries
+    // `(parameter_name, new_value, effective_height)` plus a vector of
+    // (keyholder_index, ed_sig) pairs whose count meets/exceeds
+    // `param_threshold` (default N-of-N over `param_keyholders`).
+    // Payload encoding (canonical, little-endian where noted):
+    //   [name_len: u8][name: utf8]
+    //   [value_len: u16 LE][value: bytes]
+    //   [effective_height: u64 LE]
+    //   [sig_count: u8]
+    //   sig_count × { [keyholder_index: u16 LE][ed_sig: 64B] }
+    // Off-whitelist parameter names → rejected. Mode=uncontrolled →
+    // rejected. Insufficient threshold → rejected.
+    PARAM_CHANGE   = 6,
 };
 
 struct Transaction {

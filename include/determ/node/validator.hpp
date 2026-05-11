@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace determ::node {
 
@@ -51,6 +52,16 @@ public:
     //   EXTENDED — REGISTER region accepted (R1); MERGE_EVENT accepted
     //              (R7 will install the apply path).
     void set_sharding_mode(ShardingMode m) { sharding_mode_ = m; }
+
+    // A5: governance mode mirrored from genesis. 0 = uncontrolled
+    // (PARAM_CHANGE rejected outright); 1 = governed (PARAM_CHANGE
+    // validated against keyholder set + threshold over a whitelisted
+    // parameter name set).
+    void set_governance_mode(uint8_t m)            { governance_mode_ = m; }
+    void set_param_keyholders(std::vector<PubKey> ks) {
+        param_keyholders_ = std::move(ks);
+    }
+    void set_param_threshold(uint32_t t)           { param_threshold_ = t; }
 
     // rev.9 B2c.2-full: when the validator runs on a SHARD chain, the
     // committee-selection rand must come from the BEACON's chain, not the
@@ -120,6 +131,10 @@ private:
     // TimingProfile. Default CURRENT preserves legacy behavior for any
     // call site that constructs BlockValidator without an explicit setter.
     ShardingMode sharding_mode_{ShardingMode::CURRENT};
+    // A5: governance state mirrored from genesis.
+    uint8_t      governance_mode_{0};
+    std::vector<PubKey> param_keyholders_{};
+    uint32_t     param_threshold_{0};
     EpochRandProvider external_epoch_rand_{};
 };
 

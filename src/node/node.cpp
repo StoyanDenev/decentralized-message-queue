@@ -150,6 +150,12 @@ Node::Node(const Config& cfg)
         validator_.set_shard_id(cfg_.shard_id);
         validator_.set_committee_region(cfg_.committee_region);
         validator_.set_sharding_mode(cfg_.sharding_mode);
+        // A5: governance state mirrored from genesis. Uncontrolled
+        // chains pass mode=0 + empty keyholders, which makes the
+        // validator reject any PARAM_CHANGE outright (the default).
+        validator_.set_governance_mode(gcfg.governance_mode);
+        validator_.set_param_keyholders(gcfg.param_keyholders);
+        validator_.set_param_threshold(gcfg.param_threshold);
 
         // A6 startup gate: enforce that the operator-selected sharding
         // mode is consistent with the genesis being loaded. Defense in

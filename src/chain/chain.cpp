@@ -313,6 +313,21 @@ void Chain::apply_transactions(const Block& b) {
             sender.next_nonce++;
             break;
         }
+        // A5 PARAM_CHANGE: apply-time scaffold. Validator has already
+        // verified mode, payload shape, whitelist, and multisig
+        // threshold. The fee is consumed and the nonce advances so the
+        // sender's tx stream stays deterministic; staging the actual
+        // parameter mutation at `effective_height` is a follow-on
+        // (requires Chain to expose a pending_param_changes_ map +
+        // validator-state refresh hook at the boundary). Until then,
+        // a valid PARAM_CHANGE is recorded by its presence in the
+        // canonical block stream — operators / replayers can observe
+        // it; chain-wide constants are not yet mutated mid-chain.
+        case TxType::PARAM_CHANGE: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            sender.next_nonce++;
+            break;
+        }
         // rev.9 R1: REGION_CHANGE is rejected by the validator; an
         // unrecognized type at apply is a defensive no-op (skip the
         // tx, do not touch state, do not advance nonce — this matches

@@ -57,6 +57,8 @@ json GenesisConfig::to_json() const {
             {"balance", b.balance}
         });
     }
+    json keyholders = json::array();
+    for (auto& k : param_keyholders) keyholders.push_back(to_hex(k));
     return {
         {"chain_id",                 chain_id},
         {"m_creators",               m_creators},
@@ -76,6 +78,9 @@ json GenesisConfig::to_json() const {
         {"epoch_blocks",             epoch_blocks},
         {"shard_address_salt",       to_hex(shard_address_salt)},
         {"committee_region",         committee_region},
+        {"governance_mode",          governance_mode},
+        {"param_keyholders",         keyholders},
+        {"param_threshold",          param_threshold},
         {"initial_creators",         creators},
         {"initial_balances",         balances}
     };
@@ -121,6 +126,56 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.committee_region = normalize_region(j.value("committee_region",
                                                     std::string{}),
                                             "committee_region");
+
+    // A5: governance mode. Absent / 0 = uncontrolled (default, byte-
+    // identical to pre-A5 genesis files: keyholders empty, threshold 0,
+    // and the genesis-hash mix below skips these fields entirely).
+    c.governance_mode = j.value("governance_mode", uint8_t{0});
+    if (c.governance_mode > 1) {
+        throw std::runtime_error(
+            "genesis: unknown governance_mode "
+            + std::to_string(c.governance_mode)
+            + " (0=uncontrolled, 1=governed)");
+    }
+    if (j.contains("param_keyholders")) {
+        for (auto& kj : j["param_keyholders"]) {
+            c.param_keyholders.push_back(
+                from_hex_arr<32>(kj.get<std::string>()));
+        }
+    }
+    c.param_threshold = j.value("param_threshold", uint32_t{0});
+    if (c.governance_mode == 1) {
+        if (c.param_keyholders.empty()) {
+            throw std::runtime_error(
+                "genesis: governance_mode=governed requires at least one "
+                "param_keyholder");
+        }
+        if (c.param_keyholders.size() > 255) {
+            throw std::runtime_error(
+                "genesis: param_keyholders count exceeds 255 (got "
+                + std::to_string(c.param_keyholders.size()) + ")");
+        }
+        if (c.param_threshold == 0) {
+            // Default to N-of-N when threshold field is absent/zero.
+            c.param_threshold =
+                static_cast<uint32_t>(c.param_keyholders.size());
+        }
+        if (c.param_threshold > c.param_keyholders.size()) {
+            throw std::runtime_error(
+                "genesis: param_threshold "
+                + std::to_string(c.param_threshold)
+                + " exceeds keyholder count "
+                + std::to_string(c.param_keyholders.size()));
+        }
+    } else {
+        // Uncontrolled: reject stray governance fields to avoid silent
+        // mis-deployment. Empty/zero is fine.
+        if (!c.param_keyholders.empty() || c.param_threshold != 0) {
+            throw std::runtime_error(
+                "genesis: governance_mode=uncontrolled must not set "
+                "param_keyholders or param_threshold");
+        }
+    }
 
     if (j.contains("initial_creators")) {
         for (auto& cj : j["initial_creators"]) {
@@ -246,6 +301,17 @@ Block make_genesis_block(const GenesisConfig& cfg) {
         rb.append(cfg.committee_region);
     }
     for (auto& c : cfg.initial_creators) rb.append(c.ed_pub.data(), c.ed_pub.size());
+    // A5: governance fields. governance_mode == 0 (uncontrolled) and
+    // empty keyholders is the pre-A5 default; skip the mix entirely
+    // so legacy / uncontrolled genesis files remain byte-identical
+    // (backward-compat invariant: pre-A5 hashes are preserved).
+    if (cfg.governance_mode != 0 || !cfg.param_keyholders.empty()) {
+        rb.append(static_cast<uint8_t>(cfg.governance_mode));
+        rb.append(static_cast<uint8_t>(cfg.param_keyholders.size()));
+        for (auto& k : cfg.param_keyholders)
+            rb.append(k.data(), k.size());
+        rb.append(static_cast<uint64_t>(cfg.param_threshold));
+    }
     g.cumulative_rand = rb.finalize();
 
     return g;
