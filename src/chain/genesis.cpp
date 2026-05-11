@@ -63,6 +63,8 @@ json GenesisConfig::to_json() const {
         {"k_block_sigs",             k_block_sigs},
         {"block_subsidy",            block_subsidy},
         {"subsidy_pool_initial",     subsidy_pool_initial},
+        {"subsidy_mode",             subsidy_mode},
+        {"lottery_jackpot_multiplier", lottery_jackpot_multiplier},
         {"bft_enabled",              bft_enabled},
         {"bft_escalation_threshold", bft_escalation_threshold},
         {"inclusion_model",         static_cast<uint8_t>(inclusion_model)},
@@ -85,6 +87,22 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.k_block_sigs  = j.value("k_block_sigs",  c.m_creators);   // default to M (strong)
     c.block_subsidy = j.value("block_subsidy", uint64_t{0});
     c.subsidy_pool_initial = j.value("subsidy_pool_initial", uint64_t{0});
+    c.subsidy_mode  = j.value("subsidy_mode",  uint8_t{0});
+    c.lottery_jackpot_multiplier = j.value("lottery_jackpot_multiplier",
+                                            uint32_t{0});
+    // E3 validation: under LOTTERY, multiplier must be >= 2 (M=1 is just FLAT;
+    // M=0 would divide-by-zero).
+    if (c.subsidy_mode == 1 && c.lottery_jackpot_multiplier < 2) {
+        throw std::runtime_error(
+            "genesis: subsidy_mode=1 (LOTTERY) requires "
+            "lottery_jackpot_multiplier >= 2 (got "
+            + std::to_string(c.lottery_jackpot_multiplier) + ")");
+    }
+    if (c.subsidy_mode > 1) {
+        throw std::runtime_error(
+            "genesis: unknown subsidy_mode "
+            + std::to_string(c.subsidy_mode) + " (0=FLAT, 1=LOTTERY)");
+    }
     c.bft_enabled              = j.value("bft_enabled",              true);
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
     c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));

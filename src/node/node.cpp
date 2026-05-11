@@ -376,6 +376,8 @@ Node::Node(const Config& cfg)
             chain_ = chain::Chain(std::move(g));
             chain_.set_block_subsidy(genesis_subsidy);
             chain_.set_subsidy_pool_initial(gcfg_opt->subsidy_pool_initial);
+            chain_.set_subsidy_mode(gcfg_opt->subsidy_mode);
+            chain_.set_lottery_jackpot_multiplier(gcfg_opt->lottery_jackpot_multiplier);
             chain_.set_min_stake(genesis_min_stake);
             chain_.set_shard_routing(genesis_shard_count,
                                        genesis_shard_salt,

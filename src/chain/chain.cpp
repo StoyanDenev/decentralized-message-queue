@@ -301,11 +301,35 @@ void Chain::apply_transactions(const Block& b) {
     // subsidy = min(block_subsidy_, remaining). Once the pool drains,
     // subsidy_this_block == 0 and the chain runs on transaction fees
     // alone.
-    uint64_t subsidy_this_block = block_subsidy_;
+    //
+    // E3 lottery mode: when subsidy_mode_ == 1, replace the FLAT per-
+    // block subsidy with a two-point draw seeded by this block's
+    // `cumulative_rand`. Probability 1/M of paying block_subsidy_ * M
+    // (jackpot block), probability (M-1)/M of paying 0. Expected per-
+    // block value equals FLAT subsidy. The draw is deterministic given
+    // the block — every honest node computes the same payout.
+    uint64_t base_subsidy = block_subsidy_;
+    if (subsidy_mode_ == 1 && lottery_jackpot_multiplier_ >= 2) {
+        // Read 8 bytes of cumulative_rand as the lottery seed. The
+        // commit-reveal protocol guarantees no committee member could
+        // have predicted cumulative_rand at Phase-1 decision time, so
+        // selective-abort against a jackpot is information-theoretically
+        // defeated for the same reason regular `R` is.
+        uint64_t lottery = 0;
+        for (int i = 0; i < 8; ++i) {
+            lottery = (lottery << 8) | b.cumulative_rand[i];
+        }
+        if (lottery % lottery_jackpot_multiplier_ == 0) {
+            base_subsidy = block_subsidy_ * lottery_jackpot_multiplier_;
+        } else {
+            base_subsidy = 0;
+        }
+    }
+    uint64_t subsidy_this_block = base_subsidy;
     if (subsidy_pool_initial_ != 0) {
         uint64_t remaining = subsidy_pool_initial_ > accumulated_subsidy_
             ? subsidy_pool_initial_ - accumulated_subsidy_ : 0;
-        subsidy_this_block = std::min(block_subsidy_, remaining);
+        subsidy_this_block = std::min(base_subsidy, remaining);
     }
     uint64_t total_distributed = total_fees + subsidy_this_block;
     if (total_distributed > 0 && !b.creators.empty()) {
@@ -503,8 +527,10 @@ json Chain::serialize_state(uint32_t header_count) const {
     // Genesis-pinned constants the restorer needs to apply subsequent
     // blocks correctly (creator credit, validator-eligibility gate,
     // address routing).
-    snap["block_subsidy"]        = block_subsidy_;
-    snap["subsidy_pool_initial"] = subsidy_pool_initial_;
+    snap["block_subsidy"]                = block_subsidy_;
+    snap["subsidy_pool_initial"]         = subsidy_pool_initial_;
+    snap["subsidy_mode"]                 = subsidy_mode_;
+    snap["lottery_jackpot_multiplier"]   = lottery_jackpot_multiplier_;
     snap["min_stake"]     = min_stake_;
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
@@ -547,6 +573,9 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     Chain c;
     c.block_subsidy_ = snap.value("block_subsidy", uint64_t{0});
     c.subsidy_pool_initial_ = snap.value("subsidy_pool_initial", uint64_t{0});
+    c.subsidy_mode_         = snap.value("subsidy_mode",         uint8_t{0});
+    c.lottery_jackpot_multiplier_ =
+        snap.value("lottery_jackpot_multiplier", uint32_t{0});
     c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
     c.shard_count_   = snap.value("shard_count",   uint32_t{1});
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});

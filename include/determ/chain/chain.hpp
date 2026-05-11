@@ -71,6 +71,11 @@ public:
         return subsidy_pool_initial_ > accumulated_subsidy_
             ? subsidy_pool_initial_ - accumulated_subsidy_ : 0;
     }
+    // E3: lottery mode (0=FLAT, 1=LOTTERY). Genesis-pinned.
+    uint8_t  subsidy_mode()                 const { return subsidy_mode_; }
+    void     set_subsidy_mode(uint8_t m)          { subsidy_mode_ = m; }
+    uint32_t lottery_jackpot_multiplier()   const { return lottery_jackpot_multiplier_; }
+    void     set_lottery_jackpot_multiplier(uint32_t m) { lottery_jackpot_multiplier_ = m; }
 
     // rev.8 follow-on: validator-eligibility stake threshold.
     // STAKE_INCLUSION chains use 1000 (MIN_STAKE default);
@@ -193,6 +198,13 @@ private:
     // reaches this cap, subsequent blocks pay only transaction fees;
     // chain remains live, validators are rewarded purely from fees.
     uint64_t                                    subsidy_pool_initial_{0};
+    // E3: lottery distribution. 0 = FLAT (default), 1 = LOTTERY. Under
+    // LOTTERY each block draws from a two-point distribution seeded by
+    // its own `cumulative_rand`. lottery_jackpot_multiplier_ is the M in
+    // {prob=1/M -> pay block_subsidy*M; prob=(M-1)/M -> pay 0}. Expected
+    // per-block value equals FLAT subsidy.
+    uint8_t                                     subsidy_mode_{0};
+    uint32_t                                    lottery_jackpot_multiplier_{0};
     uint64_t                                    min_stake_{1000};
     uint32_t                                    shard_count_{1};
     Hash                                        shard_salt_{};

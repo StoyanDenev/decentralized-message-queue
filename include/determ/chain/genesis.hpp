@@ -85,6 +85,18 @@ struct GenesisConfig {
     // tracks the actually-paid amount, so the invariant holds across
     // the exhaustion transition.
     uint64_t                        subsidy_pool_initial{0};
+    // E3: subsidy distribution mode.
+    //   FLAT     (0, default): each block pays `block_subsidy` evenly across
+    //                          creators. Steady, predictable, current behavior.
+    //   LOTTERY  (1): each block draws from a two-point distribution seeded by
+    //                 the block's `cumulative_rand`. Probability `1/M` of paying
+    //                 `block_subsidy * M`, otherwise 0. Expected value per block
+    //                 equals FLAT subsidy — total issuance schedule unchanged.
+    //                 M = `lottery_jackpot_multiplier` (must be >= 2).
+    // Pairs cleanly with E4 finite subsidy fund: lottery payouts still cap at
+    // remaining pool; once drained, lottery silently stops paying.
+    uint8_t                         subsidy_mode{0};                 // 0=FLAT, 1=LOTTERY
+    uint32_t                        lottery_jackpot_multiplier{0};   // required when LOTTERY, ignored when FLAT
 
     // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
     // `bft_escalation_threshold` consecutive Phase-1 aborts at the same
