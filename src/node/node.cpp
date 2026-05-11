@@ -196,10 +196,30 @@ Node::Node(const Config& cfg)
                         }
                     }
                 }
-                // MIN_STAKE / UNSTAKE_DELAY / SUSPENSION_SLASH / timing
-                // fields are not mirrored to the validator (they're chain-
-                // local or static-constant; the chain already updated
-                // its own min_stake_, and the others are Phase 3 work).
+                // A5 Phase 4: producer timing fields. Reads happen at
+                // timer-scheduling time inside on_phase_1_done /
+                // on_phase_2_done, so any update here is picked up on
+                // the next round. These do not need to live on Chain
+                // (replay doesn't depend on timing); cfg_ is the
+                // canonical runtime carrier.
+                else if (name == "tx_commit_ms" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    cfg_.tx_commit_ms = static_cast<uint32_t>(v);
+                }
+                else if (name == "block_sig_ms" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    cfg_.block_sig_ms = static_cast<uint32_t>(v);
+                }
+                else if (name == "abort_claim_ms" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    cfg_.abort_claim_ms = static_cast<uint32_t>(v);
+                }
+                // MIN_STAKE / UNSTAKE_DELAY / SUSPENSION_SLASH are
+                // chain-local: the chain wrote them itself before this
+                // hook fired, so no mirror needed here.
             });
 
         // A6 startup gate: enforce that the operator-selected sharding

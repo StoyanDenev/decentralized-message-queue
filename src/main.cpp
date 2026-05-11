@@ -1144,6 +1144,150 @@ static int cmd_send_anon(int argc, char** argv) {
     return 0;
 }
 
+// A5: build, sign, and submit a PARAM_CHANGE tx.
+//   determ submit-param-change \
+//     --priv <sender_priv_hex> \
+//     --name <param_name> \
+//     --value-hex <hex_le_bytes> \
+//     --effective-height <N> \
+//     --keyholder-sig <idx>:<priv_hex> [--keyholder-sig <idx>:<priv_hex> ...] \
+//     [--fee <N>] [--rpc-port <P>]
+//
+// The sender pays the fee; the keyholder private keys are used purely
+// for signing the (name, value, effective_height) tuple — no on-chain
+// account for keyholders is required. Each --keyholder-sig produces
+// one (idx, sig) entry inside the canonical payload. The canonical
+// signing message format mirrors validator.cpp's check.
+static int cmd_submit_param_change(int argc, char** argv) {
+    std::string priv_hex;
+    std::string from_domain;   // required: registered domain that pays the fee
+    std::string name;
+    std::string value_hex;
+    uint64_t    effective_height = 0;
+    uint64_t    fee  = 0;
+    uint16_t    port = get_rpc_port(argc, argv);
+    std::vector<std::pair<uint16_t, std::string>> keyholder_sigs;
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv")             priv_hex = argv[i + 1];
+        else if (a == "--from")             from_domain = argv[i + 1];
+        else if (a == "--name")             name = argv[i + 1];
+        else if (a == "--value-hex")        value_hex = argv[i + 1];
+        else if (a == "--effective-height") effective_height = std::stoull(argv[i + 1]);
+        else if (a == "--fee")              fee = std::stoull(argv[i + 1]);
+        else if (a == "--keyholder-sig") {
+            std::string s = argv[i + 1];
+            auto colon = s.find(':');
+            if (colon == std::string::npos) {
+                std::cerr << "--keyholder-sig requires <idx>:<priv_hex>\n";
+                return 1;
+            }
+            uint16_t idx = static_cast<uint16_t>(std::stoul(s.substr(0, colon)));
+            keyholder_sigs.emplace_back(idx, s.substr(colon + 1));
+        }
+    }
+    if (priv_hex.empty() || from_domain.empty() || name.empty()
+        || value_hex.empty() || keyholder_sigs.empty()) {
+        std::cerr << "Usage: determ submit-param-change --priv <hex> "
+                     "--from <domain> --name <NAME> --value-hex <hex> "
+                     "--effective-height <N> "
+                     "--keyholder-sig <idx>:<priv_hex> [more...] "
+                     "[--fee <N>] [--rpc-port <P>]\n";
+        return 1;
+    }
+
+    std::vector<uint8_t> value;
+    try { value = from_hex(value_hex); }
+    catch (std::exception& e) {
+        std::cerr << "Invalid --value-hex: " << e.what() << "\n"; return 1;
+    }
+    if (name.size() > 255) {
+        std::cerr << "--name too long (>255 bytes)\n"; return 1;
+    }
+    if (value.size() > 0xffff) {
+        std::cerr << "--value-hex too long (>65535 bytes)\n"; return 1;
+    }
+
+    // Build the canonical signing message that each keyholder signs:
+    //   [name_len: u8][name][value_len: u16 LE][value][effective_height: u64 LE]
+    std::vector<uint8_t> sig_msg;
+    sig_msg.push_back(static_cast<uint8_t>(name.size()));
+    sig_msg.insert(sig_msg.end(), name.begin(), name.end());
+    sig_msg.push_back(static_cast<uint8_t>(value.size() & 0xff));
+    sig_msg.push_back(static_cast<uint8_t>((value.size() >> 8) & 0xff));
+    sig_msg.insert(sig_msg.end(), value.begin(), value.end());
+    for (int i = 0; i < 8; ++i)
+        sig_msg.push_back(static_cast<uint8_t>((effective_height >> (8*i)) & 0xff));
+
+    // Build the full tx payload: sig_msg + [sig_count: u8] + each (idx, sig).
+    std::vector<uint8_t> payload = sig_msg;
+    payload.push_back(static_cast<uint8_t>(keyholder_sigs.size()));
+    for (auto& [idx, kh_hex] : keyholder_sigs) {
+        crypto::NodeKey kh;
+        try { kh.priv_seed = from_hex_arr<32>(kh_hex); }
+        catch (std::exception& e) {
+            std::cerr << "Invalid keyholder priv hex: " << e.what() << "\n";
+            return 1;
+        }
+        EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+            EVP_PKEY_ED25519, nullptr, kh.priv_seed.data(), 32);
+        if (!pkey) { std::cerr << "keyholder priv invalid\n"; return 1; }
+        size_t pub_len = 32;
+        EVP_PKEY_get_raw_public_key(pkey, kh.pub.data(), &pub_len);
+        EVP_PKEY_free(pkey);
+        Signature sig = crypto::sign(kh, sig_msg.data(), sig_msg.size());
+        payload.push_back(static_cast<uint8_t>(idx & 0xff));
+        payload.push_back(static_cast<uint8_t>((idx >> 8) & 0xff));
+        payload.insert(payload.end(), sig.begin(), sig.end());
+    }
+
+    // Sender side: derive anon address, query nonce, sign + submit.
+    crypto::NodeKey sender;
+    try { sender.priv_seed = from_hex_arr<32>(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
+    }
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
+    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
+    size_t pub_len = 32;
+    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
+    EVP_PKEY_free(pkey);
+
+    // Sender must be a registered domain (anon accounts may only
+    // TRANSFER per the validator). The provided --from is used as-is;
+    // the node's registry resolves it to a pubkey, which must match
+    // the --priv key.
+    uint64_t nonce = 0;
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "nonce",
+                                  {{"domain", from_domain}});
+        nonce = r.value("next_nonce", uint64_t{0});
+    } catch (std::exception& e) {
+        std::cerr << "nonce query failed: " << e.what() << "\n"; return 1;
+    }
+
+    chain::Transaction tx;
+    tx.type    = chain::TxType::PARAM_CHANGE;
+    tx.from    = from_domain;
+    tx.to      = from_domain;   // ignored for PARAM_CHANGE
+    tx.amount  = 0;
+    tx.fee     = fee;
+    tx.nonce   = nonce;
+    tx.payload = payload;
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(sender, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "submit_tx", {{"tx", tx.to_json()}});
+        std::cout << r.dump(2) << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "submit_tx failed: " << e.what() << "\n"; return 1;
+    }
+    return 0;
+}
+
 static int cmd_genesis_tool(int argc, char** argv) {
     if (argc < 1) {
         std::cerr << "Usage: determ genesis-tool {peer-info|build|build-sharded} ...\n";
@@ -1197,6 +1341,7 @@ int main(int argc, char** argv) {
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);
     if (cmd == "stake_info")    return cmd_stake_info(sub_argc, sub_argv);
+    if (cmd == "submit-param-change") return cmd_submit_param_change(sub_argc, sub_argv);
     if (cmd == "genesis-tool")  return cmd_genesis_tool(sub_argc, sub_argv);
     if (cmd == "account")       return cmd_account(sub_argc, sub_argv);
     if (cmd == "send_anon")     return cmd_send_anon(sub_argc, sub_argv);
