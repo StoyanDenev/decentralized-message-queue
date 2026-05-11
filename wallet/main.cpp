@@ -21,6 +21,7 @@
 #include "envelope.hpp"
 #include "recovery.hpp"
 #include "opaque_primitives.hpp"
+#include "opaque_adapter.hpp"
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -359,6 +360,54 @@ int cmd_oprf_smoke(int argc, char** argv) {
     return 0;
 }
 
+// A2 Phase 5: exercise the OPAQUE adapter directly. Used by the
+// regression test to confirm the adapter's register/authenticate
+// round-trip works and that wrong passwords are rejected.
+int cmd_opaque_handshake(int argc, char** argv) {
+    std::string mode, password, record_hex;
+    int guardian_id = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--mode"        && i + 1 < argc) mode        = argv[++i];
+        else if (a == "--password"    && i + 1 < argc) password    = argv[++i];
+        else if (a == "--guardian-id" && i + 1 < argc) guardian_id = std::stoi(argv[++i]);
+        else if (a == "--record"      && i + 1 < argc) record_hex  = argv[++i];
+    }
+    if (mode.empty() || password.empty() || guardian_id < 0 || guardian_id > 255) {
+        std::cerr << "Usage: determ-wallet opaque-handshake "
+                     "--mode {register|authenticate} --password <str> "
+                     "--guardian-id <0..255> [--record <hex>]\n";
+        return 1;
+    }
+    if (mode == "register") {
+        auto r = opaque_adapter::register_password(password,
+                       static_cast<uint8_t>(guardian_id));
+        if (!r) { std::cerr << "register failed\n"; return 1; }
+        std::cout << "suite:      " << opaque_adapter::suite_name() << "\n";
+        std::cout << "is_stub:    " << (opaque_adapter::is_stub() ? "true" : "false") << "\n";
+        std::cout << "record:     " << to_hex(r->record)     << "\n";
+        std::cout << "export_key: " << to_hex(r->export_key) << "\n";
+        return 0;
+    }
+    if (mode == "authenticate") {
+        if (record_hex.empty()) {
+            std::cerr << "authenticate requires --record\n"; return 1;
+        }
+        std::vector<uint8_t> record;
+        try { record = from_hex(record_hex); }
+        catch (std::exception& e) {
+            std::cerr << "record hex: " << e.what() << "\n"; return 1;
+        }
+        auto k = opaque_adapter::authenticate_password(password, record,
+                       static_cast<uint8_t>(guardian_id));
+        if (!k) { std::cerr << "authenticate failed\n"; return 2; }
+        std::cout << "export_key: " << to_hex(*k) << "\n";
+        return 0;
+    }
+    std::cerr << "Unknown --mode: " << mode << "\n";
+    return 1;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -375,6 +424,9 @@ void print_usage() {
         "  recover --in <file> --password <str>       Reconstruct the secret\n"
         "          [--guardians <i,j,k,...>]\n"
         "  oprf-smoke                                 Verify libsodium primitives wired\n"
+        "  opaque-handshake --mode {register|authenticate}\n"
+        "                   --password <str> --guardian-id <0..255> [--record <hex>]\n"
+        "                                             Exercise the OPAQUE adapter (stub in Phase 5)\n"
         "  version                                    Print version banner\n"
         "\n"
         "Pending (Phase 4):\n"
@@ -392,10 +444,12 @@ int main(int argc, char** argv) {
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
+    if (cmd == "opaque-handshake") return cmd_opaque_handshake(argc - 2, argv + 2);
     if (cmd == "version") {
-        std::cout << "determ-wallet v1.x Phase 4 (Shamir + AEAD envelope + "
-                     "passphrase recovery + libsodium primitives; "
-                     "libopaque integration pending Phase 5)\n";
+        std::cout << "determ-wallet v1.x Phase 5 (Shamir + AEAD envelope + "
+                     "passphrase recovery + libsodium primitives + "
+                     "OPAQUE adapter interface [stub]; libopaque vendoring "
+                     "pending Phase 6)\n";
         return 0;
     }
     if (cmd == "help" || cmd == "--help" || cmd == "-h") {
