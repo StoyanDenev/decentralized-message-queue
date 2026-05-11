@@ -27,6 +27,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA7 | [CrossShardReceipts.md](CrossShardReceipts.md) | Cross-shard atomicity: no double-credit, A1 invariant composes | ✓ |
 | FA8 | [RegionalSharding.md](RegionalSharding.md) | Regional pinning preserves FA1/FA4/FA5/FA6/FA7 | ✓ |
 | FA9 | [UnderQuorumMerge.md](UnderQuorumMerge.md) | R4 under-quorum merge preserves FA1/FA7 across BEGIN/END | ✓ |
+| FA10 | [Governance.md](Governance.md) | A5 PARAM_CHANGE soundness: no unauthorized mutation, off-whitelist immunity | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
@@ -111,5 +112,6 @@ Per-property bounds:
 | FA5 BFT fork | 2⁻¹²⁸ · K_eff (forge intersection) | 2⁻⁶² for K_eff ≤ 64 |
 | FA6 false-positive slash | 2⁻¹²⁸ | 2⁻⁶⁸ |
 | FA7 receipt fabrication | K · 2⁻¹²⁸ | 2⁻⁶² for K ≤ 64 |
+| FA10 unauthorized PARAM_CHANGE | 2⁻¹²⁸·(N−1) for N keyholders | 2⁻⁴⁵² for N = 5 |
 
 Under Grover (PQ), each `2⁻¹²⁸` degrades to `2⁻⁶⁴`. The protocol remains operationally secure but tighter PQ-signature migration is recommended.
