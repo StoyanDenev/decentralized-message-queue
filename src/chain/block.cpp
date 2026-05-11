@@ -289,6 +289,19 @@ std::vector<uint8_t> Block::signing_bytes() const {
         }
     }
 
+    // R4 Phase 3: bind partner_subset_hash into block signing-bytes
+    // ONLY when non-zero. Default zero-hash preserves byte-identical
+    // signing bytes for all pre-R4 / non-merged blocks — every existing
+    // test stays hash-stable. Non-zero binds the partner shard's tx
+    // subset commitment into the K-of-K committee signature, closing
+    // the cross-chain merged-signing path described in the R4 design.
+    {
+        Hash zero{};
+        if (partner_subset_hash != zero) {
+            b.append(partner_subset_hash);
+        }
+    }
+
     Hash h = b.finalize();
     return std::vector<uint8_t>(h.begin(), h.end());
 }
@@ -370,6 +383,15 @@ json Block::to_json() const {
     for (auto& a : initial_state) is_arr.push_back(a.to_json());
     j["initial_state"]  = is_arr;
 
+    // R4 Phase 3: serialize partner_subset_hash only when non-zero.
+    // Pre-R4 / non-merged blocks omit the key entirely, keeping JSON
+    // byte-identical for existing chain.json files.
+    {
+        Hash zero{};
+        if (partner_subset_hash != zero)
+            j["partner_subset_hash"] = to_hex(partner_subset_hash);
+    }
+
     return j;
 }
 
@@ -442,6 +464,10 @@ Block Block::from_json(const json& j) {
     if (j.contains("initial_state"))
         for (auto& ia : j["initial_state"])
             b.initial_state.push_back(GenesisAlloc::from_json(ia));
+
+    if (j.contains("partner_subset_hash"))
+        b.partner_subset_hash =
+            from_hex_arr<32>(j["partner_subset_hash"].get<std::string>());
 
     return b;
 }

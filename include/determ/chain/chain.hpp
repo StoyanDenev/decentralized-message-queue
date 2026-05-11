@@ -120,6 +120,16 @@ public:
         if (out_partner) *out_partner = it->second;
         return true;
     }
+    // Inverse lookup: shard_ids whose merge partner is `partner`. Used
+    // by Phase 3's eligibility stress branch — partner T extends its
+    // committee pool with validators from every refugee shard that
+    // currently points at T.
+    std::vector<ShardId> shards_absorbed_by(ShardId partner) const {
+        std::vector<ShardId> out;
+        for (auto& [s, p] : merge_state_)
+            if (p == partner) out.push_back(s);
+        return out;
+    }
 
     // A5 Phase 2: governance parameter staging. A validated PARAM_CHANGE
     // tx stages a (name, value) pair to activate at `effective_height`.

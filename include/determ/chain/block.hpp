@@ -275,6 +275,27 @@ struct Block {
     // duplicate-bundle gossip. Empty for SINGLE chains.
     std::vector<CrossShardReceipt> inbound_receipts;
 
+    // R4 Phase 3: when a merged committee produces a block on shard T
+    // while absorbing shard S, the committee's K-of-K signatures cover
+    // H(merged_tx_set) — the union of T's and S's tx subsets at this
+    // height. Each chain publishes only its own tx subset in
+    // `transactions`; the partner's subset is summarized by this
+    // hash so a chain can verify its own block signature locally
+    // (recompute signed digest = H(my_subset || partner_subset_hash))
+    // without ever needing to see the partner's subset.
+    //
+    // Zero-hash (default) means "no partner" — the block was produced
+    // under regular non-merged consensus. Validator (Phase 3) gates:
+    //   * non-zero partner_subset_hash requires the chain to know that
+    //     this shard is currently absorbing or absorbed (consult
+    //     Chain::merge_state_).
+    //   * zero partner_subset_hash on a chain currently in a merge
+    //     transition window is also valid — merge BEGIN/END happens at
+    //     effective_height boundaries; not every block in a merged
+    //     window need carry the union digest (only blocks whose
+    //     committee is the merged committee do).
+    Hash partner_subset_hash{};
+
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.
     std::vector<GenesisAlloc> initial_state;
