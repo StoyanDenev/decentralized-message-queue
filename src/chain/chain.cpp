@@ -5,6 +5,7 @@
 #include <determ/chain/params.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
+#include <determ/crypto/merkle.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
@@ -138,101 +139,153 @@ void Chain::stage_param_change(uint64_t effective_height,
 // stable position. The position matters for the hash, so additions go
 // at the end (or behind a feature flag that only activates from a
 // flag-day height onward).
+// v2.1: Merkle tree state commitment. The previous "single-SHA-256
+// over canonical bytes" served the S-033 foundation; this revision
+// upgrades the computation to a sorted-leaves Merkle tree without
+// changing the wire format (still a 32-byte Hash in Block.state_root).
+//
+// Each state entry becomes a Merkle leaf with a domain-prefixed key:
+//   "a:" + domain        for accounts_
+//   "s:" + domain        for stakes_
+//   "r:" + domain        for registrants_
+//   "i:" + src_shard_be8 + tx_hash  for applied_inbound_receipts_
+//   "b:" + domain        for abort_records_ (S-032 cache)
+//   "m:" + shard_id_be4  for merge_state_
+//   "p:" + eff_height_be8 + idx_be4  for pending_param_changes_
+//   "k:const_name"       for genesis-pinned constants
+//   "c:counter_name"     for A1 counters
+//
+// Key prefixes domain-separate the namespaces so a key collision
+// across maps (e.g., the same domain appearing in both accounts_ and
+// stakes_) produces distinct leaves. Value-hash is the SHA-256 of a
+// fixed canonical byte serialization for that entry type.
+//
+// Upgrade path for inclusion proofs (v2.2 light clients): the same
+// (key, value_hash) leaves feed merkle_proof(); no schema change
+// required. Light clients query a peer for "account 'alice'", receive
+// the (key, value_hash, sorted_index, leaf_count, proof) tuple, and
+// verify against the committee-signed Block.state_root.
 Hash Chain::compute_state_root() const {
-    crypto::SHA256Builder b;
+    std::vector<crypto::MerkleLeaf> leaves;
+    leaves.reserve(accounts_.size() + stakes_.size() + registrants_.size()
+                  + applied_inbound_receipts_.size() + abort_records_.size()
+                  + merge_state_.size() + pending_param_changes_.size()
+                  + 16); // constants + counters slack
 
-    // (1) accounts_ — sorted by domain.
-    b.append(static_cast<uint64_t>(accounts_.size()));
+    auto k_with_prefix = [](const std::string& prefix, const std::string& s) {
+        std::vector<uint8_t> out;
+        out.reserve(prefix.size() + s.size());
+        out.insert(out.end(), prefix.begin(), prefix.end());
+        out.insert(out.end(), s.begin(), s.end());
+        return out;
+    };
+    auto hash_bytes = [](crypto::SHA256Builder& b) { return b.finalize(); };
+
+    // accounts_
     for (auto& [domain, acct] : accounts_) {
-        b.append(static_cast<uint64_t>(domain.size()));
-        b.append(domain);
+        crypto::SHA256Builder b;
         b.append(acct.balance);
         b.append(acct.next_nonce);
+        leaves.push_back({k_with_prefix("a:", domain), hash_bytes(b)});
     }
-
-    // (2) stakes_ — sorted by domain.
-    b.append(static_cast<uint64_t>(stakes_.size()));
+    // stakes_
     for (auto& [domain, st] : stakes_) {
-        b.append(static_cast<uint64_t>(domain.size()));
-        b.append(domain);
+        crypto::SHA256Builder b;
         b.append(st.locked);
         b.append(st.unlock_height);
+        leaves.push_back({k_with_prefix("s:", domain), hash_bytes(b)});
     }
-
-    // (3) registrants_ — sorted by domain.
-    b.append(static_cast<uint64_t>(registrants_.size()));
+    // registrants_
     for (auto& [domain, r] : registrants_) {
-        b.append(static_cast<uint64_t>(domain.size()));
-        b.append(domain);
+        crypto::SHA256Builder b;
         b.append(r.ed_pub.data(), r.ed_pub.size());
         b.append(r.registered_at);
         b.append(r.active_from);
         b.append(r.inactive_from);
         b.append(static_cast<uint64_t>(r.region.size()));
         b.append(r.region);
+        leaves.push_back({k_with_prefix("r:", domain), hash_bytes(b)});
     }
-
-    // (4) applied_inbound_receipts_ — std::set is sorted.
-    b.append(static_cast<uint64_t>(applied_inbound_receipts_.size()));
+    // applied_inbound_receipts_  (key = "i:" + src_be8 + tx_hash)
     for (auto& [src, tx_hash] : applied_inbound_receipts_) {
-        b.append(static_cast<uint64_t>(src));
-        b.append(tx_hash);
+        std::vector<uint8_t> key;
+        key.reserve(2 + 8 + 32);
+        key.push_back('i'); key.push_back(':');
+        for (int i = 7; i >= 0; --i) key.push_back((src >> (8*i)) & 0xff);
+        key.insert(key.end(), tx_hash.begin(), tx_hash.end());
+        crypto::SHA256Builder b;
+        uint8_t marker = 1; b.append(&marker, 1);  // presence marker
+        leaves.push_back({std::move(key), hash_bytes(b)});
     }
-
-    // (5) abort_records_ — sorted by domain (S-032 cache field).
-    b.append(static_cast<uint64_t>(abort_records_.size()));
+    // abort_records_  (S-032 cache)
     for (auto& [domain, ar] : abort_records_) {
-        b.append(static_cast<uint64_t>(domain.size()));
-        b.append(domain);
+        crypto::SHA256Builder b;
         b.append(ar.count);
         b.append(ar.last_block);
+        leaves.push_back({k_with_prefix("b:", domain), hash_bytes(b)});
     }
-
-    // (6) merge_state_ — sorted by shard_id.
-    b.append(static_cast<uint64_t>(merge_state_.size()));
+    // merge_state_  (key = "m:" + shard_id_be4)
     for (auto& [shard, info] : merge_state_) {
-        b.append(static_cast<uint64_t>(shard));
+        std::vector<uint8_t> key;
+        key.reserve(2 + 4);
+        key.push_back('m'); key.push_back(':');
+        for (int i = 3; i >= 0; --i) key.push_back((shard >> (8*i)) & 0xff);
+        crypto::SHA256Builder b;
         b.append(static_cast<uint64_t>(info.partner_id));
         b.append(static_cast<uint64_t>(info.refugee_region.size()));
         b.append(info.refugee_region);
+        leaves.push_back({std::move(key), hash_bytes(b)});
     }
-
-    // (7) pending_param_changes_ — sorted by effective_height.
-    b.append(static_cast<uint64_t>(pending_param_changes_.size()));
+    // pending_param_changes_  (key = "p:" + eff_be8 + idx_be4)
     for (auto& [eff, entries] : pending_param_changes_) {
-        b.append(eff);
-        b.append(static_cast<uint64_t>(entries.size()));
-        for (auto& [name, value] : entries) {
+        for (size_t idx = 0; idx < entries.size(); ++idx) {
+            auto& [name, value] = entries[idx];
+            std::vector<uint8_t> key;
+            key.reserve(2 + 8 + 4);
+            key.push_back('p'); key.push_back(':');
+            for (int i = 7; i >= 0; --i) key.push_back((eff >> (8*i)) & 0xff);
+            for (int i = 3; i >= 0; --i)
+                key.push_back((uint32_t(idx) >> (8*i)) & 0xff);
+            crypto::SHA256Builder b;
             b.append(static_cast<uint64_t>(name.size()));
             b.append(name);
             b.append(static_cast<uint64_t>(value.size()));
             if (!value.empty()) b.append(value.data(), value.size());
+            leaves.push_back({std::move(key), hash_bytes(b)});
         }
     }
+    // genesis-pinned constants (one leaf each, fixed keys).
+    auto const_leaf = [&](const char* name, uint64_t value) {
+        crypto::SHA256Builder b;
+        b.append(value);
+        leaves.push_back({k_with_prefix("k:", name), hash_bytes(b)});
+    };
+    const_leaf("block_subsidy",                block_subsidy_);
+    const_leaf("subsidy_pool_initial",         subsidy_pool_initial_);
+    const_leaf("subsidy_mode",                 subsidy_mode_);
+    const_leaf("lottery_jackpot_multiplier",   lottery_jackpot_multiplier_);
+    const_leaf("min_stake",                    min_stake_);
+    const_leaf("suspension_slash",             suspension_slash_);
+    const_leaf("unstake_delay",                unstake_delay_);
+    const_leaf("merge_threshold_blocks",       merge_threshold_blocks_);
+    const_leaf("revert_threshold_blocks",      revert_threshold_blocks_);
+    const_leaf("merge_grace_blocks",           merge_grace_blocks_);
+    const_leaf("shard_count",                  shard_count_);
+    const_leaf("my_shard_id",                  my_shard_id_);
+    // shard_salt is 32 bytes — own leaf form.
+    {
+        crypto::SHA256Builder b;
+        b.append(shard_salt_);
+        leaves.push_back({k_with_prefix("k:", "shard_salt"), hash_bytes(b)});
+    }
+    // A1 supply counters.
+    const_leaf("c:genesis_total",        genesis_total_);
+    const_leaf("c:accumulated_subsidy",  accumulated_subsidy_);
+    const_leaf("c:accumulated_slashed",  accumulated_slashed_);
+    const_leaf("c:accumulated_inbound",  accumulated_inbound_);
+    const_leaf("c:accumulated_outbound", accumulated_outbound_);
 
-    // (8) genesis-pinned constants.
-    b.append(block_subsidy_);
-    b.append(subsidy_pool_initial_);
-    b.append(static_cast<uint64_t>(subsidy_mode_));
-    b.append(static_cast<uint64_t>(lottery_jackpot_multiplier_));
-    b.append(min_stake_);
-    b.append(suspension_slash_);
-    b.append(unstake_delay_);
-    b.append(static_cast<uint64_t>(merge_threshold_blocks_));
-    b.append(static_cast<uint64_t>(revert_threshold_blocks_));
-    b.append(static_cast<uint64_t>(merge_grace_blocks_));
-    b.append(static_cast<uint64_t>(shard_count_));
-    b.append(static_cast<uint64_t>(my_shard_id_));
-    b.append(shard_salt_);
-
-    // (9) A1 supply counters.
-    b.append(genesis_total_);
-    b.append(accumulated_subsidy_);
-    b.append(accumulated_slashed_);
-    b.append(accumulated_inbound_);
-    b.append(accumulated_outbound_);
-
-    return b.finalize();
+    return crypto::merkle_root(leaves);
 }
 
 // Activate all staged changes with eff_height <= current_height. Called

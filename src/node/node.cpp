@@ -859,6 +859,32 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
                                          cfg_.m_creators, mode, proposer,
                                          pending_equivocation_evidence_,
                                          inbound_snapshot);
+
+    // v2.1 / S-033 activation: populate state_root from the post-apply
+    // state. Dry-run apply on a Chain copy to compute the commitment
+    // without mutating the live chain. Other K committee members
+    // perform the same computation and either agree (matching root)
+    // or fail apply-time verification (different root → throw). The
+    // root is bound into compute_hash (via signing_bytes when non-zero),
+    // so the next block's prev_hash transitively authenticates this
+    // state commitment.
+    //
+    // Cost: O(state size) — bounded by the same primitive that closes
+    // S-032 (chain.compute_state_root reads cached fields where
+    // available). The Chain copy is bounded by std::map heap allocation
+    // for the four primary state maps. A future v2.4 overlay/delta
+    // model removes the copy by computing state_root from the apply
+    // overlay directly.
+    {
+        chain::Chain tentative_chain = chain_;
+        // Chain::append() runs apply_transactions internally. It also
+        // checks prev_hash consistency, which matches what the real
+        // apply would check. tentative.state_root is zero at this
+        // point, so the state_root verification inside apply_transactions
+        // short-circuits (zero == zero is the "not set" path).
+        tentative_chain.append(tentative);
+        tentative.state_root = tentative_chain.compute_state_root();
+    }
     Hash digest = compute_block_digest(tentative);
 
     BlockSigMsg my_sig = make_block_sig(key_, cfg_.domain,
