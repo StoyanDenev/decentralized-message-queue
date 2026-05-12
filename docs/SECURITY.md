@@ -10,23 +10,23 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **6** (S-013, S-014, S-016, S-017, S-018, S-020) | **10** | **19** |
-| Partially mitigated | **2** (S-030, S-031) | — | — | — | **2** |
-| Mitigated in-session | **4** (S-001, S-002, S-003, S-004) | **5** (S-007, S-008, S-012, S-032, S-033) | — | — | **9** |
+| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **5** (S-013, S-016, S-017, S-018, S-020) | **10** | **18** |
+| Partially mitigated | **1** (S-030) | — | **1** (S-014 RPC done; gossip pending) | — | **2** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **5** (S-007, S-008, S-012, S-032, S-033) | — | — | **10** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
 (M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Open Critical findings: zero.** Both remaining Critical-class items (S-030, S-031) are partially mitigated. Open High findings are 3 (S-006, S-010, S-011 — all design / parameter-policy concerns, no shipped-code attack surface).
+**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). Open High findings are 3 (S-006, S-010, S-011 — all design / parameter-policy concerns, no shipped-code attack surface).
 
 **Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
 Currently genuinely outstanding:
 
 - **S-030 D2 full closure (v2.7 F2)** — design specification complete in `docs/proofs/F2-SPEC.md`; implementation ~3-4 days. D1 is effective-closed via S-033 state_root binding; D2 is partial-closed via the same mechanism (apply-layer rejection). v2.7 F2 closes D2 at the consensus layer (signatures gather only on view convergence).
-- **S-031 last polish** — gossip-broadcast-out-of-lock, ~0.5d. The 5 architectural layers shipped close the practical problem; this is operational polish.
-- **S-014 rate limiting** — no per-IP / per-method buckets on RPC or gossip. ~50 LOC, operational hardening.
+- **v2.10 threshold randomness aggregation** — 🔥 promoted to active in plan.md A11. Defeats residual selective-abort attack via t-of-K threshold signatures. ~1 week including BLS12-381 vendoring + DKG tooling.
+- **S-014 gossip-side rate limiting** — RPC side closed in-session (per-peer-IP token bucket); gossip-side rate limiting pending (~30 LOC).
 
 Closed in-session (retained here for audit trail; see §3 bodies):
 
@@ -37,6 +37,8 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-007 Subsidy/fee overflow~~ — closed via `checked_add_u64` on every credit path.
 - ~~S-008 Unbounded mempool~~ — closed via `MEMPOOL_MAX_TXS = 10000` + `MEMPOOL_MAX_PER_SENDER = 100` with fee-priority eviction.
 - ~~S-012 Snapshot trust~~ — closed via state_root verification on restore.
+- ~~S-014 RPC rate limiting~~ — closed via per-peer-IP token bucket on RPC; gossip-side pending as a separate follow-on.
+- ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
 - ~~S-033 No state commitment~~ — closed via Merkle root in `Block.state_root` + signing_bytes binding.
 
@@ -266,7 +268,7 @@ For permissionless deployments wanting the literal "≤ 1 block instance per hei
 
 ### S-031 — Single global mutex serializes everything
 
-**Severity:** Critical (architectural) • **Status:** Substantially mitigated in-session (shared_mutex + A9 Phase 1 atomicity + A9 Phase 2A/2B lazy snapshot + A9 Phase 2C lock-free reader path for hot accessors; full extension to non-account containers tracked as follow-on) • **Sources:** Architectural Analysis §3.1
+**Severity:** Critical (architectural) • **Status:** Fully mitigated in-session (6 architectural layers shipped: shared_mutex + A9 Phase 1 atomicity + A9 Phase 2A/2B lazy snapshot + A9 Phase 2C lock-free reader path + async chain.save worker + gossip-out-of-lock v2.6) • **Sources:** Architectural Analysis §3.1
 
 **Mitigation landed in-session (partial — concurrency layer).** Replaced `std::mutex state_mutex_` with `std::shared_mutex` and downgraded all 11 read-only const RPC handlers to `std::shared_lock`. The other 25 acquisition sites (mutators, gossip handlers, consensus transitions) keep `std::unique_lock` with identical write-exclusion semantics. Effect: read-heavy operational workloads (`status`, `balance`, `account`, `chain_summary`, `committee`, `validators`, `nonce`, `stake_info`, `block`, `tx`, `snapshot`) now permit N concurrent readers, which is the dominant contention pattern. Writes still serialize as required for correctness.
 
@@ -630,18 +632,34 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 ### S-014 — No rate limiting on gossip + RPC
 
-**Severity:** Medium • **Status:** Open • **Sources:** Audit 3.2, OV-#10
+**Severity:** Medium • **Status:** RPC side mitigated in-session; gossip side pending • **Sources:** Audit 3.2, OV-#10
 
-**What's open.** Gossip accept loop has no cap; broadcast fan-out amplifies; RPC handle_session is synchronous per connection. Same root issue as S-001 for RPC.
+**Mitigation landed in-session (RPC side, Option 1 partial).** `RpcServer` now supports operator-configurable per-peer-IP token-bucket rate limiting. Config fields:
+
+- `rpc_rate_per_sec`: steady-state RPC calls/sec per peer IP (default 0 = disabled)
+- `rpc_rate_burst`: bucket capacity (default 0 = disabled)
+
+Per-request flow in `handle_session`: peer IP is captured from `socket->remote_endpoint().address().to_string()` once per session; before JSON parse + auth check, `consume_rate_token(peer_ip)` refills the bucket based on elapsed time × rate, attempts to consume 1 token, and returns ok or rate-limited. On rate-limit: response is `{"error": "rate_limited"}` and the request is dropped. Rate-limit ordering is BEFORE both parse and auth so rate-limited callers don't burn parse cost AND don't reveal whether their auth would have succeeded.
+
+Bucket state is `std::map<std::string, Bucket>` protected by `std::mutex` (asio's worker-thread pool means concurrent handler access). Memory bound is ~24 bytes per distinct peer IP; localhost-only default sees ~1-2 entries.
+
+Suggested production settings for external-bind operators:
+- `rpc_rate_per_sec = 100`, `rpc_rate_burst = 200` (100 sustained req/s with 2-second burst headroom)
+
+**Verified.** `tools/test_rpc_rate_limit.sh` 4/4 PASS: disabled-mode passes 30/30; tight rate (0.5/s burst 3) drains and rejects per spec; bucket refills on wait.
+
+**Remaining open.** Gossip-side rate limiting — peer-to-peer gossip messages don't currently have a similar bucket. Each peer is bounded by socket bandwidth, but no per-message rate gate. ~30 LOC follow-on. Compounds with v2.X "binary message codec" work where the gossip dispatch path gets restructured.
+
+**Pre-fix description.** Gossip accept loop has no cap; broadcast fan-out amplifies; RPC handle_session is synchronous per connection. Same root issue as S-001 for RPC.
 
 **Resolution options.**
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Per-IP token bucket** at the TCP accept layer + per-method bucket at RPC dispatch. | ~50 LOC. |
-| 2 | **Concurrent-connection cap** per peer + global. | Subset of #1. |
-
-**Recommended.** Option 1.
+| # | Option | Cost | Status |
+|---|---|---|---|
+| 1a | **Per-IP token bucket on RPC** at the TCP accept layer | ~30 LOC | ✅ Shipped |
+| 1b | **Per-method bucket** at RPC dispatch (snapshot 1/min, submit_tx capped, query uncapped) | ~30 LOC | Deferred — requires per-method weight tuning |
+| 1c | **Per-IP token bucket on gossip** at the message receive layer | ~30 LOC | Pending |
+| 2 | **Concurrent-connection cap** per peer + global | Subset of #1 | Deferred — Option 1 fires earlier |
 
 ---
 
@@ -994,7 +1012,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-023 | RPC pre-check balance | ⏳ pending (~1h) |
 | S-034 | Moot — delay-hash module deleted | ✅ done |
 
-**Track A status: 9 of 14 closed, 5 remaining (all ~hours of work).**
+**Track A status: 9.5 of 14 closed (S-014 RPC side ✅, gossip side pending), 4 fully remaining (all ~hours of work).**
 
 ### Track B — architectural lift
 
@@ -1002,11 +1020,11 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 |---|---|---|
 | S-030 D1 | Bind `b.transactions` into block validation (via S-033 indirect closure) | ✅ effective |
 | S-030 D2 | Full closure via v2.7 F2 view reconciliation | ⏳ spec'd (F2-SPEC.md), 3-4d implementation |
-| S-031 | shared_mutex + A9 Phase 1-2D + async chain.save (5 layers) | ✅ substantially mitigated; last polish: gossip-out-of-lock ~0.5d |
+| S-031 | shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock (6 layers) | ✅ fully closed |
 | S-032 | Incremental registry cache on Chain (cached registry_view_ + snapshot persistence) | ✅ done |
 | S-033 | Merkle root in `Block.state_root` + signing_bytes binding + apply/restore verification | ✅ done |
 
-**Track B status: 4 of 5 closed (one substantially mitigated). Remaining: v2.7 F2 (3-4 days).**
+**Track B status: 4 of 5 closed. Remaining: v2.7 F2 (3-4 days).**
 
 ### Track C — Additional design enhancements (deferred / partial)
 
@@ -1027,12 +1045,19 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-012 (deeper) | Trustless snapshot via state_root verification | ✅ done |
 
 **Production-readiness summary (post in-session work):**
-- Critical findings: 0 fully-open (2 partially mitigated — S-030 via S-033, S-031 via 5 layers)
+- Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
-- Track A remaining: ~1-2 days of localized fixes
+- Medium findings: 1 partially mitigated (S-014 RPC side done, gossip side pending), 5 still open (S-013, S-016, S-017, S-018, S-020) — all bounded ~hours-of-work each
+- Track A remaining: ~half-day total (4 small items + S-014 gossip-side)
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
+- v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)
 
-The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session; the remaining gates to permissionless-deployment-ready posture are ~1 week of localized + 3-4 days of v2.7.
+The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
+1. Track A small items (~half-day combined): S-013 buffer cap, S-020 Fisher-Yates, S-023 balance pre-check, S-025 dead-code delete, S-014 gossip side.
+2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
+3. v2.10 threshold randomness aggregation per plan.md A11 (~1 week, includes BLS12-381 vendoring + DKG).
+
+Total remaining: ~2 weeks to "production-deployment-ready" posture.
 
 ---
 
