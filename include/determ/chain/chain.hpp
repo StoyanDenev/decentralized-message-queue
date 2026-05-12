@@ -139,6 +139,14 @@ public:
     uint64_t                     stake_unlock_height_lockfree(const std::string& domain) const;
     std::optional<RegistryEntry> registrant_lockfree(const std::string& domain) const;
 
+    // v2.18 Theme 7 Phase 7.3: lock-free DApp registry queries.
+    // Same atomic_load mechanism as the other lockfree accessors;
+    // reads from the bundled CommittedStateBundle (extended to
+    // include dapp_registry). RPC handlers dapp_info / dapp_list
+    // use these to avoid taking state_mutex_'s shared_lock on hot
+    // query paths.
+    std::optional<DAppEntry>     dapp_lockfree(const std::string& domain) const;
+
     // A9 Phase 2C refinement: bundled state view for callers that read
     // multiple containers and need cross-container atomicity (i.e.,
     // all reads must come from the same commit, not straddle one).
@@ -165,6 +173,11 @@ public:
         std::map<std::string, AccountState>  accounts;
         std::map<std::string, StakeEntry>    stakes;
         std::map<std::string, RegistryEntry> registrants;
+        // v2.18 Theme 7 Phase 7.3: DApp registry bundled in the
+        // committed view. dapp_lockfree() reads from this map;
+        // rpc_dapp_info / rpc_dapp_list can be made lock-free at the
+        // Node layer.
+        std::map<std::string, DAppEntry>     dapp_registry;
     };
     std::shared_ptr<const CommittedStateBundle> committed_state_view() const;
 

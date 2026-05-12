@@ -201,6 +201,27 @@ public:
     nlohmann::json rpc_dapp_list(const std::string& prefix,
                                     const std::string& topic)       const;
 
+    // v2.19 Theme 7 Phase 7.4 (polling subset): retrospective query
+    // for DAPP_CALL events addressed to a DApp. Scans blocks in
+    // [from_height, to_height], filters tx.type == DAPP_CALL +
+    // tx.to == domain, optionally filters by payload-encoded topic.
+    //
+    // For DApp nodes: poll this RPC every N seconds with the last
+    // height they processed, get newly-arrived messages, process them,
+    // bump their watermark. Lightweight; works against any Determ
+    // full node.
+    //
+    // Streaming subscription (true push-based delivery) is Phase 7.4
+    // proper — a follow-on. For v2.19 ship, polling is sufficient.
+    //
+    // Result limit: at most DAPP_MESSAGES_PAGE_LIMIT events per call;
+    // caller paginates by adjusting from_height. Total bytes per call
+    // bounded by event count × MAX_DAPP_CALL_PAYLOAD + overhead.
+    nlohmann::json rpc_dapp_messages(const std::string& domain,
+                                        uint64_t           from_height,
+                                        uint64_t           to_height,
+                                        const std::string& topic)   const;
+
     // Rev. 4: accept a fully-signed Transaction JSON (built externally, e.g.
     // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
     // Used for anonymous-account TRANSFERs that aren't authored by this node.

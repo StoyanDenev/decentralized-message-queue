@@ -145,6 +145,14 @@ std::optional<RegistryEntry> Chain::registrant_lockfree(const std::string& domai
     return it->second;
 }
 
+std::optional<DAppEntry> Chain::dapp_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return std::nullopt;
+    auto it = p->dapp_registry.find(domain);
+    if (it == p->dapp_registry.end()) return std::nullopt;
+    return it->second;
+}
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -1463,9 +1471,10 @@ void Chain::apply_transactions(const Block& b) {
     // happen inside the make_shared. The bundle's contents are const,
     // so readers can't accidentally mutate the shared snapshot.
     auto __bundle = std::make_shared<CommittedStateBundle>();
-    __bundle->accounts    = accounts_;
-    __bundle->stakes      = stakes_;
-    __bundle->registrants = registrants_;
+    __bundle->accounts      = accounts_;
+    __bundle->stakes        = stakes_;
+    __bundle->registrants   = registrants_;
+    __bundle->dapp_registry = dapp_registry_;
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4996)
@@ -1846,9 +1855,10 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     // snapshot-bootstrapped values immediately after restore (no
     // intervening apply_transactions on this path).
     auto __bundle = std::make_shared<CommittedStateBundle>();
-    __bundle->accounts    = c.accounts_;
-    __bundle->stakes      = c.stakes_;
-    __bundle->registrants = c.registrants_;
+    __bundle->accounts      = c.accounts_;
+    __bundle->stakes        = c.stakes_;
+    __bundle->registrants   = c.registrants_;
+    __bundle->dapp_registry = c.dapp_registry_;
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4996)

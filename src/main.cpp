@@ -1745,6 +1745,38 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // v2.19 Theme 7 Phase 7.4: retrospective DAPP_CALL query.
+    // Usage: determ dapp-messages --domain D [--from H] [--to H]
+    //        [--topic T] [--rpc-port N]
+    // DApp node poll-and-process pattern:
+    //   while true: dapp-messages --from $WATERMARK; process; $WATERMARK = result.last_scanned + 1
+    if (cmd == "dapp-messages") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        std::string domain, topic;
+        uint64_t from_h = 0, to_h = 0;
+        for (int i = 0; i < sub_argc; ++i) {
+            std::string a = sub_argv[i];
+            if      (a == "--domain" && i + 1 < sub_argc) domain = sub_argv[++i];
+            else if (a == "--from"   && i + 1 < sub_argc) from_h = std::stoull(sub_argv[++i]);
+            else if (a == "--to"     && i + 1 < sub_argc) to_h   = std::stoull(sub_argv[++i]);
+            else if (a == "--topic"  && i + 1 < sub_argc) topic  = sub_argv[++i];
+        }
+        if (domain.empty()) {
+            std::cerr << "dapp-messages requires --domain\n";
+            return 1;
+        }
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "dapp_messages",
+                {{"domain", domain}, {"from_height", from_h},
+                 {"to_height", to_h}, {"topic", topic}});
+            std::cout << r.dump(2) << "\n";
+            return 0;
+        } catch (std::exception& e) {
+            std::cerr << "dapp-messages query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // v2.18 Theme 7: DApp registry query — list / filter.
     // Usage: determ dapp-list [--prefix P] [--topic T] [--rpc-port N]
     if (cmd == "dapp-list") {

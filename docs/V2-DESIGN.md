@@ -299,6 +299,90 @@ Full roadmap, open design questions, and economic model: [`V2-DAPP-DESIGN.md`](V
 
 ---
 
+## Theme 8 — Privacy & interop (god-protocol completeness for Determ's lane)
+
+Determ stays in its lane (payment + identity). But "best-in-class at that lane" requires two primitives v1.x + Themes 1-7 do not yet provide: **confidential transactions** and **cross-chain bridge**. Both are necessary for Determ to serve real-world payment use cases (where amounts shouldn't be public by default) and for the ecosystem to interoperate with other chains' user bases.
+
+### v2.22 — Confidential transactions (Pedersen commitments + Bulletproofs)
+
+**Motivation.** Today every TRANSFER amount is public on-chain. For payment use cases — payroll, vendor payments, B2B settlement, retail — this is incompatible with normal commercial confidentiality. The alternative (every user using a mixer DApp) doesn't compose with audit-grade compliance.
+
+**Mechanism.** Replace TRANSFER's clear-text `amount: u64` with a Pedersen commitment `C = aG + bH` where `a` is the amount and `b` is a blinding factor. Sender attaches a Bulletproof range-proof that `0 <= a <= 2^64` (so amounts can't underflow), and a balance-conservation proof binding inputs and outputs. Recipient learns `a` via a Diffie-Hellman handshake with the sender's view key.
+
+Optional view-key disclosure: account holders can publish a per-account or per-block view key that lets a designated auditor decrypt amounts. Solves the regulated-counterparty problem without forcing global transparency.
+
+
+**Cost.** 2-3 months. Bulletproofs implementation (curve25519 + range-proof aggregation) + view-key key-derivation + wallet integration + RPC schema. Sender + receiver code paths. Audit-mode docs.
+
+**Closes:** new capability (no existing finding). Enables real-world payment use cases that today need a separate privacy chain.
+
+### v2.23 — Cross-chain bridge (IBC-style light-client verification)
+
+**Motivation.** Determ exists in a multi-chain world. Today a Determ deployment is an island — no value or message can flow to/from Ethereum, Cosmos, Bitcoin, or other Determ deployments without trusted intermediaries (centralized exchanges, custodial bridges). Both options break Determ's mutual-distrust trust model.
+
+**Mechanism.** IBC-style: each side runs a light client of the other side. Sender chain locks the asset and emits a proof. Receiver chain verifies the proof against the sender's committee signatures (already authenticated via state_root from v2.1). Asset materializes as a wrapped representation on the receiver side; unwrap by reversing the flow.
+
+Phasing:
+- **Determ-to-Determ** (multi-deployment): native, light-client verification against the other deployment's manifest + state_root + committee history. ~1 month.
+- **Determ-to-Cosmos**: implement IBC light-client spec on the Determ side. ~2 months.
+- **Determ-to-Bitcoin**: SPV-style. Verify UTXO inclusion via Merkle proofs. ~2 months.
+- **Determ-to-Ethereum**: defer until SNARK-of-Ethereum-light-client tooling matures (~6+ months).
+
+**Cost.** 1-2 months for first bridge (Determ↔Determ). 2-3 months for IBC. 6+ months for Ethereum.
+
+**Closes:** new capability. Determ becomes a payment rail other ecosystems can use rather than a walled garden.
+
+### v2.24 — Audit / compliance hooks
+
+**Motivation.** Privacy by default (v2.22) needs an explicit opt-in for regulated deployments to expose amounts/parties to designated auditors (KYC/AML/tax authorities). Without this, Determ is unusable for any payment business with counterparty-disclosure obligations.
+
+**Mechanism.** Per-account `audit_view_key`: a Diffie-Hellman public key whose holder can decrypt the account's amounts. Genesis-pinned default (`""` = no auditor). Optionally rotatable via REGISTER-style tx jointly signed by the audit-key-holder and the account holder. Audit-mode operators run a special node that consumes the audit log + auditor view keys + produces compliance reports.
+
+**Cost.** 2-3 weeks. Audit-key field on accounts + view-key handshake + audit-mode RPC + auditor-tooling reference impl.
+
+**Closes:** removes the "Determ is unusable for regulated payments" objection. Composes cleanly with v2.22's privacy.
+
+---
+
+## God-protocol framing for Determ
+
+Determ explicitly does NOT aspire to be a "do-everything" chain. The competitive landscape (Ethereum, Cosmos, Polkadot, Aptos, Sui) saturates that space.
+
+The achievable, defensible framing is:
+
+> **Determ = the protocol that's so good at payment + identity that every other DApp use case is built on top of it as a Theme-7 DApp, not as a contract on a contract-VM chain.**
+
+Under this framing, "god protocol" means **best-in-class at the narrow scope, not biggest-feature-set across all scopes**. The work to close the remaining gap:
+
+| Capability | Today | After |
+|---|---|---|
+| Sub-100ms regional finality | Tactical=40ms; web=200ms | Same; already best-in-class |
+| Horizontal scale | Beacon caps ~20-50 shards | v2 beaconless removes the cap |
+| Confidential amounts | None | v2.22 Pedersen + Bulletproofs |
+| Account abstraction | Single Ed25519 | v2.14 OPAQUE recovery + v2.15 HD + multi-sig |
+| Quantum resistance | Ed25519 | v2.8 Dilithium |
+| Cross-chain interop | None | v2.23 IBC bridge (Determ↔Determ first; Cosmos second) |
+| Compliance / audit | None | v2.24 view-key disclosure |
+| Fair ordering | None | Deferred (research; v2.13 noted) |
+| DApp surface | None today | Themes 7 + v2.22/23/24 give the substrate |
+
+Total work to close: **~12-18 months focused engineering beyond what's already in V2-DESIGN.md** (themes 1-7 land in ~12-16 weeks per existing estimate; theme 8 + DApp ecosystem maturation add ~6-12 more months).
+
+### What this is NOT
+
+- Not a contract VM. DApps run off-chain on operator nodes (Theme 7 substrate); Determ provides ordered authenticated message delivery + identity + payments + integrity.
+- Not stateless validation. Determ's state is small enough that full-node operation is feasible on commodity hardware.
+- Not a DA layer. Not a rollup substrate. Not a generalized computation platform.
+- Not Ethereum-tier completeness. Different protocol family.
+
+### Why this is achievable
+
+Each theme is independently estimable, has a clear deliverable, and composes with the others. There's no research-grade unknown remaining (fair ordering and Ethereum-bridge SNARK are explicitly deferred). The ~12-18 month path is engineering, not research.
+
+The result is **a payment + identity protocol that's complete enough for any commercial use case** (privacy, audit, cross-chain, quantum-resistance) without expanding into territory better-served by other chains.
+
+---
+
 ## Cumulative v2 closes
 
 | Open finding | Closure path |
@@ -333,52 +417,6 @@ Roughly 12 of the 24 currently-open findings close in v2. The rest are operator-
 | Liveness (v2.10, v2.11) | Threshold randomness aggregation, beacon auto-detect | 1.5 weeks |
 | Composability (v2.12) | Cross-shard atomic primitives | 1 week |
 | Wallet/operator (v2.14–v2.17) | OPAQUE port, HD derivation, RPC auth, encrypted keyfiles | 2 weeks |
+| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** |
 
-**Total: 12-16 weeks** for a single coordinated v2 release. Or, broken into rolling releases:
-- **v1.5** (registry cache): 1 week — ships ahead of any other v2 work
-- **v1.6** (gossip-out-of-lock + light-RPC auth): 1 week
-- **v2.0** (state Merkle root + A9 overlay + trustless fast sync): 6-8 weeks — the "complete platform" release
-- **v2.1** (F2 view reconciliation + auto-merge): 3 weeks — closes the FA1 footnote and the R4 v1.1
-- **v2.2** (Dilithium migration): 1-2 weeks — long-runway crypto-agility
-- **v2.3** (wallet HD + atomic cross-shard + encrypted keyfiles): 3 weeks — DApp-readiness
-
----
-
-## What v2 explicitly does NOT add
-
-The non-goals from v1.x stand. v2 does not add:
-
-- **Smart-contract execution layer** (EVM, WASM). Determ stays in its "narrow base-layer" lane. Contracts belong on layered protocols, not the base chain.
-- **Off-chain storage** (IPFS-like integration).
-- **Cross-chain bridges as a base-layer primitive**. The cross-shard atomic primitive (v2.12) is intra-Determ; external-chain bridges remain application-layer.
-- **Oracle networks**.
-- **ZK / shielded transactions**. Anonymous bearer wallets remain the privacy story.
-
-These are intentional design choices, not v2 backlog. A different protocol that wants any of them should fork Determ or build a layer on top, not push it into the base.
-
----
-
-## Compatibility & migration
-
-v2 is not backward-compatible at the block format level (state Merkle root, Dilithium signatures, F2 ContribMsg view-hashes all change wire format). The migration path:
-
-1. **Genesis flag-day**: new chains start at v2 from day one. Existing v1.x chains have two options:
-2. **Hard fork at height H**: existing chain coordinates an upgrade with all validators upgrading binaries at the same height. Pre-H blocks use v1.x format; post-H blocks use v2 format. Old binaries can replay pre-H but not validate post-H.
-3. **Or stay on v1.x**: v1.x continues to be supported indefinitely. v2 is a new chain identity for deployments that need its features.
-
-Most deployments will pick option 1 (fresh genesis with v2). Established v1.x chains coordinating an upgrade pick option 2 with a multi-month deprecation notice.
-
----
-
-## Why this scope
-
-Five thematic clusters address every structurally significant open issue:
-- **Trust minimization** = the standard L1 feature gap (state commitment, light clients).
-- **Scale & concurrency** = production-deployment scalability (registry, overlay, gossip).
-- **Cryptographic hardening** = audit-grade rigor (F2 closes the FA1 footnote) + future-proofing (Dilithium).
-- **Liveness** = silent-committee-member tolerance without BFT-escalation cost.
-- **Composability** = cross-shard primitives + wallet UX for real deployments.
-
-What's deliberately not in scope: smart contracts, oracles, bridges, ZK. Each would be a coherent direction but moves Determ out of its lane. v2 doubles down on the lane.
-
-After v2, Determ is a "complete" base-layer L1 with no internal limitations. Whether anything is built on top is up to operators; the base protocol is self-sufficient.
+**Total: ~6-9 months** for a complete v2 with Theme 8. Themes 1-7 alone: 12-16 weeks per prior estimate.

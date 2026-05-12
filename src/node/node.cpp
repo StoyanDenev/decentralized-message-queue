@@ -2421,15 +2421,14 @@ json Node::rpc_stake_info(const std::string& domain) const {
 
 // v2.18/v2.19 Theme 7: DApp registry queries.
 //
-// Both use state_mutex_'s shared_lock — concurrent with other readers
-// (RPC handlers + lock-free balance/nonce/stake/registrant). Phase 7.3
-// follow-on will extend Phase 2C's bundled committed-state view to
-// include dapp_registry_ for true lock-free reads on these paths;
-// for v2.19 initial ship, shared_lock is sufficient (no degradation
-// vs the registrants_ accessor patterns).
+// v2.18 Phase 7.3: lock-free read path. dapp_lockfree atomic-loads
+// the bundled CommittedStateBundle (Phase 2C extension) and reads
+// dapp_registry from it. No state_mutex_ acquisition needed — these
+// RPC paths don't block on apply's writer lock. dapp-discovery
+// queries from wallets, light clients, and explorer tooling are now
+// genuinely concurrent with consensus.
 json Node::rpc_dapp_info(const std::string& domain) const {
-    std::shared_lock<std::shared_mutex> lk(state_mutex_);
-    auto entry = chain_.dapp(domain);
+    auto entry = chain_.dapp_lockfree(domain);
     if (!entry) {
         return {{"error", "not_found"}, {"domain", domain}};
     }
@@ -2451,12 +2450,91 @@ json Node::rpc_dapp_info(const std::string& domain) const {
     };
 }
 
+// v2.19 Theme 7 Phase 7.4 (polling subset): scan blocks for DAPP_CALL
+// events addressed to a DApp. DApp nodes poll this every N seconds
+// from their last-processed height; chain replies with all events in
+// the requested window. Streaming subscription is a future follow-on.
+//
+// Lock semantics: holds state_mutex_'s shared_lock for the block-
+// iteration (blocks_ is mutated by Chain::append; reading
+// concurrently with apply is unsafe without the lock). The lock IS
+// shared so other readers proceed; only the next apply's writer-lock
+// acquire waits.
+//
+// Pagination: at most DAPP_MESSAGES_PAGE_LIMIT events per call. If
+// the filter window has more, caller bumps from_height to one past
+// the last returned block_height and re-queries.
+namespace {
+constexpr size_t DAPP_MESSAGES_PAGE_LIMIT = 256;
+} // namespace
+
+json Node::rpc_dapp_messages(const std::string& domain,
+                                uint64_t           from_height,
+                                uint64_t           to_height,
+                                const std::string& topic) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    uint64_t head = chain_.height();
+    if (to_height == 0 || to_height > head) to_height = head;
+    json events = json::array();
+    bool truncated = false;
+    uint64_t last_scanned = from_height;
+    for (uint64_t h = from_height; h < to_height; ++h) {
+        const auto& b = chain_.at(h);
+        for (auto& tx : b.transactions) {
+            if (tx.type != chain::TxType::DAPP_CALL) continue;
+            if (tx.to != domain) continue;
+            // Optional topic filter: decode the payload header
+            // ([topic_len:u8][topic][ct_len:u32 LE][ct]).
+            std::string tx_topic;
+            if (!tx.payload.empty()) {
+                uint8_t tl = tx.payload[0];
+                if (size_t(1) + tl <= tx.payload.size()) {
+                    tx_topic.assign(
+                        reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
+                }
+            }
+            if (!topic.empty() && tx_topic != topic) continue;
+            events.push_back({
+                {"block_height", h},
+                {"tx_hash",      to_hex(tx.hash)},
+                {"from",         tx.from},
+                {"to",           tx.to},
+                {"amount",       tx.amount},
+                {"fee",          tx.fee},
+                {"nonce",        tx.nonce},
+                {"topic",        tx_topic},
+                {"payload_hex",  to_hex(tx.payload.data(), tx.payload.size())},
+            });
+            if (events.size() >= DAPP_MESSAGES_PAGE_LIMIT) {
+                truncated = true;
+                break;
+            }
+        }
+        last_scanned = h;
+        if (truncated) break;
+    }
+    return {
+        {"domain",       domain},
+        {"from_height",  from_height},
+        {"to_height",    to_height},
+        {"last_scanned", last_scanned},
+        {"truncated",    truncated},
+        {"count",        events.size()},
+        {"events",       events},
+    };
+}
+
 json Node::rpc_dapp_list(const std::string& prefix,
                             const std::string& topic) const {
-    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    // Lock-free via the committed bundle. Single atomic_load yields a
+    // shared_ptr that keeps the snapshot alive for the iteration —
+    // even if the writer publishes new bundles during the loop, we
+    // see a consistent snapshot.
+    auto view = chain_.committed_state_view();
     json out = json::array();
     uint64_t h = chain_.height();
-    for (auto& [domain, entry] : chain_.dapp_registry()) {
+    if (!view) return {{"height", h}, {"count", 0}, {"dapps", out}};
+    for (auto& [domain, entry] : view->dapp_registry) {
         // Filter: prefix match (empty prefix matches all)
         if (!prefix.empty() &&
             domain.size() < prefix.size()) continue;
