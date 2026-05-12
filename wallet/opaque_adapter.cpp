@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 // A2 Phase 5 STUB implementation. NOT real OPAQUE. NOT for production
 // secrets. See opaque_adapter.hpp for the security caveats.
 //

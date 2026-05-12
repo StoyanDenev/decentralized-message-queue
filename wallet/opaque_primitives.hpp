@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #pragma once
 // A2 Phase 4: smoke-test surface for the libsodium primitives that
 // libopaque (Phase 5) will compose into the OPAQUE registration + AKE.

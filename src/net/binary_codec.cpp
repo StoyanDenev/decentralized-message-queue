@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 // ─── Binary wire codec — A3 / S8 ─────────────────────────────────────────────
 //
 // Plan reference: plan.md, "Active: Mode selectors + economic / UX primitives",

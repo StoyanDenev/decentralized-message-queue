@@ -1,6 +1,6 @@
 # Determ: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
 
-**Version 2**
+**Version 2** · [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 > **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
@@ -976,3 +976,29 @@ The protocol is intentionally minimal: two consensus message types per block, on
 5. Hanke, T., Movahedi, M., Williams, D. "DFINITY Technology Overview Series, Consensus System." 2018.
 6. Yakovenko, A. "Solana: A new architecture for a high performance blockchain." 2018.
 7. Boneh, D., Bonneau, J., Bünz, B., Fisch, B. "Verifiable Delay Functions." CRYPTO 2018. (Theoretical context for sequential-delay primitives. Determ's iterated SHA-256 satisfies the sequentiality requirement without the succinct-verify property of true VDFs.)
+
+---
+
+## License
+
+Determ is licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE)).
+
+```
+Copyright 2026 Determ Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied. See the License for the specific language governing
+permissions and limitations under the License.
+```
+
+Third-party components (OpenSSL, Asio, nlohmann/json, libsodium) are bundled or referenced under their respective licenses. See [NOTICE](NOTICE) for the full attribution list.
+
+Source files carry an SPDX identifier (`// SPDX-License-Identifier: Apache-2.0`) so toolchain-level license scanners can verify provenance automatically.

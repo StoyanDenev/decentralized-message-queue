@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/chain/block.hpp>
 #include <determ/chain/chain.hpp>

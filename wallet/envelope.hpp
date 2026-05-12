@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #pragma once
 // A2 Phase 2: AEAD envelope wrapping individual recovery shares.
 //

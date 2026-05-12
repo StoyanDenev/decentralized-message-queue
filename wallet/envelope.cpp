@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #include "envelope.hpp"
 #include <openssl/evp.h>
 #include <openssl/rand.h>

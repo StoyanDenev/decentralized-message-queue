@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 // A2 — determ-wallet binary
 //
 // v1.x scope (Phase 1, this commit):

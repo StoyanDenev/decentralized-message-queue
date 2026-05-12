@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/sha256.hpp>

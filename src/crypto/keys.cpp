@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #include <determ/crypto/keys.hpp>
 #include <openssl/evp.h>
 #include <nlohmann/json.hpp>

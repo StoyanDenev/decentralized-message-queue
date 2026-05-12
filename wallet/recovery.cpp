@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #include "recovery.hpp"
 #include "opaque_adapter.hpp"
 #include <openssl/evp.h>

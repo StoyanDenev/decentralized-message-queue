@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #include <determ/node/validator.hpp>
 #include <determ/node/producer.hpp>
 #include <determ/chain/params.hpp>

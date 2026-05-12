@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
 #include "shamir.hpp"
 #include <openssl/rand.h>
 #include <stdexcept>

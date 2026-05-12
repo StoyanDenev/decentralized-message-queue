@@ -1,0 +1,61 @@
+Determ
+Copyright 2026 Determ Contributors
+
+This product includes software developed by the Determ Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+──────────────────────────────────────────────────────────────────────
+Third-party components vendored or referenced
+──────────────────────────────────────────────────────────────────────
+
+This product bundles or depends on the following third-party software,
+each under its own license:
+
+  * OpenSSL 1.1.1w
+      License: OpenSSL (Apache-style; dual with SSLeay)
+      Source:  https://github.com/janbar/openssl-cmake
+      Used:    crypto primitives (Ed25519, SHA-256, AES-256-GCM,
+               EVP_PKEY API, PBKDF2)
+
+  * Asio 1.30.2 (standalone)
+      License: Boost Software License 1.0
+      Source:  https://github.com/chriskohlhoff/asio
+      Used:    networking (gossip + RPC servers)
+
+  * nlohmann/json 3.11.3
+      License: MIT
+      Source:  https://github.com/nlohmann/json
+      Used:    JSON serialization (config, RPC, snapshots, block JSON)
+
+  * libsodium (via robinlinden/libsodium-cmake)
+      License: ISC
+      Source:  https://github.com/robinlinden/libsodium-cmake
+      Used:    wallet binary primitives (ristretto255, Argon2id) for
+               the OPAQUE adapter (A2 Phase 4+)
+
+  * liboprf
+      License: LGPL-3.0
+      Source:  https://github.com/stef/liboprf
+      Status:  declared in CMakeLists.txt under -DDETERM_VENDOR_OPRF=ON
+               (default OFF; vendoring scaffolding only — see
+               wallet/PHASE6_PORTING_NOTES.md). Not currently linked
+               into shipped binaries.
+
+──────────────────────────────────────────────────────────────────────
+Documentation
+──────────────────────────────────────────────────────────────────────
+
+Documentation, formal-verification proofs, and TLA+ specifications
+under docs/ are licensed under the same Apache License, Version 2.0.
+
+Project resources:
+  * README.md          — system overview and design rationale
+  * docs/WHITEPAPER-v1.x.md — standalone technical paper
+  * docs/PROTOCOL.md   — wire format specification
+  * docs/proofs/       — FA-track analytic proofs + FB-track TLA+ specs
+  * docs/SECURITY.md   — security findings triage
