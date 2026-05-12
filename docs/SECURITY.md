@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **3** (1 partially mitigated, 2 unchanged) | **6** | **4** | **10** | **23** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **19** + 1 partial |
+| Open | **3** (1 partially mitigated, 2 unchanged) | **5** | **4** | **10** | **22** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **20** + 1 partial |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -444,9 +444,24 @@ S-005 (`delay_T` not in genesis) is moot under this resolution. S-019 (Phase-2 t
 
 ### S-032 — O(N) registry rebuild on every operation
 
-**Severity:** High (scalability ceiling) • **Status:** Open • **Sources:** Architectural Analysis §3.2
+**Severity:** High (scalability ceiling) • **Status:** Mitigated in-session (options 1 + 2 from the audit's resolution table) • **Sources:** Architectural Analysis §3.2
 
-**What's open.** `NodeRegistry::build_from_chain(chain, at_index)` iterates every block from genesis to `at_index` to compute the validator pool. It is called at:
+**Mitigation landed in-session.** Two complementary changes:
+
+- **Cache on Chain** (option 1). New `Chain::AbortRecord` struct + `std::map<std::string, AbortRecord> abort_records_` member. `apply_transactions`'s Phase-1-abort-slashing loop now also maintains the cache: `ar.count++; ar.last_block = b.index`. Same policy as the previous walk (only round==1 events count). New getter `chain.abort_records()` returns const ref.
+- **Snapshot persistence** (option 2). `serialize_state` writes the map as an array; `restore_from_snapshot` reads it back. Legacy snapshots get an empty cache that populates normally post-restore.
+
+`NodeRegistry::build_from_chain` no longer walks the chain log — it reads `chain.abort_records()` directly. Same `is_suspended` lambda and suspension-formula math; behavior unchanged on the `at_index == chain.height()` path (all 8 current call sites).
+
+**Complexity shift:**
+- Per call: `O(N · T)` → `O(|registrants|)` for N = chain height, T = txs/block.
+- Lifetime over chain growing to height H: `O(H² · T)` → `O(H · T)`. The quadratic-in-height ceiling is gone.
+
+This is the prerequisite the audit named for "any chain growth beyond hobbyist scale." It also amplifies S-031's reader-concurrency mitigation: writes (which hold `unique_lock`) previously included the O(N) rebuild on every block apply; that cost is now constant, dramatically shortening writer-side critical sections and unblocking concurrent readers more frequently.
+
+**Verified post-fix:** bearer (TRANSFER path; no abort_events), equivocation_slashing (writes abort + EquivocationEvent), bft_escalation (heavy abort_events path — exercises the cache mutation under repeated round-1 timeouts).
+
+**Pre-fix description** (preserved for audit trail). `NodeRegistry::build_from_chain(chain, at_index)` iterated every block from genesis to `at_index` to compute the validator pool. It was called at:
 - `node.cpp:253` — initial construction
 - `node.cpp:934` — beacon header handler (every BEACON_HEADER message)
 - `node.cpp:1025` — shard tip handler (every SHARD_TIP message)
