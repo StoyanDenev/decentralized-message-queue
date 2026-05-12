@@ -1645,19 +1645,16 @@ void Node::on_block(const chain::Block& b) {
     apply_block_locked(b);
 }
 
-// S-002 verify_tx_signature_locked — attempted in-session,
-// reverted: see docs/proofs/S002-Mempool-Sig-Verify.md.
+// S-002 mitigation: cheap forgery check at mempool-admission time.
+// Mirrors the validator's per-tx signature verification in
+// check_transactions but does ONLY the sig check — full validation
+// (charset, payload-size bounds, type-specific rules) still happens
+// at block apply. The intent is to reject obvious forgeries before
+// they consume mempool slots or amplify through gossip.
 //
-// The implementation here is correct (mirrors the validator's per-tx
-// sig check) but cannot be wired into on_tx without first fixing
-// src/net/binary_codec.cpp::decode_tx_frame, which drops amount,
-// fee, and nonce on the binary-wire path. Post-decode txs have those
-// fields zeroed, so signing_bytes() doesn't match the original signed
-// payload and the sig fails to verify.
-//
-// Path forward: fix the binary codec to read amount/fee/nonce from
-// the fixed slots (offsets 32, 40, 48) in decode_tx_frame, then
-// re-wire this check into both on_tx and rpc_submit_tx.
+// Dependency: this only works correctly when src/net/binary_codec.cpp's
+// decode_tx_frame preserves amount/fee/nonce — see the comment in
+// binary_codec.cpp and docs/proofs/S002-Mempool-Sig-Verify.md.
 bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     using namespace determ::crypto;
     using namespace determ::chain;
@@ -1686,8 +1683,10 @@ void Node::on_tx(const chain::Transaction& tx) {
     // Drop stale-nonce txs immediately.
     if (tx.nonce < chain_.next_nonce(tx.from)) return;
 
-    // S-002 mempool-admission sig-verify is gated on the binary-codec
-    // fix; see verify_tx_signature_locked() comment above.
+    // S-002: verify signature before admitting to mempool. Silent drop
+    // on the gossip path — a forged-sig flood from any peer would
+    // otherwise consume mempool slots and amplify to other peers.
+    if (!verify_tx_signature_locked(tx)) return;
 
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
@@ -2272,8 +2271,12 @@ json Node::rpc_submit_tx(const json& tx_json) {
             "submitted tx has stale nonce " + std::to_string(tx.nonce)
           + " (expected >= " + std::to_string(chain_.next_nonce(tx.from)) + ")");
 
-    // S-002 mempool-admission sig-verify gated on binary-codec fix; see
-    // verify_tx_signature_locked() comment for the dependency.
+    // S-002: verify signature before admitting to mempool. Surface as
+    // a hard error to the submitting client (RPC callers get feedback;
+    // unlike a faceless gossip peer, the client can correct and retry).
+    if (!verify_tx_signature_locked(tx))
+        throw std::runtime_error(
+            "submitted tx signature verification failed (from " + tx.from + ")");
 
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);

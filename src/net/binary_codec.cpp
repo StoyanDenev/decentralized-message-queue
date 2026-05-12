@@ -252,10 +252,26 @@ chain::Transaction decode_tx_frame(const uint8_t* data, size_t len) {
     if (len < 128 + 1 + 2)
         throw std::runtime_error("binary_codec: tx frame too short");
 
-    // Skip the 4×32-byte fixed slots — authoritative values come from the
-    // trailer (which carries the verbatim strings + the actual payload
-    // length). The fixed slots are kept for forward compatibility (future
-    // pubkey-first identity).
+    // Read the canonical numeric fields from the fixed-slot area (where
+    // encode_tx_frame writes them). Prior to this read, the decoder was
+    // dropping amount/fee/nonce on the binary-wire path — the trailer
+    // doesn't carry them, so a binary round-trip produced a tx with
+    // zero values for these fields. That bug stayed latent because
+    // (a) the JSON wire path was often negotiated in practice, and
+    // (b) admission-side sig verification (S-002) wasn't wired, so the
+    // corrupted txs entered mempool and were filtered later. Closing
+    // S-002 forced this fix. See docs/proofs/S002-Mempool-Sig-Verify.md.
+    tx.amount = le_get_u64(data + 32);
+    tx.fee    = le_get_u64(data + 40);
+    tx.nonce  = le_get_u64(data + 48);
+    uint64_t reserved = le_get_u64(data + 56);
+    if (reserved != 0)
+        throw std::runtime_error("binary_codec: reserved field non-zero");
+
+    // Trailer starts at offset 128 — type, payload_len, overflow, etc.
+    // The 4×32-byte fixed-slot area (offsets 0..127) carries the numeric
+    // fields above plus pubkey + recipient slots whose authoritative
+    // values still come from the trailer's length-prefixed strings.
     size_t off = 128;
 
     tx.type = static_cast<chain::TxType>(data[off++]);
