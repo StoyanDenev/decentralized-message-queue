@@ -88,6 +88,29 @@ public:
     uint64_t min_stake() const { return min_stake_; }
     void     set_min_stake(uint64_t s) { min_stake_ = s; }
 
+    // S-032: per-domain Phase-1 abort accumulator, maintained
+    // incrementally in apply_transactions. NodeRegistry::build_from_chain
+    // reads this rather than walking the chain log on every call. Without
+    // this cache, each call is O(N · T) for N = chain.height(),
+    // T = txs/block; total cost over the chain's lifetime is O(N²).
+    // With the cache, build_from_chain becomes O(|registrants| + |stakes|).
+    //
+    // Semantics: `count` is the total number of Phase-1 (round=1) abort
+    // events against this domain that have been baked into a finalized
+    // block. `last_block` is the index of the most recent such block.
+    // build_from_chain's exponential-suspension formula reads both fields.
+    //
+    // Phase-2 (round=2) aborts are NOT recorded — timing skew on healthy
+    // creators can produce Phase-2 false-positives that wouldn't be
+    // suspension-worthy. Matches the existing build_from_chain behavior.
+    struct AbortRecord {
+        uint64_t count{0};
+        uint64_t last_block{0};
+    };
+    const std::map<std::string, AbortRecord>& abort_records() const {
+        return abort_records_;
+    }
+
     // A5 Phase 3: promoted from static constants in params.hpp so the
     // governance whitelist can mutate them at run-time. Default values
     // match the pre-A5 constants: SUSPENSION_SLASH=10, UNSTAKE_DELAY=1000.
@@ -294,6 +317,8 @@ private:
     uint8_t                                     subsidy_mode_{0};
     uint32_t                                    lottery_jackpot_multiplier_{0};
     uint64_t                                    min_stake_{1000};
+    // S-032 cache: see public abort_records() getter above.
+    std::map<std::string, AbortRecord>          abort_records_;
     // A5 Phase 3: instance-state promotion of params.hpp constants.
     uint64_t                                    suspension_slash_{10};
     uint64_t                                    unstake_delay_{1000};

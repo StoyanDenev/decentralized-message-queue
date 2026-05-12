@@ -550,6 +550,12 @@ void Chain::apply_transactions(const Block& b) {
     // are not economically punished. Required for BFT-mode safety.
     for (auto& ae : b.abort_events) {
         if (ae.round != 1) continue;
+        // S-032 cache: increment the abort accumulator for this domain.
+        // build_from_chain reads this cache instead of walking history.
+        auto& ar = abort_records_[ae.aborting_node];
+        ar.count++;
+        ar.last_block = b.index;
+        // Original suspension-slash stake deduction.
         auto sit = stakes_.find(ae.aborting_node);
         if (sit == stakes_.end()) continue;
         uint64_t deduct = std::min<uint64_t>(suspension_slash_, sit->second.locked);
@@ -762,6 +768,18 @@ json Chain::serialize_state(uint32_t header_count) const {
     snap["accumulated_inbound"]  = accumulated_inbound_;
     snap["accumulated_outbound"] = accumulated_outbound_;
 
+    // S-032 cache: persist the Phase-1 abort accumulator so a
+    // snapshot-bootstrapped node doesn't have to rebuild it from the log.
+    json abort_arr = json::array();
+    for (auto& [domain, ar] : abort_records_) {
+        abort_arr.push_back({
+            {"domain",     domain},
+            {"count",      ar.count},
+            {"last_block", ar.last_block},
+        });
+    }
+    snap["abort_records"] = abort_arr;
+
     // A5 Phase 2: persist pending PARAM_CHANGE entries so a snapshot-
     // bootstrapped chain activates them at the same heights an originally-
     // replayed chain would.
@@ -891,6 +909,20 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             info.refugee_region = m.value("refugee_region",
                                             std::string{});
             c.merge_state_.insert({s, std::move(info)});
+        }
+    }
+    // S-032: restore the Phase-1 abort accumulator. Older snapshots
+    // (pre-S-032) omit the field; the value() default leaves the
+    // cache empty, which is fine — build_from_chain reads an empty
+    // cache as "no suspensions on file," and any post-restore aborts
+    // will increment the cache normally.
+    if (snap.contains("abort_records")) {
+        for (auto& a : snap["abort_records"]) {
+            std::string domain = a.value("domain", std::string{});
+            Chain::AbortRecord ar;
+            ar.count      = a.value("count",      uint64_t{0});
+            ar.last_block = a.value("last_block", uint64_t{0});
+            c.abort_records_[domain] = ar;
         }
     }
     if (snap.contains("pending_param_changes")) {

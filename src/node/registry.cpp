@@ -23,22 +23,23 @@ bool NodeRegistry::contains(const std::string& domain) const {
 }
 
 NodeRegistry NodeRegistry::build_from_chain(const chain::Chain& chain, uint64_t at_index) {
-    // Suspension table: count aborts and find each domain's last abort block.
-    // Only Phase 1 (CONTRIB) aborts count toward suspension. Phase 2 (BLOCK_SIG)
-    // aborts can fire on healthy creators under timing skew (a slow signature
-    // arrival looks like absence to the timer), so using them inflates false
-    // positives and can drop the eligible pool below K. Phase 1 absence is the
-    // reliable signal that a creator is actually unresponsive.
-    struct AbortRecord { uint64_t count{0}; uint64_t last_block{0}; };
-    std::map<std::string, AbortRecord> abort_records;
-    for (uint64_t i = 0; i < at_index && i < chain.height(); ++i) {
-        for (auto& ae : chain.at(i).abort_events) {
-            if (ae.round != 1) continue;
-            auto& ar = abort_records[ae.aborting_node];
-            ar.count++;
-            ar.last_block = i;
-        }
-    }
+    // S-032 closure: read the Phase-1 abort accumulator from Chain's
+    // incrementally-maintained cache instead of walking the chain log on
+    // every call. The cache is kept current by apply_transactions; this
+    // function becomes O(|registrants|) instead of O(height × txs/block).
+    //
+    // Semantics preserved: build_from_chain still returns "the registry
+    // as of at_index" — the cache reflects all applied blocks (i.e., the
+    // current head). Call sites that pass at_index = chain.height() get
+    // identical results to the pre-S-032 walk. Call sites that pass
+    // a slightly-future at_index (e.g., validating a block being received
+    // at b.index = chain.height() + 1) also get identical results
+    // because the loop's `i < chain.height()` bound previously prevented
+    // those out-of-bounds reads.
+    //
+    // Only Phase-1 (round=1) aborts feed suspension; the cache mirrors
+    // that filter (apply_transactions only increments on round==1).
+    const auto& abort_records = chain.abort_records();
     auto is_suspended = [&](const std::string& domain) -> bool {
         auto it = abort_records.find(domain);
         if (it == abort_records.end()) return false;
