@@ -1490,6 +1490,17 @@ int main(int argc, char** argv) {
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
     if (cmd == "balance")     return cmd_balance(sub_argc, sub_argv);
+    if (cmd == "state-root") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "state_root", {});
+            std::cout << r.dump(2) << "\n";
+            return 0;
+        } catch (std::exception& e) {
+            std::cerr << "state-root query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);

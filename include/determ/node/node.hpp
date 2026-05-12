@@ -155,6 +155,14 @@ public:
     nlohmann::json rpc_register();
     nlohmann::json rpc_send(const std::string& to, uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_balance(const std::string& domain)           const;
+    // S-033 / v2.1: expose the chain's current cryptographic state
+    // commitment. Returns {"state_root": "<hex>", "height": N}. Until
+    // the producer starts populating block.state_root, this surface is
+    // a query-only foundation — operators can compare across nodes to
+    // detect silent state divergence. Once producer-side population
+    // lands (follow-on commit), Block.state_root == this for every
+    // honest node applying the same block sequence.
+    nlohmann::json rpc_state_root()                                 const;
     nlohmann::json rpc_stake(uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_unstake(uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_nonce(const std::string& domain)             const;

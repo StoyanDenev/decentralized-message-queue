@@ -320,6 +320,26 @@ struct Block {
     //     committee is the merged committee do).
     Hash partner_subset_hash{};
 
+    // S-033 / v2.1 foundation: cryptographic commitment to state-after-apply.
+    // Zero (the default) means "this block doesn't commit state" —
+    // preserves byte-identical hashes for all pre-S-033 blocks and chains.
+    // Non-zero means `state_root == Chain::compute_state_root()` after this
+    // block applies; validators re-derive and reject on mismatch.
+    //
+    // Once a chain emits a non-zero state_root in any block, all subsequent
+    // blocks should also (since they're sequential and the apply path is
+    // deterministic). Mixed populated/unpopulated state_roots within a chain
+    // are not invalid by themselves — the validator only checks non-zero
+    // entries — but operationally indicate either a producer bug or a
+    // mid-chain feature toggle.
+    //
+    // The full v2.1 sparse-Merkle-tree extension (inclusion proofs for
+    // light clients, v2.2) replaces this single 32-byte hash with a
+    // Merkle root over the SMT. Wire format stays the same — only the
+    // computation changes. Inclusion proofs are queried via a new RPC
+    // separate from the block format.
+    Hash state_root{};
+
     // Populated only at index 0 (genesis). Encodes the initial accounts /
     // stakes / registry that seed the chain. Invalid for any other block.
     std::vector<GenesisAlloc> initial_state;

@@ -2336,6 +2336,21 @@ json Node::rpc_balance(const std::string& domain) const {
     return {{"domain", domain}, {"balance", chain_.balance(domain)}};
 }
 
+// S-033 / v2.1: query the chain's current cryptographic state commitment.
+// Operators can call this against multiple nodes to detect silent state
+// divergence (a real S-030 D1 / S-030 D2 attack would manifest as the
+// same height but different state_root across nodes). Read-only via
+// shared_lock — concurrent with other readers, blocked only by active
+// writers.
+json Node::rpc_state_root() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    return {
+        {"state_root", to_hex(chain_.compute_state_root())},
+        {"height",     chain_.height()},
+        {"head_hash",  chain_.empty() ? "" : to_hex(chain_.head_hash())},
+    };
+}
+
 json Node::rpc_register() {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 

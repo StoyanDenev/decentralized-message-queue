@@ -312,6 +312,22 @@ std::vector<uint8_t> Block::signing_bytes() const {
         }
     }
 
+    // S-033 / v2.1: bind state_root into the block hash chain ONLY when
+    // non-zero. Same backward-compat pattern as partner_subset_hash —
+    // pre-S-033 blocks have zero state_root and contribute nothing to
+    // signing_bytes. When the producer populates it (post-feature-toggle),
+    // the K-of-K committee signatures cover the state-after-apply
+    // commitment. Validator re-derives and rejects on mismatch. The
+    // prev_hash chain then forward-binds the commitment so any future
+    // block's verification transitively authenticates all prior state
+    // roots — turning the chain into a verifiable state log.
+    {
+        Hash zero{};
+        if (state_root != zero) {
+            b.append(state_root);
+        }
+    }
+
     Hash h = b.finalize();
     return std::vector<uint8_t>(h.begin(), h.end());
 }
@@ -393,6 +409,12 @@ json Block::to_json() const {
     for (auto& a : initial_state) is_arr.push_back(a.to_json());
     j["initial_state"]  = is_arr;
 
+    // S-033 / v2.1: serialize state_root only when non-zero.
+    {
+        Hash zero{};
+        if (state_root != zero)
+            j["state_root"] = to_hex(state_root);
+    }
     // R4 Phase 3: serialize partner_subset_hash only when non-zero.
     // Pre-R4 / non-merged blocks omit the key entirely, keeping JSON
     // byte-identical for existing chain.json files.
@@ -478,6 +500,9 @@ Block Block::from_json(const json& j) {
     if (j.contains("partner_subset_hash"))
         b.partner_subset_hash =
             from_hex_arr<32>(j["partner_subset_hash"].get<std::string>());
+    if (j.contains("state_root"))
+        b.state_root =
+            from_hex_arr<32>(j["state_root"].get<std::string>());
 
     return b;
 }

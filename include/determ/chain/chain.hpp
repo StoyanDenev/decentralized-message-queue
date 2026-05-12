@@ -111,6 +111,41 @@ public:
         return abort_records_;
     }
 
+    // S-033 / v2.1 foundation: cryptographic commitment to current state.
+    // Computes a SHA-256 hash over the byte-canonical serialization of:
+    //   1. accounts_                 (sorted by domain)
+    //   2. stakes_                   (sorted by domain)
+    //   3. registrants_              (sorted by domain)
+    //   4. applied_inbound_receipts_ (sorted set, deterministic)
+    //   5. abort_records_            (sorted by domain)
+    //   6. merge_state_              (sorted by shard_id)
+    //   7. pending_param_changes_    (sorted by effective_height)
+    //   8. genesis-pinned constants  (block_subsidy, min_stake,
+    //                                  suspension_slash, unstake_delay,
+    //                                  merge_threshold_blocks,
+    //                                  revert_threshold_blocks,
+    //                                  merge_grace_blocks, shard_count,
+    //                                  my_shard_id)
+    //   9. A1 supply counters        (genesis_total_,
+    //                                  accumulated_subsidy_,
+    //                                  accumulated_slashed_,
+    //                                  accumulated_inbound_,
+    //                                  accumulated_outbound_)
+    //
+    // The hash is byte-canonical by construction: every container is
+    // std::map (sorted-key iteration) or std::set, every primitive is
+    // little-endian, every string is length-prefixed. Two honest nodes
+    // applying the same block sequence MUST produce byte-identical
+    // state_root values. A divergence indicates a real consensus break.
+    //
+    // Future evolution (v2.1 full): replace this single hash with a
+    // sparse Merkle root over the same canonical serialization, paired
+    // with an inclusion-proof API for light-client state queries. The
+    // wire format (32-byte Hash in Block.state_root) stays the same;
+    // only the computation changes. Light clients verify SMT proofs
+    // against this same field.
+    Hash compute_state_root() const;
+
     // A5 Phase 3: promoted from static constants in params.hpp so the
     // governance whitelist can mutate them at run-time. Default values
     // match the pre-A5 constants: SUSPENSION_SLASH=10, UNSTAKE_DELAY=1000.

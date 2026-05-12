@@ -126,6 +126,115 @@ void Chain::stage_param_change(uint64_t effective_height,
         std::move(name), std::move(value));
 }
 
+// S-033 / v2.1 foundation: byte-canonical hash over the current chain
+// state. Two honest nodes applying the same block sequence MUST produce
+// byte-identical state_root values; divergence = real consensus break.
+//
+// Serialization order is deterministic by construction: std::map iterates
+// in sorted-key order; std::set iterates in sorted order; every numeric
+// field is little-endian; every string is length-prefixed.
+//
+// Adding a new state field to Chain in the future: include it here in a
+// stable position. The position matters for the hash, so additions go
+// at the end (or behind a feature flag that only activates from a
+// flag-day height onward).
+Hash Chain::compute_state_root() const {
+    crypto::SHA256Builder b;
+
+    // (1) accounts_ — sorted by domain.
+    b.append(static_cast<uint64_t>(accounts_.size()));
+    for (auto& [domain, acct] : accounts_) {
+        b.append(static_cast<uint64_t>(domain.size()));
+        b.append(domain);
+        b.append(acct.balance);
+        b.append(acct.next_nonce);
+    }
+
+    // (2) stakes_ — sorted by domain.
+    b.append(static_cast<uint64_t>(stakes_.size()));
+    for (auto& [domain, st] : stakes_) {
+        b.append(static_cast<uint64_t>(domain.size()));
+        b.append(domain);
+        b.append(st.locked);
+        b.append(st.unlock_height);
+    }
+
+    // (3) registrants_ — sorted by domain.
+    b.append(static_cast<uint64_t>(registrants_.size()));
+    for (auto& [domain, r] : registrants_) {
+        b.append(static_cast<uint64_t>(domain.size()));
+        b.append(domain);
+        b.append(r.ed_pub.data(), r.ed_pub.size());
+        b.append(r.registered_at);
+        b.append(r.active_from);
+        b.append(r.inactive_from);
+        b.append(static_cast<uint64_t>(r.region.size()));
+        b.append(r.region);
+    }
+
+    // (4) applied_inbound_receipts_ — std::set is sorted.
+    b.append(static_cast<uint64_t>(applied_inbound_receipts_.size()));
+    for (auto& [src, tx_hash] : applied_inbound_receipts_) {
+        b.append(static_cast<uint64_t>(src));
+        b.append(tx_hash);
+    }
+
+    // (5) abort_records_ — sorted by domain (S-032 cache field).
+    b.append(static_cast<uint64_t>(abort_records_.size()));
+    for (auto& [domain, ar] : abort_records_) {
+        b.append(static_cast<uint64_t>(domain.size()));
+        b.append(domain);
+        b.append(ar.count);
+        b.append(ar.last_block);
+    }
+
+    // (6) merge_state_ — sorted by shard_id.
+    b.append(static_cast<uint64_t>(merge_state_.size()));
+    for (auto& [shard, info] : merge_state_) {
+        b.append(static_cast<uint64_t>(shard));
+        b.append(static_cast<uint64_t>(info.partner_id));
+        b.append(static_cast<uint64_t>(info.refugee_region.size()));
+        b.append(info.refugee_region);
+    }
+
+    // (7) pending_param_changes_ — sorted by effective_height.
+    b.append(static_cast<uint64_t>(pending_param_changes_.size()));
+    for (auto& [eff, entries] : pending_param_changes_) {
+        b.append(eff);
+        b.append(static_cast<uint64_t>(entries.size()));
+        for (auto& [name, value] : entries) {
+            b.append(static_cast<uint64_t>(name.size()));
+            b.append(name);
+            b.append(static_cast<uint64_t>(value.size()));
+            if (!value.empty()) b.append(value.data(), value.size());
+        }
+    }
+
+    // (8) genesis-pinned constants.
+    b.append(block_subsidy_);
+    b.append(subsidy_pool_initial_);
+    b.append(static_cast<uint64_t>(subsidy_mode_));
+    b.append(static_cast<uint64_t>(lottery_jackpot_multiplier_));
+    b.append(min_stake_);
+    b.append(suspension_slash_);
+    b.append(unstake_delay_);
+    b.append(static_cast<uint64_t>(merge_threshold_blocks_));
+    b.append(static_cast<uint64_t>(revert_threshold_blocks_));
+    b.append(static_cast<uint64_t>(merge_grace_blocks_));
+    b.append(static_cast<uint64_t>(shard_count_));
+    b.append(static_cast<uint64_t>(my_shard_id_));
+    b.append(shard_salt_);
+
+    // (9) A1 supply counters.
+    b.append(genesis_total_);
+    b.append(accumulated_subsidy_);
+    b.append(accumulated_slashed_);
+    b.append(accumulated_inbound_);
+    b.append(accumulated_outbound_);
+
+    return b.finalize();
+}
+
 // Activate all staged changes with eff_height <= current_height. Called
 // at the start of apply_transactions so the new values are in effect
 // before the block's txs replay. Decoding is per-parameter; unknown
@@ -649,6 +758,33 @@ void Chain::apply_transactions(const Block& b) {
             (unsigned long long)accumulated_slashed_,
             (unsigned long long)accumulated_outbound_);
         throw std::runtime_error(buf);
+    }
+
+    // S-033 / v2.1 foundation: state-root verification. Block may carry a
+    // commitment to state-after-apply. If non-zero, re-derive locally
+    // and reject on mismatch. Pre-S-033 blocks carry zero state_root
+    // and skip this check (preserving byte-identical hashes + backward
+    // compatibility). Once a producer starts emitting state_root, every
+    // node applying must agree byte-for-byte — divergence here is a real
+    // consensus break (different state under same digest), which is
+    // exactly the kind of failure S-030 D1 (validate-vs-apply divergence)
+    // would otherwise produce silently.
+    {
+        Hash zero{};
+        if (b.state_root != zero) {
+            Hash computed = compute_state_root();
+            if (computed != b.state_root) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "state_root mismatch at block %llu: block declares "
+                    "%02x%02x%02x%02x... but computed %02x%02x%02x%02x... "
+                    "(S-033)",
+                    (unsigned long long)b.index,
+                    b.state_root[0], b.state_root[1], b.state_root[2], b.state_root[3],
+                    computed[0], computed[1], computed[2], computed[3]);
+                throw std::runtime_error(buf);
+            }
+        }
     }
 }
 
