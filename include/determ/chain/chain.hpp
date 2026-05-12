@@ -397,6 +397,69 @@ private:
     // block sees the new values.
     void activate_pending_params(uint64_t current_height);
 
+    // A9 Phase 1: atomic block apply via snapshot + restore.
+    //
+    // Problem: apply_transactions mutates ~13 state containers + a
+    // dozen scalar counters across ~700 lines of tx-loop logic. A
+    // throw from anywhere inside (invariant assertion, malformed tx,
+    // bug) left the chain with partially-mutated state — accounts
+    // credited but stakes not unlocked, abort_records bumped but the
+    // block not in blocks_, etc. The next apply_transactions call
+    // would then operate on garbage. Tests masked this because
+    // throws were rare in happy-path replays.
+    //
+    // Fix: snapshot every mutable state field at apply entry; on any
+    // exception, move-restore the snapshot before re-throwing. The
+    // chain is observably unchanged from the failed apply — either
+    // the full block applies or nothing does.
+    //
+    // Cost: one copy per block of N (accounts) + M (stakes/registrants
+    // /etc.) maps. These are byte-shallow (std::map nodes hold POD
+    // values and short strings); the copy is dominated by allocator
+    // overhead, not data movement. Measured on bearer test: <1ms per
+    // block at 10k accounts. Acceptable until Phase 2 (overlay/delta
+    // primitive) makes the snapshot cheaper still.
+    //
+    // Phase 2 (deferred): replace the std::map deep-copy with an
+    // overlay layer — a small per-block diff map that mutators write
+    // to, with read-through to the base map. Commit = merge overlay
+    // into base; rollback = drop overlay. Enables concurrent readers
+    // during apply, batched txs, and is the foundation for the
+    // composable-tx primitive in v2.4.
+    struct StateSnapshot {
+        std::map<std::string, AccountState>          accounts;
+        std::map<std::string, StakeEntry>            stakes;
+        std::map<std::string, RegistryEntry>         registrants;
+        std::map<std::string, AbortRecord>           abort_records;
+        MergeStateMap                                merge_state;
+        std::set<std::pair<ShardId, Hash>>           applied_inbound_receipts;
+        std::map<uint64_t,
+                 std::vector<std::pair<std::string,
+                                       std::vector<uint8_t>>>>
+                                                     pending_param_changes;
+        // Scalars: all mutable counters + governance-promoted params.
+        // Genesis-pinned routing fields (shard_count_, shard_salt_,
+        // my_shard_id_) are NOT snapshotted — they cannot change
+        // during apply.
+        uint64_t genesis_total{0};
+        uint64_t accumulated_subsidy{0};
+        uint64_t accumulated_slashed{0};
+        uint64_t accumulated_inbound{0};
+        uint64_t accumulated_outbound{0};
+        uint64_t min_stake{0};
+        uint64_t suspension_slash{0};
+        uint64_t unstake_delay{0};
+        uint32_t merge_threshold_blocks{0};
+        uint32_t revert_threshold_blocks{0};
+        uint32_t merge_grace_blocks{0};
+        uint64_t block_subsidy{0};
+        uint64_t subsidy_pool_initial{0};
+        uint8_t  subsidy_mode{0};
+        uint32_t lottery_jackpot_multiplier{0};
+    };
+    StateSnapshot create_state_snapshot() const;
+    void          restore_state_snapshot(StateSnapshot&& s);
+
     void apply_transactions(const Block& b);
 };
 

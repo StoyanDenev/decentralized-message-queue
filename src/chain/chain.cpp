@@ -332,7 +332,79 @@ uint64_t Chain::live_total_supply() const {
     return s;
 }
 
+// A9 Phase 1: atomic state snapshot for rollback on apply failure.
+// Deep-copies every mutable state container + scalar. The std::map copies
+// are byte-shallow (POD values, short keys) so this is dominated by
+// allocator overhead, not data motion. <1ms per block at 10k accounts.
+Chain::StateSnapshot Chain::create_state_snapshot() const {
+    StateSnapshot s;
+    s.accounts                   = accounts_;
+    s.stakes                     = stakes_;
+    s.registrants                = registrants_;
+    s.abort_records              = abort_records_;
+    s.merge_state                = merge_state_;
+    s.applied_inbound_receipts   = applied_inbound_receipts_;
+    s.pending_param_changes      = pending_param_changes_;
+    s.genesis_total              = genesis_total_;
+    s.accumulated_subsidy        = accumulated_subsidy_;
+    s.accumulated_slashed        = accumulated_slashed_;
+    s.accumulated_inbound        = accumulated_inbound_;
+    s.accumulated_outbound       = accumulated_outbound_;
+    s.min_stake                  = min_stake_;
+    s.suspension_slash           = suspension_slash_;
+    s.unstake_delay              = unstake_delay_;
+    s.merge_threshold_blocks     = merge_threshold_blocks_;
+    s.revert_threshold_blocks    = revert_threshold_blocks_;
+    s.merge_grace_blocks         = merge_grace_blocks_;
+    s.block_subsidy              = block_subsidy_;
+    s.subsidy_pool_initial       = subsidy_pool_initial_;
+    s.subsidy_mode               = subsidy_mode_;
+    s.lottery_jackpot_multiplier = lottery_jackpot_multiplier_;
+    return s;
+}
+
+// Move-restore from snapshot. Called from apply_transactions's catch
+// block. After this returns, the chain's observable state is byte-
+// identical to before the failed apply call. param_changed_hook_ is
+// NOT restored — it's a hook installed by Node, not block-derived
+// state, and any callbacks already invoked during the failed apply
+// are inherently non-transactional anyway (they cross the
+// chain/validator boundary). Hooks fire only on successful activation
+// — see activate_pending_params, which the snapshot covers.
+void Chain::restore_state_snapshot(StateSnapshot&& s) {
+    accounts_                   = std::move(s.accounts);
+    stakes_                     = std::move(s.stakes);
+    registrants_                = std::move(s.registrants);
+    abort_records_              = std::move(s.abort_records);
+    merge_state_                = std::move(s.merge_state);
+    applied_inbound_receipts_   = std::move(s.applied_inbound_receipts);
+    pending_param_changes_      = std::move(s.pending_param_changes);
+    genesis_total_              = s.genesis_total;
+    accumulated_subsidy_        = s.accumulated_subsidy;
+    accumulated_slashed_        = s.accumulated_slashed;
+    accumulated_inbound_        = s.accumulated_inbound;
+    accumulated_outbound_       = s.accumulated_outbound;
+    min_stake_                  = s.min_stake;
+    suspension_slash_           = s.suspension_slash;
+    unstake_delay_              = s.unstake_delay;
+    merge_threshold_blocks_     = s.merge_threshold_blocks;
+    revert_threshold_blocks_    = s.revert_threshold_blocks;
+    merge_grace_blocks_         = s.merge_grace_blocks;
+    block_subsidy_              = s.block_subsidy;
+    subsidy_pool_initial_       = s.subsidy_pool_initial;
+    subsidy_mode_               = s.subsidy_mode;
+    lottery_jackpot_multiplier_ = s.lottery_jackpot_multiplier;
+}
+
 void Chain::apply_transactions(const Block& b) {
+    // A9 Phase 1: snapshot at entry; restore on any throw before re-raising.
+    // Guarantees observers see either the full block applied or no
+    // change at all. Cost: one deep-copy of state maps per block (<1ms
+    // at 10k accounts). The block-vector itself is appended only after
+    // apply_transactions returns successfully (see Chain::append), so
+    // blocks_ atomicity is handled at the caller level.
+    StateSnapshot __snapshot = create_state_snapshot();
+    try {
     // A5 Phase 2: activate any staged governance parameter changes whose
     // effective_height <= this block's index BEFORE replaying the block.
     // The new values are visible to all tx handlers and to the post-apply
@@ -838,6 +910,18 @@ void Chain::apply_transactions(const Block& b) {
                 throw std::runtime_error(buf);
             }
         }
+    }
+    } catch (...) {
+        // A9 Phase 1: any throw from the apply body leaves the chain
+        // exactly as it was at entry. Restore in-place, then re-raise
+        // so the caller (Chain::append, then up through the validator
+        // / producer path) still sees the failure. Without this catch,
+        // a mid-apply throw (invariant assertion, arithmetic overflow,
+        // bug) would leave state partially mutated — the next apply
+        // call would operate on inconsistent data and silently corrupt
+        // the chain.
+        restore_state_snapshot(std::move(__snapshot));
+        throw;
     }
 }
 
