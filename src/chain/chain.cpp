@@ -118,6 +118,28 @@ uint64_t Chain::next_nonce_lockfree(const std::string& domain) const {
     return it != p->end() ? it->second.next_nonce : 0;
 }
 
+uint64_t Chain::stake_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_stakes_view_);
+    if (!p) return 0;
+    auto it = p->find(domain);
+    return it != p->end() ? it->second.locked : 0;
+}
+
+uint64_t Chain::stake_unlock_height_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_stakes_view_);
+    if (!p) return UINT64_MAX;
+    auto it = p->find(domain);
+    return it != p->end() ? it->second.unlock_height : UINT64_MAX;
+}
+
+std::optional<RegistryEntry> Chain::registrant_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_registrants_view_);
+    if (!p) return std::nullopt;
+    auto it = p->find(domain);
+    if (it == p->end()) return std::nullopt;
+    return it->second;
+}
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -1032,6 +1054,17 @@ void Chain::apply_transactions(const Block& b) {
 #endif
     std::atomic_store(&committed_accounts_view_,
         std::make_shared<const std::map<std::string, AccountState>>(accounts_));
+    // Phase 2C extension: republish stakes and registrants too. The
+    // make_shared deep-copies the current map; for blocks that didn't
+    // mutate stakes/registrants (TRANSFER-only) this is unnecessary
+    // work but harmless — a future optimization could publish only
+    // when the corresponding lazy snapshot was captured (signal that
+    // the container was actually touched). For now, always-publish
+    // is the simplest correct shape.
+    std::atomic_store(&committed_stakes_view_,
+        std::make_shared<const std::map<std::string, StakeEntry>>(stakes_));
+    std::atomic_store(&committed_registrants_view_,
+        std::make_shared<const std::map<std::string, RegistryEntry>>(registrants_));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -1401,16 +1434,20 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
 
-    // A9 Phase 2C: publish the loaded accounts_ as the lock-free view
-    // so balance_lockfree() / next_nonce_lockfree() return the
-    // snapshot-bootstrapped values immediately after restore (no
-    // intervening apply_transactions runs on this path).
+    // A9 Phase 2C: publish loaded state as lock-free views so the
+    // *_lockfree() accessors return snapshot-bootstrapped values
+    // immediately after restore (no intervening apply_transactions
+    // on this path).
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4996)
 #endif
     std::atomic_store(&c.committed_accounts_view_,
         std::make_shared<const std::map<std::string, AccountState>>(c.accounts_));
+    std::atomic_store(&c.committed_stakes_view_,
+        std::make_shared<const std::map<std::string, StakeEntry>>(c.stakes_));
+    std::atomic_store(&c.committed_registrants_view_,
+        std::make_shared<const std::map<std::string, RegistryEntry>>(c.registrants_));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif

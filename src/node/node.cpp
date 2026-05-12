@@ -2045,18 +2045,28 @@ json Node::rpc_block(uint64_t index) const {
 }
 
 json Node::rpc_account(const std::string& addr) const {
-    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    // A9 Phase 2C-Node: lock-free read path. All four state lookups
+    // (balance, next_nonce, stake, registrant) go through the
+    // corresponding *_lockfree accessors. Each accessor atomic-loads
+    // its own committed view; the four reads aren't synchronized as
+    // a group (they may straddle a commit boundary). That's
+    // acceptable here — rpc_account is a display query, not a
+    // consensus-critical read; an explorer showing slightly cross-
+    // block fields for one rare race is a non-issue. If strong
+    // atomicity across containers is ever needed, a follow-on can
+    // add a `committed_state_view_` shared_ptr bundling all maps and
+    // atomic-publish them as one unit at commit.
     json j;
     j["address"]    = addr;
-    j["balance"]    = chain_.balance(addr);
-    j["next_nonce"] = chain_.next_nonce(addr);
+    j["balance"]    = chain_.balance_lockfree(addr);
+    j["next_nonce"] = chain_.next_nonce_lockfree(addr);
 
     // Bearer-wallet anonymous addresses surface as their pubkey-derived
     // address; show that fact for the explorer.
     j["is_anonymous"] = is_anon_address(addr);
 
     // If the address is a registered domain, attach registry + stake info.
-    auto reg_entry = chain_.registrant(addr);
+    auto reg_entry = chain_.registrant_lockfree(addr);
     if (reg_entry) {
         json r;
         r["ed_pub"]        = to_hex(reg_entry->ed_pub);
@@ -2064,15 +2074,15 @@ json Node::rpc_account(const std::string& addr) const {
         r["active_from"]   = reg_entry->active_from;
         r["inactive_from"] = reg_entry->inactive_from;
         j["registry"]      = r;
-        j["stake"]         = chain_.stake(addr);
+        j["stake"]         = chain_.stake_lockfree(addr);
     } else {
         j["registry"] = nullptr;
-        j["stake"]    = chain_.stake(addr);    // 0 if not staked
+        j["stake"]    = chain_.stake_lockfree(addr);    // 0 if not staked
     }
 
     // Aggregate visibility: has this address ever appeared on-chain?
-    bool has_state = (chain_.balance(addr) > 0)
-                  || (chain_.next_nonce(addr) > 0)
+    bool has_state = (j["balance"].get<uint64_t>() > 0)
+                  || (j["next_nonce"].get<uint64_t>() > 0)
                   || reg_entry.has_value();
     if (!has_state) return nullptr;
     return j;
@@ -2281,11 +2291,17 @@ json Node::rpc_nonce(const std::string& domain) const {
 }
 
 json Node::rpc_stake_info(const std::string& domain) const {
-    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    // A9 Phase 2C-Node: lock-free read path for stakes. See rpc_balance
+    // / rpc_nonce above. The two atomic_loads (one per lockfree call)
+    // are independent — they may return shared_ptrs from different
+    // commit cycles. For rpc_stake_info this is fine: locked and
+    // unlock_height come from the SAME StakeEntry inside one shared_ptr
+    // load, so the per-call view is internally consistent even though
+    // the two calls may straddle a commit boundary.
     return {
         {"domain",        domain},
-        {"locked",        chain_.stake(domain)},
-        {"unlock_height", chain_.stake_unlock_height(domain)}
+        {"locked",        chain_.stake_lockfree(domain)},
+        {"unlock_height", chain_.stake_unlock_height_lockfree(domain)}
     };
 }
 

@@ -92,6 +92,15 @@ public:
     uint64_t balance_lockfree(const std::string& domain) const;
     uint64_t next_nonce_lockfree(const std::string& domain) const;
 
+    // Phase 2C extension to stakes_ and registrants_. Same shared_ptr
+    // publish-at-commit mechanism; same semantics (returns the last
+    // finalized state, lock-free, safe to call without state_mutex_).
+    // The corresponding Node RPC handlers (rpc_stake_info, rpc_account)
+    // now use these and no longer block on apply's writer lock.
+    uint64_t                     stake_lockfree(const std::string& domain) const;
+    uint64_t                     stake_unlock_height_lockfree(const std::string& domain) const;
+    std::optional<RegistryEntry> registrant_lockfree(const std::string& domain) const;
+
     // Rev. 4: per-block subsidy minted to creators on apply. Set by Node
     // after loading GenesisConfig; chain-wide constant.
     uint64_t block_subsidy() const { return block_subsidy_; }
@@ -370,15 +379,25 @@ private:
     std::map<std::string, StakeEntry>           stakes_;
     std::map<std::string, RegistryEntry>        registrants_;
 
-    // A9 Phase 2C: lock-free committed view of accounts_. Published at
-    // every successful apply via std::atomic_store. Readers (RPC
-    // handlers, gossip handlers) atomic_load this pointer and read
-    // from the contents — the std::shared_ptr keeps the snapshot alive
-    // for the reader's duration, and the writer's atomic_store
-    // publishes a fresh snapshot without disturbing in-flight readers.
-    // See balance_lockfree() / next_nonce_lockfree() above.
+    // A9 Phase 2C: lock-free committed views. Published at every
+    // successful apply via std::atomic_store. Readers atomic_load
+    // and read from the const contents; the shared_ptr keeps the
+    // snapshot alive for the reader's duration. Writers publish
+    // fresh snapshots at commit without disturbing in-flight readers.
+    // See balance_lockfree() / stake_lockfree() / registrant_lockfree()
+    // above. Each container is published independently — a reader of
+    // committed_accounts_view_ doesn't synchronize with a reader of
+    // committed_stakes_view_, so the three views are not guaranteed
+    // to be from the same block. That's acceptable: each accessor
+    // returns a self-consistent view of its own container, and
+    // multi-container queries (e.g., rpc_account) are typically just
+    // composing display data, not enforcing cross-container invariants.
     std::shared_ptr<const std::map<std::string, AccountState>>
                                                 committed_accounts_view_;
+    std::shared_ptr<const std::map<std::string, StakeEntry>>
+                                                committed_stakes_view_;
+    std::shared_ptr<const std::map<std::string, RegistryEntry>>
+                                                committed_registrants_view_;
 
     uint64_t                                    block_subsidy_{0};
     // E4: optional finite subsidy fund. 0 = unlimited / perpetual subsidy
