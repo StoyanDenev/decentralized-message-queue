@@ -855,9 +855,20 @@ BlockValidator::Result BlockValidator::check_inbound_receipts(
 }
 
 BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {
+    // S-003: widened from ±5s to ±30s to match the spec text (README §8
+    // and PROTOCOL.md §4). The tighter window caused false-positive
+    // aborts under normal cross-region NTP drift (typically 50-500 ms
+    // but occasionally seconds for non-NTP'd hosts) plus in-flight
+    // network latency. ±30s is conservative-but-livenessy; honest
+    // committee members' clocks need only agree to within half a
+    // minute, which is achievable without any NTP tuning. A median-of-
+    // last-N-blocks check (Bitcoin-style) is the v2 path if drift
+    // becomes a measurement concern; today the wall-clock check is
+    // just a sanity bound, not a consensus-defining property.
+    constexpr int64_t kTimestampWindowSec = 30;
     int64_t diff = b.timestamp - now_unix();
-    if (diff > 5 || diff < -5)
-        return {false, "timestamp out of +-5s window"};
+    if (diff > kTimestampWindowSec || diff < -kTimestampWindowSec)
+        return {false, "timestamp out of +-30s window"};
     return {true, ""};
 }
 

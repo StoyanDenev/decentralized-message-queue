@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **5** | **7** | **4** | **10** | **26** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **16** |
+| Open | **4** | **7** | **4** | **10** | **25** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **17** |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -141,11 +141,15 @@ This closure required a paired fix to `src/net/binary_codec.cpp::decode_tx_frame
 
 ### S-003 — Block timestamp window ±5s contradicts spec
 
-**Severity:** Critical (for liveness) • **Status:** Open • **Sources:** Audit 1.2
+**Severity:** Critical (for liveness) • **Status:** Mitigated in-session • **Sources:** Audit 1.2
 
-**What's open.** `BlockValidator::check_timestamp` at `src/node/validator.cpp:559-564` rejects any block with `|b.timestamp - now()| > 5`. The README spec text references ±30s. Under normal cross-region NTP drift, legitimate blocks get rejected as out-of-window.
+**Mitigation landed in-session.** `BlockValidator::check_timestamp` window widened from ±5s to ±30s, matching the spec text (README §8 and PROTOCOL.md §4). The change is a one-line constant adjustment in `src/node/validator.cpp::check_timestamp`. PROTOCOL.md §4's inline comment on the `timestamp` field updated to "±30s window (S-003)". Spec, code, and documentation now agree on the canonical window.
 
-**Impact.** False-positive aborts → suspension → cascading liveness failure on globally-distributed deployments.
+The choice was option 1 from the resolution table below (the audit's recommended path). Option 2 (median-of-last-N-blocks, Bitcoin-style) is the v2 answer if drift becomes a measurement concern; today's wall-clock check is a sanity bound, not a consensus-defining property.
+
+**Pre-fix description** (preserved for audit trail). `BlockValidator::check_timestamp` at `src/node/validator.cpp:559-564` rejected any block with `|b.timestamp - now()| > 5`. The README spec text referenced ±30s. Under normal cross-region NTP drift, legitimate blocks got rejected as out-of-window.
+
+**Impact (pre-fix).** False-positive aborts → suspension → cascading liveness failure on globally-distributed deployments.
 
 **Resolution options.**
 

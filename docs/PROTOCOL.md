@@ -111,7 +111,7 @@ The region is mirrored from the REGISTER tx into the registry. `eligible_in_regi
 struct Block {
     uint64                index;
     Hash                  prev_hash;
-    int64                 timestamp;             // Unix seconds, ±5s window
+    int64                 timestamp;             // Unix seconds, ±30s window (S-003)
     Transaction[]         transactions;          // canonical (from, nonce, hash) order
     string[]              creators;              // K committee members in selection order
     Hash[][]              creator_tx_lists;      // K Phase-1 tx_hashes lists
