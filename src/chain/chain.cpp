@@ -82,6 +82,46 @@ uint64_t Chain::next_nonce(const std::string& domain) const {
     return it != accounts_.end() ? it->second.next_nonce : 0;
 }
 
+// A9 Phase 2C: lock-free committed-view readers. atomic_load the
+// shared_ptr (lock-free on all major platforms for shared_ptr<T>),
+// then read from the contents. The snapshot is immutable for as long
+// as the local shared_ptr `p` holds it; the writer's atomic_store at
+// apply commit publishes a NEW shared_ptr without disturbing readers.
+// committed_accounts_view_ is null only on a freshly-constructed
+// Chain with no apply yet — return 0 in that edge case (matches the
+// "domain not found" semantics of the locked path).
+// Suppress MSVC's C4996 deprecation warning on std::atomic_load /
+// atomic_store free functions for shared_ptr. They are deprecated in
+// C++20 in favor of std::atomic<std::shared_ptr<T>> but remain
+// functional and well-supported. Migration is a follow-on cleanup;
+// the warning suppression is local to the four call sites in this
+// file. When the toolchain moves to C++26 (where the free functions
+// are removed), convert committed_accounts_view_ to
+// std::atomic<std::shared_ptr<const std::map<...>>> and rewrite the
+// call sites mechanically.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+
+uint64_t Chain::balance_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_accounts_view_);
+    if (!p) return 0;
+    auto it = p->find(domain);
+    return it != p->end() ? it->second.balance : 0;
+}
+
+uint64_t Chain::next_nonce_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_accounts_view_);
+    if (!p) return 0;
+    auto it = p->find(domain);
+    return it != p->end() ? it->second.next_nonce : 0;
+}
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 uint64_t Chain::stake(const std::string& domain) const {
     auto it = stakes_.find(domain);
     return it != stakes_.end() ? it->second.locked : 0;
@@ -965,6 +1005,36 @@ void Chain::apply_transactions(const Block& b) {
             }
         }
     }
+    // A9 Phase 2C: publish the new committed view of accounts_ so
+    // lock-free readers see this block's updates. Must happen AFTER
+    // all in-block mutations and AFTER the state_root check (which
+    // can still throw and roll back). The std::make_shared copies the
+    // current accounts_ map; the std::atomic_store atomically swaps
+    // the published pointer. Any reader holding the prior view via
+    // an already-loaded shared_ptr keeps reading from it until they
+    // release; new readers see the new view.
+    //
+    // Cost: one map deep-copy per successful apply. This is similar
+    // cost to Phase 1's snapshot but pays for the lock-free read path
+    // rather than for rollback. Combined with Phase 2A/2B's lazy
+    // snapshot, the steady-state per-block cost on TRANSFER-only
+    // blocks is:
+    //   - One eager snapshot copy of accounts_ (Phase 1)
+    //   - One lock-free-view publish copy of accounts_ (Phase 2C)
+    //   - No copies of stakes/registrants/abort_records/merge_state/
+    //     applied_inbound_receipts (Phase 2A/2B lazy-skip)
+    // The two accounts_ copies are unavoidable absent a more invasive
+    // overlay refactor; they're paid in exchange for atomicity (Phase 1)
+    // and concurrent reads (Phase 2C) respectively.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    std::atomic_store(&committed_accounts_view_,
+        std::make_shared<const std::map<std::string, AccountState>>(accounts_));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
     } catch (...) {
         // A9 Phase 1: any throw from the apply body leaves the chain
         // exactly as it was at entry. Restore in-place, then re-raise
@@ -973,7 +1043,8 @@ void Chain::apply_transactions(const Block& b) {
         // a mid-apply throw (invariant assertion, arithmetic overflow,
         // bug) would leave state partially mutated — the next apply
         // call would operate on inconsistent data and silently corrupt
-        // the chain.
+        // the chain. committed_accounts_view_ is unchanged on rollback
+        // because the atomic_store at the success path didn't execute.
         restore_state_snapshot(std::move(__snapshot));
         throw;
     }
@@ -1329,6 +1400,20 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             }
         }
     }
+
+    // A9 Phase 2C: publish the loaded accounts_ as the lock-free view
+    // so balance_lockfree() / next_nonce_lockfree() return the
+    // snapshot-bootstrapped values immediately after restore (no
+    // intervening apply_transactions runs on this path).
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    std::atomic_store(&c.committed_accounts_view_,
+        std::make_shared<const std::map<std::string, AccountState>>(c.accounts_));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     return c;
 }

@@ -2269,8 +2269,15 @@ json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
 }
 
 json Node::rpc_nonce(const std::string& domain) const {
-    std::shared_lock<std::shared_mutex> lk(state_mutex_);
-    return {{"domain", domain}, {"next_nonce", chain_.next_nonce(domain)}};
+    // A9 Phase 2C-Node: lock-free read path. balance_lockfree /
+    // next_nonce_lockfree atomic-load the committed accounts view
+    // published at the last successful apply commit. No state_mutex_
+    // acquisition needed — the call doesn't block on the writer's
+    // unique_lock during apply. RPC clients querying nonce while a
+    // block applies see the prior committed state (correct semantics:
+    // the in-progress apply isn't finalized yet). Throughput on the
+    // hot RPC paths is no longer gated on apply duration.
+    return {{"domain", domain}, {"next_nonce", chain_.next_nonce_lockfree(domain)}};
 }
 
 json Node::rpc_stake_info(const std::string& domain) const {
@@ -2358,8 +2365,12 @@ json Node::rpc_snapshot(uint32_t header_count) const {
 }
 
 json Node::rpc_balance(const std::string& domain) const {
-    std::shared_lock<std::shared_mutex> lk(state_mutex_);
-    return {{"domain", domain}, {"balance", chain_.balance(domain)}};
+    // A9 Phase 2C-Node: lock-free path. See rpc_nonce above for the
+    // semantics — atomic_load of the committed accounts view, no
+    // state_mutex_ acquisition. balance is one of the most-hammered
+    // RPC paths (wallets poll it after every send); decoupling it
+    // from apply's writer lock is a meaningful operational improvement.
+    return {{"domain", domain}, {"balance", chain_.balance_lockfree(domain)}};
 }
 
 // S-033 / v2.1: query the chain's current cryptographic state commitment.

@@ -3,6 +3,7 @@
 #pragma once
 #include <determ/chain/block.hpp>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <optional>
@@ -59,6 +60,37 @@ public:
     uint64_t stake(const std::string& domain)      const;
     uint64_t stake_unlock_height(const std::string& domain) const;
     std::optional<RegistryEntry> registrant(const std::string& domain) const;
+
+    // A9 Phase 2C foundation: lock-free committed-view readers for
+    // accounts_. These do NOT require the caller to hold state_mutex_;
+    // they atomic-load a shared_ptr to the committed view published
+    // at the last successful apply commit. The returned snapshot is
+    // immutable for as long as the reader holds the shared_ptr; the
+    // writer (apply path) constructs and atomic-stores a new snapshot
+    // at each commit without disturbing readers.
+    //
+    // Semantics: balance_lockfree returns the COMMITTED state at the
+    // last finalized block apply. During an in-progress apply, this
+    // is the prior block's state — correct for external observers
+    // (the in-progress apply hasn't been gossiped/finalized yet).
+    // The existing balance()/next_nonce() above remain for callers
+    // inside apply that want to see the in-progress state, or for
+    // callers that already hold state_mutex_ shared_lock and want
+    // identical semantics to the pre-Phase-2C path.
+    //
+    // Node-side adoption (follow-on commit): RPC handlers that today
+    // take state_mutex_ shared_lock solely to call balance()/next_nonce
+    // will switch to the lock-free path, realizing the user-facing
+    // concurrent-read benefit. That commit is Phase 2C-Node.
+    //
+    // Implementation note: uses std::atomic_load/atomic_store free
+    // functions on shared_ptr — these are deprecated in C++20 and
+    // removed in C++26. Migration to std::atomic<std::shared_ptr<T>>
+    // is mechanical when the toolchain requires it; current MSVC
+    // (matches /std:c++17 default) supports the free functions
+    // without warning. Tracked as a follow-on cleanup.
+    uint64_t balance_lockfree(const std::string& domain) const;
+    uint64_t next_nonce_lockfree(const std::string& domain) const;
 
     // Rev. 4: per-block subsidy minted to creators on apply. Set by Node
     // after loading GenesisConfig; chain-wide constant.
@@ -337,6 +369,17 @@ private:
     std::map<std::string, AccountState>         accounts_;
     std::map<std::string, StakeEntry>           stakes_;
     std::map<std::string, RegistryEntry>        registrants_;
+
+    // A9 Phase 2C: lock-free committed view of accounts_. Published at
+    // every successful apply via std::atomic_store. Readers (RPC
+    // handlers, gossip handlers) atomic_load this pointer and read
+    // from the contents — the std::shared_ptr keeps the snapshot alive
+    // for the reader's duration, and the writer's atomic_store
+    // publishes a fresh snapshot without disturbing in-flight readers.
+    // See balance_lockfree() / next_nonce_lockfree() above.
+    std::shared_ptr<const std::map<std::string, AccountState>>
+                                                committed_accounts_view_;
+
     uint64_t                                    block_subsidy_{0};
     // E4: optional finite subsidy fund. 0 = unlimited / perpetual subsidy
     // (the historical pre-E4 default, backward-compatible). Non-zero =
