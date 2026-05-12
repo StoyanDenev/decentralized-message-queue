@@ -1501,6 +1501,30 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // v2.2 light-client foundation: state-proof CLI.
+    // Usage: determ state-proof --ns <a|s|r|b|k|c> --key <name> [--rpc-port N]
+    if (cmd == "state-proof") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        std::string ns, key;
+        for (int i = 0; i < sub_argc; ++i) {
+            std::string a = sub_argv[i];
+            if (a == "--ns" && i + 1 < sub_argc) ns = sub_argv[++i];
+            else if (a == "--key" && i + 1 < sub_argc) key = sub_argv[++i];
+        }
+        if (ns.empty() || key.empty()) {
+            std::cerr << "state-proof requires --ns and --key\n";
+            return 1;
+        }
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "state_proof",
+                {{"namespace", ns}, {"key", key}});
+            std::cout << r.dump(2) << "\n";
+            return 0;
+        } catch (std::exception& e) {
+            std::cerr << "state-proof query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);

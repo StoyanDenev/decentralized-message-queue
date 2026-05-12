@@ -100,6 +100,10 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_snapshot(params.value("headers", uint32_t{16}));
     if (method == "state_root")
         return node_.rpc_state_root();
+    if (method == "state_proof")
+        return node_.rpc_state_proof(
+            params.value("namespace", std::string{}),
+            params.value("key",       std::string{}));
     if (method == "block")
         return node_.rpc_block(params.value("index", uint64_t{0}));
     if (method == "chain_summary")

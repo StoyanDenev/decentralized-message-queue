@@ -164,6 +164,20 @@ public:
     // lands (follow-on commit), Block.state_root == this for every
     // honest node applying the same block sequence.
     nlohmann::json rpc_state_root()                                 const;
+    // v2.2 light-client foundation: inclusion proof for a state key.
+    // Returns a JSON object with the verification-input tuple, or
+    // {"error": "not_found"} if the key is not committed by the
+    // current state_root. The light client receives this plus the
+    // state_root from a trusted block header and verifies via
+    // crypto::merkle_verify (or a pure-JS/wasm port).
+    //
+    // Namespace argument: "a" (accounts), "s" (stakes), "r" (registrants),
+    //   "b" (abort_records), "k" (constants), "c" (counters). For
+    //   "a"/"s"/"r"/"b" the key argument is the domain string; for
+    //   "k"/"c" it's the constant/counter name. Other namespaces
+    //   (i/m/p) need composite keys and are not yet exposed by RPC.
+    nlohmann::json rpc_state_proof(const std::string& ns,
+                                       const std::string& key)      const;
     nlohmann::json rpc_stake(uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_unstake(uint64_t amount, uint64_t fee = 0);
     nlohmann::json rpc_nonce(const std::string& domain)             const;

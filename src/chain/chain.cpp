@@ -232,7 +232,17 @@ void Chain::stage_param_change(uint64_t effective_height,
 // required. Light clients query a peer for "account 'alice'", receive
 // the (key, value_hash, sorted_index, leaf_count, proof) tuple, and
 // verify against the committee-signed Block.state_root.
-Hash Chain::compute_state_root() const {
+// v2.2 light-client foundation: build the canonical Merkle leaves
+// vector covering the entire chain state. Used by both compute_state_root
+// (which feeds leaves into merkle_root) and state_proof (which feeds
+// the same leaves into merkle_proof plus searches for the target
+// leaf's sorted index).
+//
+// Refactored out as a private helper so the two callers don't drift
+// — any change to the leaf-encoding scheme MUST be the same for both
+// or proofs won't verify against the state_root. Keeping them in one
+// function is the invariant.
+std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
     std::vector<crypto::MerkleLeaf> leaves;
     leaves.reserve(accounts_.size() + stakes_.size() + registrants_.size()
                   + applied_inbound_receipts_.size() + abort_records_.size()
@@ -352,7 +362,58 @@ Hash Chain::compute_state_root() const {
     const_leaf("c:accumulated_inbound",  accumulated_inbound_);
     const_leaf("c:accumulated_outbound", accumulated_outbound_);
 
-    return crypto::merkle_root(leaves);
+    return leaves;
+}
+
+Hash Chain::compute_state_root() const {
+    return crypto::merkle_root(build_state_leaves());
+}
+
+// v2.2 light-client RPC: produce an inclusion proof for the given
+// state key. Builds the full leaves vector, sorts it (merkle_proof
+// expects sorted input — the leaf index it takes is the sorted-by-
+// key position), finds the target key's sorted index, and calls
+// merkle_proof to produce the sibling-hash list.
+//
+// Returns nullopt if the key isn't in the tree. A light client that
+// receives nullopt can call this method against multiple peers and
+// rely on majority — for a key the network considers absent, all
+// honest peers return nullopt. (Note: this is "membership" — non-
+// membership proofs would require an SMT with key-path indexing,
+// which is a v2 protocol evolution; the current sorted-leaves
+// design doesn't natively support absence proofs.)
+//
+// The returned StateProof is sufficient input to merkle_verify:
+//   merkle_verify(root, key, value_hash, target_index, leaf_count, proof)
+// where `root` is fetched from a trusted block header (light client
+// has the header from the committee-signed chain).
+std::optional<Chain::StateProof> Chain::state_proof(
+        const std::vector<uint8_t>& key) const {
+    auto leaves = build_state_leaves();
+    // Sort by key — merkle_proof/merkle_root both pre-sort, so we
+    // need the sorted order to find the target's index and to feed
+    // into merkle_proof. Sort here once.
+    std::sort(leaves.begin(), leaves.end(),
+        [](const crypto::MerkleLeaf& a, const crypto::MerkleLeaf& b) {
+            return a.key < b.key;
+        });
+    auto it = std::lower_bound(leaves.begin(), leaves.end(), key,
+        [](const crypto::MerkleLeaf& l, const std::vector<uint8_t>& k) {
+            return l.key < k;
+        });
+    if (it == leaves.end() || it->key != key) return std::nullopt;
+    size_t target_index = static_cast<size_t>(it - leaves.begin());
+
+    StateProof p;
+    p.key          = key;
+    p.value_hash   = it->value_hash;
+    p.target_index = target_index;
+    p.leaf_count   = leaves.size();
+    // merkle_proof expects un-sorted leaves and sorts internally,
+    // but it's also fine to pass already-sorted leaves; sort is
+    // idempotent. Pass the sorted vector directly.
+    p.proof        = crypto::merkle_proof(leaves, target_index);
+    return p;
 }
 
 // Activate all staged changes with eff_height <= current_height. Called

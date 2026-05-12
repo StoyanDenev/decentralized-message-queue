@@ -2518,6 +2518,71 @@ json Node::rpc_state_root() const {
     };
 }
 
+// v2.2 light-client foundation: inclusion proof RPC.
+//
+// Wire format: {
+//   "key": "<hex>",                  // domain-prefixed key bytes
+//   "value_hash": "<hex-32>",        // SHA-256 of the canonical value
+//   "target_index": <number>,        // sorted-leaf position
+//   "leaf_count": <number>,          // total leaves at this height
+//   "proof": ["<hex-32>", ...],      // sibling hashes bottom-up
+//   "state_root": "<hex-32>",        // recomputed at the same instant
+//   "height": <number>               // current chain height
+// }
+//
+// state_root and height are returned together so the light client can
+// verify them against the (committee-signed) Block header at that
+// height — if the header's state_root matches, the proof is honest.
+// Returning {"error": "not_found"} if the key is absent from the
+// current state. (Non-membership proofs require an SMT migration.)
+json Node::rpc_state_proof(const std::string& ns,
+                              const std::string& key) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+
+    // Build domain-prefixed key bytes matching build_state_leaves'
+    // encoding. Only the simple namespaces (single byte prefix +
+    // ASCII key) are exposed here; composite-key namespaces
+    // (i/m/p) are out of scope for this RPC.
+    std::vector<uint8_t> k;
+    if (ns == "a" || ns == "s" || ns == "r" || ns == "b" || ns == "k") {
+        // "a:" / "s:" / "r:" / "b:" / "k:" + key string
+        k.reserve(2 + key.size());
+        k.push_back(ns[0]);
+        k.push_back(':');
+        k.insert(k.end(), key.begin(), key.end());
+    } else if (ns == "c") {
+        // counters: "k:c:" + name (see build_state_leaves's const_leaf
+        // calls for counters using "c:" prefix as the name)
+        std::string composite = "c:" + key;
+        k.reserve(2 + composite.size());
+        k.push_back('k'); k.push_back(':');
+        k.insert(k.end(), composite.begin(), composite.end());
+    } else {
+        return {{"error", "unsupported namespace; use a|s|r|b|k|c"}};
+    }
+
+    auto proof_opt = chain_.state_proof(k);
+    if (!proof_opt) {
+        return {{"error", "not_found"}, {"namespace", ns}, {"key", key}};
+    }
+    auto& p = *proof_opt;
+
+    json proof_arr = json::array();
+    for (auto& h : p.proof) proof_arr.push_back(to_hex(h));
+
+    return {
+        {"namespace",    ns},
+        {"key",          key},
+        {"key_bytes",    to_hex(p.key.data(), p.key.size())},
+        {"value_hash",   to_hex(p.value_hash)},
+        {"target_index", p.target_index},
+        {"leaf_count",   p.leaf_count},
+        {"proof",        proof_arr},
+        {"state_root",   to_hex(chain_.compute_state_root())},
+        {"height",       chain_.height()},
+    };
+}
+
 json Node::rpc_register() {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 

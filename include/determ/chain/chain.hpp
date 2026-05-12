@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/chain/block.hpp>
+#include <determ/crypto/merkle.hpp>
 #include <map>
 #include <memory>
 #include <set>
@@ -215,6 +216,36 @@ public:
     // only the computation changes. Light clients verify SMT proofs
     // against this same field.
     Hash compute_state_root() const;
+
+    // v2.2 light-client foundation: inclusion proof for any state key.
+    // The light client fetches a trusted Block header (from gossip /
+    // checkpoint / committee-signed beacon), reads block.state_root,
+    // and calls a full node via state_proof RPC. The full node returns
+    // a StateProof; the light client calls crypto::merkle_verify to
+    // confirm the (key, value_hash) pair is committed by state_root.
+    //
+    // Key encoding (must match build_state_leaves exactly):
+    //   accounts:                "a:" + domain
+    //   stakes:                  "s:" + domain
+    //   registrants:             "r:" + domain
+    //   applied_inbound_receipts:"i:" + src_shard_be8 + tx_hash
+    //   abort_records:           "b:" + domain
+    //   merge_state:             "m:" + shard_id_be4
+    //   pending_param_changes:   "p:" + eff_height_be8 + idx_be4
+    //   constants:               "k:" + name
+    //   counters:                "k:c:" + name
+    //
+    // Returns nullopt if the key is not in the tree. Non-membership
+    // proofs are NOT supported by the current sorted-leaves design;
+    // a future SMT migration would add them.
+    struct StateProof {
+        std::vector<uint8_t> key;
+        Hash                 value_hash;
+        size_t               target_index;
+        size_t               leaf_count;
+        std::vector<Hash>    proof;
+    };
+    std::optional<StateProof> state_proof(const std::vector<uint8_t>& key) const;
 
     // A5 Phase 3: promoted from static constants in params.hpp so the
     // governance whitelist can mutate them at run-time. Default values
@@ -487,6 +518,14 @@ private:
     // the start of every apply_transactions(b) before tx replay so the
     // block sees the new values.
     void activate_pending_params(uint64_t current_height);
+
+    // v2.2 light-client foundation: build the canonical Merkle leaves
+    // vector covering all chain state. Single implementation used by
+    // both compute_state_root() (which calls merkle_root over the
+    // leaves) and state_proof() (which calls merkle_proof). Keeping
+    // them in one function is the invariant — any leaf-encoding
+    // change must apply to both consumers identically.
+    std::vector<crypto::MerkleLeaf> build_state_leaves() const;
 
     // A9 Phase 1: atomic block apply via snapshot + restore.
     //
