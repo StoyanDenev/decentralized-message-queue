@@ -24,6 +24,8 @@ In plain terms: two valid blocks at the same height require the **entire** commi
 
 The fully-Byzantine-committee case (T-1 clause 2) leaves a slashable forensic trail — see `EquivocationSlashing.md` (FA6).
 
+**Scope clarification — "block" means "block digest" here.** "Two valid blocks at the same height" is interpreted at the digest level: `compute_block_digest(B) = compute_block_digest(B')`. The K-of-K committee signs over this digest, so two distinct digests passing K-of-K verification is what T-1 rules out. A weaker question — "can two distinct block *instances* share the same digest" — is separately addressed: the digest covers the canonical Phase-1 commit material but excludes Phase-2-reveal-time fields and several evidence/receipt list fields. The `prev_hash` chain (which uses `signing_bytes`, covering everything) closes that residual ambiguity at the next block boundary. The full discussion is §5.3 plus `S030-D2-Analysis.md`. Reading FA1 as proving "at most one block instance per height" is stronger than what's proven here; the chain-level "at most one finalized block instance per height" follows from T-1 *plus* the `prev_hash`-chain argument made elsewhere.
+
 ---
 
 ## 2. Lemmas
@@ -154,6 +156,8 @@ This bound is significantly tighter than the BFT-mode safety claim (FA5), which 
 - **Network model variability.** T-1 is independent of synchrony assumptions. It holds in fully asynchronous networks too. Validity is a local predicate.
 - **Cross-shard atomicity.** T-1 is per-chain. Cross-shard safety (atomicity, no double-credit) is in `CrossShardReceipts.md` (FA7).
 - **BFT-mode conditional safety.** When `B` and `B'` are both BFT-mode blocks (consensus_mode = BFT), Lemma L-1.3 gives only `⌈K/3⌉ + 1` overlap, not full K. BFT-mode safety relies on `f < K_eff/3` in the committee plus equivocation slashing; the full BFT-mode argument is in `BFTSafety.md` (FA5).
+- **"≤ 1 block instance per digest" (S-030 D2).** T-1 says "at most one *digest* finalizes per height" — a single Hash value. It does NOT directly say "at most one *block instance* per height." The K-of-K committee signs `compute_block_digest()`, which is narrower than `Block::signing_bytes()` (it excludes Phase-2-reveal-time fields and several evidence/receipt list fields). Two block instances differing only in those excluded fields share the same digest; both pass K-of-K signature verification. Honest nodes applying them diverge in state until the next block's `prev_hash` (which covers the full `signing_bytes`) surfaces the mismatch one block later.
+  This is a one-block-wide *liveness/sync* window, not a safety break: FA1 as stated remains literally true, but its implicit extension "and therefore one block instance" carries the documented footnote. The structural fix — extend `compute_block_digest()` to cover the evidence/receipt fields, paired with a Phase-1 view-reconciliation mechanism so committee members converge on those fields before signing — is properly a v2 scope item. Full analysis: `S030-D2-Analysis.md`.
 
 ### 5.4 Why the protocol design supports this proof so cleanly
 
