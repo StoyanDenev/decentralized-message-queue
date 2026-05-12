@@ -2419,6 +2419,70 @@ json Node::rpc_stake_info(const std::string& domain) const {
     };
 }
 
+// v2.18/v2.19 Theme 7: DApp registry queries.
+//
+// Both use state_mutex_'s shared_lock — concurrent with other readers
+// (RPC handlers + lock-free balance/nonce/stake/registrant). Phase 7.3
+// follow-on will extend Phase 2C's bundled committed-state view to
+// include dapp_registry_ for true lock-free reads on these paths;
+// for v2.19 initial ship, shared_lock is sufficient (no degradation
+// vs the registrants_ accessor patterns).
+json Node::rpc_dapp_info(const std::string& domain) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    auto entry = chain_.dapp(domain);
+    if (!entry) {
+        return {{"error", "not_found"}, {"domain", domain}};
+    }
+
+    json topics = json::array();
+    for (auto& t : entry->topics) topics.push_back(t);
+
+    return {
+        {"domain",         domain},
+        {"service_pubkey", to_hex(entry->service_pubkey)},
+        {"endpoint_url",   entry->endpoint_url},
+        {"topics",         topics},
+        {"retention",      entry->retention},
+        {"metadata",       to_hex(entry->metadata.data(), entry->metadata.size())},
+        {"registered_at",  entry->registered_at},
+        {"active_from",    entry->active_from},
+        {"inactive_from",  entry->inactive_from},
+        {"height",         chain_.height()},
+    };
+}
+
+json Node::rpc_dapp_list(const std::string& prefix,
+                            const std::string& topic) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json out = json::array();
+    uint64_t h = chain_.height();
+    for (auto& [domain, entry] : chain_.dapp_registry()) {
+        // Filter: prefix match (empty prefix matches all)
+        if (!prefix.empty() &&
+            domain.size() < prefix.size()) continue;
+        if (!prefix.empty() &&
+            domain.compare(0, prefix.size(), prefix) != 0) continue;
+        // Filter: topic match (empty topic matches all)
+        if (!topic.empty()) {
+            bool found = false;
+            for (auto& t : entry.topics) {
+                if (t == topic) { found = true; break; }
+            }
+            if (!found) continue;
+        }
+        // Compact summary — full entry comes from rpc_dapp_info.
+        json topics_json = json::array();
+        for (auto& t : entry.topics) topics_json.push_back(t);
+        out.push_back({
+            {"domain",       domain},
+            {"endpoint_url", entry.endpoint_url},
+            {"topics",       topics_json},
+            {"active",       entry.inactive_from > h},
+        });
+    }
+    return {{"height", h}, {"count", out.size()}, {"dapps", out}};
+}
+
 json Node::rpc_submit_tx(const json& tx_json) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
     chain::Transaction tx = chain::Transaction::from_json(tx_json);

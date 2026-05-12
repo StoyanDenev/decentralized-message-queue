@@ -183,6 +183,24 @@ public:
     nlohmann::json rpc_nonce(const std::string& domain)             const;
     nlohmann::json rpc_stake_info(const std::string& domain)        const;
 
+    // v2.18/v2.19 Theme 7: DApp registry queries. The substrate for
+    // wallets and DApp-discovery tooling.
+    //
+    // rpc_dapp_info(domain): returns the DApp's full registry entry as
+    //   JSON, or {"error": "not_found"} if no entry exists. Used by
+    //   wallets before constructing a DAPP_CALL: they need the DApp's
+    //   service_pubkey (for E2E encryption) and the registered topics
+    //   list (to validate against locally before paying chain fees).
+    //
+    // rpc_dapp_list(prefix, topic): returns an array of DApp summaries
+    //   matching optional filters. `prefix` matches DApp domain
+    //   prefix (e.g., "chat." or empty for all); `topic` matches DApps
+    //   that have registered the given topic. For lightweight clients
+    //   that don't want to traverse the full registry.
+    nlohmann::json rpc_dapp_info(const std::string& domain)         const;
+    nlohmann::json rpc_dapp_list(const std::string& prefix,
+                                    const std::string& topic)       const;
+
     // Rev. 4: accept a fully-signed Transaction JSON (built externally, e.g.
     // from a CLI tool with a raw Ed25519 key) and broadcast it via gossip.
     // Used for anonymous-account TRANSFERs that aren't authored by this node.

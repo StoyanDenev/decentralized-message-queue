@@ -1442,6 +1442,226 @@ static int cmd_submit_merge_event(int argc, char** argv) {
     return 0;
 }
 
+// v2.18 Theme 7: submit a DAPP_REGISTER tx to the network.
+// The signing sender (--from + --priv) must already be a REGISTER'd
+// Determ identity. service_pubkey is generated separately (e.g., via
+// libsodium box-keypair-gen) and provided here in hex.
+static int cmd_submit_dapp_register(int argc, char** argv) {
+    std::string priv_hex, from_domain, service_pubkey_hex, endpoint_url,
+                topics_csv, metadata_hex;
+    uint8_t retention = 0;
+    bool deactivate = false;
+    uint64_t fee  = 0;
+    uint16_t port = get_rpc_port(argc, argv);
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv")            priv_hex = argv[i + 1];
+        else if (a == "--from")            from_domain = argv[i + 1];
+        else if (a == "--service-pubkey")  service_pubkey_hex = argv[i + 1];
+        else if (a == "--endpoint-url")    endpoint_url = argv[i + 1];
+        else if (a == "--topics")          topics_csv = argv[i + 1];
+        else if (a == "--retention")       retention = uint8_t(std::stoi(argv[i + 1]));
+        else if (a == "--metadata-hex")    metadata_hex = argv[i + 1];
+        else if (a == "--fee")             fee  = std::stoull(argv[i + 1]);
+    }
+    // --deactivate is a flag (no value)
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--deactivate") deactivate = true;
+    }
+    if (priv_hex.empty() || from_domain.empty() ||
+        (!deactivate && (service_pubkey_hex.empty() || endpoint_url.empty()))) {
+        std::cerr << "Usage: determ submit-dapp-register --priv <hex> --from <domain>\n"
+                     "  Create/update: --service-pubkey <64hex> --endpoint-url <url>\n"
+                     "                 [--topics t1,t2,t3] [--retention 0|1]\n"
+                     "                 [--metadata-hex <hex>]\n"
+                     "  Deactivate:    --deactivate\n"
+                     "  [--fee <N>] [--rpc-port <P>]\n";
+        return 1;
+    }
+
+    // Build payload per the canonical encoding documented in block.hpp.
+    std::vector<uint8_t> payload;
+    if (deactivate) {
+        payload.push_back(1);
+    } else {
+        payload.push_back(0);
+        std::array<uint8_t, 32> svc_pk;
+        try { svc_pk = from_hex_arr<32>(service_pubkey_hex); }
+        catch (std::exception& e) {
+            std::cerr << "Invalid --service-pubkey: " << e.what() << "\n";
+            return 1;
+        }
+        payload.insert(payload.end(), svc_pk.begin(), svc_pk.end());
+        if (endpoint_url.size() > 255) {
+            std::cerr << "--endpoint-url too long (max 255)\n"; return 1;
+        }
+        payload.push_back(uint8_t(endpoint_url.size()));
+        payload.insert(payload.end(), endpoint_url.begin(), endpoint_url.end());
+        // Parse topics CSV
+        std::vector<std::string> topics;
+        if (!topics_csv.empty()) {
+            size_t pos = 0;
+            while (pos < topics_csv.size()) {
+                size_t comma = topics_csv.find(',', pos);
+                if (comma == std::string::npos) comma = topics_csv.size();
+                topics.push_back(topics_csv.substr(pos, comma - pos));
+                pos = comma + 1;
+            }
+        }
+        if (topics.size() > 32) {
+            std::cerr << "Too many topics (max 32)\n"; return 1;
+        }
+        payload.push_back(uint8_t(topics.size()));
+        for (auto& t : topics) {
+            if (t.size() > 64) {
+                std::cerr << "Topic '" << t << "' too long (max 64)\n";
+                return 1;
+            }
+            payload.push_back(uint8_t(t.size()));
+            payload.insert(payload.end(), t.begin(), t.end());
+        }
+        payload.push_back(retention);
+        std::vector<uint8_t> metadata;
+        if (!metadata_hex.empty()) {
+            metadata = from_hex(metadata_hex);
+        }
+        if (metadata.size() > 4096) {
+            std::cerr << "Metadata too long (max 4096 bytes)\n"; return 1;
+        }
+        uint16_t mlen = uint16_t(metadata.size());
+        payload.push_back(uint8_t(mlen & 0xFF));
+        payload.push_back(uint8_t((mlen >> 8) & 0xFF));
+        payload.insert(payload.end(), metadata.begin(), metadata.end());
+    }
+
+    // Build, sign, submit.
+    crypto::NodeKey sender;
+    try { sender.priv_seed = from_hex_arr<32>(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
+    }
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
+    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
+    size_t pub_len = 32;
+    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
+    EVP_PKEY_free(pkey);
+
+    uint64_t nonce = 0;
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "nonce",
+                                  {{"domain", from_domain}});
+        nonce = r.value("next_nonce", uint64_t{0});
+    } catch (std::exception& e) {
+        std::cerr << "nonce query failed: " << e.what() << "\n"; return 1;
+    }
+
+    chain::Transaction tx;
+    tx.type    = chain::TxType::DAPP_REGISTER;
+    tx.from    = from_domain;
+    tx.to      = "";
+    tx.amount  = 0;
+    tx.fee     = fee;
+    tx.nonce   = nonce;
+    tx.payload = payload;
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(sender, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "submit_tx", {{"tx", tx.to_json()}});
+        std::cout << r.dump(2) << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "submit_tx failed: " << e.what() << "\n"; return 1;
+    }
+    return 0;
+}
+
+// v2.19 Theme 7: submit a DAPP_CALL tx to the network.
+// --to <dapp-domain> --topic <topic> --payload-hex <hex>
+// Optional --amount for atomic payment.
+static int cmd_submit_dapp_call(int argc, char** argv) {
+    std::string priv_hex, from_domain, to_domain, topic, payload_hex;
+    uint64_t amount = 0, fee = 0;
+    uint16_t port = get_rpc_port(argc, argv);
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv")        priv_hex = argv[i + 1];
+        else if (a == "--from")        from_domain = argv[i + 1];
+        else if (a == "--to")          to_domain = argv[i + 1];
+        else if (a == "--topic")       topic = argv[i + 1];
+        else if (a == "--payload-hex") payload_hex = argv[i + 1];
+        else if (a == "--amount")      amount = std::stoull(argv[i + 1]);
+        else if (a == "--fee")         fee  = std::stoull(argv[i + 1]);
+    }
+    if (priv_hex.empty() || from_domain.empty() || to_domain.empty()) {
+        std::cerr << "Usage: determ submit-dapp-call --priv <hex> --from <domain>\n"
+                     "  --to <dapp-domain> [--topic <T>] [--payload-hex <hex>]\n"
+                     "  [--amount <N>] [--fee <N>] [--rpc-port <P>]\n";
+        return 1;
+    }
+    if (topic.size() > 64) {
+        std::cerr << "Topic too long (max 64)\n"; return 1;
+    }
+
+    // Build DAPP_CALL payload: [topic_len:u8][topic][ct_len:u32 LE][ciphertext]
+    std::vector<uint8_t> ciphertext;
+    if (!payload_hex.empty()) ciphertext = from_hex(payload_hex);
+    if (ciphertext.size() > 16384) {
+        std::cerr << "Payload too large (max 16 KB)\n"; return 1;
+    }
+    std::vector<uint8_t> payload;
+    payload.push_back(uint8_t(topic.size()));
+    payload.insert(payload.end(), topic.begin(), topic.end());
+    uint32_t cl = uint32_t(ciphertext.size());
+    payload.push_back(uint8_t(cl         & 0xFF));
+    payload.push_back(uint8_t((cl >>  8) & 0xFF));
+    payload.push_back(uint8_t((cl >> 16) & 0xFF));
+    payload.push_back(uint8_t((cl >> 24) & 0xFF));
+    payload.insert(payload.end(), ciphertext.begin(), ciphertext.end());
+
+    crypto::NodeKey sender;
+    try { sender.priv_seed = from_hex_arr<32>(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "Invalid sender priv: " << e.what() << "\n"; return 1;
+    }
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+        EVP_PKEY_ED25519, nullptr, sender.priv_seed.data(), 32);
+    if (!pkey) { std::cerr << "sender priv invalid\n"; return 1; }
+    size_t pub_len = 32;
+    EVP_PKEY_get_raw_public_key(pkey, sender.pub.data(), &pub_len);
+    EVP_PKEY_free(pkey);
+
+    uint64_t nonce = 0;
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "nonce",
+                                  {{"domain", from_domain}});
+        nonce = r.value("next_nonce", uint64_t{0});
+    } catch (std::exception& e) {
+        std::cerr << "nonce query failed: " << e.what() << "\n"; return 1;
+    }
+
+    chain::Transaction tx;
+    tx.type    = chain::TxType::DAPP_CALL;
+    tx.from    = from_domain;
+    tx.to      = to_domain;
+    tx.amount  = amount;
+    tx.fee     = fee;
+    tx.nonce   = nonce;
+    tx.payload = payload;
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(sender, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    try {
+        auto r = rpc::rpc_call("127.0.0.1", port, "submit_tx", {{"tx", tx.to_json()}});
+        std::cout << r.dump(2) << "\n";
+    } catch (std::exception& e) {
+        std::cerr << "submit_tx failed: " << e.what() << "\n"; return 1;
+    }
+    return 0;
+}
+
 static int cmd_genesis_tool(int argc, char** argv) {
     if (argc < 1) {
         std::cerr << "Usage: determ genesis-tool {peer-info|build|build-sharded} ...\n";
@@ -1502,6 +1722,50 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // v2.18 Theme 7: DApp registry query — info for one DApp.
+    // Usage: determ dapp-info --domain <D> [--rpc-port N]
+    if (cmd == "dapp-info") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        std::string domain;
+        for (int i = 0; i < sub_argc; ++i) {
+            std::string a = sub_argv[i];
+            if (a == "--domain" && i + 1 < sub_argc) domain = sub_argv[++i];
+        }
+        if (domain.empty()) {
+            std::cerr << "dapp-info requires --domain\n";
+            return 1;
+        }
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "dapp_info",
+                {{"domain", domain}});
+            std::cout << r.dump(2) << "\n";
+            return 0;
+        } catch (std::exception& e) {
+            std::cerr << "dapp-info query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
+    // v2.18 Theme 7: DApp registry query — list / filter.
+    // Usage: determ dapp-list [--prefix P] [--topic T] [--rpc-port N]
+    if (cmd == "dapp-list") {
+        uint16_t port = get_rpc_port(sub_argc, sub_argv);
+        std::string prefix, topic;
+        for (int i = 0; i < sub_argc; ++i) {
+            std::string a = sub_argv[i];
+            if (a == "--prefix" && i + 1 < sub_argc) prefix = sub_argv[++i];
+            else if (a == "--topic" && i + 1 < sub_argc) topic = sub_argv[++i];
+        }
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "dapp_list",
+                {{"prefix", prefix}, {"topic", topic}});
+            std::cout << r.dump(2) << "\n";
+            return 0;
+        } catch (std::exception& e) {
+            std::cerr << "dapp-list query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // v2.2 light-client foundation: state-proof CLI.
     // Usage: determ state-proof --ns <a|s|r|b|k|c> --key <name> [--rpc-port N]
     if (cmd == "state-proof") {
@@ -2117,6 +2381,8 @@ int main(int argc, char** argv) {
     if (cmd == "stake_info")    return cmd_stake_info(sub_argc, sub_argv);
     if (cmd == "submit-param-change") return cmd_submit_param_change(sub_argc, sub_argv);
     if (cmd == "submit-merge-event")  return cmd_submit_merge_event(sub_argc, sub_argv);
+    if (cmd == "submit-dapp-register") return cmd_submit_dapp_register(sub_argc, sub_argv);
+    if (cmd == "submit-dapp-call")     return cmd_submit_dapp_call(sub_argc, sub_argv);
     if (cmd == "genesis-tool")  return cmd_genesis_tool(sub_argc, sub_argv);
     if (cmd == "account")       return cmd_account(sub_argc, sub_argv);
     if (cmd == "send_anon")     return cmd_send_anon(sub_argc, sub_argv);

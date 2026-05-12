@@ -104,6 +104,13 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_state_proof(
             params.value("namespace", std::string{}),
             params.value("key",       std::string{}));
+    // v2.18/v2.19 Theme 7: DApp registry queries.
+    if (method == "dapp_info")
+        return node_.rpc_dapp_info(params.value("domain", std::string{}));
+    if (method == "dapp_list")
+        return node_.rpc_dapp_list(
+            params.value("prefix", std::string{}),
+            params.value("topic",  std::string{}));
     if (method == "block")
         return node_.rpc_block(params.value("index", uint64_t{0}));
     if (method == "chain_summary")
