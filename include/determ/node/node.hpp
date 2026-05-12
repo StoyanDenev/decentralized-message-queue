@@ -10,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <shared_mutex>
 #include <optional>
 #include <map>
@@ -403,6 +404,41 @@ private:
     // (status/balance/account/block lookups dominate operational queries).
     mutable std::shared_mutex       state_mutex_;
     std::vector<std::thread>        threads_;
+
+    // A9 / S-031 follow-on: async chain.save() worker.
+    //
+    // Pre-fix: after every block apply, Node::on_block_finalized called
+    // chain_.save(cfg_.chain_path) synchronously while holding
+    // state_mutex_'s unique_lock. The save serializes the full chain
+    // JSON and writes it to disk — O(N) work per block where N is
+    // chain height. On long-lived chains this is the dominant cost in
+    // the apply hot path AND it blocks the next apply from acquiring
+    // unique_lock until the disk write finishes.
+    //
+    // Post-fix: enqueue_save() sets save_pending_ and notifies. The
+    // worker thread takes state_mutex_ shared_lock (concurrent with
+    // RPC readers, only contends with the NEXT writer), serializes,
+    // releases the lock, writes atomically. Multiple pending saves
+    // coalesce: while a save is running the flag may be re-set; one
+    // additional save fires after the running one completes. Burst
+    // applies → at most one save lagging behind the head.
+    //
+    // Crash semantics: between block apply and save completion, the
+    // block is in memory but not on disk. Node crash in this window =
+    // chain.json contains a slightly older head. Peers gossip the
+    // missing block(s) on restart; node catches up via normal sync.
+    // No worse than pre-fix's window-after-apply-pre-save.
+    //
+    // Stop semantics: stop() sets save_stop_, notifies, joins the
+    // worker. After join, performs one final synchronous save to
+    // ensure the latest state is on disk before process exit.
+    std::thread                     save_thread_;
+    std::mutex                      save_mutex_;
+    std::condition_variable         save_cv_;
+    std::atomic<bool>               save_pending_{false};
+    std::atomic<bool>               save_stop_{false};
+    void save_worker_loop();
+    void enqueue_save();
 };
 
 } // namespace determ::node

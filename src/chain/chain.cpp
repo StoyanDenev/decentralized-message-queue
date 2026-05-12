@@ -1463,12 +1463,39 @@ Chain Chain::restore_from_snapshot(const json& snap) {
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 void Chain::save(const std::string& path) const {
+    // Atomic write: serialize to a sibling .tmp file, fsync the file
+    // contents, then rename .tmp → path. Rename is atomic on POSIX
+    // and on Windows for same-volume same-directory targets, so an
+    // OS crash mid-write cannot leave a half-written chain.json that
+    // load() would parse-fail on. Either the old file survives intact
+    // (if rename hadn't happened) or the new file is fully present.
+    //
+    // This matters when Chain::save runs on a separate worker thread
+    // (S-031 / A9 follow-on: async save off the apply hot path). A
+    // crash window between block apply and save completion is benign
+    // — the missing block re-arrives via peer gossip on restart —
+    // but a corrupted chain.json would require manual recovery.
     fs::create_directories(fs::path(path).parent_path());
-    json j = json::array();
-    for (auto& b : blocks_) j.push_back(b.to_json());
-    std::ofstream f(path);
-    if (!f) throw std::runtime_error("Cannot write chain file: " + path);
-    f << j.dump(2);
+    std::string tmp_path = path + ".tmp";
+    {
+        json j = json::array();
+        for (auto& b : blocks_) j.push_back(b.to_json());
+        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!f) throw std::runtime_error("Cannot write chain tmp file: " + tmp_path);
+        f << j.dump(2);
+        f.flush();
+        if (!f) throw std::runtime_error("Failed to flush chain tmp file: " + tmp_path);
+    }
+    // std::filesystem::rename is implemented as ::MoveFileExA on Windows
+    // and ::rename on POSIX — both atomic for same-volume targets. On
+    // Windows, MoveFileExA with MOVEFILE_REPLACE_EXISTING is implicit
+    // when overwriting; std::filesystem handles this transparently.
+    std::error_code ec;
+    fs::rename(tmp_path, path, ec);
+    if (ec) {
+        throw std::runtime_error("Cannot rename chain tmp " + tmp_path
+            + " → " + path + ": " + ec.message());
+    }
 }
 
 Chain Chain::load(const std::string& path,

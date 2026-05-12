@@ -560,6 +560,12 @@ void Node::run() {
     for (unsigned i = 0; i < n; ++i)
         threads_.emplace_back([this] { io_.run(); });
 
+    // A9 / S-031 follow-on: spawn the async chain.save worker.
+    // Sits idle on save_cv_ until enqueue_save() flips save_pending_.
+    // See save_worker_loop() below for the loop body. The thread is
+    // joined in stop() after save_stop_ is set and save_cv_ is notified.
+    save_thread_ = std::thread([this] { save_worker_loop(); });
+
     // Initial sync probe with a startup grace period: give bootstrap peers
     // a chance to connect before we engage consensus. Without this, a fresh
     // multi-node cluster fires the first round before peers are reachable,
@@ -585,8 +591,88 @@ void Node::stop() {
     if (running_.exchange(false)) {
         io_.stop();
         for (auto& t : threads_) if (t.joinable()) t.join();
+
+        // A9 / S-031 follow-on: wind down the save worker. Signal stop,
+        // notify the cv, join. After join, run one final synchronous
+        // save below to guarantee the chain.json on disk reflects the
+        // most-recent applied state (the worker may have been waiting
+        // when stop was called, with a save_pending flag set but not
+        // yet acted on, or may have completed an earlier save before
+        // the last apply landed).
+        save_stop_.store(true);
+        save_cv_.notify_all();
+        if (save_thread_.joinable()) save_thread_.join();
+
+        // Final synchronous save covers two cases:
+        //  1. save_pending_ was set when stop fired — worker exits
+        //     loop before processing the flag.
+        //  2. An apply landed between the worker's last save and
+        //     stop() — no pending flag, but disk is stale.
+        // Both are made-good by writing once more here.
         chain_.save(cfg_.chain_path);
     }
+}
+
+// A9 / S-031 follow-on: async chain.save worker loop. Waits on
+// save_cv_ until either save_pending_ flips true (work to do) or
+// save_stop_ flips true (shutdown). On wake-with-work: clear the
+// flag, take state_mutex_'s shared_lock, call chain_.save(),
+// release the lock. Multiple notify_one calls during a running
+// save coalesce: the flag stays set, and one additional save fires
+// after the running one completes.
+//
+// Lock semantics: chain_.save() under shared_lock is concurrent with
+// RPC readers (which already hold shared_lock for their queries).
+// It DOES serialize against the next apply's unique_lock acquisition.
+// On long chains where serialize+write dominates, the next apply
+// blocks until the save finishes — same as the pre-fix behavior in
+// the limit, but with the difference that the save is no longer
+// holding the unique_lock through the disk write. The async path
+// helps most when RPCs dominate the workload (readers proceed in
+// parallel with the save), and is a stepping stone to the eventual
+// one-file-per-block model (Phase 2D) which makes save O(1).
+void Node::save_worker_loop() {
+    while (true) {
+        bool do_save = false;
+        {
+            std::unique_lock<std::mutex> lk(save_mutex_);
+            save_cv_.wait(lk, [&]() {
+                return save_pending_.load() || save_stop_.load();
+            });
+            if (save_stop_.load()) {
+                // Don't process the in-flight flag here — stop() will
+                // run the final synchronous save after we exit, so any
+                // pending work is covered. This avoids a race where the
+                // worker reads chain_ while stop() is destroying state.
+                return;
+            }
+            // Clear the flag while still holding save_mutex_ so an
+            // enqueue_save() arriving NOW will re-set the flag and the
+            // next iteration will run again. This guarantees no
+            // missed save.
+            save_pending_.store(false);
+            do_save = true;
+        }
+        if (!do_save) continue;
+        try {
+            std::shared_lock<std::shared_mutex> slk(state_mutex_);
+            chain_.save(cfg_.chain_path);
+        } catch (std::exception& e) {
+            std::cerr << "[save worker] save failed: " << e.what() << "\n";
+            // Don't terminate the loop — transient disk failures
+            // (full disk, locked file) should retry on the next
+            // enqueue_save signal. The chain in memory is fine; only
+            // the on-disk persistence is at risk.
+        }
+    }
+}
+
+void Node::enqueue_save() {
+    {
+        std::lock_guard<std::mutex> lk(save_mutex_);
+        save_pending_.store(true);
+    }
+    save_cv_.notify_one();
 }
 
 // ─── Consensus ───────────────────────────────────────────────────────────────
@@ -1620,7 +1706,16 @@ void Node::apply_block_locked(const chain::Block& b) {
     for (auto& r : b.inbound_receipts) {
         pending_inbound_receipts_.erase({r.src_shard, r.tx_hash});
     }
-    chain_.save(cfg_.chain_path);
+    // A9 / S-031 follow-on: async chain.save off the hot path.
+    // Previously: chain_.save(cfg_.chain_path) ran synchronously under
+    // state_mutex_'s unique_lock, blocking the next apply on the
+    // disk-write duration (O(N) JSON serialize + fsync per block).
+    // Now: enqueue_save sets save_pending_ and notifies; the worker
+    // thread does the serialize+write under shared_lock (concurrent
+    // with RPC readers). Apply hot path returns immediately. Crash
+    // window between apply and save is recovered via peer gossip
+    // on restart — same correctness as pre-fix.
+    enqueue_save();
 
     std::cout << "[node] accepted block #" << b.index
               << " creators=" << b.creators.size() << "\n";
