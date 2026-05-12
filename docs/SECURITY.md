@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **3** | **7** | **4** | **10** | **24** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **18** |
+| Open | **3** | **6** | **4** | **10** | **23** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **19** |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -298,9 +298,18 @@ A malicious relay can also drop transactions from `b.transactions` after committ
 
 ### S-007 — Integer overflow in subsidy distribution
 
-**Severity:** High • **Status:** Open • **Sources:** Audit 2.5
+**Severity:** High • **Status:** Mitigated in-session (options 2 + 3 from the audit's resolution table) • **Sources:** Audit 2.5
 
-**What's open.** `chain.cpp:245-253` distributes `total_distributed = total_fees + block_subsidy_` across `b.creators` with no overflow check. With a malicious genesis or a long-lived chain accumulating fees, `+=` on `accounts_[domain].balance` can wrap.
+**Mitigation landed in-session.** Two complementary changes:
+
+- **Runtime overflow checks** (option 2). New `checked_add_u64()` helper in `chain.cpp`. Every balance-credit site uses it and throws on overflow: TRANSFER receiver credit, per-creator subsidy+fees distribution, dust credit to `creators[0]`, cross-shard inbound receipt credit, per-block `block_inbound` counter accumulation. The helper is portable (the if-check optimizes to a single ADC/JC sequence; MSVC doesn't have `__builtin_add_overflow` but the check is comparable).
+- **Genesis sane-bounds check** (option 3). New check at `GenesisConfig::from_json`: reject `block_subsidy`, `subsidy_pool_initial`, or `zeroth_pool_initial` exceeding `1e18` (1 quintillion native units — sane for even 18-decimal-place currencies). Also rejects genesis where `block_subsidy * lottery_jackpot_multiplier` would overflow on a jackpot block. Each refusal cites S-007 in the error message.
+
+Defense in depth: bad genesis caught at load time before any block applies; arithmetic edge cases caught per-mutation at apply time. The two layers compose so a future regression in either path remains caught by the other.
+
+**Verified post-fix:** bearer (TRANSFER credit path) + finite_subsidy (subsidy distribution + pool-exhaustion path) regressions PASS.
+
+**Pre-fix description** (preserved for audit trail). `chain.cpp:245-253` distributed `total_distributed = total_fees + block_subsidy_` across `b.creators` with no overflow check. With a malicious genesis or a long-lived chain accumulating fees, `+=` on `accounts_[domain].balance` could wrap.
 
 **Impact.** Funds destruction or unauthorized minting. The genesis-config attack vector is most realistic — a chain operator setting an absurd `block_subsidy` produces wrap-around at apply time.
 
