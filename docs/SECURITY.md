@@ -10,19 +10,23 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **3** (2 partially mitigated, 1 unchanged) | **3** | **4** | **10** | **20** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **22** + 2 partial |
-| v2 protocol-evolution | — | — | — | — | **0** |
-| Informational (`EXTENDED` posture) | — | — | — | — | **4** |
+| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **6** (S-013, S-014, S-016, S-017, S-018, S-020) | **10** | **19** |
+| Partially mitigated | **2** (S-030, S-031) | — | — | — | **2** |
+| Mitigated in-session | **4** (S-001, S-002, S-003, S-004) | **5** (S-007, S-008, S-012, S-032, S-033) | — | — | **9** |
+| Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
+| Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
-(S-005, S-009, S-015, S-019, S-034 all closed by M-F: the iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — were removed in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
+(M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Top-of-list priorities for production deployment** (updated after in-session closures — see §3 bodies for closure details):
+**Open Critical findings: zero.** Both remaining Critical-class items (S-030, S-031) are partially mitigated. Open High findings are 3 (S-006, S-010, S-011 — all design / parameter-policy concerns, no shipped-code attack surface).
+
+**Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
 Currently genuinely outstanding:
 
-- **S-030** Block body not authenticated by `block_digest` — committee K-of-K signatures don't bind the actual transaction payloads, enabling silent post-consensus censorship and cross-node state divergence (the "1 unchanged" Critical from the exec-summary table)
-- **S-031** Single global `state_mutex_` serializes state, I/O, disk writes — **partially mitigated** in-session via A9 Phase 1-2D (lock-free reader paths for accounts_/stakes_/registrants_, async chain.save worker, atomic file write). Only remaining piece: gossip-broadcast-out-of-lock (~0.5d, tracked as plan.md C3).
+- **S-030 D2 full closure (v2.7 F2)** — design specification complete in `docs/proofs/F2-SPEC.md`; implementation ~3-4 days. D1 is effective-closed via S-033 state_root binding; D2 is partial-closed via the same mechanism (apply-layer rejection). v2.7 F2 closes D2 at the consensus layer (signatures gather only on view convergence).
+- **S-031 last polish** — gossip-broadcast-out-of-lock, ~0.5d. The 5 architectural layers shipped close the practical problem; this is operational polish.
+- **S-014 rate limiting** — no per-IP / per-method buckets on RPC or gossip. ~50 LOC, operational hardening.
 
 Closed in-session (retained here for audit trail; see §3 bodies):
 
@@ -30,8 +34,13 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-002 Mempool accepts unverified signatures~~ — closed via mempool sig-verify + paired `binary_codec.cpp::decode_tx_frame` fix.
 - ~~S-003 Block timestamp window ±5s~~ — closed via ±30s window in `BlockValidator::check_timestamp`; spec and code now agree.
 - ~~S-004 Plaintext private keys~~ — closed via AES-256-GCM passphrase envelope keyfile (v2.17).
+- ~~S-007 Subsidy/fee overflow~~ — closed via `checked_add_u64` on every credit path.
+- ~~S-008 Unbounded mempool~~ — closed via `MEMPOOL_MAX_TXS = 10000` + `MEMPOOL_MAX_PER_SENDER = 100` with fee-priority eviction.
+- ~~S-012 Snapshot trust~~ — closed via state_root verification on restore.
+- ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
+- ~~S-033 No state commitment~~ — closed via Merkle root in `Block.state_root` + signing_bytes binding.
 
-**S-030 and S-031 remaining piece are protocol/architecture-level and need real engineering** (not 1-line fixes); they're the bar for "production-ready" rather than "demo-ready."
+**Production-readiness bar:** with the in-session closures, no fully-open Critical findings remain. v2.7 F2 (for D2 full closure) is the last architectural item between current state and "permissionless-deployment-ready"; everything else is operational polish or new-feature work.
 
 ---
 
@@ -42,12 +51,12 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | ID | Sev | Title | File / Locus | Effort |
 |---|---|---|---|---|
 | S-001 | ✅ Mitigated | RPC auth (localhost-only default + HMAC-SHA-256 auth both landed) | `rpc/rpc.cpp` | done |
-| S-002 | 🔴 Crit | Mempool accepts unverified-sig transactions | `node/node.cpp:1353-1371` | 1-2d |
-| S-003 | 🔴 Crit | Block timestamp window ±5s vs README ±30s | `node/validator.cpp:559-564` | 1d |
+| S-002 | ✅ Mitigated | Mempool sig-verify on both gossip + RPC paths (paired binary_codec fix) | `node/node.cpp::verify_tx_signature_locked` | done |
+| S-003 | ✅ Mitigated | Block timestamp window aligned to ±30s (spec + code now agree) | `node/validator.cpp::check_timestamp` | done |
 | S-004 | ✅ Mitigated | Plaintext private key in `account create` output (option 1: localhost-only-default + 0600; option 2: AES-256-GCM passphrase envelope landed) | `main.cpp:cmd_account_create` | done |
 | S-005 | ✅ Closed | `delay_T` not in GenesisConfig — field removed entirely (commit `1b9b086`) | n/a | done |
 | S-006 | 🟠 High | ContribMsg cross-generation equivocation undetected | `node/node.cpp:1342` | low-med |
-| S-007 | 🟠 High | Integer overflow in subsidy distribution | `chain/chain.cpp:245-253` | 1d |
+| S-007 | ✅ Mitigated | Subsidy/fee/receipt-credit overflow-checked via checked_add_u64 (Options 2 + 3 from audit) | `chain/chain.cpp` | done |
 | S-008 | ✅ Mitigated | Mempool bounds: MEMPOOL_MAX_TXS = 10000 cap + fee-priority eviction + MEMPOOL_MAX_PER_SENDER = 100 quota | `node/node.cpp::mempool_admit_check` | done |
 | S-009 | ✅ Closed | Constant-T / SHA-256 ASIC fallacy — replaced by commit-reveal (commit `14bf3d6`); delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-010 | 🟠 High | Sybil via under-priced MIN_STAKE | `chain/params.hpp` | docs / DOMAIN_INCLUSION |
@@ -71,9 +80,9 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:30-47` | trivial |
 | S-029 | 🟢 Low | BFT-mode multi-proposer fork-choice undefined | `node/node.cpp::on_block` | bounded reorg |
 | S-030 | 🟠 Partially mitigated | Block body not authenticated by `block_digest` (D1 effective via S-033 state_root; D2 partial via S-033; F2 view-reconciliation for full D2 closure tracked v2.7) | `node/producer.cpp:206-221` | v2.7 |
-| S-031 | 🔴 Crit | Single global mutex serializes state + I/O + VDF | `node/node.cpp` (42 sites) | re-architecture |
-| S-032 | 🟠 High | O(N) registry rebuild on every operation | `node/registry.cpp::build_from_chain` | incremental state machine |
-| S-033 | 🟠 High | No cryptographic state commitment (no state root, no light clients) | `chain/block.hpp` | v2 block format |
+| S-031 | 🟠 Substantially mitigated | shared_mutex + A9 Phase 1-2D atomicity/lazy-snapshot/lock-free reads + async chain.save worker (5 layers); remaining: gossip-broadcast-out-of-lock ~0.5d | `node/node.cpp` | mostly done |
+| S-032 | ✅ Mitigated | Incremental registry cache on Chain + snapshot persistence; build_from_chain reads cache, no log walk | `node/registry.cpp::build_from_chain` | done |
+| S-033 | ✅ Mitigated | Merkle tree state commitment + Block.state_root + signing_bytes binding + apply/restore verification | `chain/chain.cpp::compute_state_root` | done |
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
 
@@ -965,53 +974,65 @@ These corrections are accepted; no current code review changed the verdict.
 
 Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track B** is the architectural lift required for production (S-030 / S-031 / S-032 / S-033) — these are not 1-LOC fixes and represent the gap between "demo-ready" and "production-ready."
 
-### Track A — localized fixes (~4-6 days)
+### Track A — localized fixes
 
-| ID | Title | Cost | Cumulative |
-|---|---|---|---|
-| S-001 (option 1) | Bind RPC to localhost by default | trivial | 5 min |
-| S-003 | Widen timestamp window to ±30s | trivial | 6 min |
-| S-025 | Delete dead `compute_tx_root_intersection` | 5 min | 11 min |
-| S-005 | Pin `delay_T` in GenesisConfig | 1d | 1d |
-| S-002 | Verify sig in `on_tx` | 1-2d | 2-3d |
-| S-007 | Saturating add in subsidy distribution | half-day | 2.5-3.5d |
-| S-008 (option 1) | Hard cap on mempool size | 1-2d | 3.5-5.5d |
-| S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ~20 LOC | 3.5-5.5d |
-| S-014 | RPC + gossip rate limiting | ~50 LOC | 3.5-5.5d |
-| S-020 | Hybrid Fisher-Yates committee selection | ~30 LOC | 3.5-5.5d |
-| S-023 | RPC pre-check balance | ~1h | 3.5-5.5d |
-| S-034 | Reuse `EVP_MD_CTX` in delay-hash loop + recalibrate `delay_T` | 1d | 4.5-6.5d |
-
-### Track B — architectural lift (~3-4 weeks)
-
-| ID | Title | Cost |
+| ID | Title | Status |
 |---|---|---|
-| S-030 | Bind `b.transactions` (or its hash) into `block_digest` (Option 3 — add `tx_set_hash` field) | ~1w including protocol-bump + tests |
-| S-031 | Move `chain_.save()` etc. out of `state_mutex_`'s critical section + one-file-per-block storage | ~1w combined |
-| S-032 | Cache `registry_` on Chain; update incrementally on apply | 1-2d |
-| S-033 | `total_supply` invariant as v1.x interim; full state_root for v2 | 1d interim / ~1w v2 |
+| S-001 (option 1) | Bind RPC to localhost by default | ✅ done |
+| S-001 (option 3) | HMAC-SHA-256 RPC auth (v2.16) | ✅ done |
+| S-002 | Verify sig in `on_tx` + paired binary_codec fix | ✅ done |
+| S-003 | Widen timestamp window to ±30s | ✅ done |
+| S-004 (option 1) | 0600 file perms + no-stdout default | ✅ done |
+| S-004 (option 2) | AES-256-GCM passphrase envelope (v2.17) | ✅ done |
+| S-005 | `delay_T` removed entirely (M-F delay-hash deletion) | ✅ done |
+| S-007 | Overflow-checked add (`checked_add_u64`) on every credit path | ✅ done |
+| S-008 (options 1 + 3) | `MEMPOOL_MAX_TXS = 10000` + fee-priority eviction + `MEMPOOL_MAX_PER_SENDER = 100` quota | ✅ done |
+| S-025 | Delete dead `compute_tx_root_intersection` | ⏳ pending (5 min) |
+| S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ⏳ pending (~20 LOC) |
+| S-014 | RPC + gossip rate limiting | ⏳ pending (~50 LOC) |
+| S-020 | Hybrid Fisher-Yates committee selection | ⏳ pending (~30 LOC) |
+| S-023 | RPC pre-check balance | ⏳ pending (~1h) |
+| S-034 | Moot — delay-hash module deleted | ✅ done |
 
-### Track C — Additional design enhancements (independent cluster, ~3-5 days)
+**Track A status: 9 of 14 closed, 5 remaining (all ~hours of work).**
 
-These don't fix existing findings but raise the design quality. Optional but recommended.
+### Track B — architectural lift
 
-| Source | Title | Cost |
+| ID | Title | Status |
 |---|---|---|
-| Economics | Protocol-derived minimum fee (`fee >= subsidy / 1024`) — fixes S-008 mempool-spam from a different angle | ~10 LOC |
-| Identity | `IP_INCLUSION` as third inclusion model — closes S-010 for testnet-class chains | ~100 LOC |
-| Consensus | Heaviest-sig-set fork-choice for S-029 BFT mode | ~30 LOC (✅ done) |
-| Consensus | Bind `cumulative_rand + t` into Phase-2 timer for S-019 | ~50 LOC |
-| Supply | `total_supply` invariant per block (S-033 cheap interim + S-012 snapshot tampering defense) | ~50 LOC |
+| S-030 D1 | Bind `b.transactions` into block validation (via S-033 indirect closure) | ✅ effective |
+| S-030 D2 | Full closure via v2.7 F2 view reconciliation | ⏳ spec'd (F2-SPEC.md), 3-4d implementation |
+| S-031 | shared_mutex + A9 Phase 1-2D + async chain.save (5 layers) | ✅ substantially mitigated; last polish: gossip-out-of-lock ~0.5d |
+| S-032 | Incremental registry cache on Chain (cached registry_view_ + snapshot persistence) | ✅ done |
+| S-033 | Merkle root in `Block.state_root` + signing_bytes binding + apply/restore verification | ✅ done |
 
-### v2 protocol-evolution
+**Track B status: 4 of 5 closed (one substantially mitigated). Remaining: v2.7 F2 (3-4 days).**
 
-| ID | Title |
-|---|---|
-| S-009 | SHA-256 delay → memory-hard or VDF |
-| S-033 (deeper) | Sparse Merkle tree for state, enabling light clients + state proofs |
-| S-012 (deeper) | Trustless snapshot via state_root verification |
+### Track C — Additional design enhancements (deferred / partial)
 
-**Total to ship a "high-bar v1":** Track A + Track B = roughly **5-6 focused weeks** of engineering. v2 is a separate roadmap.
+| Source | Title | Status |
+|---|---|---|
+| Economics | Protocol-derived minimum fee (`fee >= subsidy / 1024`) | ⏳ deferred (genesis-config + test-suite update needed) |
+| Identity | `IP_INCLUSION` as third inclusion model | ⏳ not started |
+| Consensus | Heaviest-sig-set fork-choice for S-029 BFT mode | ✅ done |
+| Consensus | Bind `cumulative_rand + t` into Phase-2 timer for S-019 | ✅ moot (commit-reveal supersedes; S-019 closed by M-F) |
+| Supply | `total_supply` invariant per block (S-033 interim + S-012 defense) | ✅ superseded by S-033 (state_root binds total state) |
+
+### v2 protocol-evolution — shipped foundations
+
+| ID | Title | Status |
+|---|---|---|
+| S-009 | SHA-256 delay → commit-reveal randomness | ✅ done (M-F replaced delay-hash) |
+| S-033 (deeper) | Merkle state commitment + inclusion proofs for light clients | ✅ foundation shipped (v2.1 + v2.2 state_proof RPC) |
+| S-012 (deeper) | Trustless snapshot via state_root verification | ✅ done |
+
+**Production-readiness summary (post in-session work):**
+- Critical findings: 0 fully-open (2 partially mitigated — S-030 via S-033, S-031 via 5 layers)
+- High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
+- Track A remaining: ~1-2 days of localized fixes
+- v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
+
+The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session; the remaining gates to permissionless-deployment-ready posture are ~1 week of localized + 3-4 days of v2.7.
 
 ---
 

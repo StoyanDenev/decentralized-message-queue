@@ -641,7 +641,7 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Binary wire codec.** Current JSON-over-TCP is convenient but verbose. A future revision will introduce a binary message codec for bandwidth efficiency.
 
-**Light clients.** Header-only sync for external observers is on the roadmap. The shard-side beacon-header light chain already lays the groundwork — external clients can do the same.
+**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). The full header-only sync flow (light client downloads only block headers + verifies against epoch-boundary committee state) builds on this primitive and is a follow-on RPC track. CLI `determ state-proof --ns <a|s|r|b|k|c> --key <name>` exercises the primitive today.
 
 **Equivocation handling — fully closed-loop:**
 
