@@ -2,6 +2,7 @@
 // Copyright 2026 Determ Contributors
 #include <determ/node/node.hpp>
 #include <determ/rpc/rpc.hpp>
+#include <determ/chain/chain.hpp>
 #include <determ/chain/block.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/keys.hpp>
@@ -1524,6 +1525,141 @@ int main(int argc, char** argv) {
             std::cerr << "state-proof query failed: " << e.what() << "\n";
             return 1;
         }
+    }
+    // A9 Phase 2D regression: in-process exercise of Chain::atomic_scope's
+    // commit / discard / nesting / exception semantics. No network, no
+    // RPC — just a freshly-constructed Chain and direct method calls.
+    // Exit 0 on all assertions passing, non-zero on any failure.
+    if (cmd == "test-atomic-scope") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a minimal genesis block: alice=100, bob=0.
+        Block genesis;
+        genesis.index           = 0;
+        genesis.prev_hash       = Hash{};
+        genesis.timestamp       = 0;
+        genesis.cumulative_rand = Hash{};
+        genesis.creators.clear();
+        GenesisAlloc a; a.domain = "alice"; a.balance = 100; a.stake = 0;
+        genesis.initial_state.push_back(a);
+        GenesisAlloc bb; bb.domain = "bob"; bb.balance = 0;  bb.stake = 0;
+        genesis.initial_state.push_back(bb);
+
+        Chain chain(genesis);
+        uint64_t alice_initial = chain.balance("alice");
+        uint64_t bob_initial   = chain.balance("bob");
+        check(alice_initial == 100, "genesis: alice = 100");
+        check(bob_initial   == 0,   "genesis: bob   = 0");
+
+        // Test 1: atomic_scope returning true commits the change.
+        // We invoke atomic_scope and inside fn, append a block that
+        // transfers 25 from alice to bob. Return true → mutations kept.
+        // Helper that builds a transfer block at the next height.
+        auto build_transfer_block = [&](uint64_t amount) {
+            Block tb;
+            tb.index           = chain.height();
+            tb.prev_hash       = chain.head_hash();
+            tb.timestamp        = 1;
+            tb.cumulative_rand = Hash{};
+            Transaction tx;
+            tx.type     = TxType::TRANSFER;
+            tx.from     = "alice";
+            tx.to       = "bob";
+            tx.amount   = amount;
+            tx.fee      = 0;
+            tx.nonce    = chain.next_nonce("alice");
+            tx.payload  = {};
+            tx.hash     = tx.compute_hash();
+            tb.transactions.push_back(tx);
+            return tb;
+        };
+
+        bool committed = chain.atomic_scope([&](Chain& c) {
+            c.append(build_transfer_block(25));
+            return true;  // keep
+        });
+        check(committed == true,                "test1: scope returned true");
+        check(chain.balance("alice") == 75,     "test1: alice=75 after commit");
+        check(chain.balance("bob")   == 25,     "test1: bob=25 after commit");
+        check(chain.height() == 2,              "test1: chain height grew");
+
+        // Test 2: atomic_scope returning false rolls back the change.
+        uint64_t alice_pre  = chain.balance("alice");
+        uint64_t bob_pre    = chain.balance("bob");
+        uint64_t height_pre = chain.height();
+        bool kept = chain.atomic_scope([&](Chain& c) {
+            c.append(build_transfer_block(10));
+            return false;  // discard
+        });
+        check(kept == false,                          "test2: scope returned false");
+        check(chain.balance("alice") == alice_pre,    "test2: alice unchanged after discard");
+        check(chain.balance("bob")   == bob_pre,      "test2: bob unchanged after discard");
+        check(chain.height()         == height_pre,   "test2: blocks_ rolled back");
+
+        // Test 3: throwing in scope rolls back AND re-raises.
+        bool caught = false;
+        try {
+            chain.atomic_scope([&](Chain& c) -> bool {
+                c.append(build_transfer_block(5));
+                throw std::runtime_error("synthetic");
+                return true;  // unreachable
+            });
+        } catch (std::exception&) {
+            caught = true;
+        }
+        check(caught,                                  "test3: exception propagates");
+        check(chain.balance("alice") == alice_pre,     "test3: alice unchanged after throw");
+        check(chain.balance("bob")   == bob_pre,       "test3: bob unchanged after throw");
+        check(chain.height()         == height_pre,    "test3: blocks_ rolled back on throw");
+
+        // Test 4: nested scopes — outer commits, inner discards.
+        // Outer appends one transfer (5). Inner appends another (3) but
+        // discards. After outer commits, only outer's 5 should land.
+        uint64_t a4 = chain.balance("alice");
+        uint64_t b4 = chain.balance("bob");
+        uint64_t h4 = chain.height();
+        chain.atomic_scope([&](Chain& outer) {
+            outer.append(build_transfer_block(5));
+            // After outer's append: alice -= 5, bob += 5
+            outer.atomic_scope([&](Chain& inner) {
+                inner.append(build_transfer_block(3));
+                // After inner's append: alice -= 3 more, bob += 3 more
+                return false;  // discard inner
+            });
+            // After inner's discard: state should reflect ONLY outer's append.
+            return true;  // commit outer
+        });
+        check(chain.balance("alice") == a4 - 5,     "test4: alice debited only outer (5)");
+        check(chain.balance("bob")   == b4 + 5,     "test4: bob credited only outer (5)");
+        check(chain.height()         == h4 + 1,     "test4: only outer block landed");
+
+        // Test 5: nested scopes — outer discards. Both inner and outer
+        // mutations roll back even if inner committed.
+        uint64_t a5 = chain.balance("alice");
+        uint64_t b5 = chain.balance("bob");
+        uint64_t h5 = chain.height();
+        chain.atomic_scope([&](Chain& outer) {
+            outer.append(build_transfer_block(7));
+            outer.atomic_scope([&](Chain& inner) {
+                inner.append(build_transfer_block(2));
+                return true;  // commit inner
+            });
+            return false;  // discard outer — should undo BOTH appends
+        });
+        check(chain.balance("alice") == a5,         "test5: alice unchanged after outer discard");
+        check(chain.balance("bob")   == b5,         "test5: bob unchanged after outer discard");
+        check(chain.height()         == h5,         "test5: both blocks rolled back");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": atomic_scope " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
     }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);

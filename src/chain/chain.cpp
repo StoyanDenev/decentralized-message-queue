@@ -451,6 +451,53 @@ void Chain::activate_pending_params(uint64_t current_height) {
     }
 }
 
+// A9 Phase 2D: composable-tx atomic-scope primitive. Captures state
+// via Phase 1's create_state_snapshot; runs fn; commits (drops the
+// snapshot) on fn returning true; rolls back (restores snapshot) on
+// fn returning false or throwing. See chain.hpp for the rationale
+// and v2.4+ caller pattern.
+//
+// Nesting: each call captures its own snapshot, so multiple
+// atomic_scope calls can be active on the call stack. Inner scope's
+// commit doesn't pop outer's snapshot; outer's rollback still
+// undoes everything since outer's entry. The snapshot stack lives
+// on the C++ call stack, no explicit chain-level scope manager
+// needed.
+//
+// Interaction with apply_transactions's Phase 1 try-catch: if
+// atomic_scope is used INSIDE an apply_transactions tx-loop body
+// (the v2.4 use case), there are two active snapshots — the outer
+// one taken at apply entry and the inner one taken at scope entry.
+// Memory cost is two copies of mutable state for the duration of
+// the inner scope. Phase 2A/2B's lazy-capture amortizes: the inner
+// scope only copies containers it actually touches.
+bool Chain::atomic_scope(std::function<bool(Chain&)> fn) {
+    StateSnapshot snapshot = create_state_snapshot();
+    // Track blocks_ size separately from StateSnapshot — Phase 1's
+    // snapshot doesn't cover blocks_ (apply_transactions never
+    // mutates blocks_; Chain::append does that AFTER apply returns).
+    // For atomic_scope's contract — "any state change during fn
+    // rolls back on discard" — we also need to undo blocks pushed
+    // via Chain::append calls inside fn.
+    size_t blocks_size_at_entry = blocks_.size();
+    try {
+        bool keep = fn(*this);
+        if (!keep) {
+            restore_state_snapshot(std::move(snapshot));
+            if (blocks_.size() > blocks_size_at_entry) {
+                blocks_.resize(blocks_size_at_entry);
+            }
+        }
+        return keep;
+    } catch (...) {
+        restore_state_snapshot(std::move(snapshot));
+        if (blocks_.size() > blocks_size_at_entry) {
+            blocks_.resize(blocks_size_at_entry);
+        }
+        throw;
+    }
+}
+
 // ─── apply_transactions ──────────────────────────────────────────────────────
 
 uint64_t Chain::live_total_supply() const {

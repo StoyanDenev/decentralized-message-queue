@@ -433,6 +433,48 @@ public:
                        const Hash& shard_salt = Hash{},
                        ShardId my_shard_id = 0);
 
+    // A9 Phase 2D: composable-tx scope primitive. Runs `fn` with the
+    // chain in a tentative state; on `fn` returning true, the
+    // mutations are kept (committed). On false (or any throw from
+    // `fn`), all mutations made during `fn` are rolled back via the
+    // Phase 1 snapshot mechanism.
+    //
+    // Nesting: atomic_scope calls can nest. Each call captures the
+    // current state and restores from its own capture on rollback.
+    // Inner scope's commit doesn't affect outer scope; outer scope's
+    // rollback still undoes everything since outer's entry. Phase
+    // 2A/2B's lazy-snapshot containers (stakes/registrants/abort_
+    // records/merge_state/applied_inbound_receipts) per-scope only
+    // capture what's mutated, so deeply-nested scopes that touch
+    // small subsets of state are cheap.
+    //
+    // Use cases (v2.4+ work):
+    //   - Composable transactions: multi-tx batches with all-or-
+    //     nothing semantics. If any inner tx fails, the whole batch
+    //     rolls back.
+    //   - Cross-shard atomic commit (2PC): each shard tentatively
+    //     applies under a scope, waits for the coordinator's
+    //     decision, then commits or discards.
+    //   - Smart-contract-lite (v2.6): bytecode execution under a
+    //     scope; revert-on-gas-out is scope-discard.
+    //
+    // Today (v1.x) no protocol-level caller uses this primitive —
+    // it's the foundation for v2.4+ work. The test_state_scope.sh
+    // regression exercises commit, discard, and nesting semantics
+    // via a CLI subcommand.
+    //
+    // Cost: one StateSnapshot capture per scope entry (Phase 1
+    // primitive). Phase 2A/2B lazy-capture means TRANSFER-only-flavor
+    // scopes pay only the accounts deep-copy; other containers
+    // captured on first mutation. Acceptable for v2.X application
+    // patterns where atomic scopes are coarse-grained (one per
+    // batch, not one per tx).
+    //
+    // Returns the value `fn` returned (true if committed, false if
+    // discarded). If `fn` throws, the snapshot is restored and the
+    // exception propagates to the caller.
+    bool atomic_scope(std::function<bool(Chain&)> fn);
+
 private:
     std::vector<Block>                          blocks_;
     std::map<std::string, AccountState>         accounts_;
