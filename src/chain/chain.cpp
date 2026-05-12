@@ -104,39 +104,44 @@ uint64_t Chain::next_nonce(const std::string& domain) const {
 #pragma warning(disable: 4996)
 #endif
 
+std::shared_ptr<const Chain::CommittedStateBundle>
+Chain::committed_state_view() const {
+    return std::atomic_load(&committed_state_view_);
+}
+
 uint64_t Chain::balance_lockfree(const std::string& domain) const {
-    auto p = std::atomic_load(&committed_accounts_view_);
+    auto p = std::atomic_load(&committed_state_view_);
     if (!p) return 0;
-    auto it = p->find(domain);
-    return it != p->end() ? it->second.balance : 0;
+    auto it = p->accounts.find(domain);
+    return it != p->accounts.end() ? it->second.balance : 0;
 }
 
 uint64_t Chain::next_nonce_lockfree(const std::string& domain) const {
-    auto p = std::atomic_load(&committed_accounts_view_);
+    auto p = std::atomic_load(&committed_state_view_);
     if (!p) return 0;
-    auto it = p->find(domain);
-    return it != p->end() ? it->second.next_nonce : 0;
+    auto it = p->accounts.find(domain);
+    return it != p->accounts.end() ? it->second.next_nonce : 0;
 }
 
 uint64_t Chain::stake_lockfree(const std::string& domain) const {
-    auto p = std::atomic_load(&committed_stakes_view_);
+    auto p = std::atomic_load(&committed_state_view_);
     if (!p) return 0;
-    auto it = p->find(domain);
-    return it != p->end() ? it->second.locked : 0;
+    auto it = p->stakes.find(domain);
+    return it != p->stakes.end() ? it->second.locked : 0;
 }
 
 uint64_t Chain::stake_unlock_height_lockfree(const std::string& domain) const {
-    auto p = std::atomic_load(&committed_stakes_view_);
+    auto p = std::atomic_load(&committed_state_view_);
     if (!p) return UINT64_MAX;
-    auto it = p->find(domain);
-    return it != p->end() ? it->second.unlock_height : UINT64_MAX;
+    auto it = p->stakes.find(domain);
+    return it != p->stakes.end() ? it->second.unlock_height : UINT64_MAX;
 }
 
 std::optional<RegistryEntry> Chain::registrant_lockfree(const std::string& domain) const {
-    auto p = std::atomic_load(&committed_registrants_view_);
+    auto p = std::atomic_load(&committed_state_view_);
     if (!p) return std::nullopt;
-    auto it = p->find(domain);
-    if (it == p->end()) return std::nullopt;
+    auto it = p->registrants.find(domain);
+    if (it == p->registrants.end()) return std::nullopt;
     return it->second;
 }
 
@@ -1048,23 +1053,23 @@ void Chain::apply_transactions(const Block& b) {
     // The two accounts_ copies are unavoidable absent a more invasive
     // overlay refactor; they're paid in exchange for atomicity (Phase 1)
     // and concurrent reads (Phase 2C) respectively.
+    // A9 Phase 2C: publish the new committed state view. Bundle all
+    // three lock-free-readable containers into a single shared_ptr
+    // so multi-container queries get cross-container atomicity (all
+    // fields read from the same commit, no straddling). Single
+    // make_shared + single atomic_store per commit; three map copies
+    // happen inside the make_shared. The bundle's contents are const,
+    // so readers can't accidentally mutate the shared snapshot.
+    auto __bundle = std::make_shared<CommittedStateBundle>();
+    __bundle->accounts    = accounts_;
+    __bundle->stakes      = stakes_;
+    __bundle->registrants = registrants_;
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4996)
 #endif
-    std::atomic_store(&committed_accounts_view_,
-        std::make_shared<const std::map<std::string, AccountState>>(accounts_));
-    // Phase 2C extension: republish stakes and registrants too. The
-    // make_shared deep-copies the current map; for blocks that didn't
-    // mutate stakes/registrants (TRANSFER-only) this is unnecessary
-    // work but harmless — a future optimization could publish only
-    // when the corresponding lazy snapshot was captured (signal that
-    // the container was actually touched). For now, always-publish
-    // is the simplest correct shape.
-    std::atomic_store(&committed_stakes_view_,
-        std::make_shared<const std::map<std::string, StakeEntry>>(stakes_));
-    std::atomic_store(&committed_registrants_view_,
-        std::make_shared<const std::map<std::string, RegistryEntry>>(registrants_));
+    std::atomic_store(&committed_state_view_,
+        std::shared_ptr<const CommittedStateBundle>(std::move(__bundle)));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -1434,20 +1439,20 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
 
-    // A9 Phase 2C: publish loaded state as lock-free views so the
-    // *_lockfree() accessors return snapshot-bootstrapped values
-    // immediately after restore (no intervening apply_transactions
-    // on this path).
+    // A9 Phase 2C: publish loaded state as the bundled lock-free view
+    // so the *_lockfree() accessors and committed_state_view() return
+    // snapshot-bootstrapped values immediately after restore (no
+    // intervening apply_transactions on this path).
+    auto __bundle = std::make_shared<CommittedStateBundle>();
+    __bundle->accounts    = c.accounts_;
+    __bundle->stakes      = c.stakes_;
+    __bundle->registrants = c.registrants_;
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4996)
 #endif
-    std::atomic_store(&c.committed_accounts_view_,
-        std::make_shared<const std::map<std::string, AccountState>>(c.accounts_));
-    std::atomic_store(&c.committed_stakes_view_,
-        std::make_shared<const std::map<std::string, StakeEntry>>(c.stakes_));
-    std::atomic_store(&c.committed_registrants_view_,
-        std::make_shared<const std::map<std::string, RegistryEntry>>(c.registrants_));
+    std::atomic_store(&c.committed_state_view_,
+        std::shared_ptr<const CommittedStateBundle>(std::move(__bundle)));
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif

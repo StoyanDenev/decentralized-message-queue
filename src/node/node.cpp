@@ -2045,44 +2045,63 @@ json Node::rpc_block(uint64_t index) const {
 }
 
 json Node::rpc_account(const std::string& addr) const {
-    // A9 Phase 2C-Node: lock-free read path. All four state lookups
-    // (balance, next_nonce, stake, registrant) go through the
-    // corresponding *_lockfree accessors. Each accessor atomic-loads
-    // its own committed view; the four reads aren't synchronized as
-    // a group (they may straddle a commit boundary). That's
-    // acceptable here — rpc_account is a display query, not a
-    // consensus-critical read; an explorer showing slightly cross-
-    // block fields for one rare race is a non-issue. If strong
-    // atomicity across containers is ever needed, a follow-on can
-    // add a `committed_state_view_` shared_ptr bundling all maps and
-    // atomic-publish them as one unit at commit.
+    // A9 Phase 2C-Node bundled path. Grab the committed view ONCE
+    // and read all four fields (balance, next_nonce, stake,
+    // registrant) from the same bundle. All four reads are
+    // guaranteed cross-container atomic — they come from the same
+    // commit, no straddling. Lock-free: no state_mutex_ acquisition.
+    // The shared_ptr keeps the bundle alive for the duration of
+    // this function; the writer's next commit publishes a fresh
+    // bundle but does not disturb our view.
+    auto view = chain_.committed_state_view();
+
     json j;
-    j["address"]    = addr;
-    j["balance"]    = chain_.balance_lockfree(addr);
-    j["next_nonce"] = chain_.next_nonce_lockfree(addr);
+    j["address"] = addr;
 
     // Bearer-wallet anonymous addresses surface as their pubkey-derived
     // address; show that fact for the explorer.
     j["is_anonymous"] = is_anon_address(addr);
 
-    // If the address is a registered domain, attach registry + stake info.
-    auto reg_entry = chain_.registrant_lockfree(addr);
+    uint64_t balance    = 0;
+    uint64_t next_nonce = 0;
+    uint64_t stake      = 0;
+    std::optional<chain::RegistryEntry> reg_entry;
+
+    if (view) {
+        auto ait = view->accounts.find(addr);
+        if (ait != view->accounts.end()) {
+            balance    = ait->second.balance;
+            next_nonce = ait->second.next_nonce;
+        }
+        auto sit = view->stakes.find(addr);
+        if (sit != view->stakes.end()) {
+            stake = sit->second.locked;
+        }
+        auto rit = view->registrants.find(addr);
+        if (rit != view->registrants.end()) {
+            reg_entry = rit->second;
+        }
+    }
+
+    j["balance"]    = balance;
+    j["next_nonce"] = next_nonce;
+
     if (reg_entry) {
         json r;
         r["ed_pub"]        = to_hex(reg_entry->ed_pub);
         r["registered_at"] = reg_entry->registered_at;
         r["active_from"]   = reg_entry->active_from;
         r["inactive_from"] = reg_entry->inactive_from;
-        j["registry"]      = r;
-        j["stake"]         = chain_.stake_lockfree(addr);
+        j["registry"] = r;
+        j["stake"]    = stake;
     } else {
         j["registry"] = nullptr;
-        j["stake"]    = chain_.stake_lockfree(addr);    // 0 if not staked
+        j["stake"]    = stake;    // 0 if not staked
     }
 
     // Aggregate visibility: has this address ever appeared on-chain?
-    bool has_state = (j["balance"].get<uint64_t>() > 0)
-                  || (j["next_nonce"].get<uint64_t>() > 0)
+    bool has_state = (balance > 0)
+                  || (next_nonce > 0)
                   || reg_entry.has_value();
     if (!has_state) return nullptr;
     return j;

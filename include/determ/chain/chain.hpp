@@ -101,6 +101,35 @@ public:
     uint64_t                     stake_unlock_height_lockfree(const std::string& domain) const;
     std::optional<RegistryEntry> registrant_lockfree(const std::string& domain) const;
 
+    // A9 Phase 2C refinement: bundled state view for callers that read
+    // multiple containers and need cross-container atomicity (i.e.,
+    // all reads must come from the same commit, not straddle one).
+    //
+    // Per-field lockfree accessors above each do their own atomic_load.
+    // If a caller queries balance, then stake, then registrant in
+    // sequence, the three reads can return values from DIFFERENT
+    // committed states if an apply commits between calls. For display
+    // queries (rpc_account) this rare race is benign, but a caller
+    // that needs internally-consistent multi-field reads should grab
+    // the bundle once and read multiple fields from the SAME shared_ptr.
+    //
+    // Usage:
+    //   auto view = chain.committed_state_view();
+    //   if (!view) return error;  // pre-apply edge case
+    //   auto bal_it = view->accounts.find(addr);
+    //   auto stk_it = view->stakes.find(addr);
+    //   // bal_it and stk_it are guaranteed from the same commit
+    //
+    // The shared_ptr keeps the bundle alive for the caller's duration;
+    // the writer's next commit publishes a new bundle without
+    // disturbing in-flight readers.
+    struct CommittedStateBundle {
+        std::map<std::string, AccountState>  accounts;
+        std::map<std::string, StakeEntry>    stakes;
+        std::map<std::string, RegistryEntry> registrants;
+    };
+    std::shared_ptr<const CommittedStateBundle> committed_state_view() const;
+
     // Rev. 4: per-block subsidy minted to creators on apply. Set by Node
     // after loading GenesisConfig; chain-wide constant.
     uint64_t block_subsidy() const { return block_subsidy_; }
@@ -379,25 +408,25 @@ private:
     std::map<std::string, StakeEntry>           stakes_;
     std::map<std::string, RegistryEntry>        registrants_;
 
-    // A9 Phase 2C: lock-free committed views. Published at every
-    // successful apply via std::atomic_store. Readers atomic_load
-    // and read from the const contents; the shared_ptr keeps the
-    // snapshot alive for the reader's duration. Writers publish
-    // fresh snapshots at commit without disturbing in-flight readers.
-    // See balance_lockfree() / stake_lockfree() / registrant_lockfree()
-    // above. Each container is published independently — a reader of
-    // committed_accounts_view_ doesn't synchronize with a reader of
-    // committed_stakes_view_, so the three views are not guaranteed
-    // to be from the same block. That's acceptable: each accessor
-    // returns a self-consistent view of its own container, and
-    // multi-container queries (e.g., rpc_account) are typically just
-    // composing display data, not enforcing cross-container invariants.
-    std::shared_ptr<const std::map<std::string, AccountState>>
-                                                committed_accounts_view_;
-    std::shared_ptr<const std::map<std::string, StakeEntry>>
-                                                committed_stakes_view_;
-    std::shared_ptr<const std::map<std::string, RegistryEntry>>
-                                                committed_registrants_view_;
+    // A9 Phase 2C: single lock-free committed view bundling accounts,
+    // stakes, and registrants. Published at every successful apply
+    // via std::atomic_store on the shared_ptr. Readers atomic_load
+    // the pointer once and read from any container in the bundle —
+    // all three are guaranteed to be from the same commit. The
+    // shared_ptr keeps the bundle alive for the reader's duration;
+    // writers publish a fresh bundle at commit without disturbing
+    // in-flight readers.
+    //
+    // Cost: one make_shared<CommittedStateBundle>(...) per successful
+    // apply — three map deep-copies into the bundle's fields. Same
+    // total work as the previous three-separate-shared_ptr design;
+    // the bundling buys cross-container atomicity at no per-block cost.
+    // Per-field lockfree accessors (balance_lockfree, stake_lockfree,
+    // etc.) atomic_load the bundle internally and read their specific
+    // field; multi-field callers should use committed_state_view()
+    // to load once and read multiple fields from the same bundle.
+    std::shared_ptr<const CommittedStateBundle>
+                                                committed_state_view_;
 
     uint64_t                                    block_subsidy_{0};
     // E4: optional finite subsidy fund. 0 = unlimited / perpetual subsidy
