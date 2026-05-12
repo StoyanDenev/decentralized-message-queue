@@ -63,7 +63,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
 | S-012 | ✅ Mitigated | Snapshot bootstrap state_root verification landed (S-033 Merkle root in Block + snapshot-side check) | `chain/chain.cpp::restore_from_snapshot` | done |
 | S-013 | 🟡 Med | BlockSigMsg buffer flood OOM | `net/gossip.cpp` (buffered_block_sigs_) | ~20 LOC |
-| S-014 | 🟡 Med | No rate limiting on gossip + RPC | `net/gossip.cpp`, `rpc/rpc.cpp` | ~50 LOC + per-IP buckets |
+| S-014 | 🟠 Partially mitigated | RPC rate-limit shipped (token bucket per peer IP + bucket refill); gossip-side rate limiting deferred | `rpc/rpc.cpp::consume_rate_token` | RPC done; gossip pending |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
 | S-017 | 🟡 Med | Producer/chain validation logic mismatch (UNSTAKE) | `node/producer.cpp` vs `chain/chain.cpp` | 2-3d |
@@ -989,7 +989,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-008 (options 1 + 3) | `MEMPOOL_MAX_TXS = 10000` + fee-priority eviction + `MEMPOOL_MAX_PER_SENDER = 100` quota | ✅ done |
 | S-025 | Delete dead `compute_tx_root_intersection` | ⏳ pending (5 min) |
 | S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ⏳ pending (~20 LOC) |
-| S-014 | RPC + gossip rate limiting | ⏳ pending (~50 LOC) |
+| S-014 | RPC + gossip rate limiting | 🟠 RPC done (token-bucket per peer IP); gossip side pending |
 | S-020 | Hybrid Fisher-Yates committee selection | ⏳ pending (~30 LOC) |
 | S-023 | RPC pre-check balance | ⏳ pending (~1h) |
 | S-034 | Moot — delay-hash module deleted | ✅ done |

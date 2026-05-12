@@ -196,7 +196,9 @@ static int cmd_start(int argc, char** argv) {
 
         rpc::RpcServer rpc_server(node.io_context_access(), node,
                                        cfg.rpc_port, cfg.rpc_localhost_only,
-                                       cfg.rpc_auth_secret);
+                                       cfg.rpc_auth_secret,
+                                       cfg.rpc_rate_per_sec,
+                                       cfg.rpc_rate_burst);
         rpc_server.start();
 
         std::cout << "[determ] Starting node domain=" << cfg.domain

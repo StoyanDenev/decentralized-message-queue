@@ -52,6 +52,16 @@ struct Config {
     // (`openssl rand -hex 32`). Share with operators via secure
     // channel (env var, secrets manager, sealed config).
     std::string              rpc_auth_secret{};
+    // v2.X / S-014: RPC rate-limiting. Token-bucket per peer IP.
+    // `rpc_rate_per_sec` is the steady-state RPC budget per second
+    // per peer; `rpc_rate_burst` is the bucket capacity (max
+    // sudden-burst calls before steady-state rate kicks in). Both 0
+    // disables rate limiting (default behavior, backward compat).
+    // Suggested defaults for operators wanting protection:
+    //   rate_per_sec = 100, burst = 200 (allows brief polling
+    //   spikes from a single client without aggressive penalty).
+    double                   rpc_rate_per_sec{0.0};
+    double                   rpc_rate_burst{0.0};
     std::vector<std::string> bootstrap_peers;
     // rev.9 B2c.5c: cross-chain peer addresses. Populated when this node
     // wants to participate in cross-chain coordination — typically a

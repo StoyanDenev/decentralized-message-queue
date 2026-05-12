@@ -28,6 +28,8 @@ json Config::to_json() const {
     j["rpc_port"]        = rpc_port;
     j["rpc_localhost_only"] = rpc_localhost_only;
     j["rpc_auth_secret"] = rpc_auth_secret;
+    j["rpc_rate_per_sec"] = rpc_rate_per_sec;
+    j["rpc_rate_burst"]   = rpc_rate_burst;
     j["bootstrap_peers"] = bootstrap_peers;
     j["beacon_peers"]    = beacon_peers;
     j["shard_peers"]     = shard_peers;
@@ -61,6 +63,8 @@ Config Config::from_json(const json& j) {
     c.listen_port     = j.value("listen_port",    uint16_t{7777});
     c.rpc_port        = j.value("rpc_port",       uint16_t{7778});
     c.rpc_auth_secret = j.value("rpc_auth_secret", std::string{});
+    c.rpc_rate_per_sec = j.value("rpc_rate_per_sec", 0.0);
+    c.rpc_rate_burst   = j.value("rpc_rate_burst",   0.0);
     // S-001: default to localhost-only. Absent field in legacy configs
     // gets the secure default; operators must opt-in to all-interfaces.
     c.rpc_localhost_only = j.value("rpc_localhost_only", true);
