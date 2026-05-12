@@ -8,6 +8,9 @@
 #include <determ/crypto/keys.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
+// v2.17: envelope crypto for passphrase-encrypted keyfiles.
+// Lives in wallet/envelope.cpp, also linked into determ binary.
+#include "envelope.hpp"
 #include <asio.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -1027,7 +1030,7 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
     }
 }
 
-// account create --out <file> [--allow-plaintext-stdout]
+// account create --out <file> [--allow-plaintext-stdout] [--passphrase <pw>]
 //
 // S-004 mitigation: refuse stdout output by default. Generating a
 // fresh privkey and printing it to stdout exposes it to terminal
@@ -1041,29 +1044,43 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
 // File permissions: std::filesystem::permissions narrowed to
 // owner_read | owner_write on the freshly-written file. On Unix
 // this is chmod 0600; on Windows the call resolves to a best-effort
-// owner-only ACL via the std::filesystem implementation. Operators
-// running on Windows servers with shared-volume permissions should
-// additionally verify via icacls.
+// owner-only ACL via the std::filesystem implementation.
 //
-// Passphrase encryption (envelope-wrapped output) is the v1.x-prime
-// next step — tracked under S-004 follow-on. The wallet binary
-// (determ-wallet envelope encrypt) already provides this primitive;
-// a future revision wires it into account create so the on-disk
-// keyfile is encrypted at rest rather than relying on filesystem
-// permissions alone.
+// v2.17 / S-004 option 2: passphrase-encrypted keyfile at rest. If
+// --passphrase is provided (or DETERM_PASSPHRASE env var is set),
+// the on-disk keyfile is wrapped in an AES-256-GCM envelope keyed
+// from PBKDF2-HMAC-SHA-256(passphrase, salt, 600k iters). The
+// envelope is serialized in the canonical dot-separated format
+// (see wallet/envelope.hpp). File permissions still get 0600 for
+// belt-and-suspenders.
+//
+// To read back: `determ account decrypt --in <file> --passphrase ...`
+// (or rely on DETERM_PASSPHRASE env var; passing on CLI is leaked
+// into shell history).
 static int cmd_account_create(int argc, char** argv) {
     std::string out_path;
+    std::string passphrase;
     bool allow_plaintext_stdout = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--out" && i + 1 < argc) out_path = argv[i + 1];
         else if (a == "--allow-plaintext-stdout") allow_plaintext_stdout = true;
+        else if (a == "--passphrase" && i + 1 < argc) passphrase = argv[i + 1];
+    }
+    // Env var fallback (avoids CLI leaking into shell history). The
+    // CLI flag wins if both are set.
+    if (passphrase.empty()) {
+        const char* env = std::getenv("DETERM_PASSPHRASE");
+        if (env && *env) passphrase = env;
     }
     if (out_path.empty() && !allow_plaintext_stdout) {
         std::cerr <<
             "S-004: refusing to emit privkey to stdout. Either:\n"
             "  determ account create --out <file>     (recommended; "
                                                        "file gets 0600 permissions)\n"
+            "  determ account create --out <file> --passphrase <pw>\n"
+            "                                         (or DETERM_PASSPHRASE env var;\n"
+            "                                          encrypts at rest, S-004 option 2)\n"
             "  determ account create --allow-plaintext-stdout  (opt-in; "
                                                                   "be aware of\n"
             "                                                   terminal "
@@ -1085,14 +1102,12 @@ static int cmd_account_create(int argc, char** argv) {
     if (out_path.empty()) {
         // --allow-plaintext-stdout was explicitly set.
         std::cout << out.dump(2) << "\n";
-    } else {
+    } else if (passphrase.empty()) {
+        // Plaintext file output (S-004 option 1 — 0600 permissions only)
         std::ofstream f(out_path);
         if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
         f << out.dump(2) << "\n";
         f.close();
-        // S-004: restrict to owner read+write only. Errors here are
-        // logged but non-fatal — the file is already written; the
-        // operator should investigate manually if perms don't stick.
         std::error_code perm_ec;
         std::filesystem::permissions(
             out_path,
@@ -1106,7 +1121,104 @@ static int cmd_account_create(int argc, char** argv) {
         }
         std::cout << "Account written to " << out_path << "\n";
         std::cout << "Address: " << addr << "\n";
+    } else {
+        // v2.17 / S-004 option 2: encrypted file output. The plaintext
+        // is the same JSON the plaintext path writes; the envelope
+        // wraps it with AES-256-GCM keyed via PBKDF2 from the
+        // passphrase. The output file is the canonical envelope
+        // serialization (dot-separated hex fields, see
+        // wallet/envelope.hpp). AAD binds the public address so a
+        // tampered envelope cannot be substituted with another
+        // address's encrypted blob.
+        std::string pt = out.dump(2);
+        std::vector<uint8_t> pt_bytes(pt.begin(), pt.end());
+        std::vector<uint8_t> aad(addr.begin(), addr.end());
+        try {
+            auto env = determ::wallet::envelope::encrypt(pt_bytes, passphrase, aad);
+            std::string blob = determ::wallet::envelope::serialize(env);
+            std::ofstream f(out_path);
+            if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
+            // Header: 1-line magic + address (plaintext metadata) +
+            // envelope blob. The address is in AAD so it's
+            // tamper-evident, but exposing it in plaintext lets
+            // operators identify which account the file belongs to
+            // without decrypting.
+            f << "DETERM-ACCOUNT-V1 " << addr << "\n";
+            f << blob << "\n";
+            f.close();
+            std::error_code perm_ec;
+            std::filesystem::permissions(
+                out_path,
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                std::filesystem::perm_options::replace,
+                perm_ec);
+            if (perm_ec) {
+                std::cerr << "Warning: could not set 0600 permissions on "
+                          << out_path << ": " << perm_ec.message() << "\n";
+            }
+            std::cout << "Encrypted account written to " << out_path << "\n";
+            std::cout << "Address: " << addr << "\n";
+            std::cout << "  (use `determ account decrypt --in " << out_path
+                      << " --passphrase ...` to recover privkey)\n";
+        } catch (std::exception& e) {
+            std::cerr << "Encryption failed: " << e.what() << "\n";
+            return 1;
+        }
     }
+    return 0;
+}
+
+// v2.17 / S-004 option 2 read-back: decrypt an envelope-wrapped keyfile
+// produced by `account create --passphrase`. Outputs the plaintext
+// JSON to stdout (privkey + address). Requires --passphrase or
+// DETERM_PASSPHRASE env var.
+static int cmd_account_decrypt(int argc, char** argv) {
+    std::string in_path, passphrase;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"         && i + 1 < argc) in_path    = argv[i + 1];
+        else if (a == "--passphrase" && i + 1 < argc) passphrase = argv[i + 1];
+    }
+    if (passphrase.empty()) {
+        const char* env = std::getenv("DETERM_PASSPHRASE");
+        if (env && *env) passphrase = env;
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ account decrypt --in <file> "
+                     "[--passphrase <pw>]\n"
+                     "  (or set DETERM_PASSPHRASE env var)\n";
+        return 1;
+    }
+    if (passphrase.empty()) {
+        std::cerr << "account decrypt requires --passphrase or "
+                     "DETERM_PASSPHRASE env var\n";
+        return 1;
+    }
+    std::ifstream f(in_path);
+    if (!f) { std::cerr << "Cannot read " << in_path << "\n"; return 1; }
+    std::string header_line, blob_line;
+    std::getline(f, header_line);
+    std::getline(f, blob_line);
+    // Validate header.
+    if (header_line.rfind("DETERM-ACCOUNT-V1 ", 0) != 0) {
+        std::cerr << "Not a DETERM-ACCOUNT-V1 file: " << in_path << "\n";
+        return 1;
+    }
+    std::string addr = header_line.substr(std::strlen("DETERM-ACCOUNT-V1 "));
+    auto env_opt = determ::wallet::envelope::deserialize(blob_line);
+    if (!env_opt) {
+        std::cerr << "Envelope deserialize failed\n";
+        return 1;
+    }
+    std::vector<uint8_t> aad(addr.begin(), addr.end());
+    auto pt_opt = determ::wallet::envelope::decrypt(*env_opt, passphrase, aad);
+    if (!pt_opt) {
+        std::cerr << "Decryption failed (wrong passphrase or "
+                     "tampered file)\n";
+        return 1;
+    }
+    std::string pt(pt_opt->begin(), pt_opt->end());
+    std::cout << pt << "\n";
     return 0;
 }
 
@@ -1136,6 +1248,7 @@ static int cmd_account(int argc, char** argv) {
     std::string sub = argv[0];
     if (sub == "create")  return cmd_account_create (argc - 1, argv + 1);
     if (sub == "address") return cmd_account_address(argc - 1, argv + 1);
+    if (sub == "decrypt") return cmd_account_decrypt(argc - 1, argv + 1);
     std::cerr << "Unknown account subcommand: " << sub << "\n";
     return 1;
 }

@@ -44,10 +44,19 @@ endif()
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
+# v2.17 / S-004 option 2: passphrase-encrypted keyfiles. The
+# envelope crypto (AES-256-GCM + PBKDF2-HMAC-SHA-256) lives in
+# wallet/envelope.cpp; main `determ` binary needs it for
+# `account create --passphrase` to encrypt the generated keyfile
+# at rest. No wallet-state is shared between binaries — only the
+# crypto primitive code.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
+
 add_executable(determ ${SOURCES})
 
 target_include_directories(determ PRIVATE
   include
+  ${CMAKE_SOURCE_DIR}/wallet
   ${asio_SOURCE_DIR}/asio/include
   ${openssl_SOURCE_DIR}/include
 )

@@ -39,7 +39,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-001 | 🔴 Crit | RPC authentication missing | `rpc/rpc.cpp:13,52-89` | 1d basic / 3d TLS+HMAC |
 | S-002 | 🔴 Crit | Mempool accepts unverified-sig transactions | `node/node.cpp:1353-1371` | 1-2d |
 | S-003 | 🔴 Crit | Block timestamp window ±5s vs README ±30s | `node/validator.cpp:559-564` | 1d |
-| S-004 | 🔴 Crit | Plaintext private key in `account create` output | `main.cpp:cmd_account_create` | 2d |
+| S-004 | ✅ Mitigated | Plaintext private key in `account create` output (option 1: localhost-only-default + 0600; option 2: AES-256-GCM passphrase envelope landed) | `main.cpp:cmd_account_create` | done |
 | S-005 | ✅ Closed | `delay_T` not in GenesisConfig — field removed entirely (commit `1b9b086`) | n/a | done |
 | S-006 | 🟠 High | ContribMsg cross-generation equivocation undetected | `node/node.cpp:1342` | low-med |
 | S-007 | 🟠 High | Integer overflow in subsidy distribution | `chain/chain.cpp:245-253` | 1d |
@@ -165,9 +165,9 @@ The choice was option 1 from the resolution table below (the audit's recommended
 
 ### S-004 — Plaintext private key in `account create` output
 
-**Severity:** Critical • **Status:** Mitigated (option 1 landed in-session; option 2 follow-on) • **Sources:** Audit 1.3
+**Severity:** Critical • **Status:** Fully mitigated (option 1 + option 2 both landed) • **Sources:** Audit 1.3
 
-**Mitigation landed in-session.** `cmd_account_create` (`src/main.cpp`) now:
+**Option 1 mitigation landed in-session.** `cmd_account_create` (`src/main.cpp`):
 
 - **Refuses stdout output by default.** `determ account create` without `--out` exits 1 with a diagnostic naming the two acceptable paths (file output or explicit opt-in for legacy plaintext-stdout).
 - **Requires `--out <file>`** for normal usage. The output file is written then immediately narrowed to owner read+write only via `std::filesystem::permissions(perms::owner_read | perms::owner_write, perm_options::replace)`. On Unix this is `chmod 0600`; on Windows the implementation does a best-effort owner-only ACL.
@@ -175,9 +175,15 @@ The choice was option 1 from the resolution table below (the audit's recommended
 
 Test infrastructure updated: `tools/test_bearer.sh` and `tools/test_adversarial.sh` switched from `account create > file` to `account create --out file` (same effect, secure default).
 
-**Pre-fix description** (preserved for audit trail). `cmd_account_create` in `src/main.cpp` emitted the raw `priv_seed` either to stdout or to an unencrypted file, with no `chmod`, no passphrase prompt, no warnings beyond a string in the JSON.
+**Option 2 mitigation landed in-session.** `account create --passphrase <pw>` (or `DETERM_PASSPHRASE` env var) wraps the keyfile in an AES-256-GCM envelope keyed via PBKDF2-HMAC-SHA-256 (600k iterations, 16-byte salt, 96-bit nonce). The encrypted file format is a header line (`DETERM-ACCOUNT-V1 <address>`) followed by the canonical envelope blob (dot-separated hex fields). AAD binds the public address so a tampered envelope cannot be substituted with another account's encrypted blob.
 
-**Option 2 follow-on (passphrase-encrypted keyfile)** is the v1.x-prime next step. The wallet binary's `envelope.cpp` already implements AES-256-GCM + PBKDF2-HMAC-SHA-256 keying; a future revision wires it into `account create --passphrase` so the on-disk keyfile is encrypted at rest. Today's fix closes the stdout-leak path (terminal scrollback, shell history, accidental log capture) and the world-readable-file path (filesystem permissions). Encryption at rest is the next layer.
+The envelope crypto (`wallet/envelope.cpp`, originally for the wallet binary's recovery-share encryption) is now also linked into the main `determ` binary. The cross-binary scope is limited to the symmetric-crypto primitive — no wallet-state (recovery shares, OPAQUE state) crosses the boundary; the daemon's address space isolation from wallet-secret material is preserved.
+
+Read-back: `determ account decrypt --in <file> --passphrase <pw>` (or `DETERM_PASSPHRASE` env var) decrypts and emits the plaintext JSON (privkey + address) to stdout. AEAD tag verification fails clean (clear error message) on wrong passphrase or tampered file.
+
+**Regression coverage:** `tools/test_account_encrypted.sh`, 7 assertions: header format, no-plaintext-leak in encrypted file, correct-passphrase round-trip, wrong-passphrase rejection, env-var auth, plaintext-path backward compat, decrypted-address well-formedness.
+
+**Pre-fix description** (preserved for audit trail). `cmd_account_create` in `src/main.cpp` emitted the raw `priv_seed` either to stdout or to an unencrypted file, with no `chmod`, no passphrase prompt, no warnings beyond a string in the JSON.
 
 **Impact.** Standard key-leak vectors: terminal scrollback, shell history, world-readable file, accidental commit, accidental log capture.
 
