@@ -179,6 +179,24 @@ public:
 private:
     void on_block(const chain::Block& b);
     void on_tx(const chain::Transaction& tx);
+
+    // S-002 mitigation: verify a transaction's Ed25519 signature at
+    // mempool-admission time so forged-sig floods are rejected before
+    // they can consume mempool slots or amplify through gossip. The
+    // full validator's check_transactions still re-verifies at block
+    // apply (defense in depth). This early check is the cheap one;
+    // declining bad sigs here prevents the DoS amplification path.
+    //
+    // Returns true if the signature verifies under the tx's claimed
+    // identity (REGISTER pubkey from payload, anonymous pubkey from
+    // bearer address, or registry pubkey for registered domains).
+    // Returns false otherwise — including when the sender's registry
+    // entry isn't available yet (a new domain submitting before its
+    // own REGISTER is finalized falls through this path; this is
+    // intentional and matches the validator's behavior).
+    //
+    // Caller must hold state_mutex_.
+    bool verify_tx_signature_locked(const chain::Transaction& tx) const;
     void on_contrib(const ContribMsg& msg);
     void on_block_sig(const BlockSigMsg& msg);
     // Called by start_delay_compute when replaying buffered sigs; assumes

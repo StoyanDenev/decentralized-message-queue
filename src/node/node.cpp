@@ -1645,11 +1645,49 @@ void Node::on_block(const chain::Block& b) {
     apply_block_locked(b);
 }
 
+// S-002 verify_tx_signature_locked — attempted in-session,
+// reverted: see docs/proofs/S002-Mempool-Sig-Verify.md.
+//
+// The implementation here is correct (mirrors the validator's per-tx
+// sig check) but cannot be wired into on_tx without first fixing
+// src/net/binary_codec.cpp::decode_tx_frame, which drops amount,
+// fee, and nonce on the binary-wire path. Post-decode txs have those
+// fields zeroed, so signing_bytes() doesn't match the original signed
+// payload and the sig fails to verify.
+//
+// Path forward: fix the binary codec to read amount/fee/nonce from
+// the fixed slots (offsets 32, 40, 48) in decode_tx_frame, then
+// re-wire this check into both on_tx and rpc_submit_tx.
+bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
+    using namespace determ::crypto;
+    using namespace determ::chain;
+    PubKey pk{};
+    const bool from_anon = is_anon_address(tx.from);
+    if (tx.type == TxType::REGISTER) {
+        if (from_anon) return false;
+        if (tx.payload.size() < 32) return false;
+        std::copy_n(tx.payload.begin(), 32, pk.begin());
+    } else if (from_anon) {
+        if (tx.type != TxType::TRANSFER) return false;
+        pk = parse_anon_pubkey(tx.from);
+    } else {
+        auto& regs = chain_.registrants();
+        auto it = regs.find(tx.from);
+        if (it == regs.end()) return false;
+        pk = it->second.ed_pub;
+    }
+    auto sb = tx.signing_bytes();
+    return verify(pk, sb.data(), sb.size(), tx.sig);
+}
+
 void Node::on_tx(const chain::Transaction& tx) {
     std::lock_guard<std::mutex> lk(state_mutex_);
 
     // Drop stale-nonce txs immediately.
     if (tx.nonce < chain_.next_nonce(tx.from)) return;
+
+    // S-002 mempool-admission sig-verify is gated on the binary-codec
+    // fix; see verify_tx_signature_locked() comment above.
 
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
@@ -2233,6 +2271,9 @@ json Node::rpc_submit_tx(const json& tx_json) {
         throw std::runtime_error(
             "submitted tx has stale nonce " + std::to_string(tx.nonce)
           + " (expected >= " + std::to_string(chain_.next_nonce(tx.from)) + ")");
+
+    // S-002 mempool-admission sig-verify gated on binary-codec fix; see
+    // verify_tx_signature_locked() comment for the dependency.
 
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
