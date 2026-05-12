@@ -67,7 +67,7 @@ SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
 
 ### 3.4 TRANSFER payload (general-purpose tokenization slot)
 
-`TRANSFER` MAY carry an optional `payload` of up to **32 bytes**. Empty payload (the historical default) is unchanged and byte-identical on the wire. A payload larger than 32 bytes is rejected by the validator with the error message `TRANSFER payload exceeds 32-byte cap (got <N> bytes)`.
+`TRANSFER` MAY carry an optional `payload` of up to **128 bytes** (constant `TRANSFER_PAYLOAD_MAX` in `chain/params.hpp`). Empty payload (the historical default) is unchanged and byte-identical on the wire. A payload larger than 128 bytes is rejected by the validator with the error message `TRANSFER payload exceeds 128-byte cap (got <N> bytes)`.
 
 **Protocol guarantees (integrity only):**
 - The payload bytes are part of `signing_bytes()` (§3.1) and are therefore covered by the sender's Ed25519 signature.
@@ -79,15 +79,16 @@ SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
 - The protocol does not parse, validate, or interpret the payload bytes. Two applications using the same payload schema can interoperate; conflicts between independent application schemas at the same byte are an application-layer concern.
 - There is no on-chain registry of payload schemas or tag namespaces.
 
-**Recommended encodings (non-normative).** Applications choose any encoding that fits within 32 bytes. Common options:
+**Recommended encodings (non-normative).** Applications choose any encoding that fits within 128 bytes. Common options:
 
 | Encoding | When to use | Trade-off |
 |----------|-------------|-----------|
 | **Raw bytes** | Single fixed-purpose deployment (one app). | Simplest. Zero overhead. No room for future extension. |
 | **Fixed-prefix tagging** (e.g. 1–4 byte ASCII tag + payload) | Multi-application coexistence on the same chain. | One byte of namespace separation. Compact. Easy to grep. Recommended default. |
-| **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) | Structured records (object pointers, Ricardian-contract refs, indexed memos). Pairs with downstream features (e.g. A8 directory entries). | Self-describing, deterministic encoding profile available, broad library support. Best general-purpose choice when the 32-byte budget allows. |
+| **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) | Structured records (object pointers, Ricardian-contract refs, indexed memos). Pairs with downstream features (e.g. A8 directory entries). | Self-describing, deterministic encoding profile available, broad library support. Best general-purpose choice for the 128-byte budget — fits small structured records comfortably. |
 | **MessagePack** | Same use-cases as CBOR. | Slightly more compact than CBOR for short objects; less canonical-encoding tooling. |
-| **JSON text** | Quick prototyping, human-readable memos. | Verbose; rarely fits non-trivial structures within 32 bytes. Discouraged for production. |
+| **JSON text** | Quick prototyping, human-readable memos. | Verbose; fits short JSON objects within 128 bytes but pricey for non-trivial structures. Discouraged for production. |
+| **Encrypted payload** (e.g. `crypto_box_seal(recipient.pubkey, plaintext)`) | Confidential memos between sender and recipient. | ~48 bytes of overhead (ephemeral key + MAC); leaves ~80 bytes for plaintext. Pairs with v2.22 confidential-tx pattern. |
 
 For multi-app interoperability, a fixed-prefix tag (e.g. the first byte being a registered application identifier, the rest being that app's encoding) is the recommended convention. The protocol enforces nothing here — it is purely a coordination mechanism between applications sharing the chain.
 

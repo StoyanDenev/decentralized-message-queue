@@ -149,27 +149,14 @@ Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists) {
     return b.finalize();
 }
 
-Hash compute_tx_root_intersection(
-    const std::vector<std::vector<Hash>>& creator_tx_lists) {
-    if (creator_tx_lists.empty()) {
-        // Vacuous: no committee → no canonical tx set.
-        return Hash{};
-    }
-    // Start with the first list, then narrow by intersecting each subsequent.
-    std::set<Hash> result(creator_tx_lists[0].begin(),
-                           creator_tx_lists[0].end());
-    for (size_t i = 1; i < creator_tx_lists.size(); ++i) {
-        std::set<Hash> next;
-        for (auto& h : creator_tx_lists[i]) {
-            if (result.count(h)) next.insert(h);
-        }
-        result = std::move(next);
-        if (result.empty()) break;     // nothing more to intersect with
-    }
-    SHA256Builder b;
-    for (auto& h : result) b.append(h);
-    return b.finalize();
-}
+// S-025 closure: compute_tx_root_intersection deleted as unused. The
+// function was a relic of a pre-v1 design where the canonical tx set
+// was the intersection of committee members' lists (every member must
+// independently propose the tx). v1 settled on union semantics —
+// censorship requires ALL K to omit. The intersection helper has no
+// callers in the current code base and is removed to reduce confusion.
+// If a future v2 mode wants intersection semantics, it can re-introduce
+// the function or guard it under a feature flag.
 
 Hash compute_delay_seed(uint64_t block_index, const Hash& prev_hash,
                          const Hash& tx_root,

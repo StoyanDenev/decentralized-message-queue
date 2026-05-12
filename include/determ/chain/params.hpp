@@ -51,6 +51,12 @@ inline constexpr size_t REGISTER_PAYLOAD_MAX_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE
 // for region-less REGISTER txs.
 inline constexpr size_t REGISTER_PAYLOAD_SIZE = REGISTER_PAYLOAD_PUBKEY_SIZE;
 
+// A4 TRANSFER payload cap. Optional, application-defined bytes carried
+// on TRANSFER for memos, off-chain pointers, fixed-prefix tags, CBOR
+// blobs, etc. Empty payload (the historical default) stays byte-identical
+// on the wire. Cap is enforced by the validator.
+inline constexpr size_t TRANSFER_PAYLOAD_MAX = 128;
+
 // rev.8 economic disincentive on abort suspension. Deducted from the
 // validator's stake at the moment an AbortEvent for this domain is baked
 // into a finalized block. Required for BFT-mode safety claims (BFT

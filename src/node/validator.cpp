@@ -580,9 +580,9 @@ BlockValidator::Result BlockValidator::check_transactions(
             // are signed (Transaction::signing_bytes binds payload) and
             // included in the block hash. Semantics are application-
             // level; see docs/PROTOCOL.md §3.
-            if (tx.payload.size() > 32)
-                return {false, "TRANSFER payload exceeds 32-byte cap (got "
-                             + std::to_string(tx.payload.size()) + " bytes)"};
+            if (tx.payload.size() > TRANSFER_PAYLOAD_MAX)
+                return {false, "TRANSFER payload exceeds " + std::to_string(TRANSFER_PAYLOAD_MAX)
+                             + "-byte cap (got " + std::to_string(tx.payload.size()) + " bytes)"};
             break;
         case TxType::REGISTER:
             break;

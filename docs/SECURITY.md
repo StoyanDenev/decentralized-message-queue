@@ -74,9 +74,9 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-020 | 🟡 Med | Rejection sampling O(K²) at K/N→1 | `crypto/random.cpp::select_m_creators` | ~30 LOC |
 | S-021 | 🟢 Low | Chain file integrity not cryptographically verified | `chain/chain.cpp::load` | 1d |
 | S-022 | 🟢 Low | 16 MB message limit too permissive (modulo snapshots) | `net/peer.cpp:38` | nuanced |
-| S-023 | 🟢 Low | RPC `send`/`stake` skip balance check | `node/node.cpp:1816` | 1h |
+| S-023 | ✅ Mitigated | RPC send/stake/unstake balance pre-check throws clear diagnostic on insufficient balance | `node/node.cpp::rpc_send/stake/unstake` | done |
 | S-024 | 🟢 Low | Deregistration timing predictability | `chain/chain.cpp::derive_delay` | low priority |
-| S-025 | 🟢 Low | `compute_tx_root_intersection` is dead code | `node/producer.cpp:146` | 5 min delete |
+| S-025 | ✅ Mitigated | `compute_tx_root_intersection` deleted (in-session); function + header decl removed | `node/producer.cpp` | done |
 | S-026 | 🟢 Low | No connection timeout / keepalive on peer sockets | `net/peer.cpp` | 1d |
 | S-027 | 🟢 Low | Info leakage in logs / verbose error messages | many | docs / runtime flag |
 | S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:30-47` | trivial |
@@ -1005,14 +1005,14 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-005 | `delay_T` removed entirely (M-F delay-hash deletion) | ✅ done |
 | S-007 | Overflow-checked add (`checked_add_u64`) on every credit path | ✅ done |
 | S-008 (options 1 + 3) | `MEMPOOL_MAX_TXS = 10000` + fee-priority eviction + `MEMPOOL_MAX_PER_SENDER = 100` quota | ✅ done |
-| S-025 | Delete dead `compute_tx_root_intersection` | ⏳ pending (5 min) |
+| S-025 | Delete dead `compute_tx_root_intersection` | ✅ done |
 | S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ⏳ pending (~20 LOC) |
 | S-014 | RPC + gossip rate limiting | 🟠 RPC done (token-bucket per peer IP); gossip side pending |
 | S-020 | Hybrid Fisher-Yates committee selection | ⏳ pending (~30 LOC) |
-| S-023 | RPC pre-check balance | ⏳ pending (~1h) |
+| S-023 | RPC pre-check balance | ✅ done |
 | S-034 | Moot — delay-hash module deleted | ✅ done |
 
-**Track A status: 9.5 of 14 closed (S-014 RPC side ✅, gossip side pending), 4 fully remaining (all ~hours of work).**
+**Track A status: 11.5 of 14 closed (S-014 RPC side ✅, gossip side pending). 2 fully remaining: S-013 BlockSigMsg buffer + S-020 Fisher-Yates.**
 
 ### Track B — architectural lift
 

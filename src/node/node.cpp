@@ -2426,6 +2426,20 @@ json Node::rpc_chain_summary(uint32_t last_n) const {
 
 json Node::rpc_send(const std::string& to, uint64_t amount, uint64_t fee) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-023: balance pre-check. The chain's apply path silently drops
+    // (continues the tx loop) if balance < amount + fee — the user
+    // would otherwise get "queued" but their tx would never debit.
+    // Surface the rejection upfront so the client knows to top up or
+    // adjust the amount before submitting.
+    uint64_t cost = amount + fee;
+    uint64_t bal  = chain_.balance(cfg_.domain);
+    if (bal < cost) {
+        throw std::runtime_error(
+            "insufficient balance: have " + std::to_string(bal)
+          + ", need " + std::to_string(cost)
+          + " (amount " + std::to_string(amount)
+          + " + fee " + std::to_string(fee) + ")");
+    }
     chain::Transaction tx;
     tx.type   = chain::TxType::TRANSFER;
     tx.from   = cfg_.domain;
@@ -2454,6 +2468,17 @@ static std::vector<uint8_t> encode_amount(uint64_t a) {
 
 json Node::rpc_stake(uint64_t amount, uint64_t fee) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-023: balance pre-check. STAKE locks `amount` from balance AND
+    // pays `fee` from balance; total deducted = amount + fee.
+    uint64_t cost = amount + fee;
+    uint64_t bal  = chain_.balance(cfg_.domain);
+    if (bal < cost) {
+        throw std::runtime_error(
+            "insufficient balance: have " + std::to_string(bal)
+          + ", need " + std::to_string(cost)
+          + " (stake-amount " + std::to_string(amount)
+          + " + fee " + std::to_string(fee) + ")");
+    }
     chain::Transaction tx;
     tx.type    = chain::TxType::STAKE;
     tx.from    = cfg_.domain;
@@ -2477,6 +2502,32 @@ json Node::rpc_stake(uint64_t amount, uint64_t fee) {
 
 json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-023: pre-check both balance (for fee) AND locked stake (for
+    // the unstake amount). UNSTAKE only pays fee from balance; it
+    // RETURNS `amount` from stake back to balance. So bal >= fee
+    // suffices for the cost side, but stake >= amount must hold for
+    // the amount side. Also check unlock_height ≤ current chain
+    // height: an UNSTAKE before the unlock window is rejected by the
+    // chain's apply path (fee refunded) but it's friendlier to fail
+    // upfront.
+    uint64_t bal = chain_.balance(cfg_.domain);
+    if (bal < fee) {
+        throw std::runtime_error(
+            "insufficient balance for fee: have " + std::to_string(bal)
+          + ", fee " + std::to_string(fee));
+    }
+    uint64_t locked = chain_.stake(cfg_.domain);
+    if (locked < amount) {
+        throw std::runtime_error(
+            "insufficient stake to unlock: locked " + std::to_string(locked)
+          + ", attempting to unstake " + std::to_string(amount));
+    }
+    uint64_t unlock_h = chain_.stake_unlock_height(cfg_.domain);
+    if (chain_.height() < unlock_h) {
+        throw std::runtime_error(
+            "stake still locked: current height " + std::to_string(chain_.height())
+          + ", unlock_height " + std::to_string(unlock_h));
+    }
     chain::Transaction tx;
     tx.type    = chain::TxType::UNSTAKE;
     tx.from    = cfg_.domain;

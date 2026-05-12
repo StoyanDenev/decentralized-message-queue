@@ -99,12 +99,12 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
 // creator to omit a tx.
 Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists);
 
-// Canonical tx_root: intersection of K-committee tx_hashes lists. Used in
-// weak mode (K<M_pool, rotating committee). A tx is included only if EVERY
-// committee member has it in their list — censorship is single-creator
-// (any one of K can omit). Trade for liveness: rotating committee tolerates
-// (pool_size − K) silent creators via suspension dropping them from pool.
-Hash compute_tx_root_intersection(const std::vector<std::vector<Hash>>& creator_tx_lists);
+// S-025 (deleted in-session): compute_tx_root_intersection was a relic
+// of the pre-v1 design where canonical tx set was the intersection of
+// K committee members' lists. v1 settled on union semantics (censorship
+// requires ALL K to omit). The intersection helper was unused and
+// removed to reduce confusion. If a future v2 mode wants intersection
+// semantics, re-introduce it then.
 
 // Delay-hash seed — combined DH inputs in selection order, anchored to
 // (idx, prev, tx_root).
