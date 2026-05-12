@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **3** (1 partially mitigated, 2 unchanged) | **5** | **4** | **10** | **22** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **20** + 1 partial |
+| Open | **3** (1 partially mitigated, 2 unchanged) | **4** | **4** | **10** | **21** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **21** + 2 partial |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -489,9 +489,18 @@ That's **8 call sites**, several of which fire per block or per gossip message. 
 
 ### S-033 — No cryptographic state commitment
 
-**Severity:** High (architectural omission) • **Status:** Open • **Sources:** Architectural Analysis §3.3, related to S-012
+**Severity:** High (architectural omission) • **Status:** Mitigated in-session (Merkle tree commitment landed; inclusion proofs follow-on) • **Sources:** Architectural Analysis §3.3, related to S-012
 
-**What's open.** `Block` contains no state root. `Chain` stores state in three `std::map`s (`accounts_`, `stakes_`, `registrants_`) plus `applied_inbound_receipts_` set, with no Merkle structure. Block hash binds creator signatures + `tx_root`, but not state-after-apply.
+**Mitigation landed in-session.** Block now carries a `state_root` field; producer populates it from a sorted-leaves Merkle tree (`include/determ/crypto/merkle.hpp`) over every canonical state entry. The root is bound into `signing_bytes` when non-zero (preserving pre-S-033 byte-stable hashes). Apply-time verification re-derives and rejects on mismatch. The chain's `prev_hash` chain transitively authenticates every prior state_root — the chain is now a verifiable state log.
+
+Side effects:
+- **S-012 partial closure**: snapshot verifiers can now compare snapshot state's Merkle root against the snapshot's tail-header committed `state_root`. The verification call inside `restore_from_snapshot` is a ~10 LOC follow-on (file slot exists; only the check is missing).
+- **S-030 D1 effective closure**: divergent apply state between honest nodes produces divergent state_root → block rejected at apply with a loud diagnostic, surfacing the bug rather than silently corrupting state.
+- **S-030 D2 partial closure**: different evidence/receipt lists produce different post-apply state → different state_root → different block_hash. The one-block `prev_hash` recovery window narrows to zero blocks (state divergence visible at compute_hash, not just at N+1).
+
+**Inclusion proofs for light clients (v2.2)**: the Merkle primitive (`merkle_proof`/`merkle_verify`) is in place; exposing it via RPC for `account_proof` / `stake_proof` queries is the next layered commit. Wire format stays unchanged across the addition.
+
+**Pre-fix description** (preserved for audit trail). `Block` contained no state root. `Chain` stored state in three `std::map`s (`accounts_`, `stakes_`, `registrants_`) plus `applied_inbound_receipts_` set, with no Merkle structure. Block hash bound creator signatures + `tx_root`, but not state-after-apply.
 
 S-012 captures the snapshot-bootstrap consequence; this entry captures the broader architectural omission.
 
