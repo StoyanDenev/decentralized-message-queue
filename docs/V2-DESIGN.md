@@ -4,7 +4,40 @@ This document scopes the v2 design changes that would make Determ a complete "ev
 
 The intent is not "Ethereum but better" — Determ stays in its lane: a payment + identity chain, no contract VM, no smart-contract execution layer. v2 makes that lane self-sufficient at any scale rather than expanding it.
 
-**Status:** design + partial implementation. Document captures the design space; multiple themes (v2.1, v2.2, v2.3, v2.4, v2.5, v2.16, v2.17, v2.18, v2.19) have shipping code in tree — check `git log --oneline | grep v2\\.` for the current shipped-items list. Each section names the change, its motivation, the implementation sketch, the cost estimate, and which existing v1.x open finding(s) it closes; design and code may have diverged for items currently shipping.
+**Status:** design + partial implementation. Document captures the design space; multiple themes have shipping code in tree. Each section names the change, its motivation, the implementation sketch, the cost estimate, and which existing v1.x open finding(s) it closes; design and code may have diverged for items currently shipping.
+
+**Per-item status (audit against current `git log`):**
+
+| Item | Status | Notes |
+|---|---|---|
+| v2.1 State Merkle root | ✅ shipped | `compute_state_root()` + Block.state_root + verification on apply/restore |
+| v2.2 Light-client headers / state_proof RPC | ✅ shipped foundation | SMT inclusion-proof RPC + CLI; full light-client header-sync remains |
+| v2.3 Trustless fast sync | ✅ shipped | state_root verified on snapshot restore |
+| v2.4 Atomic block apply (A9) | ✅ shipped | A9 Phase 1-2D + COMPOSABLE_BATCH tx |
+| v2.5 Registry cache (S-032) | ✅ shipped | Cached registry view; S-032 closed |
+| v2.6 Gossip broadcast out of lock | ⏳ outstanding | Tracked as plan.md C3; ~0.5d |
+| v2.7 F2 view reconciliation | ⏳ not started | S-030 D2 closure |
+| v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
+| v2.9 Distributed VRF for committee selection | ⏳ not started | |
+| v2.10 Threshold randomness aggregation | ⏳ not started | |
+| v2.11 Auto-detection beacon-side trigger (R4 v1.1) | ⏳ not started | |
+| v2.12 Cross-shard atomic primitives | ⏳ not started | |
+| v2.13 Fair-ordering primitive | 🔒 deferred (research) | Open research area; not on v2 critical path |
+| v2.14 Real OPAQUE wallet recovery | ⏳ not started | |
+| v2.15 Wallet HD derivation + multi-sig | ⏳ not started | |
+| v2.16 Internal RPC authentication (S-001) | ✅ shipped | HMAC-SHA-256 + localhost-only default |
+| v2.17 Passphrase-encrypted keyfiles (S-004) | ✅ shipped | AES-256-GCM envelope |
+| v2.18 DAPP_REGISTER tx + on-chain DApp registry | ✅ shipped | Theme 7 substrate |
+| v2.19 DAPP_CALL tx + payload routing | ✅ shipped | Theme 7 substrate |
+| v2.20 Streaming subscription RPC | ⚠️ partial | Polling shipped; full streaming pending |
+| v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
+| v2.22 Confidential transactions (Bulletproofs) | ⏳ not started | Theme 8 |
+| v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
+| v2.24 Audit / compliance hooks | ⏳ not started | Theme 8 |
+
+**Shipped: 9 items. Partial: 1. Outstanding: 11. Deferred: 3.**
+
+For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
 ---
 
@@ -99,9 +132,13 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 
 ## Theme 3 — Cryptographic hardening
 
-### v2.7 — F2 view reconciliation (S-030 D2 closure)
+### v2.7 — F2 view reconciliation (S-030 D2 full closure)
 
-**Motivation.** Closes S-030 D2 — the one-block window where two K-of-K-signed instances can share a digest but differ in evidence/receipt lists. Today, the `prev_hash` chain at N+1 closes the window, but inside it honest nodes can apply divergent state and re-sync after the mismatch.
+**Motivation.** Closes S-030 D2 at the consensus layer. D2 is the structural property that two K-of-K-signed block instances can share a digest but differ in evidence/receipt lists — the digest covers a strict subset of block fields.
+
+**Current state (post-S-033, partial closure).** S-033's state_root binding into `Block::signing_bytes` indirectly closes D2 at the apply layer: divergent evidence/receipt lists produce different post-apply states, hence different state_roots, hence apply-time rejection on any honest node. Two K-of-K-signed instances can still both circulate on the gossip layer (their signatures over `compute_block_digest` are both valid), but only one apply-validates. Honest-majority deployments are functionally complete; a fully-Byzantine committee minting two instances remains a residual consensus-layer gap.
+
+**v2.7's value-add over S-033.** Closes the consensus-layer gap directly: signatures gather only around one canonical view, so two instances cannot both be K-of-K-signed in the first place. For permissionless deployments wanting the literal "≤ 1 finalized K-of-K signature gathering per height," this is the structural fix.
 
 **Mechanism.** Phase-1 view reconciliation. Each member's `ContribMsg` (Phase 1 commit) includes a hash of their view of:
 - `equivocation_events` pool
@@ -109,16 +146,36 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 - `abort_events` from local observation
 - `partner_subset_hash` if in a merge
 
-The K signed Phase-1 commits canonicalize via a reconciliation rule (intersection / union / threshold — design choice). Phase-2 signatures cover the reconciled canonical lists (via `compute_block_digest` extended with these fields).
+The K signed Phase-1 commits canonicalize via a reconciliation rule (intersection / union / threshold — design choice, see `F2-SPEC.md` for per-field analysis). Phase-2 signatures cover the reconciled canonical lists (via `compute_block_digest` extended with these fields).
 
-**Reconciliation rule trade-off:**
-- **Intersection** (events all K members report) — conservative, biases against slashing inclusion under gossip lag.
-- **Union** (any member's report) — aggressive, biases toward inclusion, requires validator to verify every reported event is independently valid.
-- **Threshold** (≥ M of K report) — middle ground.
+**Open design questions before implementation.** The prior in-tree attempt at a naive extension broke the equivocation-slashing regression test under gossip-async view divergence (`docs/proofs/S030-D2-Analysis.md` §2). A second attempt requires resolving:
+1. Per-field reconciliation rule (different rules for evidence vs receipts)
+2. Pool snapshot timing semantics
+3. Wire format for view hashes (full list vs Merkle root)
+4. Phase-1 commit binding scope (combined vs per-field)
+5. Phase-2 signature semantics under union rule (binding evidence Phase-1 didn't see)
+6. Timestamp inclusion (in v2.7 scope or separate)
+7. Validator-side reconciliation caching
+8. Monitoring metrics for view-divergence rate
+9. FA1 proof update
 
-**Cost.** 1-2 days. Wire-format change to `ContribMsg`. Validator re-derivation logic. Documented reconciliation rule.
+See `docs/proofs/F2-SPEC.md` for resolutions / recommendations on each.
 
-**Closes:** S-030 D2 fully. FA1's "≤ 1 block instance per digest" becomes literally provable, removing the footnote on the headline safety claim.
+**Cost.**
+- Specification: half day (resolve the 9 design questions; write `F2-SPEC.md`).
+- Implementation given a final specification: 1-2 days.
+- Wire-format change to `ContribMsg`. Validator re-derivation logic. Reconciliation rule(s) documented.
+
+**Closes:** S-030 D2 fully (consensus-layer). FA1's "≤ 1 block instance per digest" becomes literally provable at the consensus layer, not just at apply. Removes the partial-closure footnote (Safety.md §5.3).
+
+**Comparison with S-033 (currently shipped, partial closure):**
+
+| Property | S-033 (apply-layer) | v2.7 F2 (consensus-layer) |
+|---|---|---|
+| Two K-of-K instances can exist on the wire | Yes (one fails apply) | No (signatures don't gather) |
+| Threat model coverage | Honest-majority committees | Permissionless, including 2-instance Byzantine committees |
+| Cost | Shipped | 1-2 days + specification |
+| Wire format | None (state_root field added) | ContribMsg extension (wire bump) |
 
 ### v2.8 — Post-quantum signature migration
 

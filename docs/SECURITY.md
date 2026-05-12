@@ -17,16 +17,21 @@
 
 (S-005, S-009, S-015, S-019, S-034 all closed by M-F: the iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — were removed in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Top-of-list priorities for production deployment:**
+**Top-of-list priorities for production deployment** (updated after in-session closures — see §3 bodies for closure details):
 
-- **S-030** Block body not authenticated by `block_digest` — committee K-of-K signatures don't bind the actual transaction payloads, enabling silent post-consensus censorship and cross-node state divergence
-- **S-031** Single global `state_mutex_` serializes all state, I/O, and disk writes — node freezes under any real load, deadlock risk
-- **S-001** RPC authentication missing (any network client controls the node)
-- **S-002** Mempool accepts unverified signatures (DoS via sig-forgery flood)
-- **S-003** Block timestamp window ±5s contradicts README ±30s (chain stalls under NTP drift)
-- **S-004** Private keys written to stdout / unencrypted files
+Currently genuinely outstanding:
 
-The cheapest cluster of wins (S-001-localhost-only, S-002, S-007, S-008, S-013, S-014, S-023) is roughly **2-3 days** of focused work and closes the practical attack surface meaningfully. **S-030 and S-031 are protocol/architecture-level and need real engineering** (not 1-line fixes); they're the bar for "production-ready" rather than "demo-ready."
+- **S-030** Block body not authenticated by `block_digest` — committee K-of-K signatures don't bind the actual transaction payloads, enabling silent post-consensus censorship and cross-node state divergence (the "1 unchanged" Critical from the exec-summary table)
+- **S-031** Single global `state_mutex_` serializes state, I/O, disk writes — **partially mitigated** in-session via A9 Phase 1-2D (lock-free reader paths for accounts_/stakes_/registrants_, async chain.save worker, atomic file write). Only remaining piece: gossip-broadcast-out-of-lock (~0.5d, tracked as plan.md C3).
+
+Closed in-session (retained here for audit trail; see §3 bodies):
+
+- ~~S-001 RPC authentication missing~~ — closed via `rpc_localhost_only=true` default + HMAC-SHA-256 (v2.16).
+- ~~S-002 Mempool accepts unverified signatures~~ — closed via mempool sig-verify + paired `binary_codec.cpp::decode_tx_frame` fix.
+- ~~S-003 Block timestamp window ±5s~~ — closed via ±30s window in `BlockValidator::check_timestamp`; spec and code now agree.
+- ~~S-004 Plaintext private keys~~ — closed via AES-256-GCM passphrase envelope keyfile (v2.17).
+
+**S-030 and S-031 remaining piece are protocol/architecture-level and need real engineering** (not 1-line fixes); they're the bar for "production-ready" rather than "demo-ready."
 
 ---
 
@@ -65,7 +70,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-027 | 🟢 Low | Info leakage in logs / verbose error messages | many | docs / runtime flag |
 | S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:30-47` | trivial |
 | S-029 | 🟢 Low | BFT-mode multi-proposer fork-choice undefined | `node/node.cpp::on_block` | bounded reorg |
-| S-030 | 🔴 Crit | Block body not authenticated by `block_digest` | `node/producer.cpp:206-221` | architectural |
+| S-030 | 🟠 Partially mitigated | Block body not authenticated by `block_digest` (D1 effective via S-033 state_root; D2 partial via S-033; F2 view-reconciliation for full D2 closure tracked v2.7) | `node/producer.cpp:206-221` | v2.7 |
 | S-031 | 🔴 Crit | Single global mutex serializes state + I/O + VDF | `node/node.cpp` (42 sites) | re-architecture |
 | S-032 | 🟠 High | O(N) registry rebuild on every operation | `node/registry.cpp::build_from_chain` | incremental state machine |
 | S-033 | 🟠 High | No cryptographic state commitment (no state root, no light clients) | `chain/block.hpp` | v2 block format |
@@ -208,29 +213,45 @@ Read-back: `determ account decrypt --in <file> --passphrase <pw>` (or `DETERM_PA
 
 ### S-030 — Block body not authenticated by `block_digest`
 
-**Severity:** Critical (consensus integrity) • **Status:** Open • **Sources:** Architectural Analysis §2.3
+**Severity:** Critical (consensus integrity) • **Status:** Partially mitigated (D1 effective via S-033; D2 partial via S-033; F2 view-reconciliation tracked v2.7) • **Sources:** Architectural Analysis §2.3
 
-**What's open.** `compute_block_digest` at `src/node/producer.cpp:206-221` is the hash that all K committee members sign in Phase 2. It includes `tx_root`, `creators`, `creator_tx_lists`, `creator_ed_sigs`, `creator_dh_inputs`, `delay_seed`, `delay_output`, etc. — but **NOT `b.transactions`** (the actual transaction payloads).
+**Two dimensions of the finding (D1 / D2).**
 
-The validator's only constraint linking `b.transactions` to anything is `compute_tx_root(b.creator_tx_lists) == b.tx_root` at `validator.cpp:143-145`. The validator NEVER checks that the resolved `b.transactions` matches the union of `creator_tx_lists` (or any specific reordering / completeness rule).
+This finding has two structurally distinct dimensions, addressed by different mechanisms. The pre-mitigation analysis below originally treated them as one issue; current code handles them separately.
 
-**Why this is a real vulnerability.** Each committee member runs `build_body` locally with their own `tx_store_`. If members have differing mempools, they produce different `b.transactions` lists but the same `block_digest` (since the digest doesn't depend on `b.transactions`, only on the `tx_root` hash of `creator_tx_lists`). All K members sign the same digest. **Multiple physically-distinct blocks now share the same K-of-K signature set.**
+- **D1 — Resolved tx-payload mismatch.** Each committee member runs `build_body` locally with their own `tx_store_`. The digest covers `tx_root` (a hash over the K-committee's `creator_tx_lists`) but NOT the resolved `b.transactions` list. Two members with differing mempools produce different `b.transactions` but the same digest; both pass K-of-K verification.
 
-When these blocks gossip, different nodes accept different `b.transactions` based on which copy arrived first. State divergence follows — two honest nodes apply different transaction sets at the same height. The "fork-free" property is a property of the *digest*, not of the *applied state*.
+- **D2 — Non-tx-payload field mismatch.** The digest also doesn't cover `abort_events`, `equivocation_events`, `inbound_receipts`, `cross_shard_receipts`, `partner_subset_hash`, `timestamp`, `cumulative_rand`, `delay_output`, `creator_dh_secrets`, `initial_state`, or `state_root`. Two members with differing pool views (gossip-async) produce different evidence/receipt lists but the same digest.
 
-A malicious relay can also drop transactions from `b.transactions` after committee signing; the dropped block still K-of-K-verifies because the digest doesn't include the txs.
+**D1 status — effective closure via S-033.** With state_root in `signing_bytes` (Block.compute_hash), divergent `b.transactions` produces divergent post-apply state → divergent state_root → divergent block_hash. The validator's apply-time `compute_state_root() != b.state_root` check (chain.cpp:~900) loud-fails on the inconsistent node, surfacing the bug rather than silently corrupting state. Single canonical block per height is enforced at apply, even though K-of-K signatures (over the narrower digest) don't directly bind tx payloads.
 
-**Impact.** The censorship-resistance claim ("a tx is included if any single committee member proposed it") is unenforced — a malicious relay or a member with a divergent mempool can effectively censor specific txs while keeping the protocol's signature checks happy. State divergence between honest nodes follows.
+**D2 status — partial closure via S-033.** Same mechanism: divergent evidence/receipt lists produce divergent post-apply state → state_root mismatch → block rejected at apply. Closure is "partial" because:
+- Two K-of-K-signed block instances can still both circulate at the gossip layer (signatures are valid for both — the digest covers neither's evidence list).
+- The apply-time check picks one canonical instance via state_root match. Honest nodes converge on the canonical one; nodes that received the wrong one resync from peers.
+- A fully Byzantine committee can mint two valid-looking K-of-K instances. Detection is deferred to gossip-level reconciliation against the chain's actual state log.
+
+**Full D2 closure (consensus-layer, v2.7 F2 view reconciliation).** Extends `compute_block_digest` to cover the ✗-row fields directly, via Phase-1 view-reconciliation. Prevents the two-instance attack at signature-gathering time rather than at apply time. See `docs/proofs/S030-D2-Analysis.md` for the detailed analysis (including why the naive attempt failed and the corrected pattern) and `docs/V2-DESIGN.md` v2.7 for the implementation scope.
+
+**Two closure paths summarized:**
+
+| Path | Layer | Effect |
+|---|---|---|
+| **S-033 state_root binding** (shipped) | Apply-layer rejection | Divergent state_root → block rejected at apply; both K-of-K-signed instances can exist on the wire but only one apply-validates |
+| **v2.7 F2 view reconciliation** (planned) | Consensus-layer prevention | K-of-K signatures cover ✗-row fields directly; divergent views → signatures fail to gather → second instance never finalizes |
+
+For permissionless deployments wanting the literal "≤ 1 block instance per height" property, v2.7 is the structural fix. For permissioned/consortium deployments, S-033's apply-time enforcement is functionally equivalent (deterministic apply ⇒ at most one valid state_root per starting state).
 
 **Resolution options.**
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Include `b.transactions` (or a Merkle root over them) in `block_digest`.** Block format change — adds binding from sigs to actual delivered payloads. | High. Block hash changes break wire compatibility → hard fork. ~1d code + protocol bump. |
-| 2 | **Validator re-resolves union and checks completeness.** `validator.cpp` recomputes `selected_hashes = union(creator_tx_lists)`; verifies that for every hash in the union, either it has a tx in `b.transactions` OR it was filterable at apply time (insufficient balance / wrong nonce). | Medium. ~50-100 LOC in validator. No protocol change but validator-level break. |
-| 3 | **Add a `tx_set_hash = SHA256(canonical(b.transactions))` field to the block** and include it in `block_digest`. Validator checks the field matches the actual `b.transactions`. | Medium. Block field addition; protocol-compatible if old nodes ignore unknown fields. |
+| # | Option | Cost | Status |
+|---|---|---|---|
+| 1 | **Include `b.transactions` (or a Merkle root over them) in `block_digest`.** Block format change — adds binding from sigs to actual delivered payloads. | High. Block hash changes break wire compatibility → hard fork. ~1d code + protocol bump. | Superseded by Option 4 |
+| 2 | **Validator re-resolves union and checks completeness.** `validator.cpp` recomputes `selected_hashes = union(creator_tx_lists)`; verifies that for every hash in the union, either it has a tx in `b.transactions` OR it was filterable at apply time. | Medium. ~50-100 LOC in validator. No protocol change but validator-level break. | Deferred |
+| 3 | **Add a `tx_set_hash = SHA256(canonical(b.transactions))` field to the block** and include it in `block_digest`. Validator checks the field matches the actual `b.transactions`. | Medium. Block field addition; protocol-compatible if old nodes ignore unknown fields. | Superseded by Option 4 |
+| 4 | **State_root in signing_bytes (S-033).** Block carries `state_root = MerkleRoot(canonical_state_after_apply)`. signing_bytes binds it; validator re-derives at apply and rejects on mismatch. Indirectly commits to all apply-affecting fields (txs, evidence, receipts) via the post-apply state they produce. | Shipped via S-033. Block-format-compatible (zero state_root field on pre-S-033 blocks contributes nothing to signing_bytes, preserving byte-stable hashes). | ✓ Shipped, partial D2 closure |
+| 5 | **F2 view reconciliation (v2.7).** Phase-1 commits include hash of each member's evidence/receipt pool views; canonical reconciliation at Phase 1→2; Phase-2 sigs cover the reconciled lists via extended `compute_block_digest`. | 1-2 days implementation + design-decision time for reconciliation rule per field. | Planned v2.7 |
 
-**Recommended.** Option 3 for v1.x (minimal protocol disruption + maximum safety). Option 1 is the "right" answer for v2 alongside other block-format changes.
+**Status.** Option 4 (S-033) shipped — partial D2 closure with apply-layer enforcement. Option 5 (v2.7) planned — full D2 closure with consensus-layer enforcement. Options 1-3 superseded by Option 4's broader coverage.
 
 ---
 
