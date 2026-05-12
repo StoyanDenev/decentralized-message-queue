@@ -1266,8 +1266,14 @@ static int cmd_send_anon(int argc, char** argv) {
     std::string priv_hex = argv[2];
     uint64_t    fee    = 0;
     uint16_t    port   = get_rpc_port(argc, argv);
-    for (int i = 3; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--fee") fee = std::stoull(argv[i + 1]);
+    // --nonce N: override auto-fetched nonce. Useful for stress-testing
+    // mempool admission (pipelined-nonce submissions) without waiting
+    // for confirmations. -1 = auto-fetch via RPC (default).
+    int64_t     nonce_override = -1;
+    for (int i = 3; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--fee")   fee = std::stoull(argv[i + 1]);
+        else if (std::string(argv[i]) == "--nonce") nonce_override = std::stoll(argv[i + 1]);
+    }
 
     crypto::NodeKey key;
     try {
@@ -1287,12 +1293,16 @@ static int cmd_send_anon(int argc, char** argv) {
     std::string from_addr = make_anon_address(key.pub);
 
     uint64_t nonce = 0;
-    try {
-        auto r = rpc::rpc_call("127.0.0.1", port, "nonce", {{"domain", from_addr}});
-        nonce = r.value("next_nonce", uint64_t{0});
-    } catch (std::exception& e) {
-        std::cerr << "nonce query failed: " << e.what() << "\n";
-        return 1;
+    if (nonce_override >= 0) {
+        nonce = static_cast<uint64_t>(nonce_override);
+    } else {
+        try {
+            auto r = rpc::rpc_call("127.0.0.1", port, "nonce", {{"domain", from_addr}});
+            nonce = r.value("next_nonce", uint64_t{0});
+        } catch (std::exception& e) {
+            std::cerr << "nonce query failed: " << e.what() << "\n";
+            return 1;
+        }
     }
 
     chain::Transaction tx;

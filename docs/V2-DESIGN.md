@@ -352,7 +352,7 @@ Full design: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). Summary:
 - DApp slashing (proof-of-misbehavior tx types)
 - DApp upgrade flows (service_pubkey rotation with grace period)
 
-Full roadmap, open design questions, and economic model: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md).
+Full roadmap, open design questions, and economic model: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). The companion doc also covers the **Direct-to-DApp delivery pattern** (V2-DAPP-DESIGN.md §10) — an off-chain message delivery pattern using the on-chain DApp registry for endpoint discovery + libsodium sealed-box for confidentiality. Fully implementable today on the v2.18 substrate; no new protocol code required.
 
 ---
 

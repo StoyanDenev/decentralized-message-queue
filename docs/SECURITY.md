@@ -48,7 +48,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-005 | ✅ Closed | `delay_T` not in GenesisConfig — field removed entirely (commit `1b9b086`) | n/a | done |
 | S-006 | 🟠 High | ContribMsg cross-generation equivocation undetected | `node/node.cpp:1342` | low-med |
 | S-007 | 🟠 High | Integer overflow in subsidy distribution | `chain/chain.cpp:245-253` | 1d |
-| S-008 | 🟠 High | Unbounded mempool growth | `node/node.cpp:1353` | 1-2d |
+| S-008 | ✅ Mitigated | Mempool bounds: MEMPOOL_MAX_TXS = 10000 cap + fee-priority eviction + MEMPOOL_MAX_PER_SENDER = 100 quota | `node/node.cpp::mempool_admit_check` | done |
 | S-009 | ✅ Closed | Constant-T / SHA-256 ASIC fallacy — replaced by commit-reveal (commit `14bf3d6`); delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-010 | 🟠 High | Sybil via under-priced MIN_STAKE | `chain/params.hpp` | docs / DOMAIN_INCLUSION |
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
@@ -384,9 +384,25 @@ Defense in depth: bad genesis caught at load time before any block applies; arit
 
 ### S-008 — Unbounded memory across multiple buffers
 
-**Severity:** High • **Status:** Open • **Sources:** Audit 2.6, Architectural Analysis §3.4
+**Severity:** High • **Status:** Mitigated for `tx_store_` (mempool) via Options 1 + 3 in-session; other buffers tracked separately • **Sources:** Audit 2.6, Architectural Analysis §3.4
 
-**What's open.** No size cap on multiple unbounded queues:
+**Mitigation landed in-session (tx_store_, the primary surface).** Mempool admission policy enforces two structural caps via a shared `mempool_admit_check` helper called by both `on_tx` (gossip path) and `rpc_submit_tx` (RPC path):
+
+- **Hard cap on total mempool size: `MEMPOOL_MAX_TXS = 10000`.** On overflow, the incoming tx evicts the lowest-fee incumbent if its fee is strictly higher; otherwise it's rejected. This is **fee-priority mempool**: under sustained spam, the chain economically prices out the spammer (they must pay the marginal fee to displace incumbents). Replace-by-fee on the same `(from, nonce)` slot remains separately enforced.
+- **Per-sender quota: `MEMPOOL_MAX_PER_SENDER = 100`.** Limits the number of pipelined-nonce txs a single sender can occupy in the mempool. Count computed via O(per-sender) scan of `tx_by_account_nonce_` (the std::map ordered structure gives a contiguous range per sender). Per-sender overflow always rejects — no eviction across senders for fairness.
+
+The two caps compose: a spammer either pays to displace incumbents (cap 1) or is rate-limited by their own per-sender allowance (cap 2). 10K × 100 senders covers expected production load; tunable via genesis-pinned constants if mainnet hits the ceilings.
+
+Gossip path: silent drop (a forged-sig or spam flood from a faceless peer can't amplify the rejected tx onward). RPC path: throw with diagnostic so the submitting client sees the rejection reason and can retry with higher fee.
+
+**Verified post-fix.** `tools/test_mempool_bounds.sh` 3/3 PASS:
+- Normal admission (1 tx with explicit nonce 0).
+- Pipelined-nonce burst (5 txs from one sender — integration wired).
+- Different-sender independence (independent quota verified).
+
+The 100-tx cap-firing test is hard to exercise in single-node M=K=1 infrastructure: block production drains the mempool faster than 100 admissions per second. Future test infrastructure (an in-process unit-style harness like `test-atomic-scope`) can directly exercise the cap-firing path against the helper functions without consensus drain.
+
+**Pre-fix description.** No size cap on multiple unbounded queues:
 
 | Buffer | Risk |
 |---|---|
@@ -401,14 +417,14 @@ Replace-by-fee on the mempool bounds *per-`(from, nonce)`* but not total. There'
 
 **Resolution options.**
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Hard cap on `tx_store_.size()`** (e.g., 10,000 or 100 MB total). On full, evict lowest-fee. | 1-2d. |
-| 2 | **Minimum fee threshold** rejected at `on_tx` / `submit_tx`. Threshold rises with mempool pressure. | 2-3d (fee-market dynamics). |
-| 3 | **Per-sender quota** (max N pending txs per `(from)`). | Subset of #1. |
-| 4 | **Protocol-derived minimum fee.** Enforce `tx.fee >= block_subsidy / 1024` (or similar protocol-derived constant pegged to the per-block reward). Eliminates zero-fee spam without operator tuning, scales naturally with chain economics — as the chain grows the fee floor follows. | Trivial. ~10 LOC in validator + producer. |
+| # | Option | Cost | Status |
+|---|---|---|---|
+| 1 | **Hard cap on `tx_store_.size()`** (e.g., 10,000 or 100 MB total). On full, evict lowest-fee. | 1-2d. | ✓ Shipped |
+| 2 | **Minimum fee threshold** rejected at `on_tx` / `submit_tx`. Threshold rises with mempool pressure. | 2-3d (fee-market dynamics). | Not shipped (fee-market design is a separate item) |
+| 3 | **Per-sender quota** (max N pending txs per `(from)`). | Subset of #1. | ✓ Shipped |
+| 4 | **Protocol-derived minimum fee.** Enforce `tx.fee >= block_subsidy / 1024` (or similar protocol-derived constant pegged to the per-block reward). Eliminates zero-fee spam without operator tuning, scales naturally with chain economics — as the chain grows the fee floor follows. | Trivial. ~10 LOC in validator + producer. | Deferred (would break existing tests using fee=0; genesis-configurable min-fee is a follow-on) |
 
-**Recommended.** Options 1 + 3 + 4. The three together close mempool spam from every angle: bound (size cap), spread (per-sender quota), and floor (price-per-message).
+**Status.** Options 1 + 3 shipped, closing the practical DoS surface for `tx_store_`. Option 4 (protocol-derived min-fee) is the natural next layer but requires test-suite updates (existing tests use fee=0) and a genesis-pinned configuration field for the floor; deferred as a separate item. Options for `pending_inbound_receipts_`, `pending_contribs_`, `peer_heights_` are tracked as future operational hardening; none are exploitable as catastrophically as `tx_store_` was without S-008 closure.
 
 ---
 

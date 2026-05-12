@@ -366,8 +366,48 @@ private:
     // Mempool keyed by tx.hash (primary) and indexed by (from, nonce) for
     // replace-by-fee: a new tx with the same (from, nonce) replaces the old
     // iff its fee is strictly higher.
+    //
+    // S-008 mitigation: bounded mempool. MEMPOOL_MAX_TXS is a hard cap on
+    // the total tx_store_ size; MEMPOOL_MAX_PER_SENDER is a per-sender
+    // quota that prevents one address from filling the mempool with
+    // pipelined-nonce txs. Both checks are enforced in on_tx (gossip-
+    // admission) and rpc_submit_tx (RPC admission).
+    //
+    // Eviction policy on global-cap overflow: lowest-fee tx in the
+    // mempool is evicted, IF the incoming tx's fee is strictly higher.
+    // This is "fee-priority mempool" — under sustained spam, the chain
+    // economically prices out the spammer (they must pay the marginal
+    // fee to evict). Per-sender quota overflow always rejects (no
+    // eviction across senders for fairness).
+    //
+    // Suggested defaults: 10,000 total mempool slots; 100 per sender.
+    // Tunable via genesis-pinned config in v2.X follow-on if needed.
+    static constexpr size_t MEMPOOL_MAX_TXS         = 10000;
+    static constexpr size_t MEMPOOL_MAX_PER_SENDER  = 100;
     std::map<Hash, chain::Transaction>                       tx_store_;
     std::map<std::pair<std::string, uint64_t>, Hash>         tx_by_account_nonce_;
+
+    // S-008: count txs in the mempool from a given sender. Iterates
+    // tx_by_account_nonce_ in lexicographic order; std::map's ordered
+    // structure means we can range-scan from `{sender, 0}` and stop
+    // when the key's `.first` changes. O(per-sender-count), bounded
+    // by MEMPOOL_MAX_PER_SENDER = 100.
+    size_t mempool_count_from(const std::string& sender) const;
+    // S-008: shared admission policy for tx_store_ insertion. Returns
+    // "" on accept; non-empty error string on reject. Used by both
+    // on_tx (gossip path) and rpc_submit_tx (RPC path) so the policy
+    // is the same regardless of admission channel.
+    //
+    // Caller is responsible for the sig-verify check BEFORE calling
+    // this — admission gates apply only to authenticated txs (else
+    // an unauth flood would consume admission-evaluation budget).
+    std::string mempool_admit_check(const chain::Transaction& tx) const;
+    // S-008: evict the lowest-fee tx if the new one has strictly
+    // higher fee than the current minimum. Returns true if eviction
+    // happened OR if no eviction was needed (cap not exceeded).
+    // Returns false if cap is hit AND the new tx's fee isn't high
+    // enough to displace anything — caller should reject the tx.
+    bool mempool_make_room_for(const chain::Transaction& tx);
 
     net::GossipNet                  gossip_;
     asio::io_context                io_;

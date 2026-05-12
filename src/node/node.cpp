@@ -1802,6 +1802,88 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
     return verify(pk, sb.data(), sb.size(), tx.sig);
 }
 
+// S-008 helpers (mempool admission policy).
+//
+// mempool_count_from: count tx_by_account_nonce_ entries whose key.first
+// matches `sender`. std::map iterates in sorted key order; lower_bound at
+// (sender, 0) gives the start of the sender's range. Stop when key.first
+// changes. Linear in per-sender count (bounded by MEMPOOL_MAX_PER_SENDER).
+size_t Node::mempool_count_from(const std::string& sender) const {
+    size_t count = 0;
+    auto it = tx_by_account_nonce_.lower_bound({sender, 0});
+    while (it != tx_by_account_nonce_.end() && it->first.first == sender) {
+        ++count;
+        ++it;
+    }
+    return count;
+}
+
+// mempool_admit_check: shared S-008 admission gate. Returns "" on accept,
+// non-empty error string on reject. Called by both on_tx (gossip path) and
+// rpc_submit_tx (RPC path) so the policy is the same regardless of channel.
+//
+// Order of checks:
+//   1. Per-sender quota (cheapest, bounded scan).
+//   2. Global cap + eviction feasibility (most expensive; only run if
+//      sender-quota passes).
+std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
+    // Check if this tx would REPLACE an existing one at (from, nonce).
+    // A replace doesn't add to the mempool count — same slot, same sender.
+    auto existing_it = tx_by_account_nonce_.find({tx.from, tx.nonce});
+    bool is_replace = (existing_it != tx_by_account_nonce_.end());
+
+    if (!is_replace) {
+        // Per-sender quota.
+        size_t sender_count = mempool_count_from(tx.from);
+        if (sender_count >= MEMPOOL_MAX_PER_SENDER) {
+            return "mempool: per-sender quota exceeded ("
+                 + std::to_string(MEMPOOL_MAX_PER_SENDER)
+                 + " txs from " + tx.from + ")";
+        }
+        // Global cap. Eviction is feasible only if tx.fee > current
+        // mempool minimum. Don't enforce at admission — the eviction
+        // step happens INSIDE the insert path (mempool_make_room_for).
+        // Here we just check that admission is even possible: if cap
+        // is hit AND tx.fee <= mempool min, reject early.
+        if (tx_store_.size() >= MEMPOOL_MAX_TXS) {
+            // Scan for current minimum fee.
+            uint64_t min_fee = UINT64_MAX;
+            for (auto& [_, t] : tx_store_) {
+                if (t.fee < min_fee) min_fee = t.fee;
+            }
+            if (tx.fee <= min_fee) {
+                return "mempool: full ("
+                     + std::to_string(MEMPOOL_MAX_TXS)
+                     + " txs); incoming fee " + std::to_string(tx.fee)
+                     + " <= mempool minimum " + std::to_string(min_fee);
+            }
+        }
+    }
+    return "";
+}
+
+// mempool_make_room_for: evict the lowest-fee tx if mempool is at cap.
+// Returns true if room is available (no cap hit, or eviction happened);
+// false if cap hit AND incoming tx's fee isn't high enough to displace
+// anything. Caller rejects the tx if this returns false.
+bool Node::mempool_make_room_for(const chain::Transaction& tx) {
+    if (tx_store_.size() < MEMPOOL_MAX_TXS) return true;
+    // Find lowest-fee tx. Tie-broken by hash (deterministic across nodes).
+    auto min_it = tx_store_.end();
+    for (auto it = tx_store_.begin(); it != tx_store_.end(); ++it) {
+        if (min_it == tx_store_.end() || it->second.fee < min_it->second.fee) {
+            min_it = it;
+        }
+    }
+    if (min_it == tx_store_.end()) return true; // shouldn't reach (size>=cap)
+    if (tx.fee <= min_it->second.fee) return false; // can't displace
+    // Evict the minimum.
+    auto evicted_key = std::make_pair(min_it->second.from, min_it->second.nonce);
+    tx_store_.erase(min_it);
+    tx_by_account_nonce_.erase(evicted_key);
+    return true;
+}
+
 void Node::on_tx(const chain::Transaction& tx) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
@@ -1813,6 +1895,12 @@ void Node::on_tx(const chain::Transaction& tx) {
     // otherwise consume mempool slots and amplify to other peers.
     if (!verify_tx_signature_locked(tx)) return;
 
+    // S-008: enforce mempool size cap + per-sender quota. Silent drop
+    // on the gossip path (a flood from N senders gets rate-limited
+    // without amplifying the attacker's traffic; the rejected tx
+    // doesn't propagate further).
+    if (!mempool_admit_check(tx).empty()) return;
+
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
     if (idx != tx_by_account_nonce_.end()) {
@@ -1822,6 +1910,12 @@ void Node::on_tx(const chain::Transaction& tx) {
             return; // incumbent wins (ties favor incumbent — no resource churn)
         }
         if (existing != tx_store_.end()) tx_store_.erase(existing);
+    } else {
+        // Fresh slot — check eviction feasibility for the global cap.
+        // mempool_admit_check already verified eviction is possible
+        // (tx.fee > current min), but the actual eviction happens here
+        // atomically with the insert.
+        if (!mempool_make_room_for(tx)) return;
     }
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[key] = tx.hash;
@@ -2587,6 +2681,14 @@ json Node::rpc_submit_tx(const json& tx_json) {
         throw std::runtime_error(
             "submitted tx signature verification failed (from " + tx.from + ")");
 
+    // S-008: enforce mempool admission policy. RPC path surfaces the
+    // rejection reason to the client (vs gossip's silent drop) so the
+    // submitter can decide whether to retry with a higher fee or
+    // back off.
+    if (auto err = mempool_admit_check(tx); !err.empty()) {
+        throw std::runtime_error(err);
+    }
+
     auto key = std::make_pair(tx.from, tx.nonce);
     auto idx = tx_by_account_nonce_.find(key);
     if (idx != tx_by_account_nonce_.end()) {
@@ -2595,6 +2697,12 @@ json Node::rpc_submit_tx(const json& tx_json) {
             throw std::runtime_error(
                 "incumbent tx at (from, nonce) has equal-or-higher fee");
         if (existing != tx_store_.end()) tx_store_.erase(existing);
+    } else {
+        // S-008: fresh-slot insert — apply eviction if at cap.
+        if (!mempool_make_room_for(tx)) {
+            throw std::runtime_error(
+                "mempool full; fee too low to evict any incumbent tx");
+        }
     }
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[key] = tx.hash;

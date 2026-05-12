@@ -378,6 +378,82 @@ Cross-shard adds latency (1-2 blocks on destination) but is otherwise identical 
 - **Metadata leakage**: even with encrypted payload, the chain reveals (sender, recipient DApp, timestamp, payload size). A user's pattern of DApp interaction is on-chain forever. DApps that need stronger metadata privacy should layer mix-net / onion-routing on top.
 - **Block-storage immutability**: encrypted payload commits permanent ciphertext on-chain. If the encryption is broken later (post-quantum advances on the DApp's service-key), historical messages become readable. Either use forward-secret protocols or accept this risk.
 
+### Direct-to-DApp delivery pattern (off-chain, arbitrary messages)
+
+The DApp registry publishes `(service_pubkey, endpoint_url)` per DApp — these are public and on-chain. A sender can use this information to bypass the chain entirely for messages that don't need on-chain integrity. The chain provides **identity + endpoint discovery**; the message itself goes directly sender → DApp over the network.
+
+**Use cases:**
+
+| Use case | Why off-chain |
+|---|---|
+| Real-time DApp interactions | Sub-block-time latency; no need for chain-grade integrity |
+| Encrypted streaming media / sensor feeds | Continuous data flow that would overwhelm block storage |
+| Pre-payment notification (later finalize on-chain) | Recipient prepares processing during the block round, finalizes on inclusion |
+| Push notifications | DApp pushes notifications to subscriber clients |
+| Bulk data transfer | Pointer pattern's underlying transport (alternative to IPFS/S3) |
+| Tactical command-and-control | Drone receives instructions instantly via direct radio; verifies signature locally; finalizes audit trail on-chain later |
+| Authentication challenges | OPAQUE / SRP handshake messages that shouldn't be persisted on-chain |
+
+**Mechanism:**
+
+1. Sender queries `dapp_info(domain)` RPC → gets `service_pubkey + endpoint_url` from the on-chain registry.
+2. Sender opens a direct connection (TCP, HTTP, UDP, custom radio link — transport is sender's choice) to `endpoint_url`.
+3. Sender encrypts the payload with `crypto_box_seal(service_pubkey, plaintext)` (same primitive as on-chain DAPP_CALL).
+4. Sender signs the encrypted envelope with its own Ed25519 key for authentication.
+5. DApp receives, verifies sender signature, decrypts payload, processes.
+
+**Format (recommended):**
+
+```
+DirectMessage {
+    version:      u8       // wire format version (start at 1)
+    sender_pubkey: 32 B    // sender's Ed25519 pubkey (NOT a domain; raw key)
+    timestamp:    u64      // ms since epoch; DApp rejects skew > 30s
+    nonce:        16 B     // sender-chosen random; DApp dedups by (sender_pubkey, nonce)
+    ciphertext:   var      // crypto_box_sealed payload (size bounded by DApp policy)
+    sig:          64 B     // Ed25519 over [version || sender_pubkey || timestamp || nonce || ciphertext]
+}
+```
+
+The format is **application-layer**, not protocol-mandatory. The chain provides only the identity/discovery primitives (DAPP_REGISTER); the over-the-wire format is up to the sender and DApp to agree on (recommend the above as a canonical default).
+
+**Composability with on-chain DAPP_CALL:**
+
+Hybrid pattern for higher-trust use cases:
+1. Sender direct-messages the DApp with the payload (DApp starts processing).
+2. Sender submits an on-chain `DAPP_CALL` with a hash of the direct message + minimal metadata (~32 B on-chain commitment).
+3. DApp matches the inclusion to the prior direct message, treats it as finalized.
+4. Sender pays the protocol fee + any DApp service fee through the on-chain DAPP_CALL credit.
+
+This pattern gives:
+- Sub-block-time DApp processing
+- On-chain audit trail (commitment hash)
+- On-chain payment (amount field in DAPP_CALL)
+- Minimal block storage (32-byte commitment vs full payload)
+
+**Trust model:**
+
+- **DApp authenticity**: sender trusts the on-chain DApp registry to publish a current `endpoint_url`. The chain's K-of-K signing of REGISTER ensures the operator-controlled endpoint is what's published. Endpoint rotation requires a new DAPP_REGISTER update; sender should re-query before each session.
+- **Confidentiality**: relies on `crypto_box_seal` (libsodium sealed-box, ChaCha20-Poly1305). Anonymous-sender by default; sender's signature adds authentication.
+- **Replay**: nonce + timestamp + DApp-side dedup. DApps should bound a sliding nonce window (e.g., last 10k nonces per sender).
+- **Spam / DoS**: DApp endpoint is publicly reachable; standard rate limiting / IP filtering / token-bucket / payment-gated processing per the DApp's policy. No protocol-level mitigation.
+
+**When NOT to use the direct pattern:**
+
+- High-value payments where pre-confirmation is dangerous — recipient should wait for block inclusion before acting.
+- When integrity must be globally verifiable — use on-chain DAPP_CALL.
+- When audit trail must be tamper-proof — use on-chain DAPP_CALL.
+- When the message needs delivery to multiple DApps simultaneously — gossip-broadcast via on-chain is simpler.
+
+**Implementation status:**
+
+- Discovery primitives: ✅ already shipped (v2.18 DAPP_REGISTER + `dapp_info` RPC publishes `endpoint_url`).
+- Streaming subscription on DApp side: ⚠️ partial (v2.20 polling shipped; full streaming pending).
+- Direct-message format: **application-layer; no protocol code needed** beyond the discovery primitives.
+- Reference client library: not yet — sender SDK can be written as a community contribution (~1-2 days), demonstrating the pattern with libsodium-sealed-box + Ed25519.
+
+The pattern is **fully implementable today** with existing v2.18 + libsodium. Adding a reference sender library + DApp-side receiver library would make the pattern turnkey for new DApp developers without changing the protocol.
+
 ---
 
 ## 11. Implementation roadmap
