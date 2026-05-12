@@ -1242,6 +1242,40 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         c.genesis_total_ = live + deltas_neg - deltas_pos;
     }
 
+    // S-033 follow-on: verify the loaded state matches the head block's
+    // declared state_root. This is the snapshot-side analogue of the
+    // apply-side check at line ~900 — without it, the fast-bootstrap
+    // path trusts the snapshot source unconditionally, and a hostile
+    // operator could ship a snapshot whose accounts/stakes diverge from
+    // what the chain ever committed to. With this check, any tamper
+    // produces a hash mismatch caught locally; the committee-signed
+    // block_hash (which covers state_root) means the snapshot supplier
+    // cannot manufacture a self-consistent forgery.
+    //
+    // Pre-S-033 chains carry zero state_root in their headers (the
+    // producer wrote nothing); we skip verification on those for
+    // backward compatibility. A snapshot whose tail came from a post-
+    // S-033 producer will have non-zero state_root and is verified.
+    if (!c.blocks_.empty()) {
+        Hash claimed = c.blocks_.back().state_root;
+        Hash zero{};
+        if (claimed != zero) {
+            Hash computed = c.compute_state_root();
+            if (computed != claimed) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "snapshot state_root mismatch at head block %llu: "
+                    "head declares %02x%02x%02x%02x... but loaded state "
+                    "computes %02x%02x%02x%02x... — snapshot is "
+                    "inconsistent or tampered (S-033)",
+                    (unsigned long long)c.blocks_.back().index,
+                    claimed[0], claimed[1], claimed[2], claimed[3],
+                    computed[0], computed[1], computed[2], computed[3]);
+                throw std::runtime_error(buf);
+            }
+        }
+    }
+
     return c;
 }
 
