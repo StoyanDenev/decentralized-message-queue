@@ -19,7 +19,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.7 F2 view reconciliation | ⏳ not started | S-030 D2 closure |
 | v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
 | v2.9 Distributed VRF for committee selection | ⏳ not started | |
-| v2.10 Threshold randomness aggregation | ⏳ not started | |
+| v2.10 Threshold randomness aggregation | 🔥 **active** | Promoted to defeat residual selective-abort attack. See plan.md A11 for active task brief |
 | v2.11 Auto-detection beacon-side trigger (R4 v1.1) | ⏳ not started | |
 | v2.12 Cross-shard atomic primitives | ⏳ not started | |
 | v2.13 Fair-ordering primitive | 🔒 deferred (research) | Open research area; not on v2 critical path |
@@ -35,7 +35,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
 | v2.24 Audit / compliance hooks | ⏳ not started | Theme 8 |
 
-**Shipped: 9 items. Partial: 1. Outstanding: 11. Deferred: 3.**
+**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 10. Deferred: 2 (v2.13, v2.21+).**
 
 For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
@@ -210,15 +210,35 @@ A threshold VRF (e.g., BLS-DKG with t-of-K signers) provides randomness with `t 
 
 **Status.** Considered, deprioritized. Listed for completeness; not on the v2 roadmap.
 
-### v2.10 — Threshold randomness aggregation
+### v2.10 — Threshold randomness aggregation 🔥 active
 
-**Motivation.** Similar problem as v2.9, different solution. Instead of BLS, use SHA-256 commit-reveal but aggregate `secrets` only from the t-of-K members who reveal. Under K-of-K stall, `delay_output` is still computed deterministically from the available reveals.
+**Status: promoted to active A-track** (plan.md A11). The mechanism described below has been **revised** from the earlier "aggregate-revealed-subset" approach to a stronger **t-of-K threshold-signature** scheme. The revision is motivated by a residual selective-abort attack the simpler approach didn't defeat.
 
-**Mechanism.** Modify Phase-2 finalize: instead of `delay_output = SHA-256(delay_seed ‖ secret_1 ‖ … ‖ secret_K)`, use `delay_output = SHA-256(delay_seed ‖ sort(revealed_secrets))`. As long as `t ≥ K/3 + 1`, the output is unbiasable by the silent K-t members (their commits were already published in Phase 1; they just didn't reveal).
+**Motivation.** Determ's current commit-reveal randomness leaves a residual selective-abort attack: a committee member can decline to reveal in Phase 2, forcing a re-run with different randomness. The adversary computes what `delay_output` would be (they have all K-1 commits + their own committed secret), and selectively aborts when the outcome is unfavorable.
 
-**Cost.** ~1 week. Validator path change, signing-bytes change. Composes with existing FA3 proof — the information-theoretic argument extends to t-of-K naturally.
+Defenses today (`SUSPENSION_SLASH = 10` per abort + BFT escalation) make the attack economically costly but allow **statistical bias** by paying stake per unfavorable round. For high-value randomness-dependent outcomes (committee rotation per epoch, future-block randomness used in fair-ordering DApps), the residual bias matters.
 
-**Closes:** None of today's findings. Improves liveness under partial committee silence without the v2.9 BLS dependency.
+**Earlier (now-deprecated) approach: aggregate-revealed-subset.** Compute `delay_output = SHA-256(delay_seed ‖ sort(revealed_secrets))` from the t members who revealed. This addresses K-of-K liveness stall but does NOT defeat selective abort — the silent K-t members still influence randomness by choosing whether to reveal (the aggregate depends on the revealed subset). Rejected in favor of true threshold signatures.
+
+**Current (active) mechanism: t-of-K threshold signatures.** Each committee member generates a `partial_sig_i = sign(secret_share_i, beacon_seed ‖ height)` using a t-of-K threshold-signature scheme (BLS12-381 or equivalent). Any `t = ceil(2K/3)` partial signatures combine into the SAME canonical `R = combine(partial_sig_{i1}, …, partial_sig_{it})`. The combined signature `R` replaces today's `delay_output`.
+
+**Critical property.** Any `t` partial signatures produce the SAME `R`. A withholding adversary doesn't change `R` — the other `K-t` members' partials are sufficient. Selective abort becomes ineffective for biasing randomness.
+
+| Today (commit-reveal) | After v2.10 (threshold) |
+|---|---|
+| Adversary withholding their secret aborts the round | Adversary withholding their partial sig does nothing — other t members suffice |
+| Adversary chooses to reveal/abort based on whether R favors them | Adversary cannot prevent R; their choice is irrelevant |
+| Bias possible by paying SUSPENSION_SLASH per abort | Bias requires controlling ≥ K-t+1 members — standard Byzantine bound |
+
+**Cost.** ~1 week per plan.md A11 cost estimate. Foundation: vendored threshold-signature library (BLS12-381 reference impl or alternate, ~2-3 days). Integration with existing commit-reveal phases (~2-3 days). DKG (distributed key generation) tooling for genesis-time threshold-key setup (~1 day). Tests + docs (~1-2 days).
+
+**Wire-format implications.** `creator_dh_secrets` becomes `creator_partial_sigs`. Not backward-compatible with v1 chains — flag-day upgrade required.
+
+**Composes with v2.9** (distributed VRF): VRF unbiasability + threshold randomness aggregation together close the entire randomness attack surface. Either alone is good; both together is best.
+
+**Closes:** residual selective-abort bias in randomness (the only remaining randomness-bias vector after commit-reveal closed the broader class). Strengthens FA3 information-theoretic argument from "K-of-K commit-reveal" to "t-of-K threshold aggregation," which is the strongest possible bound (matches Byzantine takeover threshold).
+
+Full task brief: `plan.md` §A11.
 
 ### v2.11 — Auto-detection beacon-side trigger (R4 v1.1)
 
@@ -442,38 +462,43 @@ The result is **a payment + identity protocol that's complete enough for any com
 
 ## Cumulative v2 closes
 
-| Open finding | Closure path |
-|---|---|
-| S-001 internal | v2.16 |
-| S-002 — already closed in v1.x | — |
-| S-003 — already closed in v1.x | — |
-| S-004 — option 1 in v1.x, option 2 in v2.17 | v2.17 |
-| S-007 — already closed in v1.x | — |
-| S-008 unbounded memory | bounded by v2.5's registry cache + future tx mempool cap |
-| S-010 sybil under-priced MIN_STAKE | operator parameter; v2 docs guidance |
-| S-011 abort-claim cartel | v2 docs (mitigated by stake economics today) |
-| S-012 snapshot trust | v2.3 |
-| S-030 D1 (validate-apply divergence) | v2.4 |
-| S-030 D2 (block_digest coverage) | v2.7 |
-| S-031 full | v2.4 + v2.6 |
-| S-032 registry rebuild | v2.5 (recommended landing in v1.5) |
-| S-033 no state commitment | v2.1 |
-| S-036 witness-window | v2.11 |
+| Finding | Closure path | Status |
+|---|---|---|
+| S-001 (RPC auth) | v2.16 HMAC-SHA-256 + localhost-only default | ✅ shipped |
+| S-002 (mempool sig-verify) | v1.x sig-verify on gossip + RPC paths | ✅ shipped |
+| S-003 (timestamp window) | ±30s window align | ✅ shipped |
+| S-004 (plaintext keys) | option 1 (0600 + no-stdout) + option 2 (v2.17 AES-256-GCM envelope) | ✅ shipped |
+| S-007 (overflow) | checked_add_u64 on credit paths | ✅ shipped |
+| S-008 (unbounded mempool) | MEMPOOL_MAX_TXS + fee-priority eviction + per-sender quota | ✅ shipped |
+| S-010 (sybil) | operator parameter; v2 docs guidance | ⏳ open (design item) |
+| S-011 (abort-claim cartel) | v2 docs (mitigated by stake economics today) | ⏳ open (design item) |
+| S-012 (snapshot trust) | v2.1 state_root + v2.3 snapshot verification | ✅ shipped |
+| S-030 D1 (validate-apply) | v2.1 state_root indirect closure (via signing_bytes + apply-time check) | ✅ effective |
+| S-030 D2 (block_digest) | v2.1 state_root partial closure + v2.7 F2 for full | 🟠 partial |
+| S-031 (global mutex) | v2.4 A9 + v2.5 + v2.6 + async chain.save | ✅ shipped (all 6 layers) |
+| S-032 (registry rebuild) | v2.5 incremental cache | ✅ shipped |
+| S-033 (no state commitment) | v2.1 Merkle root + Block.state_root | ✅ shipped |
+| S-036 (witness-window) | v2.11 beacon-side auto-detect | ⏳ open |
 
-Roughly 12 of the 24 currently-open findings close in v2. The rest are operator-policy concerns or design choices that v2 doesn't change.
+**Findings closure status:** 12 fully closed in-session + 1 partially closed (S-030) + 3 still open (S-010, S-011, S-036 — all design items or operator-policy, not shipped-code attack surface). The "12 of 24 close in v2" original target has been substantially overshot in-session.
 
 ---
 
 ## Total v2 effort
 
-| Layer | Work | Estimate |
-|---|---|---|
-| Trust minimization (v2.1–v2.3) | State Merkle root + light clients + trustless fast sync | 4-6 weeks |
-| Scale & concurrency (v2.4–v2.6) | A9 overlay, registry cache, gossip-out-of-lock | 1 week (registry cache lands in v1.5) + 1 week |
-| Cryptographic hardening (v2.7–v2.8) | F2 view reconciliation, Dilithium migration | 2-3 weeks |
-| Liveness (v2.10, v2.11) | Threshold randomness aggregation, beacon auto-detect | 1.5 weeks |
-| Composability (v2.12) | Cross-shard atomic primitives | 1 week |
-| Wallet/operator (v2.14–v2.17) | OPAQUE port, HD derivation, RPC auth, encrypted keyfiles | 2 weeks |
-| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** |
+Layer-level estimates with shipped vs remaining split:
 
-**Total: ~6-9 months** for a complete v2 with Theme 8. Themes 1-7 alone: 12-16 weeks per prior estimate.
+| Layer | Work | Total estimate | Shipped (in-tree) | Remaining |
+|---|---|---|---|---|
+| Trust minimization (v2.1–v2.3) | State Merkle root + light clients + trustless fast sync | 4-6 weeks | ✅ all 3 shipped (foundation; full header-only-sync flow still pending) | ~1 week (light-client header sync flow) |
+| Scale & concurrency (v2.4–v2.6) | A9 overlay, registry cache, gossip-out-of-lock | 2 weeks | ✅ all 3 shipped (A9 Phase 1-2D, registry cache, gossip-out-of-lock) | 0 |
+| Cryptographic hardening (v2.7–v2.8) | F2 view reconciliation, Dilithium migration | 2-3 weeks | F2 spec'd in F2-SPEC.md, code not started; Dilithium not started | 2-3 weeks |
+| Liveness (v2.10, v2.11) | Threshold randomness aggregation 🔥 active, beacon auto-detect | 1.5 weeks | 0 (v2.10 promoted to active A11) | 1.5 weeks |
+| Composability (v2.12) | Cross-shard atomic primitives | 1 week | 0 (foundation: A9 Phase 2D atomic_scope shipped; cross-shard 2PC pending) | 1 week |
+| Wallet/operator (v2.14–v2.17) | OPAQUE port, HD derivation, RPC auth, encrypted keyfiles | 2 weeks | ✅ v2.16 + v2.17 shipped; v2.14 + v2.15 not started | ~1 week |
+| Application layer (v2.18–v2.20) | DApp substrate (registry + call + RPC + polling) | (was implicit, now itemized) ~1 week | ✅ v2.18 + v2.19 shipped, v2.20 polling shipped (streaming pending) | ~3 days for streaming |
+| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** | 0 | 3-5 months |
+
+**Themes 1-7 status:** ~6 weeks of work remaining (vs 12-16 weeks at start of session). Major absorbed: v2.1, v2.2 (foundation), v2.3, v2.4 (full A9), v2.5, v2.6, v2.16, v2.17, v2.18, v2.19, v2.20 polling.
+
+**Total to complete v2 with Theme 8:** ~4-6 months from current state (down from 6-9 months estimate at the start of v2 work).
