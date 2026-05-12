@@ -247,6 +247,58 @@ This is a 2PC layered on the existing receipt mechanism. Doesn't change FA7's ex
 
 ---
 
+## Theme 7 — Application layer (DApp support)
+
+Determ stays a payment + identity chain. The application layer makes that
+trust anchor usable by off-chain DApps without expanding the protocol into
+a smart-contract platform. Two primitives: a DApp registry (analogous to
+the validator registry) and a `DAPP_CALL` message-tx type. DApp logic
+itself runs off-chain on operator-controlled nodes; the chain provides
+ordered, authenticated message delivery + stable user identity.
+
+Full design: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). Summary:
+
+### v2.18 — `DAPP_REGISTER` tx + on-chain DApp registry
+
+**Motivation.** Stable, on-chain DApp identity. Clients can look up a DApp's `service_pubkey` and `endpoint_url` from the chain instead of trusting external directories.
+
+**Mechanism.** New `TxType::DAPP_REGISTER` (op = create/update/deactivate) + new `dapp_registry_` member on Chain. Mirror of the existing `registrants_` pattern; same lazy-snapshot + state-root integration story. Anti-spam: DApp domain must have ≥ `DAPP_MIN_STAKE` locked.
+
+**Cost.** ~2 days. Tx type + state field + RPC `dapp_info` + lazy-snapshot + state-root wiring.
+
+**Closes:** none directly — enables Theme 7's downstream items.
+
+### v2.19 — `DAPP_CALL` tx + payload routing
+
+**Motivation.** Authenticated message delivery from users to DApps. Payload opaque to chain (the DApp interprets); routing by recipient domain.
+
+**Mechanism.** New `TxType::DAPP_CALL` carrying `to` (DApp domain), `amount` (optional payment), and an opaque ciphertext payload. Validator: rejects calls to inactive/missing DApps + enforces payload-size cap. Apply: TRANSFER-like credit of `amount` to recipient; payload itself does not mutate state (just sits in the block).
+
+**Cost.** ~2 days. Tx type + validator gate + apply path + wallet CLI (`determ dapp-call`).
+
+**Closes:** none directly — first application of the Theme-7 substrate.
+
+### v2.20 — Streaming subscription RPC
+
+**Motivation.** DApp nodes need a live tail of `DAPP_CALL` events as blocks finalize. Polling `dapp_messages` is wasteful at high rates.
+
+**Mechanism.** New `dapp_subscribe(domain, topic?)` RPC — newline-JSON streaming over the existing RPC socket. Per-block hook fires after the async-save worker, filters DAPP_CALLs by recipient, emits to matching subscribers. Bounded per-subscriber queue with disconnect-on-overflow.
+
+**Cost.** ~3 days. Per-block subscriber-broadcast hook + bounded queue management + integration with existing RPC session lifecycle.
+
+**Closes:** none — operational improvement for DApp node implementers.
+
+### v2.21+ deferred
+
+- DApp SDK + reference implementation (ecosystem)
+- Cross-shard DApp routing (depends on regional-sharding completion)
+- DApp slashing (proof-of-misbehavior tx types)
+- DApp upgrade flows (service_pubkey rotation with grace period)
+
+Full roadmap, open design questions, and economic model: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md).
+
+---
+
 ## Cumulative v2 closes
 
 | Open finding | Closure path |
