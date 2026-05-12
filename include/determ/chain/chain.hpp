@@ -426,20 +426,29 @@ private:
     // into base; rollback = drop overlay. Enables concurrent readers
     // during apply, batched txs, and is the foundation for the
     // composable-tx primitive in v2.4.
-    // A9 Phase 2A: three containers below are std::optional — captured
-    // lazily on the first mutation per apply, not unconditionally at
-    // entry. TRANSFER-only blocks don't touch them, so their snapshots
-    // stay nullopt and the std::set / std::map copy cost is skipped.
-    // For chains accumulating millions of inbound receipts or many
-    // historical aborts, this is the dominant per-block snapshot cost;
-    // skipping it on the common path matters. The remaining 4 containers
-    // (accounts/stakes/registrants/pending_param_changes) stay eager
-    // for now — they have many mutation sites and are touched by most
-    // blocks anyway; lazy-snapshot for those is Phase 2B follow-on.
+    // A9 Phase 2A/2B: containers below in std::optional are captured
+    // lazily on first mutation per apply, not unconditionally at
+    // entry. Blocks that don't touch a given container leave its
+    // snapshot at nullopt and skip the deep-copy cost.
+    //
+    // Containers that benefit from lazy:
+    //   - stakes (Phase 2B): TRANSFER-only blocks skip; only REGISTER/
+    //     STAKE/UNSTAKE/DEREGISTER/slashing/equivocation paths touch
+    //   - registrants (Phase 2B): only REGISTER/DEREGISTER/equivocate
+    //   - abort_records (Phase 2A): only Phase-1 slashing path
+    //   - merge_state (Phase 2A): only MERGE_EVENT apply
+    //   - applied_inbound_receipts (Phase 2A): only cross-shard inbound
+    //
+    // Containers that stay eager:
+    //   - accounts: mutated on every block (subsidy distribution) — lazy
+    //     adds ensure() check overhead at every site with no skip benefit
+    //   - pending_param_changes: mutated by activate_pending_params at
+    //     apply entry; threading an ensure-lambda there is awkward and
+    //     the container is usually tiny anyway
     struct StateSnapshot {
         std::map<std::string, AccountState>          accounts;
-        std::map<std::string, StakeEntry>            stakes;
-        std::map<std::string, RegistryEntry>         registrants;
+        std::optional<std::map<std::string, StakeEntry>>    stakes;
+        std::optional<std::map<std::string, RegistryEntry>> registrants;
         std::optional<std::map<std::string, AbortRecord>>   abort_records;
         std::optional<MergeStateMap>                        merge_state;
         std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;

@@ -345,10 +345,9 @@ uint64_t Chain::live_total_supply() const {
 Chain::StateSnapshot Chain::create_state_snapshot() const {
     StateSnapshot s;
     s.accounts                   = accounts_;
-    s.stakes                     = stakes_;
-    s.registrants                = registrants_;
-    // abort_records, merge_state, applied_inbound_receipts: deferred
-    // via std::optional; captured lazily on first mutation.
+    // stakes, registrants, abort_records, merge_state,
+    // applied_inbound_receipts: deferred via std::optional; captured
+    // lazily on first mutation. See ensure-lambdas in apply_transactions.
     s.pending_param_changes      = pending_param_changes_;
     s.genesis_total              = genesis_total_;
     s.accumulated_subsidy        = accumulated_subsidy_;
@@ -378,11 +377,13 @@ Chain::StateSnapshot Chain::create_state_snapshot() const {
 // — see activate_pending_params, which the snapshot covers.
 void Chain::restore_state_snapshot(StateSnapshot&& s) {
     accounts_                   = std::move(s.accounts);
-    stakes_                     = std::move(s.stakes);
-    registrants_                = std::move(s.registrants);
-    // A9 Phase 2A: only restore the lazy-captured containers if they
+    // A9 Phase 2A/2B: only restore lazy-captured containers if they
     // were actually mutated during apply. nullopt = container was
     // never touched, base map is already correct.
+    if (s.stakes)
+        stakes_                 = std::move(*s.stakes);
+    if (s.registrants)
+        registrants_            = std::move(*s.registrants);
     if (s.abort_records)
         abort_records_          = std::move(*s.abort_records);
     if (s.merge_state)
@@ -421,6 +422,14 @@ void Chain::apply_transactions(const Block& b) {
     // captures the live container into the snapshot on first
     // mutation. TRANSFER-only blocks bypass all three copies.
     StateSnapshot __snapshot = create_state_snapshot();
+    auto __ensure_stakes = [&]() {
+        if (!__snapshot.stakes)
+            __snapshot.stakes = stakes_;
+    };
+    auto __ensure_registrants = [&]() {
+        if (!__snapshot.registrants)
+            __snapshot.registrants = registrants_;
+    };
     auto __ensure_abort_records = [&]() {
         if (!__snapshot.abort_records)
             __snapshot.abort_records = abort_records_;
@@ -463,9 +472,11 @@ void Chain::apply_transactions(const Block& b) {
                 re.active_from   = 0;
                 re.inactive_from = UINT64_MAX;
                 re.region        = a.region; // rev.9 R1
+                __ensure_registrants();
                 registrants_[a.domain] = re;
             }
             if (a.stake > 0) {
+                __ensure_stakes();
                 stakes_[a.domain].locked        = a.stake;
                 stakes_[a.domain].unlock_height = UINT64_MAX;
                 gtotal += a.stake;
@@ -564,10 +575,12 @@ void Chain::apply_transactions(const Block& b) {
             e.active_from   = height + derive_delay(b.cumulative_rand, tx.hash);
             e.inactive_from = UINT64_MAX;
             e.region        = std::move(region);
+            __ensure_registrants();
             registrants_[tx.from] = e;
 
             // Stake_table entry exists even with 0 locked; ensures unlock_height
             // tracking is consistent. Locked is moved by STAKE/UNSTAKE.
+            __ensure_stakes();
             auto& st = stakes_[tx.from];
             st.unlock_height = UINT64_MAX;
 
@@ -603,11 +616,14 @@ void Chain::apply_transactions(const Block& b) {
             if (rit == registrants_.end()) { sender.next_nonce++; break; }
 
             uint64_t inactive_from = height + derive_delay(b.cumulative_rand, tx.hash);
+            __ensure_registrants();
             rit->second.inactive_from = inactive_from;
 
             auto sit = stakes_.find(tx.from);
-            if (sit != stakes_.end())
+            if (sit != stakes_.end()) {
+                __ensure_stakes();
                 sit->second.unlock_height = inactive_from + unstake_delay_;
+            }
 
             sender.next_nonce++;
             break;
@@ -621,6 +637,7 @@ void Chain::apply_transactions(const Block& b) {
             uint64_t cost = amount + tx.fee;
             if (sender.balance < cost) continue;
             sender.balance -= cost;
+            __ensure_stakes();
             stakes_[tx.from].locked += amount;
             total_fees += tx.fee;
             sender.next_nonce++;
@@ -643,6 +660,7 @@ void Chain::apply_transactions(const Block& b) {
                 sender.next_nonce++;
                 break;
             }
+            __ensure_stakes();
             sit->second.locked -= amount;
             sender.balance     += amount;
             sender.next_nonce++;
@@ -825,6 +843,7 @@ void Chain::apply_transactions(const Block& b) {
         auto sit = stakes_.find(ae.aborting_node);
         if (sit == stakes_.end()) continue;
         uint64_t deduct = std::min<uint64_t>(suspension_slash_, sit->second.locked);
+        __ensure_stakes();
         sit->second.locked -= deduct;
         block_slashed     += deduct;   // A1
     }
@@ -846,11 +865,13 @@ void Chain::apply_transactions(const Block& b) {
     for (auto& ev : b.equivocation_events) {
         auto sit = stakes_.find(ev.equivocator);
         if (sit != stakes_.end()) {
+            __ensure_stakes();
             block_slashed     += sit->second.locked;  // A1: full forfeit
             sit->second.locked = 0;
         }
         auto rit = registrants_.find(ev.equivocator);
         if (rit != registrants_.end()) {
+            __ensure_registrants();
             rit->second.inactive_from = b.index + 1;
         }
     }
