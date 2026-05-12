@@ -37,7 +37,7 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 
 | Command | Purpose |
 |---|---|
-| `determ account create [--out FILE]` | Generate a fresh Ed25519 key + `0x`-prefixed bearer address |
+| `determ account create --out FILE [--allow-plaintext-stdout]` | Generate a fresh Ed25519 key + `0x`-prefixed bearer address. `--out` writes to a 0600-permissioned file. Bare `account create` (no `--out`) is refused (S-004); opt in to stdout via `--allow-plaintext-stdout`. |
 | `determ account address <privkey_hex>` | Derive address from priv-key (offline, no daemon) |
 | `determ send_anon <to> <amount> <privkey_hex> [--fee N] [--rpc-port N]` | Build, sign, submit a TRANSFER from a bearer wallet |
 

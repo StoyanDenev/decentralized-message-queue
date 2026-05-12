@@ -1024,13 +1024,51 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
     }
 }
 
-// account create [--out <file>]
-//   Generates a fresh Ed25519 keypair. Prints the account address (0x + 64 hex)
-//   and the secret seed. The secret is sensitive — pipe to a file or vault.
+// account create --out <file> [--allow-plaintext-stdout]
+//
+// S-004 mitigation: refuse stdout output by default. Generating a
+// fresh privkey and printing it to stdout exposes it to terminal
+// scrollback, shell history, accidental log capture, and any process
+// reading the parent shell's tty. The default output is a file with
+// restrictive permissions (owner read+write only). Operators who
+// truly want stdout output (offline air-gapped key gen with a
+// trusted shell history) must set --allow-plaintext-stdout
+// explicitly so the choice is auditable in the invoking script.
+//
+// File permissions: std::filesystem::permissions narrowed to
+// owner_read | owner_write on the freshly-written file. On Unix
+// this is chmod 0600; on Windows the call resolves to a best-effort
+// owner-only ACL via the std::filesystem implementation. Operators
+// running on Windows servers with shared-volume permissions should
+// additionally verify via icacls.
+//
+// Passphrase encryption (envelope-wrapped output) is the v1.x-prime
+// next step — tracked under S-004 follow-on. The wallet binary
+// (determ-wallet envelope encrypt) already provides this primitive;
+// a future revision wires it into account create so the on-disk
+// keyfile is encrypted at rest rather than relying on filesystem
+// permissions alone.
 static int cmd_account_create(int argc, char** argv) {
     std::string out_path;
-    for (int i = 0; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--out") out_path = argv[i + 1];
+    bool allow_plaintext_stdout = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--out" && i + 1 < argc) out_path = argv[i + 1];
+        else if (a == "--allow-plaintext-stdout") allow_plaintext_stdout = true;
+    }
+    if (out_path.empty() && !allow_plaintext_stdout) {
+        std::cerr <<
+            "S-004: refusing to emit privkey to stdout. Either:\n"
+            "  determ account create --out <file>     (recommended; "
+                                                       "file gets 0600 permissions)\n"
+            "  determ account create --allow-plaintext-stdout  (opt-in; "
+                                                                  "be aware of\n"
+            "                                                   terminal "
+                                                                  "scrollback and\n"
+            "                                                   shell history "
+                                                                  "leakage)\n";
+        return 1;
+    }
 
     auto key = crypto::generate_node_key();
     std::string addr = make_anon_address(key.pub);
@@ -1042,11 +1080,27 @@ static int cmd_account_create(int argc, char** argv) {
         {"warning",   "store privkey securely; anyone with it controls the address"}
     };
     if (out_path.empty()) {
+        // --allow-plaintext-stdout was explicitly set.
         std::cout << out.dump(2) << "\n";
     } else {
         std::ofstream f(out_path);
         if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
         f << out.dump(2) << "\n";
+        f.close();
+        // S-004: restrict to owner read+write only. Errors here are
+        // logged but non-fatal — the file is already written; the
+        // operator should investigate manually if perms don't stick.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        if (perm_ec) {
+            std::cerr << "Warning: could not set 0600 permissions on "
+                      << out_path << ": " << perm_ec.message() << "\n";
+            std::cerr << "         Verify manually (chmod 0600 / icacls).\n";
+        }
         std::cout << "Account written to " << out_path << "\n";
         std::cout << "Address: " << addr << "\n";
     }

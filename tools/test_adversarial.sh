@@ -76,7 +76,7 @@ $DETERM genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
 
 echo
 echo "=== 3. Create anonymous recipient account ==="
-$DETERM account create > $T/recipient.json
+$DETERM account create --out $T/recipient.json
 RECIPIENT=$(python -c "import json; print(json.load(open('$T/recipient.json'))['address'])")
 echo "  recipient address: $RECIPIENT"
 

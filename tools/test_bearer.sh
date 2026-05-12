@@ -51,14 +51,14 @@ done
 
 echo
 echo "=== 2. Create anonymous account A (sender) ==="
-$DETERM account create > $T/A.json
+$DETERM account create --out $T/A.json
 A_ADDR=$(python -c "import json; print(json.load(open('$T/A.json'))['address'])")
 A_PRIV=$(python -c "import json; print(json.load(open('$T/A.json'))['privkey'])")
 echo "  A address: $A_ADDR"
 
 echo
 echo "=== 3. Create anonymous account B (recipient) ==="
-$DETERM account create > $T/B.json
+$DETERM account create --out $T/B.json
 B_ADDR=$(python -c "import json; print(json.load(open('$T/B.json'))['address'])")
 echo "  B address: $B_ADDR"
 

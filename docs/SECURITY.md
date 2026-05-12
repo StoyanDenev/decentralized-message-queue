@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **4** | **7** | **4** | **10** | **25** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **17** |
+| Open | **3** | **7** | **4** | **10** | **24** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **18** |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -165,9 +165,19 @@ The choice was option 1 from the resolution table below (the audit's recommended
 
 ### S-004 — Plaintext private key in `account create` output
 
-**Severity:** Critical • **Status:** Open • **Sources:** Audit 1.3
+**Severity:** Critical • **Status:** Mitigated (option 1 landed in-session; option 2 follow-on) • **Sources:** Audit 1.3
 
-**What's open.** `cmd_account_create` in `src/main.cpp` emits the raw `priv_seed` either to stdout or to an unencrypted file, with no `chmod`, no passphrase prompt, no warnings beyond a string in the JSON.
+**Mitigation landed in-session.** `cmd_account_create` (`src/main.cpp`) now:
+
+- **Refuses stdout output by default.** `determ account create` without `--out` exits 1 with a diagnostic naming the two acceptable paths (file output or explicit opt-in for legacy plaintext-stdout).
+- **Requires `--out <file>`** for normal usage. The output file is written then immediately narrowed to owner read+write only via `std::filesystem::permissions(perms::owner_read | perms::owner_write, perm_options::replace)`. On Unix this is `chmod 0600`; on Windows the implementation does a best-effort owner-only ACL.
+- **Opt-in `--allow-plaintext-stdout`** for the legacy stdout behavior (offline air-gapped key gen, controlled-shell scenarios). The flag's name makes the choice auditable in invoking scripts.
+
+Test infrastructure updated: `tools/test_bearer.sh` and `tools/test_adversarial.sh` switched from `account create > file` to `account create --out file` (same effect, secure default).
+
+**Pre-fix description** (preserved for audit trail). `cmd_account_create` in `src/main.cpp` emitted the raw `priv_seed` either to stdout or to an unencrypted file, with no `chmod`, no passphrase prompt, no warnings beyond a string in the JSON.
+
+**Option 2 follow-on (passphrase-encrypted keyfile)** is the v1.x-prime next step. The wallet binary's `envelope.cpp` already implements AES-256-GCM + PBKDF2-HMAC-SHA-256 keying; a future revision wires it into `account create --passphrase` so the on-disk keyfile is encrypted at rest. Today's fix closes the stdout-leak path (terminal scrollback, shell history, accidental log capture) and the world-readable-file path (filesystem permissions). Encryption at rest is the next layer.
 
 **Impact.** Standard key-leak vectors: terminal scrollback, shell history, world-readable file, accidental commit, accidental log capture.
 
