@@ -895,6 +895,74 @@ void Chain::apply_transactions(const Block& b) {
         //
         // The actual committee stress branch + partner_subset_hash
         // + witness-window validation are downstream (R4 Phase 3+).
+        // v2.4: composable-tx batch. Payload is JSON array of inner txs;
+        // each inner is independently signed (validated upstream). Outer
+        // fee is charged whether inner txs succeed or fail (block-space
+        // billing — same model as gas in EVMs). Inner txs run inside
+        // chain.atomic_scope; any inner failure rolls back ALL inner
+        // mutations atomically. Outer nonce advances once regardless.
+        case TxType::COMPOSABLE_BATCH: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            sender.next_nonce++;
+
+            // Decode inner txs from JSON payload.
+            std::vector<Transaction> inner_txs;
+            try {
+                std::string s(tx.payload.begin(), tx.payload.end());
+                auto arr = json::parse(s);
+                if (!arr.is_array()) break;
+                for (auto& j : arr) {
+                    inner_txs.push_back(Transaction::from_json(j));
+                }
+            } catch (...) {
+                // Malformed payload: outer fee + nonce already consumed;
+                // inner txs don't apply. Defensive — validator should
+                // have rejected at shape-validation; the apply-side
+                // catch keeps the chain replayable if a malformed batch
+                // somehow lands.
+                break;
+            }
+            if (inner_txs.empty() || inner_txs.size() > MAX_COMPOSABLE_INNER) {
+                break;
+            }
+
+            // Apply all inner txs atomically. v2.4 supports only TRANSFER
+            // inner-tx type; other types are rejected and trigger
+            // whole-batch rollback. This bounds the v2.4 surface to the
+            // dominant use cases (atomic swaps, bundled transfers); v2.4+
+            // can extend the inner-tx whitelist as semantics for STAKE/
+            // UNSTAKE/REGISTER inside a batch are designed (e.g., nonce
+            // ordering across the registry namespace).
+            //
+            // Cross-shard inner TRANSFERs are also rejected in v2.4 —
+            // cross-shard atomic semantics belong to v2.5 (2PC). This
+            // batch primitive is single-shard.
+            atomic_scope([&](Chain& c) -> bool {
+                for (auto& inner : inner_txs) {
+                    // Inner-type whitelist
+                    if (inner.type != TxType::TRANSFER) return false;
+                    // Inner fee must be 0 — outer pays
+                    if (inner.fee != 0) return false;
+                    // No cross-shard inner txs in v2.4
+                    if (c.is_cross_shard(inner.to)) return false;
+                    // Inner sender's nonce must match its current chain nonce
+                    AccountState& isender = c.accounts_[inner.from];
+                    if (inner.nonce != isender.next_nonce) return false;
+                    if (isender.balance < inner.amount) return false;
+                    // Apply: debit inner.from, credit inner.to, advance nonce
+                    isender.balance -= inner.amount;
+                    uint64_t& irecv = c.accounts_[inner.to].balance;
+                    if (!checked_add_u64(irecv, inner.amount, &irecv)) {
+                        // S-007: refuse to wrap recipient balance.
+                        return false;
+                    }
+                    isender.next_nonce++;
+                }
+                return true;
+            });
+            break;
+        }
+
         case TxType::MERGE_EVENT: {
             if (!charge_fee(sender, tx.fee)) continue;
             auto ev = MergeEvent::decode(tx.payload);

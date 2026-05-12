@@ -1661,6 +1661,134 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
+    // v2.4 composable transactions: in-process apply-path test.
+    // Builds a Chain with three accounts (alice, bob, carol), constructs
+    // COMPOSABLE_BATCH txs with various inner-tx shapes, applies them
+    // via Chain::append, and verifies the all-or-nothing semantics.
+    if (cmd == "test-composable-batch") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Genesis: alice=100, bob=50, carol=0.
+        Block genesis;
+        genesis.index           = 0;
+        genesis.prev_hash       = Hash{};
+        genesis.timestamp       = 0;
+        genesis.cumulative_rand = Hash{};
+        auto mk_alloc = [](const std::string& d, uint64_t bal) {
+            GenesisAlloc a; a.domain = d; a.balance = bal; a.stake = 0;
+            return a;
+        };
+        genesis.initial_state.push_back(mk_alloc("alice", 100));
+        genesis.initial_state.push_back(mk_alloc("bob",   50));
+        genesis.initial_state.push_back(mk_alloc("carol", 0));
+        Chain chain(genesis);
+
+        // Helper: build a TRANSFER inner tx (unsigned — apply-path doesn't
+        // re-verify sigs; that's validator-side. This test exercises
+        // apply semantics, not sig verification).
+        auto mk_inner_transfer = [](const std::string& from,
+                                       const std::string& to,
+                                       uint64_t amount,
+                                       uint64_t nonce) {
+            Transaction t;
+            t.type   = TxType::TRANSFER;
+            t.from   = from;
+            t.to     = to;
+            t.amount = amount;
+            t.fee    = 0;
+            t.nonce  = nonce;
+            t.payload = {};
+            t.hash    = t.compute_hash();
+            return t;
+        };
+        // Helper: package inner txs into a COMPOSABLE_BATCH JSON payload.
+        auto pack_batch = [](const std::vector<Transaction>& inner) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (auto& t : inner) arr.push_back(t.to_json());
+            std::string s = arr.dump();
+            return std::vector<uint8_t>(s.begin(), s.end());
+        };
+        // Helper: build a block carrying a single COMPOSABLE_BATCH outer tx.
+        auto build_batch_block = [&](const std::string& outer_from,
+                                        uint64_t outer_fee,
+                                        const std::vector<Transaction>& inner) {
+            Block b;
+            b.index           = chain.height();
+            b.prev_hash       = chain.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            Transaction outer;
+            outer.type    = TxType::COMPOSABLE_BATCH;
+            outer.from    = outer_from;
+            outer.to      = "";
+            outer.amount  = 0;
+            outer.fee     = outer_fee;
+            outer.nonce   = chain.next_nonce(outer_from);
+            outer.payload = pack_batch(inner);
+            outer.hash    = outer.compute_hash();
+            b.transactions.push_back(outer);
+            return b;
+        };
+
+        // Test 1: successful batch — alice→bob 25, bob→carol 10.
+        // Expected: alice=75, bob=65, carol=10. Nonces advance:
+        // alice +2 (outer batch + inner TRANSFER), bob +1 (inner).
+        uint64_t alice_n0 = chain.next_nonce("alice");
+        uint64_t bob_n0   = chain.next_nonce("bob");
+        std::vector<Transaction> inner1 = {
+            mk_inner_transfer("alice", "bob",   25, alice_n0 + 1),
+            mk_inner_transfer("bob",   "carol", 10, bob_n0),
+        };
+        chain.append(build_batch_block("alice", /*fee=*/0, inner1));
+        check(chain.balance("alice") == 75,  "test1: alice=75 (commit)");
+        check(chain.balance("bob")   == 65,  "test1: bob=65 (commit)");
+        check(chain.balance("carol") == 10,  "test1: carol=10 (commit)");
+        check(chain.next_nonce("alice") == alice_n0 + 2,
+              "test1: alice nonce +2 (outer + inner)");
+        check(chain.next_nonce("bob")   == bob_n0 + 1,
+              "test1: bob nonce +1 (inner)");
+        check(chain.next_nonce("carol") == 0,
+              "test1: carol nonce unchanged");
+
+        // Test 2: failing batch — alice→bob 25 (ok), then alice→bob 200
+        // (alice has 50 after first inner, can't send 200). Whole batch
+        // rolls back. Outer fee + outer nonce still consumed.
+        uint64_t alice_pre  = chain.balance("alice");
+        uint64_t bob_pre    = chain.balance("bob");
+        uint64_t carol_pre  = chain.balance("carol");
+        uint64_t alice_n1   = chain.next_nonce("alice");
+        uint64_t bob_n1     = chain.next_nonce("bob");
+        std::vector<Transaction> inner2 = {
+            mk_inner_transfer("alice", "bob", 25,  alice_n1 + 1),
+            mk_inner_transfer("alice", "bob", 200, alice_n1 + 2),
+        };
+        chain.append(build_batch_block("alice", 0, inner2));
+        // Save balances/nonces to locals before checking to avoid an
+        // apparent MSVC optimization issue when chain.balance() is
+        // called inline in a check() argument across multiple statements
+        // post-rollback (see investigation note in commit message).
+        uint64_t alice_after2  = chain.balance("alice");
+        uint64_t bob_after2    = chain.balance("bob");
+        uint64_t carol_after2  = chain.balance("carol");
+        uint64_t alice_n_after = chain.next_nonce("alice");
+        uint64_t bob_n_after   = chain.next_nonce("bob");
+        check(alice_after2  == alice_pre,    "test2: alice unchanged (rollback)");
+        check(bob_after2    == bob_pre,      "test2: bob unchanged (rollback)");
+        check(carol_after2  == carol_pre,    "test2: carol unchanged (rollback)");
+        check(alice_n_after == alice_n1 + 1, "test2: alice nonce +1 (outer)");
+        check(bob_n_after   == bob_n1,       "test2: bob nonce unchanged (rollback)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": composable_batch " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);

@@ -63,7 +63,56 @@ enum class TxType : uint8_t {
     // evidence_window_start + merge_threshold_blocks) must support the
     // trigger condition (no SHARD_TIP_s + eligible_in_region < 2K).
     MERGE_EVENT    = 7,
+    // v2.4 composable transactions. Outer tx is signed by a submitter
+    // who pays the outer fee and consumes their next_nonce; the
+    // payload is a serialized vector<Transaction> of inner txs, each
+    // independently signed by its own sender. Apply path runs all
+    // inner txs inside chain.atomic_scope: if any inner tx fails
+    // shape, sig, balance, or nonce checks, the entire batch rolls
+    // back atomically — including any state mutations from earlier
+    // inner txs in the same batch. Enables:
+    //   - Atomic multi-account swaps (A pays B iff B pays C)
+    //   - Bid + lock + release patterns (auctions, escrow)
+    //   - Bundled transfers with single-fee amortization
+    //   - Multi-sig parallel approval (M signers act independently,
+    //     commit iff all M land in the batch)
+    //
+    // Payload encoding (canonical, LE where noted):
+    //   [inner_count: u16 LE]                 # 1..MAX_COMPOSABLE_INNER
+    //   inner_count × Transaction (binary_codec serialized)
+    //
+    // Validator constraints:
+    //   - inner_count in [1, MAX_COMPOSABLE_INNER]; reject empty or
+    //     oversized batches at submit-time
+    //   - Each inner tx must validate independently (shape + sig +
+    //     known sender for non-bearer types)
+    //   - Inner txs MUST NOT be COMPOSABLE_BATCH themselves (flat,
+    //     no recursion — keeps the scope stack depth bounded and
+    //     avoids subtle pathological cases)
+    //   - Inner txs MUST have fee == 0 (outer batch pays the chain fee)
+    //
+    // Apply semantics:
+    //   - Outer batch consumes submitter's next_nonce (one slot)
+    //   - Outer fee is charged to submitter regardless of inner success
+    //     (submitter paid for the BLOCK SPACE; inner failure rolls back
+    //     state changes but not the fee — same model as gas in EVMs)
+    //   - Inner txs are applied in array order via atomic_scope
+    //   - On any inner tx failure: rollback all inner mutations,
+    //     outer fee still charged, outer nonce still consumed
+    //
+    // Wallet-side semantics: a relayer can build a COMPOSABLE_BATCH on
+    // behalf of multiple users — each user signs their inner tx
+    // separately and hands it to the relayer, who packages them and
+    // signs the outer envelope. No user has to trust the others;
+    // signatures bind each user's intent independently.
+    COMPOSABLE_BATCH = 8,
 };
+
+// v2.4 cap on inner-tx count per batch. 64 is generous for the use
+// cases (atomic swaps, bundled transfers) without exposing the chain
+// to memory-exhaustion via gigantic batches. Validator rejects
+// batches exceeding this; producer wouldn't accept them either.
+inline constexpr uint16_t MAX_COMPOSABLE_INNER = 64;
 
 struct Transaction {
     TxType               type{TxType::TRANSFER};

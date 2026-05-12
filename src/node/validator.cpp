@@ -754,6 +754,87 @@ BlockValidator::Result BlockValidator::check_transactions(
             // num_shards) requires Chain access — defer to apply.
             break;
         }
+        case TxType::COMPOSABLE_BATCH: {
+            // v2.4: validate the batch envelope + each inner tx's shape
+            // and signature. Constraints:
+            //   - Payload decodes as a JSON array of inner txs
+            //   - Inner count in [1, MAX_COMPOSABLE_INNER]
+            //   - Each inner.type == TRANSFER (v2.4 restriction)
+            //   - Each inner.fee == 0 (outer pays the chain fee)
+            //   - Each inner.payload.size() <= 32 (same as a standalone
+            //     TRANSFER)
+            //   - Each inner is independently signed by its inner.from
+            //     (anon address parse for bearer; registry lookup for
+            //     registered domain)
+            //   - No nested COMPOSABLE_BATCH (flat only)
+            //
+            // Inner nonce-to-chain-state consistency is NOT checked
+            // here — that depends on the live chain state at apply
+            // time, and the apply path performs the check inside
+            // atomic_scope (rolling back the whole batch if any inner
+            // nonce mismatches). Same for balance checks.
+            std::vector<Transaction> inner;
+            try {
+                std::string s(tx.payload.begin(), tx.payload.end());
+                auto arr = nlohmann::json::parse(s);
+                if (!arr.is_array()) {
+                    return {false, "COMPOSABLE_BATCH payload not a JSON array"};
+                }
+                for (auto& j : arr) {
+                    inner.push_back(Transaction::from_json(j));
+                }
+            } catch (std::exception& e) {
+                return {false,
+                    std::string("COMPOSABLE_BATCH payload malformed: ") + e.what()};
+            }
+            if (inner.empty()) {
+                return {false, "COMPOSABLE_BATCH empty (must contain at "
+                               "least 1 inner tx)"};
+            }
+            if (inner.size() > MAX_COMPOSABLE_INNER) {
+                return {false, "COMPOSABLE_BATCH oversized (max "
+                             + std::to_string(MAX_COMPOSABLE_INNER)
+                             + " inner txs)"};
+            }
+            for (size_t ii = 0; ii < inner.size(); ++ii) {
+                auto& it = inner[ii];
+                if (it.type != TxType::TRANSFER) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] type must be TRANSFER in v2.4"};
+                }
+                if (it.fee != 0) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] fee must be 0 (outer pays)"};
+                }
+                if (it.payload.size() > 32) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] payload exceeds 32 bytes"};
+                }
+                // Inner-tx signature verification: derive the inner.from's
+                // pubkey (parse_anon_pubkey for bearer / registry.find for
+                // registered) and verify it.sig over it.signing_bytes().
+                PubKey ipk{};
+                if (is_anon_address(it.from)) {
+                    ipk = parse_anon_pubkey(it.from);
+                } else if (auto re = registry.find(it.from)) {
+                    ipk = re->pubkey;
+                } else {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] sender not in registry: " + it.from};
+                }
+                auto sb = it.signing_bytes();
+                if (!verify(ipk, sb.data(), sb.size(), it.sig)) {
+                    return {false, "COMPOSABLE_BATCH inner["
+                                 + std::to_string(ii)
+                                 + "] signature invalid from " + it.from};
+                }
+            }
+            break;
+        }
         }
     }
     return {true, ""};
