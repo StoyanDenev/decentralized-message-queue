@@ -235,10 +235,15 @@ A malicious relay can also drop transactions from `b.transactions` after committ
 
 **Verified post-fix:** bearer (mutator path + rpc_balance heavy), state_root (S-033 hash + apply path), governance_param_change (mutator + activation + snapshot + rpc_nonce reads), equivocation_slashing (slashing apply path), domain_registry (REGISTER/DEREGISTER + lazy paths), snapshot_bootstrap (restore-from-snapshot publish path) all PASS. Hot-path overhead unmeasurable in test wall-clock.
 
+**Mitigation landed in-session (partial — async save, S-031 follow-on).** `chain.save()` is now off the apply hot path. After every block apply, Node calls `enqueue_save()` which sets an atomic flag and notifies a condition variable; a dedicated worker thread serializes the JSON and writes atomically (`.tmp` + rename) under `state_mutex_` `shared_lock` (concurrent with RPC readers). The apply's `unique_lock` duration is bounded by apply itself, not by disk I/O. Multiple bursting applies coalesce into one save plus one tail save. `Chain::save()` switched to atomic write so a worker-process crash mid-write cannot leave a half-written chain.json. Lifecycle hooks: `Node::start` spawns the worker; `Node::stop` signals stop, joins, then does one final synchronous save.
+
+Crash semantics. Between block apply and save completion, the block is in memory but not on disk. A node crash here loads the older chain.json on restart and resyncs the missing tail via peer gossip — same as the pre-fix narrow window between apply completion and the synchronous fsync returning. Functionally indistinguishable.
+
 **Remaining open under S-031** (mechanical follow-on, not architectural):
 
-- Extend the Phase 2C lock-free reader pattern to the non-account containers — `stake()`, `stake_unlock_height()`, `registrant()`, and the other const accessors still take `state_mutex_` `shared_lock`. Each container needs its own `shared_ptr<const map>` member + publish-at-commit. Mechanical edit ~30 LOC per container; ship as use cases demand.
-- Long-running disk I/O operations (`chain.save()` fsync, snapshot persistence) still hold `unique_lock` and block writers from re-entering. Move these to a separate worker thread with a WAL pattern — independent from the Phase 2C work.
+- Extend the Phase 2C lock-free reader pattern to additional containers as use cases demand (abort_records, merge_state, etc., currently lockless reads aren't needed for these — they're queried only from internal validator paths already holding the lock).
+- One-file-per-block storage. With async save, the saving thread can fall behind apply on bursty workloads (save coalesces but takes O(N) per fire). Switching to per-block files makes save O(1) and the worker can never fall behind. Strict perf improvement, not a correctness fix.
+- C++26 deprecation cleanup for `std::atomic_load/store` free functions on shared_ptr — migrate to `std::atomic<std::shared_ptr<T>>`.
 - `delay_worker_.join()` under the lock — moot since M-F removed the delay-hash worker entirely.
 - `rpc_submit_tx` broadcasts via gossip while holding `unique_lock`. The lock could be released before the broadcast call (the tx is already in `tx_store_` at that point; the broadcast is a network operation that doesn't touch chain state). ~10 LOC, untouched in this commit to keep the change surgical.
 - `delay_worker_.join()` under the lock — moot since M-F removed the delay-hash worker entirely.
