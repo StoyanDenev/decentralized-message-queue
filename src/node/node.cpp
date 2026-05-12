@@ -569,7 +569,7 @@ void Node::run() {
         io_, std::chrono::milliseconds(1500));
     grace->async_wait([this, grace](std::error_code ec) {
         if (ec) return;
-        std::lock_guard<std::mutex> lk(state_mutex_);
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (gossip_.peer_count() == 0) {
             state_ = SyncState::IN_SYNC;
             check_if_selected();
@@ -740,7 +740,7 @@ void Node::start_contrib_phase() {
     contrib_timer_.expires_after(std::chrono::milliseconds(cfg_.tx_commit_ms));
     contrib_timer_.async_wait([this](std::error_code ec) {
         if (ec) return;
-        std::lock_guard<std::mutex> lk(state_mutex_);
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
         handle_contrib_timeout();
     });
 
@@ -778,7 +778,7 @@ void Node::enter_block_sig_phase() {
 
     Hash placeholder = crypto::sha256(current_delay_seed_);
     asio::post(io_, [this, placeholder] {
-        std::lock_guard<std::mutex> lk(state_mutex_);
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (phase_ != ConsensusPhase::CONTRIB) return;
         start_block_sig_phase(placeholder);
 
@@ -872,7 +872,7 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
     block_sig_timer_.expires_after(std::chrono::milliseconds(cfg_.block_sig_ms));
     block_sig_timer_.async_wait([this](std::error_code ec) {
         if (ec) return;
-        std::lock_guard<std::mutex> lk(state_mutex_);
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
         handle_block_sig_timeout();
     });
 
@@ -1020,7 +1020,7 @@ void Node::handle_block_sig_timeout() {
 }
 
 void Node::on_abort_claim(const AbortClaimMsg& msg) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     if (msg.block_index != chain_.height()) return;
     Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();
@@ -1094,7 +1094,7 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
 
 void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
                             const chain::AbortEvent& ev) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     if (block_index != chain_.height()) return;
     Hash my_prev = chain_.empty() ? Hash{} : chain_.head_hash();
@@ -1150,7 +1150,7 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
 // and not already pooled, accept into pending_equivocation_evidence_ for
 // inclusion in the next block we produce.
 void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     if (ev.digest_a == ev.digest_b) return;
     if (ev.sig_a == ev.sig_b)       return;
@@ -1191,7 +1191,7 @@ void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
 //
 // SINGLE / BEACON roles ignore this message.
 void Node::on_beacon_header(const chain::Block& b) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     if (cfg_.chain_role != ChainRole::SHARD) return;
 
     // 1. Sequential index check.
@@ -1277,7 +1277,7 @@ void Node::on_beacon_header(const chain::Block& b) {
 //
 // SINGLE / SHARD roles ignore this message.
 void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     if (cfg_.chain_role != ChainRole::BEACON) return;
 
     // 1. Shard ID range.
@@ -1399,7 +1399,7 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
 void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
                                             const chain::Block& src_block,
                                             const net::Message& relay) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     if (cfg_.chain_role == ChainRole::BEACON) {
         // Relay: re-broadcast to peers other than the sender. The
@@ -1437,7 +1437,7 @@ void Node::on_snapshot_request(uint32_t header_count,
                                   std::shared_ptr<net::Peer> peer) {
     nlohmann::json snap;
     {
-        std::lock_guard<std::mutex> lk(state_mutex_);
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
         if (chain_.empty()) return;     // nothing to serve
         snap = chain_.serialize_state(header_count);
     }
@@ -1643,7 +1643,7 @@ void Node::apply_block_locked(const chain::Block& b) {
 }
 
 void Node::on_block(const chain::Block& b) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     apply_block_locked(b);
 }
 
@@ -1680,7 +1680,7 @@ bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
 }
 
 void Node::on_tx(const chain::Transaction& tx) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     // Drop stale-nonce txs immediately.
     if (tx.nonce < chain_.next_nonce(tx.from)) return;
@@ -1705,7 +1705,7 @@ void Node::on_tx(const chain::Transaction& tx) {
 }
 
 void Node::on_contrib(const ContribMsg& msg) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     uint64_t expected_index = chain_.height();
     if (msg.block_index != expected_index) return;
@@ -1753,7 +1753,7 @@ void Node::on_contrib(const ContribMsg& msg) {
 }
 
 void Node::on_block_sig(const BlockSigMsg& msg) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     on_block_sig_locked(msg);
 }
 
@@ -1844,7 +1844,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
 
 void Node::on_get_chain(uint64_t from_index, uint16_t count,
                          std::shared_ptr<net::Peer> peer) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     if (count == 0)   count = 64;
     if (count > 256)  count = 256;     // anti-DoS cap
 
@@ -1860,7 +1860,7 @@ void Node::on_get_chain(uint64_t from_index, uint16_t count,
 void Node::on_chain_response(const std::vector<chain::Block>& blocks,
                               bool has_more,
                               std::shared_ptr<net::Peer> peer) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     if (blocks.empty()) {
         // Peer reports nothing more — try transitioning to IN_SYNC.
         start_sync_if_behind();
@@ -1883,14 +1883,14 @@ void Node::on_chain_response(const std::vector<chain::Block>& blocks,
 }
 
 void Node::on_status_request(std::shared_ptr<net::Peer> peer) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     std::string ghash = chain_.empty() ? std::string{} : to_hex(chain_.at(0).compute_hash());
     peer->send(net::make_status_response(chain_.height(), ghash));
 }
 
 void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
                                std::shared_ptr<net::Peer> peer) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     // Reject peers on a different genesis. Their chain is not ours; they will
     // never feed us valid blocks. But STILL fall through to
@@ -1960,7 +1960,7 @@ void Node::request_next_chunk() {
 // ─── RPC Handlers ────────────────────────────────────────────────────────────
 
 json Node::rpc_status() const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     json j;
     j["height"]      = chain_.height();
     j["head_hash"]   = chain_.empty() ? "" : to_hex(chain_.head_hash());
@@ -2013,13 +2013,13 @@ json Node::rpc_peers() const {
 }
 
 json Node::rpc_block(uint64_t index) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     if (index >= chain_.height()) return nullptr;
     return chain_.at(index).to_json();
 }
 
 json Node::rpc_account(const std::string& addr) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     json j;
     j["address"]    = addr;
     j["balance"]    = chain_.balance(addr);
@@ -2053,7 +2053,7 @@ json Node::rpc_account(const std::string& addr) const {
 }
 
 json Node::rpc_tx(const std::string& hash_hex) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     if (hash_hex.size() != 64) return nullptr;
     Hash target;
     try {
@@ -2081,7 +2081,7 @@ json Node::rpc_tx(const std::string& hash_hex) const {
 }
 
 json Node::rpc_committee() const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     json arr = json::array();
     if (chain_.empty()) return arr;
 
@@ -2118,7 +2118,7 @@ json Node::rpc_committee() const {
 }
 
 json Node::rpc_validators() const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     json arr = json::array();
     auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
     for (auto& nd : reg.sorted_nodes()) {
@@ -2135,7 +2135,7 @@ json Node::rpc_validators() const {
 }
 
 json Node::rpc_chain_summary(uint32_t last_n) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     json arr = json::array();
     uint64_t total = chain_.height();
     if (total > 0) {
@@ -2175,7 +2175,7 @@ json Node::rpc_chain_summary(uint32_t last_n) const {
 }
 
 json Node::rpc_send(const std::string& to, uint64_t amount, uint64_t fee) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     chain::Transaction tx;
     tx.type   = chain::TxType::TRANSFER;
     tx.from   = cfg_.domain;
@@ -2201,7 +2201,7 @@ static std::vector<uint8_t> encode_amount(uint64_t a) {
 }
 
 json Node::rpc_stake(uint64_t amount, uint64_t fee) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     chain::Transaction tx;
     tx.type    = chain::TxType::STAKE;
     tx.from    = cfg_.domain;
@@ -2222,7 +2222,7 @@ json Node::rpc_stake(uint64_t amount, uint64_t fee) {
 }
 
 json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     chain::Transaction tx;
     tx.type    = chain::TxType::UNSTAKE;
     tx.from    = cfg_.domain;
@@ -2243,12 +2243,12 @@ json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
 }
 
 json Node::rpc_nonce(const std::string& domain) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     return {{"domain", domain}, {"next_nonce", chain_.next_nonce(domain)}};
 }
 
 json Node::rpc_stake_info(const std::string& domain) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     return {
         {"domain",        domain},
         {"locked",        chain_.stake(domain)},
@@ -2257,7 +2257,7 @@ json Node::rpc_stake_info(const std::string& domain) const {
 }
 
 json Node::rpc_submit_tx(const json& tx_json) {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     chain::Transaction tx = chain::Transaction::from_json(tx_json);
 
     // Recompute hash to defend against client-side errors / tampering.
@@ -2308,7 +2308,7 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
     on_equivocation_evidence(ev);
 
     // Re-grab to inspect post-handler state for the response.
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
     bool present = false;
     for (auto& e : pending_equivocation_evidence_) {
         if (e.equivocator == ev.equivocator
@@ -2327,17 +2327,17 @@ json Node::rpc_submit_equivocation(const json& ev_json) {
 }
 
 json Node::rpc_snapshot(uint32_t header_count) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     return chain_.serialize_state(header_count);
 }
 
 json Node::rpc_balance(const std::string& domain) const {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
     return {{"domain", domain}, {"balance", chain_.balance(domain)}};
 }
 
 json Node::rpc_register() {
-    std::lock_guard<std::mutex> lk(state_mutex_);
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
 
     // Payload (rev.9 R1): [pubkey: 32B][region_len: u8][region: utf8].
     // When cfg_.region is empty we emit only the 32-byte pubkey

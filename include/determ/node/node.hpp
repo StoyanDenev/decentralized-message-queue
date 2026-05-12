@@ -10,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <optional>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -385,7 +386,14 @@ private:
     std::shared_ptr<net::Peer>               sync_peer_;
 
     std::atomic<bool>               running_{false};
-    mutable std::mutex              state_mutex_;
+    // S-031 partial mitigation: shared_mutex permits N concurrent readers
+    // (read-only RPCs taking std::shared_lock) while serializing writes
+    // (mutations + consensus state transitions taking std::unique_lock).
+    // Full A9 overlay/delta state model (the audit's structural fix) is
+    // a deeper refactor; this is the high-leverage subset that lifts
+    // the throughput ceiling for the common read-heavy workload
+    // (status/balance/account/block lookups dominate operational queries).
+    mutable std::shared_mutex       state_mutex_;
     std::vector<std::thread>        threads_;
 };
 
