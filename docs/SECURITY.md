@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **3** | **6** | **4** | **10** | **23** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **19** |
+| Open | **3** (1 partially mitigated, 2 unchanged) | **6** | **4** | **10** | **23** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **19** + 1 partial |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -223,9 +223,19 @@ A malicious relay can also drop transactions from `b.transactions` after committ
 
 ### S-031 — Single global mutex serializes everything
 
-**Severity:** Critical (architectural) • **Status:** Open • **Sources:** Architectural Analysis §3.1
+**Severity:** Critical (architectural) • **Status:** Partially mitigated in-session (shared_mutex landed; full A9 overlay/delta still v2) • **Sources:** Architectural Analysis §3.1
 
-**What's open.** `Node` is a god-object protected by one `std::mutex state_mutex_`. 42 references in `node.cpp`. Every critical operation holds this lock:
+**Mitigation landed in-session (partial).** Replaced `std::mutex state_mutex_` with `std::shared_mutex` and downgraded all 11 read-only const RPC handlers to `std::shared_lock`. The other 25 acquisition sites (mutators, gossip handlers, consensus transitions) keep `std::unique_lock` with identical write-exclusion semantics. Effect: read-heavy operational workloads (`status`, `balance`, `account`, `chain_summary`, `committee`, `validators`, `nonce`, `stake_info`, `block`, `tx`, `snapshot`) now permit N concurrent readers, which is the dominant contention pattern. Writes still serialize as required for correctness.
+
+**Verified post-fix:** bearer (mutator path), governance_param_change (mutator + activation + snapshot), under_quorum_merge (operator-driven state transitions + snapshot reads) all PASS.
+
+**Remaining open under S-031** (tracked here, requires v2 work):
+
+- Long-running write operations (apply, `chain.save()` fsync, snapshot persistence) still hold `unique_lock` and block readers during the operation. Closing this requires the full A9 overlay/delta state model — reads proceed against an immutable snapshot while apply mutates an overlay in the background.
+- `rpc_submit_tx` broadcasts via gossip while holding `unique_lock`. The lock could be released before the broadcast call (the tx is already in `tx_store_` at that point; the broadcast is a network operation that doesn't touch chain state). ~10 LOC, untouched in this commit to keep the change surgical.
+- `delay_worker_.join()` under the lock — moot since M-F removed the delay-hash worker entirely.
+
+**Pre-fix description** (preserved for audit trail). `Node` is a god-object protected by one `std::mutex state_mutex_`. 42 references in `node.cpp`. Every critical operation holds this lock:
 - All consensus state mutation
 - Block application + the synchronous `chain_.save()` that follows (writes the entire chain JSON to disk — `node.cpp:1300`)
 - VDF verification on the piggyback path: `delay_hash_verify` (4M SHA-256 iterations) is called under the lock at `node.cpp:1446`
