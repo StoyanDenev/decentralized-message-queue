@@ -165,6 +165,18 @@ std::optional<RegistryEntry> Chain::registrant(const std::string& domain) const 
     return it->second;
 }
 
+// v2.18 Theme 7: DApp registry lookup. Returns nullopt for unknown or
+// inactive DApps. "Inactive" = inactive_from <= current height; we
+// don't have direct access to height here, so the caller (validator
+// or producer) checks inactive_from against the block context. This
+// accessor returns the raw entry regardless of activity — callers
+// gate on inactive_from themselves.
+std::optional<DAppEntry> Chain::dapp(const std::string& domain) const {
+    auto it = dapp_registry_.find(domain);
+    if (it == dapp_registry_.end()) return std::nullopt;
+    return it->second;
+}
+
 void Chain::set_shard_routing(uint32_t shard_count,
                                  const Hash& salt,
                                  ShardId my_shard_id) {
@@ -247,6 +259,7 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
     leaves.reserve(accounts_.size() + stakes_.size() + registrants_.size()
                   + applied_inbound_receipts_.size() + abort_records_.size()
                   + merge_state_.size() + pending_param_changes_.size()
+                  + dapp_registry_.size()
                   + 16); // constants + counters slack
 
     auto k_with_prefix = [](const std::string& prefix, const std::string& s) {
@@ -282,6 +295,28 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         b.append(static_cast<uint64_t>(r.region.size()));
         b.append(r.region);
         leaves.push_back({k_with_prefix("r:", domain), hash_bytes(b)});
+    }
+    // v2.18 Theme 7: dapp_registry_ (key = "d:" + domain). Each leaf
+    // is hash over the entry's canonical fields. Light clients prove
+    // a DApp's registration via state_proof using the "d:" namespace.
+    for (auto& [domain, e] : dapp_registry_) {
+        crypto::SHA256Builder b;
+        b.append(e.service_pubkey.data(), e.service_pubkey.size());
+        b.append(e.registered_at);
+        b.append(e.active_from);
+        b.append(e.inactive_from);
+        b.append(static_cast<uint64_t>(e.endpoint_url.size()));
+        b.append(e.endpoint_url);
+        b.append(static_cast<uint64_t>(e.topics.size()));
+        for (auto& t : e.topics) {
+            b.append(static_cast<uint64_t>(t.size()));
+            b.append(t);
+        }
+        // retention is one byte; promote to u64 for SHA256Builder.
+        b.append(static_cast<uint64_t>(e.retention));
+        b.append(static_cast<uint64_t>(e.metadata.size()));
+        if (!e.metadata.empty()) b.append(e.metadata.data(), e.metadata.size());
+        leaves.push_back({k_with_prefix("d:", domain), hash_bytes(b)});
     }
     // applied_inbound_receipts_  (key = "i:" + src_be8 + tx_hash)
     for (auto& [src, tx_hash] : applied_inbound_receipts_) {
@@ -565,6 +600,8 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
         merge_state_            = std::move(*s.merge_state);
     if (s.applied_inbound_receipts)
         applied_inbound_receipts_ = std::move(*s.applied_inbound_receipts);
+    if (s.dapp_registry)
+        dapp_registry_          = std::move(*s.dapp_registry);
     pending_param_changes_      = std::move(s.pending_param_changes);
     genesis_total_              = s.genesis_total;
     accumulated_subsidy_        = s.accumulated_subsidy;
@@ -616,6 +653,10 @@ void Chain::apply_transactions(const Block& b) {
     auto __ensure_applied_inbound_receipts = [&]() {
         if (!__snapshot.applied_inbound_receipts)
             __snapshot.applied_inbound_receipts = applied_inbound_receipts_;
+    };
+    auto __ensure_dapp_registry = [&]() {
+        if (!__snapshot.dapp_registry)
+            __snapshot.dapp_registry = dapp_registry_;
     };
     try {
     // A5 Phase 2: activate any staged governance parameter changes whose
@@ -984,6 +1025,84 @@ void Chain::apply_transactions(const Block& b) {
                 }
             }
             sender.next_nonce++;
+            break;
+        }
+        // v2.18 Theme 7: DApp registration / update / deactivation.
+        // tx.from must be a registered Determ domain (validator-checked);
+        // here we just decode + apply. Payload encoding documented in
+        // block.hpp DAPP_REGISTER comment. On op=0 (create/update),
+        // upsert dapp_registry_[tx.from]; on op=1 (deactivate), set
+        // inactive_from = height + DAPP_GRACE_BLOCKS. Defensive on
+        // malformed payload: charge fee + advance nonce, skip the
+        // mutation (matches validator-side reject so honest replay
+        // stays consistent if a malformed tx ever slips through).
+        case TxType::DAPP_REGISTER: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            sender.next_nonce++;
+            // Decode payload
+            if (tx.payload.empty()) break;
+            uint8_t op = tx.payload[0];
+            if (op == 1) {
+                // Deactivate
+                auto it = dapp_registry_.find(tx.from);
+                if (it == dapp_registry_.end()) break;
+                __ensure_dapp_registry();
+                dapp_registry_[tx.from].inactive_from =
+                    height + DAPP_GRACE_BLOCKS;
+                break;
+            }
+            if (op != 0) break;  // unknown op — defensive no-op
+            // op=0: create/update. Decode the rest of the payload.
+            size_t p = 1;
+            auto need = [&](size_t n) { return p + n <= tx.payload.size(); };
+            if (!need(32)) break;
+            DAppEntry e;
+            std::copy_n(tx.payload.begin() + p, 32, e.service_pubkey.begin());
+            p += 32;
+            if (!need(1)) break;
+            uint8_t url_len = tx.payload[p++];
+            if (!need(url_len)) break;
+            e.endpoint_url.assign(
+                reinterpret_cast<const char*>(tx.payload.data() + p), url_len);
+            p += url_len;
+            if (!need(1)) break;
+            uint8_t topic_count = tx.payload[p++];
+            if (topic_count > MAX_DAPP_TOPICS) break;
+            for (uint8_t i = 0; i < topic_count; ++i) {
+                if (!need(1)) { topic_count = 0; break; }
+                uint8_t tl = tx.payload[p++];
+                if (tl > MAX_DAPP_TOPIC_LEN) { topic_count = 0; break; }
+                if (!need(tl))               { topic_count = 0; break; }
+                e.topics.emplace_back(
+                    reinterpret_cast<const char*>(tx.payload.data() + p), tl);
+                p += tl;
+            }
+            if (topic_count == 0 && !e.topics.empty()) {
+                // Partial decode failure — abort upsert.
+                break;
+            }
+            if (!need(1)) break;
+            e.retention = tx.payload[p++];
+            if (!need(2)) break;
+            uint16_t metalen = uint16_t(tx.payload[p]) |
+                               (uint16_t(tx.payload[p + 1]) << 8);
+            p += 2;
+            if (metalen > MAX_DAPP_METADATA) break;
+            if (!need(metalen)) break;
+            e.metadata.assign(tx.payload.begin() + p,
+                              tx.payload.begin() + p + metalen);
+            // Preserve registered_at on update; refresh active_from /
+            // clear inactive_from. New entries get registered_at = height.
+            __ensure_dapp_registry();
+            auto existing = dapp_registry_.find(tx.from);
+            if (existing != dapp_registry_.end()) {
+                e.registered_at = existing->second.registered_at;
+            } else {
+                e.registered_at = height;
+            }
+            e.active_from   = height;
+            e.inactive_from = UINT64_MAX;
+            dapp_registry_[tx.from] = std::move(e);
             break;
         }
         // rev.9 R1: REGION_CHANGE is rejected by the validator; an

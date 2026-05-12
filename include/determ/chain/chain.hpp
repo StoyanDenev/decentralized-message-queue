@@ -43,6 +43,43 @@ struct RegistryEntry {
     std::string region{};
 };
 
+// v2.18 Theme 7: on-chain DApp registry entry. Sibling of RegistryEntry
+// for the application-layer DApp discovery + identity. Keyed by DApp's
+// owning Determ domain (which must already be REGISTER'd in
+// registrants_). Mutated by DAPP_REGISTER tx (apply path); queried by
+// light-client + wallet RPC for DApp discovery. See docs/V2-DAPP-DESIGN.md
+// for the conceptual model.
+struct DAppEntry {
+    // Ed25519/libsodium box pubkey for E2E encryption of DAPP_CALL
+    // payloads. Distinct from the DApp owner's REGISTER pubkey so
+    // the service key can be rotated independently of the owner's
+    // identity (e.g., for compromised-key recovery).
+    PubKey                   service_pubkey{};
+    // Primary discovery URL — typically https://... or .onion. Clients
+    // resolve the DApp's network address from this. Operator can update
+    // by re-issuing DAPP_REGISTER with op=0.
+    std::string              endpoint_url{};
+    // Supported routing tags. Validator rejects DAPP_CALL with a topic
+    // not in this set (empty topic is always allowed). DApps can add
+    // new topics via re-registration.
+    std::vector<std::string> topics{};
+    // 0 = full retention (default); 1 = prunable from older blocks
+    // by operator-policy snapshot tooling. Note: prunable retention
+    // does NOT affect the state_root commitment — the on-chain
+    // commitment is preserved via the snapshot/Merkle path; only
+    // raw payload bytes in old blocks can be pruned.
+    uint8_t                  retention{0};
+    // Opaque DApp-defined info (icon URL, description, version,
+    // schema pointers, etc.). Chain treats as bytes.
+    std::vector<uint8_t>     metadata{};
+    uint64_t                 registered_at{0};
+    uint64_t                 active_from{0};
+    // UINT64_MAX while still active; set by DAPP_REGISTER op=1 to
+    // inclusion_height + DAPP_GRACE_BLOCKS. Calls to a DApp with
+    // inactive_from <= current_height are rejected at validate time.
+    uint64_t                 inactive_from{UINT64_MAX};
+};
+
 class Chain {
 public:
     Chain() = default;
@@ -355,6 +392,12 @@ public:
     const std::map<std::string, AccountState>&   accounts()    const { return accounts_;    }
     const std::map<std::string, StakeEntry>&     stakes()      const { return stakes_;      }
     const std::map<std::string, RegistryEntry>&  registrants() const { return registrants_; }
+    const std::map<std::string, DAppEntry>&      dapp_registry() const { return dapp_registry_; }
+
+    // v2.18 Theme 7: lookup helper for DApp registry. Returns nullopt
+    // if no entry exists or if the entry's inactive_from has passed.
+    // Validator + producer use this to gate DAPP_CALL on a live DApp.
+    std::optional<DAppEntry> dapp(const std::string& domain) const;
 
     // ─── Unitary-balance invariant (A1) ────────────────────────────────────
     // GENESIS_TOTAL is fixed at genesis-apply time as the sum of all
@@ -480,6 +523,13 @@ private:
     std::map<std::string, AccountState>         accounts_;
     std::map<std::string, StakeEntry>           stakes_;
     std::map<std::string, RegistryEntry>        registrants_;
+
+    // v2.18 Theme 7: on-chain DApp registry. Keyed by DApp's owning
+    // domain (which must be in registrants_). Mutated by DAPP_REGISTER
+    // apply; queried by lookups. Phase 2A/2B lazy-snapshot integration:
+    // most blocks have no DApp registration, so the snapshot stays
+    // nullopt and skips the deep-copy cost.
+    std::map<std::string, DAppEntry>            dapp_registry_;
 
     // A9 Phase 2C: single lock-free committed view bundling accounts,
     // stakes, and registrants. Published at every successful apply
@@ -624,6 +674,7 @@ private:
         std::optional<std::map<std::string, AbortRecord>>   abort_records;
         std::optional<MergeStateMap>                        merge_state;
         std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;
+        std::optional<std::map<std::string, DAppEntry>>     dapp_registry;
         std::map<uint64_t,
                  std::vector<std::pair<std::string,
                                        std::vector<uint8_t>>>>

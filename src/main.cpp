@@ -1665,6 +1665,146 @@ int main(int argc, char** argv) {
     // Builds a Chain with three accounts (alice, bob, carol), constructs
     // COMPOSABLE_BATCH txs with various inner-tx shapes, applies them
     // via Chain::append, and verifies the all-or-nothing semantics.
+    // v2.18 Theme 7: in-process apply-path test for DAPP_REGISTER.
+    // Builds a Chain with alice as a REGISTER'd domain (the DApp's
+    // owner), then applies a series of DAPP_REGISTER txs exercising
+    // create / update / deactivate paths. Verifies dapp_registry_
+    // state + state_root changes accordingly.
+    if (cmd == "test-dapp-register") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Genesis: alice is a registered Determ domain with stake.
+        Block genesis;
+        genesis.index           = 0;
+        genesis.prev_hash       = Hash{};
+        genesis.timestamp       = 0;
+        genesis.cumulative_rand = Hash{};
+        GenesisAlloc a;
+        a.domain = "alice";
+        a.balance = 1000;
+        a.stake = 100;
+        for (size_t i = 0; i < a.ed_pub.size(); ++i) a.ed_pub[i] = uint8_t(i + 1);
+        genesis.initial_state.push_back(a);
+        Chain chain(genesis);
+
+        // Helper: build a DAPP_REGISTER payload for op=0 (create/update).
+        auto pack_register_v0 = [](const PubKey& svc_pk,
+                                      const std::string& url,
+                                      const std::vector<std::string>& topics,
+                                      uint8_t retention,
+                                      const std::vector<uint8_t>& metadata) {
+            std::vector<uint8_t> p;
+            p.push_back(0);  // op = create/update
+            p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+            p.push_back(uint8_t(url.size()));
+            p.insert(p.end(), url.begin(), url.end());
+            p.push_back(uint8_t(topics.size()));
+            for (auto& t : topics) {
+                p.push_back(uint8_t(t.size()));
+                p.insert(p.end(), t.begin(), t.end());
+            }
+            p.push_back(retention);
+            p.push_back(uint8_t(metadata.size() & 0xFF));
+            p.push_back(uint8_t((metadata.size() >> 8) & 0xFF));
+            p.insert(p.end(), metadata.begin(), metadata.end());
+            return p;
+        };
+        auto pack_register_v1 = []() {
+            return std::vector<uint8_t>{1};  // op = deactivate, no further bytes
+        };
+
+        auto build_dapp_register_block = [&](const std::string& from,
+                                                const std::vector<uint8_t>& payload) {
+            Block b;
+            b.index           = chain.height();
+            b.prev_hash       = chain.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            Transaction tx;
+            tx.type    = TxType::DAPP_REGISTER;
+            tx.from    = from;
+            tx.to      = "";
+            tx.amount  = 0;
+            tx.fee     = 0;
+            tx.nonce   = chain.next_nonce(from);
+            tx.payload = payload;
+            tx.hash    = tx.compute_hash();
+            b.transactions.push_back(tx);
+            return b;
+        };
+
+        // Test 1: create. alice registers a DApp.
+        PubKey svc_pk{};
+        for (size_t i = 0; i < svc_pk.size(); ++i) svc_pk[i] = uint8_t(0xA0 + i);
+        std::vector<std::string> topics = {"chat", "files"};
+        std::vector<uint8_t> meta = {0xDE, 0xAD, 0xBE, 0xEF};
+        auto pl1 = pack_register_v0(svc_pk, "https://dapp.example", topics, 0, meta);
+        Hash root_before = chain.compute_state_root();
+        chain.append(build_dapp_register_block("alice", pl1));
+        Hash root_after  = chain.compute_state_root();
+
+        auto entry_opt = chain.dapp("alice");
+        check(entry_opt.has_value(),                  "test1: dapp entry exists");
+        check(entry_opt && entry_opt->endpoint_url == "https://dapp.example",
+              "test1: endpoint_url correct");
+        check(entry_opt && entry_opt->topics.size() == 2,
+              "test1: topic count = 2");
+        check(entry_opt && entry_opt->topics[0] == "chat",
+              "test1: topic[0] = chat");
+        check(entry_opt && entry_opt->topics[1] == "files",
+              "test1: topic[1] = files");
+        check(entry_opt && entry_opt->service_pubkey == svc_pk,
+              "test1: service_pubkey matches");
+        check(entry_opt && entry_opt->retention == 0,
+              "test1: retention = 0 (default)");
+        check(entry_opt && entry_opt->metadata == meta,
+              "test1: metadata round-trips");
+        check(entry_opt && entry_opt->inactive_from == UINT64_MAX,
+              "test1: entry is active");
+        check(root_after != root_before,
+              "test1: state_root changed after DAPP_REGISTER");
+
+        // Test 2: update — change endpoint_url, add a topic.
+        std::vector<std::string> topics2 = {"chat", "files", "notifications"};
+        auto pl2 = pack_register_v0(svc_pk, "https://dapp.v2.example", topics2, 1, meta);
+        uint64_t registered_at_before = entry_opt->registered_at;
+        chain.append(build_dapp_register_block("alice", pl2));
+        auto entry2 = chain.dapp("alice");
+        check(entry2.has_value(),                      "test2: entry still exists");
+        check(entry2 && entry2->endpoint_url == "https://dapp.v2.example",
+              "test2: endpoint_url updated");
+        check(entry2 && entry2->topics.size() == 3,
+              "test2: topic count = 3");
+        check(entry2 && entry2->retention == 1,
+              "test2: retention updated to 1");
+        check(entry2 && entry2->registered_at == registered_at_before,
+              "test2: registered_at preserved across update");
+
+        // Test 3: deactivate.
+        auto pl3 = pack_register_v1();
+        uint64_t height_pre_deactivate = chain.height();
+        chain.append(build_dapp_register_block("alice", pl3));
+        auto entry3 = chain.dapp("alice");
+        check(entry3.has_value(),                      "test3: entry still in registry");
+        check(entry3 && entry3->inactive_from != UINT64_MAX,
+              "test3: inactive_from set");
+        // height_pre_deactivate is the height BEFORE the deactivate block applies.
+        // The apply-time height is height_pre_deactivate (block_index passed to apply).
+        // inactive_from = height_pre_deactivate + DAPP_GRACE_BLOCKS.
+        check(entry3 && entry3->inactive_from == height_pre_deactivate + DAPP_GRACE_BLOCKS,
+              "test3: inactive_from = current_height + GRACE");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": dapp_register " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "test-composable-batch") {
         using namespace determ;
         using namespace determ::chain;

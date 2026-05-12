@@ -106,6 +106,36 @@ enum class TxType : uint8_t {
     // signs the outer envelope. No user has to trust the others;
     // signatures bind each user's intent independently.
     COMPOSABLE_BATCH = 8,
+    // v2.18 (Theme 7 DApp support): register / update / deactivate a
+    // DApp service. tx.from must already be a Determ registered domain
+    // (REGISTER'd). The DApp registry is a sibling of registrants_ on
+    // Chain; it stores discovery + encryption metadata so light clients
+    // and wallets can find DApps and encrypt payloads to them. See
+    // docs/V2-DAPP-DESIGN.md for the full design.
+    //
+    // Payload encoding (canonical, LE where noted):
+    //   [op: u8]                # 0 = create/update, 1 = deactivate
+    //   if op == 0:
+    //     [service_pubkey: 32B] # libsodium box pubkey (E2E encryption)
+    //     [endpoint_url_len: u8]
+    //     [endpoint_url: utf8]  # primary discovery (https/onion/etc.)
+    //     [topic_count: u8]     # <= MAX_DAPP_TOPICS
+    //     topic_count × {
+    //       [topic_len: u8]
+    //       [topic: utf8]       # lowercase [a-z0-9._-]+, <= 64 bytes
+    //     }
+    //     [retention: u8]       # 0 = full, 1 = pruneable-after-K
+    //     [metadata_len: u16 LE]
+    //     [metadata: bytes]     # opaque DApp-defined info, <= MAX_DAPP_METADATA
+    //   if op == 1:
+    //     (no further bytes — tx.from identifies the entry)
+    //
+    // Apply: inserts/updates dapp_registry_[tx.from] for op=0; sets
+    // inactive_from = current_height + DAPP_GRACE_BLOCKS for op=1.
+    // No state change to other containers. DApp registry contributes
+    // a "d:" namespace leaf to state_root (analogous to "r:" for
+    // registrants).
+    DAPP_REGISTER  = 9,
 };
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use
@@ -113,6 +143,14 @@ enum class TxType : uint8_t {
 // to memory-exhaustion via gigantic batches. Validator rejects
 // batches exceeding this; producer wouldn't accept them either.
 inline constexpr uint16_t MAX_COMPOSABLE_INNER = 64;
+
+// v2.18 DApp registration caps. Genesis-pinned; can be promoted to
+// governance-mutable via PARAM_CHANGE later if needed.
+inline constexpr uint8_t  MAX_DAPP_TOPICS         = 32;
+inline constexpr uint8_t  MAX_DAPP_TOPIC_LEN      = 64;
+inline constexpr uint8_t  MAX_DAPP_ENDPOINT_LEN   = 255;
+inline constexpr uint16_t MAX_DAPP_METADATA       = 4096;  // 4 KB
+inline constexpr uint64_t DAPP_GRACE_BLOCKS       = 100;
 
 struct Transaction {
     TxType               type{TxType::TRANSFER};

@@ -754,6 +754,113 @@ BlockValidator::Result BlockValidator::check_transactions(
             // num_shards) requires Chain access — defer to apply.
             break;
         }
+        // v2.18 Theme 7: DApp registration shape check. Payload is
+        // documented in block.hpp DAPP_REGISTER comment; validator
+        // verifies the structural envelope + preconditions.
+        // Apply path performs the actual mutation; if the payload is
+        // malformed beyond what validator catches, apply silently
+        // no-ops (charging fee + advancing nonce). Validator's job
+        // is to reject malformed at submit-time so honest mempool
+        // never carries them.
+        case TxType::DAPP_REGISTER: {
+            // tx.from must already be a registered Determ identity.
+            // (Anonymous addresses cannot register DApps — DApp
+            // identity is built on Determ identity.)
+            if (is_anon_address(tx.from)) {
+                return {false, "DAPP_REGISTER from anonymous account is "
+                               "not allowed (anchor on a registered domain)"};
+            }
+            if (!registry.find(tx.from)) {
+                return {false, "DAPP_REGISTER sender not in registry: "
+                             + tx.from};
+            }
+            if (tx.payload.empty()) {
+                return {false, "DAPP_REGISTER payload empty"};
+            }
+            uint8_t op = tx.payload[0];
+            if (op == 1) {
+                // Deactivate: no further payload required.
+                if (tx.payload.size() != 1) {
+                    return {false, "DAPP_REGISTER deactivate payload must "
+                                   "be exactly 1 byte (op only)"};
+                }
+                break;
+            }
+            if (op != 0) {
+                return {false, "DAPP_REGISTER unknown op: "
+                             + std::to_string(int(op))};
+            }
+            // op=0: validate the full payload shape.
+            size_t p = 1;
+            auto need = [&](size_t n) { return p + n <= tx.payload.size(); };
+            if (!need(32)) return {false, "DAPP_REGISTER payload truncated (service_pubkey)"};
+            p += 32;
+            if (!need(1)) return {false, "DAPP_REGISTER payload truncated (url_len)"};
+            uint8_t url_len = tx.payload[p++];
+            if (url_len > MAX_DAPP_ENDPOINT_LEN) {
+                return {false, "DAPP_REGISTER endpoint_url too long (max "
+                             + std::to_string(MAX_DAPP_ENDPOINT_LEN) + ")"};
+            }
+            if (!need(url_len)) return {false, "DAPP_REGISTER payload truncated (endpoint_url)"};
+            // Endpoint charset: printable ASCII only (no control bytes,
+            // no UTF-8 multibyte). Conservative; covers https/onion/etc.
+            for (uint8_t i = 0; i < url_len; ++i) {
+                unsigned char c = tx.payload[p + i];
+                if (c < 0x20 || c > 0x7E) {
+                    return {false, "DAPP_REGISTER endpoint_url has non-"
+                                   "printable-ASCII byte"};
+                }
+            }
+            p += url_len;
+            if (!need(1)) return {false, "DAPP_REGISTER payload truncated (topic_count)"};
+            uint8_t topic_count = tx.payload[p++];
+            if (topic_count > MAX_DAPP_TOPICS) {
+                return {false, "DAPP_REGISTER topic_count exceeds "
+                             + std::to_string(MAX_DAPP_TOPICS)};
+            }
+            for (uint8_t i = 0; i < topic_count; ++i) {
+                if (!need(1)) return {false, "DAPP_REGISTER topic truncated (len)"};
+                uint8_t tl = tx.payload[p++];
+                if (tl == 0 || tl > MAX_DAPP_TOPIC_LEN) {
+                    return {false, "DAPP_REGISTER topic length invalid"};
+                }
+                if (!need(tl)) return {false, "DAPP_REGISTER topic truncated (bytes)"};
+                // Topic charset: lowercase [a-z0-9._-]+, same flavor as
+                // domain. Defensive normalize-then-validate: caller
+                // must produce canonical form.
+                for (uint8_t j = 0; j < tl; ++j) {
+                    unsigned char c = tx.payload[p + j];
+                    bool ok = (c >= 'a' && c <= 'z')
+                           || (c >= '0' && c <= '9')
+                           || c == '.' || c == '_' || c == '-';
+                    if (!ok) {
+                        return {false, "DAPP_REGISTER topic has invalid "
+                                       "char (allowed [a-z0-9._-])"};
+                    }
+                }
+                p += tl;
+            }
+            if (!need(1)) return {false, "DAPP_REGISTER payload truncated (retention)"};
+            uint8_t retention = tx.payload[p++];
+            if (retention > 1) {
+                return {false, "DAPP_REGISTER retention must be 0 or 1"};
+            }
+            if (!need(2)) return {false, "DAPP_REGISTER payload truncated (metadata_len)"};
+            uint16_t metalen = uint16_t(tx.payload[p]) |
+                               (uint16_t(tx.payload[p + 1]) << 8);
+            p += 2;
+            if (metalen > MAX_DAPP_METADATA) {
+                return {false, "DAPP_REGISTER metadata exceeds "
+                             + std::to_string(MAX_DAPP_METADATA) + " bytes"};
+            }
+            if (!need(metalen)) return {false, "DAPP_REGISTER payload truncated (metadata)"};
+            p += metalen;
+            // Trailing-byte check: payload must end exactly here.
+            if (p != tx.payload.size()) {
+                return {false, "DAPP_REGISTER payload has trailing bytes"};
+            }
+            break;
+        }
         case TxType::COMPOSABLE_BATCH: {
             // v2.4: validate the batch envelope + each inner tx's shape
             // and signature. Constraints:
