@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **6** | **7** | **4** | **10** | **27** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **15** |
+| Open | **5** | **7** | **4** | **10** | **26** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **16** |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -112,9 +112,15 @@ These are documented under the "Resolution options" table below; the localhost-o
 
 ### S-002 — Mempool accepts unverified-signature transactions
 
-**Severity:** Critical • **Status:** Open • **Sources:** Audit 1.4
+**Severity:** Critical • **Status:** Mitigated in-session (paired with binary-codec amount/fee/nonce fix) • **Sources:** Audit 1.4
 
-**What's open.** `Node::on_tx` (`src/node/node.cpp:1353-1371`) accepts incoming transactions into `tx_store_` after only a stale-nonce check and a replace-by-fee check. **No `crypto::verify` is called** on this path. Signature verification only happens later in `BlockValidator::check_transactions` at apply time.
+**Mitigation landed in-session.** Both `Node::on_tx` (gossip-path admission) and `Node::rpc_submit_tx` (client RPC admission) now call `Node::verify_tx_signature_locked()` before accepting a tx into `tx_store_`. The helper mirrors `BlockValidator::check_transactions`'s per-tx signature check: it derives the sender's Ed25519 pubkey based on `tx.type` (REGISTER → payload bytes 0..31; anon TRANSFER → bearer address parse; otherwise → registry lookup) and verifies `tx.sig` over `tx.signing_bytes()`. On failure: gossip path silently drops (a forged-sig flood from any peer cannot amplify), RPC path throws with a diagnostic so the submitting client can retry.
+
+This closure required a paired fix to `src/net/binary_codec.cpp::decode_tx_frame`: pre-fix, the decoder skipped the fixed-slot area at offsets 32–55 where the encoder writes `amount`, `fee`, and `nonce`, producing post-decode txs with zero values for these fields. The fields are now read explicitly, restoring the encode/decode round-trip property. The bug was latent because S-002's openness meant zero-field txs entered the mempool and were filtered later at apply (silent corruption). Closing S-002 surfaced the codec bug; both fix together. See `docs/proofs/S002-Mempool-Sig-Verify.md` for the full analysis trail.
+
+**Verified post-fix:** bearer (anon TRANSFER) + governance (registered-domain PARAM_CHANGE) + equivocation_slashing regressions all PASS. The legit-tx code path through both admission sites (RPC and gossip) is exercised by existing tests; a dedicated forged-sig rejection regression is a follow-on once test-side Ed25519 forge tooling is available (currently requires PyNaCl not present in the test environment, or a `determ` CLI helper for offline forged-sig construction).
+
+**Pre-fix description** (preserved for audit trail). `Node::on_tx` (`src/node/node.cpp:1353-1371`) accepted incoming transactions into `tx_store_` after only a stale-nonce check and a replace-by-fee check. **No `crypto::verify` was called** on this path. Signature verification happened only later in `BlockValidator::check_transactions` at apply time.
 
 **Impact.**
 - Mempool flood with valid-shape, invalid-signature transactions.
