@@ -15,7 +15,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.3 Trustless fast sync | ✅ shipped | state_root verified on snapshot restore |
 | v2.4 Atomic block apply (A9) | ✅ shipped | A9 Phase 1-2D + COMPOSABLE_BATCH tx |
 | v2.5 Registry cache (S-032) | ✅ shipped | Cached registry view; S-032 closed |
-| v2.6 Gossip broadcast out of lock | ⏳ outstanding | Tracked as plan.md C3; ~0.5d |
+| v2.6 Gossip broadcast out of lock | ✅ shipped | All 5 broadcast sites release unique_lock before broadcast |
 | v2.7 F2 view reconciliation | ⏳ not started | S-030 D2 closure |
 | v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
 | v2.9 Distributed VRF for committee selection | ⏳ not started | |

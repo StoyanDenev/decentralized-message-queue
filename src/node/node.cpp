@@ -2436,6 +2436,8 @@ json Node::rpc_send(const std::string& to, uint64_t amount, uint64_t fee) {
 
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
     gossip_.broadcast(net::make_transaction(tx));
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
 }
@@ -2463,6 +2465,8 @@ json Node::rpc_stake(uint64_t amount, uint64_t fee) {
 
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
     gossip_.broadcast(net::make_transaction(tx));
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}, {"locked_increment", amount}};
 }
@@ -2484,6 +2488,8 @@ json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
 
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
     gossip_.broadcast(net::make_transaction(tx));
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}, {"unlock_at", chain_.stake_unlock_height(cfg_.domain)}};
 }
@@ -2706,6 +2712,14 @@ json Node::rpc_submit_tx(const json& tx_json) {
     }
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[key] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ BEFORE the gossip
+    // broadcast. The tx is already in tx_store_ + tx_by_account_nonce_
+    // by this point — peers receiving the broadcast will gossip-replay
+    // through on_tx, which re-validates and re-inserts (idempotent
+    // under replace-by-fee). The broadcast itself is a network op that
+    // doesn't touch chain state; holding state_mutex_ across it
+    // serialized all other state operations against network latency.
+    lk.unlock();
     gossip_.broadcast(net::make_transaction(tx));
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
 }
@@ -2868,6 +2882,8 @@ json Node::rpc_register() {
 
     tx_store_[tx.hash] = tx;
     tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
     gossip_.broadcast(net::make_transaction(tx));
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
 }
