@@ -20,6 +20,17 @@ using determ::crypto::sha256;
 // to avoid a circular include.
 static constexpr uint64_t REGISTRATION_DELAY_WINDOW = 10;
 
+// S-007: portable checked u64 addition. Returns false on overflow.
+// Used at every balance/counter mutation site that could realistically
+// overflow under adversarial genesis or accumulated-fees scenarios.
+// MSVC doesn't have __builtin_add_overflow; the if-check is uniformly
+// portable and the compiler optimizes it to a single ADC/JC sequence.
+static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
+    if (a > UINT64_MAX - b) return false;
+    *out = a + b;
+    return true;
+}
+
 // Compute the randomized 1..REGISTRATION_DELAY_WINDOW delay, deterministically
 // derived from the block's cumulative_rand and the tx hash so all nodes agree
 // and the operator can't pick their own activation height.
@@ -237,7 +248,15 @@ void Chain::apply_transactions(const Block& b) {
             // outbound credit. amount + fee leave this shard's supply
             // here; fee still accrues to creators on this side.
             if (!is_cross_shard(tx.to)) {
-                accounts_[tx.to].balance += tx.amount;
+                // S-007: overflow check. Receiver's balance might already
+                // be near UINT64_MAX (long-lived deployments aggregating
+                // payouts); refuse to wrap.
+                auto& rcv = accounts_[tx.to].balance;
+                if (!checked_add_u64(rcv, tx.amount, &rcv)) {
+                    throw std::runtime_error(
+                        "S-007: TRANSFER credit would overflow recipient "
+                        "balance (to=" + tx.to + ")");
+                }
             } else {
                 // A1: amount has left this shard's accounted supply.
                 // Fee stays here (accrues to creators below).
@@ -487,14 +506,38 @@ void Chain::apply_transactions(const Block& b) {
             ? subsidy_pool_initial_ - accumulated_subsidy_ : 0;
         subsidy_this_block = std::min(base_subsidy, remaining);
     }
-    uint64_t total_distributed = total_fees + subsidy_this_block;
+    // S-007: overflow-checked addition. total_fees and subsidy_this_block
+    // are each individually bounded (fees by senders' balances, subsidy
+    // by genesis cap / pool); the sum is bounded for realistic genesis
+    // values but a fabricated genesis with adversarial block_subsidy
+    // could push it past UINT64_MAX. Hard-fail in that case rather than
+    // wrap.
+    uint64_t total_distributed = 0;
+    if (!checked_add_u64(total_fees, subsidy_this_block, &total_distributed)) {
+        throw std::runtime_error(
+            "S-007: total_distributed (fees + subsidy) overflowed u64 "
+            "(fees=" + std::to_string(total_fees)
+          + " subsidy=" + std::to_string(subsidy_this_block) + ")");
+    }
     if (total_distributed > 0 && !b.creators.empty()) {
         size_t   m           = b.creators.size();
         uint64_t per_creator = total_distributed / m;
         uint64_t remainder   = total_distributed % m;
-        for (auto& domain : b.creators)
-            accounts_[domain].balance += per_creator;
-        accounts_[b.creators[0]].balance += remainder;
+        for (auto& domain : b.creators) {
+            auto& bal = accounts_[domain].balance;
+            if (!checked_add_u64(bal, per_creator, &bal)) {
+                throw std::runtime_error(
+                    "S-007: per-creator credit would overflow creator "
+                    "balance (creator=" + domain + ")");
+            }
+        }
+        // Dust (division remainder) to creator[0]. Same overflow check.
+        auto& bal0 = accounts_[b.creators[0]].balance;
+        if (!checked_add_u64(bal0, remainder, &bal0)) {
+            throw std::runtime_error(
+                "S-007: dust credit would overflow creator[0] balance "
+                "(creator=" + b.creators[0] + ")");
+        }
     }
 
     // rev.8 suspension slashing. Each Phase-1 (round=1) AbortEvent baked
@@ -546,9 +589,20 @@ void Chain::apply_transactions(const Block& b) {
     for (auto& r : b.inbound_receipts) {
         auto key = std::make_pair(r.src_shard, r.tx_hash);
         if (applied_inbound_receipts_.count(key)) continue;
-        accounts_[r.to].balance += r.amount;
+        // S-007: overflow-checked credit on the cross-shard inbound path.
+        auto& rcv = accounts_[r.to].balance;
+        if (!checked_add_u64(rcv, r.amount, &rcv)) {
+            throw std::runtime_error(
+                "S-007: inbound receipt credit would overflow recipient "
+                "balance (to=" + r.to + ")");
+        }
         applied_inbound_receipts_.insert(key);
-        block_inbound += r.amount;     // A1
+        // block_inbound is a per-block u64 counter — also check for
+        // overflow into the per-block sum.
+        if (!checked_add_u64(block_inbound, r.amount, &block_inbound)) {
+            throw std::runtime_error(
+                "S-007: per-block inbound sum overflowed u64");
+        }
     }
 
     // A1: book the per-block deltas, then assert the unitary-balance

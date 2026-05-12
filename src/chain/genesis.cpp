@@ -115,6 +115,41 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
             "genesis: unknown subsidy_mode "
             + std::to_string(c.subsidy_mode) + " (0=FLAT, 1=LOTTERY)");
     }
+
+    // S-007: sane-bounds check on subsidy-related fields. The apply
+    // path's per-mutation overflow checks catch wrap-around but a
+    // genesis with absurdly-large block_subsidy would still throw at
+    // first apply rather than at genesis-load. Reject obviously-bogus
+    // values up-front so operators see the problem before deploying.
+    // 10^18 = 1 quintillion units; sane for any realistic denomination
+    // (even 18-decimal-place currencies have <= 10^18 native units
+    // per "unit" of value).
+    constexpr uint64_t kSaneBoundsMax = 1000000000000000000ull; // 1e18
+    if (c.block_subsidy > kSaneBoundsMax) {
+        throw std::runtime_error(
+            "genesis: block_subsidy " + std::to_string(c.block_subsidy)
+          + " exceeds sane-bounds (1e18); refusing to load. S-007.");
+    }
+    if (c.subsidy_pool_initial > kSaneBoundsMax) {
+        throw std::runtime_error(
+            "genesis: subsidy_pool_initial "
+          + std::to_string(c.subsidy_pool_initial)
+          + " exceeds sane-bounds (1e18); refusing to load. S-007.");
+    }
+    if (c.zeroth_pool_initial > kSaneBoundsMax) {
+        throw std::runtime_error(
+            "genesis: zeroth_pool_initial "
+          + std::to_string(c.zeroth_pool_initial)
+          + " exceeds sane-bounds (1e18); refusing to load. S-007.");
+    }
+    if (c.lottery_jackpot_multiplier > 0
+        && c.block_subsidy != 0
+        && c.block_subsidy > kSaneBoundsMax / c.lottery_jackpot_multiplier) {
+        throw std::runtime_error(
+            "genesis: block_subsidy * lottery_jackpot_multiplier "
+            "would overflow on jackpot block; reduce one or both. "
+            "S-007.");
+    }
     c.bft_enabled              = j.value("bft_enabled",              true);
     c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
     c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));
