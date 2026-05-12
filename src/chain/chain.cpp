@@ -333,17 +333,22 @@ uint64_t Chain::live_total_supply() const {
 }
 
 // A9 Phase 1: atomic state snapshot for rollback on apply failure.
-// Deep-copies every mutable state container + scalar. The std::map copies
-// are byte-shallow (POD values, short keys) so this is dominated by
-// allocator overhead, not data motion. <1ms per block at 10k accounts.
+// A9 Phase 2A refinement: three high-cost-per-copy containers
+// (abort_records_, merge_state_, applied_inbound_receipts_) are now
+// captured LAZILY in std::optional fields — they start nullopt and
+// are populated on the first mutation per apply via ensure-lambdas
+// inside apply_transactions. For TRANSFER-only blocks (the common
+// case), these stays nullopt and no std::set / std::map copy
+// happens at all. The remaining containers stay eager — most
+// blocks touch them and lazy-snapshot adds ensure() call overhead
+// without saving anything.
 Chain::StateSnapshot Chain::create_state_snapshot() const {
     StateSnapshot s;
     s.accounts                   = accounts_;
     s.stakes                     = stakes_;
     s.registrants                = registrants_;
-    s.abort_records              = abort_records_;
-    s.merge_state                = merge_state_;
-    s.applied_inbound_receipts   = applied_inbound_receipts_;
+    // abort_records, merge_state, applied_inbound_receipts: deferred
+    // via std::optional; captured lazily on first mutation.
     s.pending_param_changes      = pending_param_changes_;
     s.genesis_total              = genesis_total_;
     s.accumulated_subsidy        = accumulated_subsidy_;
@@ -375,9 +380,15 @@ void Chain::restore_state_snapshot(StateSnapshot&& s) {
     accounts_                   = std::move(s.accounts);
     stakes_                     = std::move(s.stakes);
     registrants_                = std::move(s.registrants);
-    abort_records_              = std::move(s.abort_records);
-    merge_state_                = std::move(s.merge_state);
-    applied_inbound_receipts_   = std::move(s.applied_inbound_receipts);
+    // A9 Phase 2A: only restore the lazy-captured containers if they
+    // were actually mutated during apply. nullopt = container was
+    // never touched, base map is already correct.
+    if (s.abort_records)
+        abort_records_          = std::move(*s.abort_records);
+    if (s.merge_state)
+        merge_state_            = std::move(*s.merge_state);
+    if (s.applied_inbound_receipts)
+        applied_inbound_receipts_ = std::move(*s.applied_inbound_receipts);
     pending_param_changes_      = std::move(s.pending_param_changes);
     genesis_total_              = s.genesis_total;
     accumulated_subsidy_        = s.accumulated_subsidy;
@@ -403,7 +414,25 @@ void Chain::apply_transactions(const Block& b) {
     // at 10k accounts). The block-vector itself is appended only after
     // apply_transactions returns successfully (see Chain::append), so
     // blocks_ atomicity is handled at the caller level.
+    //
+    // A9 Phase 2A: three high-cost containers (abort_records,
+    // merge_state, applied_inbound_receipts) are deferred — see
+    // create_state_snapshot. Each has an ensure-lambda below that
+    // captures the live container into the snapshot on first
+    // mutation. TRANSFER-only blocks bypass all three copies.
     StateSnapshot __snapshot = create_state_snapshot();
+    auto __ensure_abort_records = [&]() {
+        if (!__snapshot.abort_records)
+            __snapshot.abort_records = abort_records_;
+    };
+    auto __ensure_merge_state = [&]() {
+        if (!__snapshot.merge_state)
+            __snapshot.merge_state = merge_state_;
+    };
+    auto __ensure_applied_inbound_receipts = [&]() {
+        if (!__snapshot.applied_inbound_receipts)
+            __snapshot.applied_inbound_receipts = applied_inbound_receipts_;
+    };
     try {
     // A5 Phase 2: activate any staged governance parameter changes whose
     // effective_height <= this block's index BEFORE replaying the block.
@@ -682,11 +711,13 @@ void Chain::apply_transactions(const Block& b) {
                     MergePartnerInfo info;
                     info.partner_id     = ev->partner_id;
                     info.refugee_region = ev->merging_shard_region;
+                    __ensure_merge_state();
                     merge_state_.insert({ev->shard_id, std::move(info)});
                 } else {  // END
                     auto it = merge_state_.find(ev->shard_id);
                     if (it != merge_state_.end()
                         && it->second.partner_id == ev->partner_id) {
+                        __ensure_merge_state();
                         merge_state_.erase(it);
                     }
                 }
@@ -786,6 +817,7 @@ void Chain::apply_transactions(const Block& b) {
         if (ae.round != 1) continue;
         // S-032 cache: increment the abort accumulator for this domain.
         // build_from_chain reads this cache instead of walking history.
+        __ensure_abort_records();
         auto& ar = abort_records_[ae.aborting_node];
         ar.count++;
         ar.last_block = b.index;
@@ -838,6 +870,7 @@ void Chain::apply_transactions(const Block& b) {
                 "S-007: inbound receipt credit would overflow recipient "
                 "balance (to=" + r.to + ")");
         }
+        __ensure_applied_inbound_receipts();
         applied_inbound_receipts_.insert(key);
         // block_inbound is a per-block u64 counter — also check for
         // overflow into the per-block sum.

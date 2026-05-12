@@ -426,13 +426,23 @@ private:
     // into base; rollback = drop overlay. Enables concurrent readers
     // during apply, batched txs, and is the foundation for the
     // composable-tx primitive in v2.4.
+    // A9 Phase 2A: three containers below are std::optional — captured
+    // lazily on the first mutation per apply, not unconditionally at
+    // entry. TRANSFER-only blocks don't touch them, so their snapshots
+    // stay nullopt and the std::set / std::map copy cost is skipped.
+    // For chains accumulating millions of inbound receipts or many
+    // historical aborts, this is the dominant per-block snapshot cost;
+    // skipping it on the common path matters. The remaining 4 containers
+    // (accounts/stakes/registrants/pending_param_changes) stay eager
+    // for now — they have many mutation sites and are touched by most
+    // blocks anyway; lazy-snapshot for those is Phase 2B follow-on.
     struct StateSnapshot {
         std::map<std::string, AccountState>          accounts;
         std::map<std::string, StakeEntry>            stakes;
         std::map<std::string, RegistryEntry>         registrants;
-        std::map<std::string, AbortRecord>           abort_records;
-        MergeStateMap                                merge_state;
-        std::set<std::pair<ShardId, Hash>>           applied_inbound_receipts;
+        std::optional<std::map<std::string, AbortRecord>>   abort_records;
+        std::optional<MergeStateMap>                        merge_state;
+        std::optional<std::set<std::pair<ShardId, Hash>>>   applied_inbound_receipts;
         std::map<uint64_t,
                  std::vector<std::pair<std::string,
                                        std::vector<uint8_t>>>>
