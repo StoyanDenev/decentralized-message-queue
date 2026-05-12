@@ -1105,6 +1105,113 @@ void Chain::apply_transactions(const Block& b) {
             dapp_registry_[tx.from] = std::move(e);
             break;
         }
+        // v2.19 Theme 7 Phase 7.2: DApp message delivery. Outer tx is
+        // signed by a Determ user (registered or anon); recipient is
+        // the DApp's owning domain. Payload is opaque to chain. Apply
+        // path mirrors TRANSFER's debit/credit for tx.amount; the
+        // payload sits in the block, indexed by tx_root, consumed
+        // off-chain by DApp nodes filtering on tx.to.
+        //
+        // Defensive checks here mirror validator gates so honest
+        // replay stays consistent even if a malformed tx slipped
+        // through validation: missing/inactive DApp, unknown topic,
+        // oversized payload all silently no-op (charge fee, advance
+        // nonce, skip credit). A well-formed tx that fails ONLY
+        // because the sender lacks balance ALSO no-ops the credit
+        // (same behavior as TRANSFER's `if (sender.balance < cost)
+        // continue;` line).
+        case TxType::DAPP_CALL: {
+            // Look up DApp; reject if missing or inactive.
+            auto dit = dapp_registry_.find(tx.to);
+            if (dit == dapp_registry_.end()) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            const DAppEntry& dapp = dit->second;
+            if (dapp.inactive_from <= height) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            // Decode payload for topic check (chain validates the
+            // routing tag but doesn't interpret the ciphertext).
+            std::string topic;
+            if (tx.payload.size() < 1) {
+                // Truly empty payload — defensive no-op
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            uint8_t tl = tx.payload[0];
+            if (1 + size_t(tl) > tx.payload.size()) {
+                // Malformed: topic_len overruns
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            topic.assign(
+                reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
+            // Topic must be empty or in DApp's registered topics.
+            if (!topic.empty()) {
+                bool found = false;
+                for (auto& t : dapp.topics) {
+                    if (t == topic) { found = true; break; }
+                }
+                if (!found) {
+                    if (!charge_fee(sender, tx.fee)) continue;
+                    sender.next_nonce++;
+                    break;
+                }
+            }
+            // ciphertext_len + bounds check (we don't decrypt; just
+            // verify the framing is well-formed before counting
+            // payload-size budget).
+            size_t p = 1 + size_t(tl);
+            if (p + 4 > tx.payload.size()) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            uint32_t ct_len = uint32_t(tx.payload[p])
+                            | (uint32_t(tx.payload[p + 1]) << 8)
+                            | (uint32_t(tx.payload[p + 2]) << 16)
+                            | (uint32_t(tx.payload[p + 3]) << 24);
+            p += 4;
+            if (ct_len > MAX_DAPP_CALL_PAYLOAD) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            if (p + ct_len != tx.payload.size()) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            // v2.19 single-shard only: cross-shard DAPP_CALL is
+            // Phase 7.6 follow-on (requires beacon-relay extension
+            // to carry payload bytes across shards). Reject here so
+            // honest mempool never carries cross-shard DAPP_CALL.
+            if (is_cross_shard(tx.to)) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            // All structural checks pass — apply the debit/credit/
+            // nonce. Same semantics as TRANSFER's same-shard leg.
+            uint64_t cost = tx.amount + tx.fee;
+            if (sender.balance < cost) continue;  // skip whole tx
+            sender.balance -= cost;
+            auto& rcv = accounts_[tx.to].balance;
+            if (!checked_add_u64(rcv, tx.amount, &rcv)) {
+                throw std::runtime_error(
+                    "S-007: DAPP_CALL credit would overflow recipient "
+                    "balance (to=" + tx.to + ")");
+            }
+            total_fees += tx.fee;
+            sender.next_nonce++;
+            break;
+        }
         // rev.9 R1: REGION_CHANGE is rejected by the validator; an
         // unrecognized type at apply is a defensive no-op (skip the
         // tx, do not touch state, do not advance nonce — this matches

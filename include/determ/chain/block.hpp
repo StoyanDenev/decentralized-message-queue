@@ -136,6 +136,48 @@ enum class TxType : uint8_t {
     // a "d:" namespace leaf to state_root (analogous to "r:" for
     // registrants).
     DAPP_REGISTER  = 9,
+    // v2.19 (Theme 7 Phase 7.2): authenticated message to a registered
+    // DApp. tx.to is the DApp's owning domain; tx.amount is an optional
+    // payment that credits the DApp's account (same model as TRANSFER's
+    // credit leg). The payload carries the actual application message,
+    // opaque to the chain — typically encrypted to the DApp's
+    // service_pubkey via libsodium sealed-box.
+    //
+    // Block-level ordering is canonical message ordering for the DApp.
+    // Two DApp validator-nodes monitoring the chain see the same
+    // sequence; each filters by tx.to == own_dapp_domain.
+    //
+    // Payload encoding (canonical, LE where noted):
+    //   [topic_len: u8]
+    //   [topic: utf8]               # routing tag; must be "" or in
+    //                               # DApp's registered topics
+    //   [ciphertext_len: u32 LE]
+    //   [ciphertext: bytes]         # opaque to chain; size cap
+    //                               # MAX_DAPP_CALL_PAYLOAD
+    //
+    // Validator constraints (v2.19):
+    //   - tx.to must be a currently-active DApp in dapp_registry_
+    //   - topic must be "" or in DApp.topics
+    //   - ciphertext_len matches remaining payload bytes
+    //   - Total payload size <= MAX_DAPP_CALL_PAYLOAD
+    //   - tx.to NOT cross-shard (cross-shard DAPP_CALL is Phase 7.6,
+    //     requires beacon-relay extension to carry payload bytes
+    //     across shards; v2.19 ships single-shard only)
+    //
+    // Apply semantics:
+    //   - Charge tx.fee from sender (paid to validators like any tx)
+    //   - Debit sender by tx.amount, credit DApp by tx.amount
+    //     (S-007 overflow-checked on the credit leg)
+    //   - Advance sender's nonce
+    //   - Payload itself: NO state mutation. The message is just
+    //     recorded in the block stream, tx_root commits to it, and
+    //     DApp nodes filter the chain for it.
+    //
+    // Off-chain consumption: a DApp node reads finalized blocks (via
+    // RPC subscription or chain replay), filters DAPP_CALL where
+    // tx.to == own_domain, decrypts the payload with its
+    // service_pubkey, and dispatches to internal handlers.
+    DAPP_CALL      = 10,
 };
 
 // v2.4 cap on inner-tx count per batch. 64 is generous for the use
@@ -151,6 +193,14 @@ inline constexpr uint8_t  MAX_DAPP_TOPIC_LEN      = 64;
 inline constexpr uint8_t  MAX_DAPP_ENDPOINT_LEN   = 255;
 inline constexpr uint16_t MAX_DAPP_METADATA       = 4096;  // 4 KB
 inline constexpr uint64_t DAPP_GRACE_BLOCKS       = 100;
+
+// v2.19 DAPP_CALL payload cap. 16 KB is generous for typical messages
+// (signed JSON commands, small encrypted blobs) without exposing the
+// chain to memory pressure from gigantic payloads. Larger DApp data
+// should use the off-chain-pointer pattern (carry hash + URL in the
+// ciphertext, fetch payload off-chain). Genesis-pinned; can be
+// PARAM_CHANGE-promoted if the ecosystem demands it.
+inline constexpr uint32_t MAX_DAPP_CALL_PAYLOAD   = 16384; // 16 KB
 
 struct Transaction {
     TxType               type{TxType::TRANSFER};

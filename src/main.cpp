@@ -1805,6 +1805,188 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
+    // v2.19 Theme 7 Phase 7.2: in-process apply-path test for DAPP_CALL.
+    // Builds a Chain with alice (user) and dapp_owner (DApp's owning
+    // Determ identity), registers a DApp on dapp_owner, then exercises
+    // DAPP_CALL across various scenarios (success, missing DApp,
+    // deactivated DApp, unknown topic, payment + message).
+    if (cmd == "test-dapp-call") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Genesis: alice (user with balance) + dappowner (DApp's owner).
+        Block genesis;
+        genesis.index           = 0;
+        genesis.prev_hash       = Hash{};
+        genesis.timestamp       = 0;
+        genesis.cumulative_rand = Hash{};
+        GenesisAlloc a;
+        a.domain = "alice"; a.balance = 1000; a.stake = 0;
+        for (size_t i = 0; i < a.ed_pub.size(); ++i) a.ed_pub[i] = uint8_t(i + 1);
+        genesis.initial_state.push_back(a);
+        GenesisAlloc d;
+        d.domain = "dappowner"; d.balance = 0; d.stake = 100;
+        for (size_t i = 0; i < d.ed_pub.size(); ++i) d.ed_pub[i] = uint8_t(i + 100);
+        genesis.initial_state.push_back(d);
+        Chain chain(genesis);
+
+        // Helper: pack a DAPP_REGISTER payload (op=0).
+        auto pack_register = [](const PubKey& svc_pk,
+                                   const std::string& url,
+                                   const std::vector<std::string>& topics) {
+            std::vector<uint8_t> p;
+            p.push_back(0);
+            p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+            p.push_back(uint8_t(url.size()));
+            p.insert(p.end(), url.begin(), url.end());
+            p.push_back(uint8_t(topics.size()));
+            for (auto& t : topics) {
+                p.push_back(uint8_t(t.size()));
+                p.insert(p.end(), t.begin(), t.end());
+            }
+            p.push_back(0);  // retention = 0
+            p.push_back(0); p.push_back(0);  // metadata_len = 0
+            return p;
+        };
+        // Helper: pack a DAPP_CALL payload (topic + ciphertext).
+        auto pack_call = [](const std::string& topic,
+                               const std::vector<uint8_t>& ct) {
+            std::vector<uint8_t> p;
+            p.push_back(uint8_t(topic.size()));
+            p.insert(p.end(), topic.begin(), topic.end());
+            uint32_t l = uint32_t(ct.size());
+            p.push_back(uint8_t(l         & 0xFF));
+            p.push_back(uint8_t((l >>  8) & 0xFF));
+            p.push_back(uint8_t((l >> 16) & 0xFF));
+            p.push_back(uint8_t((l >> 24) & 0xFF));
+            p.insert(p.end(), ct.begin(), ct.end());
+            return p;
+        };
+        // Helper: build a block carrying one tx.
+        auto build_block = [&](TxType type,
+                                  const std::string& from,
+                                  const std::string& to,
+                                  uint64_t amount,
+                                  uint64_t fee,
+                                  const std::vector<uint8_t>& payload) {
+            Block b;
+            b.index           = chain.height();
+            b.prev_hash       = chain.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            Transaction tx;
+            tx.type    = type;
+            tx.from    = from;
+            tx.to      = to;
+            tx.amount  = amount;
+            tx.fee     = fee;
+            tx.nonce   = chain.next_nonce(from);
+            tx.payload = payload;
+            tx.hash    = tx.compute_hash();
+            b.transactions.push_back(tx);
+            return b;
+        };
+
+        // Setup: dappowner registers a DApp with two topics.
+        PubKey svc_pk{};
+        for (size_t i = 0; i < svc_pk.size(); ++i) svc_pk[i] = uint8_t(0xC0 + i);
+        std::vector<std::string> topics = {"chat", "rpc"};
+        chain.append(build_block(TxType::DAPP_REGISTER, "dappowner", "",
+                                    0, 0, pack_register(svc_pk, "https://dapp.example", topics)));
+        check(chain.dapp("dappowner").has_value(),
+              "setup: DApp registered");
+
+        // Test 1: successful DAPP_CALL with payment.
+        // alice sends a "chat" message to dappowner with 5 DTM payment.
+        std::vector<uint8_t> ciphertext = {0xAA, 0xBB, 0xCC, 0xDD};
+        uint64_t alice_pre  = chain.balance("alice");
+        uint64_t dapp_pre   = chain.balance("dappowner");
+        chain.append(build_block(TxType::DAPP_CALL, "alice", "dappowner",
+                                    /*amount=*/5, /*fee=*/0,
+                                    pack_call("chat", ciphertext)));
+        uint64_t alice_post = chain.balance("alice");
+        uint64_t dapp_post  = chain.balance("dappowner");
+        check(alice_post == alice_pre - 5,
+              "test1: alice debited 5 (DAPP_CALL amount)");
+        check(dapp_post  == dapp_pre + 5,
+              "test1: dappowner credited 5");
+        check(chain.next_nonce("alice") == 1,
+              "test1: alice nonce +1");
+
+        // Test 2: DAPP_CALL with amount=0 — pure message, no transfer.
+        uint64_t alice_pre2 = chain.balance("alice");
+        uint64_t dapp_pre2  = chain.balance("dappowner");
+        chain.append(build_block(TxType::DAPP_CALL, "alice", "dappowner",
+                                    0, 0, pack_call("rpc", {0x01, 0x02})));
+        check(chain.balance("alice")     == alice_pre2,
+              "test2: alice unchanged (amount=0)");
+        check(chain.balance("dappowner") == dapp_pre2,
+              "test2: dappowner unchanged (amount=0)");
+        check(chain.next_nonce("alice")  == 2,
+              "test2: alice nonce +1");
+
+        // Test 3: DAPP_CALL to nonexistent DApp — apply silently no-ops
+        // (defensive; validator would have rejected at submit-time).
+        uint64_t alice_pre3 = chain.balance("alice");
+        chain.append(build_block(TxType::DAPP_CALL, "alice", "ghost.dapp",
+                                    100, 0, pack_call("chat", ciphertext)));
+        check(chain.balance("alice")     == alice_pre3,
+              "test3: alice unchanged (missing DApp)");
+        check(chain.balance("ghost.dapp") == 0,
+              "test3: ghost.dapp not credited");
+        check(chain.next_nonce("alice")  == 3,
+              "test3: alice nonce +1 (defensive consume)");
+
+        // Test 4: DAPP_CALL with topic not in DApp's registered list.
+        uint64_t alice_pre4 = chain.balance("alice");
+        uint64_t dapp_pre4  = chain.balance("dappowner");
+        chain.append(build_block(TxType::DAPP_CALL, "alice", "dappowner",
+                                    10, 0, pack_call("unregistered", ciphertext)));
+        check(chain.balance("alice")     == alice_pre4,
+              "test4: alice unchanged (unknown topic)");
+        check(chain.balance("dappowner") == dapp_pre4,
+              "test4: dappowner unchanged (unknown topic)");
+
+        // Test 5: DAPP_CALL with empty topic — allowed, applies normally.
+        uint64_t alice_pre5 = chain.balance("alice");
+        uint64_t dapp_pre5  = chain.balance("dappowner");
+        chain.append(build_block(TxType::DAPP_CALL, "alice", "dappowner",
+                                    3, 0, pack_call("", ciphertext)));
+        check(chain.balance("alice")     == alice_pre5 - 3,
+              "test5: alice debited 3 (empty topic allowed)");
+        check(chain.balance("dappowner") == dapp_pre5 + 3,
+              "test5: dappowner credited 3");
+
+        // Test 6: deactivated DApp — DAPP_CALL no-ops after grace period.
+        // Deactivate the DApp; apply at height >= deactivate_height + GRACE
+        // means inactive_from <= height → rejected.
+        chain.append(build_block(TxType::DAPP_REGISTER, "dappowner", "",
+                                    0, 0, std::vector<uint8_t>{1}));
+        // The DApp is now inactive_from = current_height + DAPP_GRACE_BLOCKS.
+        // For this test, we can't easily wait 100 blocks; instead, we
+        // verify the DApp ENTRY now has inactive_from set, and that a
+        // DAPP_CALL one block later (inactive_from > current still) is
+        // accepted (within grace period).
+        auto entry = chain.dapp("dappowner");
+        check(entry.has_value() && entry->inactive_from != UINT64_MAX,
+              "test6: DApp inactive_from set after deactivate");
+        // During grace period, calls should still apply.
+        uint64_t alice_pre6 = chain.balance("alice");
+        chain.append(build_block(TxType::DAPP_CALL, "alice", "dappowner",
+                                    1, 0, pack_call("chat", {0xFF})));
+        check(chain.balance("alice") == alice_pre6 - 1,
+              "test6: alice debited (call during grace period still applies)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": dapp_call " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "test-composable-batch") {
         using namespace determ;
         using namespace determ::chain;

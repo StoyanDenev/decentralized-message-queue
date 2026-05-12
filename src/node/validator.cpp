@@ -861,6 +861,76 @@ BlockValidator::Result BlockValidator::check_transactions(
             }
             break;
         }
+        // v2.19 Theme 7 Phase 7.2: DApp message shape check. Apply path
+        // performs debit/credit + nonce advance; validator's job is to
+        // reject malformed/wrong-recipient/unknown-topic at submit-time
+        // so mempool never carries them.
+        case TxType::DAPP_CALL: {
+            // Recipient must be a currently-active DApp.
+            auto d_opt = chain.dapp(tx.to);
+            if (!d_opt) {
+                return {false, "DAPP_CALL recipient not in DApp registry: "
+                             + tx.to};
+            }
+            // Block-relative active check: validator runs on the
+            // soon-to-be-applied block; b.index is the would-be height.
+            if (d_opt->inactive_from <= b.index) {
+                return {false, "DAPP_CALL recipient DApp is deactivated: "
+                             + tx.to};
+            }
+            // v2.19 single-shard only.
+            if (chain.is_cross_shard(tx.to)) {
+                return {false, "DAPP_CALL cross-shard not supported in "
+                               "v2.19 (deferred to Phase 7.6); recipient "
+                               "must be on this shard"};
+            }
+            // Payload framing: [topic_len:u8][topic][ct_len:u32 LE][ct]
+            if (tx.payload.size() < 5) {
+                return {false, "DAPP_CALL payload too short (need at "
+                               "least 5 bytes for framing)"};
+            }
+            uint8_t tl = tx.payload[0];
+            if (tl > MAX_DAPP_TOPIC_LEN) {
+                return {false, "DAPP_CALL topic_len exceeds "
+                             + std::to_string(MAX_DAPP_TOPIC_LEN)};
+            }
+            if (size_t(1) + tl + 4 > tx.payload.size()) {
+                return {false, "DAPP_CALL payload truncated (topic + "
+                               "ct_len header)"};
+            }
+            std::string topic(
+                reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
+            if (!topic.empty()) {
+                // Topic must be in the DApp's registered topics.
+                bool found = false;
+                for (auto& t : d_opt->topics) {
+                    if (t == topic) { found = true; break; }
+                }
+                if (!found) {
+                    return {false, "DAPP_CALL topic not registered with "
+                                   "recipient DApp: " + topic};
+                }
+            }
+            size_t p = 1 + size_t(tl);
+            uint32_t ct_len = uint32_t(tx.payload[p])
+                            | (uint32_t(tx.payload[p + 1]) << 8)
+                            | (uint32_t(tx.payload[p + 2]) << 16)
+                            | (uint32_t(tx.payload[p + 3]) << 24);
+            p += 4;
+            if (ct_len > MAX_DAPP_CALL_PAYLOAD) {
+                return {false, "DAPP_CALL ciphertext exceeds "
+                             + std::to_string(MAX_DAPP_CALL_PAYLOAD)
+                             + " bytes"};
+            }
+            if (p + ct_len != tx.payload.size()) {
+                return {false, "DAPP_CALL payload size mismatch "
+                               "(ct_len declares "
+                             + std::to_string(ct_len)
+                             + ", actual remaining "
+                             + std::to_string(tx.payload.size() - p) + ")"};
+            }
+            break;
+        }
         case TxType::COMPOSABLE_BATCH: {
             // v2.4: validate the batch envelope + each inner tx's shape
             // and signature. Constraints:
