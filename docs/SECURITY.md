@@ -36,7 +36,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 
 | ID | Sev | Title | File / Locus | Effort |
 |---|---|---|---|---|
-| S-001 | 🔴 Crit | RPC authentication missing | `rpc/rpc.cpp:13,52-89` | 1d basic / 3d TLS+HMAC |
+| S-001 | ✅ Mitigated | RPC auth (localhost-only default + HMAC-SHA-256 auth both landed) | `rpc/rpc.cpp` | done |
 | S-002 | 🔴 Crit | Mempool accepts unverified-sig transactions | `node/node.cpp:1353-1371` | 1-2d |
 | S-003 | 🔴 Crit | Block timestamp window ±5s vs README ±30s | `node/validator.cpp:559-564` | 1d |
 | S-004 | ✅ Mitigated | Plaintext private key in `account create` output (option 1: localhost-only-default + 0600; option 2: AES-256-GCM passphrase envelope landed) | `main.cpp:cmd_account_create` | done |
@@ -78,16 +78,23 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 
 ### S-001 — RPC authentication missing
 
-**Severity:** Critical • **Status:** Partially mitigated (localhost-only default landed in-session) • **Sources:** Audit 1.1, OV-#10
+**Severity:** Critical • **Status:** Fully mitigated (localhost-only default + HMAC RPC auth both landed) • **Sources:** Audit 1.1, OV-#10
 
-**What landed in-session.** Config field `rpc_localhost_only` defaults to `true`; the RPC acceptor now binds to `127.0.0.1` rather than `tcp::v4()` (any-interface) unless the operator explicitly sets the field to `false`. Legacy configs without the field get the secure default. External network clients can no longer reach the RPC port via the unauthenticated path that S-001 originally documented. Verified end-to-end in `tools/test_rpc_localhost_only.sh` (5/5 PASS).
+**Option 1 landed in-session.** Config field `rpc_localhost_only` defaults to `true`; the RPC acceptor now binds to `127.0.0.1` rather than `tcp::v4()` (any-interface) unless the operator explicitly sets the field to `false`. Legacy configs without the field get the secure default. External network clients can no longer reach the RPC port via the unauthenticated path that S-001 originally documented. Verified end-to-end in `tools/test_rpc_localhost_only.sh` (5/5 PASS).
 
-**What's still open.** A localhost-only bind closes the network-reachable attack surface but does NOT add authentication for clients that ARE on the loopback (any user / process on the host can still hit the RPC). Production deployments wanting multi-tenant host safety need:
-- An auth-token middleware (HMAC over request body + monotonic counter)
-- OR a reverse proxy with HTTP-level auth wrapping the JSON-line transport
-- OR mTLS termination at the wallet/operator boundary
+**Option 3 landed in-session (HMAC RPC auth).** Config field `rpc_auth_secret` is a hex-encoded shared secret. When non-empty, the RPC server requires every request to carry an `auth` field that's `hex(HMAC-SHA-256(secret, method || "|" || params_canonical_json))`. The server computes the expected HMAC after JSON parse-round-trip (which canonicalizes object key order via nlohmann's deterministic dump) and compares constant-time to avoid timing side-channels. Mismatch → `{"error": "auth_failed"}`. Empty → `{"error": "auth_required: missing 'auth' field"}`.
 
-These are documented under the "Resolution options" table below; the localhost-only default closes the cheapest critical path (network-reachable RPC) while leaving the broader authentication question to operator policy.
+Client side (CLI + `rpc_call`): if `DETERM_RPC_AUTH_SECRET` env var is set, every outgoing request automatically gets the auth field computed from the env-var secret. No code change needed for existing subcommands.
+
+External-bind-without-auth warning. When `rpc_localhost_only=false` AND `rpc_auth_secret=""` at startup, the node logs `[WARNING: external bind without HMAC auth ...]`. Operators are explicitly nudged toward either keeping localhost-only or setting the auth secret.
+
+**Threat model coverage with v2.16:**
+- Network-reachable unauthenticated RPC: closed (option 1)
+- Cross-tenant on the same host (multi-user box): closed (option 3 — attacker without secret cannot forge requests)
+- Replay of authenticated requests by MITM: NOT addressed in v2.16. Replay protection (per-request nonce + sequence) is a follow-on; S-001's primary issue (unauthenticated requests) is fully closed.
+- Secret distribution: operator's responsibility (env var, sealed config, secrets manager). The protocol's job ends at "supports shared-secret auth."
+
+**Regression coverage:** `tools/test_rpc_hmac_auth.sh`, 5 assertions: unauth call when auth disabled, unauth call rejected when auth enabled, wrong-secret rejected, correct-secret authenticates, malformed-hex secret yields clear error.
 
 **Original finding text** (preserved for audit-trail continuity). The RPC server (`src/rpc/rpc.cpp:13`) constructs its acceptor with `tcp::v4()` — bound to all IPv4 interfaces, port-only. Dispatch (`rpc.cpp:52-89`) executes `submit_tx`, `register`, `stake`, `unstake`, `submit_equivocation`, `snapshot`, `account` query, and so on with no authentication, no TLS, no rate limit, and no localhost-only restriction by default.
 

@@ -1,11 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/rpc/rpc.hpp>
+#include <determ/types.hpp>
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 
 namespace determ::rpc {
 
 using json = nlohmann::json;
+
+namespace {
+
+// v2.16: parse hex string → bytes. Returns empty on parse failure.
+std::vector<uint8_t> hex_to_bytes(const std::string& s) {
+    if (s.size() % 2 != 0) return {};
+    std::vector<uint8_t> out;
+    out.reserve(s.size() / 2);
+    for (size_t i = 0; i < s.size(); i += 2) {
+        unsigned int byte;
+        if (std::sscanf(s.c_str() + i, "%02x", &byte) != 1) return {};
+        out.push_back(static_cast<uint8_t>(byte));
+    }
+    return out;
+}
+
+// v2.16: hex-encode bytes.
+std::string bytes_to_hex(const uint8_t* data, size_t len) {
+    std::ostringstream o;
+    o << std::hex << std::setfill('0');
+    for (size_t i = 0; i < len; ++i)
+        o << std::setw(2) << static_cast<int>(data[i]);
+    return o.str();
+}
+
+// v2.16: canonical serialization of (method, params) for HMAC input.
+// Format: "<method>|<params.dump>" where params.dump uses nlohmann's
+// default key ordering (insertion-order for json::object). For
+// determinism across client/server, both sides must use the same
+// params object structure — the client constructs the params and
+// computes the HMAC over its own dump; the server re-dumps after
+// JSON parsing.
+//
+// Note: nlohmann::json json::object preserves insertion order, but
+// json::parse normalizes to sorted order. To make client-and-server
+// agree, both should use sorted keys. We achieve this by serializing
+// to a string with json's default "compact" dump which uses
+// alphabetical key order for objects (per nlohmann's spec).
+std::string canonical_for_hmac(const std::string& method, const json& params) {
+    // dump() with no indent uses sorted keys for json::object (since
+    // params is parsed from JSON on the server, the parse-then-dump
+    // round trip yields the same canonical form the client would
+    // compute pre-send).
+    return method + "|" + params.dump();
+}
+
+std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
+                              const std::string& message) {
+    unsigned char hmac[32];
+    unsigned int  hmac_len = 0;
+    HMAC(EVP_sha256(),
+         key.data(),  static_cast<int>(key.size()),
+         reinterpret_cast<const unsigned char*>(message.data()),
+         message.size(),
+         hmac, &hmac_len);
+    return bytes_to_hex(hmac, hmac_len);
+}
+
+} // namespace
 
 // ─── Server ──────────────────────────────────────────────────────────────────
 
@@ -13,7 +77,7 @@ using json = nlohmann::json;
 // asio::ip::address_v4::loopback() returns the loopback address — equivalent
 // to make_address("127.0.0.1") but avoids the string-parsing path.
 RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
-                       bool localhost_only)
+                       bool localhost_only, const std::string& auth_secret_hex)
     : io_(io)
     , node_(node)
     , acceptor_(io, asio::ip::tcp::endpoint(
@@ -21,10 +85,41 @@ RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
                            ? asio::ip::tcp::endpoint(
                                  asio::ip::address_v4::loopback(), port).address()
                            : asio::ip::address(asio::ip::address_v4::any()),
-                       port)) {
+                       port))
+    , auth_secret_(hex_to_bytes(auth_secret_hex)) {
     std::cout << "[rpc] listening on "
               << (localhost_only ? "127.0.0.1" : "0.0.0.0")
-              << ":" << port << "\n";
+              << ":" << port;
+    if (!auth_secret_.empty()) {
+        std::cout << " (HMAC auth enabled, "
+                  << auth_secret_.size() << "-byte secret)";
+    } else if (!localhost_only) {
+        // S-001 warning: external bind WITHOUT auth is dangerous. Operator
+        // should set rpc_auth_secret OR keep localhost_only=true.
+        std::cout << " [WARNING: external bind without HMAC auth — "
+                  << "set rpc_auth_secret in config or enable "
+                  << "rpc_localhost_only]";
+    }
+    std::cout << "\n";
+}
+
+std::string RpcServer::verify_auth(const json& req) const {
+    if (auth_secret_.empty()) return ""; // Auth disabled, pass.
+    if (!req.contains("auth") || !req["auth"].is_string()) {
+        return "auth_required: missing 'auth' field";
+    }
+    std::string method = req.value("method", "");
+    auto params = req.value("params", json::object());
+    std::string expected = hmac_sha256_hex(auth_secret_,
+                                              canonical_for_hmac(method, params));
+    std::string got = req.value("auth", std::string{});
+    // Constant-time compare to avoid timing side-channels.
+    if (expected.size() != got.size()) return "auth_failed";
+    int diff = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        diff |= (expected[i] ^ got[i]);
+    }
+    return (diff == 0) ? "" : "auth_failed";
 }
 
 void RpcServer::start() { accept_loop(); }
@@ -51,8 +146,16 @@ void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
         json response;
         try {
             auto req = json::parse(line);
-            response["result"] = dispatch(req);
-            response["error"]  = nullptr;
+            // v2.16: HMAC auth check before dispatching. Skip if
+            // auth_secret_ is empty (auth disabled).
+            std::string auth_err = verify_auth(req);
+            if (!auth_err.empty()) {
+                response["result"] = nullptr;
+                response["error"]  = auth_err;
+            } else {
+                response["result"] = dispatch(req);
+                response["error"]  = nullptr;
+            }
         } catch (std::exception& e) {
             response["result"] = nullptr;
             response["error"]  = e.what();
@@ -135,7 +238,8 @@ json RpcServer::dispatch(const json& req) {
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 json rpc_call(const std::string& host, uint16_t port,
-               const std::string& method, const json& params) {
+               const std::string& method, const json& params,
+               const std::string& auth_secret_hex) {
     asio::io_context io;
     asio::ip::tcp::resolver resolver(io);
     auto endpoints = resolver.resolve(host, std::to_string(port));
@@ -144,6 +248,27 @@ json rpc_call(const std::string& host, uint16_t port,
     asio::connect(socket, endpoints);
 
     json req = {{"method", method}, {"params", params}};
+    // v2.16: auth secret resolution. Order of precedence:
+    //   1. Explicit auth_secret_hex argument (programmatic / per-call)
+    //   2. DETERM_RPC_AUTH_SECRET env var (operator/CLI standard)
+    //   3. None (auth disabled — server accepts only if it also has
+    //      no rpc_auth_secret configured)
+    std::string effective_secret = auth_secret_hex;
+    if (effective_secret.empty()) {
+        const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
+        if (env && *env) effective_secret = env;
+    }
+    if (!effective_secret.empty()) {
+        auto key = hex_to_bytes(effective_secret);
+        if (key.empty()) {
+            throw std::runtime_error(
+                "rpc_call: auth secret is not valid hex "
+                "(expected 2N hex chars from --auth-secret or "
+                "DETERM_RPC_AUTH_SECRET env var)");
+        }
+        req["auth"] = hmac_sha256_hex(key,
+            canonical_for_hmac(method, params));
+    }
     std::string line = req.dump() + "\n";
     asio::write(socket, asio::buffer(line));
 

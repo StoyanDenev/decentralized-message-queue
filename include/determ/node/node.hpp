@@ -30,6 +30,28 @@ struct Config {
     // interfaces. The unauthenticated all-interfaces default that
     // S-001 documented is no longer reachable through config silence.
     bool                     rpc_localhost_only{true};
+    // v2.16 / S-001 full closure: HMAC-SHA-256 RPC authentication.
+    // Hex-encoded shared secret. Empty (default) = auth disabled (only
+    // localhost-only enforcement). Non-empty = every RPC request MUST
+    // include an `auth` field that's hex(HMAC-SHA-256(secret,
+    // method || "|" || params_canonical_json)). Server rejects with
+    // {"error": "auth_failed"} otherwise.
+    //
+    // Threat model: closes the unauthenticated-RPC attack surface
+    // (S-001) when localhost_only is false. With auth enabled,
+    // network-reachable RPC requires possession of the shared secret;
+    // without the secret, an attacker cannot forge requests.
+    //
+    // Replay protection: NOT included in v2.16. An MITM that captures
+    // an authenticated request can replay it. Adding a per-request
+    // nonce (timestamp + sequence) is a follow-on; the v2.16 ship
+    // closes S-001's primary issue (unauthenticated requests) but
+    // leaves replay as a documented separate concern.
+    //
+    // Recommended generation: 32 random bytes hex-encoded
+    // (`openssl rand -hex 32`). Share with operators via secure
+    // channel (env var, secrets manager, sealed config).
+    std::string              rpc_auth_secret{};
     std::vector<std::string> bootstrap_peers;
     // rev.9 B2c.5c: cross-chain peer addresses. Populated when this node
     // wants to participate in cross-chain coordination — typically a

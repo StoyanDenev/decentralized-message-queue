@@ -4,7 +4,7 @@ This document scopes the v2 design changes that would make Determ a complete "ev
 
 The intent is not "Ethereum but better" — Determ stays in its lane: a payment + identity chain, no contract VM, no smart-contract execution layer. v2 makes that lane self-sufficient at any scale rather than expanding it.
 
-**Status:** design space only. No code in this document. Each section names the change, its motivation, the implementation sketch, the cost estimate, and which existing v1.x open finding(s) it closes.
+**Status:** design + partial implementation. Document captures the design space; multiple themes (v2.1, v2.2, v2.3, v2.4, v2.5, v2.16, v2.17, v2.18, v2.19) have shipping code in tree — check `git log --oneline | grep v2\\.` for the current shipped-items list. Each section names the change, its motivation, the implementation sketch, the cost estimate, and which existing v1.x open finding(s) it closes; design and code may have diverged for items currently shipping.
 
 ---
 
