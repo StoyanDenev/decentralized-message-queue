@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open | **3** (1 partially mitigated, 2 unchanged) | **4** | **4** | **10** | **21** |
-| Mitigated since rev.7 / in-session | — | — | — | — | **21** + 2 partial |
+| Open | **3** (2 partially mitigated, 1 unchanged) | **3** | **4** | **10** | **20** |
+| Mitigated since rev.7 / in-session | — | — | — | — | **22** + 2 partial |
 | v2 protocol-evolution | — | — | — | — | **0** |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** |
 
@@ -47,7 +47,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-009 | ✅ Closed | Constant-T / SHA-256 ASIC fallacy — replaced by commit-reveal (commit `14bf3d6`); delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-010 | 🟠 High | Sybil via under-priced MIN_STAKE | `chain/params.hpp` | docs / DOMAIN_INCLUSION |
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
-| S-012 | 🟠 High | Snapshot bootstrap is "trust the source" | `chain/chain.cpp::restore_from_snapshot` | 50 LOC now / v2 root |
+| S-012 | ✅ Mitigated | Snapshot bootstrap state_root verification landed (S-033 Merkle root in Block + snapshot-side check) | `chain/chain.cpp::restore_from_snapshot` | done |
 | S-013 | 🟡 Med | BlockSigMsg buffer flood OOM | `net/gossip.cpp` (buffered_block_sigs_) | ~20 LOC |
 | S-014 | 🟡 Med | No rate limiting on gossip + RPC | `net/gossip.cpp`, `rpc/rpc.cpp` | ~50 LOC + per-IP buckets |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
@@ -425,11 +425,22 @@ S-005 (`delay_T` not in genesis) is moot under this resolution. S-019 (Phase-2 t
 
 ### S-012 — Snapshot bootstrap is "trust the source"
 
-**Severity:** High (trust boundary, not chain-break) • **Status:** Open • **Sources:** OV-#6 (rev.9 addition)
+**Severity:** High (trust boundary, not chain-break) • **Status:** Mitigated in-session (Option 3 landed: state_root in Block + snapshot-side verification against tail head's state_root) • **Sources:** OV-#6 (rev.9 addition)
 
-**What's open.** B6.basic restores state directly from a snapshot file with one sanity check (recomputed `head_hash` must match the snapshot's claimed value). The `accounts`/`stakes`/`registrants` maps aren't cryptographically tied to the head — the receiver trusts the donor's serialization. A malicious donor could ship a snapshot where Alice has 10× her real balance.
+**Mitigation landed in-session.** Closes Option 3 from the resolution table below. The full chain of cryptographic ties is now in place:
+1. Each block carries a `state_root` field — a SHA-256 Merkle root over the canonical state at apply time. Producer auto-populates via dry-run apply; validators verify on apply (S-033).
+2. Snapshots include the chain's tail block headers, which carry their stored `state_root` field.
+3. `Chain::restore_from_snapshot` now computes `compute_state_root()` over the loaded `accounts`/`stakes`/`registrants`/etc., and compares it to the tail head block's stored `state_root`. Mismatch throws `std::runtime_error` and refuses the restore.
 
-**Detection is fast** — first applied block diverges. But the receiver's first-block window is unprotected.
+A malicious donor who tampers with any account balance now produces a Merkle root mismatch caught locally at restore time. The receiver does not need to fetch peer blocks to detect tampering. The committee-signed `block_hash` already covers `state_root`, so the supplier cannot manufacture a self-consistent forgery (changing state shifts state_root, which shifts block_hash, which invalidates the committee signatures embedded in the snapshot's tail headers).
+
+Pre-S-033 chains carry zero `state_root` in their headers; verification is skipped on those for backward compatibility. A snapshot built from a post-S-033 producer (the active code path) is always verified.
+
+**Verified post-fix:** `test_snapshot_bootstrap.sh` PASSES (receiver bootstraps from snapshot alone, donors stopped, head_hash + state_root both verified, no genesis required).
+
+**Pre-fix description** (preserved for audit trail). B6.basic restores state directly from a snapshot file with one sanity check (recomputed `head_hash` must match the snapshot's claimed value). The `accounts`/`stakes`/`registrants` maps aren't cryptographically tied to the head — the receiver trusts the donor's serialization. A malicious donor could ship a snapshot where Alice has 10× her real balance.
+
+**Detection was fast pre-fix** — first applied block diverged. But the receiver's first-block window was unprotected; with state_root verification at restore, the unprotected window is closed.
 
 **Resolution options.**
 
@@ -437,10 +448,10 @@ S-005 (`delay_T` not in genesis) is moot under this resolution. S-019 (Phase-2 t
 |---|---|---|
 | 1 | **Post-restore consistency check.** Fetch next ~10 blocks from peers and replay; on mismatch, roll back to genesis-replay. | ~50 LOC. |
 | 2 | **Multi-source consensus.** Receiver fetches snapshots from N peers, accepts only if M agree on every entry. | Medium. Parallel fetcher. |
-| 3 | **State Merkle root in Block.** Each block commits to `SHA256(canonical_state)`. Snapshot includes state; receiver verifies against the root in the snapshot's tail head. v2 protocol change. | High. Block format change → hard fork. Also enables light clients. |
-| 4 | **Total-supply check on snapshot restore.** Cross-references S-033's Option 4: if the chain commits `total_supply` per block, a snapshot includes the expected supply and the receiver verifies that `Σ(snapshot.accounts.balance) + Σ(snapshot.stakes.locked) == snapshot.total_supply`. Catches inflate-Alice attacks (the most natural snapshot-tampering vector) for free. | Low. Pairs with S-033's Option 4. ~10 additional LOC in `Chain::restore_from_snapshot`. |
+| 3 | **State Merkle root in Block.** ✅ **Landed in-session.** Each block commits to a Merkle root over canonical state. Snapshot includes state + tail headers; receiver verifies `compute_state_root()` over loaded state matches tail head's `state_root` field. Also enables future light clients (v2.2). | Shipped via S-033 + snapshot-side check. |
+| 4 | **Total-supply check on snapshot restore.** Cross-references S-033's Option 4: if the chain commits `total_supply` per block, a snapshot includes the expected supply and the receiver verifies that `Σ(snapshot.accounts.balance) + Σ(snapshot.stakes.locked) == snapshot.total_supply`. Catches inflate-Alice attacks (the most natural snapshot-tampering vector) for free. | Low. Pairs with S-033's Option 4. ~10 additional LOC in `Chain::restore_from_snapshot`. Subsumed by Option 3 (the Merkle root already covers all balances). |
 
-**Recommended.** Option 1 + Option 4 immediately (these compound — Option 1 catches divergence after restore, Option 4 catches tampering at restore). Option 3 for v2.
+**Status.** Option 3 landed; closes the practical attack surface. Option 1 (peer-cross-check post-restore) remains optional belt-and-suspenders for the (highly unlikely) case of a state_root collision attack, and is tracked as a low-priority follow-on rather than a security-critical gap.
 
 ---
 
