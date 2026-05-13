@@ -5,7 +5,9 @@
 #include <determ/chain/block.hpp>
 #include <determ/node/producer.hpp>
 #include <asio.hpp>
+#include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -22,6 +24,16 @@ public:
     void broadcast(const Message& msg);
     void send_to_domain(const std::string& domain, const Message& msg);
     void set_hello(const std::string& domain, uint16_t listen_port);
+
+    // S-014 (gossip side): per-peer-IP token-bucket rate limit on
+    // inbound message dispatch. Same mechanism as RpcServer's. Both 0
+    // disables the limiter (default). HELLO is exempt so newly-attached
+    // peers can complete the handshake; everything else is metered.
+    // Recommended starter settings for external-bind nodes:
+    //   per_sec = 500, burst = 1000 — sufficient for healthy consensus
+    //   gossip (a single node sends a few msgs/s steady-state; bursts
+    //   on round transitions). Adjust upward for high-throughput shards.
+    void set_rate_limit(double per_sec, double burst);
     // rev.9 B2c.5: this node's chain identity, included in HELLOs we
     // send so peers can tag us. Default SINGLE/0 preserves rev.7/8
     // behavior on chains where roles aren't used.
@@ -78,6 +90,11 @@ private:
     void handle_message(std::shared_ptr<Peer> peer, const Message& msg);
     void handle_peer_closed(std::shared_ptr<Peer> peer);
 
+    // S-014 (gossip side): consume one rate token for `ip`. Refills the
+    // bucket from elapsed time. Returns true on success; false signals
+    // the dispatch path to silently drop the message.
+    bool consume_rate_token(const std::string& ip);
+
     asio::io_context&                        io_;
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
     std::vector<std::shared_ptr<Peer>>       peers_;
@@ -86,6 +103,19 @@ private:
     uint16_t                                 our_port_{0};
     ChainRole                                our_role_{ChainRole::SINGLE};
     ShardId                                  our_shard_id_{0};
+
+    // S-014 (gossip side): per-peer-IP token bucket. Same shape as the
+    // RpcServer's. Map grows with distinct source IPs; bucket size is
+    // ~24 bytes so 10K entries is <300 KB. v2.X follow-on: periodic
+    // prune of buckets idle for > N minutes.
+    struct Bucket {
+        double                                tokens{0.0};
+        std::chrono::steady_clock::time_point last;
+    };
+    double                        rate_per_sec_{0.0};
+    double                        burst_{0.0};
+    mutable std::mutex            buckets_mutex_;
+    std::map<std::string, Bucket> buckets_;
 };
 
 } // namespace determ::net

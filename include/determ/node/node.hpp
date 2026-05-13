@@ -62,6 +62,15 @@ struct Config {
     //   spikes from a single client without aggressive penalty).
     double                   rpc_rate_per_sec{0.0};
     double                   rpc_rate_burst{0.0};
+    // S-014 (gossip side): per-peer-IP gossip rate limit. Same
+    // mechanism as RPC. HELLO is exempt so newly-attached peers finish
+    // handshake even under pressure. Both 0 disables (default).
+    // Suggested defaults for external-bind operators:
+    //   gossip_rate_per_sec = 500, gossip_rate_burst = 1000
+    // (healthy consensus is a few msgs/s steady-state with bursts on
+    // round transitions; 500/s with 1000 burst absorbs that headroom).
+    double                   gossip_rate_per_sec{0.0};
+    double                   gossip_rate_burst{0.0};
     std::vector<std::string> bootstrap_peers;
     // rev.9 B2c.5c: cross-chain peer addresses. Populated when this node
     // wants to participate in cross-chain coordination — typically a

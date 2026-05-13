@@ -18,6 +18,36 @@ void GossipNet::set_chain_identity(ChainRole role, ShardId shard_id) {
     our_shard_id_ = shard_id;
 }
 
+void GossipNet::set_rate_limit(double per_sec, double burst) {
+    rate_per_sec_ = per_sec;
+    burst_        = burst;
+    if (per_sec > 0.0 && burst > 0.0) {
+        std::cout << "[gossip] rate-limit " << per_sec << "/s, burst " << burst
+                  << " per peer-IP (HELLO exempt)\n";
+    }
+}
+
+// S-014 (gossip side): consume 1 token for the source IP. Rate
+// limit disabled when either field <= 0. First request from an IP
+// starts with a full bucket so legitimate peers don't get hit cold.
+bool GossipNet::consume_rate_token(const std::string& ip) {
+    if (rate_per_sec_ <= 0.0 || burst_ <= 0.0) return true;
+    std::lock_guard<std::mutex> lk(buckets_mutex_);
+    auto now = std::chrono::steady_clock::now();
+    auto& b = buckets_[ip];
+    if (b.last.time_since_epoch().count() == 0) {
+        b.tokens = burst_;
+        b.last   = now;
+    } else {
+        double elapsed_sec = std::chrono::duration<double>(now - b.last).count();
+        b.tokens = std::min(burst_, b.tokens + elapsed_sec * rate_per_sec_);
+        b.last   = now;
+    }
+    if (b.tokens < 1.0) return false;
+    b.tokens -= 1.0;
+    return true;
+}
+
 void GossipNet::listen(uint16_t port) {
     asio::ip::tcp::endpoint ep(asio::ip::tcp::v4(), port);
     acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_, ep);
@@ -124,6 +154,21 @@ static bool peer_message_allowed(const Peer& peer, MsgType type,
 
 void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
     try {
+        // S-014 (gossip side): per-peer-IP token bucket. Gate every
+        // non-HELLO message. HELLO is exempt so a freshly-attached peer
+        // can finish the handshake even when their IP's bucket is empty
+        // (the HELLO is a single message per connection — it cannot be
+        // weaponised on its own). For everything else, drop silently on
+        // rate-limit; the peer's gossip path is metered without
+        // closing the TCP connection.
+        if (msg.type != MsgType::HELLO) {
+            // Strip ":<port>" from peer address to key on bare IP.
+            // Multiple connections from the same source share one bucket.
+            std::string ip = peer->address();
+            auto colon = ip.rfind(':');
+            if (colon != std::string::npos) ip = ip.substr(0, colon);
+            if (!consume_rate_token(ip)) return;
+        }
         // rev.9 B2c.5b: enforce role-based filter for cross-chain
         // pollution. HELLO is exempt (it's the handshake that tags the
         // peer in the first place). For all other messages, the peer

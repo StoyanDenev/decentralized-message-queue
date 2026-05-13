@@ -30,6 +30,8 @@ json Config::to_json() const {
     j["rpc_auth_secret"] = rpc_auth_secret;
     j["rpc_rate_per_sec"] = rpc_rate_per_sec;
     j["rpc_rate_burst"]   = rpc_rate_burst;
+    j["gossip_rate_per_sec"] = gossip_rate_per_sec;
+    j["gossip_rate_burst"]   = gossip_rate_burst;
     j["bootstrap_peers"] = bootstrap_peers;
     j["beacon_peers"]    = beacon_peers;
     j["shard_peers"]     = shard_peers;
@@ -65,6 +67,8 @@ Config Config::from_json(const json& j) {
     c.rpc_auth_secret = j.value("rpc_auth_secret", std::string{});
     c.rpc_rate_per_sec = j.value("rpc_rate_per_sec", 0.0);
     c.rpc_rate_burst   = j.value("rpc_rate_burst",   0.0);
+    c.gossip_rate_per_sec = j.value("gossip_rate_per_sec", 0.0);
+    c.gossip_rate_burst   = j.value("gossip_rate_burst",   0.0);
     // S-001: default to localhost-only. Absent field in legacy configs
     // gets the secure default; operators must opt-in to all-interfaces.
     c.rpc_localhost_only = j.value("rpc_localhost_only", true);
@@ -511,6 +515,8 @@ chain_loaded:
 
     gossip_.set_hello(cfg_.domain, cfg_.listen_port);
     gossip_.set_chain_identity(cfg_.chain_role, cfg_.shard_id);
+    // S-014 (gossip side): per-peer-IP token bucket. 0/0 disables (default).
+    gossip_.set_rate_limit(cfg_.gossip_rate_per_sec, cfg_.gossip_rate_burst);
     gossip_.on_block         = [this](auto& b)   { on_block(b); };
     gossip_.on_tx            = [this](auto& tx)  { on_tx(tx); };
     gossip_.on_contrib       = [this](auto& c)   { on_contrib(c); };

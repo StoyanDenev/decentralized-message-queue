@@ -11,8 +11,8 @@
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
 | Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **3** (S-016, S-017, S-018) | **10** | **16** |
-| Partially mitigated | **1** (S-030) | — | **1** (S-014 RPC done; gossip pending) | — | **2** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **7** (S-007, S-008, S-012, S-013, S-020, S-032, S-033) | — | — | **12** |
+| Partially mitigated | **1** (S-030) | — | — | — | **1** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **8** (S-007, S-008, S-012, S-013, S-014, S-020, S-032, S-033) | — | — | **13** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -65,7 +65,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
 | S-012 | ✅ Mitigated | Snapshot bootstrap state_root verification landed (S-033 Merkle root in Block + snapshot-side check) | `chain/chain.cpp::restore_from_snapshot` | done |
 | S-013 | ✅ Mitigated | Per-signer cap (2 entries) on `buffered_block_sigs_` via `try_buffer_block_sig`; existing pre-filters at the call site already restrict signers to current K-committee ∩ registry, so total buffer is bounded at 2·K | `node/node.cpp::try_buffer_block_sig` | done |
-| S-014 | 🟠 Partially mitigated | RPC rate-limit shipped (token bucket per peer IP + bucket refill); gossip-side rate limiting deferred | `rpc/rpc.cpp::consume_rate_token` | RPC done; gossip pending |
+| S-014 | ✅ Mitigated | Token bucket per peer IP on both RPC (`rpc/rpc.cpp::consume_rate_token`) and gossip (`net/gossip.cpp::consume_rate_token`); HELLO exempt so handshake completes under pressure | `rpc/rpc.cpp` + `net/gossip.cpp` | done |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
 | S-017 | 🟡 Med | Producer/chain validation logic mismatch (UNSTAKE) | `node/producer.cpp` vs `chain/chain.cpp` | 2-3d |
@@ -637,27 +637,33 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 ---
 
-### S-014 — No rate limiting on gossip + RPC
+### S-014 — No rate limiting on gossip + RPC — ✅ Mitigated in-session
 
-**Severity:** Medium • **Status:** RPC side mitigated in-session; gossip side pending • **Sources:** Audit 3.2, OV-#10
+**Severity:** Medium (was) • **Status:** ✅ Mitigated • **Sources:** Audit 3.2, OV-#10
 
-**Mitigation landed in-session (RPC side, Option 1 partial).** `RpcServer` now supports operator-configurable per-peer-IP token-bucket rate limiting. Config fields:
+**Mitigation landed in-session.** Token-bucket per-peer-IP rate limiting now gates both the RPC and the gossip receive layer. Same Bucket struct + refill formula + `std::map<string, Bucket>` shape on both sides.
+
+**RPC side.** `RpcServer::consume_rate_token` runs in `handle_session` BEFORE JSON parse and auth — rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded. Config:
 
 - `rpc_rate_per_sec`: steady-state RPC calls/sec per peer IP (default 0 = disabled)
 - `rpc_rate_burst`: bucket capacity (default 0 = disabled)
 
-Per-request flow in `handle_session`: peer IP is captured from `socket->remote_endpoint().address().to_string()` once per session; before JSON parse + auth check, `consume_rate_token(peer_ip)` refills the bucket based on elapsed time × rate, attempts to consume 1 token, and returns ok or rate-limited. On rate-limit: response is `{"error": "rate_limited"}` and the request is dropped. Rate-limit ordering is BEFORE both parse and auth so rate-limited callers don't burn parse cost AND don't reveal whether their auth would have succeeded.
+Suggested external-bind defaults: `rate=100`, `burst=200`.
 
-Bucket state is `std::map<std::string, Bucket>` protected by `std::mutex` (asio's worker-thread pool means concurrent handler access). Memory bound is ~24 bytes per distinct peer IP; localhost-only default sees ~1-2 entries.
+**Gossip side.** `GossipNet::consume_rate_token` runs at the top of `handle_message`, after HELLO exemption and before role-filter + dispatch. HELLO is exempt so a freshly-attached peer can complete the handshake even when their IP's bucket is empty — a single HELLO per connection cannot be weaponised on its own. Multiple connections from the same source share one bucket (peer address has `":<port>"` stripped to key on bare IP). Config:
 
-Suggested production settings for external-bind operators:
-- `rpc_rate_per_sec = 100`, `rpc_rate_burst = 200` (100 sustained req/s with 2-second burst headroom)
+- `gossip_rate_per_sec`: steady-state gossip msgs/sec per peer IP (default 0 = disabled)
+- `gossip_rate_burst`: bucket capacity (default 0 = disabled)
 
-**Verified.** `tools/test_rpc_rate_limit.sh` 4/4 PASS: disabled-mode passes 30/30; tight rate (0.5/s burst 3) drains and rejects per spec; bucket refills on wait.
+Suggested external-bind defaults: `rate=500`, `burst=1000`. Healthy consensus is a few msgs/s steady-state with bursts on round transitions; 500/s × 1000 burst absorbs the headroom comfortably.
 
-**Remaining open.** Gossip-side rate limiting — peer-to-peer gossip messages don't currently have a similar bucket. Each peer is bounded by socket bandwidth, but no per-message rate gate. ~30 LOC follow-on. Compounds with v2.X "binary message codec" work where the gossip dispatch path gets restructured.
+**Bucket state.** `std::map<std::string, Bucket>` protected by `std::mutex` on each side. Memory bound is ~24 bytes per distinct peer IP. Concurrent access guarded by the mutex (asio's worker-thread pool puts handlers on multiple threads).
 
-**Pre-fix description.** Gossip accept loop has no cap; broadcast fan-out amplifies; RPC handle_session is synchronous per connection. Same root issue as S-001 for RPC.
+**Verified.**
+- `tools/test_rpc_rate_limit.sh` 4/4 PASS — RPC side: disabled-mode passes 30/30; tight rate (0.5/s burst 3) drains and rejects per spec; bucket refills on wait.
+- `tools/test_gossip_rate_limit.sh` 3/3 PASS — gossip side: 500/s 1000-burst lets the chain advance freely (h=68 in ~20s); 1/s 2-burst starves consensus (h=1 over 8s).
+
+**Pre-fix description.** Gossip accept loop had no cap; broadcast fan-out amplifies; RPC `handle_session` was synchronous per connection. Same root issue as S-001 for RPC.
 
 **Resolution options.**
 
@@ -665,7 +671,7 @@ Suggested production settings for external-bind operators:
 |---|---|---|---|
 | 1a | **Per-IP token bucket on RPC** at the TCP accept layer | ~30 LOC | ✅ Shipped |
 | 1b | **Per-method bucket** at RPC dispatch (snapshot 1/min, submit_tx capped, query uncapped) | ~30 LOC | Deferred — requires per-method weight tuning |
-| 1c | **Per-IP token bucket on gossip** at the message receive layer | ~30 LOC | Pending |
+| 1c | **Per-IP token bucket on gossip** at the message receive layer | ~30 LOC | ✅ Shipped |
 | 2 | **Concurrent-connection cap** per peer + global | Subset of #1 | Deferred — Option 1 fires earlier |
 
 ---
@@ -1013,12 +1019,12 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-008 (options 1 + 3) | `MEMPOOL_MAX_TXS = 10000` + fee-priority eviction + `MEMPOOL_MAX_PER_SENDER = 100` quota | ✅ done |
 | S-025 | Delete dead `compute_tx_root_intersection` | ✅ done |
 | S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ✅ done |
-| S-014 | RPC + gossip rate limiting | 🟠 RPC done (token-bucket per peer IP); gossip side pending |
+| S-014 | RPC + gossip rate limiting | ✅ done (RPC + gossip both shipped with token-bucket per peer IP) |
 | S-020 | Hybrid Fisher-Yates committee selection | ✅ done |
 | S-023 | RPC pre-check balance | ✅ done |
 | S-034 | Moot — delay-hash module deleted | ✅ done |
 
-**Track A status: 13.5 of 14 closed (S-014 RPC side ✅, gossip side pending). 0 fully remaining; S-014 gossip-side is the only Track A residue.**
+**Track A status: 14 of 14 closed. ✅ Track A complete.**
 
 ### Track B — architectural lift
 
@@ -1053,13 +1059,13 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
-- Medium findings: 1 partially mitigated (S-014 RPC side done, gossip side pending), 3 still open (S-016, S-017, S-018) — all bounded ~hours-of-work each
-- Track A remaining: ~tens-of-minutes (S-014 gossip-side only)
+- Medium findings: 3 open (S-016, S-017, S-018) — all bounded ~hours-of-work each
+- Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)
 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
-1. Track A small items (~tens-of-minutes): S-014 gossip side.
+1. ~~Track A small items~~ — **complete in-session**.
 2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
 3. v2.10 threshold randomness aggregation per plan.md A11 (~1 week, includes BLS12-381 vendoring + DKG).
 
