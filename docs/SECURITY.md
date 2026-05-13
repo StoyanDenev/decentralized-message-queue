@@ -18,7 +18,7 @@
 
 (M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). Open High findings are 3 (S-006, S-010, S-011 — all design / parameter-policy concerns, no shipped-code attack surface).
+**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound.
 
 **Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
