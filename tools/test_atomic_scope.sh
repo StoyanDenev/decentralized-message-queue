@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A9 Phase 2D — Chain::atomic_scope primitive regression test.
 #
-# Runs the in-process `unchained test-atomic-scope` subcommand which
+# Runs the in-process `determ test-atomic-scope` subcommand which
 # exercises the scope semantics over a freshly-constructed in-memory
 # Chain. No network, no RPC — just direct method calls against the
 # primitive that v2.4 composable txs / v2.5 cross-shard 2PC / v2.6
@@ -24,10 +24,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 
 echo "=== A9 Phase 2D atomic_scope semantics ==="
-OUT=$($UNCHAINED test-atomic-scope 2>&1)
+OUT=$($DETERM test-atomic-scope 2>&1)
 echo "$OUT"
 
 # Pass condition: final line says "PASS: atomic_scope all assertions"

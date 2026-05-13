@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A2 Phase 3 — unchained-wallet create-recovery + recover end-to-end.
+# A2 Phase 3 — determ-wallet create-recovery + recover end-to-end.
 #
 # Verifies:
 #   1. create-recovery writes a self-contained recovery setup.
@@ -16,7 +16,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WALLET=build/Release/unchained-wallet.exe
+WALLET=build/Release/determ-wallet.exe
 T_DIR=test_recovery
 SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PW="myp4ssphr4se"
@@ -110,7 +110,7 @@ echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
-  echo "  PASS: unchained-wallet recovery end-to-end"; exit 0
+  echo "  PASS: determ-wallet recovery end-to-end"; exit 0
 else
   echo "  FAIL"; exit 1
 fi

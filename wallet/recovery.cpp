@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #include "recovery.hpp"
 #include "opaque_adapter.hpp"
 #include <openssl/evp.h>
@@ -9,7 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace unchained::wallet::recovery {
+namespace determ::wallet::recovery {
 
 using nlohmann::json;
 
@@ -261,4 +261,4 @@ std::optional<RecoverySetup> from_json(const std::string& blob) {
     }
 }
 
-} // namespace unchained::wallet::recovery
+} // namespace determ::wallet::recovery

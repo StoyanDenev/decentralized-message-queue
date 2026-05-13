@@ -12,17 +12,17 @@
 #   6. DAPP_CALL during DApp's deactivation grace period: still
 #      applies (DApp can wind down without instant cutoff).
 #
-# In-process via `unchained test-dapp-call` CLI — no network, no RPC.
+# In-process via `determ test-dapp-call` CLI — no network, no RPC.
 # Tests the protocol-level apply path directly.
 #
 # Run from repo root: bash tools/test_dapp_call.sh
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 
 echo "=== v2.19 DAPP_CALL apply semantics ==="
-OUT=$($UNCHAINED test-dapp-call 2>&1)
+OUT=$($DETERM test-dapp-call 2>&1)
 echo "$OUT"
 
 if echo "$OUT" | tail -3 | grep -q "PASS: dapp_call all assertions"; then

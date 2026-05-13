@@ -27,7 +27,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=C:/sauromatae/build/Release/unchained.exe
+DETERM=C:/sauromatae/build/Release/determ.exe
 T=test_xshard
 TABS=C:/sauromatae/$T
 
@@ -45,26 +45,26 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
 
 get_account_balance() {
-  $UNCHAINED show-account "$2" --rpc-port "$1" 2>/dev/null | grep '^balance' | awk '{print $3}'
+  $DETERM show-account "$2" --rpc-port "$1" 2>/dev/null | grep '^balance' | awk '{print $3}'
 }
 
 rm -rf $T
 mkdir -p $T/beacon $T/shard0 $T/shard1
 
 echo "=== 1. Init data dirs + node keys ==="
-$UNCHAINED init --data-dir $T/beacon --profile regional_test 2>&1 | tail -1
-$UNCHAINED init --data-dir $T/shard0 --profile regional_test 2>&1 | tail -1
-$UNCHAINED init --data-dir $T/shard1 --profile regional_test 2>&1 | tail -1
+$DETERM init --data-dir $T/beacon --profile regional_test 2>&1 | tail -1
+$DETERM init --data-dir $T/shard0 --profile regional_test 2>&1 | tail -1
+$DETERM init --data-dir $T/shard1 --profile regional_test 2>&1 | tail -1
 
-$UNCHAINED genesis-tool peer-info beacon_n  --data-dir $T/beacon --stake 1000 > $T/beacon_p.json
-$UNCHAINED genesis-tool peer-info shard0_n  --data-dir $T/shard0 --stake 1000 > $T/shard0_p.json
-$UNCHAINED genesis-tool peer-info shard1_n  --data-dir $T/shard1 --stake 1000 > $T/shard1_p.json
+$DETERM genesis-tool peer-info beacon_n  --data-dir $T/beacon --stake 1000 > $T/beacon_p.json
+$DETERM genesis-tool peer-info shard0_n  --data-dir $T/shard0 --stake 1000 > $T/shard0_p.json
+$DETERM genesis-tool peer-info shard1_n  --data-dir $T/shard1 --stake 1000 > $T/shard1_p.json
 
 # Use a fixed deterministic salt so the Python grinder agrees with C++.
 SALT="00112233445566778899aabbccddeeff0123456789abcdef0123456789abcdef"
@@ -88,7 +88,7 @@ found = {0: None, 1: None}
 for i in range(200):
     if all(found.values()): break
     out_path = "$TABS/wallets/k_%d.json" % i
-    subprocess.run(["$UNCHAINED", "account", "create", "--out", out_path],
+    subprocess.run(["$DETERM", "account", "create", "--out", out_path],
                    check=True, capture_output=True)
     with open(out_path) as f: w = json.load(f)
     s = shard_for(w["address"])
@@ -164,9 +164,9 @@ $(cat $T/shard1_p.json | tr -d '\n')
 }
 EOF
 
-$UNCHAINED genesis-tool build $T/beacon_gen.json | tail -1
-$UNCHAINED genesis-tool build $T/shard0_gen.json | tail -1
-$UNCHAINED genesis-tool build $T/shard1_gen.json | tail -1
+$DETERM genesis-tool build $T/beacon_gen.json | tail -1
+$DETERM genesis-tool build $T/shard0_gen.json | tail -1
+$DETERM genesis-tool build $T/shard1_gen.json | tail -1
 BEACON_HASH=$(cat $T/beacon_gen.json.hash)
 SHARD0_HASH=$(cat $T/shard0_gen.json.hash)
 SHARD1_HASH=$(cat $T/shard1_gen.json.hash)
@@ -208,11 +208,11 @@ configure_node $T/shard1/config.json shard1_n 7782 8782 beacon_peers \
 echo
 echo "=== 5. Start 3 nodes (1 beacon + 2 shards, cross-peered) ==="
 NODE_PIDS=("" "" "")
-$UNCHAINED start --config $T/beacon/config.json > $T/beacon/log 2>&1 &
+$DETERM start --config $T/beacon/config.json > $T/beacon/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$UNCHAINED start --config $T/shard0/config.json > $T/shard0/log 2>&1 &
+$DETERM start --config $T/shard0/config.json > $T/shard0/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$UNCHAINED start --config $T/shard1/config.json > $T/shard1/log 2>&1 &
+$DETERM start --config $T/shard1/config.json > $T/shard1/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 echo
@@ -238,7 +238,7 @@ echo "  B on shard1: balance=$B_BAL_PRE (expected 0 — no on-chain state yet)"
 
 echo
 echo "=== 7. TRANSFER 50 from A (shard 0) to B (shard 1) via send_anon ==="
-$UNCHAINED send_anon "$B_ADDR" 50 "$A_PRIV" --rpc-port 8781
+$DETERM send_anon "$B_ADDR" 50 "$A_PRIV" --rpc-port 8781
 
 echo
 echo "=== 8. Poll up to 30s for cross-shard credit to land ==="

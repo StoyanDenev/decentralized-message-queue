@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
-#include <unchained/net/messages.hpp>
+#include <determ/net/messages.hpp>
 #include <asio.hpp>
 #include <functional>
 #include <memory>
@@ -9,7 +9,7 @@
 #include <deque>
 #include <mutex>
 
-namespace unchained::net {
+namespace determ::net {
 
 class Peer : public std::enable_shared_from_this<Peer> {
 public:
@@ -73,4 +73,4 @@ void async_connect(asio::io_context& io,
                    std::function<void(std::shared_ptr<Peer>)> on_connect,
                    std::function<void(const std::string&)>    on_error);
 
-} // namespace unchained::net
+} // namespace determ::net

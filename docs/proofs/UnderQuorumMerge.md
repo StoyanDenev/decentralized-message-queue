@@ -110,7 +110,7 @@ Bonus: the apply-time idempotency guard (duplicate BEGIN with same (shard, partn
 
 - **S-036 captured-beacon attack.** A fully-compromised beacon committee could fabricate the MERGE_BEGIN payload's `evidence_window_start` field, claiming a trigger condition that never actually held. R4 Phase 6 ships partial mitigation (bounds checks: window must lie in past, effective_height must respect grace), but full historical validation against on-chain SHARD_TIP records remains a v1.1 work item (currently SHARD_TIP is gossip-only — no on-chain commitment to its absence).
 - **Cascading merges.** If shard T (currently absorbing S) also drops below 2K and tries to merge with U, the protocol does not chain S→T→U. v1.x first-trigger-wins; v1.1 work item per the design doc.
-- **Auto-detection trigger.** The beacon-side observation logic that emits MERGE_BEGIN automatically based on `eligible_in_region < 2K` over the window is v1.1. Operator-driven MERGE_EVENT via `unchained submit-merge-event` is the v1.x path.
+- **Auto-detection trigger.** The beacon-side observation logic that emits MERGE_BEGIN automatically based on `eligible_in_region < 2K` over the window is v1.1. Operator-driven MERGE_EVENT via `determ submit-merge-event` is the v1.x path.
 - **Slashing during merge.** Refugees misbehaving on T's merged block are slashed on S (their home chain). Per the R4 design, eligibility clears via the stress-branch predicate the next time S's pool is queried. The cross-chain slashing mechanic (B5 EquivocationEvent relay) already supports this — no special-case logic required.
 
 ---
@@ -119,14 +119,14 @@ Bonus: the apply-time idempotency guard (duplicate BEGIN with same (shard, partn
 
 | Component | Source |
 |---|---|
-| `MergeEvent` struct + canonical codec | `include/unchained/chain/block.hpp::MergeEvent`; `src/chain/block.cpp` |
+| `MergeEvent` struct + canonical codec | `include/determ/chain/block.hpp::MergeEvent`; `src/chain/block.cpp` |
 | Validator MERGE_EVENT case (gate + bounds) | `src/node/validator.cpp::check_transactions` MERGE_EVENT branch |
 | `Chain::merge_state_` + insert/erase apply | `src/chain/chain.cpp::apply_transactions` |
-| `Chain::shards_absorbed_by(partner)` inverse lookup | `include/unchained/chain/chain.hpp` |
+| `Chain::shards_absorbed_by(partner)` inverse lookup | `include/determ/chain/chain.hpp` |
 | Producer-side stress branch | `src/node/node.cpp::check_if_selected` |
 | Validator-side stress branch | `src/node/validator.cpp::check_creator_selection`, `check_abort_certs` |
-| `Block::partner_subset_hash` field | `include/unchained/chain/block.hpp::Block` |
-| `unchained submit-merge-event` CLI | `src/main.cpp::cmd_submit_merge_event` |
+| `Block::partner_subset_hash` field | `include/determ/chain/block.hpp::Block` |
+| `determ submit-merge-event` CLI | `src/main.cpp::cmd_submit_merge_event` |
 | Integration test | `tools/test_under_quorum_merge.sh` |
 
 A reviewer can confirm safety preservation by:
@@ -144,4 +144,4 @@ T-9 + T-9a establish that R4's under-quorum merge mechanism preserves the safety
 
 The Phase 6 bounds (effective_height grace, BEGIN evidence window past-bound) constrain the captured-beacon attack surface but do not fully close S-036. Full closure requires on-chain SHARD_TIP records — a v1.1 work item that does not block v1.x acceptance.
 
-Unchained's v1.x merge mechanism is operator-driven (submit-merge-event CLI), audit-trace-friendly (every event is a canonical 26+region_len byte payload in a finalized block), and provably-safety-preserving under standard cryptographic assumptions.
+Determ's v1.x merge mechanism is operator-driven (submit-merge-event CLI), audit-trace-friendly (every event is a canonical 26+region_len byte payload in a finalized block), and provably-safety-preserving under standard cryptographic assumptions.

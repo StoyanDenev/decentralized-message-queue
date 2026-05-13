@@ -1,6 +1,6 @@
-# Unchained Quickstart
+# Determ Quickstart
 
-A 5-minute walkthrough of the full Unchained v1 operator workflow: build, run a 3-node cluster, send a transaction, take a snapshot, and bootstrap a fresh node from that snapshot. Cross-shard transfers + equivocation slashing are exercised by the regression tests in `tools/`.
+A 5-minute walkthrough of the full Determ v1 operator workflow: build, run a 3-node cluster, send a transaction, take a snapshot, and bootstrap a fresh node from that snapshot. Cross-shard transfers + equivocation slashing are exercised by the regression tests in `tools/`.
 
 ## 1. Build
 
@@ -9,7 +9,7 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-Single binary: `build/Release/unchained.exe` (Windows) or `build/unchained` (Linux/Mac).
+Single binary: `build/Release/determ.exe` (Windows) or `build/determ` (Linux/Mac).
 
 ## 2. Run the regression suite
 
@@ -29,14 +29,14 @@ All 8 should print `PASS:`.
 ## 3. Run a 3-node single chain by hand
 
 ```bash
-UNCHAINED=$(pwd)/build/Release/unchained.exe
+DETERM=$(pwd)/build/Release/determ.exe
 T=$(pwd)/quickstart
 rm -rf $T && mkdir -p $T
 
 # 3 data dirs + per-node Ed25519 keypairs.
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/n$n --profile web
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
+  $DETERM init --data-dir $T/n$n --profile web
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
     > $T/p$n.json
 done
 
@@ -55,7 +55,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 999}]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json
+$DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 
 # Wire each node's config (3-mesh, ports 7771-7773 / 8771-8773).
@@ -77,12 +77,12 @@ with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)
 done
 
 # Start all three.
-$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
-$UNCHAINED start --config $T/n2/config.json > $T/n2/log 2>&1 &
-$UNCHAINED start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
 
 sleep 15
-$UNCHAINED status --rpc-port 8771   # height should be > 1
+$DETERM status --rpc-port 8771   # height should be > 1
 ```
 
 Stop the cluster with `kill %1 %2 %3` when done.
@@ -90,19 +90,19 @@ Stop the cluster with `kill %1 %2 %3` when done.
 ## 4. Inspect the chain
 
 ```bash
-$UNCHAINED status --rpc-port 8771                 # head, role, epoch, mempool, ...
-$UNCHAINED chain-summary --rpc-port 8771 --last 5 # recent blocks compact
-$UNCHAINED show-block 5 --rpc-port 8771           # full block JSON
-$UNCHAINED validators --rpc-port 8771             # registered validator pool
-$UNCHAINED committee --rpc-port 8771              # current epoch's K committee
-$UNCHAINED show-account treasury --rpc-port 8771  # account state (balance + nonce)
+$DETERM status --rpc-port 8771                 # head, role, epoch, mempool, ...
+$DETERM chain-summary --rpc-port 8771 --last 5 # recent blocks compact
+$DETERM show-block 5 --rpc-port 8771           # full block JSON
+$DETERM validators --rpc-port 8771             # registered validator pool
+$DETERM committee --rpc-port 8771              # current epoch's K committee
+$DETERM show-account treasury --rpc-port 8771  # account state (balance + nonce)
 ```
 
 ## 5. Send a TRANSFER from a bearer wallet
 
 ```bash
 # Generate a bearer wallet (random Ed25519 key + 0x-prefixed address).
-$UNCHAINED account create --out $T/alice.json
+$DETERM account create --out $T/alice.json
 ALICE_ADDR=$(python -c "import json; print(json.load(open('$T/alice.json'))['address'])")
 ALICE_PRIV=$(python -c "import json; print(json.load(open('$T/alice.json'))['privkey'])")
 
@@ -111,7 +111,7 @@ ALICE_PRIV=$(python -c "import json; print(json.load(open('$T/alice.json'))['pri
 # initial_balances above. Real flow: pre-fund Alice in genesis, OR
 # transfer from a node1 (creators receive subsidy + fees). For this
 # quickstart, transfer from node1 (which has accumulated subsidy):
-$UNCHAINED send node1 100 --rpc-port 8771   # not directly — node1's own
+$DETERM send node1 100 --rpc-port 8771   # not directly — node1's own
                                           # priv key is in $T/n1/node_key.json
                                           # CLI authoring TRANSFERs from
                                           # registered domains is a node-
@@ -120,25 +120,25 @@ $UNCHAINED send node1 100 --rpc-port 8771   # not directly — node1's own
 # Easier: from a bearer wallet that you pre-funded in initial_balances.
 # Set initial_balances = [{"domain": "$ALICE_ADDR", "balance": 100}, ...]
 # in genesis BEFORE step 3, then send_anon works:
-$UNCHAINED send_anon "$BOB_ADDR" 25 "$ALICE_PRIV" --rpc-port 8771
+$DETERM send_anon "$BOB_ADDR" 25 "$ALICE_PRIV" --rpc-port 8771
 ```
 
 ## 6. Snapshot create + fetch + restore
 
 ```bash
 # Operator dumps the running chain's state.
-$UNCHAINED snapshot create --out $T/snap.json --rpc-port 8771
+$DETERM snapshot create --out $T/snap.json --rpc-port 8771
 
 # Verify the file.
-$UNCHAINED snapshot inspect --in $T/snap.json
+$DETERM snapshot inspect --in $T/snap.json
 
 # Fetch the same snapshot from a remote peer over the gossip wire
 # (no genesis or chain config locally — pure network client).
-$UNCHAINED snapshot fetch --peer 127.0.0.1:7771 --out $T/snap2.json
+$DETERM snapshot fetch --peer 127.0.0.1:7771 --out $T/snap2.json
 
 # Bootstrap a brand-new node from the snapshot (no genesis required).
 mkdir -p $T/receiver
-$UNCHAINED init --data-dir $T/receiver
+$DETERM init --data-dir $T/receiver
 python -c "
 import json
 with open('$T/receiver/config.json') as f: c = json.load(f)
@@ -151,10 +151,10 @@ c['key_path']      = '$T/receiver/node_key.json'
 c['data_dir']      = '$T/receiver'
 with open('$T/receiver/config.json','w') as f: json.dump(c,f,indent=2)
 "
-$UNCHAINED start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
+$DETERM start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
 sleep 5
 grep "restored from snapshot" $T/receiver/log
-$UNCHAINED status --rpc-port 8799   # head_hash matches snapshot
+$DETERM status --rpc-port 8799   # head_hash matches snapshot
 ```
 
 ## 7. Cross-shard deployment (optional)
@@ -200,7 +200,7 @@ PRIV1=$(python -c "import json; print(json.load(open('n1/node_key.json'))['priv_
 PRIV2=$(python -c "import json; print(json.load(open('n2/node_key.json'))['priv_seed'])")
 PRIV3=$(python -c "import json; print(json.load(open('n3/node_key.json'))['priv_seed'])")
 
-$UNCHAINED submit-param-change \
+$DETERM submit-param-change \
   --priv "$PRIV1" --from node1 \
   --name MIN_STAKE --value-hex "d007000000000000" \
   --effective-height 50 --fee 0 \
@@ -214,12 +214,12 @@ After block 50 finalizes, `snapshot inspect` shows `min_stake: 2000`. Whitelist 
 
 ## 10. Wallet recovery (A2)
 
-The `unchained-wallet` binary is separate from the chain daemon. Generate a recovery setup for any 32-byte secret (typically your Ed25519 seed):
+The `determ-wallet` binary is separate from the chain daemon. Generate a recovery setup for any 32-byte secret (typically your Ed25519 seed):
 
 ```bash
 # Split a seed into 3-of-5 shares with passphrase protection
 SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-./build/Release/unchained-wallet create-recovery \
+./build/Release/determ-wallet create-recovery \
   --seed $SEED --password "my-recovery-passphrase" \
   -t 3 -n 5 --out wallet_backup.json
 
@@ -227,7 +227,7 @@ SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 # (cloud storage, hardware token, trusted peers, paper backup, etc.)
 
 # Recover any time using >=3 of the 5 guardians:
-./build/Release/unchained-wallet recover \
+./build/Release/determ-wallet recover \
   --in wallet_backup.json \
   --password "my-recovery-passphrase" \
   --guardians 0,2,4
@@ -242,7 +242,7 @@ When a regional shard's validator pool drops below 2K, the protocol can absorb i
 
 ```bash
 # Operator initiates a merge of shard 0 into shard 1 at height 30:
-$UNCHAINED submit-merge-event \
+$DETERM submit-merge-event \
   --priv "$PRIV1" --from node1 \
   --event begin \
   --shard-id 0 --partner-id 1 \
@@ -252,7 +252,7 @@ $UNCHAINED submit-merge-event \
   --rpc-port 8771
 
 # When the regional pool recovers, end the merge:
-$UNCHAINED submit-merge-event \
+$DETERM submit-merge-event \
   --priv "$PRIV1" --from node1 \
   --event end \
   --shard-id 0 --partner-id 1 \

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
-#include <unchained/types.hpp>
+#include <determ/types.hpp>
 #include <chrono>
 
-namespace unchained::crypto {
+namespace determ::crypto {
 
 class SHA256Builder {
 public:
@@ -35,4 +35,4 @@ Hash sha256(const Hash& a, const std::string& s);
 inline Hash sha256(const std::vector<uint8_t>& v) { return sha256(v.data(), v.size()); }
 inline Hash sha256(const Hash& h)                  { return sha256(h.data(), 32); }
 
-} // namespace unchained::crypto
+} // namespace determ::crypto

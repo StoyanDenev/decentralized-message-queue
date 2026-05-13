@@ -20,7 +20,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_adv
 
 # Track node PIDs for cleanup. NOTE: we may stop node3 mid-test, so we
@@ -41,11 +41,11 @@ cleanup() {
 }
 trap cleanup EXIT INT
 
-# `unchained status` and `unchained balance` already unwrap the JSON-RPC `result`
+# `determ status` and `determ balance` already unwrap the JSON-RPC `result`
 # envelope, so the CLI's stdout is the result object directly.
 get_height() {
   local port=$1
-  $UNCHAINED status --rpc-port "$port" 2>/dev/null \
+  $DETERM status --rpc-port "$port" 2>/dev/null \
     | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height','-'))
 except: print('-')"
@@ -54,7 +54,7 @@ except: print('-')"
 get_balance() {
   local port=$1
   local domain=$2
-  $UNCHAINED balance "$domain" --rpc-port "$port" 2>/dev/null \
+  $DETERM balance "$domain" --rpc-port "$port" 2>/dev/null \
     | python -c "import sys,json
 try: print(json.load(sys.stdin).get('balance','-'))
 except: print('-')"
@@ -64,19 +64,19 @@ rm -rf $T
 mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes (web profile, will override to weak K=2) ==="
-$UNCHAINED init --data-dir $T/n1 --profile web 2>&1 | tail -1
-$UNCHAINED init --data-dir $T/n2 --profile web 2>&1 | tail -1
-$UNCHAINED init --data-dir $T/n3 --profile web 2>&1 | tail -1
+$DETERM init --data-dir $T/n1 --profile web 2>&1 | tail -1
+$DETERM init --data-dir $T/n2 --profile web 2>&1 | tail -1
+$DETERM init --data-dir $T/n3 --profile web 2>&1 | tail -1
 
 echo
 echo "=== 2. Generate peer-info entries ==="
-$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
-$UNCHAINED genesis-tool peer-info node2 --data-dir $T/n2 --stake 1000 > $T/p2.json
-$UNCHAINED genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
+$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$DETERM genesis-tool peer-info node2 --data-dir $T/n2 --stake 1000 > $T/p2.json
+$DETERM genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
 
 echo
 echo "=== 3. Create anonymous recipient account ==="
-$UNCHAINED account create --out $T/recipient.json
+$DETERM account create --out $T/recipient.json
 RECIPIENT=$(python -c "import json; print(json.load(open('$T/recipient.json'))['address'])")
 echo "  recipient address: $RECIPIENT"
 
@@ -98,7 +98,7 @@ $(cat $T/p3.json | tr -d '\n')
   ]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json
+$DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -139,7 +139,7 @@ echo
 echo "=== 6. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   echo "  n$n: pid ${NODE_PIDS[$((n-1))]}"
   sleep 0.3
@@ -168,7 +168,7 @@ done
 
 echo
 echo "=== 9. Submit TRANSFER from node1 → recipient (1 DTM, well within node1's balance) ==="
-RESP=$($UNCHAINED send "$RECIPIENT" 1 --rpc-port 8771 2>&1)
+RESP=$($DETERM send "$RECIPIENT" 1 --rpc-port 8771 2>&1)
 echo "  RPC response: $RESP"
 
 echo
@@ -192,7 +192,7 @@ fi
 echo
 echo "=== 12. Final consistency check across all 3 nodes ==="
 get_head() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('head_hash','?'))
 except: print('?')"
 }

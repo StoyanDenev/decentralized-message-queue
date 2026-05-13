@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/crypto/keys.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/crypto/keys.hpp>
 #include <openssl/evp.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
 
-namespace unchained::crypto {
+namespace determ::crypto {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -83,4 +83,4 @@ bool verify(const PubKey& pub, const uint8_t* data, size_t len, const Signature&
     return ok;
 }
 
-} // namespace unchained::crypto
+} // namespace determ::crypto

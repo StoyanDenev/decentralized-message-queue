@@ -8,7 +8,7 @@
 #      registered_at is preserved across updates.
 #   3. deactivate: op=1 sets inactive_from = current_height + GRACE.
 #
-# In-process via `unchained test-dapp-register` CLI — no network, no RPC.
+# In-process via `determ test-dapp-register` CLI — no network, no RPC.
 # Tests the protocol-level apply path directly against a freshly-
 # constructed Chain with alice as a REGISTER'd Determ identity.
 #
@@ -16,10 +16,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 
 echo "=== v2.18 DAPP_REGISTER apply semantics ==="
-OUT=$($UNCHAINED test-dapp-register 2>&1)
+OUT=$($DETERM test-dapp-register 2>&1)
 echo "$OUT"
 
 if echo "$OUT" | tail -3 | grep -q "PASS: dapp_register all assertions"; then

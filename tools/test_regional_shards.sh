@@ -20,7 +20,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_regional_shards
 
 declare -a NODE_PIDS
@@ -37,7 +37,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -47,8 +47,8 @@ for n in 1 2 3 4 5 6; do mkdir -p $T/n$n; done
 
 echo "=== 1. Init 6 nodes: n1-n3 us-east (active), n4-n6 eu-west (spectators) ==="
 for n in 1 2 3 4 5 6; do
-  $UNCHAINED init --data-dir $T/n$n --profile web_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM init --data-dir $T/n$n --profile web_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 # Inject region into each peer-info entry post-hoc (peer-info doesn't yet
@@ -89,7 +89,7 @@ $(cat $T/p6.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -101,7 +101,7 @@ g = json.load(open('$T/gen_alt.json'))
 g['committee_region'] = 'eu-west'
 json.dump(g, open('$T/gen_alt.json','w'), indent=2)
 "
-$UNCHAINED genesis-tool build $T/gen_alt.json > /dev/null 2>&1
+$DETERM genesis-tool build $T/gen_alt.json > /dev/null 2>&1
 GHASH_ALT=$(cat $T/gen_alt.json.hash 2>/dev/null)
 
 echo
@@ -131,7 +131,7 @@ echo
 echo "=== 4. Start 3 us-east nodes only (eu-west nodes deliberately absent) ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done
@@ -148,7 +148,7 @@ H1=$(get_status_field 8771 height)
 echo "  height: $H1"
 
 # Inspect a recent block's committee — should be entirely from {node1,node2,node3}.
-COMMITTEE=$($UNCHAINED show-block 3 --rpc-port 8771 2>/dev/null | python -c "
+COMMITTEE=$($DETERM show-block 3 --rpc-port 8771 2>/dev/null | python -c "
 import sys, json
 try:
   b = json.load(sys.stdin)

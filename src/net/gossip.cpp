@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/net/gossip.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/net/gossip.hpp>
 #include <iostream>
 #include <algorithm>
 
-namespace unchained::net {
+namespace determ::net {
 
 GossipNet::GossipNet(asio::io_context& io) : io_(io) {}
 
@@ -307,4 +307,4 @@ size_t GossipNet::peer_count() const {
     return peers_.size();
 }
 
-} // namespace unchained::net
+} // namespace determ::net

@@ -10,7 +10,7 @@
 # escalation path doesn't always recover from cleanly. M=K=2 (smaller
 # committee) finalizes reliably under the same fast timers and still
 # exercises the profile's posture (BEACON role + CURRENT mode + the A6
-# startup gate). The profile's M=K=3 default is what `unchained init`
+# startup gate). The profile's M=K=3 default is what `determ init`
 # writes into a fresh config; operators tune genesis they actually deploy.
 #
 # What this exercises that other tests don't:
@@ -22,7 +22,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_beacon_only
 
 declare -a NODE_PIDS
@@ -39,7 +39,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -49,8 +49,8 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 BEACON-role nodes with cluster_test profile ==="
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/n$n --profile cluster_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM init --data-dir $T/n$n --profile cluster_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
@@ -75,7 +75,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -109,7 +109,7 @@ echo "=== 4. Start 3 nodes with staggered startup ==="
 # timer punishes any cold-start lag with phase1 aborts.
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.8
 done

@@ -1,8 +1,8 @@
-# Unchained v2 — Design space
+# Determ v2 — Design space
 
-This document scopes the v2 design changes that would make Unchained a complete "every base-layer concern handled" protocol. v1.x is feature-complete on its narrow scope (fork-free L1 payment + identity with mutual-distrust safety). v2 closes the structural gaps that v1.x's design intent intentionally deferred.
+This document scopes the v2 design changes that would make Determ a complete "every base-layer concern handled" protocol. v1.x is feature-complete on its narrow scope (fork-free L1 payment + identity with mutual-distrust safety). v2 closes the structural gaps that v1.x's design intent intentionally deferred.
 
-The intent is not "Ethereum but better" — Unchained stays in its lane: a payment + identity chain, no contract VM, no smart-contract execution layer. v2 makes that lane self-sufficient at any scale rather than expanding it.
+The intent is not "Ethereum but better" — Determ stays in its lane: a payment + identity chain, no contract VM, no smart-contract execution layer. v2 makes that lane self-sufficient at any scale rather than expanding it.
 
 **Status:** design + partial implementation. Document captures the design space; multiple themes have shipping code in tree. Each section names the change, its motivation, the implementation sketch, the cost estimate, and which existing v1.x open finding(s) it closes; design and code may have diverged for items currently shipping.
 
@@ -67,7 +67,7 @@ Validator: re-derives `state_root` post-apply and rejects on mismatch with `bloc
 
 Header sync is `O(H)` with small constants. State proofs are `O(log N)`. Both are tiny compared to full-node `O(H · T)` replay.
 
-**Cost.** Medium. Header-only-sync protocol message (new `MsgType::HEADERS_REQUEST`/`HEADERS_RESPONSE`), CLI for `unchained light-status` / `unchained light-balance`, documentation of trust model (still trusts the committee's signature, not the RPC provider). ~1 week.
+**Cost.** Medium. Header-only-sync protocol message (new `MsgType::HEADERS_REQUEST`/`HEADERS_RESPONSE`), CLI for `determ light-status` / `determ light-balance`, documentation of trust model (still trusts the committee's signature, not the RPC provider). ~1 week.
 
 **Closes:** A class of DApp deployment models v1.x can't support.
 
@@ -204,7 +204,7 @@ Wallet recovery (A2) similarly: dual-derived seed (Ed25519 + Dilithium private k
 
 A threshold VRF (e.g., BLS-DKG with t-of-K signers) provides randomness with `t < K` participants. Even if `K - t` members are silent, the t honest members can complete the randomness round.
 
-**Trade-off:** introduces BLS (pairing-friendly curves) into Unchained's cryptographic stack — currently SHA-256 + Ed25519 only. The "two primitives only" minimalism is a design value; BLS doubles the audit surface.
+**Trade-off:** introduces BLS (pairing-friendly curves) into Determ's cryptographic stack — currently SHA-256 + Ed25519 only. The "two primitives only" minimalism is a design value; BLS doubles the audit surface.
 
 **Recommendation:** defer to v2.x or v3. The K-of-K commit-reveal + BFT escalation tandem is working; the marginal liveness gain isn't worth the cryptographic-stack expansion.
 
@@ -214,7 +214,7 @@ A threshold VRF (e.g., BLS-DKG with t-of-K signers) provides randomness with `t 
 
 **Status: promoted to active A-track** (plan.md A11). The mechanism described below has been **revised** from the earlier "aggregate-revealed-subset" approach to a stronger **t-of-K threshold-signature** scheme. The revision is motivated by a residual selective-abort attack the simpler approach didn't defeat.
 
-**Motivation.** Unchained's current commit-reveal randomness leaves a residual selective-abort attack: a committee member can decline to reveal in Phase 2, forcing a re-run with different randomness. The adversary computes what `delay_output` would be (they have all K-1 commits + their own committed secret), and selectively aborts when the outcome is unfavorable.
+**Motivation.** Determ's current commit-reveal randomness leaves a residual selective-abort attack: a committee member can decline to reveal in Phase 2, forcing a re-run with different randomness. The adversary computes what `delay_output` would be (they have all K-1 commits + their own committed secret), and selectively aborts when the outcome is unfavorable.
 
 Defenses today (`SUSPENSION_SLASH = 10` per abort + BFT escalation) make the attack economically costly but allow **statistical bias** by paying stake per unfavorable round. For high-value randomness-dependent outcomes (committee rotation per epoch, future-block randomness used in fair-ordering DApps), the residual bias matters.
 
@@ -242,7 +242,7 @@ Full task brief: `plan.md` §A11.
 
 ### v2.11 — Auto-detection beacon-side trigger (R4 v1.1)
 
-**Motivation.** R4 ships in v1.x with operator-driven `MERGE_EVENT` submission via `unchained submit-merge-event`. Production deployments want auto-detection: beacon observes `eligible_in_region(s) < 2K` over `merge_threshold_blocks` and no `SHARD_TIP_s` arrival → emits `MERGE_BEGIN` autonomously.
+**Motivation.** R4 ships in v1.x with operator-driven `MERGE_EVENT` submission via `determ submit-merge-event`. Production deployments want auto-detection: beacon observes `eligible_in_region(s) < 2K` over `merge_threshold_blocks` and no `SHARD_TIP_s` arrival → emits `MERGE_BEGIN` autonomously.
 
 **Mechanism.** Beacon maintains a per-shard observation window. State machine: NORMAL → STRESS_CANDIDATE (after first observation) → STRESS_TRIGGER (after threshold) → emits MERGE_BEGIN. Symmetric for revert with hysteresis.
 
@@ -270,13 +270,13 @@ This is a 2PC layered on the existing receipt mechanism. Doesn't change FA7's ex
 
 ### v2.13 — Fair-ordering primitive
 
-**Motivation.** Unchained's union-tx-root means inclusion is collaborative (FA2), but the *ordering* within a block is producer-chosen. For DEX deployments, MEV-extractive orderings (frontrun, sandwich) are possible at the committee level.
+**Motivation.** Determ's union-tx-root means inclusion is collaborative (FA2), but the *ordering* within a block is producer-chosen. For DEX deployments, MEV-extractive orderings (frontrun, sandwich) are possible at the committee level.
 
 **Mechanism.** Per-block commit-reveal on tx ordering. Phase-1 commits include a hash of the producer's intended tx ordering. Phase-2 reveals the ordering. The block's canonical ordering is derived from the K revealed orderings via a fair-aggregation rule (e.g., random-shuffle seeded by `cumulative_rand`, or Aequitas-style intersection ordering).
 
 **Cost.** Multi-week. Validator change, ordering-rule design (which is itself a hard problem — see Aequitas, Themis literature).
 
-**Status.** Considered, deprioritized — fair ordering is an open research area. Not on the v2 roadmap; flagged for future protocol families built on Unchained.
+**Status.** Considered, deprioritized — fair ordering is an open research area. Not on the v2 roadmap; flagged for future protocol families built on Determ.
 
 ---
 
@@ -306,9 +306,9 @@ This is a 2PC layered on the existing receipt mechanism. Doesn't change FA7's ex
 
 **Motivation.** v1.x landed localhost-only RPC bind as default. Remaining gap: multi-tenant hosts where multiple processes share loopback.
 
-**Mechanism.** Mandatory HMAC-SHA-256 token middleware. Token generated at first start, stored at `{data_dir}/rpc_token` with 0600 permissions. Every RPC call carries `X-Unchained-Auth: <token>` header (over the existing JSON-line transport — add to the request envelope, not the body). Server compares constant-time.
+**Mechanism.** Mandatory HMAC-SHA-256 token middleware. Token generated at first start, stored at `{data_dir}/rpc_token` with 0600 permissions. Every RPC call carries `X-Determ-Auth: <token>` header (over the existing JSON-line transport — add to the request envelope, not the body). Server compares constant-time.
 
-**Cost.** Half day. Token gen + verification + CLI `unchained status` etc. need to pass the token from `{data_dir}/rpc_token` automatically.
+**Cost.** Half day. Token gen + verification + CLI `determ status` etc. need to pass the token from `{data_dir}/rpc_token` automatically.
 
 **Closes:** S-001 fully.
 
@@ -316,7 +316,7 @@ This is a 2PC layered on the existing receipt mechanism. Doesn't change FA7's ex
 
 **Motivation.** v1.x landed no-stdout default + 0600 perms (S-004 option 1). Remaining: encryption at rest. The wallet binary's `envelope.cpp` already implements AES-256-GCM + PBKDF2-HMAC-SHA-256; main.cpp can call into it.
 
-**Mechanism.** `unchained account create --passphrase` prompts (or reads from env var) for a passphrase, runs the seed through `envelope::encrypt`, writes the envelope blob to disk. `unchained account address` and any other consumer prompts to decrypt before use.
+**Mechanism.** `determ account create --passphrase` prompts (or reads from env var) for a passphrase, runs the seed through `envelope::encrypt`, writes the envelope blob to disk. `determ account address` and any other consumer prompts to decrypt before use.
 
 **Cost.** Half day. The crypto is already shipped; the work is wiring + CLI UX + env-var override for unattended scripts.
 
@@ -326,7 +326,7 @@ This is a 2PC layered on the existing receipt mechanism. Doesn't change FA7's ex
 
 ## Theme 7 — Application layer (DApp support)
 
-Unchained stays a payment + identity chain. The application layer makes that
+Determ stays a payment + identity chain. The application layer makes that
 trust anchor usable by off-chain DApps without expanding the protocol into
 a smart-contract platform. Two primitives: a DApp registry (analogous to
 the validator registry) and a `DAPP_CALL` message-tx type. DApp logic
@@ -351,7 +351,7 @@ Full design: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). Summary:
 
 **Mechanism.** New `TxType::DAPP_CALL` carrying `to` (DApp domain), `amount` (optional payment), and an opaque ciphertext payload. Validator: rejects calls to inactive/missing DApps + enforces payload-size cap. Apply: TRANSFER-like credit of `amount` to recipient; payload itself does not mutate state (just sits in the block).
 
-**Cost.** ~2 days. Tx type + validator gate + apply path + wallet CLI (`unchained dapp-call`).
+**Cost.** ~2 days. Tx type + validator gate + apply path + wallet CLI (`determ dapp-call`).
 
 **Closes:** none directly — first application of the Theme-7 substrate.
 
@@ -376,9 +376,9 @@ Full roadmap, open design questions, and economic model: [`V2-DAPP-DESIGN.md`](V
 
 ---
 
-## Theme 8 — Privacy & interop (god-protocol completeness for Unchained's lane)
+## Theme 8 — Privacy & interop (god-protocol completeness for Determ's lane)
 
-Unchained stays in its lane (payment + identity). But "best-in-class at that lane" requires two primitives v1.x + Themes 1-7 do not yet provide: **confidential transactions** and **cross-chain bridge**. Both are necessary for Unchained to serve real-world payment use cases (where amounts shouldn't be public by default) and for the ecosystem to interoperate with other chains' user bases.
+Determ stays in its lane (payment + identity). But "best-in-class at that lane" requires two primitives v1.x + Themes 1-7 do not yet provide: **confidential transactions** and **cross-chain bridge**. Both are necessary for Determ to serve real-world payment use cases (where amounts shouldn't be public by default) and for the ecosystem to interoperate with other chains' user bases.
 
 ### v2.22 — Confidential transactions (Pedersen commitments + Bulletproofs)
 
@@ -395,39 +395,39 @@ Optional view-key disclosure: account holders can publish a per-account or per-b
 
 ### v2.23 — Cross-chain bridge (IBC-style light-client verification)
 
-**Motivation.** Unchained exists in a multi-chain world. Today a Unchained deployment is an island — no value or message can flow to/from Ethereum, Cosmos, Bitcoin, or other Unchained deployments without trusted intermediaries (centralized exchanges, custodial bridges). Both options break Unchained's mutual-distrust trust model.
+**Motivation.** Determ exists in a multi-chain world. Today a Determ deployment is an island — no value or message can flow to/from Ethereum, Cosmos, Bitcoin, or other Determ deployments without trusted intermediaries (centralized exchanges, custodial bridges). Both options break Determ's mutual-distrust trust model.
 
 **Mechanism.** IBC-style: each side runs a light client of the other side. Sender chain locks the asset and emits a proof. Receiver chain verifies the proof against the sender's committee signatures (already authenticated via state_root from v2.1). Asset materializes as a wrapped representation on the receiver side; unwrap by reversing the flow.
 
 Phasing:
-- **Unchained-to-Unchained** (multi-deployment): native, light-client verification against the other deployment's manifest + state_root + committee history. ~1 month.
-- **Unchained-to-Cosmos**: implement IBC light-client spec on the Unchained side. ~2 months.
-- **Unchained-to-Bitcoin**: SPV-style. Verify UTXO inclusion via Merkle proofs. ~2 months.
-- **Unchained-to-Ethereum**: defer until SNARK-of-Ethereum-light-client tooling matures (~6+ months).
+- **Determ-to-Determ** (multi-deployment): native, light-client verification against the other deployment's manifest + state_root + committee history. ~1 month.
+- **Determ-to-Cosmos**: implement IBC light-client spec on the Determ side. ~2 months.
+- **Determ-to-Bitcoin**: SPV-style. Verify UTXO inclusion via Merkle proofs. ~2 months.
+- **Determ-to-Ethereum**: defer until SNARK-of-Ethereum-light-client tooling matures (~6+ months).
 
-**Cost.** 1-2 months for first bridge (Unchained↔Unchained). 2-3 months for IBC. 6+ months for Ethereum.
+**Cost.** 1-2 months for first bridge (Determ↔Determ). 2-3 months for IBC. 6+ months for Ethereum.
 
-**Closes:** new capability. Unchained becomes a payment rail other ecosystems can use rather than a walled garden.
+**Closes:** new capability. Determ becomes a payment rail other ecosystems can use rather than a walled garden.
 
 ### v2.24 — Audit / compliance hooks
 
-**Motivation.** Privacy by default (v2.22) needs an explicit opt-in for regulated deployments to expose amounts/parties to designated auditors (KYC/AML/tax authorities). Without this, Unchained is unusable for any payment business with counterparty-disclosure obligations.
+**Motivation.** Privacy by default (v2.22) needs an explicit opt-in for regulated deployments to expose amounts/parties to designated auditors (KYC/AML/tax authorities). Without this, Determ is unusable for any payment business with counterparty-disclosure obligations.
 
 **Mechanism.** Per-account `audit_view_key`: a Diffie-Hellman public key whose holder can decrypt the account's amounts. Genesis-pinned default (`""` = no auditor). Optionally rotatable via REGISTER-style tx jointly signed by the audit-key-holder and the account holder. Audit-mode operators run a special node that consumes the audit log + auditor view keys + produces compliance reports.
 
 **Cost.** 2-3 weeks. Audit-key field on accounts + view-key handshake + audit-mode RPC + auditor-tooling reference impl.
 
-**Closes:** removes the "Unchained is unusable for regulated payments" objection. Composes cleanly with v2.22's privacy.
+**Closes:** removes the "Determ is unusable for regulated payments" objection. Composes cleanly with v2.22's privacy.
 
 ---
 
-## God-protocol framing for Unchained
+## God-protocol framing for Determ
 
-Unchained explicitly does NOT aspire to be a "do-everything" chain. The competitive landscape (Ethereum, Cosmos, Polkadot, Aptos, Sui) saturates that space.
+Determ explicitly does NOT aspire to be a "do-everything" chain. The competitive landscape (Ethereum, Cosmos, Polkadot, Aptos, Sui) saturates that space.
 
 The achievable, defensible framing is:
 
-> **Unchained = the protocol that's so good at payment + identity that every other DApp use case is built on top of it as a Theme-7 DApp, not as a contract on a contract-VM chain.**
+> **Determ = the protocol that's so good at payment + identity that every other DApp use case is built on top of it as a Theme-7 DApp, not as a contract on a contract-VM chain.**
 
 Under this framing, "god protocol" means **best-in-class at the narrow scope, not biggest-feature-set across all scopes**. The work to close the remaining gap:
 
@@ -446,8 +446,8 @@ Total work to close: **~12-18 months focused engineering beyond what's already i
 
 ### What this is NOT
 
-- Not a contract VM. DApps run off-chain on operator nodes (Theme 7 substrate); Unchained provides ordered authenticated message delivery + identity + payments + integrity.
-- Not stateless validation. Unchained's state is small enough that full-node operation is feasible on commodity hardware.
+- Not a contract VM. DApps run off-chain on operator nodes (Theme 7 substrate); Determ provides ordered authenticated message delivery + identity + payments + integrity.
+- Not stateless validation. Determ's state is small enough that full-node operation is feasible on commodity hardware.
 - Not a DA layer. Not a rollup substrate. Not a generalized computation platform.
 - Not Ethereum-tier completeness. Different protocol family.
 
@@ -459,26 +459,26 @@ The result is **a payment + identity protocol that's complete enough for any com
 
 ### Composing with an external zk-VM — the canonical "God Stack" pattern
 
-Szabo's "God Protocol" requires three properties: **perfect execution** (deterministic ordering + finality), **perfect computation** (arbitrary contracts), and **perfect privacy** (mathematically hidden inputs). Unchained explicitly does not pursue computation + privacy *on-chain* — it deliberately stays in its lane. But it composes cleanly with an external **zero-knowledge VM (zk-VM) as a Layer 2** to deliver all three properties as a stack.
+Szabo's "God Protocol" requires three properties: **perfect execution** (deterministic ordering + finality), **perfect computation** (arbitrary contracts), and **perfect privacy** (mathematically hidden inputs). Determ explicitly does not pursue computation + privacy *on-chain* — it deliberately stays in its lane. But it composes cleanly with an external **zero-knowledge VM (zk-VM) as a Layer 2** to deliver all three properties as a stack.
 
 **Architecture:**
 
 | Layer | Role | Provides |
 |---|---|---|
 | **L2 — Privacy & Computation engine** (external zk-VM, e.g. RISC Zero / SP1 / zkSync / custom) | Arbitrary smart-contract execution. ZK proofs hide inputs. Batches many user transactions, produces a single succinct proof of correct execution + state transition. | Perfect computation + perfect privacy |
-| **L1 — Unchained v2 (Unbreakable Judge)** | The L2 submits its batch's final state root + ZK validity proof reference as a single small commitment on Unchained. Unchained's K-of-K committee signs the block including that commitment; cross-shard receipts route credits/debits if the L2 spans multiple L1 shards. | Perfect execution (deterministic K-of-K finality, fork-free, sub-second on tactical/web profile) |
+| **L1 — Determ v2 (Unbreakable Judge)** | The L2 submits its batch's final state root + ZK validity proof reference as a single small commitment on Determ. Determ's K-of-K committee signs the block including that commitment; cross-shard receipts route credits/debits if the L2 spans multiple L1 shards. | Perfect execution (deterministic K-of-K finality, fork-free, sub-second on tactical/web profile) |
 
-**How the commitment lands on Unchained:**
+**How the commitment lands on Determ:**
 
 - L2 finalizes a batch → computes `(prev_state_root, new_state_root, batch_id, proof_ref)` → produces a 32-byte commitment hash.
 - L2 operator submits a TRANSFER (or DAPP_CALL, depending on L2 economics) with the commitment in the **A4 TRANSFER payload** (≤128 bytes; commitment + small metadata fits comfortably).
 - For DApp-aware L2s: use **DAPP_CALL** routing to a registered "L2 settlement" DApp identity (Theme 7 substrate). Allows DApp-side per-batch processing + on-chain audit trail.
-- Unchained K-of-K committee signs the L1 block — commitment now has L1's unconditional safety claim (§10.4).
+- Determ K-of-K committee signs the L1 block — commitment now has L1's unconditional safety claim (§10.4).
 - L2 fast-sync nodes verify the L2's claimed state by checking the L1 commitment (via v2.2 `state_proof` RPC + v2.1 Merkle state root). No need to re-execute the batch.
 
-**Why Unchained specifically fits the role of L1 judge:**
+**Why Determ specifically fits the role of L1 judge:**
 
-| Property | Unchained delivers | Vs. alternatives |
+| Property | Determ delivers | Vs. alternatives |
 |---|---|---|
 | Deterministic finality | K-of-K signatures, no probabilistic confirmation | Better than PoW (probabilistic) and most BFT chains (slashing-conditional) |
 | Sub-second finality on tactical profile (40 ms blocks) | Yes, with regional sharding | Better than Ethereum (~13s), Cosmos (~6s), Bitcoin (~10 min) |
@@ -486,15 +486,15 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 | Small commitment fits on-chain | A4 128-byte TRANSFER payload + v2.18/v2.19 DAPP_CALL routing | Comparable |
 | Audit trail / immutability | State Merkle root (v2.1) + light-client proofs (v2.2) — anyone can verify | Standard for modern chains |
 | Cross-shard L2 batches | EXTENDED sharding + cross-shard receipts (B3) — L2 can span L1 shards | Better than monolithic L1s for horizontally-scaled L2s |
-| Post-quantum future-proof | v2.8 Dilithium migration roadmap | Unchained-specific advantage at PQC migration time |
+| Post-quantum future-proof | v2.8 Dilithium migration roadmap | Determ-specific advantage at PQC migration time |
 
-**What changes about Unchained to enable this — nothing.** The existing primitives (A4 TRANSFER payload, v2.18 DAPP_REGISTER, v2.19 DAPP_CALL, v2.1 state Merkle root, v2.2 state_proof RPC) are exactly the substrate a zk-VM L2 needs. Unchained's "stay in its lane" framing means we don't build the zk-VM — but the protocol provides the perfect anchor for any L2 ecosystem that wants to build one against it.
+**What changes about Determ to enable this — nothing.** The existing primitives (A4 TRANSFER payload, v2.18 DAPP_REGISTER, v2.19 DAPP_CALL, v2.1 state Merkle root, v2.2 state_proof RPC) are exactly the substrate a zk-VM L2 needs. Determ's "stay in its lane" framing means we don't build the zk-VM — but the protocol provides the perfect anchor for any L2 ecosystem that wants to build one against it.
 
 **Cross-reference:**
 
 - **TRANSFER payload (A4)** — 128 bytes is enough for `(prev_root: 32B, new_root: 32B, batch_id: 32B, proof_metadata: ~32B)`. Roomy.
 - **DAPP_REGISTER (v2.18)** — register the L2's settlement endpoint as a DApp; users discover the L2 via on-chain registry.
-- **DAPP_CALL (v2.19)** — fee-bearing settlement-call routing; the L2 operator pays Unchained committee fees for each batch settlement.
+- **DAPP_CALL (v2.19)** — fee-bearing settlement-call routing; the L2 operator pays Determ committee fees for each batch settlement.
 - **State Merkle root (v2.1) + state_proof RPC (v2.2)** — L2 light clients verify the L1 commitment without trusting any RPC provider.
 - **Direct-to-DApp pattern (V2-DAPP-DESIGN.md §10)** — L2 users can submit batch-precursor messages directly to the L2 sequencer off-chain, with on-chain settlement following.
 - **EXTENDED sharding** — L2 settlements can use different L1 shards for different L2 tenants or regions.
@@ -502,10 +502,10 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 **What a deploying operator must understand:**
 
 - The L2 is operator-controlled in the sense that any zk-VM operator can submit commitments. The chain doesn't validate the L2's claimed state transition beyond checking the operator's signature on the on-chain tx. Trust in the L2's correctness comes from the ZK proof itself, which is L2-side.
-- Unchained provides ordering + censorship-resistance + immutable audit trail; it does NOT provide L2 correctness verification. That's the ZK proof's job.
-- The L2 operator + Unchained's K-of-K committee together form a meaningful trust boundary: L2 operator vouches for state transition (via ZK proof); Unchained vouches for inclusion order + finality (via K-of-K). Neither can corrupt the other's domain without breaking their respective primitives.
+- Determ provides ordering + censorship-resistance + immutable audit trail; it does NOT provide L2 correctness verification. That's the ZK proof's job.
+- The L2 operator + Determ's K-of-K committee together form a meaningful trust boundary: L2 operator vouches for state transition (via ZK proof); Determ vouches for inclusion order + finality (via K-of-K). Neither can corrupt the other's domain without breaking their respective primitives.
 
-**Status:** This is a deployment pattern, **not a Unchained protocol feature**. No code change is required on Unchained's side to support it. A reference L2-side zk-VM operator can be built today on the existing substrate (Theme 7 + A4 + v2.1/v2.2); the protocol provides the L1 judge role unchanged. Reference implementation is community/ecosystem work, not in Unchained's core scope.
+**Status:** This is a deployment pattern, **not a Determ protocol feature**. No code change is required on Determ's side to support it. A reference L2-side zk-VM operator can be built today on the existing substrate (Theme 7 + A4 + v2.1/v2.2); the protocol provides the L1 judge role unchanged. Reference implementation is community/ecosystem work, not in Determ's core scope.
 
 ---
 

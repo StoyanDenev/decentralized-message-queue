@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
 // A2 Phase 4: smoke-test surface for the libsodium primitives that
 // libopaque (Phase 5) will compose into the OPAQUE registration + AKE.
@@ -26,7 +26,7 @@
 #include <vector>
 #include <optional>
 
-namespace unchained::wallet::primitives {
+namespace determ::wallet::primitives {
 
 // libsodium initialization. Must be called once before any other
 // routine in this header. Returns true on success. Threadsafe.
@@ -56,4 +56,4 @@ std::vector<uint8_t> argon2id(const std::vector<uint8_t>& password,
                                 uint64_t opslimit = 3,
                                 size_t   memlimit = 64ull * 1024 * 1024);
 
-} // namespace unchained::wallet::primitives
+} // namespace determ::wallet::primitives

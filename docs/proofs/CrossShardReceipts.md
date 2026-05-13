@@ -1,6 +1,6 @@
 # FA7 — Cross-shard receipt atomicity
 
-This document proves that Unchained's cross-shard transfer mechanism preserves the supply invariant and never double-credits a destination account, under the cryptographic and behavioral assumptions of `Preliminaries.md`.
+This document proves that Determ's cross-shard transfer mechanism preserves the supply invariant and never double-credits a destination account, under the cryptographic and behavioral assumptions of `Preliminaries.md`.
 
 The mechanism: a `TRANSFER` whose `to` address routes (via `shard_id_for_address`) to a different shard debits the sender on the source shard and emits a `CrossShardReceipt`. The destination shard credits `to.balance += amount` when a future block bakes the receipt into `inbound_receipts`. The properties to prove are *safety* (no double-credit, no fabrication) and *atomicity* (the per-shard supply counters compose into a global invariant).
 
@@ -10,7 +10,7 @@ The mechanism: a `TRANSFER` whose `to` address routes (via `shard_id_for_address
 
 ## 1. Theorem statements
 
-**Setup.** Let `S = {0, 1, ..., shard_count - 1}` be the shard set. Each shard `s ∈ S` runs an independent Unchained chain. A `CrossShardReceipt r` carries:
+**Setup.** Let `S = {0, 1, ..., shard_count - 1}` be the shard set. Each shard `s ∈ S` runs an independent Determ chain. A `CrossShardReceipt r` carries:
 
 - `src_shard, dst_shard ∈ S` with `src_shard ≠ dst_shard`
 - `src_block_index, src_block_hash`: pin the producing block
@@ -162,7 +162,7 @@ The right-hand side is a global invariant whose components evolve only by genesi
 
 ### 6.1 Atomicity vs. classic 2PC
 
-Unchained does not use two-phase commit. The source-side debit is *unconditional* once `B_s` finalizes; the destination-side credit happens whenever a future dst block bakes the receipt. The two halves are not simultaneously committed.
+Determ does not use two-phase commit. The source-side debit is *unconditional* once `B_s` finalizes; the destination-side credit happens whenever a future dst block bakes the receipt. The two halves are not simultaneously committed.
 
 **Why this is sound:** the supply invariant T-7.1 books in-flight receipts to the `Pending` ledger, not to any local account. From a global-supply accounting view, the funds *do exist* during transit (they're tracked in `accumulated_outbound_` on src). They simply aren't claimable by any account until delivery.
 
@@ -175,7 +175,7 @@ Unchained does not use two-phase commit. The source-side debit is *unconditional
 ### 6.2 What this proof does NOT cover
 
 - **Timeout/refund** for stuck receipts: not implemented. If a dst shard goes permanently silent, funds are stuck in `Pending`. A future R5/R6 revision could add a refund mechanism gated on observed absence of dst liveness over many epochs.
-- **Cross-shard atomic swaps**: a TRANSFER that should succeed iff a corresponding TRANSFER on another shard succeeds. Not a primitive of Unchained; would require an explicit two-phase protocol layered on top of receipts.
+- **Cross-shard atomic swaps**: a TRANSFER that should succeed iff a corresponding TRANSFER on another shard succeeds. Not a primitive of Determ; would require an explicit two-phase protocol layered on top of receipts.
 - **Beacon-mediated receipts**: when `shard_count == 0` (BEACON-only) cross-chain transfers route through the beacon. The mechanism is the same (V12/V13 generalize) but the beacon's role as routing oracle adds a single-point-of-trust assumption equivalent to FA1 on the beacon chain.
 
 ### 6.3 Concrete-security bound
@@ -188,7 +188,7 @@ Per L-7.4, fabricating an inbound receipt requires forging K signatures, probabi
 
 | Document | Source |
 |---|---|
-| `CrossShardReceipt` struct | `include/unchained/chain/block.hpp::CrossShardReceipt` |
+| `CrossShardReceipt` struct | `include/determ/chain/block.hpp::CrossShardReceipt` |
 | V12 source-side receipt binding | `src/node/validator.cpp::check_cross_shard_receipts` |
 | V13 destination-side dedup | `src/node/validator.cpp::check_inbound_receipts` |
 | Apply credit + dedup-set update | `src/chain/chain.cpp::apply_transactions` (line ~420) |

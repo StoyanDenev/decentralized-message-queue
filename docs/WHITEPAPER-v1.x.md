@@ -1,4 +1,4 @@
-# Unchained: A Fork-Free L1 Payment and Identity Chain with Mutual-Distrust Safety
+# Determ: A Fork-Free L1 Payment and Identity Chain with Mutual-Distrust Safety
 
 **Version 1.x specification, 2026**
 
@@ -6,9 +6,9 @@
 
 ## Abstract
 
-We present Unchained, a Layer-1 blockchain protocol designed around three structural properties: fork freedom (at most one block finalizes per height), censorship resistance (any single non-Byzantine validator suffices to defeat censorship), and zero-trust safety (no protocol component trusts any participant). Safety is achieved through K-of-K mutual-distrust consensus — every committee member must sign every block — combined with union-tx-root inclusion (the canonical transaction set is the union of every committee member's proposed list). Liveness is achieved through per-height BFT escalation: when the K-of-K committee cannot complete, an automatic fallback to a `ceil(2K/3)` BFT consensus mode unsticks the chain, with the per-block safety mode tagged in the block header so applications can reason about per-block trust.
+We present Determ, a Layer-1 blockchain protocol designed around three structural properties: fork freedom (at most one block finalizes per height), censorship resistance (any single non-Byzantine validator suffices to defeat censorship), and zero-trust safety (no protocol component trusts any participant). Safety is achieved through K-of-K mutual-distrust consensus — every committee member must sign every block — combined with union-tx-root inclusion (the canonical transaction set is the union of every committee member's proposed list). Liveness is achieved through per-height BFT escalation: when the K-of-K committee cannot complete, an automatic fallback to a `ceil(2K/3)` BFT consensus mode unsticks the chain, with the per-block safety mode tagged in the block header so applications can reason about per-block trust.
 
-The protocol uses only two cryptographic primitives — Ed25519 signatures and SHA-256 hashes — and avoids proof-of-work, multi-round voting, and trusted leaders. Randomness is generated via a SHA-256 commit-reveal protocol that defeats selective-abort attacks by information-theoretic construction rather than economic disincentive. Unchained scales horizontally via a beacon + shard architecture with cross-shard receipts; in EXTENDED mode, shards group validators by region for sub-second in-shard finality on the public internet.
+The protocol uses only two cryptographic primitives — Ed25519 signatures and SHA-256 hashes — and avoids proof-of-work, multi-round voting, and trusted leaders. Randomness is generated via a SHA-256 commit-reveal protocol that defeats selective-abort attacks by information-theoretic construction rather than economic disincentive. Determ scales horizontally via a beacon + shard architecture with cross-shard receipts; in EXTENDED mode, shards group validators by region for sub-second in-shard finality on the public internet.
 
 This v1.x specification covers consensus, sharding, regional pinning with under-quorum merge, governance via N-of-N keyholder PARAM_CHANGE, economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and a separate wallet binary implementing distributed seed recovery via Shamir's Secret Sharing layered with AEAD envelopes and an OPAQUE password-authenticated key exchange. Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions (Ed25519 EUF-CMA, SHA-256 collision and preimage resistance, with a random-oracle treatment of the commit-reveal binding); a parallel TLA+ specification covers the state-machine layer.
 
@@ -20,7 +20,7 @@ This v1.x specification covers consensus, sharding, regional pinning with under-
 
 Existing blockchain protocols make different tradeoffs across the safety-liveness axis. Nakamoto consensus achieves liveness at the cost of probabilistic, eventual finality and a deep fork tail. BFT-family protocols (Tendermint, Cosmos, Algorand) achieve immediate finality conditional on an honest supermajority (`f < N/3`), trading away unconditional safety: a Byzantine `≥ N/3` can fork. Pipelined and DAG-based designs (Solana, Aleph) sacrifice further on the safety axis for throughput.
 
-Unchained targets a different point in this design space: **unconditional safety in steady state**, with conditional liveness restored by a tagged BFT fallback only when the unconditional path stalls. The protocol's primary mechanism is structurally simple — every committee member must sign every block — but the consequences are substantial: a single non-Byzantine validator anywhere in the committee suffices to prevent forks. Censorship resistance follows directly: the canonical transaction set is the union of every committee member's proposed list, so a single honest member suffices to include any pending transaction. The economic security argument inverts from BFT's "majority-honest" assumption to "any-honest" — strictly weaker, strictly more conservative.
+Determ targets a different point in this design space: **unconditional safety in steady state**, with conditional liveness restored by a tagged BFT fallback only when the unconditional path stalls. The protocol's primary mechanism is structurally simple — every committee member must sign every block — but the consequences are substantial: a single non-Byzantine validator anywhere in the committee suffices to prevent forks. Censorship resistance follows directly: the canonical transaction set is the union of every committee member's proposed list, so a single honest member suffices to include any pending transaction. The economic security argument inverts from BFT's "majority-honest" assumption to "any-honest" — strictly weaker, strictly more conservative.
 
 This positioning suits applications where safety failures are intolerable (payments, identity, settlement) and where occasional stalls under adversarial load are acceptable. It is explicitly unsuitable for applications requiring arbitrary computation (no contract VM), high-throughput at any cost (no optimistic concurrency), or eventual-consistency semantics (no fork tail).
 
@@ -63,7 +63,7 @@ We consider three composable adversary capabilities:
 
 ### 2.3 Safety claims under the adversary model
 
-- **Unconditional safety** (MD-mode blocks): Unchained's K-of-K committee structure means a single non-Byzantine member of any committee suffices to prevent forks at that height. This is structurally weaker than BFT's "f < N/3" assumption — it requires only `1 ≤ |V \ F|`, not `|V \ F| > 2N/3`.
+- **Unconditional safety** (MD-mode blocks): Determ's K-of-K committee structure means a single non-Byzantine member of any committee suffices to prevent forks at that height. This is structurally weaker than BFT's "f < N/3" assumption — it requires only `1 ≤ |V \ F|`, not `|V \ F| > 2N/3`.
 - **Conditional safety** (BFT-mode blocks): when the K-of-K committee cannot complete (e.g., a member is offline), the protocol escalates to a `ceil(2K/3)` BFT consensus mode with a designated proposer. Safety is now conditional on `f < K_eff/3` for that single block, plus economic slashing recovery for any equivocator (full stake forfeiture + deregistration).
 - **Censorship resistance**: an honest validator anywhere in the K committee proposes its transaction list in phase 1; the canonical block's transaction set is the union of all K lists. Censorship requires unanimous collusion of all K members at every block where the targeted transaction is pending — `(f/|V|)^K` capture probability per epoch boundary.
 
@@ -108,7 +108,7 @@ Each block is produced in two phases by a K-member committee selected determinis
 
 ### 3.2 Selective-abort defense
 
-The classical attack against commit-reveal randomness is selective abort: a committee member, after seeing other reveals, refuses to reveal its own if the resulting block would be unfavorable. Unchained's commit-reveal design defeats this structurally:
+The classical attack against commit-reveal randomness is selective abort: a committee member, after seeing other reveals, refuses to reveal its own if the resulting block would be unfavorable. Determ's commit-reveal design defeats this structurally:
 
 - `dh_input_i = SHA-256(secret_i ‖ pubkey_i)` is published before any other phase-2 message.
 - `delay_seed` is computed entirely from phase-1 data — it is committed before any reveal.
@@ -146,7 +146,7 @@ Slashing soundness: an honest validator can never be slashed for equivocation. B
 
 ### 4.1 Two-tier addresses
 
-Unchained distinguishes two address classes sharing the same balance namespace:
+Determ distinguishes two address classes sharing the same balance namespace:
 
 - **Registered domains:** named on-chain via REGISTER transactions; eligible to participate in consensus committees. Identity = `(domain_name, ed25519_pubkey)` pair; the chain enforces the binding via the REGISTER transaction's signature.
 - **Anonymous bearer wallets:** addresses derived from an Ed25519 public key (`addr = "0x" || hex(pubkey)`); no registration required. Any user can self-issue keys offline; the chain accepts TRANSFER transactions signed by the corresponding private key.
@@ -160,7 +160,7 @@ Real deployments have two distinct identity requirements that don't compose well
 - **Validators need accountability.** A misbehaving validator must be identifiable for slashing, reputation, and exit consequences. Domain registration with on-chain stake or DNS-anchored names provides this.
 - **End users need fungibility + offline issuance.** A payment recipient cannot wait for on-chain registration before generating an address. Bearer wallets satisfy this requirement.
 
-Unchained's two-tier model preserves both: the validator pool is fully accountable, while end-user transfers are zero-friction. The bearer model has a natural privacy benefit (no on-chain identity), but Unchained does not market this as the primary feature — anonymity comes from the bearer's choice to use a fresh key per transaction, not from any cryptographic mixer.
+Determ's two-tier model preserves both: the validator pool is fully accountable, while end-user transfers are zero-friction. The bearer model has a natural privacy benefit (no on-chain identity), but Determ does not market this as the primary feature — anonymity comes from the bearer's choice to use a fresh key per transaction, not from any cryptographic mixer.
 
 ---
 
@@ -168,7 +168,7 @@ Unchained's two-tier model preserves both: the validator pool is fully accountab
 
 ### 5.1 Beacon + shards
 
-A sharded Unchained deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+A sharded Determ deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
 
 The `ShardingMode` axis (pinned per timing profile at genesis) selects topology:
 
@@ -325,11 +325,11 @@ See `docs/proofs/EconomicSoundness.md` (FA11) for the full invariance proofs acr
 
 ### 9.1 Problem
 
-A lost Ed25519 private key today means permanent loss of the registered domain and its balance. Unchained's wallet recovery primitive provides opt-in distributed seed reconstruction without weakening the chain's identity model.
+A lost Ed25519 private key today means permanent loss of the registered domain and its balance. Determ's wallet recovery primitive provides opt-in distributed seed reconstruction without weakening the chain's identity model.
 
 ### 9.2 Mechanism
 
-Pure client-side feature implemented in a separate `unchained-wallet` binary; no protocol changes. The wallet's secret material never enters the chain daemon's address space.
+Pure client-side feature implemented in a separate `determ-wallet` binary; no protocol changes. The wallet's secret material never enters the chain daemon's address space.
 
 Setup flow:
 
@@ -362,7 +362,7 @@ The v1.x release ships a stub OPAQUE adapter using libsodium's Argon2id directly
 
 ## 10. Formal verification
 
-Unchained's safety-critical mechanisms have full coverage in two parallel tracks: analytic proofs against standard cryptographic assumptions, and machine-checkable state-machine specifications in TLA+.
+Determ's safety-critical mechanisms have full coverage in two parallel tracks: analytic proofs against standard cryptographic assumptions, and machine-checkable state-machine specifications in TLA+.
 
 ### 10.1 FA-track (analytic proofs)
 
@@ -405,25 +405,25 @@ Under post-quantum threat (Grover's algorithm reducing collision and signature-f
 
 ### 11.1 Nakamoto consensus (Bitcoin)
 
-Probabilistic eventual finality via proof-of-work and longest-chain selection. Safety is asymptotic in confirmation depth; fork tails are routine. Unchained inverts this: immediate unconditional finality per block, no fork tail, no proof-of-work. Trade: Unchained's per-block latency is ~200ms–1.5s (committee-RTT bounded); Bitcoin's is ~10 minutes.
+Probabilistic eventual finality via proof-of-work and longest-chain selection. Safety is asymptotic in confirmation depth; fork tails are routine. Determ inverts this: immediate unconditional finality per block, no fork tail, no proof-of-work. Trade: Determ's per-block latency is ~200ms–1.5s (committee-RTT bounded); Bitcoin's is ~10 minutes.
 
 ### 11.2 Tendermint / Cosmos / Algorand
 
-BFT-family protocols with immediate finality conditional on `f < N/3`. Multi-round voting (typically 2–3 rounds per block) gives strong safety in expectation but allows forks when the honest supermajority assumption is violated. Unchained's MD mode is structurally stronger (any single honest validator prevents forks); BFT mode is roughly equivalent but uses it as a fallback rather than the primary path.
+BFT-family protocols with immediate finality conditional on `f < N/3`. Multi-round voting (typically 2–3 rounds per block) gives strong safety in expectation but allows forks when the honest supermajority assumption is violated. Determ's MD mode is structurally stronger (any single honest validator prevents forks); BFT mode is roughly equivalent but uses it as a fallback rather than the primary path.
 
 ### 11.3 Dfinity / Internet Computer
 
-Threshold-BLS-based consensus with strong probabilistic guarantees and high throughput. Heavier cryptographic dependencies (pairing-friendly curves, threshold BLS). Unchained uses only Ed25519 + SHA-256, no exotic primitives.
+Threshold-BLS-based consensus with strong probabilistic guarantees and high throughput. Heavier cryptographic dependencies (pairing-friendly curves, threshold BLS). Determ uses only Ed25519 + SHA-256, no exotic primitives.
 
 ### 11.4 Solana
 
-Pipeline-parallel PoS with proof-of-history. High throughput but documented occasional forks under load. Unchained accepts lower throughput per shard but scales horizontally via the EXTENDED sharding mode without compromising per-block safety.
+Pipeline-parallel PoS with proof-of-history. High throughput but documented occasional forks under load. Determ accepts lower throughput per shard but scales horizontally via the EXTENDED sharding mode without compromising per-block safety.
 
 ### 11.5 Ethereum (Gasper)
 
-Hybrid finality gadget (Casper FFG) layered over a fork-choice rule (LMD GHOST). Probabilistic safety with checkpoint finality every 32 blocks. Unchained trades the smart-contract platform for stronger per-block safety; the two protocols target different use cases.
+Hybrid finality gadget (Casper FFG) layered over a fork-choice rule (LMD GHOST). Probabilistic safety with checkpoint finality every 32 blocks. Determ trades the smart-contract platform for stronger per-block safety; the two protocols target different use cases.
 
-The general pattern: existing protocols trade between liveness, finality latency, and economic security in standard combinations. Unchained targets a less common point — unconditional safety in steady state with tagged BFT fallback — which suits payment + identity use cases but is less suitable for arbitrary computation.
+The general pattern: existing protocols trade between liveness, finality latency, and economic security in standard combinations. Determ targets a less common point — unconditional safety in steady state with tagged BFT fallback — which suits payment + identity use cases but is less suitable for arbitrary computation.
 
 ---
 
@@ -445,7 +445,7 @@ These are intentional non-goals, not roadmap items.
 
 **v1.1 targeted improvements:**
 
-- Beacon-side MERGE_EVENT auto-detection (observe `eligible_in_region < 2K` over the threshold window, emit MERGE_BEGIN automatically). v1.x ships operator-driven via `unchained submit-merge-event`.
+- Beacon-side MERGE_EVENT auto-detection (observe `eligible_in_region < 2K` over the threshold window, emit MERGE_BEGIN automatically). v1.x ships operator-driven via `determ submit-merge-event`.
 - Full S-036 witness-window historical validation. Requires SHARD_TIP records moved from gossip-only to on-chain.
 - Real libopaque + liboprf vendoring for the wallet's OPAQUE adapter. Windows MSVC port of upstream VLAs is the principal blocker; four completion paths documented.
 
@@ -465,13 +465,13 @@ A partition that splits the committee blocks progress on both sides until it hea
 
 ## 13. Conclusion
 
-Unchained demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with only two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by structural construction rather than economic disincentive. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
+Determ demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with only two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by structural construction rather than economic disincentive. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
 
 The protocol is intentionally minimal: two consensus message types per block, one signature scheme, one hash function, no exotic cryptography or external dependencies. This makes it auditable, implementable, and amenable to formal verification of its core safety property: no two valid blocks at the same height. The v1.x specification covers consensus, sharding (CURRENT + EXTENDED with regional pinning and under-quorum merge), governance (uncontrolled + governed modes with N-of-N keyholder PARAM_CHANGE), economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and distributed wallet recovery via Shamir + AEAD + OPAQUE composition.
 
 Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in approximately 25 KLOC of C++ across the chain daemon and wallet binary, with 24 integration test suites covering every protocol feature.
 
-Unchained's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than BFT-family protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an occasional stall.
+Determ's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than BFT-family protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an occasional stall.
 
 ---
 

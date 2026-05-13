@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-// A2 — unchained-wallet binary
+// Copyright 2026 Determ Contributors
+// A2 — determ-wallet binary
 //
 // v1.x scope (Phase 1, this commit):
 //   * shamir split <secret-hex> -t N -n M         → write N shares to stdout
@@ -12,7 +12,7 @@
 //   * OPAQUE registration + AKE (via libopaque)
 //   * create-recovery / recover end-to-end flows
 //
-// Build target: unchained-wallet (separate from `unchained` daemon binary).
+// Build target: determ-wallet (separate from `determ` daemon binary).
 //
 // Why a separate binary: the wallet handles secret material that should
 // never share an address space with a networked daemon. The wallet must
@@ -32,7 +32,7 @@
 #include <vector>
 #include <cstring>
 
-using namespace unchained::wallet;
+using namespace determ::wallet;
 
 namespace {
 
@@ -91,7 +91,7 @@ int cmd_shamir_split(int argc, char** argv) {
         else if (a.size() && a[0] != '-')   secret_hex  = a;
     }
     if (secret_hex.empty() || threshold <= 0 || share_count <= 0) {
-        std::cerr << "Usage: unchained-wallet shamir split <secret_hex> "
+        std::cerr << "Usage: determ-wallet shamir split <secret_hex> "
                      "-t <threshold> -n <share_count>\n";
         return 1;
     }
@@ -121,7 +121,7 @@ int cmd_shamir_split(int argc, char** argv) {
 
 int cmd_shamir_combine(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained-wallet shamir combine <share> "
+        std::cerr << "Usage: determ-wallet shamir combine <share> "
                      "[<share> ...]\n";
         return 1;
     }
@@ -146,7 +146,7 @@ int cmd_shamir_combine(int argc, char** argv) {
 
 int cmd_shamir(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained-wallet shamir {split|combine} ...\n";
+        std::cerr << "Usage: determ-wallet shamir {split|combine} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -167,7 +167,7 @@ int cmd_envelope_encrypt(int argc, char** argv) {
         else if (a == "--iters"     && i + 1 < argc) iters         = static_cast<uint32_t>(std::stoul(argv[++i]));
     }
     if (plaintext_hex.empty() || password.empty()) {
-        std::cerr << "Usage: unchained-wallet envelope encrypt "
+        std::cerr << "Usage: determ-wallet envelope encrypt "
                      "--plaintext <hex> --password <str> "
                      "[--aad <hex>] [--iters <N>]\n";
         return 1;
@@ -197,7 +197,7 @@ int cmd_envelope_decrypt(int argc, char** argv) {
         else if (a == "--aad"      && i + 1 < argc) aad_hex  = argv[++i];
     }
     if (blob.empty() || password.empty()) {
-        std::cerr << "Usage: unchained-wallet envelope decrypt "
+        std::cerr << "Usage: determ-wallet envelope decrypt "
                      "--envelope <blob> --password <str> [--aad <hex>]\n";
         return 1;
     }
@@ -225,7 +225,7 @@ int cmd_envelope_decrypt(int argc, char** argv) {
 
 int cmd_envelope(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained-wallet envelope {encrypt|decrypt} ...\n";
+        std::cerr << "Usage: determ-wallet envelope {encrypt|decrypt} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -249,7 +249,7 @@ int cmd_create_recovery(int argc, char** argv) {
     }
     if (seed_hex.empty() || password.empty() || out_path.empty()
         || threshold <= 0 || share_count <= 0) {
-        std::cerr << "Usage: unchained-wallet create-recovery "
+        std::cerr << "Usage: determ-wallet create-recovery "
                      "--seed <hex> --password <str> -t T -n N --out <file> "
                      "[--scheme {passphrase|opaque}]\n";
         return 1;
@@ -300,7 +300,7 @@ int cmd_recover(int argc, char** argv) {
         else if (a == "--guardians" && i + 1 < argc) guardians_csv  = argv[++i];
     }
     if (in_path.empty() || password.empty()) {
-        std::cerr << "Usage: unchained-wallet recover --in <file> --password <str> "
+        std::cerr << "Usage: determ-wallet recover --in <file> --password <str> "
                      "[--guardians <csv of 0..N-1 indices>]\n";
         return 1;
     }
@@ -386,7 +386,7 @@ int cmd_opaque_handshake(int argc, char** argv) {
         else if (a == "--record"      && i + 1 < argc) record_hex  = argv[++i];
     }
     if (mode.empty() || password.empty() || guardian_id < 0 || guardian_id > 255) {
-        std::cerr << "Usage: unchained-wallet opaque-handshake "
+        std::cerr << "Usage: determ-wallet opaque-handshake "
                      "--mode {register|authenticate} --password <str> "
                      "--guardian-id <0..255> [--record <hex>]\n";
         return 1;
@@ -422,7 +422,7 @@ int cmd_opaque_handshake(int argc, char** argv) {
 
 void print_usage() {
     std::cerr <<
-        "Usage: unchained-wallet <command> ...\n"
+        "Usage: determ-wallet <command> ...\n"
         "\n"
         "Commands:\n"
         "  shamir split <hex> -t <T> -n <N>           Split secret into N shares\n"
@@ -459,7 +459,7 @@ int main(int argc, char** argv) {
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
     if (cmd == "opaque-handshake") return cmd_opaque_handshake(argc - 2, argv + 2);
     if (cmd == "version") {
-        std::cout << "unchained-wallet v1.x Phase 5 (Shamir + AEAD envelope + "
+        std::cout << "determ-wallet v1.x Phase 5 (Shamir + AEAD envelope + "
                      "passphrase recovery + libsodium primitives + "
                      "OPAQUE adapter interface [stub]; libopaque vendoring "
                      "pending Phase 6)\n";

@@ -27,7 +27,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_nef
 ZEROTH=0x0000000000000000000000000000000000000000000000000000000000000000
 
@@ -45,13 +45,13 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
 
 get_balance() {
-  $UNCHAINED balance "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM balance "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('balance',0))
 except: print(0)"
 }
@@ -61,8 +61,8 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 validator nodes ==="
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
@@ -82,7 +82,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -95,7 +95,7 @@ g = json.load(open('$T/gen_alt.json'))
 g['zeroth_pool_initial'] = 500
 json.dump(g, open('$T/gen_alt.json','w'), indent=2)
 "
-$UNCHAINED genesis-tool build $T/gen_alt.json > /dev/null 2>&1
+$DETERM genesis-tool build $T/gen_alt.json > /dev/null 2>&1
 
 echo
 echo "=== 3. Configure 3-mesh ==="
@@ -124,7 +124,7 @@ echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done
@@ -154,7 +154,7 @@ fi
 
 # Cross-check: querying show-account on the Zeroth address returns the
 # same balance the genesis declared.
-ACCT=$($UNCHAINED show-account $ZEROTH --rpc-port 8771 2>&1)
+ACCT=$($DETERM show-account $ZEROTH --rpc-port 8771 2>&1)
 if echo "$ACCT" | grep -qE "balance[[:space:]]*:[[:space:]]*1000"; then
   echo "  show-account on Zeroth address reports balance: 1000"
 else

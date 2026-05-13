@@ -7,7 +7,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_mn
 
 cleanup() {
@@ -29,15 +29,15 @@ rm -rf $T
 mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Generate node keys (cluster profile) ==="
-$UNCHAINED init --data-dir $T/n1 --profile regional 2>&1 | tail -1
-$UNCHAINED init --data-dir $T/n2 --profile regional 2>&1 | tail -1
-$UNCHAINED init --data-dir $T/n3 --profile regional 2>&1 | tail -1
+$DETERM init --data-dir $T/n1 --profile regional 2>&1 | tail -1
+$DETERM init --data-dir $T/n2 --profile regional 2>&1 | tail -1
+$DETERM init --data-dir $T/n3 --profile regional 2>&1 | tail -1
 
 echo
 echo "=== 2. Generate peer-info entries ==="
-$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
-$UNCHAINED genesis-tool peer-info node2 --data-dir $T/n2 --stake 1000 > $T/p2.json
-$UNCHAINED genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
+$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$DETERM genesis-tool peer-info node2 --data-dir $T/n2 --stake 1000 > $T/p2.json
+$DETERM genesis-tool peer-info node3 --data-dir $T/n3 --stake 1000 > $T/p3.json
 
 echo
 echo "=== 3. Build genesis (M=3, K=3 strong, subsidy=10, regional profile) ==="
@@ -57,9 +57,9 @@ $(cat $T/p3.json | tr -d '\n')
   ]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json
+$DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
-# unchained.exe is a native Windows binary; use Windows-native paths in configs.
+# determ.exe is a native Windows binary; use Windows-native paths in configs.
 GPATH="C:/sauromatae/$T/gen.json"
 echo "Genesis path: $GPATH"
 
@@ -104,7 +104,7 @@ echo
 echo "=== 5. Start 3 nodes (background, logs to $T/n*/log) ==="
 NODE_PIDS=()
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS+=($!)
   echo "  n$n started (pid ${NODE_PIDS[-1]})"
   sleep 0.3   # stagger so peer connects don't all fire simultaneously
@@ -116,7 +116,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 3
   echo "[t=$((i*3))s] heights:"
   for n in 1 2 3; do
-    H=$($UNCHAINED status --rpc-port 877$n 2>/dev/null | python -c "
+    H=$($DETERM status --rpc-port 877$n 2>/dev/null | python -c "
 import sys, json
 try:
     j = json.load(sys.stdin)
@@ -132,7 +132,7 @@ echo
 echo "=== 7. Final status snapshots ==="
 for n in 1 2 3; do
   echo "--- n$n ---"
-  $UNCHAINED status --rpc-port 877$n 2>&1 | head -25
+  $DETERM status --rpc-port 877$n 2>&1 | head -25
 done
 
 echo

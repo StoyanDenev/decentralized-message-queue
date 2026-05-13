@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A2 Phase 1 — unchained-wallet shamir split/combine smoke test.
+# A2 Phase 1 — determ-wallet shamir split/combine smoke test.
 #
 # Verifies:
 #   1. split produces N distinct shares with non-zero x-coordinates 1..N.
@@ -15,7 +15,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WALLET=build/Release/unchained-wallet.exe
+WALLET=build/Release/determ-wallet.exe
 
 pass_count=0
 fail_count=0
@@ -101,7 +101,7 @@ echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
-  echo "  PASS: unchained-wallet shamir end-to-end"
+  echo "  PASS: determ-wallet shamir end-to-end"
   exit 0
 else
   echo "  FAIL"

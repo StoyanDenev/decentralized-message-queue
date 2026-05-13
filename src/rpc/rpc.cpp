@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/rpc/rpc.hpp>
-#include <unchained/types.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/rpc/rpc.hpp>
+#include <determ/types.hpp>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
 
-namespace unchained::rpc {
+namespace determ::rpc {
 
 using json = nlohmann::json;
 
@@ -279,12 +279,12 @@ json rpc_call(const std::string& host, uint16_t port,
     json req = {{"method", method}, {"params", params}};
     // v2.16: auth secret resolution. Order of precedence:
     //   1. Explicit auth_secret_hex argument (programmatic / per-call)
-    //   2. UNCHAINED_RPC_AUTH_SECRET env var (operator/CLI standard)
+    //   2. DETERM_RPC_AUTH_SECRET env var (operator/CLI standard)
     //   3. None (auth disabled — server accepts only if it also has
     //      no rpc_auth_secret configured)
     std::string effective_secret = auth_secret_hex;
     if (effective_secret.empty()) {
-        const char* env = std::getenv("UNCHAINED_RPC_AUTH_SECRET");
+        const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
         if (env && *env) effective_secret = env;
     }
     if (!effective_secret.empty()) {
@@ -293,7 +293,7 @@ json rpc_call(const std::string& host, uint16_t port,
             throw std::runtime_error(
                 "rpc_call: auth secret is not valid hex "
                 "(expected 2N hex chars from --auth-secret or "
-                "UNCHAINED_RPC_AUTH_SECRET env var)");
+                "DETERM_RPC_AUTH_SECRET env var)");
         }
         req["auth"] = hmac_sha256_hex(key,
             canonical_for_hmac(method, params));
@@ -313,4 +313,4 @@ json rpc_call(const std::string& host, uint16_t port,
     return j["result"];
 }
 
-} // namespace unchained::rpc
+} // namespace determ::rpc

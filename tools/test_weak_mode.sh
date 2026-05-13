@@ -10,7 +10,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_weak
 
 declare -a NODE_PIDS
@@ -29,14 +29,14 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_height() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null \
+  $DETERM status --rpc-port "$1" 2>/dev/null \
     | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height','-'))
 except: print('-')"
 }
 
 get_head() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('head_hash','?'))
 except: print('?')"
 }
@@ -46,13 +46,13 @@ mkdir -p $T/n1 $T/n2 $T/n3 $T/n4
 
 echo "=== 1. Init 4 nodes ==="
 for n in 1 2 3 4; do
-  $UNCHAINED init --data-dir $T/n$n --profile web 2>&1 | tail -1
+  $DETERM init --data-dir $T/n$n --profile web 2>&1 | tail -1
 done
 
 echo
 echo "=== 2. Generate peer-info entries ==="
 for n in 1 2 3 4; do
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
@@ -74,7 +74,7 @@ $(cat $T/p4.json | tr -d '\n')
   ]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json
+$DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -115,7 +115,7 @@ echo
 echo "=== 5. Start 4 nodes ==="
 NODE_PIDS=("" "" "" "")
 for n in 1 2 3 4; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   echo "  n$n: pid ${NODE_PIDS[$((n-1))]}"
   sleep 0.3

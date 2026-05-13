@@ -19,7 +19,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WALLET=build/Release/unchained-wallet.exe
+WALLET=build/Release/determ-wallet.exe
 T_DIR=test_opaque_recovery
 SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PW="myp4ssphr4se"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A2 Phase 2 — unchained-wallet envelope (AES-256-GCM) smoke test.
+# A2 Phase 2 — determ-wallet envelope (AES-256-GCM) smoke test.
 #
 # Verifies:
 #   1. encrypt + decrypt round-trip yields the original plaintext.
@@ -15,7 +15,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WALLET=build/Release/unchained-wallet.exe
+WALLET=build/Release/determ-wallet.exe
 PLAIN="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PW="hunter2"
 ITERS=10000   # keep low for test speed; production uses 600000
@@ -104,7 +104,7 @@ echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
-  echo "  PASS: unchained-wallet envelope end-to-end"; exit 0
+  echo "  PASS: determ-wallet envelope end-to-end"; exit 0
 else
   echo "  FAIL"; exit 1
 fi

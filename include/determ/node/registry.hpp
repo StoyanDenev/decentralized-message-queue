@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
-#include <unchained/types.hpp>
-#include <unchained/chain/chain.hpp>
+#include <determ/types.hpp>
+#include <determ/chain/chain.hpp>
 #include <string>
 #include <vector>
 #include <optional>
 
-namespace unchained::node {
+namespace determ::node {
 
 // A REGISTER tx in block N activates at block N + 1..DELAY_WINDOW (random).
 // A DEREGISTER tx in block N takes effect at block N + 1..DELAY_WINDOW (random).
@@ -61,4 +61,4 @@ private:
     std::vector<NodeEntry> nodes_; // kept sorted by domain
 };
 
-} // namespace unchained::node
+} // namespace determ::node

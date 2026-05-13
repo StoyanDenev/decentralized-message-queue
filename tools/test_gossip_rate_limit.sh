@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_gossip_rate
 TABS=C:/sauromatae/$T
 
@@ -41,8 +41,8 @@ assert() {
 
 echo "=== 1. Init 3 nodes + 3-of-3 genesis ==="
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 cat > $T/gen.json <<EOF
@@ -58,7 +58,7 @@ $(cat $T/p3.json | tr -d '\n')
   ]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 write_config() {
@@ -90,7 +90,7 @@ with open('$T/n$n/config.json','w') as f: json.dump(c, f, indent=2)
 
 start_all() {
   for n in 1 2 3; do
-    $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+    $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
     NODE_PIDS[$((n-1))]=$!
   done
   sleep 2
@@ -107,7 +107,7 @@ stop_all() {
 }
 
 poll_height() {
-  $UNCHAINED status --rpc-port 8796 2>/dev/null \
+  $DETERM status --rpc-port 8796 2>/dev/null \
     | python -c "import sys,json
 try: print(json.load(sys.stdin)['height'])
 except Exception: print(0)" 2>/dev/null

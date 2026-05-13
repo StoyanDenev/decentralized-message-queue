@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
-#include <unchained/chain/block.hpp>
-#include <unchained/chain/chain.hpp>
-#include <unchained/crypto/keys.hpp>
-#include <unchained/types.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/crypto/keys.hpp>
+#include <determ/types.hpp>
 #include <map>
 #include <string>
 #include <vector>
 
-namespace unchained::node {
+namespace determ::node {
 
 // ─── Phase 1 — TxCommit + DhInput (combined) ─────────────────────────────────
 // Each committee member broadcasts their proposed tx_hashes plus a fresh
@@ -190,4 +190,4 @@ chain::Block build_body(
     // from these (compute_block_rand) when non-empty.
     const std::vector<Hash>&                  ordered_secrets = {});
 
-} // namespace unchained::node
+} // namespace determ::node

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include "unchained/types.hpp"
+#include "determ/types.hpp"
 
-namespace unchained::chain {
+namespace determ::chain {
 
-using ChainRole    = ::unchained::ChainRole;
-using ShardingMode = ::unchained::ShardingMode;
+using ChainRole    = ::determ::ChainRole;
+using ShardingMode = ::determ::ShardingMode;
 
 // ─── L1 (Identity) parameters ───────────────────────────────────────────────
 // Chain-wide constants. A domain is eligible for creator selection only while
@@ -150,4 +150,4 @@ inline constexpr TimingProfile PROFILE_TACTICAL_TEST {
     ChainRole::SHARD, ShardingMode::EXTENDED
 };
 
-} // namespace unchained::chain
+} // namespace determ::chain

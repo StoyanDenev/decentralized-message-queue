@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/chain/block.hpp>
-#include <unchained/crypto/sha256.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/chain/block.hpp>
+#include <determ/crypto/sha256.hpp>
 
-namespace unchained::chain {
+namespace determ::chain {
 
-using namespace unchained::crypto;
+using namespace determ::crypto;
 using json = nlohmann::json;
 
 // ─── Transaction ─────────────────────────────────────────────────────────────
@@ -507,4 +507,4 @@ Block Block::from_json(const json& j) {
     return b;
 }
 
-} // namespace unchained::chain
+} // namespace determ::chain

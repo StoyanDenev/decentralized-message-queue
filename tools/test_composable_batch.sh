@@ -9,7 +9,7 @@
 #      are undone even though they would have succeeded individually.
 #      Outer fee + outer nonce are still consumed (block-space billing).
 #
-# In-process via `unchained test-composable-batch` CLI — no network,
+# In-process via `determ test-composable-batch` CLI — no network,
 # no RPC. Tests the protocol-level apply path directly against a
 # freshly-constructed Chain with three accounts (alice, bob, carol).
 #
@@ -17,10 +17,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 
 echo "=== v2.4 composable_batch apply semantics ==="
-OUT=$($UNCHAINED test-composable-batch 2>&1)
+OUT=$($DETERM test-composable-batch 2>&1)
 echo "$OUT"
 
 if echo "$OUT" | tail -3 | grep -q "PASS: composable_batch all assertions"; then

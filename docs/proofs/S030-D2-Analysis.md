@@ -68,9 +68,9 @@ The equivocation-slashing regression test demonstrated this experimentally: unde
 
 ## 3. The correct F2 design
 
-The fix is structural and requires the same kind of view-reconciliation step Unchained already uses for `tx_root`:
+The fix is structural and requires the same kind of view-reconciliation step Determ already uses for `tx_root`:
 
-### 3.1 What Unchained already does for tx_root
+### 3.1 What Determ already does for tx_root
 
 - Each member's `ContribMsg` (Phase 1) contains `tx_hashes` — that member's *view* of the mempool.
 - Each member signs over `make_contrib_commitment(block_index, prev_hash, tx_hashes, dh_input)` — their own view, authenticated.

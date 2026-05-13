@@ -1,4 +1,4 @@
-# Unchained v1 Protocol Specification
+# Determ v1 Protocol Specification
 
 This document specifies wire formats, hash inputs, and the consensus state machine at a level sufficient for an external implementer to build a compatible client. The reference implementation is in this repository; where implementation behavior diverges from this document, treat the implementation as authoritative and file an issue to reconcile.
 
@@ -27,7 +27,7 @@ Key-derived. Format: `0x` + 64 lowercase hex characters (66 chars total).
 addr = "0x" + hex(ed25519_public_key)
 ```
 
-The `is_anon_address(s)` predicate in [`include/unchained/types.hpp`](../include/unchained/types.hpp) is canonical: `len == 66 && s[0..2] == "0x" && all hex`.
+The `is_anon_address(s)` predicate in [`include/determ/types.hpp`](../include/determ/types.hpp) is canonical: `len == 66 && s[0..2] == "0x" && all hex`.
 
 Bearer addresses **cannot** register, stake, or be selected as creators. They can only hold balance and send/receive `TRANSFER`.
 
@@ -467,13 +467,13 @@ Apply path:
 
 Committee eligibility stress branch: when `Chain::shards_absorbed_by(my_shard)` is non-empty, producer + validator extend their eligible pool with validators tagged in each refugee region.
 
-Authentication piggybacks on the enclosing beacon block's K-of-K signatures — no per-tx multisig. Auto-detection (beacon observes trigger condition and emits MERGE_BEGIN automatically) is a v1.1 work item; v1.x is operator-driven via `unchained submit-merge-event`.
+Authentication piggybacks on the enclosing beacon block's K-of-K signatures — no per-tx multisig. Auto-detection (beacon observes trigger condition and emits MERGE_BEGIN automatically) is a v1.1 work item; v1.x is operator-driven via `determ submit-merge-event`.
 
 Soundness proof: `docs/proofs/UnderQuorumMerge.md` (FA9).
 
 ## 15. Wallet recovery (A2)
 
-Pure client-side feature; no chain protocol changes. The `unchained-wallet` binary handles the user's Ed25519 seed offline:
+Pure client-side feature; no chain protocol changes. The `determ-wallet` binary handles the user's Ed25519 seed offline:
 
 ```
 seed → Shamir SSS (T-of-N, GF(2^8)) → per-share AEAD envelope

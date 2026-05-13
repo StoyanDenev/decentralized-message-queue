@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/node/producer.hpp>
-#include <unchained/chain/params.hpp>
-#include <unchained/crypto/keys.hpp>
-#include <unchained/crypto/random.hpp>
-#include <unchained/crypto/sha256.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/node/producer.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/keys.hpp>
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <algorithm>
 #include <map>
 #include <set>
 #include <stdexcept>
 
-namespace unchained::node {
+namespace determ::node {
 
-using namespace unchained::crypto;
-using namespace unchained::chain;
+using namespace determ::crypto;
+using namespace determ::chain;
 using json = nlohmann::json;
 
 // ─── ContribMsg JSON ─────────────────────────────────────────────────────────
@@ -483,4 +483,4 @@ Block build_body(
     return b;
 }
 
-} // namespace unchained::node
+} // namespace determ::node

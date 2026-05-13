@@ -8,7 +8,7 @@
 #      plaintext JSON (address + privkey).
 #   3. account decrypt with the wrong passphrase fails (AEAD tag
 #      mismatch).
-#   4. UNCHAINED_PASSPHRASE env var works as an alternative to --passphrase.
+#   4. DETERM_PASSPHRASE env var works as an alternative to --passphrase.
 #   5. Plaintext-output path (no --passphrase) still works (S-004
 #      option 1 backward compat).
 #   6. File permissions are 0600-equivalent.
@@ -17,7 +17,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_account_enc
 mkdir -p $T
 rm -f $T/*
@@ -29,7 +29,7 @@ assert() {
 }
 
 echo "=== 1. Encrypted account create ==="
-$UNCHAINED account create --out $T/enc.acct --passphrase "topsecret-pass-abc123" 2>&1 | tail -3
+$DETERM account create --out $T/enc.acct --passphrase "topsecret-pass-abc123" 2>&1 | tail -3
 
 # Verify file format: header line + envelope blob line
 HEADER=$(head -1 $T/enc.acct)
@@ -47,7 +47,7 @@ fi
 
 echo
 echo "=== 2. Decrypt with correct passphrase ==="
-$UNCHAINED account decrypt --in $T/enc.acct --passphrase "topsecret-pass-abc123" > $T/dec_correct.json 2>&1
+$DETERM account decrypt --in $T/enc.acct --passphrase "topsecret-pass-abc123" > $T/dec_correct.json 2>&1
 if [ -s $T/dec_correct.json ] && grep -q '"privkey"' $T/dec_correct.json; then
   assert true "decrypt with correct passphrase recovers privkey"
 else
@@ -56,7 +56,7 @@ fi
 
 echo
 echo "=== 3. Decrypt with wrong passphrase fails ==="
-OUT=$($UNCHAINED account decrypt --in $T/enc.acct --passphrase "wrong-pass" 2>&1 || true)
+OUT=$($DETERM account decrypt --in $T/enc.acct --passphrase "wrong-pass" 2>&1 || true)
 if echo "$OUT" | grep -qi "decryption failed"; then
   assert true "decrypt with wrong passphrase rejected"
 else
@@ -64,17 +64,17 @@ else
 fi
 
 echo
-echo "=== 4. UNCHAINED_PASSPHRASE env var ==="
-UNCHAINED_PASSPHRASE="topsecret-pass-abc123" $UNCHAINED account decrypt --in $T/enc.acct > $T/dec_env.json 2>&1
+echo "=== 4. DETERM_PASSPHRASE env var ==="
+DETERM_PASSPHRASE="topsecret-pass-abc123" $DETERM account decrypt --in $T/enc.acct > $T/dec_env.json 2>&1
 if [ -s $T/dec_env.json ] && grep -q '"privkey"' $T/dec_env.json; then
-  assert true "UNCHAINED_PASSPHRASE env var works"
+  assert true "DETERM_PASSPHRASE env var works"
 else
-  assert false "UNCHAINED_PASSPHRASE env var did not authenticate"
+  assert false "DETERM_PASSPHRASE env var did not authenticate"
 fi
 
 echo
 echo "=== 5. Plaintext path still works (S-004 option 1 backward compat) ==="
-$UNCHAINED account create --out $T/plain.acct 2>&1 | tail -2
+$DETERM account create --out $T/plain.acct 2>&1 | tail -2
 # Plaintext file should contain "privkey"
 if grep -q '"privkey"' $T/plain.acct; then
   assert true "plaintext path (no --passphrase) writes a privkey field"

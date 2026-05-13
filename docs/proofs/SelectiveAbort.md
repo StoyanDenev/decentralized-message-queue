@@ -1,8 +1,8 @@
 # FA3 — Selective-abort defense (commit-reveal hybrid)
 
-This document proves the security property that defines Unchained's randomness contribution: **no single committee member can predictively bias the block randomness `R` by selectively aborting their Phase-1 contribution or by choosing a non-uniform Phase-1 secret.**
+This document proves the security property that defines Determ's randomness contribution: **no single committee member can predictively bias the block randomness `R` by selectively aborting their Phase-1 contribution or by choosing a non-uniform Phase-1 secret.**
 
-The defense replaces the iterated-SHA-256 "delay function" approach that Unchained used in earlier revisions (closed by S-009; see `docs/SECURITY.md` §M-F). The new defense is **information-theoretic under preimage resistance**, not time-bound. ASIC speedup, quantum compute, and arbitrary parallelism are irrelevant to the security argument.
+The defense replaces the iterated-SHA-256 "delay function" approach that Determ used in earlier revisions (closed by S-009; see `docs/SECURITY.md` §M-F). The new defense is **information-theoretic under preimage resistance**, not time-bound. ASIC speedup, quantum compute, and arbitrary parallelism are irrelevant to the security argument.
 
 **Companion documents:** `Preliminaries.md` (F0) for notation; `Safety.md` (FA1) for the K-of-K commit binding.
 
@@ -157,7 +157,7 @@ This gives a weaker but standard-model-clean version of T-3. The qualitative cla
 
 ## 5. Why the iterated-SHA-256 approach failed (S-009 closure)
 
-Earlier Unchained revisions used `R = SHA256^T(seed)` — iterated SHA-256 — for selective-abort defense. The argument was:
+Earlier Determ revisions used `R = SHA256^T(seed)` — iterated SHA-256 — for selective-abort defense. The argument was:
 
 - A Byzantine `v_i` evaluating `R` for any candidate `s_i^*` requires `T` sequential SHA-256 operations.
 - If `T` exceeds the Phase-1 window's duration, `v_i` can't grind in time.
@@ -234,7 +234,7 @@ If yes, the member's contribution becomes optional, and rational members opt-in 
 
 If no, contribution is mandatory in the protocol-theoretic sense — any choice yields the same expected outcome.
 
-T-3 establishes "no" for Unchained. This is the structural security guarantee that distinguishes commit-reveal from time-bound approaches.
+T-3 establishes "no" for Determ. This is the structural security guarantee that distinguishes commit-reveal from time-bound approaches.
 
 ### 7.2 Concrete numbers
 
@@ -249,7 +249,7 @@ These bounds are **per round**. Over many rounds, the union bound applies trivia
 
 ### 7.3 Comparison to other PAKE / randomness primitives
 
-- **BLS-based threshold beacons (Dfinity).** Members collaboratively sign a seed; the signature is the randomness. Selective abort is possible: a member who would gain from a particular outcome aborts, then the threshold sig fails or proceeds with a different committee. The protocol response is "abort" → no randomness produced. Unchained's commit-reveal solves this by *not requiring contribution* — if a member aborts, `R` is still uniform over the remaining members' secrets.
+- **BLS-based threshold beacons (Dfinity).** Members collaboratively sign a seed; the signature is the randomness. Selective abort is possible: a member who would gain from a particular outcome aborts, then the threshold sig fails or proceeds with a different committee. The protocol response is "abort" → no randomness produced. Determ's commit-reveal solves this by *not requiring contribution* — if a member aborts, `R` is still uniform over the remaining members' secrets.
 - **VRF-based (Cardano, Algorand).** Each member's VRF output is deterministic given their key + seed. Selective abort means choosing whether to include one's VRF output. Subject to the same critique as BLS beacons.
 - **Iterated-SHA-256 VDFs (Solana PoH).** Solana uses PoH for clock, not for randomness. Randomness comes from elsewhere (typically leader-coin-flip). T-3 doesn't apply directly.
 
@@ -282,4 +282,4 @@ These three implementation points are the protocol-level corollaries of the math
 
 Selective abort against `R` is information-theoretically defeated by commit-reveal under SHA-256 preimage resistance. No assumption about adversary compute time, ASIC speed, parallelism, or quantum capability is required for the qualitative claim. The concrete-security bound is `2⁻¹²⁸` per evaluation in both ROM and standard model.
 
-This is the load-bearing argument for the S-009 closure: Unchained's randomness contribution is now structurally sound where the iterated-SHA-256 approach was structurally vulnerable to compute-time asymmetry.
+This is the load-bearing argument for the S-009 closure: Determ's randomness contribution is now structurally sound where the iterated-SHA-256 approach was structurally vulnerable to compute-time asymmetry.

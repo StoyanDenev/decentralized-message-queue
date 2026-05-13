@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #include "shamir.hpp"
 #include <openssl/rand.h>
 #include <stdexcept>
 #include <set>
 
-namespace unchained::wallet::shamir {
+namespace determ::wallet::shamir {
 
 // GF(2^8) arithmetic. AES irreducible polynomial 0x11b. Multiplication
 // via the runtime double-and-add ladder; small enough that lookup tables
@@ -123,4 +123,4 @@ combine(const std::vector<Share>& shares) {
     return secret;
 }
 
-} // namespace unchained::wallet::shamir
+} // namespace determ::wallet::shamir

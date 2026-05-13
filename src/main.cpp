@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/node/node.hpp>
-#include <unchained/rpc/rpc.hpp>
-#include <unchained/chain/chain.hpp>
-#include <unchained/chain/block.hpp>
-#include <unchained/chain/params.hpp>
-#include <unchained/crypto/keys.hpp>
-#include <unchained/chain/genesis.hpp>
-#include <unchained/net/messages.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/node/node.hpp>
+#include <determ/rpc/rpc.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/keys.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/net/messages.hpp>
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
-// Lives in wallet/envelope.cpp, also linked into unchained binary.
+// Lives in wallet/envelope.cpp, also linked into determ binary.
 #include "envelope.hpp"
 #include <asio.hpp>
 #include <openssl/evp.h>
@@ -23,17 +23,17 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
-using namespace unchained;
+using namespace determ;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 static std::string default_data_dir() {
 #ifdef _WIN32
     const char* appdata = std::getenv("APPDATA");
-    return appdata ? std::string(appdata) + "\\unchained" : ".unchained";
+    return appdata ? std::string(appdata) + "\\determ" : ".determ";
 #else
     const char* home = std::getenv("HOME");
-    return home ? std::string(home) + "/.unchained" : ".unchained";
+    return home ? std::string(home) + "/.determ" : ".determ";
 #endif
 }
 
@@ -42,40 +42,40 @@ static std::string config_path(const std::string& data_dir) {
 }
 
 static void usage() {
-    std::cout << R"(Unchained — fork-free DH-consensus cryptocurrency
+    std::cout << R"(Determ — fork-free DH-consensus cryptocurrency
 
 Usage:
-  unchained init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|single_test|cluster_test|web_test|regional_test|global_test|tactical_test]
+  determ init [--data-dir <dir>] [--profile cluster|web|regional|global|tactical|single_test|cluster_test|web_test|regional_test|global_test|tactical_test]
                                               [--genesis <config.json>]
                                               Generate node keys and config
-  unchained register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
-  unchained start [--config <path>]             Start node (sync + participate in consensus)
-  unchained send <to_domain> <amount>           Submit TRANSFER transaction
-  unchained status                              Chain head, node count, next creators
-  unchained show-block <index>                  Print block at index (full JSON)
-  unchained chain-summary [--last N]            Compact summary of last N blocks
-  unchained validators                          List the current validator pool
-  unchained committee                           List the current epoch's K-of-K committee
-  unchained show-account <address>              Inspect any address (balance, nonce, registry, stake)
-  unchained show-tx <hash>                      Look up a tx by hash (block_index + payload)
-  unchained snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
-  unchained snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
-  unchained snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
-  unchained peers                               List connected peers
-  unchained balance [<domain>]                  Show domain balance
-  unchained stake <amount> [--fee <n>]          Lock <amount> as registration stake
-  unchained unstake <amount> [--fee <n>]        Release stake (after deregister + delay)
-  unchained nonce [<domain>]                    Show next account nonce
-  unchained stake_info [<domain>]               Show locked stake and unlock height
-  unchained genesis-tool peer-info <domain>     Print this node's creator entry (JSON)
+  determ register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
+  determ start [--config <path>]             Start node (sync + participate in consensus)
+  determ send <to_domain> <amount>           Submit TRANSFER transaction
+  determ status                              Chain head, node count, next creators
+  determ show-block <index>                  Print block at index (full JSON)
+  determ chain-summary [--last N]            Compact summary of last N blocks
+  determ validators                          List the current validator pool
+  determ committee                           List the current epoch's K-of-K committee
+  determ show-account <address>              Inspect any address (balance, nonce, registry, stake)
+  determ show-tx <hash>                      Look up a tx by hash (block_index + payload)
+  determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
+  determ snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
+  determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
+  determ peers                               List connected peers
+  determ balance [<domain>]                  Show domain balance
+  determ stake <amount> [--fee <n>]          Lock <amount> as registration stake
+  determ unstake <amount> [--fee <n>]        Release stake (after deregister + delay)
+  determ nonce [<domain>]                    Show next account nonce
+  determ stake_info [<domain>]               Show locked stake and unlock height
+  determ genesis-tool peer-info <domain>     Print this node's creator entry (JSON)
                                               for inclusion in a genesis config.
-  unchained genesis-tool build <config.json>    Build a genesis from peer-info entries
-  unchained genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
+  determ genesis-tool build <config.json>    Build a genesis from peer-info entries
+  determ genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
                                               and print the genesis hash.
-  unchained account create [--out <file>]       Generate a fresh anonymous account
+  determ account create [--out <file>]       Generate a fresh anonymous account
                                               keypair (Ed25519). Prints address + privkey.
-  unchained account address <privkey_hex>       Derive the account address from a hex privkey.
-  unchained send_anon <to> <amount> <privkey_hex>
+  determ account address <privkey_hex>       Derive the account address from a hex privkey.
+  determ send_anon <to> <amount> <privkey_hex>
                                               Sign a TRANSFER from the anon account
                                               corresponding to <privkey_hex> and submit
                                               via the daemon's submit_tx RPC.
@@ -165,7 +165,7 @@ static int cmd_init(int argc, char** argv) {
               << ", K=" << cfg.k_block_sigs
               << ", mode=" << mode << ")\n";
     std::cout << "Edit the config to set your domain and bootstrap peers, then run:\n";
-    std::cout << "  unchained start\n";
+    std::cout << "  determ start\n";
     return 0;
 }
 
@@ -189,7 +189,7 @@ static int cmd_start(int argc, char** argv) {
         }
         if (cfg.chain_path.empty()) cfg.chain_path = cfg.data_dir + "/chain.json";
 
-        std::cout << "[unchained] Loading node domain=" << cfg.domain
+        std::cout << "[determ] Loading node domain=" << cfg.domain
                   << " genesis_path=" << cfg.genesis_path << "\n" << std::flush;
 
         node::Node node(cfg);
@@ -201,16 +201,16 @@ static int cmd_start(int argc, char** argv) {
                                        cfg.rpc_rate_burst);
         rpc_server.start();
 
-        std::cout << "[unchained] Starting node domain=" << cfg.domain
+        std::cout << "[determ] Starting node domain=" << cfg.domain
                   << " port=" << cfg.listen_port << "\n" << std::flush;
         node.run(); // blocks
         return 0;
     } catch (std::exception& e) {
-        std::cerr << "[unchained] FATAL: " << e.what() << std::endl;
+        std::cerr << "[determ] FATAL: " << e.what() << std::endl;
         std::cerr.flush();
         return 1;
     } catch (...) {
-        std::cerr << "[unchained] FATAL: unknown exception" << std::endl;
+        std::cerr << "[determ] FATAL: unknown exception" << std::endl;
         std::cerr.flush();
         return 1;
     }
@@ -252,7 +252,7 @@ static int submit_tx_with_retry(uint16_t port,
 }
 
 static int cmd_register(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: unchained register <domain>\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ register <domain>\n"; return 1; }
     std::string domain   = argv[0];
     uint16_t    rpc_port = get_rpc_port(argc, argv);
     try {
@@ -267,7 +267,7 @@ static int cmd_register(int argc, char** argv) {
 }
 
 static int cmd_send(int argc, char** argv) {
-    if (argc < 2) { std::cerr << "Usage: unchained send <to_domain> <amount> [--fee <n>]\n"; return 1; }
+    if (argc < 2) { std::cerr << "Usage: determ send <to_domain> <amount> [--fee <n>]\n"; return 1; }
     std::string to     = argv[0];
     uint64_t    amount = std::stoull(argv[1]);
     uint64_t    fee    = 0;
@@ -290,11 +290,11 @@ static int cmd_status(int argc, char** argv) {
     return 0;
 }
 
-// unchained show-block <index> [--rpc-port N]
+// determ show-block <index> [--rpc-port N]
 //   Prints the full block at the given index from a running node.
 static int cmd_show_block(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained show-block <index> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-block <index> [--rpc-port N]\n";
         return 1;
     }
     uint64_t index = std::stoull(argv[0]);
@@ -314,7 +314,7 @@ static int cmd_show_block(int argc, char** argv) {
     return 0;
 }
 
-// unchained validators [--rpc-port N]
+// determ validators [--rpc-port N]
 //   Lists the current validator pool (registered + active + staked +
 //   not suspended) with each entry's domain, pubkey, stake, active_from.
 static int cmd_validators(int argc, char** argv) {
@@ -343,7 +343,7 @@ static int cmd_validators(int argc, char** argv) {
     return 0;
 }
 
-// unchained chain-summary [--last N] [--rpc-port N]
+// determ chain-summary [--last N] [--rpc-port N]
 //   Prints a compact summary of the last N blocks (default 10).
 static int cmd_chain_summary(int argc, char** argv) {
     uint32_t last_n = 10;
@@ -385,7 +385,7 @@ static int cmd_chain_summary(int argc, char** argv) {
     return 0;
 }
 
-// unchained committee [--rpc-port N]
+// determ committee [--rpc-port N]
 //   Print the current epoch's K-of-K committee (the creators producing
 //   blocks right now). Pure function of chain state — deterministic
 //   across all nodes on the same chain at the same height.
@@ -415,13 +415,13 @@ static int cmd_committee(int argc, char** argv) {
     return 0;
 }
 
-// unchained show-account <address> [--rpc-port N]
+// determ show-account <address> [--rpc-port N]
 //   Inspect on-chain state for an arbitrary address (registered domain or
 //   anonymous bearer wallet). Prints balance, next nonce, and registry
 //   info + stake when the address is a registered validator.
 static int cmd_show_account(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained show-account <address> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-account <address> [--rpc-port N]\n";
         return 1;
     }
     std::string addr = argv[0];
@@ -455,7 +455,7 @@ static int cmd_show_account(int argc, char** argv) {
     return 0;
 }
 
-// unchained snapshot create [--out file.json] [--headers N] [--rpc-port N]
+// determ snapshot create [--out file.json] [--headers N] [--rpc-port N]
 //   B6.basic: dump chain state (accounts, stakes, registrants, dedup,
 //   tail headers) to a file. Operators host this for fast-bootstrap of
 //   new nodes — restoring from a snapshot avoids replaying every block
@@ -505,15 +505,15 @@ static int cmd_snapshot_create(int argc, char** argv) {
     return 0;
 }
 
-// unchained snapshot fetch --peer host:port --out file.json [--headers N]
+// determ snapshot fetch --peer host:port --out file.json [--headers N]
 //   B6.basic: connect to a running node, send a SNAPSHOT_REQUEST over
 //   the gossip-wire protocol, write the response to a file. Pure
 //   network client; no genesis or chain config needed locally. After
 //   fetch, validates by round-tripping through restore_from_snapshot
 //   (head_hash sanity check). Operator workflow:
-//     unchained snapshot fetch --peer 1.2.3.4:7771 --out snap.json
+//     determ snapshot fetch --peer 1.2.3.4:7771 --out snap.json
 //     # ... edit config to set snapshot_path = snap.json ...
-//     unchained start
+//     determ start
 static int cmd_snapshot_fetch(int argc, char** argv) {
     std::string peer_str, out_path;
     uint32_t header_count = 16;
@@ -525,7 +525,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
                                     std::stoul(argv[i + 1]));
     }
     if (peer_str.empty() || out_path.empty()) {
-        std::cerr << "Usage: unchained snapshot fetch --peer host:port "
+        std::cerr << "Usage: determ snapshot fetch --peer host:port "
                      "--out file.json [--headers N]\n";
         return 1;
     }
@@ -597,7 +597,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
     }
 }
 
-// unchained snapshot inspect --in file.json
+// determ snapshot inspect --in file.json
 //   Round-trips a snapshot through Chain::restore_from_snapshot and
 //   prints a human-readable summary. Validates JSON format, version,
 //   and head_hash consistency (rejects loudly on mismatch). Useful
@@ -607,7 +607,7 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
     for (int i = 0; i < argc - 1; ++i)
         if (std::string(argv[i]) == "--in") in_path = argv[i + 1];
     if (in_path.empty()) {
-        std::cerr << "Usage: unchained snapshot inspect --in <file>\n";
+        std::cerr << "Usage: determ snapshot inspect --in <file>\n";
         return 1;
     }
     try {
@@ -638,7 +638,7 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
 
 static int cmd_snapshot(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained snapshot {create|inspect} ...\n";
+        std::cerr << "Usage: determ snapshot {create|inspect} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -649,12 +649,12 @@ static int cmd_snapshot(int argc, char** argv) {
     return 1;
 }
 
-// unchained show-tx <hash> [--rpc-port N]
+// determ show-tx <hash> [--rpc-port N]
 //   Look up a transaction by its hex-encoded hash. Reports the tx
 //   payload, the block it landed in, and the block's timestamp.
 static int cmd_show_tx(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained show-tx <hash> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-tx <hash> [--rpc-port N]\n";
         return 1;
     }
     std::string hash_hex = argv[0];
@@ -705,7 +705,7 @@ static int cmd_balance(int argc, char** argv) {
 }
 
 static int cmd_stake(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: unchained stake <amount> [--fee <n>]\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ stake <amount> [--fee <n>]\n"; return 1; }
     uint64_t amount = std::stoull(argv[0]);
     uint64_t fee    = 0;
     uint16_t port   = get_rpc_port(argc, argv);
@@ -715,7 +715,7 @@ static int cmd_stake(int argc, char** argv) {
 }
 
 static int cmd_unstake(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: unchained unstake <amount> [--fee <n>]\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ unstake <amount> [--fee <n>]\n"; return 1; }
     uint64_t amount = std::stoull(argv[0]);
     uint64_t fee    = 0;
     uint16_t port   = get_rpc_port(argc, argv);
@@ -744,7 +744,7 @@ static int cmd_nonce(int argc, char** argv) {
 //   signed by the same key), so no separate proof-of-possession is emitted here.
 static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained genesis-tool peer-info <domain> [--data-dir <dir>] [--stake <n>]\n";
+        std::cerr << "Usage: determ genesis-tool peer-info <domain> [--data-dir <dir>] [--stake <n>]\n";
         return 1;
     }
     std::string domain   = argv[0];
@@ -758,7 +758,7 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     std::string kpath = data_dir + "/node_key.json";
     if (!fs::exists(kpath)) {
         std::cerr << "Key not found at " << kpath
-                  << " (run 'unchained init --data-dir " << data_dir << "' first)\n";
+                  << " (run 'determ init --data-dir " << data_dir << "' first)\n";
         return 1;
     }
     auto key = crypto::load_node_key(kpath);
@@ -778,7 +778,7 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
 //   <config>.hash next to the file for convenient distribution.
 static int cmd_genesis_tool_build(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained genesis-tool build <genesis_config.json>\n";
+        std::cerr << "Usage: determ genesis-tool build <genesis_config.json>\n";
         return 1;
     }
     std::string path = argv[0];
@@ -833,7 +833,7 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
 //   is Stage B2b/B2c — out of scope for this minimal scaffolding step.
 static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained genesis-tool build-sharded "
+        std::cerr << "Usage: determ genesis-tool build-sharded "
                      "<genesis_config.json> [--profile <name>]\n";
         return 1;
     }
@@ -1050,15 +1050,15 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
 // owner-only ACL via the std::filesystem implementation.
 //
 // v2.17 / S-004 option 2: passphrase-encrypted keyfile at rest. If
-// --passphrase is provided (or UNCHAINED_PASSPHRASE env var is set),
+// --passphrase is provided (or DETERM_PASSPHRASE env var is set),
 // the on-disk keyfile is wrapped in an AES-256-GCM envelope keyed
 // from PBKDF2-HMAC-SHA-256(passphrase, salt, 600k iters). The
 // envelope is serialized in the canonical dot-separated format
 // (see wallet/envelope.hpp). File permissions still get 0600 for
 // belt-and-suspenders.
 //
-// To read back: `unchained account decrypt --in <file> --passphrase ...`
-// (or rely on UNCHAINED_PASSPHRASE env var; passing on CLI is leaked
+// To read back: `determ account decrypt --in <file> --passphrase ...`
+// (or rely on DETERM_PASSPHRASE env var; passing on CLI is leaked
 // into shell history).
 static int cmd_account_create(int argc, char** argv) {
     std::string out_path;
@@ -1073,18 +1073,18 @@ static int cmd_account_create(int argc, char** argv) {
     // Env var fallback (avoids CLI leaking into shell history). The
     // CLI flag wins if both are set.
     if (passphrase.empty()) {
-        const char* env = std::getenv("UNCHAINED_PASSPHRASE");
+        const char* env = std::getenv("DETERM_PASSPHRASE");
         if (env && *env) passphrase = env;
     }
     if (out_path.empty() && !allow_plaintext_stdout) {
         std::cerr <<
             "S-004: refusing to emit privkey to stdout. Either:\n"
-            "  unchained account create --out <file>     (recommended; "
+            "  determ account create --out <file>     (recommended; "
                                                        "file gets 0600 permissions)\n"
-            "  unchained account create --out <file> --passphrase <pw>\n"
-            "                                         (or UNCHAINED_PASSPHRASE env var;\n"
+            "  determ account create --out <file> --passphrase <pw>\n"
+            "                                         (or DETERM_PASSPHRASE env var;\n"
             "                                          encrypts at rest, S-004 option 2)\n"
-            "  unchained account create --allow-plaintext-stdout  (opt-in; "
+            "  determ account create --allow-plaintext-stdout  (opt-in; "
                                                                   "be aware of\n"
             "                                                   terminal "
                                                                   "scrollback and\n"
@@ -1137,8 +1137,8 @@ static int cmd_account_create(int argc, char** argv) {
         std::vector<uint8_t> pt_bytes(pt.begin(), pt.end());
         std::vector<uint8_t> aad(addr.begin(), addr.end());
         try {
-            auto env = unchained::wallet::envelope::encrypt(pt_bytes, passphrase, aad);
-            std::string blob = unchained::wallet::envelope::serialize(env);
+            auto env = determ::wallet::envelope::encrypt(pt_bytes, passphrase, aad);
+            std::string blob = determ::wallet::envelope::serialize(env);
             std::ofstream f(out_path);
             if (!f) { std::cerr << "Cannot write " << out_path << "\n"; return 1; }
             // Header: 1-line magic + address (plaintext metadata) +
@@ -1146,7 +1146,7 @@ static int cmd_account_create(int argc, char** argv) {
             // tamper-evident, but exposing it in plaintext lets
             // operators identify which account the file belongs to
             // without decrypting.
-            f << "UNCHAINED-ACCOUNT-V1 " << addr << "\n";
+            f << "DETERM-ACCOUNT-V1 " << addr << "\n";
             f << blob << "\n";
             f.close();
             std::error_code perm_ec;
@@ -1161,7 +1161,7 @@ static int cmd_account_create(int argc, char** argv) {
             }
             std::cout << "Encrypted account written to " << out_path << "\n";
             std::cout << "Address: " << addr << "\n";
-            std::cout << "  (use `unchained account decrypt --in " << out_path
+            std::cout << "  (use `determ account decrypt --in " << out_path
                       << " --passphrase ...` to recover privkey)\n";
         } catch (std::exception& e) {
             std::cerr << "Encryption failed: " << e.what() << "\n";
@@ -1174,7 +1174,7 @@ static int cmd_account_create(int argc, char** argv) {
 // v2.17 / S-004 option 2 read-back: decrypt an envelope-wrapped keyfile
 // produced by `account create --passphrase`. Outputs the plaintext
 // JSON to stdout (privkey + address). Requires --passphrase or
-// UNCHAINED_PASSPHRASE env var.
+// DETERM_PASSPHRASE env var.
 static int cmd_account_decrypt(int argc, char** argv) {
     std::string in_path, passphrase;
     for (int i = 0; i < argc; ++i) {
@@ -1183,18 +1183,18 @@ static int cmd_account_decrypt(int argc, char** argv) {
         else if (a == "--passphrase" && i + 1 < argc) passphrase = argv[i + 1];
     }
     if (passphrase.empty()) {
-        const char* env = std::getenv("UNCHAINED_PASSPHRASE");
+        const char* env = std::getenv("DETERM_PASSPHRASE");
         if (env && *env) passphrase = env;
     }
     if (in_path.empty()) {
-        std::cerr << "Usage: unchained account decrypt --in <file> "
+        std::cerr << "Usage: determ account decrypt --in <file> "
                      "[--passphrase <pw>]\n"
-                     "  (or set UNCHAINED_PASSPHRASE env var)\n";
+                     "  (or set DETERM_PASSPHRASE env var)\n";
         return 1;
     }
     if (passphrase.empty()) {
         std::cerr << "account decrypt requires --passphrase or "
-                     "UNCHAINED_PASSPHRASE env var\n";
+                     "DETERM_PASSPHRASE env var\n";
         return 1;
     }
     std::ifstream f(in_path);
@@ -1203,18 +1203,18 @@ static int cmd_account_decrypt(int argc, char** argv) {
     std::getline(f, header_line);
     std::getline(f, blob_line);
     // Validate header.
-    if (header_line.rfind("UNCHAINED-ACCOUNT-V1 ", 0) != 0) {
-        std::cerr << "Not a UNCHAINED-ACCOUNT-V1 file: " << in_path << "\n";
+    if (header_line.rfind("DETERM-ACCOUNT-V1 ", 0) != 0) {
+        std::cerr << "Not a DETERM-ACCOUNT-V1 file: " << in_path << "\n";
         return 1;
     }
-    std::string addr = header_line.substr(std::strlen("UNCHAINED-ACCOUNT-V1 "));
-    auto env_opt = unchained::wallet::envelope::deserialize(blob_line);
+    std::string addr = header_line.substr(std::strlen("DETERM-ACCOUNT-V1 "));
+    auto env_opt = determ::wallet::envelope::deserialize(blob_line);
     if (!env_opt) {
         std::cerr << "Envelope deserialize failed\n";
         return 1;
     }
     std::vector<uint8_t> aad(addr.begin(), addr.end());
-    auto pt_opt = unchained::wallet::envelope::decrypt(*env_opt, passphrase, aad);
+    auto pt_opt = determ::wallet::envelope::decrypt(*env_opt, passphrase, aad);
     if (!pt_opt) {
         std::cerr << "Decryption failed (wrong passphrase or "
                      "tampered file)\n";
@@ -1228,7 +1228,7 @@ static int cmd_account_decrypt(int argc, char** argv) {
 // account address <privkey_hex>
 //   Derives the account address from a privkey hex string (offline, no daemon needed).
 static int cmd_account_address(int argc, char** argv) {
-    if (argc < 1) { std::cerr << "Usage: unchained account address <privkey_hex>\n"; return 1; }
+    if (argc < 1) { std::cerr << "Usage: determ account address <privkey_hex>\n"; return 1; }
     crypto::NodeKey key;
     key.priv_seed = from_hex_arr<32>(argv[0]);
 
@@ -1245,7 +1245,7 @@ static int cmd_account_address(int argc, char** argv) {
 
 static int cmd_account(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained account {create|address} ...\n";
+        std::cerr << "Usage: determ account {create|address} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -1259,7 +1259,7 @@ static int cmd_account(int argc, char** argv) {
 // send_anon <to> <amount> <privkey_hex> [--fee <n>] [--rpc-port <p>]
 static int cmd_send_anon(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: unchained send_anon <to> <amount> <privkey_hex> "
+        std::cerr << "Usage: determ send_anon <to> <amount> <privkey_hex> "
                      "[--fee <n>] [--rpc-port <p>]\n";
         return 1;
     }
@@ -1329,7 +1329,7 @@ static int cmd_send_anon(int argc, char** argv) {
 }
 
 // A5: build, sign, and submit a PARAM_CHANGE tx.
-//   unchained submit-param-change \
+//   determ submit-param-change \
 //     --priv <sender_priv_hex> \
 //     --name <param_name> \
 //     --value-hex <hex_le_bytes> \
@@ -1372,7 +1372,7 @@ static int cmd_submit_param_change(int argc, char** argv) {
     }
     if (priv_hex.empty() || from_domain.empty() || name.empty()
         || value_hex.empty() || keyholder_sigs.empty()) {
-        std::cerr << "Usage: unchained submit-param-change --priv <hex> "
+        std::cerr << "Usage: determ submit-param-change --priv <hex> "
                      "--from <domain> --name <NAME> --value-hex <hex> "
                      "--effective-height <N> "
                      "--keyholder-sig <idx>:<priv_hex> [more...] "
@@ -1473,7 +1473,7 @@ static int cmd_submit_param_change(int argc, char** argv) {
 }
 
 // R4: build, sign, and submit a MERGE_EVENT tx.
-//   unchained submit-merge-event \
+//   determ submit-merge-event \
 //     --priv <sender_priv_hex> --from <sender_domain> \
 //     --event {begin|end} \
 //     --shard-id <N> --partner-id <N> \
@@ -1505,7 +1505,7 @@ static int cmd_submit_merge_event(int argc, char** argv) {
         else if (a == "--fee")               fee  = std::stoull(argv[i + 1]);
     }
     if (priv_hex.empty() || from_domain.empty() || event_str.empty()) {
-        std::cerr << "Usage: unchained submit-merge-event "
+        std::cerr << "Usage: determ submit-merge-event "
                      "--priv <hex> --from <domain> --event {begin|end} "
                      "--shard-id <N> --partner-id <N> "
                      "--effective-height <N> --evidence-window-start <N> "
@@ -1570,7 +1570,7 @@ static int cmd_submit_merge_event(int argc, char** argv) {
 
 // v2.18 Theme 7: submit a DAPP_REGISTER tx to the network.
 // The signing sender (--from + --priv) must already be a REGISTER'd
-// Unchained identity. service_pubkey is generated separately (e.g., via
+// Determ identity. service_pubkey is generated separately (e.g., via
 // libsodium box-keypair-gen) and provided here in hex.
 static int cmd_submit_dapp_register(int argc, char** argv) {
     std::string priv_hex, from_domain, service_pubkey_hex, endpoint_url,
@@ -1596,7 +1596,7 @@ static int cmd_submit_dapp_register(int argc, char** argv) {
     }
     if (priv_hex.empty() || from_domain.empty() ||
         (!deactivate && (service_pubkey_hex.empty() || endpoint_url.empty()))) {
-        std::cerr << "Usage: unchained submit-dapp-register --priv <hex> --from <domain>\n"
+        std::cerr << "Usage: determ submit-dapp-register --priv <hex> --from <domain>\n"
                      "  Create/update: --service-pubkey <64hex> --endpoint-url <url>\n"
                      "                 [--topics t1,t2,t3] [--retention 0|1]\n"
                      "                 [--metadata-hex <hex>]\n"
@@ -1721,7 +1721,7 @@ static int cmd_submit_dapp_call(int argc, char** argv) {
         else if (a == "--fee")         fee  = std::stoull(argv[i + 1]);
     }
     if (priv_hex.empty() || from_domain.empty() || to_domain.empty()) {
-        std::cerr << "Usage: unchained submit-dapp-call --priv <hex> --from <domain>\n"
+        std::cerr << "Usage: determ submit-dapp-call --priv <hex> --from <domain>\n"
                      "  --to <dapp-domain> [--topic <T>] [--payload-hex <hex>]\n"
                      "  [--amount <N>] [--fee <N>] [--rpc-port <P>]\n";
         return 1;
@@ -1790,7 +1790,7 @@ static int cmd_submit_dapp_call(int argc, char** argv) {
 
 static int cmd_genesis_tool(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: unchained genesis-tool {peer-info|build|build-sharded} ...\n";
+        std::cerr << "Usage: determ genesis-tool {peer-info|build|build-sharded} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -1849,7 +1849,7 @@ int main(int argc, char** argv) {
         }
     }
     // v2.18 Theme 7: DApp registry query — info for one DApp.
-    // Usage: unchained dapp-info --domain <D> [--rpc-port N]
+    // Usage: determ dapp-info --domain <D> [--rpc-port N]
     if (cmd == "dapp-info") {
         uint16_t port = get_rpc_port(sub_argc, sub_argv);
         std::string domain;
@@ -1872,7 +1872,7 @@ int main(int argc, char** argv) {
         }
     }
     // v2.19 Theme 7 Phase 7.4: retrospective DAPP_CALL query.
-    // Usage: unchained dapp-messages --domain D [--from H] [--to H]
+    // Usage: determ dapp-messages --domain D [--from H] [--to H]
     //        [--topic T] [--rpc-port N]
     // DApp node poll-and-process pattern:
     //   while true: dapp-messages --from $WATERMARK; process; $WATERMARK = result.last_scanned + 1
@@ -1904,7 +1904,7 @@ int main(int argc, char** argv) {
     }
 
     // v2.18 Theme 7: DApp registry query — list / filter.
-    // Usage: unchained dapp-list [--prefix P] [--topic T] [--rpc-port N]
+    // Usage: determ dapp-list [--prefix P] [--topic T] [--rpc-port N]
     if (cmd == "dapp-list") {
         uint16_t port = get_rpc_port(sub_argc, sub_argv);
         std::string prefix, topic;
@@ -1925,7 +1925,7 @@ int main(int argc, char** argv) {
     }
 
     // v2.2 light-client foundation: state-proof CLI.
-    // Usage: unchained state-proof --ns <a|s|r|b|k|c> --key <name> [--rpc-port N]
+    // Usage: determ state-proof --ns <a|s|r|b|k|c> --key <name> [--rpc-port N]
     if (cmd == "state-proof") {
         uint16_t port = get_rpc_port(sub_argc, sub_argv);
         std::string ns, key;
@@ -1953,8 +1953,8 @@ int main(int argc, char** argv) {
     // RPC — just a freshly-constructed Chain and direct method calls.
     // Exit 0 on all assertions passing, non-zero on any failure.
     if (cmd == "test-atomic-scope") {
-        using namespace unchained;
-        using namespace unchained::chain;
+        using namespace determ;
+        using namespace determ::chain;
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
@@ -2093,15 +2093,15 @@ int main(int argc, char** argv) {
     // create / update / deactivate paths. Verifies dapp_registry_
     // state + state_root changes accordingly.
     if (cmd == "test-dapp-register") {
-        using namespace unchained;
-        using namespace unchained::chain;
+        using namespace determ;
+        using namespace determ::chain;
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
             else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
         };
 
-        // Genesis: alice is a registered Unchained domain with stake.
+        // Genesis: alice is a registered Determ domain with stake.
         Block genesis;
         genesis.index           = 0;
         genesis.prev_hash       = Hash{};
@@ -2229,12 +2229,12 @@ int main(int argc, char** argv) {
     }
     // v2.19 Theme 7 Phase 7.2: in-process apply-path test for DAPP_CALL.
     // Builds a Chain with alice (user) and dapp_owner (DApp's owning
-    // Unchained identity), registers a DApp on dapp_owner, then exercises
+    // Determ identity), registers a DApp on dapp_owner, then exercises
     // DAPP_CALL across various scenarios (success, missing DApp,
     // deactivated DApp, unknown topic, payment + message).
     if (cmd == "test-dapp-call") {
-        using namespace unchained;
-        using namespace unchained::chain;
+        using namespace determ;
+        using namespace determ::chain;
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
             if (cond) std::cout << "  PASS: " << msg << "\n";
@@ -2410,8 +2410,8 @@ int main(int argc, char** argv) {
         return fail == 0 ? 0 : 1;
     }
     if (cmd == "test-composable-batch") {
-        using namespace unchained;
-        using namespace unchained::chain;
+        using namespace determ;
+        using namespace determ::chain;
         int fail = 0;
         auto check = [&](bool cond, const char* msg) {
             if (cond) std::cout << "  PASS: " << msg << "\n";

@@ -4,7 +4,7 @@
 #   1. Create anonymous account A with privkey held only by user.
 #   2. Genesis funds A with 100 DTM.
 #   3. Create anonymous account B (recipient).
-#   4. `unchained send_anon` signs TRANSFER from A to B with raw privkey,
+#   4. `determ send_anon` signs TRANSFER from A to B with raw privkey,
 #      submits via daemon's `submit_tx` RPC.
 #   5. Verify B's balance updates on all 3 nodes (full anonymity flow).
 #
@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_bearer
 
 declare -a NODE_PIDS
@@ -30,12 +30,12 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_balance() {
-  $UNCHAINED balance "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM balance "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('balance','-'))
 except: print('-')"
 }
 get_height() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height','-'))
 except: print('-')"
 }
@@ -45,20 +45,20 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes (single_test profile: SINGLE+NONE) ==="
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
 echo "=== 2. Create anonymous account A (sender) ==="
-$UNCHAINED account create --out $T/A.json
+$DETERM account create --out $T/A.json
 A_ADDR=$(python -c "import json; print(json.load(open('$T/A.json'))['address'])")
 A_PRIV=$(python -c "import json; print(json.load(open('$T/A.json'))['privkey'])")
 echo "  A address: $A_ADDR"
 
 echo
 echo "=== 3. Create anonymous account B (recipient) ==="
-$UNCHAINED account create --out $T/B.json
+$DETERM account create --out $T/B.json
 B_ADDR=$(python -c "import json; print(json.load(open('$T/B.json'))['address'])")
 echo "  B address: $B_ADDR"
 
@@ -80,7 +80,7 @@ $(cat $T/p3.json | tr -d '\n')
   ]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json
+$DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -114,7 +114,7 @@ echo
 echo "=== 6. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done
@@ -133,7 +133,7 @@ echo "  B balance @ n1: $(get_balance 8771 $B_ADDR)  (expected: 0, never funded)
 
 echo
 echo "=== 8. Use send_anon: bearer wallet A signs TRANSFER 25 DTM to B ==="
-RESP=$($UNCHAINED send_anon "$B_ADDR" 25 "$A_PRIV" --rpc-port 8771 2>&1)
+RESP=$($DETERM send_anon "$B_ADDR" 25 "$A_PRIV" --rpc-port 8771 2>&1)
 echo "  RPC response: $RESP"
 
 echo

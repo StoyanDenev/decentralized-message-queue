@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 // ─── Binary wire codec — A3 / S8 ─────────────────────────────────────────────
 //
 // Plan reference: plan.md, "Active: Mode selectors + economic / UX primitives",
@@ -133,11 +133,11 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include <unchained/net/messages.hpp>
+#include <determ/net/messages.hpp>
 #include <cstring>
 #include <stdexcept>
 
-namespace unchained::net {
+namespace determ::net {
 
 namespace {
 
@@ -378,4 +378,4 @@ Message decode_binary(const uint8_t* data, size_t len) {
     return m;
 }
 
-} // namespace unchained::net
+} // namespace determ::net

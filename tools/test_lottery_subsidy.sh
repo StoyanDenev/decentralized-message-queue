@@ -26,7 +26,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_lottery_subsidy
 
 declare -a NODE_PIDS
@@ -43,7 +43,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -53,8 +53,8 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes with single_test profile ==="
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
@@ -75,7 +75,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -106,7 +106,7 @@ echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done
@@ -124,13 +124,13 @@ echo "  height: $H"
 
 # Total paid = sum of creator balances. Genesis allocates 0 to creators,
 # so all balances came from subsidy distribution.
-B1=$($UNCHAINED balance node1 --rpc-port 8771 2>/dev/null | python -c "import sys,json
+B1=$($DETERM balance node1 --rpc-port 8771 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('balance',0))
 except: print(0)")
-B2=$($UNCHAINED balance node2 --rpc-port 8771 2>/dev/null | python -c "import sys,json
+B2=$($DETERM balance node2 --rpc-port 8771 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('balance',0))
 except: print(0)")
-B3=$($UNCHAINED balance node3 --rpc-port 8771 2>/dev/null | python -c "import sys,json
+B3=$($DETERM balance node3 --rpc-port 8771 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('balance',0))
 except: print(0)")
 TOTAL=$(( B1 + B2 + B3 ))
@@ -141,8 +141,7 @@ echo "  creator balances: node1=$B1 node2=$B2 node3=$B3 sum=$TOTAL"
 # a zero-subsidy block credits nothing if there are no txs.
 JACKPOT_BLOCKS=$(python -c "
 import json
-_cj = json.load(open('$T/n1/chain.json'))
-blocks = _cj['blocks'] if isinstance(_cj, dict) and 'blocks' in _cj else _cj
+blocks = json.load(open('$T/n1/chain.json'))
 # Count: each block's subsidy is either 50 or 0 in this test (no fees).
 # Reconstruct by walking and tallying per-creator credits.
 # Heuristic: any height where total cumulative balance jumped by 50 was

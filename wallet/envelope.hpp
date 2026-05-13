@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
 // A2 Phase 2: AEAD envelope wrapping individual recovery shares.
 //
@@ -12,7 +12,7 @@
 // without libopaque on the build path yet.
 //
 // Wire format (canonical, little-endian where noted):
-//   [magic: 4B = "DWE1"]   // unchained wallet envelope v1
+//   [magic: 4B = "DWE1"]   // determ wallet envelope v1
 //   [salt_len: u8][salt: bytes]               // PBKDF2 salt (>= 16 bytes)
 //   [pbkdf2_iters: u32 LE]                    // KDF cost parameter
 //   [nonce: 12B]                              // AES-GCM 96-bit nonce
@@ -31,7 +31,7 @@
 #include <string>
 #include <optional>
 
-namespace unchained::wallet::envelope {
+namespace determ::wallet::envelope {
 
 struct Envelope {
     std::vector<uint8_t> salt;
@@ -72,4 +72,4 @@ decrypt(const Envelope& env,
 std::string serialize(const Envelope& env);
 std::optional<Envelope> deserialize(const std::string& blob);
 
-} // namespace unchained::wallet::envelope
+} // namespace determ::wallet::envelope

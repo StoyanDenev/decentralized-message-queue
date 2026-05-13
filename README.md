@@ -1,8 +1,8 @@
-# Unchained: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
+# Determ: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
 
 **Version 2** · [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-> **Scope, briefly:** Unchained is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
+> **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
 > **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
 >
@@ -14,9 +14,9 @@
 
 ## Abstract
 
-Unchained is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase, K-of-K unanimous co-creation protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
+Determ is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase, K-of-K unanimous co-creation protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
 
-Two design choices distinguish Unchained from prior fork-free systems:
+Two design choices distinguish Determ from prior fork-free systems:
 
 1. **Commit-reveal selective-abort defense.** The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` is committed-then-revealed: in Phase 1 every committee member commits to a 32-byte secret via `SHA256(secret ‖ pubkey)`; in Phase 2 they reveal. A committee member deciding whether to publish their Phase 1 commitment cannot predict `R` because the other K−1 secrets are still uniformly random under SHA-256 preimage resistance. Selective abort — the canonical attack on aggregate-signature randomness beacons — is cryptographically defeated, not just economically discouraged.
 
@@ -30,7 +30,7 @@ Identity is two-tiered: **registered domains** (named, staked, eligible to be se
 
 Most blockchain consensus protocols separate block proposal from finalization. A single leader proposes a block; a committee, a validator set, or accumulated proof-of-work finalizes it. This architecture introduces either probabilistic finality (Bitcoin), multi-round voting latency (Tendermint, Ethereum PoS), or a trusted-leader failure mode (Solana, early DPoS systems).
 
-Unchained takes a different approach: a small committee of `K` creators co-produces every block, and each block carries `K` independently-signed authenticators. A valid block requires all `K` signatures over the same digest. There is no proposer to censor and no quorum threshold to game — the only way to prevent block production is to make at least one committee member silent, which the protocol detects and reroutes around.
+Determ takes a different approach: a small committee of `K` creators co-produces every block, and each block carries `K` independently-signed authenticators. A valid block requires all `K` signatures over the same digest. There is no proposer to censor and no quorum threshold to game — the only way to prevent block production is to make at least one committee member silent, which the protocol detects and reroutes around.
 
 The protocol's randomness is supplied by a **commit-reveal protocol** rather than an aggregate signature or a randomness beacon. Phase 1 seals each member's contribution to `R` under a SHA-256 commitment; Phase 2 reveals. At the moment a committee member decides whether to contribute, the K−1 other secrets are still uniformly random — preimage resistance makes `R` unpredictable until reveals gather, defeating selective abort.
 
@@ -53,27 +53,27 @@ This design has three consequences worth highlighting:
 
 Transactions from both account types are signed under Ed25519. The chain validates signatures uniformly; the only difference is consensus eligibility.
 
-**Trust model — zero-trust system, mutual-distrust environment.** Unchained is a **zero-trust system internally**. The protocol itself assumes nothing about any participant's honesty, intent, or alignment with chain progress. It only enforces rules: verify signatures, run the consensus state machine, propagate messages. No participant — including beacons, validators, users, or operators — is granted any trust by the protocol. Every actor is treated as potentially adversarial.
+**Trust model — zero-trust system, mutual-distrust environment.** Determ is a **zero-trust system internally**. The protocol itself assumes nothing about any participant's honesty, intent, or alignment with chain progress. It only enforces rules: verify signatures, run the consensus state machine, propagate messages. No participant — including beacons, validators, users, or operators — is granted any trust by the protocol. Every actor is treated as potentially adversarial.
 
 **All trust comes from outside the system, never from within it.** External observers (users, regulators, auditors) may form their own beliefs about specific validators based on external evidence — public domain identity, off-chain reputation, regulatory accountability, code review of the validator software, etc. — and those beliefs may inform the observer's choice of which chain to use, which validators to peer with, which blocks to consider final beyond protocol guarantees. But none of those external beliefs are encoded into the protocol. The protocol works identically whether observers trust validators or not.
 
-Unchained contrasts here with classic BFT protocols (Tendermint, HotStuff, PBFT) that assume participants pursue a **common goal** — *advance the chain* — and bound the fraction that can defect from that goal (typically `f < N/3`). BFT framings smuggle a soft trust assumption into the protocol: "≥2/3 of validators want the chain to function." Unchained assumes nothing of the kind. **Validators have no common goal.** Each is a self-interested actor pursuing its own block reward. They do not cooperate voluntarily; they cooperate **involuntarily and only at the moment of block propagation**, because the protocol's K-of-K and union-tx-root rules make individual defection either rewardless (no share of the block) or impotent (a refusal to include a tx is overridden by anyone else who does include it).
+Determ contrasts here with classic BFT protocols (Tendermint, HotStuff, PBFT) that assume participants pursue a **common goal** — *advance the chain* — and bound the fraction that can defect from that goal (typically `f < N/3`). BFT framings smuggle a soft trust assumption into the protocol: "≥2/3 of validators want the chain to function." Determ assumes nothing of the kind. **Validators have no common goal.** Each is a self-interested actor pursuing its own block reward. They do not cooperate voluntarily; they cooperate **involuntarily and only at the moment of block propagation**, because the protocol's K-of-K and union-tx-root rules make individual defection either rewardless (no share of the block) or impotent (a refusal to include a tx is overridden by anyone else who does include it).
 
 This is "mutual distrust" — every validator watches every other, assumes every other is potentially adversarial, and the protocol is robust *because* the rules align self-interested behavior into chain progress without requiring shared intent.
 
 ### 2.1 The actual decentralization threshold
 
-Unchained's safety + censorship-resistance properties hold **as long as at least one validator in the registry is non-Byzantine**:
+Determ's safety + censorship-resistance properties hold **as long as at least one validator in the registry is non-Byzantine**:
 
 - **At least 1 non-Byzantine validator anywhere in the registry → mutual-distrust environment.** The K-of-K committee rotates over time, so a single non-Byzantine validator eventually appears on any committee. Their Phase 1 contribution unions any censored tx into the block (mutual inclusion). Their refusal to sign malformed proposals is a veto on those they reject (mutual veto). The chain stays open and uncensored.
-- **0 non-Byzantine validators (100% adversarial capture) → fully controlled adversarial network.** No protocol provides safety in this case — the attacker controls every committee member at every height and can produce any block they want. This is the universal limit beyond which no consensus protocol can function. Unchained makes no claim here.
+- **0 non-Byzantine validators (100% adversarial capture) → fully controlled adversarial network.** No protocol provides safety in this case — the attacker controls every committee member at every height and can produce any block they want. This is the universal limit beyond which no consensus protocol can function. Determ makes no claim here.
 
 Two important caveats on this threshold:
 
 1. **"Non-Byzantine" is not "honest."** The protocol doesn't require *anyone* to be honest in any moral sense — it only requires that *some* participant follows protocol rules (for whatever reason: self-interest, regulation, mistake, ethics). Following the protocol is rationally cheaper than deviating, so the property holds even under fully self-interested rational actors.
 2. **The threshold is a property of the system, not a protocol assumption.** The protocol does not *believe* that ≥1 validator is non-Byzantine — it doesn't believe anything. The threshold is what an *external observer* needs to assume in order to expect the chain to remain useful. If the observer doesn't believe even ≥1 validator follows the protocol, they don't use the chain. That choice happens outside the system.
 
-The "honest minority" tolerance most BFT protocols celebrate (`f < N/3`) is **strictly weaker** than what Unchained's K-of-K + union model achieves: Unchained tolerates `f < N` (one non-Byzantine validator in the entire registry suffices for safety + censorship resistance), at the cost of giving up `f < N/3` liveness (a single Byzantine in the *committee* can halt that round, mitigated by rotation + BFT escalation in §10.4).
+The "honest minority" tolerance most BFT protocols celebrate (`f < N/3`) is **strictly weaker** than what Determ's K-of-K + union model achieves: Determ tolerates `f < N` (one non-Byzantine validator in the entire registry suffices for safety + censorship resistance), at the cost of giving up `f < N/3` liveness (a single Byzantine in the *committee* can halt that round, mitigated by rotation + BFT escalation in §10.4).
 
 ### 2.2 The three structural properties
 
@@ -87,7 +87,7 @@ The mutual-distrust model rests on:
 
 ### 2.3 Trade-off vs. BFT
 
-Unchained gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; BFT escalation in §10.4 falls back to `ceil(2K/3)` after threshold aborts). In return it gets:
+Determ gives up `f < N/3` Byzantine *liveness* tolerance — a single silent committee member halts the round (in strong mode; BFT escalation in §10.4 falls back to `ceil(2K/3)` after threshold aborts). In return it gets:
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
 - **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
@@ -269,14 +269,14 @@ The genesis block is signed implicitly by the operator who builds it; integrity 
 
 ### 5.1 Inclusion models
 
-Unchained supports two genesis-pinned validator-inclusion policies. Both deliver **identical decentralization and censorship-resistance guarantees** — they differ only in the Sybil-resistance medium and the disincentive currency.
+Determ supports two genesis-pinned validator-inclusion policies. Both deliver **identical decentralization and censorship-resistance guarantees** — they differ only in the Sybil-resistance medium and the disincentive currency.
 
 | Mode | `min_stake` | Sybil cost | Disincentive on misbehavior |
 |---|---|---|---|
 | **`STAKE_INCLUSION`** (default) | 1000 (configurable) | Capital lock-up `min_stake × N` | Stake forfeit (suspension slash + equivocation forfeit) |
 | **`DOMAIN_INCLUSION`** | 0 | Domain registration | Deregistration (lose all future block rewards; re-entry costs a fresh registration) |
 
-**Why the decentralization claim is mode-invariant:** Unchained's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **unanimous collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
+**Why the decentralization claim is mode-invariant:** Determ's K-of-K mutual veto plus union tx_root means a tx is included if **any single committee member** adds it to their Phase-1 hash list. A single honest validator anywhere in the registry, given enough rounds, eventually rotates onto a committee and unions the tx into a block. Censorship would require **unanimous collusion of every validator that ever rotates onto any committee** — structurally impossible without 100% capture of the registry. This property is a function of K-of-K + union + rotation, not of the inclusion mechanism. Both `STAKE_INCLUSION` and `DOMAIN_INCLUSION` deliver it equally.
 
 The choice between modes is operational: which Sybil-resistance medium and disincentive currency the deployment prefers. Stake is the natural choice for chains where the native token has economic weight; domain-based inclusion is the natural choice for deployments where on-chain economics doesn't yet exist or where validator identities are intentionally public for accountability.
 
@@ -432,7 +432,7 @@ With `K = 3` and `f/N = 0.10`: `P ≈ 10⁻³` per round. Since the committee ro
 
 A naive aggregate-signature randomness beacon (e.g., a BLS-based randomness beacon) is vulnerable to **selective abort**: a committee member could compute the resulting `R` from a candidate Phase 1 set, decide whether `R` favors them, and choose whether to publish their share — biasing future selection.
 
-Unchained defeats this with a Phase-1/Phase-2 commit-reveal binding:
+Determ defeats this with a Phase-1/Phase-2 commit-reveal binding:
 
 - In Phase 1, each member commits to their secret via `dh_input = SHA256(secret_i ‖ pubkey_i)` — a one-way commitment under SHA-256 preimage resistance.
 - The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` depends on **all K** revealed secrets. While a member is deciding whether to publish their Phase-1 commitment, the K−1 other secrets are still uniformly random; under SHA-256 preimage resistance, no candidate `R` can be tested.
@@ -495,8 +495,8 @@ An anonymous account is a user-side keypair whose address is `0x` followed by th
 
 The CLI exposes:
 
-- `unchained account create` — generates `{address, privkey}`.
-- `unchained send_anon <to> <amount> <privkey>` — signs a TRANSFER offline and submits via any node's `submit_tx` RPC.
+- `determ account create` — generates `{address, privkey}`.
+- `determ send_anon <to> <amount> <privkey>` — signs a TRANSFER offline and submits via any node's `submit_tx` RPC.
 
 Anonymous accounts cannot be selected as creators (consensus requires registered domains), but they can receive arbitrary credits and transfer them under bearer-wallet semantics: possession of the private key is full authority.
 
@@ -605,27 +605,27 @@ Block time approaches `T_phase_1 + T_phase_2 + 2 × max RTT in committee` once t
 
 ### 14.1 Bitcoin (Nakamoto Consensus)
 
-PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. Unchained is registration-gated, immediately final, fork-free.
+PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. Determ is registration-gated, immediately final, fork-free.
 
 ### 14.2 Ethereum (Gasper)
 
-PoS with 2/3+ attester finality over ~12.8 minutes. Unchained finalizes per block (~500 ms web profile). Ethereum tolerates per-validator faults; Unchained's K-of-K does not, but achieves stronger censorship resistance through union tx set.
+PoS with 2/3+ attester finality over ~12.8 minutes. Determ finalizes per block (~500 ms web profile). Ethereum tolerates per-validator faults; Determ's K-of-K does not, but achieves stronger censorship resistance through union tx set.
 
 ### 14.3 Tendermint / Cosmos
 
-2/3+ vote in a two-phase commit. Single proposer per round is a censorship bottleneck; Unchained's union-of-K is not.
+2/3+ vote in a two-phase commit. Single proposer per round is a censorship bottleneck; Determ's union-of-K is not.
 
 ### 14.4 Algorand
 
-VRF sortition + BA* over ~3.7 s. Tolerates `f < N/3` Byzantine. Unchained's per-round committee is much smaller (`K`, typically 3) but every member must contribute — censorship requires unanimity within the committee.
+VRF sortition + BA* over ~3.7 s. Tolerates `f < N/3` Byzantine. Determ's per-round committee is much smaller (`K`, typically 3) but every member must contribute — censorship requires unanimity within the committee.
 
 ### 14.5 Dfinity / Internet Computer
 
-Threshold BLS beacon + ranked leader model. Unchained has no leader; all `K` committee members are co-equal. Unchained uses a commit-reveal randomness protocol (not threshold BLS) for per-block `R`, which avoids the selective-abort vulnerability inherent to aggregate-signature beacons without depending on the heavy threshold-BLS toolchain.
+Threshold BLS beacon + ranked leader model. Determ has no leader; all `K` committee members are co-equal. Determ uses a commit-reveal randomness protocol (not threshold BLS) for per-block `R`, which avoids the selective-abort vulnerability inherent to aggregate-signature beacons without depending on the heavy threshold-BLS toolchain.
 
 ### 14.6 Solana
 
-Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality lagging by ~32 slots. Unchained's randomness uses commit-reveal rather than iterated SHA-256; finality is per-slot K-of-K signatures rather than tower-vote accumulation.
+Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality lagging by ~32 slots. Determ's randomness uses commit-reveal rather than iterated SHA-256; finality is per-slot K-of-K signatures rather than tower-vote accumulation.
 
 ---
 
@@ -641,7 +641,7 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Binary wire codec.** Current JSON-over-TCP is convenient but verbose. A future revision will introduce a binary message codec for bandwidth efficiency.
 
-**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). The full header-only sync flow (light client downloads only block headers + verifies against epoch-boundary committee state) builds on this primitive and is a follow-on RPC track. CLI `unchained state-proof --ns <a|s|r|b|k|c> --key <name>` exercises the primitive today.
+**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). The full header-only sync flow (light client downloads only block headers + verifies against epoch-boundary committee state) builds on this primitive and is a follow-on RPC track. CLI `determ state-proof --ns <a|s|r|b|k|c> --key <name>` exercises the primitive today.
 
 **Equivocation handling — fully closed-loop:**
 
@@ -668,7 +668,7 @@ BFT-mode safety claims (conditional on `f < N/3` plus economic disincentive) are
 
 ## 16. Sharding
 
-A sharded Unchained deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+A sharded Determ deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
 
 The `ShardingMode` axis (pinned per profile) selects the topology:
 
@@ -765,7 +765,7 @@ Legacy payload (`region_len = 0`, no trailing bytes) is wire-compatible — it m
 
 ### 17.6 Censorship + safety claims under sharding
 
-Unchained's K-conjunction censorship resistance is **per-shard, per-epoch**. An adversary capturing a single shard's K-committee for an epoch can censor that shard's transactions for the epoch. Rotation at the next epoch boundary evicts them. Operator knobs:
+Determ's K-conjunction censorship resistance is **per-shard, per-epoch**. An adversary capturing a single shard's K-committee for an epoch can censor that shard's transactions for the epoch. Rotation at the next epoch boundary evicts them. Operator knobs:
 
 - Larger `K_per_shard` — harder to capture.
 - Shorter `E` — less window per capture.
@@ -792,7 +792,7 @@ When a shard's regional pool drops below `2K`, that shard temporarily merges com
 - **Auto-revert.** A symmetric `MERGE_END` event reverts the partner to its native pool. Default thresholds: `merge_threshold_blocks = 100`, `revert_threshold_blocks = 200` (2:1 hysteresis to bias toward stability).
 - **Grace period.** `effective_height >= block.index + merge_grace_blocks` so committees observe the transition before it takes effect.
 
-Operator surface: `unchained submit-merge-event --event {begin|end} --shard-id N --partner-id N --effective-height N --refugee-region R --priv <hex> --from <domain>`. Auto-detection on the beacon (observe `eligible_in_region < 2K` over the threshold window) is a v1.1 work item; v1.x ships the operator-driven path.
+Operator surface: `determ submit-merge-event --event {begin|end} --shard-id N --partner-id N --effective-height N --refugee-region R --priv <hex> --from <domain>`. Auto-detection on the beacon (observe `eligible_in_region < 2K` over the threshold window) is a v1.1 work item; v1.x ships the operator-driven path.
 
 Safety preservation is proven in `docs/proofs/UnderQuorumMerge.md` (FA9).
 
@@ -800,9 +800,9 @@ Safety preservation is proven in `docs/proofs/UnderQuorumMerge.md` (FA9).
 
 ## 17. Scope
 
-Unchained's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
+Determ's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
 
-### 17.1 What Unchained is built for
+### 17.1 What Determ is built for
 
 - **Permissionless payment system.** TRANSFER between named domains and anonymous bearer-wallet accounts. Censorship-resistant via K-of-K + union tx_root — any single non-Byzantine committee member can include any tx. Zero-trust safety (no protocol component trusts any participant).
 - **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 non-Byzantine validator remains in the registry).
@@ -819,9 +819,9 @@ Unchained's design intent is intentionally narrow: a **fork-free L1 payment + id
 - **Page-reward economies** — applications using the native subsidy + fee distribution as the incentive primitive.
 - **Anything stateless that fits the named-account balance model.**
 
-### 17.3 What Unchained does not host
+### 17.3 What Determ does not host
 
-- **Computation beyond balance arithmetic** — needs a contract VM that Unchained doesn't provide.
+- **Computation beyond balance arithmetic** — needs a contract VM that Determ doesn't provide.
 - **Large on-chain state** — tx payloads are tiny by design.
 - **Cross-application composability** — no contracts means no cross-app calls.
 - **Off-chain data dependencies** — no oracle infrastructure.
@@ -841,20 +841,20 @@ A future fork or layer-2 could add these. The base protocol does not.
 
 ### 17.5 Honest framing
 
-Calling Unchained a "DApp hosting network" misrepresents what it is. Calling it a "decentralized cryptocurrency with mutual-distrust safety" is accurate. Specific fits:
+Calling Determ a "DApp hosting network" misrepresents what it is. Calling it a "decentralized cryptocurrency with mutual-distrust safety" is accurate. Specific fits:
 
 - Inter-organization settlement where payment + identity is the whole value proposition.
 - Censorship-resistant value transfer in environments where trust assumptions about validators are explicitly rejected.
 - Federated registries where domain-anchored validators provide identity and the chain provides ordering + auditability.
 - Regional payment networks (`EXTENDED` sharding) where in-shard sub-second finality matters and operators are explicit about regional trust assumptions.
 
-If you need contracts, build them on a different chain or build a layer-2 on top of Unchained. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with cryptoeconomic safety — not to be everything.
+If you need contracts, build them on a different chain or build a layer-2 on top of Determ. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with cryptoeconomic safety — not to be everything.
 
 ---
 
 ## 18. Governance
 
-Unchained supports two genesis-pinned governance modes:
+Determ supports two genesis-pinned governance modes:
 
 - **`governance_mode = 0` (uncontrolled, default).** Consensus constants are immutable post-genesis. Changing any of them requires a new chain identity. Suitable for permissionless deployments and chains that want a single, stable parameter set forever.
 - **`governance_mode = 1` (governed).** An N-of-N founder keyholder set may emit `PARAM_CHANGE` transactions mutating a whitelisted parameter set mid-chain. Suitable for consortium and enterprise deployments where parameter tuning is operationally necessary.
@@ -872,7 +872,7 @@ Off-list parameters (committee size K, sharding mode, chain identity, crypto pri
 
 The PARAM_CHANGE payload carries `(name, value, effective_height)` plus signatures from `>= param_threshold` distinct keyholders over the canonical signing message. The validator rejects mode-incompatible, off-whitelist, or threshold-failing transactions outright. The apply path stages the change; activation fires at `effective_height` via `Chain::activate_pending_params(h)`.
 
-Operator surface: `unchained submit-param-change --priv <sender_hex> --from <sender_domain> --name <NAME> --value-hex <hex> --effective-height N --keyholder-sig <idx>:<priv_hex> [more...]`. Offline-signed; the CLI bundles the multisig + tx wrap.
+Operator surface: `determ submit-param-change --priv <sender_hex> --from <sender_domain> --name <NAME> --value-hex <hex> --effective-height N --keyholder-sig <idx>:<priv_hex> [more...]`. Offline-signed; the CLI bundles the multisig + tx wrap.
 
 Soundness is proven in `docs/proofs/Governance.md` (FA10).
 
@@ -880,7 +880,7 @@ Soundness is proven in `docs/proofs/Governance.md` (FA10).
 
 ## 18.5. Wallet recovery (A2)
 
-A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `unchained-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing, AEAD envelopes, and an OPAQUE adapter — solving key loss without weakening on-chain trust.
+A lost Ed25519 private key today means permanent loss of the registered domain and its balance. The `determ-wallet` binary provides an opt-in distributed recovery primitive layered over Shamir's Secret Sharing, AEAD envelopes, and an OPAQUE adapter — solving key loss without weakening on-chain trust.
 
 **Threat model.** The wallet's recovery flow protects against:
 
@@ -916,35 +916,35 @@ The setup is fully portable — it carries everything needed for threshold recon
 **Operator surface:**
 
 ```
-unchained-wallet shamir split <hex> -t T -n N         Split secret into N shares
-unchained-wallet shamir combine <share> ...           Reconstruct from >=T shares
-unchained-wallet envelope encrypt --plaintext <hex>   AEAD-wrap arbitrary data
+determ-wallet shamir split <hex> -t T -n N         Split secret into N shares
+determ-wallet shamir combine <share> ...           Reconstruct from >=T shares
+determ-wallet envelope encrypt --plaintext <hex>   AEAD-wrap arbitrary data
                                 --password <str>
-unchained-wallet envelope decrypt --envelope <blob>   Unwrap an envelope
+determ-wallet envelope decrypt --envelope <blob>   Unwrap an envelope
                                 --password <str>
-unchained-wallet create-recovery --seed <hex>         Persist a T-of-N recovery setup
+determ-wallet create-recovery --seed <hex>         Persist a T-of-N recovery setup
                               --password <str>
                               -t T -n N --out <file>
                               [--scheme {passphrase|opaque}]
-unchained-wallet recover --in <file>                  Reconstruct the seed
+determ-wallet recover --in <file>                  Reconstruct the seed
                       --password <str>
                       [--guardians <i,j,k,...>]
-unchained-wallet opaque-handshake --mode {register|authenticate}
+determ-wallet opaque-handshake --mode {register|authenticate}
                                 --password <str>
                                 --guardian-id <0..255>
                                 [--record <hex>]
-unchained-wallet oprf-smoke                           Verify libsodium primitives wired
+determ-wallet oprf-smoke                           Verify libsodium primitives wired
 ```
 
 **Phase status.** v1.x ships Phases 1–5 + 7 (greenfield wallet binary, all crypto layers wired against libsodium, OPAQUE adapter interface locked, recovery flow routed through the adapter). Phase 6 (vendor real libopaque + liboprf to replace the stub adapter implementation) is multi-cycle Windows MSVC porting work; the wallet's `is_stub()` flag gates production deployment until that lands. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis covering both stub and real-OPAQUE bounds.
 
-**Binary isolation.** `unchained-wallet` is a separate executable from the `unchained` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
+**Binary isolation.** `determ-wallet` is a separate executable from the `determ` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
 
 ---
 
 ## 19. Formal verification
 
-Unchained's safety-critical mechanisms are covered by per-property analytic proofs and machine-checkable TLA+ specifications. The full set lives in [`docs/proofs/`](docs/proofs/README.md):
+Determ's safety-critical mechanisms are covered by per-property analytic proofs and machine-checkable TLA+ specifications. The full set lives in [`docs/proofs/`](docs/proofs/README.md):
 
 | Layer | Coverage |
 |---|---|
@@ -959,7 +959,7 @@ Concrete-security bounds: every property holds with probability `≥ 1 − Q · 
 
 ## 20. Conclusion
 
-Unchained demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by construction rather than by economic disincentive or wall-clock delay. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
+Determ demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by construction rather than by economic disincentive or wall-clock delay. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
 
 The two-tier identity model — registered domains for consensus, anonymous accounts for transfers — preserves both governance auditability and end-user fungibility under one unified Ed25519 signature scheme.
 
@@ -975,16 +975,16 @@ The protocol is intentionally minimal: two consensus message types per block, on
 4. Kwon, J. "Tendermint: Consensus without Mining." 2014.
 5. Hanke, T., Movahedi, M., Williams, D. "DFINITY Technology Overview Series, Consensus System." 2018.
 6. Yakovenko, A. "Solana: A new architecture for a high performance blockchain." 2018.
-7. Boneh, D., Bonneau, J., Bünz, B., Fisch, B. "Verifiable Delay Functions." CRYPTO 2018. (Theoretical context for sequential-delay primitives. Unchained's iterated SHA-256 satisfies the sequentiality requirement without the succinct-verify property of true VDFs.)
+7. Boneh, D., Bonneau, J., Bünz, B., Fisch, B. "Verifiable Delay Functions." CRYPTO 2018. (Theoretical context for sequential-delay primitives. Determ's iterated SHA-256 satisfies the sequentiality requirement without the succinct-verify property of true VDFs.)
 
 ---
 
 ## License
 
-Unchained is licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE)).
+Determ is licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE)).
 
 ```
-Copyright 2026 Unchained Contributors
+Copyright 2026 Determ Contributors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

@@ -1,6 +1,6 @@
 # FA4 — Liveness theorem (probabilistic)
 
-This document proves Unchained's chain-progress guarantee: under partial synchrony, bounded per-validator unavailability, and BFT escalation enabled, the chain produces blocks with probability 1, and the expected number of round retries per height is bounded.
+This document proves Determ's chain-progress guarantee: under partial synchrony, bounded per-validator unavailability, and BFT escalation enabled, the chain produces blocks with probability 1, and the expected number of round retries per height is bounded.
 
 Unlike the cryptographic-soundness proofs (FA1 safety, FA2 censorship, FA3 selective-abort), FA4 is a **probabilistic** argument: liveness is not guaranteed for every single round (a Byzantine committee can stall one round), but the **expected** time to finalization is bounded.
 
@@ -50,7 +50,7 @@ $$
 
 **Proof.** Let `Live_i` be the event that committee member `v_i` successfully broadcasts its Phase-1 contribution within the round window. By (L2), `Pr[Live_i] = 1 - p`. By A4.1 independence, `Pr[⋂_i Live_i] = ∏_i (1-p) = (1-p)^K`.
 
-The independence assumption holds under typical operational conditions (uncorrelated network jitter, hardware faults). Correlated outages (rack-level power failure, regional internet partition) violate A4.1. For Unchained's `EXTENDED` sharding mode, regional concentration could correlate failures within a region — for global pools, correlation is generally low.   ∎
+The independence assumption holds under typical operational conditions (uncorrelated network jitter, hardware faults). Correlated outages (rack-level power failure, regional internet partition) violate A4.1. For Determ's `EXTENDED` sharding mode, regional concentration could correlate failures within a region — for global pools, correlation is generally low.   ∎
 
 ### Lemma L-4.2 — Geometric expectation
 
@@ -131,7 +131,7 @@ $$
 \mathbb{E}[\text{total rounds}] = \mathbb{E}[\text{MD rounds before escalation}] + \mathbb{E}[\text{BFT rounds after escalation}]
 $$
 
-For typical Unchained parameters (`K=3, p=0.05, T_threshold=5`):
+For typical Determ parameters (`K=3, p=0.05, T_threshold=5`):
 
 - `E[MD rounds] ≈ 1.17` (geometric on `q = 0.857`).
 - `Pr[hits escalation] ≈ 0.143^5 ≈ 5.9 × 10⁻⁵`.
@@ -168,7 +168,7 @@ This is the special case of T-4 with no BFT fallback. It's exactly the geometric
 
 **Concrete numbers.** For `K = 3`, `p = 0.05`: expected blocks `≈ 1.17` per finalization. For `p = 0.20`: `≈ 1.95` per finalization. For `p = 0.50`: `≈ 8` per finalization. For `p = 0.80`: `≈ 125` per finalization. As `p → 1`, expected rounds → ∞ (graceful degradation).
 
-For `p < 0.30`, the throughput penalty is modest (under 3x slowdown). Above `p = 0.5`, finalization becomes glacial; this is the operational threshold below which Unchained assumes its deployment.
+For `p < 0.30`, the throughput penalty is modest (under 3x slowdown). Above `p = 0.5`, finalization becomes glacial; this is the operational threshold below which Determ assumes its deployment.
 
 ---
 
@@ -205,7 +205,7 @@ This is a deployment-time choice, not a per-block choice.
 
 ### 5.4 What "almost surely" means
 
-`Pr[indefinite stall] = 0` doesn't mean "in finite time always finalizes." It means: for any finite time `T`, `Pr[stall longer than T] → 0` as `T → ∞`. For Unchained's typical parameters, the chain progresses at near-linear pace (1.17x baseline rounds per height); for adversarial parameters, progress slows but remains positive in expectation.
+`Pr[indefinite stall] = 0` doesn't mean "in finite time always finalizes." It means: for any finite time `T`, `Pr[stall longer than T] → 0` as `T → ∞`. For Determ's typical parameters, the chain progresses at near-linear pace (1.17x baseline rounds per height); for adversarial parameters, progress slows but remains positive in expectation.
 
 In practice, monitoring at the operator level: if expected rounds per block exceeds 5, something operational is wrong (network partition, persistent Byzantine abstention, hardware fault); operator-level recovery (restart suspicious validators, restore network connectivity, etc.) brings `p` back down.
 
@@ -243,6 +243,6 @@ A reviewer can confirm the protocol's liveness story by reading these source pat
 
 ## 7. Conclusion
 
-Liveness in Unchained is a probabilistic claim with bounded expected delay: `E[rounds per block] ≤ 1/(1-p)^K + O(T_threshold)`. The bound is exact (not asymptotic), tight for typical Unchained parameters, and characterizes both MD-only and MD+BFT-escalation deployments.
+Liveness in Determ is a probabilistic claim with bounded expected delay: `E[rounds per block] ≤ 1/(1-p)^K + O(T_threshold)`. The bound is exact (not asymptotic), tight for typical Determ parameters, and characterizes both MD-only and MD+BFT-escalation deployments.
 
-The proof's structural feature is that liveness is **not** unconditional (a sufficiently large `p` slows the chain), but indefinite-stall has probability zero under (L2) and (L5). This is the deliberate trade Unchained makes: safety is unconditional (FA1); liveness is best-effort probabilistic with a graceful-degradation curve.
+The proof's structural feature is that liveness is **not** unconditional (a sufficiently large `p` slows the chain), but indefinite-stall has probability zero under (L2) and (L5). This is the deliberate trade Determ makes: safety is unconditional (FA1); liveness is best-effort probabilistic with a graceful-degradation curve.

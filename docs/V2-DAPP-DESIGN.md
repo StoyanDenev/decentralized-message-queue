@@ -1,6 +1,6 @@
-# Unchained v2 — DApp support design
+# Determ v2 — DApp support design
 
-Companion to [`V2-DESIGN.md`](V2-DESIGN.md). Scopes Theme 7 (application layer): how third-party decentralized applications can use Unchained as their trust anchor without requiring Unchained itself to execute application logic.
+Companion to [`V2-DESIGN.md`](V2-DESIGN.md). Scopes Theme 7 (application layer): how third-party decentralized applications can use Determ as their trust anchor without requiring Determ itself to execute application logic.
 
 **Status:** design only. No code in this document.
 
@@ -8,7 +8,7 @@ Companion to [`V2-DESIGN.md`](V2-DESIGN.md). Scopes Theme 7 (application layer):
 
 ## 1. Motivation + scope
 
-Unchained is a payment + identity chain by intent. It is not a programmable platform (no smart-contract VM, no on-chain state-machine extensions). The DApp design preserves this while exposing two primitives that third-party applications need:
+Determ is a payment + identity chain by intent. It is not a programmable platform (no smart-contract VM, no on-chain state-machine extensions). The DApp design preserves this while exposing two primitives that third-party applications need:
 
 1. **An authenticated message queue.** Ordered, signed, replay-protected, censorship-resistant. Applications running off-chain consume the message stream and apply their own semantics.
 2. **A trusted user registry.** Stable identities (domain → pubkey). The chain provides the lookup; applications enforce their own authorization on top.
@@ -23,12 +23,12 @@ Unchained is a payment + identity chain by intent. It is not a programmable plat
 **Scope (out):**
 - On-chain DApp execution. DApp logic runs off-chain on operator-controlled nodes.
 - On-chain DApp state. The chain stores only the message stream + DApp registration metadata.
-- Native escrow / smart-contract primitives. Use [v2.4 `COMPOSABLE_BATCH`](../include/unchained/chain/block.hpp) for atomicity between a payment and a DApp call.
-- Inter-DApp transactions on-chain. DApps coordinate off-chain; Unchained provides only individual-message authentication.
+- Native escrow / smart-contract primitives. Use [v2.4 `COMPOSABLE_BATCH`](../include/determ/chain/block.hpp) for atomicity between a payment and a DApp call.
+- Inter-DApp transactions on-chain. DApps coordinate off-chain; Determ provides only individual-message authentication.
 
-**Design philosophy.** Unchained as protocol substrate, DApps as protocol consumers. The chain stays small and verifiable; the application ecosystem stays flexible and unconstrained.
+**Design philosophy.** Determ as protocol substrate, DApps as protocol consumers. The chain stays small and verifiable; the application ecosystem stays flexible and unconstrained.
 
-**The zk-VM L2 special case.** A particularly powerful instance of the DApp pattern is the "God Stack" — a zero-knowledge Virtual Machine operating as a Layer 2 against Unchained as L1. The L2 zk-VM runs arbitrary smart contracts off-chain, generates ZK proofs of correct execution, and submits batch commitments via DAPP_CALL or A4 TRANSFER payload. Unchained provides the deterministic ordering + finality (L1 judge role); the L2 provides arbitrary computation + privacy. Together they satisfy Szabo's God Protocol (execution + computation + privacy) without requiring Unchained to expand its scope. See [`V2-DESIGN.md`](V2-DESIGN.md) → "Composing with an external zk-VM — the canonical 'God Stack' pattern" for the full architecture. From Unchained's perspective, the zk-VM is just another Theme 7 DApp; the pattern is fully implementable today on the existing v2.18/v2.19 substrate without protocol-side changes.
+**The zk-VM L2 special case.** A particularly powerful instance of the DApp pattern is the "God Stack" — a zero-knowledge Virtual Machine operating as a Layer 2 against Determ as L1. The L2 zk-VM runs arbitrary smart contracts off-chain, generates ZK proofs of correct execution, and submits batch commitments via DAPP_CALL or A4 TRANSFER payload. Determ provides the deterministic ordering + finality (L1 judge role); the L2 provides arbitrary computation + privacy. Together they satisfy Szabo's God Protocol (execution + computation + privacy) without requiring Determ to expand its scope. See [`V2-DESIGN.md`](V2-DESIGN.md) → "Composing with an external zk-VM — the canonical 'God Stack' pattern" for the full architecture. From Determ's perspective, the zk-VM is just another Theme 7 DApp; the pattern is fully implementable today on the existing v2.18/v2.19 substrate without protocol-side changes.
 
 ---
 
@@ -36,19 +36,19 @@ Unchained is a payment + identity chain by intent. It is not a programmable plat
 
 ### Actors
 
-| Actor | Role | Has chain identity? | Runs Unchained node? |
+| Actor | Role | Has chain identity? | Runs Determ node? |
 |---|---|---|---|
 | **End user / wallet** | sends DApp calls, receives DApp replies | yes (anon or registered domain) | optional (can use a provider full node via RPC) |
-| **DApp operator** | publishes the DApp registry entry, runs DApp logic | yes (registered domain — the DApp's identity) | optional (can be a Unchained node, a full node, or just chain-RPC client) |
-| **DApp validator-node** | one or more nodes that monitor the chain, execute DApp logic, expose RPC for end users | inherits DApp operator's identity | yes (subset of Unchained nodes) |
-| **Unchained validator** | participates in block consensus | yes (registered validator) | yes (full Unchained node) |
+| **DApp operator** | publishes the DApp registry entry, runs DApp logic | yes (registered domain — the DApp's identity) | optional (can be a Determ node, a full node, or just chain-RPC client) |
+| **DApp validator-node** | one or more nodes that monitor the chain, execute DApp logic, expose RPC for end users | inherits DApp operator's identity | yes (subset of Determ nodes) |
+| **Determ validator** | participates in block consensus | yes (registered validator) | yes (full Determ node) |
 
-The first three roles are independent of Unchained's validator role. A DApp operator does NOT need to be a Unchained validator; they just need to register their DApp and run nodes that filter the chain for their messages.
+The first three roles are independent of Determ's validator role. A DApp operator does NOT need to be a Determ validator; they just need to register their DApp and run nodes that filter the chain for their messages.
 
 ### Message flow
 
 ```
-End user             Unchained network               DApp node
+End user             Determ network               DApp node
    │                       │                          │
    │  submit_tx(DAPP_CALL) │                          │
    │  to="dapp.example",   │                          │
@@ -92,7 +92,7 @@ enum class TxType : uint8_t {
 
 ### 3.1 `DAPP_REGISTER`
 
-Creates, updates, or deactivates a DApp registry entry. The `tx.from` is the DApp's owning domain — must already be a registered Unchained identity (via the existing `REGISTER` tx).
+Creates, updates, or deactivates a DApp registry entry. The `tx.from` is the DApp's owning domain — must already be a registered Determ identity (via the existing `REGISTER` tx).
 
 **Payload (canonical, LE where noted):**
 
@@ -112,7 +112,7 @@ topic_count × {
 ```
 
 **Constraints:**
-- `tx.from` must already be REGISTER'd as a Unchained domain.
+- `tx.from` must already be REGISTER'd as a Determ domain.
 - `service_pubkey` cannot equal the all-zero key (Zeroth pool reservation).
 - `endpoint_url` ≤ 255 bytes; charset = printable ASCII.
 - Each `topic` ≤ 64 bytes; lowercase `[a-z0-9._-]+`.
@@ -270,9 +270,9 @@ The first three are stateless read-only queries (use the lock-free reader path).
 Two new wallet primitives in the CLI/SDK:
 
 ```
-unchained dapp-call --to <dapp-domain> [--topic T] [--amount N] [--encrypt-to <pubkey>] \
+determ dapp-call --to <dapp-domain> [--topic T] [--amount N] [--encrypt-to <pubkey>] \
                  [--from <signing-key-path>] --payload <file-or-string>
-unchained dapp-info --to <dapp-domain>
+determ dapp-info --to <dapp-domain>
 ```
 
 `dapp-call`:
@@ -296,15 +296,15 @@ Both apply or both roll back. DApp validator-node sees the batch as one unit. **
 
 ## 8. DApp node operation modes
 
-DApp operators choose how tightly to integrate with Unchained:
+DApp operators choose how tightly to integrate with Determ:
 
-**Mode A — RPC client.** Lightest. The DApp's logic runs as a process that opens an RPC connection to a Unchained full node (operator's own or a trusted public one). Uses `dapp_subscribe` to receive finalized DAPP_CALL events. Trust: relies on the chosen RPC provider to not censor or fabricate. Best for development, testnet, low-stakes apps.
+**Mode A — RPC client.** Lightest. The DApp's logic runs as a process that opens an RPC connection to a Determ full node (operator's own or a trusted public one). Uses `dapp_subscribe` to receive finalized DAPP_CALL events. Trust: relies on the chosen RPC provider to not censor or fabricate. Best for development, testnet, low-stakes apps.
 
-**Mode B — Full node.** DApp operator runs a Unchained full node. The DApp logic is a sidecar process on the same host, talking to localhost RPC (lock-free / no auth needed per S-001 localhost-only default). Trust: minimal — same as any Unchained user running their own node.
+**Mode B — Full node.** DApp operator runs a Determ full node. The DApp logic is a sidecar process on the same host, talking to localhost RPC (lock-free / no auth needed per S-001 localhost-only default). Trust: minimal — same as any Determ user running their own node.
 
-**Mode C — Validator node.** DApp operator also registers as a Unchained validator. Their node participates in block consensus AND filters its own DApp messages. Highest cost (stake required), highest trust minimization. Reasonable when the DApp's economics support running validator infrastructure.
+**Mode C — Validator node.** DApp operator also registers as a Determ validator. Their node participates in block consensus AND filters its own DApp messages. Highest cost (stake required), highest trust minimization. Reasonable when the DApp's economics support running validator infrastructure.
 
-**Mode D — Sharded DApp.** For high-volume DApps, the DApp logic itself shards: multiple DApp domains (`dapp-shard-0.example`, `dapp-shard-1.example`) routed by user identity hash. The chain's existing regional-sharding (R0-R6) lets each shard live on a separate Unchained shard, distributing load.
+**Mode D — Sharded DApp.** For high-volume DApps, the DApp logic itself shards: multiple DApp domains (`dapp-shard-0.example`, `dapp-shard-1.example`) routed by user identity hash. The chain's existing regional-sharding (R0-R6) lets each shard live on a separate Determ shard, distributing load.
 
 **Recommendation:** ship Mode B as the documented default. Mode A as the lowest-friction onboarding. Modes C/D as ecosystem-driven.
 
@@ -329,7 +329,7 @@ To prevent DApp-spam attacks (flooding a DApp with `DAPP_CALL` from many anon ac
 The chain doesn't dictate how DApps charge their users. Options for DApp operators:
 - Charge per `DAPP_CALL` via the tx's `amount` field — payment is atomic with the call
 - Subscription model: pre-pay periodically; DApp logic tracks balance off-chain
-- Free-with-Sybil-protection: rely on Unchained's identity stake as cost of entry
+- Free-with-Sybil-protection: rely on Determ's identity stake as cost of entry
 
 ### Slashable conditions (DApp operator)
 
@@ -471,7 +471,7 @@ Phased shipping plan, each phase is a single bounded commit:
 - Integration with `build_state_leaves` (new `"d:"` namespace leaf)
 - Phase 2A/2B lazy-snapshot integration
 - New RPC: `dapp_info(domain)`, `dapp_list()`
-- Regression: in-process CLI test (`unchained test-dapp-register`)
+- Regression: in-process CLI test (`determ test-dapp-register`)
 
 ### Phase 7.2 — `DAPP_CALL` tx + payload routing (~2 days)
 
@@ -480,8 +480,8 @@ Phased shipping plan, each phase is a single bounded commit:
 - Apply path: amount credit (TRANSFER-like) + nonce advance
 - Anti-spam: chain-wide `DAPP_CALL` min-fee
 - New RPC: `dapp_messages(domain, from_height, to_height, topic)` — paginated retrospective query
-- Regression: in-process CLI test (`unchained test-dapp-call`)
-- Wallet CLI: `unchained dapp-call`, `unchained dapp-info`
+- Regression: in-process CLI test (`determ test-dapp-call`)
+- Wallet CLI: `determ dapp-call`, `determ dapp-info`
 
 ### Phase 7.3 — Lock-free DApp reader path (~1 day)
 
@@ -500,7 +500,7 @@ Phased shipping plan, each phase is a single bounded commit:
 ### Phase 7.5 — DApp SDK + reference implementation (~1 week, ecosystem)
 
 Out of scope for the chain. Reference DApp written as a small process that:
-- Connects to Unchained full node via RPC
+- Connects to Determ full node via RPC
 - Calls `dapp_subscribe`
 - Implements a sample app (suggested: public bulletin board)
 - Documents the SDK pattern in `docs/DAPP-SDK.md`
@@ -568,7 +568,7 @@ When a DApp goes offline, what happens to pending DAPP_CALL txs in the gossip me
 
 **Recommendation:** validator rejects DAPP_CALL where `tx.to`'s DApp entry has `inactive_from <= current_height`. Pending txs in mempool are dropped at validation. Clients see a "DApp inactive" error on submit.
 
-### Q8: Unchained node bandwidth cost of carrying DApp messages
+### Q8: Determ node bandwidth cost of carrying DApp messages
 
 A high-volume DApp could saturate gossip with `DAPP_CALL` txs. Even with the min-fee floor, sustained legitimate volume might dwarf payment txs.
 
@@ -578,10 +578,10 @@ A high-volume DApp could saturate gossip with `DAPP_CALL` txs. Even with the min
 
 ## 13. Closure / cross-references
 
-This design extends Unchained to support an application ecosystem WITHOUT becoming a programmable platform. The chain stays in its lane (payments + identity); DApps live alongside (off-chain logic anchored to on-chain identity + messaging).
+This design extends Determ to support an application ecosystem WITHOUT becoming a programmable platform. The chain stays in its lane (payments + identity); DApps live alongside (off-chain logic anchored to on-chain identity + messaging).
 
 **Builds on:**
-- [v2.4 `COMPOSABLE_BATCH`](../include/unchained/chain/block.hpp) — atomic payment-plus-message bundling
+- [v2.4 `COMPOSABLE_BATCH`](../include/determ/chain/block.hpp) — atomic payment-plus-message bundling
 - [v2.2 state_proof RPC](../src/node/node.cpp) — DApp registration verification for light clients
 - v2.1 state Merkle root — DApp registry committed in `state_root`
 - Existing REGISTER + identity stack — DApp identities are just registered domains

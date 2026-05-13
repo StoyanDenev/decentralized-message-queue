@@ -11,7 +11,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=build/Release/unchained.exe
+DETERM=build/Release/determ.exe
 T=test_chain_integrity
 TABS=C:/sauromatae/$T
 
@@ -38,8 +38,8 @@ assert() {
 }
 
 echo "=== 1. Init single-node chain (M=K=1) ==="
-$UNCHAINED init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
-$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
+$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 cat > $T/gen.json <<EOF
 {
   "chain_id": "test-integrity",
@@ -51,7 +51,7 @@ $(cat $T/p1.json | tr -d '\n')
   ]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 python -c "
@@ -73,11 +73,11 @@ with open('$T/n1/config.json','w') as f: json.dump(c, f, indent=2)
 
 echo
 echo "=== 2. Start node + advance 5 blocks ==="
-$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!
 sleep 1
 for _ in $(seq 1 40); do
-  H=$($UNCHAINED status --rpc-port 8820 2>/dev/null | python -c "import sys,json
+  H=$($DETERM status --rpc-port 8820 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)" 2>/dev/null)
   if [ "$H" -ge "5" ]; then break; fi
@@ -141,7 +141,7 @@ json.dump(j, open('$T/n1/chain.json','w'))
 
 echo
 echo "=== 6. Restart node — must refuse to load tampered chain ==="
-$UNCHAINED start --config $T/n1/config.json > $T/n1/log_after 2>&1 &
+$DETERM start --config $T/n1/config.json > $T/n1/log_after 2>&1 &
 NODE_PIDS[0]=$!
 sleep 3
 # The node should exit on load failure. Check that it's not running and
@@ -169,11 +169,11 @@ NODE_PIDS[0]=
 echo
 echo "=== 7. Restore original; load must succeed ==="
 cp $T/n1/chain.json.orig $T/n1/chain.json
-$UNCHAINED start --config $T/n1/config.json > $T/n1/log_final 2>&1 &
+$DETERM start --config $T/n1/config.json > $T/n1/log_final 2>&1 &
 NODE_PIDS[0]=$!
 sleep 3
 for _ in $(seq 1 20); do
-  H_FINAL=$($UNCHAINED status --rpc-port 8820 2>/dev/null | python -c "import sys,json
+  H_FINAL=$($DETERM status --rpc-port 8820 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin)['height'])
 except: print(0)" 2>/dev/null)
   if [ "$H_FINAL" -ge "5" ]; then break; fi

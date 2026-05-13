@@ -1,6 +1,6 @@
 # FA2 — Censorship resistance theorem (K-conjunction)
 
-This document proves Unchained's structural censorship-resistance claim: a transaction `t` known to any honest committee member at Phase-1 commit time is included in the next finalized block. The dual corollary gives the per-round probability that an adversary can censor `t` as `(f/N)^K`, exponential in the committee size `K`.
+This document proves Determ's structural censorship-resistance claim: a transaction `t` known to any honest committee member at Phase-1 commit time is included in the next finalized block. The dual corollary gives the per-round probability that an adversary can censor `t` as `(f/N)^K`, exponential in the committee size `K`.
 
 **Companion documents:** `Preliminaries.md` (F0) for notation; `Safety.md` (FA1) for the finalization guarantee that the included `t` survives.
 
@@ -110,7 +110,7 @@ $$
 \left(\frac{f-K+1}{N-K+1}\right)^K \leq \Pr[K\text{-subset} \subseteq F] \leq \left(\frac{f}{N-K+1}\right)^K
 $$
 
-Both bounds equal `(f/N)^K + O(K²/N)` for `K ≪ N`. For Unchained's typical parameters (`K ∈ {2, 3, 5, 7}`, `N` from 10s to 100s), the `K²/N` correction is bounded by `~5%`.
+Both bounds equal `(f/N)^K + O(K²/N)` for `K ≪ N`. For Determ's typical parameters (`K ∈ {2, 3, 5, 7}`, `N` from 10s to 100s), the `K²/N` correction is bounded by `~5%`.
 
 **Step 4 (persistent censorship).** Suppose the adversary's goal is to keep `t` out of *all* blocks at height `h` (forever). After the first round, if the committee fails to censor (any honest member rotates in and includes `t`), `t` is in the block; the adversary loses. So persistent censorship requires every round at `h` to draw a fully-Byzantine committee.
 
@@ -137,7 +137,7 @@ This contrasts sharply with:
 - **Leader-based protocols** (Bitcoin, Solana, Tendermint): the leader chooses the tx set. A Byzantine leader can censor `t` by not including it; the next leader may rectify, but per-slot censorship is `(f/N)¹` not `(f/N)^K`.
 - **Threshold-signature protocols** (Dfinity): a threshold committee co-produces blocks but the tx set is still leader-proposed. K-of-N threshold sigs say nothing about whose tx_root won.
 
-Unchained's K-conjunction censorship resistance is a structural property of the union construction, not a probabilistic-quorum property. Even a single honest member among K Byzantines forces tx inclusion.
+Determ's K-conjunction censorship resistance is a structural property of the union construction, not a probabilistic-quorum property. Even a single honest member among K Byzantines forces tx inclusion.
 
 ### 5.2 What does "fair selection rule" mean (H4 fine print)
 
@@ -145,7 +145,7 @@ L-2.3's H4 requires: "selection rule applied uniformly to all mempool entries." 
 
 For the proof, H4's natural reading is: any mempool-tx selection rule that doesn't depend on the tx's content (e.g., "first 1000 by fee", "all", "random sample with deterministic seed") counts as honest. Rules that depend on the tx's address or memo content count as censorship (Byzantine).
 
-Implementation note: Unchained's current node code uses "all of `tx_store_`" (line 604 in `src/node/node.cpp::start_contrib_phase`). This is the strongest form of H4 — every mempool entry goes into `tx_hashes`. The censorship bound `(f/N)^K` holds unconditionally for honest nodes running this rule.
+Implementation note: Determ's current node code uses "all of `tx_store_`" (line 604 in `src/node/node.cpp::start_contrib_phase`). This is the strongest form of H4 — every mempool entry goes into `tx_hashes`. The censorship bound `(f/N)^K` holds unconditionally for honest nodes running this rule.
 
 ### 5.3 Cross-shard cases
 
@@ -170,7 +170,7 @@ Each lemma loses negligible probability:
 
 Combined: T-2 holds with probability `1 - O(2⁻¹²⁸)` per height per honest committee member.
 
-T-2.1's `(f/N)^K` bound is a uniform-distribution claim; it assumes `select_m_creators`'s output is uniform over `K`-subsets, which holds under ROM. The `O(K²/N)` correction is small for typical Unchained parameters.
+T-2.1's `(f/N)^K` bound is a uniform-distribution claim; it assumes `select_m_creators`'s output is uniform over `K`-subsets, which holds under ROM. The `O(K²/N)` correction is small for typical Determ parameters.
 
 ---
 

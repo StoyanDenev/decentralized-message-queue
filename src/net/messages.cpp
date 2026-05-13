@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/net/messages.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/net/messages.hpp>
 #include <stdexcept>
 
-namespace unchained::net {
+namespace determ::net {
 
 std::vector<uint8_t> Message::serialize() const {
     nlohmann::json envelope;
@@ -56,4 +56,4 @@ std::vector<uint8_t> Message::serialize_binary() const {
     return out;
 }
 
-} // namespace unchained::net
+} // namespace determ::net

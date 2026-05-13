@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
-#include <unchained/net/peer.hpp>
-#include <unchained/net/rate_limiter.hpp>
-#include <unchained/chain/block.hpp>
-#include <unchained/node/producer.hpp>
+#include <determ/net/peer.hpp>
+#include <determ/net/rate_limiter.hpp>
+#include <determ/chain/block.hpp>
+#include <determ/node/producer.hpp>
 #include <asio.hpp>
 #include <functional>
 #include <memory>
@@ -12,7 +12,7 @@
 #include <mutex>
 #include <string>
 
-namespace unchained::net {
+namespace determ::net {
 
 class GossipNet {
 public:
@@ -103,4 +103,4 @@ private:
     RateLimiter                              rate_limiter_;
 };
 
-} // namespace unchained::net
+} // namespace determ::net

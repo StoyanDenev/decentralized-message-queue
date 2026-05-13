@@ -149,10 +149,10 @@ Strongly negligible. Under Grover (post-quantum), the per-forgery bound degrades
 
 | Component | Source |
 |---|---|
-| Genesis fields (governance_mode, param_keyholders, param_threshold) | `include/unchained/chain/genesis.hpp::GenesisConfig` |
+| Genesis fields (governance_mode, param_keyholders, param_threshold) | `include/determ/chain/genesis.hpp::GenesisConfig` |
 | Validator gate (mode + whitelist + threshold) | `src/node/validator.cpp::check_transactions` PARAM_CHANGE branch |
 | Whitelist constant `kWhitelist` | same file, inside the branch |
-| Chain's pending map + stage helper | `include/unchained/chain/chain.hpp::pending_param_changes_`, `stage_param_change` |
+| Chain's pending map + stage helper | `include/determ/chain/chain.hpp::pending_param_changes_`, `stage_param_change` |
 | Apply branch (parse + stage) | `src/chain/chain.cpp::apply_transactions` PARAM_CHANGE case |
 | Activation switch | `src/chain/chain.cpp::activate_pending_params` |
 | ParamChangedHook (validator + node mirror) | `src/node/node.cpp` ctor |
@@ -178,4 +178,4 @@ T-10 + T-11 + T-10.1 establish that A5 governance is sound:
 
 The proof covers the cryptographic-enforcement layer. The human-trust layer (whether N keyholders should be trusted to coordinate honestly) is not within the scope of formal verification; it is a deployment-time decision codified by the genesis-pinned founder set.
 
-Combined with FA1–FA9, A5 governance soundness completes the formal coverage of every safety-critical mechanism shipped in Unchained v1.x.
+Combined with FA1–FA9, A5 governance soundness completes the formal coverage of every safety-critical mechanism shipped in Determ v1.x.

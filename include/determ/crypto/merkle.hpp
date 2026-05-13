@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
 
 // v2.1: deterministic Merkle tree over sorted (key, value-hash) pairs.
@@ -24,11 +24,11 @@
 // honest nodes with the same (key, value_hash) set produce byte-
 // identical roots.
 
-#include <unchained/types.hpp>
+#include <determ/types.hpp>
 #include <vector>
 #include <utility>
 
-namespace unchained::crypto {
+namespace determ::crypto {
 
 // One leaf entry. `key` is opaque bytes; the tree sorts by lexicographic
 // byte order. `value_hash` is the SHA-256 of the canonical serialization
@@ -80,4 +80,4 @@ Hash merkle_leaf_hash(const std::vector<uint8_t>& key,
 //   inner_hash = SHA-256(0x01 || left || right)
 Hash merkle_inner_hash(const Hash& left, const Hash& right);
 
-} // namespace unchained::crypto
+} // namespace determ::crypto

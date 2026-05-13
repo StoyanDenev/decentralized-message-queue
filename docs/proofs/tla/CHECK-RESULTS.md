@@ -147,7 +147,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The three TLA+ specifications cover the state-machine layer of Unchained's safety and atomicity properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The three TLA+ specifications cover the state-machine layer of Determ's safety and atomicity properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.

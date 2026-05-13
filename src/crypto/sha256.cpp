@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
-#include <unchained/crypto/sha256.hpp>
+// Copyright 2026 Determ Contributors
+#include <determ/crypto/sha256.hpp>
 #include <openssl/evp.h>
 #include <stdexcept>
 #include <cstring>
 
-namespace unchained::crypto {
+namespace determ::crypto {
 
 struct SHA256Builder::Impl {
     EVP_MD_CTX* ctx;
@@ -56,4 +56,4 @@ Hash sha256(const Hash& a, const std::string& s) {
     return SHA256Builder{}.append(a).append(s).finalize();
 }
 
-} // namespace unchained::crypto
+} // namespace determ::crypto

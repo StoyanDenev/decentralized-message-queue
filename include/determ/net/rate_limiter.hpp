@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
 #include <algorithm>
 #include <chrono>
@@ -7,7 +7,7 @@
 #include <mutex>
 #include <string>
 
-namespace unchained::net {
+namespace determ::net {
 
 // S-014 token-bucket rate limiter, per opaque key (typically a peer IP).
 // Used identically by RpcServer (`consume_rate_token` in `handle_session`)
@@ -68,4 +68,4 @@ private:
     std::map<std::string, Bucket> buckets_;
 };
 
-} // namespace unchained::net
+} // namespace determ::net

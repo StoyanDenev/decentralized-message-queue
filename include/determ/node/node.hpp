@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #pragma once
-#include <unchained/chain/chain.hpp>
-#include <unchained/node/registry.hpp>
-#include <unchained/node/validator.hpp>
-#include <unchained/node/producer.hpp>
-#include <unchained/net/gossip.hpp>
+#include <determ/chain/chain.hpp>
+#include <determ/node/registry.hpp>
+#include <determ/node/validator.hpp>
+#include <determ/node/producer.hpp>
+#include <determ/net/gossip.hpp>
 #include <asio.hpp>
 #include <thread>
 #include <atomic>
@@ -16,7 +16,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 
-namespace unchained::node {
+namespace determ::node {
 
 struct Config {
     std::string              domain;
@@ -249,7 +249,7 @@ public:
     //
     // For DApp nodes: poll this RPC every N seconds with the last
     // height they processed, get newly-arrived messages, process them,
-    // bump their watermark. Lightweight; works against any Unchained
+    // bump their watermark. Lightweight; works against any Determ
     // full node.
     //
     // Streaming subscription (true push-based delivery) is Phase 7.4
@@ -580,4 +580,4 @@ private:
     void enqueue_save();
 };
 
-} // namespace unchained::node
+} // namespace determ::node

@@ -1,6 +1,6 @@
 # FA11 — Economic soundness (A1 unitary balance + E1/E3/E4)
 
-This document proves that Unchained's economic primitives — A1 (unitary supply invariant), E1 (Negative Entry Fee from Zeroth pool), E3 (lottery subsidy mode), E4 (finite subsidy fund) — collectively preserve a closed-form supply ledger across every block apply. The bound is sharp: total live value across all accounts and stakes exactly matches `genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound` after every block.
+This document proves that Determ's economic primitives — A1 (unitary supply invariant), E1 (Negative Entry Fee from Zeroth pool), E3 (lottery subsidy mode), E4 (finite subsidy fund) — collectively preserve a closed-form supply ledger across every block apply. The bound is sharp: total live value across all accounts and stakes exactly matches `genesis_total + accumulated_subsidy + accumulated_inbound − accumulated_slashed − accumulated_outbound` after every block.
 
 Three properties matter:
 
@@ -230,7 +230,7 @@ No randomness, no external state, no time-dependence. Two honest nodes applying 
 
 | Component | Source |
 |---|---|
-| A1 counters declaration | `include/unchained/chain/chain.hpp` (`genesis_total_` ... `accumulated_outbound_`) |
+| A1 counters declaration | `include/determ/chain/chain.hpp` (`genesis_total_` ... `accumulated_outbound_`) |
 | Genesis-time `genesis_total_` initialization | `src/chain/chain.cpp::apply_transactions` `b.index == 0` branch |
 | Per-block delta tracking | `src/chain/chain.cpp::apply_transactions` (line ~205+) |
 | Apply-tail assertion | `src/chain/chain.cpp::apply_transactions` (line ~530+) |
@@ -250,7 +250,7 @@ A reviewer can confirm soundness by:
 
 ## 9. Conclusion
 
-T-12 establishes Unchained's closed-form supply invariant unconditionally — no cryptographic assumption is required; the apply path's mechanical counter updates make it structurally true. T-13 + T-14 establish that all three economic primitives (E1 NEF, E3 lottery, E4 finite pool) preserve the invariant.
+T-12 establishes Determ's closed-form supply invariant unconditionally — no cryptographic assumption is required; the apply path's mechanical counter updates make it structurally true. T-13 + T-14 establish that all three economic primitives (E1 NEF, E3 lottery, E4 finite pool) preserve the invariant.
 
 The proof is mechanical because the design is mechanical: every state mutation is paired with the corresponding counter delta, and the post-apply assertion catches any divergence before the block commits. Combined with FA1's safety guarantee (no forks finalize), this means an operator can compute the chain's total supply *as of any height* from genesis parameters + the chain's counter values — and that number is exact, not approximate, even under cross-shard transit and slashing.
 

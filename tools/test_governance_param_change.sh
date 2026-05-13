@@ -20,7 +20,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-UNCHAINED=C:/sauromatae/build/Release/unchained.exe
+DETERM=C:/sauromatae/build/Release/determ.exe
 T=test_gov_pc
 TABS=C:/sauromatae/$T
 
@@ -42,8 +42,8 @@ mkdir -p $T/donor1 $T/donor2 $T/donor3
 
 echo "=== 1. Init 3 donor data dirs ==="
 for n in 1 2 3; do
-  $UNCHAINED init --data-dir $T/donor$n --profile single_test 2>&1 | tail -1
-  $UNCHAINED genesis-tool peer-info donor$n --data-dir $T/donor$n --stake 1000 \
+  $DETERM init --data-dir $T/donor$n --profile single_test 2>&1 | tail -1
+  $DETERM genesis-tool peer-info donor$n --data-dir $T/donor$n --stake 1000 \
     > $T/p$n.json
 done
 
@@ -77,7 +77,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "donor1", "balance": 1000}]
 }
 EOF
-$UNCHAINED genesis-tool build $T/gen.json | tail -1
+$DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 echo
@@ -109,24 +109,24 @@ configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
-$UNCHAINED start --config $T/donor1/config.json > $T/donor1/log 2>&1 &
+$DETERM start --config $T/donor1/config.json > $T/donor1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$UNCHAINED start --config $T/donor2/config.json > $T/donor2/log 2>&1 &
+$DETERM start --config $T/donor2/config.json > $T/donor2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$UNCHAINED start --config $T/donor3/config.json > $T/donor3/log 2>&1 &
+$DETERM start --config $T/donor3/config.json > $T/donor3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 echo
 echo "=== 5. Wait for chain to advance past height 5 ==="
 for _ in $(seq 1 120); do
-  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
+  H=$($DETERM status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
   if [ "$H" -ge 5 ] 2>/dev/null; then break; fi
   sleep 0.5
 done
-H_BEFORE=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
+H_BEFORE=$($DETERM status --rpc-port 8771 2>/dev/null \
             | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  height before PARAM_CHANGE: $H_BEFORE"
 
@@ -139,7 +139,7 @@ VALUE_HEX="d007000000000000"
 
 echo
 echo "=== 6. Submit PARAM_CHANGE MIN_STAKE → 2000 at height $EFF ==="
-$UNCHAINED submit-param-change \
+$DETERM submit-param-change \
   --priv "$PRIV1" \
   --from donor1 \
   --name MIN_STAKE \
@@ -154,21 +154,21 @@ $UNCHAINED submit-param-change \
 echo
 echo "=== 7. Wait for chain to advance past effective_height ==="
 for _ in $(seq 1 120); do
-  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
+  H=$($DETERM status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
   if [ "$H" -gt "$EFF" ] 2>/dev/null; then break; fi
   sleep 0.5
 done
-H_AFTER=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
+H_AFTER=$($DETERM status --rpc-port 8771 2>/dev/null \
            | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  height after wait: $H_AFTER (need > $EFF)"
 
 echo
 echo "=== 8. Snapshot + inspect: verify min_stake activated ==="
-$UNCHAINED snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -1
-MIN_STAKE_LIVE=$($UNCHAINED snapshot inspect --in $T/snap.json 2>&1 \
+$DETERM snapshot create --out $T/snap.json --rpc-port 8771 2>&1 | tail -1
+MIN_STAKE_LIVE=$($DETERM snapshot inspect --in $T/snap.json 2>&1 \
                   | grep "min_stake" | head -1 \
                   | awk '{print $NF}')
 echo "  live min_stake: $MIN_STAKE_LIVE (expected 2000)"

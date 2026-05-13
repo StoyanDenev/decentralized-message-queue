@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Unchained Contributors
+// Copyright 2026 Determ Contributors
 #include "envelope.hpp"
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -7,7 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace unchained::wallet::envelope {
+namespace determ::wallet::envelope {
 
 static constexpr uint32_t MAGIC_LE = 0x31455744;   // "DWE1" little-endian
 static constexpr size_t   NONCE_LEN = 12;
@@ -246,4 +246,4 @@ std::optional<Envelope> deserialize(const std::string& blob) {
     }
 }
 
-} // namespace unchained::wallet::envelope
+} // namespace determ::wallet::envelope

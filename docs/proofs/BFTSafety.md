@@ -117,7 +117,7 @@ The "fork" at height `h` doesn't propagate because subsequent blocks build on wh
 
 ## 5. Discussion
 
-### 5.1 The trade Unchained makes
+### 5.1 The trade Determ makes
 
 Under MD mode (FA1), safety is unconditional given ≥1 honest in committee. Under BFT mode (this proof), safety is conditional on `f_h < K_eff/3` in the committee.
 
@@ -157,7 +157,7 @@ When B1 is violated, the recovery path (T-5.1) loses an additional `2⁻¹²⁸`
 
 | Document | Source |
 |---|---|
-| BFT-mode `consensus_mode = BFT` block | `include/unchained/chain/block.hpp::ConsensusMode::BFT` |
+| BFT-mode `consensus_mode = BFT` block | `include/determ/chain/block.hpp::ConsensusMode::BFT` |
 | `K_eff = ⌈2K/3⌉` quorum check | `src/node/validator.cpp::check_block_sigs` BFT branch |
 | BFT escalation trigger | `src/node/node.cpp::check_if_selected` (when pool drops below K + abort threshold met) |
 | `bft_proposer` deterministic election | `proposer_idx` in node.cpp |
@@ -178,7 +178,7 @@ BFT-mode blocks are safe under `f_h < K_eff/3` within the committee. The trade v
 
 When the bound is violated, slashing recovery (T-5.1) repairs the damage by removing the equivocators. This is materially stronger than classical BFT failure modes (where exceeding f<N/3 simply breaks safety with no recovery).
 
-The proof complements FA1 (MD-mode unconditional) and FA4 (liveness via escalation) to give Unchained's full safety/liveness story:
+The proof complements FA1 (MD-mode unconditional) and FA4 (liveness via escalation) to give Determ's full safety/liveness story:
 
 - MD: unconditional safety, conditional liveness.
 - BFT: conditional safety, much-stronger liveness.
