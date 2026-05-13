@@ -38,7 +38,8 @@ count_bft_blocks() {
   python -c "
 import json
 try:
-  blocks = json.load(open('$T/n$n/chain.json'))
+  _cj = json.load(open('$T/n$n/chain.json'))
+  blocks = _cj['blocks'] if isinstance(_cj, dict) and 'blocks' in _cj else _cj
   bft = sum(1 for b in blocks if b.get('consensus_mode',0) == 1)
   md  = sum(1 for b in blocks if b.get('consensus_mode',0) == 0)
   print(f'{md} {bft}')
@@ -52,7 +53,8 @@ last_bft_proposer() {
   python -c "
 import json
 try:
-  blocks = json.load(open('$T/n$n/chain.json'))
+  _cj = json.load(open('$T/n$n/chain.json'))
+  blocks = _cj['blocks'] if isinstance(_cj, dict) and 'blocks' in _cj else _cj
   bft = [b for b in blocks if b.get('consensus_mode',0) == 1]
   if bft: print(bft[-1].get('bft_proposer','?'))
   else: print('(none)')
