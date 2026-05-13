@@ -214,7 +214,7 @@ K_{h,r,s}[i] = pool[indices[i]],  i ∈ [0, K)
 Where:
 
 - `eligible_in_region(R)`: returns the full eligible pool when `R = ""` (global / CURRENT mode); when `R ≠ ""` returns only validators whose registered `region` matches `R` (EXTENDED mode).
-- `select_m_creators(seed, n, K)`: deterministic K-out-of-n sampler using `seed` as the PRG source (see `src/crypto/random.cpp`). Without replacement; rejection-sampled so no duplicates.
+- `select_m_creators(seed, n, K)`: deterministic K-out-of-n sampler using `seed` as the PRG source (see `src/crypto/random.cpp`). Without replacement. Hybrid implementation (S-020): rejection sampling when `2K ≤ n` (cheap, no allocation); partial Fisher-Yates shuffle when `2K > n` (bounded O(n) regardless of ratio). Both branches uniform over K-subsets under ROM on `seed`.
 
 For the beacon chain (SINGLE or BEACON role), `shard_id = 0` and `committee_region = ""` typically; the same formula applies.
 

@@ -19,7 +19,7 @@ Let `K` be the genesis-pinned committee size. Let `M := ⌈2K/3⌉` be the BFT-e
 - **(L1) Partial synchrony** (Preliminaries §3.1): there exists `Δ` such that within synchrony intervals, every honest broadcast is delivered to every honest peer within `Δ`.
 - **(L2) Bounded per-validator unavailability**: `p < 1`. Equivalently, `(1-p) > 0`.
 - **(L3) BFT-escalation enabled**: `bft_enabled = true` at genesis. (Optional; without it, the theorem holds for MD-mode rounds only and requires `(1-p)^K > 0` for liveness; see §4.)
-- **(L4) Committee rotation per round is uniform-random** (modeled in §6 of Preliminaries; rejection sampling under ROM on the seed).
+- **(L4) Committee rotation per round is uniform-random** (modeled in §6 of Preliminaries; hybrid selector — rejection sampling at `2K ≤ N`, partial Fisher-Yates shuffle at `2K > N` — both uniform under ROM on the seed).
 - **(L5) Synchrony window contains the round**: the round timer `T_round ≥ 2Δ + ε` for some small `ε`, so message delivery completes before timeout.
 
 then:

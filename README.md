@@ -321,7 +321,7 @@ indices    = select_m_creators(effective_rand, |available|, K)
 committee  = [available[i] : i in indices]
 ```
 
-`select_m_creators` is rejection sampling with a counter — deterministic, terminates in `O(K)` for small `K/N`. Excluding aborted-this-height domains from the local pool ensures committee re-selection after an abort doesn't re-pick the same silent creator before the chain-baked suspension takes effect on the next finalized block. The validator reproduces the same selection given a block's `abort_events` field.
+`select_m_creators` uses a deterministic hybrid (S-020): rejection sampling with a counter when `2K ≤ N` (cheap path, expected `O(K)` hashes, no allocation), or a partial Fisher-Yates shuffle when `2K > N` (bounded `O(N)` setup + exactly `K` hashes, no rejection spin even at `K = N − 1`). Both branches are pure functions of `(random_state, N, K)` so every node picks the same branch and the same indices. Excluding aborted-this-height domains from the local pool ensures committee re-selection after an abort doesn't re-pick the same silent creator before the chain-baked suspension takes effect on the next finalized block. The validator reproduces the same selection given a block's `abort_events` field.
 
 ---
 

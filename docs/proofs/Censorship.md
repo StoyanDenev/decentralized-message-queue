@@ -96,7 +96,7 @@ Therefore `t ∈ B.transactions` at height `h` for the finalized block.   ∎
 
 The probability that all `K` committee members at round `r` are Byzantine is the probability that the deterministic `select_m_creators(rand, N, K)` outputs `K` indices all within `F`.
 
-**Step 1.** `select_m_creators` is rejection-sampling: it draws indices from `[0, N)` uniformly and discards duplicates. Under the random-oracle model on the seed (Preliminaries §2.1 ROM), the output distribution is uniform over `K`-element subsets of `[0, N)`.
+**Step 1.** `select_m_creators` is a deterministic hybrid sampler (S-020): rejection-sampling when `2K ≤ N` (draws indices from `[0, N)` uniformly via SHA-256-derived hashes, discards duplicates) or partial Fisher-Yates shuffle when `2K > N` (initialises the `[0, N)` index array and swaps `indices[i]` with `indices[i + h_i mod (N − i)]` for `i ∈ [0, K)`). Both branches consume the same ROM source; under the random-oracle model on the seed (Preliminaries §2.1 ROM) each produces the uniform distribution over `K`-element subsets of `[0, N)` — rejection sampling is the classical construction, and Fisher-Yates with uniform `j ∈ [i, N)` at every step is the textbook uniform-permutation generator (Knuth Vol 2 §3.4.2).
 
 **Step 2.** The fraction of `K`-subsets entirely within `F` is:
 

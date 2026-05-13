@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **5** (S-013, S-016, S-017, S-018, S-020) | **10** | **18** |
+| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **4** (S-013, S-016, S-017, S-018) | **10** | **17** |
 | Partially mitigated | **1** (S-030) | — | **1** (S-014 RPC done; gossip pending) | — | **2** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **5** (S-007, S-008, S-012, S-032, S-033) | — | — | **10** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **6** (S-007, S-008, S-012, S-020, S-032, S-033) | — | — | **11** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -71,7 +71,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-017 | 🟡 Med | Producer/chain validation logic mismatch (UNSTAKE) | `node/producer.cpp` vs `chain/chain.cpp` | 2-3d |
 | S-018 | 🟡 Med | JSON parsing without schema validation | all `from_json` | 2-3d |
 | S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
-| S-020 | 🟡 Med | Rejection sampling O(K²) at K/N→1 | `crypto/random.cpp::select_m_creators` | ~30 LOC |
+| S-020 | ✅ Mitigated | Hybrid Fisher-Yates: rejection sampling at K/N ≤ 0.5, partial FY shuffle at K/N > 0.5 — bounded O(N) regardless of ratio | `crypto/random.cpp::select_m_creators` + `select_after_abort_m` | done |
 | S-021 | 🟢 Low | Chain file integrity not cryptographically verified | `chain/chain.cpp::load` | 1d |
 | S-022 | 🟢 Low | 16 MB message limit too permissive (modulo snapshots) | `net/peer.cpp:38` | nuanced |
 | S-023 | ✅ Mitigated | RPC send/stake/unstake balance pre-check throws clear diagnostic on insufficient balance | `node/node.cpp::rpc_send/stake/unstake` | done |
@@ -752,20 +752,19 @@ Suggested production settings for external-bind operators:
 
 ---
 
-### S-020 — Rejection sampling O(K²) at K/N → 1
+### S-020 — Rejection sampling O(K²) at K/N → 1 — ✅ Mitigated in-session
 
-**Severity:** Medium (latency amplification under stress) • **Status:** Open • **Sources:** OV-#3, Gemini analysis
+**Severity:** Medium (was) • **Status:** ✅ Mitigated • **Sources:** OV-#3, Gemini analysis
 
-**What's open.** `select_m_creators` uses rejection sampling with a counter. Average cost is O(K) when K << N. After cascading suspensions shrink N toward K, every random pick collides; the inner loop iterates many times per slot. Compounds with S-013 under stress.
+**What changed.** `crypto/random.cpp::select_m_creators` and `select_after_abort_m` now branch on `2K vs N`:
+- **`2K ≤ N`** — unchanged rejection sampling. Cheap, no allocation, expected O(K) hashes, and preserves rev.9 output for the K/N ≤ 0.5 regime so existing committee-index fixtures stay stable.
+- **`2K > N`** — partial Fisher-Yates shuffle over an `[0..N)` index array. O(N) setup + exactly K hashes + K swaps, with no rejection spin. The worst case (K = N or K = N−1) is now bounded; rejection sampling on the same input expected ~N tries for the final pick.
 
-**Resolution options.**
+`select_after_abort_m` pins `new_first` at slot 0 of the shuffle buffer (the abort-hash offset is part of the consensus contract) and Fisher-Yates the remaining `m−1` positions.
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Hybrid Fisher-Yates** when K/N > 0.6; rejection sampling otherwise. | ~30 LOC. |
-| 2 | **Always Fisher-Yates.** | Trivial. |
+**Determinism.** Both `K` and `N` are inputs to the function; every node picks the same branch and the same indices. No fork height needed because no chain history sits on the K > N/2 path — current regression tests run with M ≤ 2, K ≤ M, N_registered ≤ 3 and all hit the rejection branch (verified: governance, equivocation, BFT escalation, bearer, atomic_scope, dapp_register all green after the change).
 
-**Recommended.** Option 1 (hybrid). One-evening fix.
+**Effort.** ~40 LOC including comments. Header doc updated in `include/determ/crypto/random.hpp`.
 
 ---
 
@@ -1008,11 +1007,11 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-025 | Delete dead `compute_tx_root_intersection` | ✅ done |
 | S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ⏳ pending (~20 LOC) |
 | S-014 | RPC + gossip rate limiting | 🟠 RPC done (token-bucket per peer IP); gossip side pending |
-| S-020 | Hybrid Fisher-Yates committee selection | ⏳ pending (~30 LOC) |
+| S-020 | Hybrid Fisher-Yates committee selection | ✅ done |
 | S-023 | RPC pre-check balance | ✅ done |
 | S-034 | Moot — delay-hash module deleted | ✅ done |
 
-**Track A status: 11.5 of 14 closed (S-014 RPC side ✅, gossip side pending). 2 fully remaining: S-013 BlockSigMsg buffer + S-020 Fisher-Yates.**
+**Track A status: 12.5 of 14 closed (S-014 RPC side ✅, gossip side pending). 1 fully remaining: S-013 BlockSigMsg buffer.**
 
 ### Track B — architectural lift
 
@@ -1047,13 +1046,13 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
-- Medium findings: 1 partially mitigated (S-014 RPC side done, gossip side pending), 5 still open (S-013, S-016, S-017, S-018, S-020) — all bounded ~hours-of-work each
-- Track A remaining: ~half-day total (4 small items + S-014 gossip-side)
+- Medium findings: 1 partially mitigated (S-014 RPC side done, gossip side pending), 4 still open (S-013, S-016, S-017, S-018) — all bounded ~hours-of-work each
+- Track A remaining: ~quarter-day total (S-013 + S-014 gossip-side)
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)
 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
-1. Track A small items (~half-day combined): S-013 buffer cap, S-020 Fisher-Yates, S-023 balance pre-check, S-025 dead-code delete, S-014 gossip side.
+1. Track A small items (~quarter-day combined): S-013 buffer cap, S-014 gossip side.
 2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
 3. v2.10 threshold randomness aggregation per plan.md A11 (~1 week, includes BLS12-381 vendoring + DKG).
 

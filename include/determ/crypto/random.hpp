@@ -19,7 +19,10 @@ Hash compute_dh_output_m(const std::vector<Hash>& shares);
 Hash update_random_state(const Hash& prev_state, const Hash& dh_output);
 
 // Select M distinct creator indices deterministically from random_state.
-// Uses rejection sampling with a counter; guaranteed to terminate when node_count >= m.
+// S-020 hybrid: rejection sampling when 2K ≤ N (cheap, no allocation,
+// preserves rev.9 output for the K/N ≤ 0.5 regime); partial Fisher-Yates
+// shuffle when 2K > N (bounded O(N) setup + exactly K hashes, no spin).
+// Determinism: K, N and random_state pick the branch — every node agrees.
 std::vector<size_t> select_m_creators(const Hash& random_state, size_t node_count, size_t m);
 
 // Abort-dependent offset hashing (prevents cartel navigation of fallback sequence)
