@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **2** (S-016, S-018) | **10** | **15** |
+| Open (untouched) | **0** | **2** (S-010, S-011) | **2** (S-016, S-018) | **10** | **14** |
 | Partially mitigated | **1** (S-030) | — | — | — | **1** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **9** (S-007, S-008, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | — | **14** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **10** (S-006, S-007, S-008, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | — | **15** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -33,6 +33,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-002 Mempool accepts unverified signatures~~ — closed via mempool sig-verify + paired `binary_codec.cpp::decode_tx_frame` fix.
 - ~~S-003 Block timestamp window ±5s~~ — closed via ±30s window in `BlockValidator::check_timestamp`; spec and code now agree.
 - ~~S-004 Plaintext private keys~~ — closed via AES-256-GCM passphrase envelope keyfile (v2.17).
+- ~~S-006 ContribMsg same-generation equivocation~~ — closed via detection in `on_contrib`; reuses existing `EquivocationEvent` channel (no new wire format).
 - ~~S-007 Subsidy/fee overflow~~ — closed via `checked_add_u64` on every credit path.
 - ~~S-008 Unbounded mempool~~ — closed via `MEMPOOL_MAX_TXS = 10000` + `MEMPOOL_MAX_PER_SENDER = 100` with fee-priority eviction.
 - ~~S-012 Snapshot trust~~ — closed via state_root verification on restore.
@@ -59,7 +60,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-003 | ✅ Mitigated | Block timestamp window aligned to ±30s (spec + code now agree) | `node/validator.cpp::check_timestamp` | done |
 | S-004 | ✅ Mitigated | Plaintext private key in `account create` output (option 1: localhost-only-default + 0600; option 2: AES-256-GCM passphrase envelope landed) | `main.cpp:cmd_account_create` | done |
 | S-005 | ✅ Closed | `delay_T` not in GenesisConfig — field removed entirely (commit `1b9b086`) | n/a | done |
-| S-006 | 🟠 High | ContribMsg cross-generation equivocation undetected | `node/node.cpp:1342` | low-med |
+| S-006 | ✅ Mitigated | Same-generation ContribMsg equivocation now detected in `on_contrib`; piggybacks on existing `EquivocationEvent` channel (no new wire format) | `node/node.cpp::on_contrib` | done |
 | S-007 | ✅ Mitigated | Subsidy/fee/receipt-credit overflow-checked via checked_add_u64 (Options 2 + 3 from audit) | `chain/chain.cpp` | done |
 | S-008 | ✅ Mitigated | Mempool bounds: MEMPOOL_MAX_TXS = 10000 cap + fee-priority eviction + MEMPOOL_MAX_PER_SENDER = 100 quota | `node/node.cpp::mempool_admit_check` | done |
 | S-009 | ✅ Closed | Constant-T / SHA-256 ASIC fallacy — replaced by commit-reveal (commit `14bf3d6`); delay-hash module deleted (commit `1b9b086`) | n/a | done |
@@ -346,23 +347,44 @@ Crash semantics. Between block apply and save completion, the block is in memory
 
 ---
 
-### S-006 — ContribMsg cross-generation equivocation undetected
+### S-006 — ContribMsg same-generation equivocation undetected — ✅ Mitigated in-session
 
-**Severity:** High • **Status:** Open • **Sources:** Audit 2.4, OV-#8
+**Severity:** High (was) • **Status:** ✅ Mitigated • **Sources:** Audit 2.4, OV-#8
 
-**What's open.** Block-level equivocation IS now closed-loop in rev.8 (BlockSigMsg over distinct digests at the same height → `EquivocationEvent` → full stake forfeit + deregister, see §5 below). But **ContribMsg-level equivocation across abort generations is still deferred**: the comment near `node.cpp:1342` says *"Real equivocation detection requires generation tracking (planned for a future rev). For now, if we're still in CONTRIB phase and receive a duplicate from a signer we already have, ignore the new one."* The `contrib_equivocations_` map declared in `node.hpp` is never written to.
+**Pre-fix description.** Block-level equivocation was already closed-loop in rev.8 (BlockSigMsg over distinct digests at the same height → `EquivocationEvent` → full stake forfeit + deregister). But ContribMsg-level equivocation was deferred: the same signer at the SAME generation could broadcast two distinct contribs (different `tx_hashes` or `dh_input`) and the receiver silently dropped the duplicate without slashing. The `contrib_equivocations_` map declared in `node.hpp` was never written to.
 
-**Impact.** A creator can present different `tx_hashes` lists (or `dh_input`s) to different peers at the same height, biasing the union tx-set seen by different members. Severity is bounded by the K-of-K signing of the ultimate block — divergent contribs cause K-of-K to fail and the round to abort, which is *itself* slashable via S-005's existing block-level path. So in practice this exploit converts to "force the chain to abort," which the BFT escalation path can recover from.
+**Mitigation landed in-session (Option 1, simplified — reused the existing equivocation channel).**
 
-**Resolution options.**
+The generation gate already in place (`on_contrib` line ≈1946) restricts `pending_contribs_` to the current `aborts_gen` only, so a duplicate at the same signer there is necessarily a same-generation conflict. The fix recomputes the commitment of the incoming `msg` and compares it to the recomputed commitment of the existing entry. Different commitments + both already passed Ed25519 verification → equivocation evidence.
+
+Crucially, no new event type or block-format change was needed:
+
+| Layer | Existing block-level equivocation | New ContribMsg equivocation |
+|---|---|---|
+| Two distinct digests | `compute_block_digest(b)` over two different block bodies | `make_contrib_commitment(...)` over two different `(tx_hashes, dh_input)` snapshots |
+| Two signatures by same key | BlockSigMsg.ed_sig × 2 | ContribMsg.ed_sig × 2 |
+| Validator V11 check | "two digests differ, two sigs verify against equivocator's pubkey" | identical contract — works as-is |
+| Apply-time slashing | full stake forfeit + deregister | identical — no new apply path |
+
+So the closure piggybacks on the existing `EquivocationEvent` struct (`block.hpp:256`), validator's `check_equivocation_events`, and chain.cpp slashing apply path. The detection just feeds the same `pending_equivocation_evidence_` buffer the block-level path uses.
+
+The freshly-arrived contrib is still dropped from `pending_contribs_` (the earlier-arrived entry wins as the canonical contrib for this signer this round); the slashing happens separately when the next produced block bakes the evidence.
+
+**Cleanup.** The unused `contrib_equivocations_` field was removed from `node.hpp` and its `clear()` call from `reset_round` — no longer needed since detection now routes through `pending_equivocation_evidence_`.
+
+**Cross-generation equivocation deferred.** A signer who aborts and retries at a higher `aborts_gen` legitimately sends a different contrib at the same height. That's NOT equivocation; the generation gate correctly drops the cross-gen duplicate before reaching the same-gen comparison. Option 2 from the resolution table (cross-generation hash binding) addresses a different threat model (cartel coordinating across abort generations) and is deferred — the generation gate ensures honest peers can't be tricked into accepting cross-gen contribs as the canonical view, so the cartel can't bias the union tx-set across generations without one of them committing same-gen equivocation, which IS now detected.
+
+**Effort.** ~55 LOC in `on_contrib` + ~3 LOC of field/clear cleanup.
+
+**Verified.** state_root single-node PASS, governance_param_change 3-of-3 multi-node PASS. The detection logic is dormant on honest paths (no committee member equivocates), so no behavioral regression possible.
+
+**Original resolution options (preserved for audit trail).**
 
 | # | Option | Cost |
 |---|---|---|
-| 1 | **Generation-keyed `pending_contribs_`.** Index by `(signer, aborts_gen)`. Two contribs at the same key with different commitments → `ContribEquivocationEvent` → gossip + slash. | Low-medium. ~1d. |
-| 2 | **Cross-generation hash binding.** ContribMsg commits to `prev_aborts_gen_hash || dh_input`, preventing backdating. | Medium. ContribMsg field + commitment change → block format implications. |
-| 3 | **Status quo** (rely on K-of-K abort to neutralize the divergence; don't slash). | Free. Acceptable if BFT escalation reliably recovers. |
-
-**Recommended.** Option 1 for v1.1.
+| 1 | **Generation-keyed `pending_contribs_`.** Index by `(signer, aborts_gen)`. Two contribs at the same key with different commitments → `ContribEquivocationEvent` → gossip + slash. | Low-medium. ~1d. **Shipped** — simplified by reusing the existing EquivocationEvent struct, since the generation gate already restricts `pending_contribs_` to current-gen-only. |
+| 2 | **Cross-generation hash binding.** ContribMsg commits to `prev_aborts_gen_hash || dh_input`, preventing backdating. | Medium. ContribMsg field + commitment change → block format implications. **Deferred** — different threat model, not required after Option 1. |
+| 3 | **Status quo** (rely on K-of-K abort to neutralize the divergence; don't slash). | Free. **Rejected** — Option 1 is cheap and provides actual deterrence. |
 
 ---
 
@@ -1063,7 +1085,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
-- High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
+- High findings: 2 open (S-010, S-011 — both design / parameter-policy items, not shipped-code attack surface)
 - Medium findings: 2 open (S-016, S-018) — both bounded ~hours-of-work each; S-016 overlaps with v2.7 F2 scope so deferring is correct
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)

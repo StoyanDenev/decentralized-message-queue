@@ -1574,7 +1574,6 @@ void Node::on_snapshot_request(uint32_t header_count,
 
 void Node::reset_round() {
     pending_contribs_.clear();
-    contrib_equivocations_.clear();
     pending_block_sigs_.clear();
     buffered_block_sigs_.clear();
     pending_claims_.clear();
@@ -1960,17 +1959,70 @@ void Node::on_contrib(const ContribMsg& msg) {
         return;
     }
 
-    // Duplicate handling: a same-signer ContribMsg may arrive after a round
-    // restart (post-abort) with a fresh dh_input — this is NOT equivocation,
-    // it's a legitimate retry within the same height under a different abort
-    // generation. Real equivocation detection requires generation tracking
-    // (planned for a future rev). For now, if we're still in CONTRIB phase
-    // and receive a duplicate from a signer we already have, ignore the new
-    // one (keep the earlier-arrived view). If we're past CONTRIB (in
-    // BLOCK_SIG), the round is locked-in and stale messages shouldn't reach
-    // here anyway.
+    // S-006 closure: same-signer duplicate at the SAME generation.
+    //
+    // Pre-fix: any duplicate (existing in pending_contribs_) was silently
+    // dropped on the assumption it was a legitimate retry across abort
+    // generations. But the generation gate above (line 1946) already
+    // restricts pending_contribs_ to the current generation only — so a
+    // duplicate here means the same signer produced TWO different
+    // ContribMsgs at the SAME (block_index, prev_hash, aborts_gen) with
+    // different content. That's equivocation: they signed two different
+    // commitments under the same identity at the same round-state.
+    //
+    // Detect by comparing the freshly-recomputed commitment of `msg` to
+    // the existing entry's recomputed commitment. The sig over `msg` has
+    // already passed verification above (line 1958); the existing entry's
+    // sig passed the same check when it was first admitted. Two distinct
+    // commitments, both signed by the same key → conflicting evidence.
+    //
+    // Build an EquivocationEvent and route it through the same channel
+    // used by BlockSigMsg-level equivocation: the validator's
+    // check_equivocation_events doesn't care WHAT kind of digest the two
+    // halves are — it only checks "two distinct digests, both signatures
+    // verify under the equivocator's registered key". The contrib
+    // commitments slot into that contract cleanly.
+    //
+    // After detection, drop the duplicate from pending_contribs_ entry
+    // anyway — we keep the earlier-arrived view as the canonical contrib
+    // for this signer this round. The evidence handles the slashing
+    // separately at the next produced block.
     auto existing = pending_contribs_.find(msg.signer);
-    if (existing != pending_contribs_.end()) return;
+    if (existing != pending_contribs_.end()) {
+        Hash existing_commit = make_contrib_commitment(
+            existing->second.block_index, existing->second.prev_hash,
+            existing->second.tx_hashes,   existing->second.dh_input);
+        // commit (declared above for the sig-verify path) is the new
+        // message's commitment.
+        if (existing_commit != commit) {
+            chain::EquivocationEvent ev;
+            ev.equivocator          = msg.signer;
+            ev.block_index          = msg.block_index;
+            ev.digest_a             = existing_commit;
+            ev.sig_a                = existing->second.ed_sig;
+            ev.digest_b             = commit;
+            ev.sig_b                = msg.ed_sig;
+            ev.shard_id             = cfg_.shard_id;
+            ev.beacon_anchor_height = beacon_headers_.empty()
+                ? 0 : beacon_headers_.back().index;
+
+            bool dup = false;
+            for (auto& e : pending_equivocation_evidence_) {
+                if (e.equivocator == ev.equivocator
+                    && e.block_index == ev.block_index) {
+                    dup = true; break;
+                }
+            }
+            if (!dup) {
+                pending_equivocation_evidence_.push_back(ev);
+                gossip_.broadcast(net::make_equivocation_evidence(ev));
+                std::cerr << "[node] S-006 ContribMsg equivocation detected: "
+                          << msg.signer << " at h=" << msg.block_index
+                          << " (gossiped; will be baked into next block)\n";
+            }
+        }
+        return;
+    }
 
     pending_contribs_[msg.signer] = msg;
 

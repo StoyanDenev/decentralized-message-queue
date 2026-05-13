@@ -439,11 +439,13 @@ private:
 
     ConsensusPhase                  phase_{ConsensusPhase::IDLE};
 
-    // Phase 1 — Contrib accumulation. Equivocation produces a second contrib
-    // from the same signer with different content; the first wins, the second
-    // is recorded as slashable evidence (S7).
+    // Phase 1 — Contrib accumulation. Equivocation (same signer at the
+    // same generation with two different commitments) is now routed
+    // through the shared `pending_equivocation_evidence_` buffer used by
+    // BlockSigMsg-level equivocation (S-006 closure). The legacy
+    // `contrib_equivocations_` map that sat here unused was removed
+    // alongside that closure.
     std::map<std::string, ContribMsg>                       pending_contribs_;
-    std::map<std::string, std::pair<ContribMsg, ContribMsg>> contrib_equivocations_;
 
     // Per-round canonical inputs. tx_root + delay_seed are derived from
     // the K Phase-1 contribs and used as the seed for the commit-reveal
