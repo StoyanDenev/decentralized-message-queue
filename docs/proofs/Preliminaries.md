@@ -118,7 +118,7 @@ A validator `v_i ∈ V \ F` is **honest** iff, in every round of every height, i
 
 **H1.** Generates a fresh Phase-1 secret `s_i ←ᵤ {0,1}²⁵⁶` (uniform draw, fresh per round); publishes the commitment `c_i = SHA256(s_i ‖ pk_i)` as part of its `ContribMsg` Phase-1 broadcast.
 
-**H2.** Signs at most one block-digest per (height, round) pair. Specifically, the Phase-2 `BlockSigMsg.ed_sig` is a signature over exactly one `compute_block_digest(B)` value at any height; `v_i` never signs two distinct digests at the same height in the same round.
+**H2.** Signs at most one block-digest AND at most one contrib commitment per (height, round, aborts_gen) tuple. Specifically: (a) the Phase-2 `BlockSigMsg.ed_sig` is a signature over exactly one `compute_block_digest(B)` value at any height — `v_i` never signs two distinct block digests at the same height in the same round; (b) the Phase-1 `ContribMsg.ed_sig` is a signature over exactly one `make_contrib_commitment(block_index, prev_hash, tx_hashes, dh_input)` value at any height-and-generation — `v_i` never signs two distinct contrib commitments at the same (height, aborts_gen) (post-S-006 closure). Cross-generation contribs are legitimate retries after abort and do NOT violate H2.
 
 **H3.** Reveals its Phase-1 secret in Phase-2's `BlockSigMsg.dh_secret` iff the K Phase-1 commits have all been received and validated.
 
