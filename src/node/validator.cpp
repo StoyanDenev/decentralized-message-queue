@@ -594,6 +594,24 @@ BlockValidator::Result BlockValidator::check_transactions(
         case TxType::UNSTAKE:
             if (tx.payload.size() != 8)
                 return {false, "STAKE/UNSTAKE payload must be 8 bytes"};
+            // S-017: validator gains the unlock_height check for UNSTAKE.
+            // Pre-fix: only producer (build_body) filtered on `locked < amount`
+            // and only chain.apply_transactions checked unlock_height — a tx
+            // that the producer happened to include would silently fail-and-
+            // refund at apply time, with the validator silent on the gap.
+            // Post-fix: validator rejects too-early UNSTAKE up-front; the
+            // chain layer's refund branch becomes belt-and-suspenders for
+            // tx-included-by-buggy-producer paths but is still kept so
+            // honest users never lose a fee to a too-early include.
+            if (tx.type == TxType::UNSTAKE) {
+                uint64_t unlock = chain.stake_unlock_height(tx.from);
+                if (b.index < unlock) {
+                    return {false,
+                            "UNSTAKE before unlock_height: from=" + tx.from
+                          + " block_height=" + std::to_string(b.index)
+                          + " unlock_height=" + std::to_string(unlock)};
+                }
+            }
             break;
         case TxType::REGION_CHANGE:
             // Defensive: the early branch above already rejects

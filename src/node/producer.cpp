@@ -457,6 +457,11 @@ Block build_body(
             if (sb < tx.fee) continue;
             uint64_t& lk = get_locked(tx.from);
             if (lk < amount) continue;
+            // S-017: skip too-early UNSTAKE so it doesn't reach validators
+            // (which now also reject it — see validator.cpp UNSTAKE branch).
+            // Apply-time refund branch in chain.cpp remains as a defense
+            // against tx-included-by-buggy-producer paths.
+            if (b.index < chain.stake_unlock_height(tx.from)) continue;
             sb -= tx.fee;
             break;
         }

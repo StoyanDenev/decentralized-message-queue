@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **3** (S-016, S-017, S-018) | **10** | **16** |
+| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **2** (S-016, S-018) | **10** | **15** |
 | Partially mitigated | **1** (S-030) | — | — | — | **1** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **8** (S-007, S-008, S-012, S-013, S-014, S-020, S-032, S-033) | — | — | **13** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **9** (S-007, S-008, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | — | **14** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -38,6 +38,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-012 Snapshot trust~~ — closed via state_root verification on restore.
 - ~~S-013 BlockSigMsg buffer flood OOM~~ — closed via per-signer cap (2 entries) in `try_buffer_block_sig`; total buffer bounded at 2·K through existing pre-filters.
 - ~~S-014 No rate limiting on gossip + RPC~~ — closed via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet` (per-peer-IP token bucket, HELLO exempt).
+- ~~S-017 Producer/chain UNSTAKE divergence~~ — closed via Option 2: validator + producer both gain the `unlock_height` check; apply-time refund retained as belt-and-suspenders.
 - ~~S-020 Rejection sampling O(K²) at K/N → 1~~ — closed via hybrid selector (rejection sampling at 2K ≤ N, partial Fisher-Yates shuffle at 2K > N — bounded O(N) regardless of ratio).
 - ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
@@ -69,7 +70,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-014 | ✅ Mitigated | Token bucket per peer IP via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet`; HELLO exempt so handshake completes under pressure | `net/rate_limiter.hpp` + `rpc/rpc.cpp` + `net/gossip.cpp` | done |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
-| S-017 | 🟡 Med | Producer/chain validation logic mismatch (UNSTAKE) | `node/producer.cpp` vs `chain/chain.cpp` | 2-3d |
+| S-017 | ✅ Mitigated (Option 2) | Validator + producer both check `unlock_height` on UNSTAKE; apply-time refund retained as belt-and-suspenders | `node/validator.cpp` + `node/producer.cpp` | done |
 | S-018 | 🟡 Med | JSON parsing without schema validation | all `from_json` | 2-3d |
 | S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
 | S-020 | ✅ Mitigated | Hybrid Fisher-Yates: rejection sampling at K/N ≤ 0.5, partial FY shuffle at K/N > 0.5 — bounded O(N) regardless of ratio | `crypto/random.cpp::select_m_creators` + `select_after_abort_m` | done |
@@ -713,20 +714,23 @@ Suggested external-bind defaults: `rate=500`, `burst=1000`. Healthy consensus is
 
 ---
 
-### S-017 — Producer/chain validation logic mismatch (UNSTAKE)
+### S-017 — Producer/chain validation logic mismatch (UNSTAKE) — ✅ Mitigated in-session (Option 2)
 
-**Severity:** Medium • **Status:** Open • **Sources:** Audit 3.5, 3.8
+**Severity:** Medium (was) • **Status:** ✅ Mitigated (Option 2) • **Sources:** Audit 3.5, 3.8
 
-**What's open.** `producer.cpp::build_body` filters UNSTAKE on `lk < amount` only. `chain.cpp::apply_transactions` checks `unlock_height` AND refunds the fee if too-early. Validator (`check_transactions`) doesn't check unlock_height at all. So a tx the producer includes can silently fail at apply, with the chain layer doing what should be validator-layer work.
+**Pre-fix description.** `producer.cpp::build_body` filtered UNSTAKE on `lk < amount` only. `chain.cpp::apply_transactions` checked `unlock_height` AND refunded the fee on too-early. Validator (`check_transactions`) didn't check unlock_height at all. So a tx the producer included could silently fail at apply, with the chain layer doing what should be validator-layer work.
 
-**Resolution options.**
+**Mitigation landed in-session (Option 2 — the "less invasive" path).**
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Unify into a shared `validate_tx_apply(...)` helper** called by both producer and validator. Move unlock_height check there. Drop the apply-time refund (fail = no inclusion). | 2-3d. |
-| 2 | **Chain layer continues to refund**, but validator gains the unlock_height check too. | 1d. Less invasive but keeps the divergence. |
+1. **Validator gains the unlock_height check.** `BlockValidator::check_transactions` UNSTAKE branch now resolves `chain.stake_unlock_height(tx.from)` and rejects the block if `b.index < unlock_height`. The error message names the height + unlock_height for operator debugging. Symmetric with the apply-time `height < sit->second.unlock_height` rejection in `Chain::apply_transactions`.
+2. **Producer skips too-early UNSTAKE.** `producer.cpp::build_body` UNSTAKE branch gains the same gate so honest producers don't include txs that downstream validators would reject. Pre-fix this was missing — a tx could land in a block, validator passed, chain refunded. Post-fix the tx never reaches the block.
+3. **Chain apply-time refund retained** as belt-and-suspenders against tx-included-by-buggy-producer paths; honest users never lose a fee even if a misbehaving peer slips a too-early UNSTAKE past the validator (which post-fix it cannot, but the defense costs nothing to keep).
 
-**Recommended.** Option 1.
+Net effect: the divergence is closed at all three layers. Option 1 (unified `validate_tx_apply` helper + drop apply-time refund) is the deeper refactor — deferred because Option 2 captures the safety win without restructuring the apply path.
+
+**Effort.** ~20 LOC across `validator.cpp` UNSTAKE branch + `producer.cpp` UNSTAKE branch.
+
+**Verified.** `test_governance_param_change.sh` PASS (3-of-3 cluster exercises REGISTER + STAKE lifecycle; no behavioral regression). No dedicated S-017 shell test — DEREGISTER isn't currently CLI-accessible, so the unlock_height countdown can't be triggered from a shell-only test without expanding the CLI surface. The closure is structural alignment with no new behavior visible at the CLI layer.
 
 ---
 
@@ -1060,7 +1064,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
-- Medium findings: 3 open (S-016, S-017, S-018) — all bounded ~hours-of-work each
+- Medium findings: 2 open (S-016, S-018) — both bounded ~hours-of-work each; S-016 overlaps with v2.7 F2 scope so deferring is correct
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)
