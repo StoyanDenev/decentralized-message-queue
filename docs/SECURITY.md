@@ -26,7 +26,6 @@ Currently genuinely outstanding:
 
 - **S-030 D2 full closure (v2.7 F2)** — design specification complete in `docs/proofs/F2-SPEC.md`; implementation ~3-4 days. D1 is effective-closed via S-033 state_root binding; D2 is partial-closed via the same mechanism (apply-layer rejection). v2.7 F2 closes D2 at the consensus layer (signatures gather only on view convergence).
 - **v2.10 threshold randomness aggregation** — 🔥 promoted to active in plan.md A11. Defeats residual selective-abort attack via t-of-K threshold signatures. ~1 week including BLS12-381 vendoring + DKG tooling.
-- **S-014 gossip-side rate limiting** — RPC side closed in-session (per-peer-IP token bucket); gossip-side rate limiting pending (~30 LOC).
 
 Closed in-session (retained here for audit trail; see §3 bodies):
 
@@ -37,7 +36,9 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-007 Subsidy/fee overflow~~ — closed via `checked_add_u64` on every credit path.
 - ~~S-008 Unbounded mempool~~ — closed via `MEMPOOL_MAX_TXS = 10000` + `MEMPOOL_MAX_PER_SENDER = 100` with fee-priority eviction.
 - ~~S-012 Snapshot trust~~ — closed via state_root verification on restore.
-- ~~S-014 RPC rate limiting~~ — closed via per-peer-IP token bucket on RPC; gossip-side pending as a separate follow-on.
+- ~~S-013 BlockSigMsg buffer flood OOM~~ — closed via per-signer cap (2 entries) in `try_buffer_block_sig`; total buffer bounded at 2·K through existing pre-filters.
+- ~~S-014 No rate limiting on gossip + RPC~~ — closed via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet` (per-peer-IP token bucket, HELLO exempt).
+- ~~S-020 Rejection sampling O(K²) at K/N → 1~~ — closed via hybrid selector (rejection sampling at 2K ≤ N, partial Fisher-Yates shuffle at 2K > N — bounded O(N) regardless of ratio).
 - ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
 - ~~S-033 No state commitment~~ — closed via Merkle root in `Block.state_root` + signing_bytes binding.
