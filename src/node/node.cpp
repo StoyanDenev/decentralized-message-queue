@@ -1978,6 +1978,30 @@ void Node::on_block_sig(const BlockSigMsg& msg) {
     on_block_sig_locked(msg);
 }
 
+// S-013: bounded per-signer admission into buffered_block_sigs_. Caller must
+// hold state_mutex_. Two slots per signer is enough to capture one honest
+// BlockSigMsg plus one equivocation-evidence sig at the same height;
+// anything beyond is spam. Pre-filters at the caller (current_creator_domains_
+// membership + registry_ lookup) already cap distinct signers to at most K,
+// so the buffer is bounded at 2·K entries.
+//
+// Why a fixed per-signer cap rather than total-queue + LRU: LRU evicts honest
+// entries when a spammer impersonates K signers — under K-of-K mutual
+// distrust we have no quorum to declare which entry is honest, so we'd be
+// indifferent to which we keep. The per-signer cap closes the attack
+// asymmetrically: a single Byzantine signer can't crowd out honest peers'
+// buffer slots no matter how fast they push.
+static constexpr size_t MAX_BUFFERED_BLOCK_SIGS_PER_SIGNER = 2;
+
+void Node::try_buffer_block_sig(const BlockSigMsg& msg) {
+    size_t per_signer = 0;
+    for (const auto& m : buffered_block_sigs_) {
+        if (m.signer == msg.signer && ++per_signer >= MAX_BUFFERED_BLOCK_SIGS_PER_SIGNER)
+            return; // drop silently
+    }
+    buffered_block_sigs_.push_back(msg);
+}
+
 void Node::on_block_sig_locked(const BlockSigMsg& msg) {
     // Caller must hold state_mutex_. Used both from gossip dispatch (via
     // on_block_sig wrapper) and from enter_block_sig_phase when replaying
@@ -1994,7 +2018,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
 
     // If we haven't reached BLOCK_SIG yet, buffer for replay.
     if (phase_ != ConsensusPhase::BLOCK_SIG) {
-        buffered_block_sigs_.push_back(msg);
+        try_buffer_block_sig(msg);
         return;
     }
 
@@ -2037,7 +2061,7 @@ void Node::on_block_sig_locked(const BlockSigMsg& msg) {
     auto cit = pending_contribs_.find(msg.signer);
     if (cit == pending_contribs_.end()) {
         // No commit yet — buffer for later (the contrib may be in flight).
-        buffered_block_sigs_.push_back(msg);
+        try_buffer_block_sig(msg);
         return;
     }
     Hash expected_commit = crypto::SHA256Builder{}

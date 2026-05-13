@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **4** (S-013, S-016, S-017, S-018) | **10** | **17** |
+| Open (untouched) | **0** | **3** (S-006, S-010, S-011) | **3** (S-016, S-017, S-018) | **10** | **16** |
 | Partially mitigated | **1** (S-030) | — | **1** (S-014 RPC done; gossip pending) | — | **2** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **6** (S-007, S-008, S-012, S-020, S-032, S-033) | — | — | **11** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **7** (S-007, S-008, S-012, S-013, S-020, S-032, S-033) | — | — | **12** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -64,7 +64,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-010 | 🟠 High | Sybil via under-priced MIN_STAKE | `chain/params.hpp` | docs / DOMAIN_INCLUSION |
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
 | S-012 | ✅ Mitigated | Snapshot bootstrap state_root verification landed (S-033 Merkle root in Block + snapshot-side check) | `chain/chain.cpp::restore_from_snapshot` | done |
-| S-013 | 🟡 Med | BlockSigMsg buffer flood OOM | `net/gossip.cpp` (buffered_block_sigs_) | ~20 LOC |
+| S-013 | ✅ Mitigated | Per-signer cap (2 entries) on `buffered_block_sigs_` via `try_buffer_block_sig`; existing pre-filters at the call site already restrict signers to current K-committee ∩ registry, so total buffer is bounded at 2·K | `node/node.cpp::try_buffer_block_sig` | done |
 | S-014 | 🟠 Partially mitigated | RPC rate-limit shipped (token bucket per peer IP + bucket refill); gossip-side rate limiting deferred | `rpc/rpc.cpp::consume_rate_token` | RPC done; gossip pending |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
@@ -420,7 +420,7 @@ The 100-tx cap-firing test is hard to exercise in single-node M=K=1 infrastructu
 | `tx_store_` (mempool) | OOM under tx flood (compounds with S-002) |
 | `pending_inbound_receipts_` | OOM from cross-shard receipt bundles |
 | `pending_contribs_` / `pending_block_sigs_` | OOM from consensus message spam |
-| BlockSigMsg pre-verify buffer (`buffered_block_sigs_`) | Covered separately by S-013 |
+| BlockSigMsg pre-verify buffer (`buffered_block_sigs_`) | ✅ Bounded — S-013 closure (per-signer cap of 2; total ≤ 2·K via pre-filters) |
 | `peer_heights_` map | Never pruned, grows with peer churn |
 | Active peer connections | No accept-rate cap |
 
@@ -612,21 +612,28 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 ## 5. Medium findings (open)
 
-### S-013 — BlockSigMsg buffer flood OOM
+### S-013 — BlockSigMsg buffer flood OOM — ✅ Mitigated in-session
 
-**Severity:** Medium (local DoS) • **Status:** Open • **Sources:** OV-#2, Gemini analysis
+**Severity:** Medium (local DoS) (was) • **Status:** ✅ Mitigated • **Sources:** OV-#2, Gemini analysis
 
-**What's open.** `BlockSigMsg` packets that arrive before the local node's delay-hash completes are buffered (we can't verify the signature yet — `block_digest` depends on `delay_output` we haven't computed). An adversary floods the Phase-1 window with millions of valid-shape, fraudulent BlockSigMsgs. Each gets queued. When delay-hash completes, the node verifies the entire bloated buffer; OOM crash before consensus thread can do useful work.
+**Pre-fix description.** `BlockSigMsg` packets that arrive before the local node has assembled its K Phase-1 contribs are buffered for replay on Phase-2 entry. An adversary floods the Phase-1 window with valid-shape BlockSigMsgs; each gets queued; OOM crash.
 
-**Resolution options.**
+**Mitigation landed in-session.** Two-layer defense:
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Bounded per-peer queue** (each peer's buffered count ≤ K). | Trivial, ~10 LOC. |
-| 2 | **Cheap pre-filter:** reject BlockSigMsgs whose `signer` isn't in current `registry_` (string lookup, no crypto). | Trivial. |
-| 3 | **Bounded total queue + LRU eviction.** | Trivial. |
+1. **Pre-filters at the call site (Option 2)** — `on_block_sig_locked` already rejects:
+   - Wrong `block_index` (must equal `chain_.height()`).
+   - Signer not in `current_creator_domains_` (current round's K-committee).
+   - Signer not in `registry_` (active registered validator).
 
-**Recommended.** Options 1+2 together. ~20 LOC.
+   These reject before the buffer-add, so only valid-shape messages from registered K-committee members ever reach the buffer.
+
+2. **Per-signer cap (Option 1)** — `try_buffer_block_sig` (new helper) caps each signer to **2 entries** in `buffered_block_sigs_`. The cap admits the honest BlockSigMsg + one equivocation-evidence sig at the same height; anything beyond is silently dropped. Combined with the pre-filter, the total buffer is bounded at **2·K entries** regardless of how aggressively a Byzantine signer pushes.
+
+**Why per-signer rather than total-queue + LRU.** Under K-of-K mutual distrust there's no quorum to decide which buffered entry is honest, so LRU would evict honest entries when a spammer impersonates K signers. Per-signer asymmetric cap closes the attack: a single Byzantine signer can't crowd out honest peers' buffer slots regardless of their send rate.
+
+**Effort.** ~25 LOC including comments. Helper signature + header decl added in `include/determ/node/node.hpp`.
+
+**Verified.** State-root, dapp_register, governance_param_change, BFT escalation all green with the cap in place; pre-existing equivocation_slashing TIME_WAIT flake confirmed unchanged via stash-revert comparison.
 
 ---
 
@@ -1005,13 +1012,13 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 | S-007 | Overflow-checked add (`checked_add_u64`) on every credit path | ✅ done |
 | S-008 (options 1 + 3) | `MEMPOOL_MAX_TXS = 10000` + fee-priority eviction + `MEMPOOL_MAX_PER_SENDER = 100` quota | ✅ done |
 | S-025 | Delete dead `compute_tx_root_intersection` | ✅ done |
-| S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ⏳ pending (~20 LOC) |
+| S-013 | Bounded BlockSigMsg buffer + signer pre-filter | ✅ done |
 | S-014 | RPC + gossip rate limiting | 🟠 RPC done (token-bucket per peer IP); gossip side pending |
 | S-020 | Hybrid Fisher-Yates committee selection | ✅ done |
 | S-023 | RPC pre-check balance | ✅ done |
 | S-034 | Moot — delay-hash module deleted | ✅ done |
 
-**Track A status: 12.5 of 14 closed (S-014 RPC side ✅, gossip side pending). 1 fully remaining: S-013 BlockSigMsg buffer.**
+**Track A status: 13.5 of 14 closed (S-014 RPC side ✅, gossip side pending). 0 fully remaining; S-014 gossip-side is the only Track A residue.**
 
 ### Track B — architectural lift
 
@@ -1046,13 +1053,13 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 3 open (S-006, S-010, S-011 — all design / parameter-policy items, not shipped-code attack surface)
-- Medium findings: 1 partially mitigated (S-014 RPC side done, gossip side pending), 4 still open (S-013, S-016, S-017, S-018) — all bounded ~hours-of-work each
-- Track A remaining: ~quarter-day total (S-013 + S-014 gossip-side)
+- Medium findings: 1 partially mitigated (S-014 RPC side done, gossip side pending), 3 still open (S-016, S-017, S-018) — all bounded ~hours-of-work each
+- Track A remaining: ~tens-of-minutes (S-014 gossip-side only)
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)
 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
-1. Track A small items (~quarter-day combined): S-013 buffer cap, S-014 gossip side.
+1. Track A small items (~tens-of-minutes): S-014 gossip side.
 2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
 3. v2.10 threshold randomness aggregation per plan.md A11 (~1 week, includes BLS12-381 vendoring + DKG).
 

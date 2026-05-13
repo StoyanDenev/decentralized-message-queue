@@ -299,6 +299,9 @@ private:
     // Called by start_delay_compute when replaying buffered sigs; assumes
     // state_mutex_ is already held by the caller.
     void on_block_sig_locked(const BlockSigMsg& msg);
+    // S-013: bounded per-signer admission into buffered_block_sigs_.
+    // Caller must hold state_mutex_.
+    void try_buffer_block_sig(const BlockSigMsg& msg);
     void on_abort_claim(const AbortClaimMsg& msg);
     void on_abort_event(uint64_t block_index, const Hash& prev_hash,
                          const chain::AbortEvent& ev);
