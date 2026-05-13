@@ -65,7 +65,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
 | S-012 | ✅ Mitigated | Snapshot bootstrap state_root verification landed (S-033 Merkle root in Block + snapshot-side check) | `chain/chain.cpp::restore_from_snapshot` | done |
 | S-013 | ✅ Mitigated | Per-signer cap (2 entries) on `buffered_block_sigs_` via `try_buffer_block_sig`; existing pre-filters at the call site already restrict signers to current K-committee ∩ registry, so total buffer is bounded at 2·K | `node/node.cpp::try_buffer_block_sig` | done |
-| S-014 | ✅ Mitigated | Token bucket per peer IP on both RPC (`rpc/rpc.cpp::consume_rate_token`) and gossip (`net/gossip.cpp::consume_rate_token`); HELLO exempt so handshake completes under pressure | `rpc/rpc.cpp` + `net/gossip.cpp` | done |
+| S-014 | ✅ Mitigated | Token bucket per peer IP via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet`; HELLO exempt so handshake completes under pressure | `net/rate_limiter.hpp` + `rpc/rpc.cpp` + `net/gossip.cpp` | done |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
 | S-017 | 🟡 Med | Producer/chain validation logic mismatch (UNSTAKE) | `node/producer.cpp` vs `chain/chain.cpp` | 2-3d |
@@ -641,23 +641,23 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 **Severity:** Medium (was) • **Status:** ✅ Mitigated • **Sources:** Audit 3.2, OV-#10
 
-**Mitigation landed in-session.** Token-bucket per-peer-IP rate limiting now gates both the RPC and the gossip receive layer. Same Bucket struct + refill formula + `std::map<string, Bucket>` shape on both sides.
+**Mitigation landed in-session.** Token-bucket per-peer-IP rate limiting now gates both the RPC and the gossip receive layer. Both call sites use a shared `determ::net::RateLimiter` helper (`include/determ/net/rate_limiter.hpp`) so the policy + refill arithmetic + per-key bucket map live in exactly one place.
 
-**RPC side.** `RpcServer::consume_rate_token` runs in `handle_session` BEFORE JSON parse and auth — rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded. Config:
+**RPC side.** `rate_limiter_.consume(peer_ip)` runs in `handle_session` BEFORE JSON parse and auth — rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded. Config:
 
 - `rpc_rate_per_sec`: steady-state RPC calls/sec per peer IP (default 0 = disabled)
 - `rpc_rate_burst`: bucket capacity (default 0 = disabled)
 
 Suggested external-bind defaults: `rate=100`, `burst=200`.
 
-**Gossip side.** `GossipNet::consume_rate_token` runs at the top of `handle_message`, after HELLO exemption and before role-filter + dispatch. HELLO is exempt so a freshly-attached peer can complete the handshake even when their IP's bucket is empty — a single HELLO per connection cannot be weaponised on its own. Multiple connections from the same source share one bucket (peer address has `":<port>"` stripped to key on bare IP). Config:
+**Gossip side.** `rate_limiter_.consume(ip)` runs at the top of `handle_message`, after HELLO exemption and before role-filter + dispatch. HELLO is exempt so a freshly-attached peer can complete the handshake even when their IP's bucket is empty — a single HELLO per connection cannot be weaponised on its own. Multiple connections from the same source share one bucket (peer address has `":<port>"` stripped to key on bare IP). Config:
 
 - `gossip_rate_per_sec`: steady-state gossip msgs/sec per peer IP (default 0 = disabled)
 - `gossip_rate_burst`: bucket capacity (default 0 = disabled)
 
 Suggested external-bind defaults: `rate=500`, `burst=1000`. Healthy consensus is a few msgs/s steady-state with bursts on round transitions; 500/s × 1000 burst absorbs the headroom comfortably.
 
-**Bucket state.** `std::map<std::string, Bucket>` protected by `std::mutex` on each side. Memory bound is ~24 bytes per distinct peer IP. Concurrent access guarded by the mutex (asio's worker-thread pool puts handlers on multiple threads).
+**Bucket state (in the shared helper).** `std::map<std::string, Bucket>` protected by `std::mutex` inside `RateLimiter`. Memory bound is ~24 bytes per distinct peer IP. Concurrent access guarded by the mutex (asio's worker-thread pool puts handlers on multiple threads). Each consumer (RPC, GossipNet) owns its own `RateLimiter` instance — separate per-IP buckets per layer, but identical refill semantics.
 
 **Verified.**
 - `tools/test_rpc_rate_limit.sh` 4/4 PASS — RPC side: disabled-mode passes 30/30; tight rate (0.5/s burst 3) drains and rejects per spec; bucket refills on wait.

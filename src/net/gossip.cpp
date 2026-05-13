@@ -19,33 +19,11 @@ void GossipNet::set_chain_identity(ChainRole role, ShardId shard_id) {
 }
 
 void GossipNet::set_rate_limit(double per_sec, double burst) {
-    rate_per_sec_ = per_sec;
-    burst_        = burst;
-    if (per_sec > 0.0 && burst > 0.0) {
+    rate_limiter_.configure(per_sec, burst);
+    if (rate_limiter_.enabled()) {
         std::cout << "[gossip] rate-limit " << per_sec << "/s, burst " << burst
                   << " per peer-IP (HELLO exempt)\n";
     }
-}
-
-// S-014 (gossip side): consume 1 token for the source IP. Rate
-// limit disabled when either field <= 0. First request from an IP
-// starts with a full bucket so legitimate peers don't get hit cold.
-bool GossipNet::consume_rate_token(const std::string& ip) {
-    if (rate_per_sec_ <= 0.0 || burst_ <= 0.0) return true;
-    std::lock_guard<std::mutex> lk(buckets_mutex_);
-    auto now = std::chrono::steady_clock::now();
-    auto& b = buckets_[ip];
-    if (b.last.time_since_epoch().count() == 0) {
-        b.tokens = burst_;
-        b.last   = now;
-    } else {
-        double elapsed_sec = std::chrono::duration<double>(now - b.last).count();
-        b.tokens = std::min(burst_, b.tokens + elapsed_sec * rate_per_sec_);
-        b.last   = now;
-    }
-    if (b.tokens < 1.0) return false;
-    b.tokens -= 1.0;
-    return true;
 }
 
 void GossipNet::listen(uint16_t port) {
@@ -167,7 +145,7 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
             std::string ip = peer->address();
             auto colon = ip.rfind(':');
             if (colon != std::string::npos) ip = ip.substr(0, colon);
-            if (!consume_rate_token(ip)) return;
+            if (!rate_limiter_.consume(ip)) return;
         }
         // rev.9 B2c.5b: enforce role-based filter for cross-chain
         // pollution. HELLO is exempt (it's the handshake that tags the

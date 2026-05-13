@@ -2,12 +2,11 @@
 // Copyright 2026 Determ Contributors
 #pragma once
 #include <determ/net/peer.hpp>
+#include <determ/net/rate_limiter.hpp>
 #include <determ/chain/block.hpp>
 #include <determ/node/producer.hpp>
 #include <asio.hpp>
-#include <chrono>
 #include <functional>
-#include <map>
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -90,11 +89,6 @@ private:
     void handle_message(std::shared_ptr<Peer> peer, const Message& msg);
     void handle_peer_closed(std::shared_ptr<Peer> peer);
 
-    // S-014 (gossip side): consume one rate token for `ip`. Refills the
-    // bucket from elapsed time. Returns true on success; false signals
-    // the dispatch path to silently drop the message.
-    bool consume_rate_token(const std::string& ip);
-
     asio::io_context&                        io_;
     std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
     std::vector<std::shared_ptr<Peer>>       peers_;
@@ -104,18 +98,9 @@ private:
     ChainRole                                our_role_{ChainRole::SINGLE};
     ShardId                                  our_shard_id_{0};
 
-    // S-014 (gossip side): per-peer-IP token bucket. Same shape as the
-    // RpcServer's. Map grows with distinct source IPs; bucket size is
-    // ~24 bytes so 10K entries is <300 KB. v2.X follow-on: periodic
-    // prune of buckets idle for > N minutes.
-    struct Bucket {
-        double                                tokens{0.0};
-        std::chrono::steady_clock::time_point last;
-    };
-    double                        rate_per_sec_{0.0};
-    double                        burst_{0.0};
-    mutable std::mutex            buckets_mutex_;
-    std::map<std::string, Bucket> buckets_;
+    // S-014 (gossip side): per-peer-IP token bucket, keyed on bare IP
+    // (port stripped). Shared limiter type with RpcServer.
+    RateLimiter                              rate_limiter_;
 };
 
 } // namespace determ::net

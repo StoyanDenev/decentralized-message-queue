@@ -87,9 +87,8 @@ RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
                                  asio::ip::address_v4::loopback(), port).address()
                            : asio::ip::address(asio::ip::address_v4::any()),
                        port))
-    , auth_secret_(hex_to_bytes(auth_secret_hex))
-    , rate_per_sec_(rate_per_sec)
-    , burst_(burst) {
+    , auth_secret_(hex_to_bytes(auth_secret_hex)) {
+    rate_limiter_.configure(rate_per_sec, burst);
     std::cout << "[rpc] listening on "
               << (localhost_only ? "127.0.0.1" : "0.0.0.0")
               << ":" << port;
@@ -103,34 +102,11 @@ RpcServer::RpcServer(asio::io_context& io, node::Node& node, uint16_t port,
                   << "set rpc_auth_secret in config or enable "
                   << "rpc_localhost_only]";
     }
-    if (rate_per_sec_ > 0.0 && burst_ > 0.0) {
-        std::cout << " (rate-limit " << rate_per_sec_ << "/s, burst "
-                  << burst_ << ")";
+    if (rate_limiter_.enabled()) {
+        std::cout << " (rate-limit " << rate_limiter_.rate_per_sec() << "/s, burst "
+                  << rate_limiter_.burst() << ")";
     }
     std::cout << "\n";
-}
-
-// S-014: token-bucket consume. Refill based on wall-clock elapsed
-// since last consume (capped at `burst_` capacity); attempt to
-// consume 1 token. Returns true on success, false on rate-limited.
-// rate_per_sec_ == 0 disables the gate (always true).
-bool RpcServer::consume_rate_token(const std::string& ip) {
-    if (rate_per_sec_ <= 0.0 || burst_ <= 0.0) return true;
-    std::lock_guard<std::mutex> lk(buckets_mutex_);
-    auto now = std::chrono::steady_clock::now();
-    auto& b = buckets_[ip];
-    if (b.last.time_since_epoch().count() == 0) {
-        // First request from this IP: start with full bucket.
-        b.tokens = burst_;
-        b.last   = now;
-    } else {
-        double elapsed_sec = std::chrono::duration<double>(now - b.last).count();
-        b.tokens = std::min(burst_, b.tokens + elapsed_sec * rate_per_sec_);
-        b.last   = now;
-    }
-    if (b.tokens < 1.0) return false;
-    b.tokens -= 1.0;
-    return true;
 }
 
 std::string RpcServer::verify_auth(const json& req) const {
@@ -193,7 +169,7 @@ void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
             // compute HMAC) — auth-rate-limit ordering: rate-limit
             // fires first because rate-limited callers shouldn't
             // even reveal whether their auth was valid.
-            if (!consume_rate_token(peer_ip)) {
+            if (!rate_limiter_.consume(peer_ip)) {
                 response["result"] = nullptr;
                 response["error"]  = "rate_limited";
             } else {
