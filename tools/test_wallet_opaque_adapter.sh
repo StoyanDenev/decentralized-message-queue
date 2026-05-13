@@ -23,7 +23,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WALLET=build/Release/determ-wallet.exe
+WALLET=build/Release/unchained-wallet.exe
 PW="myp4ssphr4se"
 GID=3
 

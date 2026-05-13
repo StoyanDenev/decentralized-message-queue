@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #include "opaque_primitives.hpp"
 #include <sodium.h>
 #include <mutex>
 #include <cstring>
 
-namespace determ::wallet::primitives {
+namespace unchained::wallet::primitives {
 
 namespace {
 std::once_flag g_init_flag;
@@ -76,4 +76,4 @@ std::vector<uint8_t> argon2id(const std::vector<uint8_t>& password,
     return out;
 }
 
-} // namespace determ::wallet::primitives
+} // namespace unchained::wallet::primitives

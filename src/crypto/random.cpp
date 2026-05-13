@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/crypto/random.hpp>
-#include <determ/crypto/sha256.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/crypto/random.hpp>
+#include <unchained/crypto/sha256.hpp>
 #include <algorithm>
 #include <stdexcept>
 
-namespace determ::crypto {
+namespace unchained::crypto {
 
 Hash compute_dh_output(const Hash& share_a, const Hash& share_b) {
     return sha256(share_a, share_b);
@@ -189,4 +189,4 @@ ShardId shard_id_for_address(const std::string& addr,
     return static_cast<ShardId>(v % shard_count);
 }
 
-} // namespace determ::crypto
+} // namespace unchained::crypto

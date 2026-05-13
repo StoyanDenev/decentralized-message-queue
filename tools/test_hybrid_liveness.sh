@@ -15,7 +15,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_hyb_live
 
 declare -a NODE_PIDS
@@ -32,12 +32,12 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_height() {
-  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height','-'))
 except: print('-')"
 }
 get_head() {
-  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('head_hash','?'))
 except: print('?')"
 }
@@ -47,8 +47,8 @@ mkdir -p $T/n1 $T/n2 $T/n3 $T/n4
 
 echo "=== 1. Init 4 nodes ==="
 for n in 1 2 3 4; do
-  $DETERM init --data-dir $T/n$n --profile web 2>&1 | tail -1
-  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $UNCHAINED init --data-dir $T/n$n --profile web 2>&1 | tail -1
+  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
@@ -68,7 +68,7 @@ $(cat $T/p4.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 1000000}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json
+$UNCHAINED genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -103,7 +103,7 @@ echo
 echo "=== 4. Start 4 nodes ==="
 NODE_PIDS=("" "" "" "")
 for n in 1 2 3 4; do
-  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done

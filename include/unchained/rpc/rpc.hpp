@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/net/rate_limiter.hpp>
-#include <determ/node/node.hpp>
+#include <unchained/net/rate_limiter.hpp>
+#include <unchained/node/node.hpp>
 #include <asio.hpp>
 #include <functional>
 #include <memory>
 #include <string>
 
-namespace determ::rpc {
+namespace unchained::rpc {
 
 // Minimal line-oriented JSON-RPC server.
 // Client sends: {"method": "...", "params": {...}}\n
@@ -63,4 +63,4 @@ nlohmann::json rpc_call(const std::string& host, uint16_t port,
                          const nlohmann::json& params = {},
                          const std::string& auth_secret_hex = "");
 
-} // namespace determ::rpc
+} // namespace unchained::rpc

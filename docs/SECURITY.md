@@ -1,4 +1,4 @@
-# Determ Security Posture
+# Unchained Security Posture
 
 **Doc status:** Canonical. Reconciles the rev.7 [SECURITY_AUDIT.md](https://github.com/) findings with the in-tree [OPEN-VULNERABILITIES.md](OPEN-VULNERABILITIES.md) (now superseded by this file) against current code at rev.8 + rev.9 sharding through B6.basic.
 
@@ -107,7 +107,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 
 **Option 3 landed in-session (HMAC RPC auth).** Config field `rpc_auth_secret` is a hex-encoded shared secret. When non-empty, the RPC server requires every request to carry an `auth` field that's `hex(HMAC-SHA-256(secret, method || "|" || params_canonical_json))`. The server computes the expected HMAC after JSON parse-round-trip (which canonicalizes object key order via nlohmann's deterministic dump) and compares constant-time to avoid timing side-channels. Mismatch → `{"error": "auth_failed"}`. Empty → `{"error": "auth_required: missing 'auth' field"}`.
 
-Client side (CLI + `rpc_call`): if `DETERM_RPC_AUTH_SECRET` env var is set, every outgoing request automatically gets the auth field computed from the env-var secret. No code change needed for existing subcommands.
+Client side (CLI + `rpc_call`): if `UNCHAINED_RPC_AUTH_SECRET` env var is set, every outgoing request automatically gets the auth field computed from the env-var secret. No code change needed for existing subcommands.
 
 External-bind-without-auth warning. When `rpc_localhost_only=false` AND `rpc_auth_secret=""` at startup, the node logs `[WARNING: external bind without HMAC auth ...]`. Operators are explicitly nudged toward either keeping localhost-only or setting the auth secret.
 
@@ -148,7 +148,7 @@ External-bind-without-auth warning. When `rpc_localhost_only=false` AND `rpc_aut
 
 This closure required a paired fix to `src/net/binary_codec.cpp::decode_tx_frame`: pre-fix, the decoder skipped the fixed-slot area at offsets 32–55 where the encoder writes `amount`, `fee`, and `nonce`, producing post-decode txs with zero values for these fields. The fields are now read explicitly, restoring the encode/decode round-trip property. The bug was latent because S-002's openness meant zero-field txs entered the mempool and were filtered later at apply (silent corruption). Closing S-002 surfaced the codec bug; both fix together. See `docs/proofs/S002-Mempool-Sig-Verify.md` for the full analysis trail.
 
-**Verified post-fix:** bearer (anon TRANSFER) + governance (registered-domain PARAM_CHANGE) + equivocation_slashing regressions all PASS. The legit-tx code path through both admission sites (RPC and gossip) is exercised by existing tests; a dedicated forged-sig rejection regression is a follow-on once test-side Ed25519 forge tooling is available (currently requires PyNaCl not present in the test environment, or a `determ` CLI helper for offline forged-sig construction).
+**Verified post-fix:** bearer (anon TRANSFER) + governance (registered-domain PARAM_CHANGE) + equivocation_slashing regressions all PASS. The legit-tx code path through both admission sites (RPC and gossip) is exercised by existing tests; a dedicated forged-sig rejection regression is a follow-on once test-side Ed25519 forge tooling is available (currently requires PyNaCl not present in the test environment, or a `unchained` CLI helper for offline forged-sig construction).
 
 **Pre-fix description** (preserved for audit trail). `Node::on_tx` (`src/node/node.cpp:1353-1371`) accepted incoming transactions into `tx_store_` after only a stale-nonce check and a replace-by-fee check. **No `crypto::verify` was called** on this path. Signature verification happened only later in `BlockValidator::check_transactions` at apply time.
 
@@ -199,17 +199,17 @@ The choice was option 1 from the resolution table below (the audit's recommended
 
 **Option 1 mitigation landed in-session.** `cmd_account_create` (`src/main.cpp`):
 
-- **Refuses stdout output by default.** `determ account create` without `--out` exits 1 with a diagnostic naming the two acceptable paths (file output or explicit opt-in for legacy plaintext-stdout).
+- **Refuses stdout output by default.** `unchained account create` without `--out` exits 1 with a diagnostic naming the two acceptable paths (file output or explicit opt-in for legacy plaintext-stdout).
 - **Requires `--out <file>`** for normal usage. The output file is written then immediately narrowed to owner read+write only via `std::filesystem::permissions(perms::owner_read | perms::owner_write, perm_options::replace)`. On Unix this is `chmod 0600`; on Windows the implementation does a best-effort owner-only ACL.
 - **Opt-in `--allow-plaintext-stdout`** for the legacy stdout behavior (offline air-gapped key gen, controlled-shell scenarios). The flag's name makes the choice auditable in invoking scripts.
 
 Test infrastructure updated: `tools/test_bearer.sh` and `tools/test_adversarial.sh` switched from `account create > file` to `account create --out file` (same effect, secure default).
 
-**Option 2 mitigation landed in-session.** `account create --passphrase <pw>` (or `DETERM_PASSPHRASE` env var) wraps the keyfile in an AES-256-GCM envelope keyed via PBKDF2-HMAC-SHA-256 (600k iterations, 16-byte salt, 96-bit nonce). The encrypted file format is a header line (`DETERM-ACCOUNT-V1 <address>`) followed by the canonical envelope blob (dot-separated hex fields). AAD binds the public address so a tampered envelope cannot be substituted with another account's encrypted blob.
+**Option 2 mitigation landed in-session.** `account create --passphrase <pw>` (or `UNCHAINED_PASSPHRASE` env var) wraps the keyfile in an AES-256-GCM envelope keyed via PBKDF2-HMAC-SHA-256 (600k iterations, 16-byte salt, 96-bit nonce). The encrypted file format is a header line (`UNCHAINED-ACCOUNT-V1 <address>`) followed by the canonical envelope blob (dot-separated hex fields). AAD binds the public address so a tampered envelope cannot be substituted with another account's encrypted blob.
 
-The envelope crypto (`wallet/envelope.cpp`, originally for the wallet binary's recovery-share encryption) is now also linked into the main `determ` binary. The cross-binary scope is limited to the symmetric-crypto primitive — no wallet-state (recovery shares, OPAQUE state) crosses the boundary; the daemon's address space isolation from wallet-secret material is preserved.
+The envelope crypto (`wallet/envelope.cpp`, originally for the wallet binary's recovery-share encryption) is now also linked into the main `unchained` binary. The cross-binary scope is limited to the symmetric-crypto primitive — no wallet-state (recovery shares, OPAQUE state) crosses the boundary; the daemon's address space isolation from wallet-secret material is preserved.
 
-Read-back: `determ account decrypt --in <file> --passphrase <pw>` (or `DETERM_PASSPHRASE` env var) decrypts and emits the plaintext JSON (privkey + address) to stdout. AEAD tag verification fails clean (clear error message) on wrong passphrase or tampered file.
+Read-back: `unchained account decrypt --in <file> --passphrase <pw>` (or `UNCHAINED_PASSPHRASE` env var) decrypts and emits the plaintext JSON (privkey + address) to stdout. AEAD tag verification fails clean (clear error message) on wrong passphrase or tampered file.
 
 **Regression coverage:** `tools/test_account_encrypted.sh`, 7 assertions: header format, no-plaintext-leak in encrypted file, correct-passphrase round-trip, wrong-passphrase rejection, env-var auth, plaintext-path backward compat, decrypted-address well-formedness.
 
@@ -336,7 +336,7 @@ Crash semantics. Between block apply and save completion, the block is in memory
 
 **Severity:** High (consensus-divergence) • **Status:** ✅ Moot — see M-F. The iteration count is no longer load-bearing; `delay_T` divergence between nodes no longer affects consensus. The field can be removed in cleanup. • **Sources:** Audit 3.9 (re-classified up from Medium)
 
-**What's open.** `GenesisConfig` (`include/determ/chain/genesis.hpp:78-105`) contains no `delay_T` field. `grep delay_T genesis.{hpp,cpp}` returns empty. `delay_T` is loaded from the per-node `Config` instead. Two nodes with different per-node `delay_T` will produce differently-validated blocks (the validator at `node.cpp:1446` uses `cfg_.delay_T`).
+**What's open.** `GenesisConfig` (`include/unchained/chain/genesis.hpp:78-105`) contains no `delay_T` field. `grep delay_T genesis.{hpp,cpp}` returns empty. `delay_T` is loaded from the per-node `Config` instead. Two nodes with different per-node `delay_T` will produce differently-validated blocks (the validator at `node.cpp:1446` uses `cfg_.delay_T`).
 
 **Impact.** Consensus divergence between misconfigured nodes. The PROTOCOL.md claim that `delay_T` is "genesis-pinned" is **not enforced by code**.
 
@@ -652,7 +652,7 @@ That's **8 call sites**, several of which fire per block or per gossip message. 
 
 **Severity:** High (architectural omission) • **Status:** Mitigated in-session (Merkle tree commitment landed; inclusion proofs follow-on) • **Sources:** Architectural Analysis §3.3, related to S-012
 
-**Mitigation landed in-session.** Block now carries a `state_root` field; producer populates it from a sorted-leaves Merkle tree (`include/determ/crypto/merkle.hpp`) over every canonical state entry. The root is bound into `signing_bytes` when non-zero (preserving pre-S-033 byte-stable hashes). Apply-time verification re-derives and rejects on mismatch. The chain's `prev_hash` chain transitively authenticates every prior state_root — the chain is now a verifiable state log.
+**Mitigation landed in-session.** Block now carries a `state_root` field; producer populates it from a sorted-leaves Merkle tree (`include/unchained/crypto/merkle.hpp`) over every canonical state entry. The root is bound into `signing_bytes` when non-zero (preserving pre-S-033 byte-stable hashes). Apply-time verification re-derives and rejects on mismatch. The chain's `prev_hash` chain transitively authenticates every prior state_root — the chain is now a verifiable state log.
 
 Side effects:
 - **S-012 partial closure**: snapshot verifiers can now compare snapshot state's Merkle root against the snapshot's tail-header committed `state_root`. The verification call inside `restore_from_snapshot` is a ~10 LOC follow-on (file slot exists; only the check is missing).
@@ -707,7 +707,7 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 **Why per-signer rather than total-queue + LRU.** Under K-of-K mutual distrust there's no quorum to decide which buffered entry is honest, so LRU would evict honest entries when a spammer impersonates K signers. Per-signer asymmetric cap closes the attack: a single Byzantine signer can't crowd out honest peers' buffer slots regardless of their send rate.
 
-**Effort.** ~25 LOC including comments. Helper signature + header decl added in `include/determ/node/node.hpp`.
+**Effort.** ~25 LOC including comments. Helper signature + header decl added in `include/unchained/node/node.hpp`.
 
 **Verified.** State-root, dapp_register, governance_param_change, BFT escalation all green with the cap in place; pre-existing equivocation_slashing TIME_WAIT flake confirmed unchanged via stash-revert comparison.
 
@@ -717,7 +717,7 @@ This is a fundamental omission for any L1 claiming to be a "base layer."
 
 **Severity:** Medium (was) • **Status:** ✅ Mitigated • **Sources:** Audit 3.2, OV-#10
 
-**Mitigation landed in-session.** Token-bucket per-peer-IP rate limiting now gates both the RPC and the gossip receive layer. Both call sites use a shared `determ::net::RateLimiter` helper (`include/determ/net/rate_limiter.hpp`) so the policy + refill arithmetic + per-key bucket map live in exactly one place.
+**Mitigation landed in-session.** Token-bucket per-peer-IP rate limiting now gates both the RPC and the gossip receive layer. Both call sites use a shared `unchained::net::RateLimiter` helper (`include/unchained/net/rate_limiter.hpp`) so the policy + refill arithmetic + per-key bucket map live in exactly one place.
 
 **RPC side.** `rate_limiter_.consume(peer_ip)` runs in `handle_session` BEFORE JSON parse and auth — rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded. Config:
 
@@ -856,7 +856,7 @@ Net effect: the divergence is closed at all three layers. Option 1 (unified `val
 
 **Determinism.** Both `K` and `N` are inputs to the function; every node picks the same branch and the same indices. No fork height needed because no chain history sits on the K > N/2 path — current regression tests run with M ≤ 2, K ≤ M, N_registered ≤ 3 and all hit the rejection branch (verified: governance, equivocation, BFT escalation, bearer, atomic_scope, dapp_register all green after the change).
 
-**Effort.** ~40 LOC including comments. Header doc updated in `include/determ/crypto/random.hpp`.
+**Effort.** ~40 LOC including comments. Header doc updated in `include/unchained/crypto/random.hpp`.
 
 ---
 
@@ -901,7 +901,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 **Severity:** Operational • **Status:** Open • **Sources:** Architectural Analysis §4.1, §4.2
 
-**What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/determ.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
+**What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/unchained.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
 
 **Why this is operational, not a vulnerability.** A bug-free codebase doesn't strictly need unit tests, but their absence makes regression-prevention impossible. Edge cases (`ContribMsg` with invalid `aborts_gen`, delay-worker exception handling, two same-height blocks in different orders, equivocation under network partition) require targeted unit tests; the integration scripts can't drive them.
 
@@ -999,7 +999,7 @@ The narrower ContribMsg-level case is still open as S-006.
 
 ### M-C — Linear-time sync barrier → snapshot bootstrap (was Gemini "fatal architectural flaw")
 
-**B6.basic added** `Chain::serialize_state` + `restore_from_snapshot` + `determ snapshot {create,inspect,fetch}` + `Config::snapshot_path` for fast-bootstrap. Receiver skips per-block replay; restores state directly. The cryptographic-zero-trust version still requires a state Merkle root in the block format (deferred to v2 — see S-012). Verified in [`tools/test_snapshot_bootstrap.sh`](../tools/test_snapshot_bootstrap.sh).
+**B6.basic added** `Chain::serialize_state` + `restore_from_snapshot` + `unchained snapshot {create,inspect,fetch}` + `Config::snapshot_path` for fast-bootstrap. Receiver skips per-block replay; restores state directly. The cryptographic-zero-trust version still requires a state Merkle root in the block format (deferred to v2 — see S-012). Verified in [`tools/test_snapshot_bootstrap.sh`](../tools/test_snapshot_bootstrap.sh).
 
 ### M-D — Blind-abort liveness exploit → BFT escalation
 
@@ -1048,7 +1048,7 @@ The SHA-256^T delay-hash function has been removed from the protocol. The select
 
 ### M-I — Wallet recovery primitive shipped (A2)
 
-**New in this session.** Greenfield `determ-wallet` binary providing distributed seed recovery via T-of-N Shamir SSS layered with AES-256-GCM AEAD envelopes. Two schemes: `passphrase` (default; PBKDF2 directly off the password) and `opaque` (routes through an OPAQUE adapter). The Phase 5 stub adapter (default v1.x) uses libsodium Argon2id directly — gated by `is_stub()` against production use until Phase 6 real libopaque vendoring lands. Pubkey-checksum gate prevents silent reconstruction corruption.
+**New in this session.** Greenfield `unchained-wallet` binary providing distributed seed recovery via T-of-N Shamir SSS layered with AES-256-GCM AEAD envelopes. Two schemes: `passphrase` (default; PBKDF2 directly off the password) and `opaque` (routes through an OPAQUE adapter). The Phase 5 stub adapter (default v1.x) uses libsodium Argon2id directly — gated by `is_stub()` against production use until Phase 6 real libopaque vendoring lands. Pubkey-checksum gate prevents silent reconstruction corruption.
 
 **Binary isolation:** the wallet handles secret material; the chain daemon never has access to user seeds.
 

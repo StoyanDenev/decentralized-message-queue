@@ -21,7 +21,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_mempool_bounds
 TABS=C:/sauromatae/$T
 
@@ -48,12 +48,12 @@ assert() {
 }
 
 echo "=== 1. Init 1 node + genesis ==="
-$DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
-$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$UNCHAINED init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
+$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 
 # Anon wallet for tx submission. Give it lots of balance so it can
 # create many txs (each tx debits 1 + fee).
-$DETERM account create --out $T/anon.json 2>&1 | tail -1
+$UNCHAINED account create --out $T/anon.json 2>&1 | tail -1
 A_PRIV=$(python -c "import json; print(json.load(open('$T/anon.json'))['privkey'])")
 A_ADDR=$(python -c "import json; print(json.load(open('$T/anon.json'))['address'])")
 
@@ -69,7 +69,7 @@ $(cat $T/p1.json | tr -d '\n')
   "initial_balances": [{"domain": "$A_ADDR", "balance": 1000000}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 python -c "
@@ -96,13 +96,13 @@ with open('$T/n1/config.json','w') as f: json.dump(c, f, indent=2)
 
 echo
 echo "=== 2. Start node ==="
-$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!
 sleep 2
 
 echo
 echo "=== 3. Submit 1 tx — normal admission ==="
-RESP=$($DETERM send_anon "test1" 1 "$A_PRIV" --rpc-port 8794 --nonce 0 2>&1 | tail -3 || true)
+RESP=$($UNCHAINED send_anon "test1" 1 "$A_PRIV" --rpc-port 8794 --nonce 0 2>&1 | tail -3 || true)
 if echo "$RESP" | grep -q '"status": "queued"'; then
   assert true "first tx admitted normally (explicit nonce 0)"
 else
@@ -123,7 +123,7 @@ echo "=== 4. Multiple txs from same sender with pipelined nonces ==="
 # of drain rate).
 all_queued=true
 for n in $(seq 1 5); do
-  RESP=$($DETERM send_anon "to_$n" 1 "$A_PRIV" --rpc-port 8794 --nonce $n 2>&1 | tail -3 || true)
+  RESP=$($UNCHAINED send_anon "to_$n" 1 "$A_PRIV" --rpc-port 8794 --nonce $n 2>&1 | tail -3 || true)
   if ! echo "$RESP" | grep -q '"status": "queued"'; then
     all_queued=false
     echo "  unexpected rejection at #$n: $(echo "$RESP" | head -2)"
@@ -137,14 +137,14 @@ done
 echo
 echo "=== 5. Submit a tx from a DIFFERENT sender — should admit (per-sender quota is per-from) ==="
 # Create a 2nd anon wallet. Its quota is independent of A_ADDR's.
-$DETERM account create --out $T/anon2.json 2>&1 | tail -1
+$UNCHAINED account create --out $T/anon2.json 2>&1 | tail -1
 B_PRIV=$(python -c "import json; print(json.load(open('$T/anon2.json'))['privkey'])")
 B_ADDR=$(python -c "import json; print(json.load(open('$T/anon2.json'))['address'])")
 # B has zero balance from genesis, so the TRANSFER will be admitted to
 # mempool (validator's mempool-admit only checks sig + nonce + quota; the
 # balance-check is at apply time, which is irrelevant here — we just want
 # to verify admission isn't blocked by A's quota).
-RESP=$($DETERM send_anon "test_b" 0 "$B_PRIV" --rpc-port 8794 --nonce 0 2>&1 | tail -3 || true)
+RESP=$($UNCHAINED send_anon "test_b" 0 "$B_PRIV" --rpc-port 8794 --nonce 0 2>&1 | tail -3 || true)
 if echo "$RESP" | grep -q '"status": "queued"'; then
   assert true "tx from different sender admitted (independent quota)"
 else

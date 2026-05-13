@@ -1,6 +1,6 @@
 # FA1 — Safety theorem (fork freedom)
 
-This document proves that Determ's K-of-K mutual-distrust protocol produces at most one valid block per height, under the cryptographic assumptions of `Preliminaries.md` §2 plus the honest-behavior definition §4.
+This document proves that Unchained's K-of-K mutual-distrust protocol produces at most one valid block per height, under the cryptographic assumptions of `Preliminaries.md` §2 plus the honest-behavior definition §4.
 
 **Companion documents:** `Preliminaries.md` (notation, model, validator definition); `EquivocationSlashing.md` (FA6, picks up the "fully-Byzantine committee" edge case).
 
@@ -133,9 +133,9 @@ So only case (a) survives: `B = B'`.   ∎
 
 ## 5. Discussion
 
-### 5.1 What "unconditional safety" means in Determ's documentation
+### 5.1 What "unconditional safety" means in Unchained's documentation
 
-Determ claims "unconditional fork-freedom" in MD-mode. Reading T-1, this is **slightly informal** but accurate in practice:
+Unchained claims "unconditional fork-freedom" in MD-mode. Reading T-1, this is **slightly informal** but accurate in practice:
 
 - Strict unconditional: would require ruling out clause 2 (fully-Byzantine equivocating committee). T-1 doesn't.
 - Practical unconditional: clause 2 is detectable (every signature is on-chain after gossip), and FA6 (equivocation slashing) makes it economically suicidal for any rational actor — every member loses their entire stake AND their domain registration.
@@ -166,7 +166,7 @@ This bound is significantly tighter than the BFT-mode safety claim (FA5), which 
 
 ### 5.4 Why the protocol design supports this proof so cleanly
 
-Determ's safety proof is unusually short for a consensus protocol. Three structural reasons:
+Unchained's safety proof is unusually short for a consensus protocol. Three structural reasons:
 
 1. **No fork-choice rule.** No "heaviest chain" or "longest chain" tiebreaker logic to verify. Fork-freedom is a *local* validation predicate, not a *global* fork-choice outcome.
 2. **No leader / proposer.** No leader-election rule to formally verify. K-of-K is symmetric in committee members.

@@ -1,6 +1,6 @@
 # FA6 — Equivocation slashing soundness
 
-This document proves that Determ's equivocation-slashing mechanism produces no false positives: under EUF-CMA, an **honest** validator is **never** named as the equivocator in a finalized `EquivocationEvent`.
+This document proves that Unchained's equivocation-slashing mechanism produces no false positives: under EUF-CMA, an **honest** validator is **never** named as the equivocator in a finalized `EquivocationEvent`.
 
 The proof is short and direct. It exists to make explicit the security gap that would otherwise be implicit: "slashing only the guilty" is a property of the design, not an obvious fact.
 
@@ -105,7 +105,7 @@ So the cross-shard slash is sound under the same EUF-CMA bound — `≤ 2⁻¹²
 
 ### 4.1 Why "no false positives" is the right property
 
-A consensus protocol with overly-aggressive slashing creates the wrong incentives: honest validators face slash risk for honest mistakes (NTP drift, packet loss, brief offline windows). Determ's design carefully distinguishes:
+A consensus protocol with overly-aggressive slashing creates the wrong incentives: honest validators face slash risk for honest mistakes (NTP drift, packet loss, brief offline windows). Unchained's design carefully distinguishes:
 
 - **Equivocation slash** (this proof, FA6): cryptographic, no false positives. An honest validator can NEVER be slashed for equivocation — the only way they get slashed is if they actually signed two conflicting blocks.
 - **Suspension slash** (`SUSPENSION_SLASH = 10`, Preliminaries §1): economic, occurs on round-1 aborts that are baked into the chain. This is a livelihood penalty for unavailability, not for misbehavior. False positives are possible (an honest but slow validator gets suspension-slashed) but bounded in magnitude.
@@ -140,7 +140,7 @@ In the post-quantum era under Grover, the bound degrades to roughly `Q · 2⁻�
 
 | Document | Source |
 |---|---|
-| `EquivocationEvent` struct | `include/determ/chain/block.hpp::EquivocationEvent` |
+| `EquivocationEvent` struct | `include/unchained/chain/block.hpp::EquivocationEvent` |
 | V11 validation | `src/node/validator.cpp::check_equivocation_events` |
 | Apply slash (zero stake + deregister) | `src/chain/chain.cpp::apply_transactions` line ~340 |
 | Equivocation detection | `src/node/node.cpp::apply_block_locked` (cross-block check) |

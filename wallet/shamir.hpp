@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
 // A2 Phase 1: Shamir's Secret Sharing over GF(2^8).
 //
@@ -25,7 +25,7 @@
 #include <vector>
 #include <optional>
 
-namespace determ::wallet::shamir {
+namespace unchained::wallet::shamir {
 
 // One share = (x-coordinate, evaluations). x must be non-zero and
 // distinct across all shares in a split.
@@ -49,4 +49,4 @@ std::vector<Share> split(const std::vector<uint8_t>& secret,
 std::optional<std::vector<uint8_t>>
 combine(const std::vector<Share>& shares);
 
-} // namespace determ::wallet::shamir
+} // namespace unchained::wallet::shamir

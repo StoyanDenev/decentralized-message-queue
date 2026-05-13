@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/types.hpp>
+#include <unchained/types.hpp>
 #include <string>
 
-namespace determ::crypto {
+namespace unchained::crypto {
 
 struct NodeKey {
     PubKey                  pub{};        // Ed25519 public key
@@ -24,4 +24,4 @@ inline bool verify(const PubKey& pub, const std::vector<uint8_t>& v, const Signa
     return verify(pub, v.data(), v.size(), sig);
 }
 
-} // namespace determ::crypto
+} // namespace unchained::crypto

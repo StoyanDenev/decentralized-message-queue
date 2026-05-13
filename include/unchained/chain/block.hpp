@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/types.hpp>
-#include <determ/crypto/keys.hpp>
+#include <unchained/types.hpp>
+#include <unchained/crypto/keys.hpp>
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <optional>
 #include <nlohmann/json.hpp>
 
-namespace determ::chain {
+namespace unchained::chain {
 
 // Consensus mode for a block. Per-height escalation: shards default to
 // MUTUAL_DISTRUST and escalate to BFT after `bft_escalation_threshold`
@@ -107,7 +107,7 @@ enum class TxType : uint8_t {
     // signatures bind each user's intent independently.
     COMPOSABLE_BATCH = 8,
     // v2.18 (Theme 7 DApp support): register / update / deactivate a
-    // DApp service. tx.from must already be a Determ registered domain
+    // DApp service. tx.from must already be a Unchained registered domain
     // (REGISTER'd). The DApp registry is a sibling of registrants_ on
     // Chain; it stores discovery + encryption metadata so light clients
     // and wallets can find DApps and encrypt payloads to them. See
@@ -221,9 +221,9 @@ struct Transaction {
 };
 
 // Forward declaration — full struct lives in node/producer.hpp.
-} // namespace determ::chain
-namespace determ::node { struct AbortClaimMsg; }
-namespace determ::chain {
+} // namespace unchained::chain
+namespace unchained::node { struct AbortClaimMsg; }
+namespace unchained::chain {
 
 struct AbortEvent {
     uint8_t     round{0};
@@ -488,4 +488,4 @@ struct Block {
     static Block   from_json(const nlohmann::json& j);
 };
 
-} // namespace determ::chain
+} // namespace unchained::chain

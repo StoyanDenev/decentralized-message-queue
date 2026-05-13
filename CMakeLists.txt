@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(determ CXX C)
+project(unchained CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,7 +35,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
-# ── determ executable ───────────────────────────────────────────────────────
+# ── unchained executable ───────────────────────────────────────────────────────
 add_definitions(-DASIO_STANDALONE -DASIO_NO_DEPRECATED)
 
 if(WIN32)
@@ -46,33 +46,33 @@ file(GLOB_RECURSE SOURCES "src/*.cpp")
 
 # v2.17 / S-004 option 2: passphrase-encrypted keyfiles. The
 # envelope crypto (AES-256-GCM + PBKDF2-HMAC-SHA-256) lives in
-# wallet/envelope.cpp; main `determ` binary needs it for
+# wallet/envelope.cpp; main `unchained` binary needs it for
 # `account create --passphrase` to encrypt the generated keyfile
 # at rest. No wallet-state is shared between binaries — only the
 # crypto primitive code.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
 
-add_executable(determ ${SOURCES})
+add_executable(unchained ${SOURCES})
 
-target_include_directories(determ PRIVATE
+target_include_directories(unchained PRIVATE
   include
   ${CMAKE_SOURCE_DIR}/wallet
   ${asio_SOURCE_DIR}/asio/include
   ${openssl_SOURCE_DIR}/include
 )
 
-target_link_libraries(determ PRIVATE
+target_link_libraries(unchained PRIVATE
   ssl
   crypto
   nlohmann_json::nlohmann_json
 )
 
 if(WIN32)
-  target_link_libraries(determ PRIVATE ws2_32 wsock32 crypt32)
+  target_link_libraries(unchained PRIVATE ws2_32 wsock32 crypt32)
 endif()
 
 if(UNIX)
-  target_link_libraries(determ PRIVATE pthread)
+  target_link_libraries(unchained PRIVATE pthread)
 endif()
 
 # ── libsodium (A2 Phase 4: provides ristretto255 + Argon2id for libopaque) ──
@@ -88,7 +88,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(sodium)
 
 # ── liboprf (A2 Phase 6: OPRF + threshold OPRF — libopaque dependency) ──────
-# Off by default. Set -DDETERM_VENDOR_OPRF=ON to enable.
+# Off by default. Set -DUNCHAINED_VENDOR_OPRF=ON to enable.
 #
 # Status: integration scaffolding shipped (FetchContent + arpa/inet.h
 # portability shim under wallet/oprf_shim/), but the actual upstream
@@ -99,8 +99,8 @@ FetchContent_MakeAvailable(sodium)
 # vendor would build cleanly; on Windows MSVC it's multi-day porting
 # work. Keeping the integration declaration in-tree so a future cycle
 # can pick up where this commit left off.
-option(DETERM_VENDOR_OPRF "Vendor liboprf for the wallet's OPAQUE adapter" OFF)
-if(DETERM_VENDOR_OPRF)
+option(UNCHAINED_VENDOR_OPRF "Vendor liboprf for the wallet's OPAQUE adapter" OFF)
+if(UNCHAINED_VENDOR_OPRF)
   FetchContent_Declare(
     oprf
     GIT_REPOSITORY https://github.com/stef/liboprf.git
@@ -131,24 +131,24 @@ if(DETERM_VENDOR_OPRF)
   target_link_libraries(oprf PUBLIC sodium)
 endif()
 
-# ── determ-wallet executable (A2 Phases 1-4) ────────────────────────────────
+# ── unchained-wallet executable (A2 Phases 1-4) ────────────────────────────────
 # Separate binary so wallet secret material never shares address space with
-# the networked `determ` daemon. Phase 5 will add libopaque on top of
+# the networked `unchained` daemon. Phase 5 will add libopaque on top of
 # libsodium with an in-tree CMake shim (libopaque upstream is autotools).
 file(GLOB_RECURSE WALLET_SOURCES "wallet/*.cpp")
-add_executable(determ-wallet ${WALLET_SOURCES})
-target_include_directories(determ-wallet PRIVATE
+add_executable(unchained-wallet ${WALLET_SOURCES})
+target_include_directories(unchained-wallet PRIVATE
   wallet
   ${openssl_SOURCE_DIR}/include
 )
-target_link_libraries(determ-wallet PRIVATE
+target_link_libraries(unchained-wallet PRIVATE
   crypto
   sodium
   nlohmann_json::nlohmann_json
 )
 if(WIN32)
-  target_link_libraries(determ-wallet PRIVATE ws2_32 crypt32)
+  target_link_libraries(unchained-wallet PRIVATE ws2_32 crypt32)
 endif()
 if(UNIX)
-  target_link_libraries(determ-wallet PRIVATE pthread)
+  target_link_libraries(unchained-wallet PRIVATE pthread)
 endif()

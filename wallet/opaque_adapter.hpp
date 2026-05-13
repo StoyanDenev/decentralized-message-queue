@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
 // A2 Phase 5: OPAQUE adapter interface.
 //
@@ -36,7 +36,7 @@
 #include <vector>
 #include <optional>
 
-namespace determ::wallet::opaque_adapter {
+namespace unchained::wallet::opaque_adapter {
 
 // True if the currently-linked OPAQUE adapter is the Phase 5 stub
 // (libsodium-direct, no OPRF, no real OPAQUE). False once Phase 6
@@ -82,4 +82,4 @@ authenticate_password(const std::string& password,
                         const std::vector<uint8_t>& record,
                         uint8_t guardian_id);
 
-} // namespace determ::wallet::opaque_adapter
+} // namespace unchained::wallet::opaque_adapter

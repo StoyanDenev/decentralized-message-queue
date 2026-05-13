@@ -1,6 +1,6 @@
 # FA12 — Wallet recovery soundness (A2)
 
-This document proves that Determ's wallet recovery primitive — distributed Shamir secret sharing layered with AEAD envelopes and (optionally) password-authenticated key exchange — preserves the user's Ed25519 seed under composable adversary models. The argument has four layers:
+This document proves that Unchained's wallet recovery primitive — distributed Shamir secret sharing layered with AEAD envelopes and (optionally) password-authenticated key exchange — preserves the user's Ed25519 seed under composable adversary models. The argument has four layers:
 
 1. **Shamir** — below-threshold compromise leaks zero information about the secret.
 2. **AEAD envelope** — per-share tampering is cryptographically detectable.
@@ -224,7 +224,7 @@ A reviewer can confirm soundness by:
 
 ## 10. Conclusion
 
-T-12 + T-13 + T-14 + T-15 establish that Determ's wallet recovery primitive provides strong information-theoretic + cryptographic guarantees against composite adversary models:
+T-12 + T-13 + T-14 + T-15 establish that Unchained's wallet recovery primitive provides strong information-theoretic + cryptographic guarantees against composite adversary models:
 
 - Below-threshold compromise leaks **zero** information about the seed.
 - AEAD prevents undetected share tampering (`2⁻¹²⁸` per attempt).
@@ -233,4 +233,4 @@ T-12 + T-13 + T-14 + T-15 establish that Determ's wallet recovery primitive prov
 
 The Phase 5 stub adapter is a development scaffold; the formal bounds tighten substantially once Phase 6 vendors real libopaque. The wallet's `is_stub()` API surface is explicitly designed to gate against accidental production use of the stub.
 
-This completes formal coverage of every v1.x safety-critical mechanism in Determ, chain and wallet alike.
+This completes formal coverage of every v1.x safety-critical mechanism in Unchained, chain and wallet alike.

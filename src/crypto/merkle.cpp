@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/crypto/merkle.hpp>
-#include <determ/crypto/sha256.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/crypto/merkle.hpp>
+#include <unchained/crypto/sha256.hpp>
 #include <algorithm>
 #include <cstring>
 
-namespace determ::crypto {
+namespace unchained::crypto {
 
 namespace {
 
@@ -140,4 +140,4 @@ bool merkle_verify(const Hash& root,
     return proof_idx == proof.size() && current == root;
 }
 
-} // namespace determ::crypto
+} // namespace unchained::crypto

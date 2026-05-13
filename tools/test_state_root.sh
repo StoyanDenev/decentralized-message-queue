@@ -24,7 +24,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_state_root
 TABS=C:/sauromatae/$T
 
@@ -52,15 +52,15 @@ assert() {
 
 echo "=== 1. Init 3 nodes (single_test: M=K=3) ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 # Anon wallets for the post-transfer state-change test
-$DETERM account create --out $T/anon_a.json 2>&1 | tail -1
+$UNCHAINED account create --out $T/anon_a.json 2>&1 | tail -1
 A_PRIV=$(python -c "import json; print(json.load(open('$T/anon_a.json'))['privkey'])")
 A_ADDR=$(python -c "import json; print(json.load(open('$T/anon_a.json'))['address'])")
-$DETERM account create --out $T/anon_b.json 2>&1 | tail -1
+$UNCHAINED account create --out $T/anon_b.json 2>&1 | tail -1
 B_ADDR=$(python -c "import json; print(json.load(open('$T/anon_b.json'))['address'])")
 
 cat > $T/gen.json <<EOF
@@ -77,7 +77,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "$A_ADDR", "balance": 100}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 configure_node() {
@@ -107,17 +107,17 @@ configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 2. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
-$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$UNCHAINED start --config $T/n2/config.json > $T/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$UNCHAINED start --config $T/n3/config.json > $T/n3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.5
 
 echo
 echo "=== 3. Wait for chain to advance past height 5 ==="
 for _ in $(seq 1 80); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
+  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
@@ -128,7 +128,7 @@ echo "  chain height: $H"
 
 echo
 echo "=== 4. state_root RPC: format check ==="
-R=$($DETERM state-root --rpc-port 8771 2>/dev/null)
+R=$($UNCHAINED state-root --rpc-port 8771 2>/dev/null)
 SR=$(echo "$R" | python -c "import sys,json; print(json.load(sys.stdin)['state_root'])" 2>/dev/null || echo "")
 H_R=$(echo "$R" | python -c "import sys,json; print(json.load(sys.stdin).get('height',0))" 2>/dev/null || echo "")
 echo "  state_root: ${SR:0:32}... (height $H_R)"
@@ -150,11 +150,11 @@ echo "=== 5. (Determinism check removed — see test comment header) ==="
 echo
 echo "=== 6. After TRANSFER applies: state_root changes ==="
 SR_BEFORE="$SR"
-$DETERM send_anon $B_ADDR 25 $A_PRIV --rpc-port 8771 2>&1 | tail -2
+$UNCHAINED send_anon $B_ADDR 25 $A_PRIV --rpc-port 8771 2>&1 | tail -2
 # Poll until state_root differs (the tx has been included + applied).
 SR_AFTER=""
 for _ in $(seq 1 60); do
-  R=$($DETERM state-root --rpc-port 8771 2>/dev/null)
+  R=$($UNCHAINED state-root --rpc-port 8771 2>/dev/null)
   SR_AFTER=$(echo "$R" | python -c "import sys,json; print(json.load(sys.stdin)['state_root'])" 2>/dev/null || echo "")
   if [ -n "$SR_AFTER" ] && [ "$SR_AFTER" != "$SR_BEFORE" ]; then break; fi
   sleep 0.5

@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WALLET=build/Release/determ-wallet.exe
+WALLET=build/Release/unchained-wallet.exe
 
 OUT=$($WALLET oprf-smoke 2>&1)
 echo "$OUT"

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 // A2 Phase 5 STUB implementation. NOT real OPAQUE. NOT for production
 // secrets. See opaque_adapter.hpp for the security caveats.
 //
@@ -24,7 +24,7 @@
 #include <sodium.h>
 #include <cstring>
 
-namespace determ::wallet::opaque_adapter {
+namespace unchained::wallet::opaque_adapter {
 
 namespace {
 
@@ -92,4 +92,4 @@ authenticate_password(const std::string& password,
     return export_key;
 }
 
-} // namespace determ::wallet::opaque_adapter
+} // namespace unchained::wallet::opaque_adapter

@@ -20,7 +20,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_shard_manifest
 
 declare -a NODE_PIDS
@@ -37,7 +37,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -46,16 +46,16 @@ rm -rf $T
 mkdir -p $T/beacon $T/shard1 $T/shard2
 
 echo "=== 1. Init: 1 beacon + 2 shard nodes (shard has 2 validators) ==="
-$DETERM init --data-dir $T/beacon --profile global_test 2>&1 | tail -1
+$UNCHAINED init --data-dir $T/beacon --profile global_test 2>&1 | tail -1
 # shard nodes use web_test (SHARD+EXTENDED) — needed to accept the
 # committee_region in their genesis; regional_test (SHARD+CURRENT) would
 # reject any non-empty committee_region per the A6 startup gate.
-$DETERM init --data-dir $T/shard1 --profile web_test 2>&1 | tail -1
-$DETERM init --data-dir $T/shard2 --profile web_test 2>&1 | tail -1
+$UNCHAINED init --data-dir $T/shard1 --profile web_test 2>&1 | tail -1
+$UNCHAINED init --data-dir $T/shard2 --profile web_test 2>&1 | tail -1
 
-$DETERM genesis-tool peer-info beacon_node --data-dir $T/beacon --stake 1000 > $T/beacon_p.json
-$DETERM genesis-tool peer-info shard_n1    --data-dir $T/shard1 --stake 1000 > $T/shard1_p.json
-$DETERM genesis-tool peer-info shard_n2    --data-dir $T/shard2 --stake 1000 > $T/shard2_p.json
+$UNCHAINED genesis-tool peer-info beacon_node --data-dir $T/beacon --stake 1000 > $T/beacon_p.json
+$UNCHAINED genesis-tool peer-info shard_n1    --data-dir $T/shard1 --stake 1000 > $T/shard1_p.json
+$UNCHAINED genesis-tool peer-info shard_n2    --data-dir $T/shard2 --stake 1000 > $T/shard2_p.json
 
 # Inject region tags. Beacon doesn't need a region (pool is global at
 # beacon level — manifest tells beacon what each SHARD's region is, not
@@ -85,7 +85,7 @@ $(cat $T/beacon_p.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$DETERM genesis-tool build $T/beacon_gen.json | tail -1
+$UNCHAINED genesis-tool build $T/beacon_gen.json | tail -1
 BEACON_GHASH=$(cat $T/beacon_gen.json.hash)
 
 # Shard genesis: chain_role=2, shard_id=0, committee_region="us-east", S=3.
@@ -107,7 +107,7 @@ $(cat $T/shard2_p.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$DETERM genesis-tool build $T/shard_gen.json | tail -1
+$UNCHAINED genesis-tool build $T/shard_gen.json | tail -1
 SHARD_GHASH=$(cat $T/shard_gen.json.hash)
 
 echo
@@ -146,11 +146,11 @@ EOF
 echo
 echo "=== 4. Start beacon + 2 shard nodes ==="
 NODE_PIDS=("" "" "")
-$DETERM start --config $T/beacon/config.json > $T/beacon/log 2>&1 &
+$UNCHAINED start --config $T/beacon/config.json > $T/beacon/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.5
-$DETERM start --config $T/shard1/config.json > $T/shard1/log 2>&1 &
+$UNCHAINED start --config $T/shard1/config.json > $T/shard1/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.5
-$DETERM start --config $T/shard2/config.json > $T/shard2/log 2>&1 &
+$UNCHAINED start --config $T/shard2/config.json > $T/shard2/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.5
 
 echo
@@ -188,7 +188,7 @@ fi
 # Now test the fail-closed path: a fresh beacon-EXTENDED node without
 # a manifest must refuse to start.
 mkdir -p $T/beacon_no_manifest
-$DETERM init --data-dir $T/beacon_no_manifest --profile global_test 2>&1 > /dev/null
+$UNCHAINED init --data-dir $T/beacon_no_manifest --profile global_test 2>&1 > /dev/null
 python -c "
 import json
 with open('$T/beacon_no_manifest/config.json') as f: c = json.load(f)
@@ -202,7 +202,7 @@ c['rpc_port']     = 8799
 with open('$T/beacon_no_manifest/config.json','w') as f: json.dump(c,f,indent=2)
 "
 # Explicitly NO manifest file in this data_dir. Start should fail.
-START_OUT=$($DETERM start --config $T/beacon_no_manifest/config.json 2>&1 || true)
+START_OUT=$($UNCHAINED start --config $T/beacon_no_manifest/config.json 2>&1 || true)
 if echo "$START_OUT" | grep -q "requires shard_manifest"; then
   echo "  fail-closed: beacon refuses to start without manifest"
 else

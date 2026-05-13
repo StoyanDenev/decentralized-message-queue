@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/chain/block.hpp>
-#include <determ/node/producer.hpp>
+#include <unchained/chain/block.hpp>
+#include <unchained/node/producer.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <stdexcept>
 
-namespace determ::net {
+namespace unchained::net {
 
 enum class MsgType : uint8_t {
     HELLO            = 0,
@@ -107,7 +107,7 @@ std::vector<uint8_t> encode_binary(const Message& m);
 Message              decode_binary(const uint8_t* data, size_t len);
 
 inline Message make_hello(const std::string& domain, uint16_t port,
-                            determ::ChainRole role = determ::ChainRole::SINGLE,
+                            unchained::ChainRole role = unchained::ChainRole::SINGLE,
                             ShardId shard_id = 0,
                             uint8_t wire_version = kWireVersionMax) {
     // rev.9 B2c.5: HELLO carries the sender's chain identity so peers can
@@ -199,4 +199,4 @@ inline Message make_status_response(uint64_t height, const std::string& genesis_
     return {MsgType::STATUS_RESPONSE, {{"height", height}, {"genesis", genesis_hash}}};
 }
 
-} // namespace determ::net
+} // namespace unchained::net

@@ -16,7 +16,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_dapp_e2e
 TABS=C:/sauromatae/$T
 
@@ -44,8 +44,8 @@ assert() {
 
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 # Extract node1's priv for signing DAPP_REGISTER + DAPP_CALL.
@@ -82,7 +82,7 @@ $(cat $T/p3.json | tr -d '\n')
   ]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 configure_node() {
@@ -112,17 +112,17 @@ configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 2. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
-$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$UNCHAINED start --config $T/n2/config.json > $T/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$UNCHAINED start --config $T/n3/config.json > $T/n3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.5
 
 echo
 echo "=== 3. Wait for chain past height 5 ==="
 for _ in $(seq 1 80); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
+  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
@@ -133,7 +133,7 @@ echo "  chain height: $H"
 
 echo
 echo "=== 4. node1 submits DAPP_REGISTER ==="
-$DETERM submit-dapp-register --rpc-port 8771 \
+$UNCHAINED submit-dapp-register --rpc-port 8771 \
   --priv "$N1_PRIV" --from node1 \
   --service-pubkey "$SVC_PUBKEY" \
   --endpoint-url "https://dapp.example" \
@@ -143,7 +143,7 @@ $DETERM submit-dapp-register --rpc-port 8771 \
 echo
 echo "=== 5. Wait for DApp registration to apply ==="
 for _ in $(seq 1 60); do
-  INFO=$($DETERM dapp-info --rpc-port 8771 --domain node1 2>/dev/null)
+  INFO=$($UNCHAINED dapp-info --rpc-port 8771 --domain node1 2>/dev/null)
   if echo "$INFO" | python -c "
 import sys,json
 try:
@@ -171,7 +171,7 @@ except: print(0)" 2>/dev/null || echo "0")
 
 echo
 echo "=== 6. dapp-list includes node1 ==="
-LIST=$($DETERM dapp-list --rpc-port 8771 2>/dev/null)
+LIST=$($UNCHAINED dapp-list --rpc-port 8771 2>/dev/null)
 COUNT=$(echo "$LIST" | python -c "
 import sys,json
 try: print(json.load(sys.stdin).get('count',0))
@@ -182,7 +182,7 @@ except: print(0)" 2>/dev/null || echo "0")
 
 echo
 echo "=== 7. dapp-list filtered by topic=chat ==="
-LIST_CHAT=$($DETERM dapp-list --rpc-port 8771 --topic chat 2>/dev/null)
+LIST_CHAT=$($UNCHAINED dapp-list --rpc-port 8771 --topic chat 2>/dev/null)
 COUNT_CHAT=$(echo "$LIST_CHAT" | python -c "
 import sys,json
 try: print(json.load(sys.stdin).get('count',0))
@@ -193,7 +193,7 @@ except: print(0)" 2>/dev/null || echo "0")
 
 echo
 echo "=== 8. dapp-list filtered by topic=unknown returns nothing ==="
-LIST_NONE=$($DETERM dapp-list --rpc-port 8771 --topic notatopic 2>/dev/null)
+LIST_NONE=$($UNCHAINED dapp-list --rpc-port 8771 --topic notatopic 2>/dev/null)
 COUNT_NONE=$(echo "$LIST_NONE" | python -c "
 import sys,json
 try: print(json.load(sys.stdin).get('count',0))
@@ -210,7 +210,7 @@ echo "=== 9. dapp-messages RPC shape (no events expected, empty DApp) ==="
 # semantics are covered comprehensively by test_dapp_call.sh
 # (16 in-process assertions). This E2E test asserts the RPC + CLI
 # substrate from Phase 7.3/7.4 works.
-MSG=$($DETERM dapp-messages --rpc-port 8771 --domain node1 --from 0 2>/dev/null)
+MSG=$($UNCHAINED dapp-messages --rpc-port 8771 --domain node1 --from 0 2>/dev/null)
 echo "$MSG" > $T/msg.json
 HAS_FIELDS=$(python -c "
 import json
@@ -230,7 +230,7 @@ print('true' if isinstance(j.get('events'), list) else 'false')" 2>/dev/null || 
   || assert false "dapp-messages events not an array"
 
 # Filter by topic works structurally even with no events
-MSG_FILTERED=$($DETERM dapp-messages --rpc-port 8771 --domain node1 --from 0 --topic chat 2>/dev/null)
+MSG_FILTERED=$($UNCHAINED dapp-messages --rpc-port 8771 --domain node1 --from 0 --topic chat 2>/dev/null)
 echo "$MSG_FILTERED" > $T/msg_filt.json
 FILT_OK=$(python -c "
 import json

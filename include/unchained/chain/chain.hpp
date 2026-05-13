@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/chain/block.hpp>
-#include <determ/crypto/merkle.hpp>
+#include <unchained/chain/block.hpp>
+#include <unchained/crypto/merkle.hpp>
 #include <map>
 #include <memory>
 #include <set>
@@ -13,7 +13,7 @@
 #include <vector>
 #include <functional>
 
-namespace determ::chain {
+namespace unchained::chain {
 
 struct AccountState {
     uint64_t balance{0};
@@ -45,7 +45,7 @@ struct RegistryEntry {
 
 // v2.18 Theme 7: on-chain DApp registry entry. Sibling of RegistryEntry
 // for the application-layer DApp discovery + identity. Keyed by DApp's
-// owning Determ domain (which must already be REGISTER'd in
+// owning Unchained domain (which must already be REGISTER'd in
 // registrants_). Mutated by DAPP_REGISTER tx (apply path); queried by
 // light-client + wallet RPC for DApp discovery. See docs/V2-DAPP-DESIGN.md
 // for the conceptual model.
@@ -718,4 +718,4 @@ private:
     void apply_transactions(const Block& b);
 };
 
-} // namespace determ::chain
+} // namespace unchained::chain

@@ -1,8 +1,8 @@
-# Determ — Formal-verification Preliminaries
+# Unchained — Formal-verification Preliminaries
 
 This document fixes the notation, cryptographic assumptions, network model, and protocol-object definitions that the per-property theorems (Safety, Censorship Resistance, Selective-Abort Defense, Liveness, BFT-mode safety, Equivocation Slashing, Cross-shard Receipts, Regional Sharding) reference.
 
-A reader who has not seen the Determ implementation can follow this document to understand what the formal claims are *about*. A reader who has only the code can use the cross-references in §10 to locate the source-level objects.
+A reader who has not seen the Unchained implementation can follow this document to understand what the formal claims are *about*. A reader who has only the code can use the cross-references in §10 to locate the source-level objects.
 
 ---
 
@@ -102,7 +102,7 @@ A may **not**:
 
 ### 3.3 Honest fraction bounds
 
-For **safety claims** (no two valid blocks at the same height, no false-positive equivocation slashing, etc.), no upper bound on `f` is assumed. Determ's K-of-K mutual-distrust safety holds even if `f = N` for MD-mode blocks — see Safety theorem (FA1).
+For **safety claims** (no two valid blocks at the same height, no false-positive equivocation slashing, etc.), no upper bound on `f` is assumed. Unchained's K-of-K mutual-distrust safety holds even if `f = N` for MD-mode blocks — see Safety theorem (FA1).
 
 For **BFT-mode block safety**: `f < K/3` *within the K-effective BFT committee* is required. See FA5.
 
@@ -272,9 +272,9 @@ Notation in this document maps to source-level objects as follows:
 
 | Document | Source |
 |---|---|
-| `V`, `pk_i`, `sk_i` | `include/determ/node/registry.hpp::NodeEntry`, `crypto::NodeKey` |
+| `V`, `pk_i`, `sk_i` | `include/unchained/node/registry.hpp::NodeEntry`, `crypto::NodeKey` |
 | `K_h`, `K_{h,r,s}` | `src/node/node.cpp::check_if_selected` (per-node), `src/node/validator.cpp::check_creator_selection` (verifier) |
-| `c_i` (Phase-1 commit) | `ContribMsg::dh_input` in `include/determ/node/producer.hpp` |
+| `c_i` (Phase-1 commit) | `ContribMsg::dh_input` in `include/unchained/node/producer.hpp` |
 | `s_i` (Phase-1 secret) | `Node::current_round_secret_` in `src/node/node.cpp` (held locally, revealed in Phase 2) |
 | `B.tx_root` | `Block::tx_root` |
 | `B.delay_seed` | `Block::delay_seed` |
@@ -289,7 +289,7 @@ Notation in this document maps to source-level objects as follows:
 | `epoch_committee_seed` | `crypto::epoch_committee_seed` |
 | `eligible_in_region` | `NodeRegistry::eligible_in_region` |
 | `applied_inbound_receipts_` | `Chain::applied_inbound_receipts_` |
-| Equivocation event | `EquivocationEvent` in `include/determ/chain/block.hpp` |
+| Equivocation event | `EquivocationEvent` in `include/unchained/chain/block.hpp` |
 
 ---
 

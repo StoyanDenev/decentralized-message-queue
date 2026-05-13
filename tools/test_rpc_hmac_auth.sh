@@ -5,7 +5,7 @@
 #   1. Auth disabled (default): unauthenticated RPC works.
 #   2. Auth enabled: RPC without auth → error "auth_required".
 #   3. Auth enabled: RPC with wrong auth → error "auth_failed".
-#   4. Auth enabled: RPC with correct auth via DETERM_RPC_AUTH_SECRET
+#   4. Auth enabled: RPC with correct auth via UNCHAINED_RPC_AUTH_SECRET
 #      env var → success.
 #   5. Auth enabled: tampered auth (one-byte flip) → rejected.
 #
@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_rpc_hmac
 TABS=C:/sauromatae/$T
 
@@ -44,10 +44,10 @@ SECRET="aabbccddeeff0011223344556677889900112233445566778899aabbccddeeff"
 WRONG_SECRET="0000000000000000000000000000000000000000000000000000000000000000"
 
 echo "=== 1. Init node WITHOUT auth (default) ==="
-$DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
+$UNCHAINED init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
 
 # Build a minimal SINGLE-role genesis (M=1, K=1, just node1 as creator).
-$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 
 cat > $T/gen.json <<EOF
 {
@@ -61,7 +61,7 @@ $(cat $T/p1.json | tr -d '\n')
   "initial_balances": [{"domain": "node1", "balance": 100}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 configure_node_no_auth() {
@@ -95,7 +95,7 @@ with open('$T/n1/config.json','w') as f: json.dump(c, f, indent=2)
 }
 
 start_node() {
-  $DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+  $UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
   NODE_PIDS[0]=$!
   sleep 1
 }
@@ -113,8 +113,8 @@ start_node
 
 echo
 echo "=== 2. Auth disabled: status call works without auth ==="
-unset DETERM_RPC_AUTH_SECRET
-$DETERM status --rpc-port 8791 > $T/r2.out 2> $T/r2.err || true
+unset UNCHAINED_RPC_AUTH_SECRET
+$UNCHAINED status --rpc-port 8791 > $T/r2.out 2> $T/r2.err || true
 HAS_HEIGHT=$(python -c "
 import json
 try:
@@ -133,8 +133,8 @@ start_node
 
 echo
 echo "=== 4. Auth enabled: call WITHOUT auth → error ==="
-unset DETERM_RPC_AUTH_SECRET
-$DETERM status --rpc-port 8791 > $T/r4.out 2> $T/r4.err || true
+unset UNCHAINED_RPC_AUTH_SECRET
+$UNCHAINED status --rpc-port 8791 > $T/r4.out 2> $T/r4.err || true
 if grep -qi "auth" $T/r4.err 2>/dev/null || grep -qi "auth" $T/r4.out 2>/dev/null; then
   assert true "unauthenticated call rejected with auth error"
 else
@@ -143,7 +143,7 @@ fi
 
 echo
 echo "=== 5. Auth enabled: call WITH wrong secret → error ==="
-DETERM_RPC_AUTH_SECRET="$WRONG_SECRET" $DETERM status --rpc-port 8791 > $T/r5.out 2> $T/r5.err || true
+UNCHAINED_RPC_AUTH_SECRET="$WRONG_SECRET" $UNCHAINED status --rpc-port 8791 > $T/r5.out 2> $T/r5.err || true
 if grep -qi "auth" $T/r5.err 2>/dev/null || grep -qi "auth" $T/r5.out 2>/dev/null; then
   assert true "wrong-secret call rejected"
 else
@@ -152,7 +152,7 @@ fi
 
 echo
 echo "=== 6. Auth enabled: call WITH correct secret → success ==="
-DETERM_RPC_AUTH_SECRET="$SECRET" $DETERM status --rpc-port 8791 > $T/r6.out 2> $T/r6.err || true
+UNCHAINED_RPC_AUTH_SECRET="$SECRET" $UNCHAINED status --rpc-port 8791 > $T/r6.out 2> $T/r6.err || true
 HAS_HEIGHT=$(python -c "
 import json
 try:
@@ -165,7 +165,7 @@ except: print('false')" 2>/dev/null || echo "false")
 
 echo
 echo "=== 7. Auth enabled: malformed-hex secret → clear error ==="
-DETERM_RPC_AUTH_SECRET="not-hex-zzz" $DETERM status --rpc-port 8791 > $T/r7.out 2> $T/r7.err || true
+UNCHAINED_RPC_AUTH_SECRET="not-hex-zzz" $UNCHAINED status --rpc-port 8791 > $T/r7.out 2> $T/r7.err || true
 if grep -qi "not valid hex" $T/r7.err 2>/dev/null || grep -qi "not valid hex" $T/r7.out 2>/dev/null; then
   assert true "malformed-hex secret rejected with clear error"
 else

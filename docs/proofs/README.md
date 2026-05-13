@@ -1,10 +1,10 @@
-# Determ — Formal proofs index
+# Unchained — Formal proofs index
 
-This directory contains the per-property analytic proofs for Determ's consensus, sharding, and slashing mechanisms. Each proof is self-contained: a theorem statement, the cryptographic and behavioral assumptions it depends on, the proof itself, and an implementation cross-reference so a reviewer can match the math to the code.
+This directory contains the per-property analytic proofs for Unchained's consensus, sharding, and slashing mechanisms. Each proof is self-contained: a theorem statement, the cryptographic and behavioral assumptions it depends on, the proof itself, and an implementation cross-reference so a reviewer can match the math to the code.
 
 The proofs target two audiences:
 
-1. **Protocol reviewers** — to confirm the properties Determ claims are actually proved, not assumed.
+1. **Protocol reviewers** — to confirm the properties Unchained claims are actually proved, not assumed.
 2. **Implementers** — to confirm each invariant is enforced at the exact source location the proof cites.
 
 The proofs are written in standard mathematical prose, not in a machine-checkable spec language. A future track (FB) will add TLA+ models for the consensus and sharding state machines; the FA-track documents here are the human-readable counterpart.
@@ -51,7 +51,7 @@ All FA-track proofs reduce to one or more of:
 - **(A4) SHA-256 preimage resistance** — finding `x` with `SHA256(x) = h` for adversary-chosen `h` is `≤ 2⁻²⁵⁶`. Used in FA3 (commit-reveal hiding).
 - **(A5) SHA-256 as a random oracle** — used in FA3 (analytic) for the cleanest formulation; FA3 also gives a standard-model version with weaker constants.
 
-The PQ degradation under Grover (square-root speedup) is discussed in each proof's "Concrete-security bound" section. Determ's design upgrades to post-quantum signatures (Dilithium / Falcon) would restore the classical bounds; this is a pre-planned migration path, not a current requirement.
+The PQ degradation under Grover (square-root speedup) is discussed in each proof's "Concrete-security bound" section. Unchained's design upgrades to post-quantum signatures (Dilithium / Falcon) would restore the classical bounds; this is a pre-planned migration path, not a current requirement.
 
 ---
 

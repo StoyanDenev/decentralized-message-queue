@@ -15,7 +15,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_rpc_rate
 TABS=C:/sauromatae/$T
 
@@ -42,8 +42,8 @@ assert() {
 }
 
 echo "=== 1. Init node + minimal SINGLE genesis ==="
-$DETERM init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
-$DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
+$UNCHAINED init --data-dir $T/n1 --profile single_test 2>&1 | tail -1
+$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 
 cat > $T/gen.json <<EOF
 {
@@ -56,7 +56,7 @@ $(cat $T/p1.json | tr -d '\n')
   ]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 # Configure with rate-limit DISABLED first (defaults).
@@ -81,7 +81,7 @@ with open('$T/n1/config.json','w') as f: json.dump(c, f, indent=2)
 "
 
 start_node() {
-  $DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+  $UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
   NODE_PIDS[0]=$!
   sleep 1
 }
@@ -99,7 +99,7 @@ echo "=== 2. Rate-limit DISABLED: 30 status queries should all succeed ==="
 start_node
 disabled_ok=0
 for i in $(seq 1 30); do
-  if $DETERM status --rpc-port 8795 > $T/out_$i 2>&1; then
+  if $UNCHAINED status --rpc-port 8795 > $T/out_$i 2>&1; then
     disabled_ok=$((disabled_ok + 1))
   fi
 done
@@ -128,7 +128,7 @@ echo "=== 4. Burst of 15 immediate queries: ~3 succeed, rest rate-limited ==="
 enabled_ok=0
 enabled_rl=0
 for i in $(seq 1 15); do
-  OUT=$($DETERM status --rpc-port 8795 2>&1 || true)
+  OUT=$($UNCHAINED status --rpc-port 8795 2>&1 || true)
   if echo "$OUT" | grep -q '"height"'; then
     enabled_ok=$((enabled_ok + 1))
   elif echo "$OUT" | grep -qi "rate_limited"; then
@@ -149,7 +149,7 @@ echo "=== 5. Wait 6s → bucket refills → 3 more queries succeed ==="
 sleep 6
 refill_ok=0
 for i in $(seq 1 6); do
-  OUT=$($DETERM status --rpc-port 8795 2>&1 || true)
+  OUT=$($UNCHAINED status --rpc-port 8795 2>&1 || true)
   if echo "$OUT" | grep -q '"height"'; then
     refill_ok=$((refill_ok + 1))
   fi

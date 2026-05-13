@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/types.hpp>
+#include <unchained/types.hpp>
 #include <utility>
 #include <string>
 #include <cstdint>
 #include <vector>
 
-namespace determ::crypto {
+namespace unchained::crypto {
 
 // dh_output = SHA256(share_a || share_b)
 Hash compute_dh_output(const Hash& share_a, const Hash& share_b);
@@ -57,4 +57,4 @@ ShardId shard_id_for_address(const std::string& addr,
                                 uint32_t shard_count,
                                 const Hash& shard_address_salt);
 
-} // namespace determ::crypto
+} // namespace unchained::crypto

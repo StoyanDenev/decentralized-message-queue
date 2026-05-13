@@ -19,7 +19,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_rpc_local
 TABS=C:/sauromatae/$T
 
@@ -47,12 +47,12 @@ assert() {
 
 echo "=== 1. Init two single-node setups ==="
 for n in n_default n_open; do
-  $DETERM init --data-dir $T/$n --profile single_test 2>&1 | tail -1
+  $UNCHAINED init --data-dir $T/$n --profile single_test 2>&1 | tail -1
 done
 
 # Genesis: tiny single-validator chain (M=K=1) for fast smoke-test.
-$DETERM genesis-tool peer-info node1 --data-dir $T/n_default --stake 1000 > $T/p_default.json
-$DETERM genesis-tool peer-info node1 --data-dir $T/n_open    --stake 1000 > $T/p_open.json
+$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n_default --stake 1000 > $T/p_default.json
+$UNCHAINED genesis-tool peer-info node1 --data-dir $T/n_open    --stake 1000 > $T/p_open.json
 for variant in default open; do
   cat > $T/gen_$variant.json <<EOF
 {
@@ -64,7 +64,7 @@ for variant in default open; do
   "initial_balances": [{"domain": "node1", "balance": 100}]
 }
 EOF
-  $DETERM genesis-tool build $T/gen_$variant.json | tail -1
+  $UNCHAINED genesis-tool build $T/gen_$variant.json | tail -1
 done
 
 echo
@@ -103,9 +103,9 @@ with open('$T/n_open/config.json','w') as f: json.dump(c, f, indent=2)
 echo
 echo "=== 3. Start both nodes ==="
 NODE_PIDS=("" "")
-$DETERM start --config $T/n_default/config.json > $T/n_default/log 2>&1 &
+$UNCHAINED start --config $T/n_default/config.json > $T/n_default/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.5
-$DETERM start --config $T/n_open/config.json    > $T/n_open/log    2>&1 &
+$UNCHAINED start --config $T/n_open/config.json    > $T/n_open/log    2>&1 &
 NODE_PIDS[1]=$!; sleep 2
 
 echo
@@ -127,8 +127,8 @@ fi
 
 echo
 echo "=== 5. Functional: localhost RPC reaches both nodes ==="
-S1=$($DETERM status --rpc-port 8901 2>&1 | tr -d '\n\r')
-S2=$($DETERM status --rpc-port 8902 2>&1 | tr -d '\n\r')
+S1=$($UNCHAINED status --rpc-port 8901 2>&1 | tr -d '\n\r')
+S2=$($UNCHAINED status --rpc-port 8902 2>&1 | tr -d '\n\r')
 if echo "$S1" | grep -q '"head_hash"'; then
   assert true "localhost RPC status on default node (8901)"
 else

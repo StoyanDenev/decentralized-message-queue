@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
 #include <array>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <chrono>
 
-namespace determ {
+namespace unchained {
 
 using Hash      = std::array<uint8_t, 32>;
 using PubKey    = std::array<uint8_t, 32>;
@@ -123,4 +123,4 @@ inline std::string make_anon_address(const PubKey& pk) {
     return "0x" + to_hex(pk);
 }
 
-} // namespace determ
+} // namespace unchained

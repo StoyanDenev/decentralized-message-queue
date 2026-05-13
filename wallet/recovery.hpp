@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
 // A2 Phase 3: end-to-end create-recovery / recover composition.
 //
@@ -39,7 +39,7 @@
 #include <vector>
 #include <optional>
 
-namespace determ::wallet::recovery {
+namespace unchained::wallet::recovery {
 
 struct RecoverySetup {
     uint32_t                              version{1};
@@ -118,4 +118,4 @@ std::optional<RecoverySetup> from_json(const std::string& blob);
 // can never silently succeed against a malformed wallet.
 std::vector<uint8_t> seed_pubkey_checksum(const std::vector<uint8_t>& ed25519_seed);
 
-} // namespace determ::wallet::recovery
+} // namespace unchained::wallet::recovery

@@ -26,7 +26,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_uq_merge
 TABS=C:/sauromatae/$T
 
@@ -48,8 +48,8 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes (web_test = SHARD+EXTENDED, M=3 K=2) ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile web_test 2>&1 | tail -1
-  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $UNCHAINED init --data-dir $T/n$n --profile web_test 2>&1 | tail -1
+  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 inject_region() {
@@ -86,7 +86,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "node1", "balance": 1000}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 GPATH="$TABS/gen.json"
 
@@ -119,24 +119,24 @@ configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
-$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$UNCHAINED start --config $T/n2/config.json > $T/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$UNCHAINED start --config $T/n3/config.json > $T/n3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.3
 
 echo
 echo "=== 5. Wait for chain to advance past height 5 ==="
 for _ in $(seq 1 120); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
+  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
   if [ "$H" -ge 5 ] 2>/dev/null; then break; fi
   sleep 0.5
 done
-H_BEFORE=$($DETERM status --rpc-port 8771 2>/dev/null \
+H_BEFORE=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
             | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 echo "  height before MERGE_BEGIN: $H_BEFORE"
 
@@ -151,7 +151,7 @@ EFF=$((H_BEFORE + 20))
 
 echo
 echo "=== 6. Submit MERGE_BEGIN(shard=0, partner=1, region=us-east) at h=$EFF ==="
-$DETERM submit-merge-event \
+$UNCHAINED submit-merge-event \
   --priv "$PRIV1" \
   --from node1 \
   --event begin \
@@ -165,7 +165,7 @@ $DETERM submit-merge-event \
 echo
 echo "=== 7. Wait for tx inclusion + a few more blocks ==="
 for _ in $(seq 1 60); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
+  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
@@ -175,7 +175,7 @@ done
 
 echo
 echo "=== 8. Snapshot + verify merge_state populated ==="
-$DETERM snapshot create --out $T/snap_begin.json --rpc-port 8771 2>&1 | tail -1
+$UNCHAINED snapshot create --out $T/snap_begin.json --rpc-port 8771 2>&1 | tail -1
 MERGE_COUNT=$(python -c "
 import json
 try:
@@ -202,10 +202,10 @@ echo "  first entry: $MERGE_FIRST"
 
 echo
 echo "=== 9. Submit MERGE_END(shard=0, partner=1) and verify state clears ==="
-H_AFTER_BEGIN=$($DETERM status --rpc-port 8771 2>/dev/null \
+H_AFTER_BEGIN=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
                 | python -c "import sys,json; print(json.load(sys.stdin)['height'])")
 END_EFF=$((H_AFTER_BEGIN + 20))
-$DETERM submit-merge-event \
+$UNCHAINED submit-merge-event \
   --priv "$PRIV1" \
   --from node1 \
   --event end \
@@ -216,7 +216,7 @@ $DETERM submit-merge-event \
   --rpc-port 8771 2>&1 | tail -4
 
 for _ in $(seq 1 60); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
+  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
@@ -224,7 +224,7 @@ except: print(0)")
   sleep 0.5
 done
 
-$DETERM snapshot create --out $T/snap_end.json --rpc-port 8771 2>&1 | tail -1
+$UNCHAINED snapshot create --out $T/snap_end.json --rpc-port 8771 2>&1 | tail -1
 MERGE_COUNT_END=$(python -c "
 import json
 try:

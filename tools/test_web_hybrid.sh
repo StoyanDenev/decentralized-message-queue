@@ -13,7 +13,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_web_hybrid
 
 declare -a NODE_PIDS
@@ -30,7 +30,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -40,8 +40,8 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 SHARD-role nodes with web_test profile ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile web_test 2>&1 | tail -1
-  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $UNCHAINED init --data-dir $T/n$n --profile web_test 2>&1 | tail -1
+  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
@@ -63,7 +63,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": []
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -94,7 +94,7 @@ echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done
@@ -111,7 +111,7 @@ H1=$(get_status_field 8771 height)
 ROLE=$(get_status_field 8771 chain_role)
 
 # Inspect block 4's committee size — should be 2 (hybrid K=2 of M=3).
-COMMITTEE_SIZE=$($DETERM show-block 4 --rpc-port 8771 2>/dev/null | python -c "
+COMMITTEE_SIZE=$($UNCHAINED show-block 4 --rpc-port 8771 2>/dev/null | python -c "
 import sys, json
 try:
   b = json.load(sys.stdin)

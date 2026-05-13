@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/chain/block.hpp>
-#include <determ/chain/chain.hpp>
-#include <determ/node/registry.hpp>
+#include <unchained/chain/block.hpp>
+#include <unchained/chain/chain.hpp>
+#include <unchained/node/registry.hpp>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
-namespace determ::node {
+namespace unchained::node {
 
 class BlockValidator {
 public:
@@ -140,4 +140,4 @@ private:
     EpochRandProvider external_epoch_rand_{};
 };
 
-} // namespace determ::node
+} // namespace unchained::node

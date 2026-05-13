@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/chain/chain.hpp>
-#include <determ/chain/genesis.hpp>
-#include <determ/chain/params.hpp>
-#include <determ/crypto/sha256.hpp>
-#include <determ/crypto/random.hpp>
-#include <determ/crypto/merkle.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/chain/chain.hpp>
+#include <unchained/chain/genesis.hpp>
+#include <unchained/chain/params.hpp>
+#include <unchained/crypto/sha256.hpp>
+#include <unchained/crypto/random.hpp>
+#include <unchained/crypto/merkle.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
 #include <cstdio>
 
-namespace determ::chain {
+namespace unchained::chain {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
-using determ::crypto::sha256;
+using unchained::crypto::sha256;
 
 // Registration / deregistration randomized delay window. Kept in sync with
 // node/registry.hpp REGISTRATION_DELAY_WINDOW; we duplicate the constant here
@@ -1036,7 +1036,7 @@ void Chain::apply_transactions(const Block& b) {
             break;
         }
         // v2.18 Theme 7: DApp registration / update / deactivation.
-        // tx.from must be a registered Determ domain (validator-checked);
+        // tx.from must be a registered Unchained domain (validator-checked);
         // here we just decode + apply. Payload encoding documented in
         // block.hpp DAPP_REGISTER comment. On op=0 (create/update),
         // upsert dapp_registry_[tx.from]; on op=1 (deactivate), set
@@ -1114,7 +1114,7 @@ void Chain::apply_transactions(const Block& b) {
             break;
         }
         // v2.19 Theme 7 Phase 7.2: DApp message delivery. Outer tx is
-        // signed by a Determ user (registered or anon); recipient is
+        // signed by a Unchained user (registered or anon); recipient is
         // the DApp's owning domain. Payload is opaque to chain. Apply
         // path mirrors TRANSFER's debit/credit for tx.amount; the
         // payload sits in the block, indexed by tx_root, consumed
@@ -1993,4 +1993,4 @@ Chain Chain::load(const std::string& path,
     return c;
 }
 
-} // namespace determ::chain
+} // namespace unchained::chain

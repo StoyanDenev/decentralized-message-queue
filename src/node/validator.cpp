@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/node/validator.hpp>
-#include <determ/node/producer.hpp>
-#include <determ/chain/params.hpp>
-#include <determ/crypto/sha256.hpp>
-#include <determ/crypto/random.hpp>
-#include <determ/crypto/keys.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/node/validator.hpp>
+#include <unchained/node/producer.hpp>
+#include <unchained/chain/params.hpp>
+#include <unchained/crypto/sha256.hpp>
+#include <unchained/crypto/random.hpp>
+#include <unchained/crypto/keys.hpp>
 #include <algorithm>
 #include <chrono>
 #include <map>
 #include <set>
 
-namespace determ::node {
+namespace unchained::node {
 
-using namespace determ::crypto;
-using namespace determ::chain;
+using namespace unchained::crypto;
+using namespace unchained::chain;
 
 BlockValidator::Result BlockValidator::validate(const Block& b,
                                                 const Chain& chain,
@@ -781,9 +781,9 @@ BlockValidator::Result BlockValidator::check_transactions(
         // is to reject malformed at submit-time so honest mempool
         // never carries them.
         case TxType::DAPP_REGISTER: {
-            // tx.from must already be a registered Determ identity.
+            // tx.from must already be a registered Unchained identity.
             // (Anonymous addresses cannot register DApps — DApp
-            // identity is built on Determ identity.)
+            // identity is built on Unchained identity.)
             if (is_anon_address(tx.from)) {
                 return {false, "DAPP_REGISTER from anonymous account is "
                                "not allowed (anchor on a registered domain)"};
@@ -1150,4 +1150,4 @@ BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {
     return {true, ""};
 }
 
-} // namespace determ::node
+} // namespace unchained::node

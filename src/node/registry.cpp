@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/node/registry.hpp>
-#include <determ/chain/block.hpp>
-#include <determ/chain/params.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/node/registry.hpp>
+#include <unchained/chain/block.hpp>
+#include <unchained/chain/params.hpp>
 #include <algorithm>
 #include <map>
 
-namespace determ::node {
+namespace unchained::node {
 
 std::vector<NodeEntry> NodeRegistry::sorted_nodes() const {
     return nodes_;
@@ -94,4 +94,4 @@ std::vector<NodeEntry> NodeRegistry::eligible_in_region(
     return out;
 }
 
-} // namespace determ::node
+} // namespace unchained::node

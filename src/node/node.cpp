@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/node/node.hpp>
-#include <determ/chain/genesis.hpp>
-#include <determ/chain/params.hpp>
-#include <determ/crypto/random.hpp>
-#include <determ/crypto/sha256.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/node/node.hpp>
+#include <unchained/chain/genesis.hpp>
+#include <unchained/chain/params.hpp>
+#include <unchained/crypto/random.hpp>
+#include <unchained/crypto/sha256.hpp>
 #include <set>
 #include <openssl/rand.h>
 #include <filesystem>
@@ -13,7 +13,7 @@
 #include <sstream>
 #include <algorithm>
 
-namespace determ::node {
+namespace unchained::node {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -1790,8 +1790,8 @@ void Node::on_block(const chain::Block& b) {
 // decode_tx_frame preserves amount/fee/nonce — see the comment in
 // binary_codec.cpp and docs/proofs/S002-Mempool-Sig-Verify.md.
 bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
-    using namespace determ::crypto;
-    using namespace determ::chain;
+    using namespace unchained::crypto;
+    using namespace unchained::chain;
     PubKey pk{};
     const bool from_anon = is_anon_address(tx.from);
     if (tx.type == TxType::REGISTER) {
@@ -3025,4 +3025,4 @@ json Node::rpc_register() {
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
 }
 
-} // namespace determ::node
+} // namespace unchained::node

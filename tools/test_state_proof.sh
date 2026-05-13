@@ -17,7 +17,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_state_proof
 TABS=C:/sauromatae/$T
 
@@ -45,12 +45,12 @@ assert() {
 
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
-  $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
+  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $UNCHAINED genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 # Anon wallet — its address goes into accounts_ (namespace "a:")
-$DETERM account create --out $T/anon_a.json 2>&1 | tail -1
+$UNCHAINED account create --out $T/anon_a.json 2>&1 | tail -1
 A_ADDR=$(python -c "import json; print(json.load(open('$T/anon_a.json'))['address'])")
 
 cat > $T/gen.json <<EOF
@@ -67,7 +67,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "$A_ADDR", "balance": 100}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json | tail -1
+$UNCHAINED genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
 
 configure_node() {
@@ -97,17 +97,17 @@ configure_node 3 7773 8773 '["127.0.0.1:7771","127.0.0.1:7772"]'
 echo
 echo "=== 2. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
-$DETERM start --config $T/n1/config.json > $T/n1/log 2>&1 &
+$UNCHAINED start --config $T/n1/config.json > $T/n1/log 2>&1 &
 NODE_PIDS[0]=$!; sleep 0.3
-$DETERM start --config $T/n2/config.json > $T/n2/log 2>&1 &
+$UNCHAINED start --config $T/n2/config.json > $T/n2/log 2>&1 &
 NODE_PIDS[1]=$!; sleep 0.3
-$DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
+$UNCHAINED start --config $T/n3/config.json > $T/n3/log 2>&1 &
 NODE_PIDS[2]=$!; sleep 0.5
 
 echo
 echo "=== 3. Wait for chain to advance past height 5 ==="
 for _ in $(seq 1 80); do
-  H=$($DETERM status --rpc-port 8771 2>/dev/null \
+  H=$($UNCHAINED status --rpc-port 8771 2>/dev/null \
        | python -c "import sys,json
 try: print(json.load(sys.stdin).get('height',0))
 except: print(0)")
@@ -118,7 +118,7 @@ echo "  chain height: $H"
 
 echo
 echo "=== 4. state_proof for present account 'A' (namespace=a) ==="
-PROOF=$($DETERM state-proof --rpc-port 8771 --ns a --key "$A_ADDR" 2>/dev/null)
+PROOF=$($UNCHAINED state-proof --rpc-port 8771 --ns a --key "$A_ADDR" 2>/dev/null)
 echo "$PROOF" > $T/proof.json
 
 # Structure check
@@ -173,7 +173,7 @@ echo "  actual:   ${actual_vh:0:32}..."
 
 echo
 echo "=== 6. state_proof for absent key returns not_found ==="
-MISS=$($DETERM state-proof --rpc-port 8771 --ns a --key "0xdeadbeef" 2>/dev/null)
+MISS=$($UNCHAINED state-proof --rpc-port 8771 --ns a --key "0xdeadbeef" 2>/dev/null)
 is_not_found=$(echo "$MISS" | python -c "
 import sys, json
 try:

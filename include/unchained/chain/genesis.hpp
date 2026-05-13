@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
+// Copyright 2026 Unchained Contributors
 #pragma once
-#include <determ/chain/block.hpp>
+#include <unchained/chain/block.hpp>
 #include <string>
 #include <vector>
 
-namespace determ::chain {
+namespace unchained::chain {
 
 // rev.8 follow-on: validator inclusion policy. Both modes preserve the
 // same decentralization property — K-of-K mutual veto + union tx_root
@@ -76,7 +76,7 @@ struct GenesisConfig {
     // Constraint: 1 <= k_block_sigs <= m_creators. Default = m_creators (strong).
     uint32_t                        k_block_sigs{3};
     // Rev. 4: per-block reward minted to creators alongside fees ("page reward"
-    // from the original Determ spec). Genesis-pinned. 0 = no subsidy (fees only).
+    // from the original Unchained spec). Genesis-pinned. 0 = no subsidy (fees only).
     uint64_t                        block_subsidy{0};
     // E4: optional cap on total cumulative subsidy ever paid. 0 (default)
     // preserves the historical perpetual-subsidy behavior — chain mints
@@ -215,6 +215,6 @@ Block make_genesis_block(const GenesisConfig& cfg);
 Hash compute_genesis_hash(const GenesisConfig& cfg);
 
 // Legacy zeros-genesis: kept for tests / no-config fallback.
-Block make_genesis(const std::string& seed = "determ-genesis-2026");
+Block make_genesis(const std::string& seed = "unchained-genesis-2026");
 
-} // namespace determ::chain
+} // namespace unchained::chain

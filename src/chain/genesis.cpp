@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/chain/genesis.hpp>
-#include <determ/chain/params.hpp>
-#include <determ/crypto/sha256.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/chain/genesis.hpp>
+#include <unchained/chain/params.hpp>
+#include <unchained/crypto/sha256.hpp>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
 #include <algorithm>
 
-namespace determ::chain {
+namespace unchained::chain {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
-using namespace determ::crypto;
+using namespace unchained::crypto;
 
 // rev.9 R1: region tag normalization. Used at every parse boundary
 // (genesis JSON load, REGISTER tx apply / validate). ASCII tolower;
@@ -404,4 +404,4 @@ Block make_genesis(const std::string& /*seed*/) {
     return g;
 }
 
-} // namespace determ::chain
+} // namespace unchained::chain

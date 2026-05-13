@@ -2,7 +2,7 @@
 
 ## Status
 
-**Integration scaffolding in place; actual build blocked on MSVC VLA support.** Gated behind `-DDETERM_VENDOR_OPRF=ON` in `CMakeLists.txt`. Default build is clean; the wallet ships with the Phase 5 stub adapter.
+**Integration scaffolding in place; actual build blocked on MSVC VLA support.** Gated behind `-DUNCHAINED_VENDOR_OPRF=ON` in `CMakeLists.txt`. Default build is clean; the wallet ships with the Phase 5 stub adapter.
 
 ## What works
 
@@ -62,7 +62,7 @@ Keep the integration scaffolding; document that real-OPAQUE recovery is Unix-onl
 
 ## Recommendation
 
-Path A or B in a future cycle dedicated to MSVC porting. Path D is acceptable as a stopgap given Windows is not the primary determ deployment platform (Linux servers are).
+Path A or B in a future cycle dedicated to MSVC porting. Path D is acceptable as a stopgap given Windows is not the primary unchained deployment platform (Linux servers are).
 
 ## Repro
 
@@ -71,13 +71,13 @@ Path A or B in a future cycle dedicated to MSVC porting. Path D is acceptable as
 cmake -B build && cmake --build build --config Release
 
 # Attempt liboprf vendoring on Windows MSVC — fails on VLAs:
-cmake -B build -DDETERM_VENDOR_OPRF=ON
+cmake -B build -DUNCHAINED_VENDOR_OPRF=ON
 cmake --build build --config Release --target oprf
 # Expect: ~50+ C2057 / C2466 / C2133 errors at oprf.h, toprf.h, oprf.c
 
 # Attempt liboprf vendoring on Unix (untested in this commit but
 # expected to work given upstream's autotools build runs on Linux):
-cmake -B build -DDETERM_VENDOR_OPRF=ON
+cmake -B build -DUNCHAINED_VENDOR_OPRF=ON
 cmake --build build --config Release --target oprf
 # Expect: clean build, oprf.a static library produced
 ```

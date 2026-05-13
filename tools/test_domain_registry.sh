@@ -12,7 +12,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+UNCHAINED=build/Release/unchained.exe
 T=test_domain_reg
 
 declare -a NODE_PIDS
@@ -29,7 +29,7 @@ cleanup() {
 trap cleanup EXIT INT
 
 get_status_field() {
-  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $UNCHAINED status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
 except: print('-')"
 }
@@ -39,9 +39,9 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
+  $UNCHAINED init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
   # NOTE: stake=0. In DOMAIN_INCLUSION mode the registry doesn't gate on stake.
-  $DETERM genesis-tool peer-info "validator$n.example.com" --data-dir $T/n$n --stake 0 > $T/p$n.json
+  $UNCHAINED genesis-tool peer-info "validator$n.example.com" --data-dir $T/n$n --stake 0 > $T/p$n.json
 done
 
 echo
@@ -62,7 +62,7 @@ $(cat $T/p3.json | tr -d '\n')
   "initial_balances": [{"domain": "treasury", "balance": 1000}]
 }
 EOF
-$DETERM genesis-tool build $T/gen.json 2>&1 | grep -E "Inclusion|min_stake|Mode|hash"
+$UNCHAINED genesis-tool build $T/gen.json 2>&1 | grep -E "Inclusion|min_stake|Mode|hash"
 GHASH=$(cat $T/gen.json.hash)
 GPATH="C:/sauromatae/$T/gen.json"
 
@@ -96,7 +96,7 @@ echo
 echo "=== 4. Start 3 nodes ==="
 NODE_PIDS=("" "" "")
 for n in 1 2 3; do
-  $DETERM start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
+  $UNCHAINED start --config $T/n$n/config.json > $T/n$n/log 2>&1 &
   NODE_PIDS[$((n-1))]=$!
   sleep 0.3
 done
@@ -134,7 +134,7 @@ fi
 # Verify all 3 nodes agree on the chain by comparing prev_hash at a fixed
 # past index (block 4's prev_hash = hash of block 3, canonical & stable).
 get_prev_hash() {
-  $DETERM show-block "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+  $UNCHAINED show-block "$2" --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('prev_hash',''))
 except: print('')"
 }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Determ Contributors
-#include <determ/net/peer.hpp>
+// Copyright 2026 Unchained Contributors
+#include <unchained/net/peer.hpp>
 #include <iostream>
 
-namespace determ::net {
+namespace unchained::net {
 
 Peer::Peer(asio::ip::tcp::socket socket)
     : socket_(std::move(socket)) {
@@ -127,4 +127,4 @@ void async_connect(asio::io_context& io,
         });
 }
 
-} // namespace determ::net
+} // namespace unchained::net
