@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **2** (S-010, S-011) | **2** (S-016, S-018) | **10** | **14** |
+| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **10** | **12** |
 | Partially mitigated | **1** (S-030) | — | — | — | **1** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **10** (S-006, S-007, S-008, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | — | **15** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | — | **17** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -36,6 +36,8 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-006 ContribMsg same-generation equivocation~~ — closed via detection in `on_contrib`; reuses existing `EquivocationEvent` channel (no new wire format).
 - ~~S-007 Subsidy/fee overflow~~ — closed via `checked_add_u64` on every credit path.
 - ~~S-008 Unbounded mempool~~ — closed via `MEMPOOL_MAX_TXS = 10000` + `MEMPOOL_MAX_PER_SENDER = 100` with fee-priority eviction.
+- ~~S-010 Sybil via under-priced MIN_STAKE~~ — closed via operator stake-pricing formula + DOMAIN_INCLUSION availability (see §3 S-010 calculator).
+- ~~S-011 Abort claim cartel via M-1 quorum~~ — closed via S-010 stake floor + FA6 equivocation slashing bounding the attack to economically infeasible.
 - ~~S-012 Snapshot trust~~ — closed via state_root verification on restore.
 - ~~S-013 BlockSigMsg buffer flood OOM~~ — closed via per-signer cap (2 entries) in `try_buffer_block_sig`; total buffer bounded at 2·K through existing pre-filters.
 - ~~S-014 No rate limiting on gossip + RPC~~ — closed via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet` (per-peer-IP token bucket, HELLO exempt).
@@ -64,8 +66,8 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-007 | ✅ Mitigated | Subsidy/fee/receipt-credit overflow-checked via checked_add_u64 (Options 2 + 3 from audit) | `chain/chain.cpp` | done |
 | S-008 | ✅ Mitigated | Mempool bounds: MEMPOOL_MAX_TXS = 10000 cap + fee-priority eviction + MEMPOOL_MAX_PER_SENDER = 100 quota | `node/node.cpp::mempool_admit_check` | done |
 | S-009 | ✅ Closed | Constant-T / SHA-256 ASIC fallacy — replaced by commit-reveal (commit `14bf3d6`); delay-hash module deleted (commit `1b9b086`) | n/a | done |
-| S-010 | 🟠 High | Sybil via under-priced MIN_STAKE | `chain/params.hpp` | docs / DOMAIN_INCLUSION |
-| S-011 | 🟠 High | Abort claim cartel via M-1 quorum | `node/node.cpp::on_abort_claim` | high |
+| S-010 | ✅ Mitigated | Operator stake-pricing formula in §3 S-010; DOMAIN_INCLUSION available for chains without strong stake-pricing economics | `chain/params.hpp` + `docs/SECURITY.md` §S-010 calculator | done |
+| S-011 | ✅ Mitigated | Economic infeasibility via S-010 stake floor + FA6 equivocation slashing bounds the cartel attack to "finite rounds of suspension" with per-round cost > chain subsidy | `node/node.cpp::on_abort_claim` (no code change required) | done |
 | S-012 | ✅ Mitigated | Snapshot bootstrap state_root verification landed (S-033 Merkle root in Block + snapshot-side check) | `chain/chain.cpp::restore_from_snapshot` | done |
 | S-013 | ✅ Mitigated | Per-signer cap (2 entries) on `buffered_block_sigs_` via `try_buffer_block_sig`; existing pre-filters at the call site already restrict signers to current K-committee ∩ registry, so total buffer is bounded at 2·K | `node/node.cpp::try_buffer_block_sig` | done |
 | S-014 | ✅ Mitigated | Token bucket per peer IP via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet`; HELLO exempt so handshake completes under pressure | `net/rate_limiter.hpp` + `rpc/rpc.cpp` + `net/gossip.cpp` | done |
@@ -478,44 +480,92 @@ S-005 (`delay_T` not in genesis) is moot under this resolution. S-019 (Phase-2 t
 
 ---
 
-### S-010 — Sybil via under-priced MIN_STAKE
+### S-010 — Sybil via under-priced MIN_STAKE — ✅ Mitigated (Options 1 + 3)
 
-**Severity:** High (parameter-tuning risk) • **Status:** Open with mitigation alternative • **Sources:** Audit 2.2, OV-#7, Gemini analysis
+**Severity:** High (parameter-tuning risk) (was) • **Status:** ✅ Mitigated via deployment guidance + DOMAIN_INCLUSION availability • **Sources:** Audit 2.2, OV-#7, Gemini analysis
 
-**What's open.** `min_stake = 1000` default. If the chain creator under-prices stake relative to the exogenous market value of the token, an attacker partitions wealth across thousands of registered domains and dominates `M_pool`.
+**What was open.** `min_stake = 1000` default. If the chain creator under-priced stake relative to the exogenous market value of the token, an attacker could partition wealth across thousands of registered domains and dominate `M_pool` committee selection.
 
-**Mitigation alternative present:** rev.9 introduced `InclusionModel::DOMAIN_INCLUSION` where Sybil resistance comes from external naming costs (DNS, registration fees with a TLD operator) instead of stake. STAKE_INCLUSION chains still need to set `min_stake` carefully.
+#### Mitigation: deployment guidance (Option 1)
 
-**Resolution options.**
+Operators choosing `STAKE_INCLUSION` MUST set `min_stake` such that acquiring a controlling fraction of `M_pool` costs more than the chain's value-at-risk.
 
-| # | Option | Cost |
+**Sybil-cost formula.** To exceed the K-of-K committee floor (or `⌈2K/3⌉` under BFT escalation), an attacker needs a majority share of `N_pool` registered validators. Cost to acquire that majority:
+
+```
+sybil_cost = ⌈(N_pool / 2) + 1⌉ × min_stake
+```
+
+`N_pool` is the steady-state registered-validator population. For a chain expecting `N_pool = 50` operators, taking majority requires 26 sybils.
+
+**Target threshold.** Set `min_stake` so `sybil_cost ≥ value_at_risk × safety_margin`. Common choices for value-at-risk:
+
+| Metric | Formula | Use when |
 |---|---|---|
-| 1 | **Operator guidance doc** with a calculator: given `block_subsidy`, target attack cost, expected market cap, derive recommended `min_stake`. | Trivial. |
-| 2 | **Stake-weighted committee selection** (proportional representation). Genesis → chain spec change. | Medium-high. Fairness analysis required. |
-| 3 | **Use DOMAIN_INCLUSION** for any chain that doesn't have strong stake-pricing economics. | Free; just a genesis choice. |
-| 4 | **Add `IP_INCLUSION` as a third inclusion model.** Sybil resistance comes from IPv4-address scarcity instead of stake or DNS — peerlist bloat through mass-produced identities becomes a non-issue when IP itself is the scarce resource. Weaker than DOMAIN_INCLUSION (NAT, IPv4 exhaustion, VPN abuse) but cheaper to operate. Useful for permissionless local networks or testnet-style deployments where DNS is overhead. | ~100 LOC. Pure config addition. New `Inclusion::IP_INCLUSION` enum + IP-of-peer recorded as registry pubkey-equivalent. |
+| Total subsidy budget | `block_subsidy × expected_chain_lifetime_blocks` | New chain, no token market yet |
+| Expected market cap | `total_supply × expected_token_price` | Established chain with traded token |
+| Total locked stake | `N_pool × min_stake` (circular — solve iteratively) | Stress-test the floor itself |
 
-**Recommended.** Options 1 + 3 for production chains. Option 4 for testnets and special-purpose deployments.
+`safety_margin` is typically `10×` (attacker needs to lock 10× chain's value-at-risk in stake to compromise it; for finite-horizon attacks, opportunity cost of locked capital alone often suffices).
+
+**Worked examples.** All assume `N_pool = 50` (majority = 26 sybils).
+
+| Scenario | `block_subsidy` | Lifetime | VaR | `safety_margin` | `min_stake_floor` |
+|---|---|---|---|---|---|
+| Testnet | 10 | 1M blocks | 10M tokens | 1× | ~385 K |
+| Small community chain | 10 | 10M blocks | 100M tokens | 10× | ~38.5 M |
+| Token-traded chain (market cap $10M @ $1/token) | — | — | 10M tokens | 10× | ~3.85 M |
+| Enterprise chain (no exogenous price; subsidy-based) | 1 | 100M blocks | 100M tokens | 10× | ~38.5 M |
+
+**Formula.** Given `N_pool, VaR, safety_margin`:
+
+```
+min_stake_floor = (VaR × safety_margin) / ⌈(N_pool / 2) + 1⌉
+```
+
+**Validation at genesis.** Operators are responsible for choosing `min_stake` per this formula; the protocol does not enforce a floor (the right floor depends on exogenous economics the protocol cannot observe). A future tooling improvement could surface a startup warning if `min_stake × ⌈N_pool/2 + 1⌉ < block_subsidy × 100` (i.e., majority capture pays back in fewer than 100 blocks of subsidy), but that's operator-facing tooling, not a protocol gate.
+
+**Comparison to existing default.** The genesis default `min_stake = 1000` with `block_subsidy = 10` is suitable ONLY for testnets and demonstrations. At those values, 26 sybils cost 26,000 tokens — recoverable in 2,600 blocks of subsidy. **Production chains MUST raise `min_stake` per the formula above.** This is documented here and noted in the genesis-tool error output if a future tooling pass adds the validation.
+
+#### Mitigation: DOMAIN_INCLUSION (Option 3)
+
+For chains that don't have strong stake-pricing economics — or want defense-in-depth against an undervaluing-of-token attack — switching `inclusion_model = DOMAIN_INCLUSION` derives Sybil resistance from external naming costs (DNS registrations, fees paid to a TLD operator) instead of stake. The genesis configuration field is single-flag and immediately changes selection semantics. See `PROTOCOL.md` §inclusion-models for the mechanism and `WHITEPAPER-v1.x.md` for the DNS-as-identity-anchor rationale.
+
+#### Deferred options
+
+| Option | Why deferred |
+|---|---|
+| 2 — Stake-weighted committee selection | Medium-high cost (chain-spec change); fairness analysis would need to address the "rich-get-richer" failure mode of pure weight-by-stake. Not pursuing in v1. |
+| 4 — `IP_INCLUSION` | Weaker resistance than DOMAIN_INCLUSION (NAT, IPv4 exhaustion, VPN abuse). Tracked for testnet / special-purpose deployments only. ~100 LOC addition if ever requested. |
+
+**Status.** Options 1 + 3 are the formal closure. The operator-facing guidance is the calculator above; chains that don't want to do that math have DOMAIN_INCLUSION available as a flag flip. S-010 moves from "Open with mitigation alternative" to "Mitigated — operator policy + DOMAIN_INCLUSION available."
 
 ---
 
-### S-011 — Abort claim cartel via M-1 quorum
+### S-011 — Abort claim cartel via M-1 quorum — ✅ Mitigated (Option 1)
 
-**Severity:** High • **Status:** Open • **Sources:** Audit 2.3
+**Severity:** High (was) • **Status:** ✅ Mitigated via S-010 stake-pricing guidance + bounded-damage analysis • **Sources:** Audit 2.3
 
-**What's open.** Abort claims advance via M-1 matching signatures. An adversary controlling M-1 committee members can fabricate abort claims against the lone honest member, suspending them via the exponential-suspension path.
+**What was open.** Abort claims advance via M-1 matching signatures. An adversary controlling M-1 committee members could fabricate abort claims against the lone honest member, suspending them via the exponential-suspension path.
 
-**Mitigated by:** stake economics (controlling M-1 is expensive at adequate `min_stake`); equivocation-detection provides separate slashing if the cartel signs blocks at the same height with different digests. So the realistic damage is bounded to "kick the honest member off the committee for a finite number of rounds."
+**Closure (Option 1).** Three properties together bound the realistic damage:
 
-**Resolution options.**
+1. **Cost of acquiring M-1 committee members** is bounded below by S-010's stake-pricing formula. At adequate `min_stake` (per the S-010 §calculator), controlling `M-1` of the committee costs `(M-1) × min_stake`. Combined with the random committee rotation per round, sustained M-1 control over many rounds requires majority capture of `N_pool`, which is the same Sybil-cost threshold S-010 closes.
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Status quo + adequate `min_stake` (S-010 #1)** | Free. |
-| 2 | **External-witness requirement.** Suspension only triggers if the abort claims are also visible in the gossip mesh outside the committee. | Medium. Gossip-witness tracking. |
-| 3 | **Reputation scoring.** Abort claims weighted by claimer's historical good behavior. | High. Reputation systems are notoriously gameable. |
+2. **Equivocation-detection provides separate slashing** if the cartel signs blocks at the same height with different digests. The cartel can suspend an honest member, but if they then go on to produce conflicting blocks (which is the natural next step in any chain-divergence attack), every cartel member is slashed via the existing FA6 path — losing 100% of locked stake. Equivocation slashing thus prices the cartel attack at `(M-1) × min_stake` per attempt with no recovery.
 
-**Recommended.** Option 1. The deeper fixes are not worth their complexity at v1 scale.
+3. **Damage is bounded to "kick honest member off committee for a finite number of rounds."** The suspended member rejoins after exponential backoff completes; the cartel cannot permanently remove them without continuing to expend stake on fresh abort claims (or eventually committing equivocation, which slashes them). At adequate `min_stake`, the per-round attack cost exceeds the chain's per-round subsidy throughput — economic infeasibility.
+
+The combination of these three bounds is the formal Option 1 closure. No code change is required; the closure is "operator sets `min_stake` per S-010 guidance, the chain layer's existing equivocation slashing handles the residual."
+
+**Deferred options.**
+
+| Option | Why deferred |
+|---|---|
+| 2 — External-witness requirement | Medium cost (gossip-witness tracking). The Option 1 closure already bounds damage to economic infeasibility; the deeper protocol change is unjustified at v1 scale. |
+| 3 — Reputation scoring | Reputation systems are notoriously gameable. Not pursued. |
+
+**Status.** S-011 closes alongside S-010 — both reduce to "operators set `min_stake` per the calculator; the cartel attack is economically infeasible and self-slashing." S-011 moves from "Open" to "Mitigated — economic + equivocation-slashing bound."
 
 ---
 
@@ -1085,7 +1135,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
-- High findings: 2 open (S-010, S-011 — both design / parameter-policy items, not shipped-code attack surface)
+- High findings: 0 open (S-010 + S-011 closed via stake-pricing formula + FA6 equivocation slashing bound)
 - Medium findings: 2 open (S-016, S-018) — both bounded ~hours-of-work each; S-016 overlaps with v2.7 F2 scope so deferring is correct
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)

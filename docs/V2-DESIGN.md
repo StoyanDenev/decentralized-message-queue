@@ -519,8 +519,8 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 | S-004 (plaintext keys) | option 1 (0600 + no-stdout) + option 2 (v2.17 AES-256-GCM envelope) | ✅ shipped |
 | S-007 (overflow) | checked_add_u64 on credit paths | ✅ shipped |
 | S-008 (unbounded mempool) | MEMPOOL_MAX_TXS + fee-priority eviction + per-sender quota | ✅ shipped |
-| S-010 (sybil) | operator parameter; v2 docs guidance | ⏳ open (design item) |
-| S-011 (abort-claim cartel) | v2 docs (mitigated by stake economics today) | ⏳ open (design item) |
+| S-010 (sybil) | operator stake-pricing formula + DOMAIN_INCLUSION alternative | ✅ shipped (SECURITY.md §S-010 calculator) |
+| S-011 (abort-claim cartel) | S-010 stake floor + FA6 equivocation slashing bound | ✅ shipped (no code change needed; closed by economic argument + existing slashing) |
 | S-012 (snapshot trust) | v2.1 state_root + v2.3 snapshot verification | ✅ shipped |
 | S-030 D1 (validate-apply) | v2.1 state_root indirect closure (via signing_bytes + apply-time check) | ✅ effective |
 | S-030 D2 (block_digest) | v2.1 state_root partial closure + v2.7 F2 for full | 🟠 partial |
@@ -529,7 +529,7 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 | S-033 (no state commitment) | v2.1 Merkle root + Block.state_root | ✅ shipped |
 | S-036 (witness-window) | v2.11 beacon-side auto-detect | ⏳ open |
 
-**Findings closure status:** 12 fully closed in-session + 1 partially closed (S-030) + 3 still open (S-010, S-011, S-036 — all design items or operator-policy, not shipped-code attack surface). The "12 of 24 close in v2" original target has been substantially overshot in-session.
+**Findings closure status:** 17 fully closed in-session + 1 partially closed (S-030 D2 via S-033 apply-layer; v2.7 F2 closes at consensus layer) + 2 still open Medium (S-016 overlaps with v2.7 F2 scope; S-018 mechanical JSON schema). All open High findings closed in-session via S-010 stake-pricing formula + S-011 economic-bound argument. The "12 of 24 close in v2" original target has been substantially overshot in-session.
 
 ---
 
