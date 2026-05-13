@@ -7,7 +7,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 - [QUICKSTART.md](QUICKSTART.md) — 5-minute walkthrough: build, run a 3-node cluster, send transactions, snapshot create + restore.
 - [CLI-REFERENCE.md](CLI-REFERENCE.md) — every `determ` subcommand at a glance, grouped by purpose.
 - [PROTOCOL.md](PROTOCOL.md) — formal v1 protocol specification: wire formats, hash inputs, consensus state machine, message types. What an external implementer needs to build a compatible client.
-- [SECURITY.md](SECURITY.md) — canonical security posture. 17 findings mitigated in-session + 1 partial (S-030 D2 via S-033 apply-layer, v2.7 F2 spec'd for full consensus-layer closure) + 2 open Medium (S-016, S-018) + 10 open Low/Op. Zero open Critical, zero open High. Track A (localized fixes) 14/14 complete. Reconciles the rev.7 audit and the prior `OPEN-VULNERABILITIES.md` against current code. What a security reviewer should look at.
+- [SECURITY.md](SECURITY.md) — canonical security posture. 19 findings mitigated in-session + 1 partial (S-030 D2 via S-033 apply-layer, v2.7 F2 spec'd for full consensus-layer closure) + 2 open Medium (S-016, S-018) + 8 open Low/Op. Zero open Critical, zero open High. Track A (localized fixes) 14/14 complete. Reconciles the rev.7 audit and the prior `OPEN-VULNERABILITIES.md` against current code. What a security reviewer should look at.
 
 ## Behavioral test suite
 

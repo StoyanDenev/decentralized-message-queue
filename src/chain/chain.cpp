@@ -1890,8 +1890,22 @@ void Chain::save(const std::string& path) const {
     fs::create_directories(fs::path(path).parent_path());
     std::string tmp_path = path + ".tmp";
     {
-        json j = json::array();
-        for (auto& b : blocks_) j.push_back(b.to_json());
+        // S-021: chain.json is now a wrapping object carrying a
+        // `head_hash` field alongside the canonical `blocks` array.
+        // head_hash is hex of the latest block's compute_hash() — which
+        // transitively covers every prior block via the prev_hash chain
+        // + committee signatures. Load-time mismatch indicates on-disk
+        // tampering (or a corrupted write) and is rejected before
+        // replay starts. Legacy array-form chain.json is still accepted
+        // (no-op fallback); the next save() upgrades the format.
+        json blocks_arr = json::array();
+        for (auto& b : blocks_) blocks_arr.push_back(b.to_json());
+        json j;
+        j["head_hash"] = blocks_.empty()
+                          ? std::string{}
+                          : to_hex(blocks_.back().compute_hash());
+        j["blocks"]    = std::move(blocks_arr);
+
         std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
         if (!f) throw std::runtime_error("Cannot write chain tmp file: " + tmp_path);
         f << j.dump(2);
@@ -1935,11 +1949,47 @@ Chain Chain::load(const std::string& path,
     c.shard_count_   = shard_count;
     c.shard_salt_    = shard_salt;
     c.my_shard_id_   = my_shard_id;
-    for (auto& bj : j) {
+
+    // S-021: accept both formats:
+    //   * legacy: top-level JSON array of blocks (pre-S-021 chain.json).
+    //   * wrapped: object with { "head_hash": "<hex>", "blocks": [...] }.
+    //     head_hash gates load with O(1) tampering detection — the head's
+    //     compute_hash() is recomputed after replay and compared.
+    std::string expected_head_hex;
+    const json* blocks_ptr = nullptr;
+    if (j.is_array()) {
+        blocks_ptr = &j;
+    } else if (j.is_object()) {
+        expected_head_hex = j.value("head_hash", std::string{});
+        if (!j.contains("blocks") || !j["blocks"].is_array())
+            throw std::runtime_error("chain file: wrapped form missing 'blocks' array");
+        blocks_ptr = &j["blocks"];
+    } else {
+        throw std::runtime_error("chain file: expected JSON array or object");
+    }
+
+    for (auto& bj : *blocks_ptr) {
         Block b = Block::from_json(bj);
         c.apply_transactions(b);
         c.blocks_.push_back(std::move(b));
     }
+
+    // S-021: verify head_hash matches recomputed head digest. Empty
+    // expected_head_hex means legacy array-form chain.json (no
+    // gate); also empty for a degenerate zero-block chain.
+    if (!expected_head_hex.empty()) {
+        if (c.blocks_.empty()) {
+            throw std::runtime_error(
+                "chain file: head_hash set but blocks list is empty");
+        }
+        std::string actual_head_hex = to_hex(c.blocks_.back().compute_hash());
+        if (actual_head_hex != expected_head_hex) {
+            throw std::runtime_error(
+                "chain file: head_hash mismatch (tampering or corruption?); "
+                "stored=" + expected_head_hex + " computed=" + actual_head_hex);
+        }
+    }
+
     return c;
 }
 

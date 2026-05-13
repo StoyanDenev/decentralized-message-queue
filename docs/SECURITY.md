@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **10** | **12** |
+| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **8** | **10** |
 | Partially mitigated | **1** (S-030) | — | — | — | **1** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | — | **17** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **2** (S-021, S-029) | **19** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -43,6 +43,8 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-014 No rate limiting on gossip + RPC~~ — closed via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet` (per-peer-IP token bucket, HELLO exempt).
 - ~~S-017 Producer/chain UNSTAKE divergence~~ — closed via Option 2: validator + producer both gain the `unlock_height` check; apply-time refund retained as belt-and-suspenders.
 - ~~S-020 Rejection sampling O(K²) at K/N → 1~~ — closed via hybrid selector (rejection sampling at 2K ≤ N, partial Fisher-Yates shuffle at 2K > N — bounded O(N) regardless of ratio).
+- ~~S-021 Chain file integrity not cryptographically verified~~ — closed via wrapping chain.json with `head_hash` + load-time recompute + mismatch reject (O(1) tampering detection before replay).
+- ~~S-029 BFT-mode multi-proposer fork-choice undefined~~ — closed via `Chain::resolve_fork`: heaviest sig set / fewer aborts / smallest hash, deterministic across peers.
 - ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
 - ~~S-033 No state commitment~~ — closed via Merkle root in `Block.state_root` + signing_bytes binding.
@@ -77,15 +79,15 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-018 | 🟡 Med | JSON parsing without schema validation | all `from_json` | 2-3d |
 | S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
 | S-020 | ✅ Mitigated | Hybrid Fisher-Yates: rejection sampling at K/N ≤ 0.5, partial FY shuffle at K/N > 0.5 — bounded O(N) regardless of ratio | `crypto/random.cpp::select_m_creators` + `select_after_abort_m` | done |
-| S-021 | 🟢 Low | Chain file integrity not cryptographically verified | `chain/chain.cpp::load` | 1d |
+| S-021 | ✅ Mitigated | `chain.json` is now a wrapping object `{head_hash, blocks}`; load recomputes head digest and rejects on mismatch (O(1) tampering detection before replay) | `chain/chain.cpp::save` + `::load` | done |
 | S-022 | 🟢 Low | 16 MB message limit too permissive (modulo snapshots) | `net/peer.cpp:38` | nuanced |
 | S-023 | ✅ Mitigated | RPC send/stake/unstake balance pre-check throws clear diagnostic on insufficient balance | `node/node.cpp::rpc_send/stake/unstake` | done |
 | S-024 | 🟢 Low | Deregistration timing predictability | `chain/chain.cpp::derive_delay` | low priority |
 | S-025 | ✅ Mitigated | `compute_tx_root_intersection` deleted (in-session); function + header decl removed | `node/producer.cpp` | done |
 | S-026 | 🟢 Low | No connection timeout / keepalive on peer sockets | `net/peer.cpp` | 1d |
 | S-027 | 🟢 Low | Info leakage in logs / verbose error messages | many | docs / runtime flag |
-| S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:30-47` | trivial |
-| S-029 | 🟢 Low | BFT-mode multi-proposer fork-choice undefined | `node/node.cpp::on_block` | bounded reorg |
+| S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:106-114` (`is_anon_address`) | needs normalization audit, not "trivial" — see §6 entry |
+| S-029 | ✅ Mitigated | `Chain::resolve_fork` ranks by (heaviest sig set, fewer aborts, smallest block hash); deterministic across peers | `chain/chain.cpp::resolve_fork` | done |
 | S-030 | 🟠 Partially mitigated | Block body not authenticated by `block_digest` (D1 effective via S-033 state_root; D2 partial via S-033; F2 view-reconciliation for full D2 closure tracked v2.7) | `node/producer.cpp:206-221` | v2.7 |
 | S-031 | ✅ Mitigated | shared_mutex + A9 Phase 1-2D atomicity/lazy-snapshot/lock-free reads + async chain.save worker + gossip-out-of-lock (v2.6) — all 6 layers shipped | `node/node.cpp` | done |
 | S-032 | ✅ Mitigated | Incremental registry cache on Chain + snapshot persistence; build_from_chain reads cache, no log walk | `node/registry.cpp::build_from_chain` | done |
@@ -919,15 +921,15 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 | ID | Title | Quick fix |
 |---|---|---|
-| S-021 | Chain file integrity not cryptographically verified | Store + verify a cumulative hash; or keep relying on apply-time validation (current de-facto defense). |
+| S-021 | Chain file integrity not cryptographically verified | ✅ **Closed.** `chain.json` is now a wrapping JSON object `{head_hash, blocks}`. `head_hash` is hex of the latest block's `compute_hash()`, which transitively covers every prior block via the `prev_hash` chain + committee signatures. On load, after parsing + replay, the recomputed head digest is compared to the stored `head_hash`; mismatch → throw `"chain file: head_hash mismatch (tampering or corruption?)"`. Legacy array-form chain.json is still accepted (no-op fallback); the next save() upgrades the format. Test: `tools/test_chain_integrity.sh` 4/4 PASS. |
 | S-022 | 16 MB message limit too permissive — but snapshots use it | Per-message-type limits: 1 MB for CONTRIB/BLOCK_SIG; 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. |
 | S-023 | RPC `send`/`stake` skip balance check | Pre-check balance before queueing. ~1h. |
 | S-024 | Deregistration timing predictability (1-10 block grind window) | Acceptable per auditor's own re-classification. v2 could mix in a future block hash. |
 | S-025 | `compute_tx_root_intersection` is dead code | Delete it or guard under `#ifdef DETERM_INTERSECTION_MODE`. 5 minutes. |
 | S-026 | No connection timeout / keepalive | 30s timeout on idle peer connections. Add periodic keepalive. ~1d. |
 | S-027 | Info leakage in logs / error messages reveal state | Configurable log levels; redact in production builds. |
-| S-028 | Hex parsing only accepts lowercase | `is_anon_address` is canonical; downstream parsers should accept either case. Trivial. |
-| S-029 | BFT-mode multi-proposer fork-choice undefined | Status quo (first-seen-wins) + slashing handles it. **Better:** primary fork-choice = heaviest sig set (more committee members ratified), tiebreaker = longest descendant chain. ~30 LOC in `apply_block_locked`. **Implemented in `Chain::resolve_fork`** as of this commit series. |
+| S-028 | Hex parsing only accepts lowercase | The "trivial" auditor framing understates the work: relaxing `is_anon_address` alone fragments balances (uppercase + lowercase variants land in different account-map entries). A correct closure needs (a) case-insensitive validation, (b) a `normalize_anon_address(s)` helper that returns lowercase canonical form, (c) application of the helper at every user-input boundary (RPC, CLI, gossip) before storage. Estimate: ~half-day. Status: deferred pending input-layer normalization audit. |
+| S-029 | BFT-mode multi-proposer fork-choice undefined | ✅ **Closed.** `Chain::resolve_fork` ranks by `(heaviest sig set, fewer abort_events, smallest block hash)`. Deterministic across peers — every node picks the same head when two same-height blocks arrive. |
 
 ---
 
