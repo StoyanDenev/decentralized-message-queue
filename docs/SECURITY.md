@@ -1040,7 +1040,7 @@ The narrower ContribMsg-level case is now also closed (S-006 closure in-session)
 
 ### M-B — Hybrid-mode K-of-M liveness gap → BFT escalation (was Audit 2.1)
 
-**rev.8 added** per-height BFT escalation: after `bft_escalation_threshold` (default 5) round-1 aborts at the same height AND `bft_enabled = true`, the next round produces a `consensus_mode = BFT` block requiring `ceil(2K/3)` signatures plus a deterministic `bft_proposer`. The auditor's recommendation ("either disable hybrid mode or implement proper proposer rotation") was implemented as the second option. Verified in [`tools/test_bft_escalation.sh`](../tools/test_bft_escalation.sh).
+**rev.8 added** per-height BFT escalation: after `bft_escalation_threshold` (default 5) aborts at the same height AND `bft_enabled = true` AND `pool < K` AND `pool ≥ ceil(2K/3)`, the next round produces a `consensus_mode = BFT` block. The block's committee shrinks to `k_bft = ceil(2K/3)` slots and requires the within-committee 2/3 quorum `Q = ceil(2·k_bft/3)` signatures, with a deterministic `bft_proposer` mandatorily signing. The auditor's recommendation ("either disable hybrid mode or implement proper proposer rotation") was implemented as the second option. Verified in [`tools/test_bft_escalation.sh`](../tools/test_bft_escalation.sh).
 
 ### M-C — Linear-time sync barrier → snapshot bootstrap (was Gemini "fatal architectural flaw")
 
