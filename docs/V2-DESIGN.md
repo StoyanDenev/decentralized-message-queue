@@ -357,13 +357,15 @@ Full design: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). Summary:
 
 **Closes:** none directly — first application of the Theme-7 substrate.
 
-### v2.20 — Streaming subscription RPC
+### v2.20 — Streaming subscription RPC — ⚠️ partial (polling shipped, streaming pending)
 
-**Motivation.** DApp nodes need a live tail of `DAPP_CALL` events as blocks finalize. Polling `dapp_messages` is wasteful at high rates.
+**Status.** v2.19 shipped the **polling** subset under the `dapp_messages` RPC (retrospective query with `from_height` / `to_height` / `topic` filters, 256-event pages). The **streaming** subset documented below is the remaining ~3 days of work.
+
+**Motivation.** DApp nodes need a live tail of `DAPP_CALL` events as blocks finalize. Polling `dapp_messages` works for moderate event rates but burns RPC trips at high update frequencies; streaming closes that gap.
 
 **Mechanism.** New `dapp_subscribe(domain, topic?)` RPC — newline-JSON streaming over the existing RPC socket. Per-block hook fires after the async-save worker, filters DAPP_CALLs by recipient, emits to matching subscribers. Bounded per-subscriber queue with disconnect-on-overflow.
 
-**Cost.** ~3 days. Per-block subscriber-broadcast hook + bounded queue management + integration with existing RPC session lifecycle.
+**Cost.** ~3 days remaining. Per-block subscriber-broadcast hook + bounded queue management + integration with existing RPC session lifecycle.
 
 **Closes:** none — operational improvement for DApp node implementers.
 
