@@ -45,7 +45,7 @@ FB-track (TLA+ machine-checkable):
 | File | Scope |
 |---|---|
 | [F2-SPEC.md](F2-SPEC.md) | Implementation specification for v2.7 F2 view reconciliation (the consensus-layer closure of S-030 D2). 9 open design questions resolved; PAKE-style architecture for per-field reconciliation rules. Cited by `docs/SECURITY.md` §S-030. |
-| [S030-D2-Analysis.md](S030-D2-Analysis.md) | Analysis of S-030 D2 (block-body fields not in `block_digest`) + comparison of the two closure paths (apply-layer via S-033 state_root, consensus-layer via v2.7 F2). Section 3.5 documents which fields each path covers. |
+| [S030-D2-Analysis.md](S030-D2-Analysis.md) | Analysis of S-030 D2 (block-body fields not in `block_digest`) + comparison of the two closure paths (apply-layer via S-033 state_root + S-038 producer wiring, consensus-layer via v2.7 F2). Section 3.5 documents which fields each path covers. |
 | [S002-Mempool-Sig-Verify.md](S002-Mempool-Sig-Verify.md) | Analysis trail for S-002 closure (mempool accepts unverified sigs) including the paired `binary_codec::decode_tx_frame` fix that surfaced once mempool sig-verify gated the gossip path. |
 
 ---
