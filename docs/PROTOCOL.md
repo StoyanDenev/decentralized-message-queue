@@ -177,7 +177,7 @@ struct Block {
     Hash                  delay_seed;            // SHA256(index || prev_hash || tx_root || dh_inputs...)
     Hash                  delay_output;          // SHA256(delay_seed || ordered_dh_secrets)
     Signature[]           creator_block_sigs;    // K Phase-2 block-digest sigs
-    ConsensusMode         consensus_mode;        // 0=MUTUAL_DISTRUST (K-of-K), 1=BFT (ceil(2K/3))
+    ConsensusMode         consensus_mode;        // 0=MUTUAL_DISTRUST (K-of-K), 1=BFT (k_bft = ⌈2K/3⌉ committee, Q = ⌈2·k_bft/3⌉ quorum — see §5.3)
     string                bft_proposer;          // empty unless mode==BFT
     Hash                  cumulative_rand;       // SHA256(prev.cumulative_rand || delay_output)
     AbortEvent[]          abort_events;          // claims-quorum-certified prior round aborts
@@ -287,7 +287,7 @@ struct BlockSigMsg {
 };
 ```
 
-Each receiver verifies that `SHA256(dh_secret ‖ signer.pubkey) == dh_input`. Once K reveals gather, the block's final `delay_output = SHA256(delay_seed ‖ ordered_dh_secrets)` is computed and the block can be finalized. A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **ceil(2K/3) of K** have (BFT mode after escalation).
+Each receiver verifies that `SHA256(dh_secret ‖ signer.pubkey) == dh_input`. Once K reveals gather, the block's final `delay_output = SHA256(delay_seed ‖ ordered_dh_secrets)` is computed and the block can be finalized. A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **`Q = ⌈2·k_bft/3⌉` of `k_bft = ⌈2K/3⌉`** have (BFT mode after escalation — see §5.3 for the two-level shrinkage; the BFT block carries `k_bft` slots and requires `Q` nonzero sigs, not `⌈2K/3⌉` of the genesis K).
 
 ### 5.2 Committee selection
 At each round, the K-committee derives from:
