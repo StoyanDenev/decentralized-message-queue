@@ -498,38 +498,27 @@ Envelope: { "type": uint8, "payload": <message-specific JSON> }
 
 ### 9.2 Message types
 
-| ID | Name | Direction | Payload |
-|---|---|---|---|
-| 0 | HELLO | initial handshake | `{domain, port, role, shard_id}` |
-| 1 | BLOCK | gossip | `Block` JSON |
-| 2 | TRANSACTION | gossip | `Transaction` JSON |
-| 3 | BLOCK_SIG | committee | `BlockSigMsg` JSON |
-| 4 | CONTRIB | committee | `ContribMsg` JSON |
-| 5 | GET_CHAIN | sync | `{from, count}` |
-| 6 | CHAIN_RESPONSE | sync | `{blocks, has_more}` |
-| 7 | STATUS_REQUEST | sync | `{}` |
-| 8 | STATUS_RESPONSE | sync | `{height, genesis}` |
-| 9 | ABORT_CLAIM | committee | `AbortClaimMsg` JSON |
-| 10 | ABORT_EVENT | gossip | `{block_index, prev_hash, event}` |
-| 11 | EQUIVOCATION_EVIDENCE | gossip | `EquivocationEvent` JSON |
-| 12 | BEACON_HEADER | beacon→shard | `Block` JSON |
-| 13 | SHARD_TIP | shard→beacon | `{shard_id, tip}` |
-| 1 | BLOCK | gossip | `Block` JSON |
-| 2 | TRANSACTION | gossip | `Transaction` JSON |
-| 3 | BLOCK_SIG | committee | `BlockSigMsg` JSON |
-| 4 | CONTRIB | committee | `ContribMsg` JSON |
-| 5 | GET_CHAIN | sync | `{from, count}` |
-| 6 | CHAIN_RESPONSE | sync | `{blocks, has_more}` |
-| 7 | STATUS_REQUEST | sync | `{}` |
-| 8 | STATUS_RESPONSE | sync | `{height, genesis}` |
-| 9 | ABORT_CLAIM | committee | `AbortClaimMsg` JSON |
-| 10 | ABORT_EVENT | gossip | `{block_index, prev_hash, event}` |
-| 11 | EQUIVOCATION_EVIDENCE | gossip | `EquivocationEvent` JSON |
-| 12 | BEACON_HEADER | beacon→shard | `Block` JSON |
-| 13 | SHARD_TIP | shard→beacon | `{shard_id, tip}` |
-| 14 | CROSS_SHARD_RECEIPT_BUNDLE | shard↔beacon | `{src_shard, src_block}` |
-| 15 | SNAPSHOT_REQUEST | client→peer | `{headers}` |
-| 16 | SNAPSHOT_RESPONSE | peer→client | snapshot JSON |
+The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator. The body-size cap column lists the per-type ceiling applied by `Peer::read_body` after JSON deserialize (`include/determ/net/messages.hpp::max_message_bytes`); the framing layer enforces the global 16 MB ceiling before this check.
+
+| ID | Name | Direction | Body cap | Payload |
+|---|---|---|---|---|
+| 0  | HELLO                     | initial handshake | 1 MB  | `{domain, port, role, shard_id, wire_version}` |
+| 1  | BLOCK                     | gossip            | 4 MB  | `Block` JSON |
+| 2  | TRANSACTION               | gossip            | 1 MB  | `Transaction` JSON |
+| 3  | BLOCK_SIG                 | committee         | 1 MB  | `BlockSigMsg` JSON (Phase 2: digest sig + dh_secret) |
+| 4  | CONTRIB                   | committee         | 1 MB  | `ContribMsg` JSON (Phase 1: tx_commit + dh_input + ed sig) |
+| 5  | GET_CHAIN                 | sync              | 1 MB  | `{from, count}` |
+| 6  | CHAIN_RESPONSE            | sync              | 16 MB | `{blocks, has_more}` (bootstrap-only) |
+| 7  | STATUS_REQUEST            | sync              | 1 MB  | `{}` |
+| 8  | STATUS_RESPONSE           | sync              | 1 MB  | `{height, genesis, head_hash, role, shard_id, wire_version, ...}` |
+| 9  | ABORT_CLAIM               | committee         | 1 MB  | `AbortClaimMsg` JSON |
+| 10 | ABORT_EVENT               | gossip            | 1 MB  | `{block_index, prev_hash, event}` (event carries inline signed claims) |
+| 11 | EQUIVOCATION_EVIDENCE     | gossip            | 1 MB  | `EquivocationEvent` JSON |
+| 12 | BEACON_HEADER             | beacon→shard      | 4 MB  | `Block` JSON (beacon block; shard verifies K-of-K from prior-verified pool) |
+| 13 | SHARD_TIP                 | shard→beacon      | 4 MB  | `{shard_id, tip}` where `tip` is a full `Block` JSON |
+| 14 | CROSS_SHARD_RECEIPT_BUNDLE| shard↔beacon      | 4 MB  | `{src_shard, src_block}` (full source block for independent K-of-K verify) |
+| 15 | SNAPSHOT_REQUEST          | client→peer       | 1 MB  | `{headers}` |
+| 16 | SNAPSHOT_RESPONSE         | peer→client       | 16 MB | serialized chain-state JSON (bootstrap-only) |
 
 ### 9.3 Role-based filter
 Cross-role traffic is restricted by the receiving peer:
