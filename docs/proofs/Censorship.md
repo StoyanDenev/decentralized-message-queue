@@ -122,7 +122,7 @@ $$
 
 For `K = 3`, `R = 5`, `f/N = 0.1`: `P ≈ 10⁻¹⁵` per height. Effectively impossible for any economically rational adversary.
 
-In a malicious scenario the adversary can also *abort* rounds to force re-selection, hoping to land a fully-Byzantine committee on a later try. The number of abort events `R` is bounded by the chain's `bft_escalation_threshold` (default 5) at which point BFT mode engages and a designated proposer single-sigs the block (cf. FA5); we don't need to extend `R` arbitrarily.   ∎
+In a malicious scenario the adversary can also *abort* rounds to force re-selection, hoping to land a fully-Byzantine committee on a later try. The number of abort events `R` is bounded by the chain's `bft_escalation_threshold` (default 5) at which point BFT mode engages: the committee shrinks to `k_bft = ⌈2K/3⌉`, the designated proposer must sign, and the within-committee 2/3 quorum `Q = ⌈2·k_bft/3⌉` finalizes the block (cf. FA5). Censorship in BFT mode still requires `k_bft`-conjunction over the smaller committee (the union-tx-root rule covers all `k_bft` Phase-1 contributions; only Phase-2 BlockSig slots accept sentinels). `R` does not need to extend arbitrarily.   ∎
 
 ---
 
