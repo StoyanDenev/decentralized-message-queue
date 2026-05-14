@@ -30,7 +30,7 @@ When an `EquivocationEvent` is baked into a finalized block, `apply_transactions
 **Theorem T-6 (Soundness of equivocation slashing).** Under:
 
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2): no polynomial-time adversary forges a signature by an honest key with non-negligible probability.
-- **(H2) Honest validator behavior** (Preliminaries §4): an honest validator signs at most one digest per (height, round) pair.
+- **(H2) Honest validator behavior** (Preliminaries §4): an honest validator signs at most one `compute_block_digest` per (height, round) pair AND at most one `make_contrib_commitment` per (height, aborts_gen) tuple (the latter clause is the S-006 closure that brings ContribMsg-level equivocation under the same digest-agnostic V11 channel — see §5 cross-reference for both detection paths).
 
 then for every `v_i ∈ V \ F` (honest validator):
 
