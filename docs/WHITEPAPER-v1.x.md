@@ -449,13 +449,23 @@ These are intentional non-goals, not roadmap items.
 - Full S-036 witness-window historical validation. Requires SHARD_TIP records moved from gossip-only to on-chain.
 - Real libopaque + liboprf vendoring for the wallet's OPAQUE adapter. Windows MSVC port of upstream VLAs is the principal blocker; four completion paths documented.
 
-**v2 design space:**
+**v2 design space (canonical list in `docs/V2-DESIGN.md` — 26 items across 9 themes):**
 
-- Stake-weighted creator selection (proportional to bonded stake rather than uniform from eligible pool).
-- Light-client header sync for external observers.
-- Binary message codec for bandwidth efficiency (current implementation is JSON-over-TCP with HELLO version negotiation).
-- Threshold randomness via VRF for committee selection (current: deterministic from `cumulative_rand`).
-- Post-quantum signature migration (Dilithium / Falcon).
+- v2.1 State Merkle root — ✅ shipped (`compute_state_root` + `Block.state_root` + `signing_bytes` binding).
+- v2.2 Light-client headers / state_proof RPC — ✅ foundation shipped (SMT inclusion-proof RPC + CLI); header-only sync flow remains as a follow-on.
+- v2.3 Trustless fast sync — ✅ shipped (state_root verified on snapshot restore).
+- v2.4 Atomic block apply (A9) — ✅ shipped (Phase 1-2D + COMPOSABLE_BATCH).
+- v2.5 Registry cache (S-032) — ✅ shipped.
+- v2.6 Gossip out of state-lock — ✅ shipped.
+- A3/v2.X Binary message codec — ✅ shipped (`src/net/binary_codec.cpp`; per-pair `wire_version` negotiated via HELLO; legacy JSON remains the default until both sides advertise v1).
+- v2.7 F2 view reconciliation (full S-030 D2 closure) — ⏳ spec'd in `docs/proofs/F2-SPEC.md`, ~3-4 days.
+- v2.10 Threshold randomness aggregation — 🔥 active, ~1 week (BLS12-381 + DKG); defeats residual selective-abort.
+- Stake-weighted creator selection — design item, parallel-representation analysis required first.
+- v2.8 Post-quantum signature migration (Dilithium / Falcon) — ⏳ not started.
+- v2.14 OPAQUE wallet recovery (real `libopaque`) — ⏳ not started; gated on the MSVC porting of upstream VLAs.
+- v2.25 + v2.26 Distributed identity provider (DSSO) — ⏳ Theme 9 new; depends on v2.10 + v2.14.
+
+The v2 themes cover Theme 1 (Trust minimization), Theme 2 (Scale + concurrency), Theme 3 (Cryptographic hardening), Theme 4 (Liveness + randomness), Theme 5 (Composability), Theme 6 (Wallet + operator UX), Theme 7 (DApp layer — v2.18 / v2.19 shipped), Theme 8 (Privacy + interop — v2.22 / v2.23 / v2.24), Theme 9 (DSSO — v2.25 / v2.26).
 
 ### 12.3 Network partition behavior
 
@@ -469,7 +479,7 @@ Determ demonstrates that fork-free, immediately-final consensus is achievable at
 
 The protocol is intentionally minimal: two consensus message types per block, one signature scheme, one hash function, no exotic cryptography or external dependencies. This makes it auditable, implementable, and amenable to formal verification of its core safety property: no two valid blocks at the same height. The v1.x specification covers consensus, sharding (CURRENT + EXTENDED with regional pinning and under-quorum merge), governance (uncontrolled + governed modes with N-of-N keyholder PARAM_CHANGE), economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and distributed wallet recovery via Shamir + AEAD + OPAQUE composition.
 
-Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in approximately 25 KLOC of C++ across the chain daemon and wallet binary, with 24 integration test suites covering every protocol feature.
+Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in ~17 KLOC of C++ across the chain daemon and wallet binary, with 45+ shell-driven integration test suites in `tools/test_*.sh` covering every protocol feature (consensus, sharding, equivocation slashing, governance PARAM_CHANGE, A1 unitary balance, A9 atomic apply, S-008 mempool bounds, S-014 rate-limit on both RPC and gossip, S-021 chain-file integrity, S-022 per-message-type caps, S-026 TCP keepalive, S-028 anon-address case normalization, v2.18 / v2.19 DApp substrate, OPAQUE wallet recovery via stub adapter, and end-to-end cross-shard transfer + under-quorum merge).
 
 Determ's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than BFT-family protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an occasional stall.
 
@@ -566,4 +576,4 @@ This whitepaper is a self-contained narrative; deeper technical details are spli
 | `docs/proofs/` | Formal-verification proofs (F0 + FA1–FA12, FB1–FB4) |
 | `wallet/PHASE6_PORTING_NOTES.md` | libopaque integration status + completion paths |
 
-The reference implementation lives at `src/` (chain daemon, ~25 KLOC C++) and `wallet/` (wallet binary, ~1500 LOC C++ plus vendored libsodium). Integration tests at `tools/test_*.sh` cover every protocol feature in 24 self-contained suites.
+The reference implementation lives at `src/` (chain daemon) and `wallet/` (wallet binary), totalling ~17 KLOC of C++ across both binaries plus vendored libsodium / OpenSSL. Integration tests at `tools/test_*.sh` cover every protocol feature in 45+ self-contained suites; representative entries are listed in `docs/README.md` § "Behavioral test suite."
