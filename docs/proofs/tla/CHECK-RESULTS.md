@@ -84,13 +84,13 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 
 | Spec construct | Source location |
 |---|---|
-| `Consensus.contribs` | `src/node/producer.cpp` Phase-1 commit gather |
-| `Consensus.secrets_revealed` | `src/node/producer.cpp::on_phase2` reveal gate |
-| `Consensus.SeenKCommits` | `src/node/producer.cpp::check_phase1_complete` |
-| `Consensus.Finalize` quorum | `src/node/validator.cpp::check_block_sigs` |
-| `Sharding.emitted_receipts` | `Block::cross_shard_receipts` field |
-| `Sharding.pending_inbound` | `Node::pending_inbound_receipts_` |
-| `Sharding.applied` | `Chain::applied_inbound_receipts_` |
+| `Consensus.contribs` | `src/node/node.cpp::on_contrib` (Phase-1 commit gather into `pending_contribs_`) |
+| `Consensus.secrets_revealed` | `src/node/node.cpp::on_block_sig` (Phase-2 reveal gate, `pending_block_sigs_` admission) |
+| `Consensus.SeenKCommits` | `src/node/node.cpp::on_contrib` (the `pending_contribs_.size() == current_creator_domains_.size()` check that fires `start_block_sig_phase`) |
+| `Consensus.Finalize` quorum | `src/node/validator.cpp::check_block_sigs` (MD: K-of-K; BFT: ceil(2K/3)) |
+| `Sharding.emitted_receipts` | `chain::Block::cross_shard_receipts` field |
+| `Sharding.pending_inbound` | `node::Node::pending_inbound_receipts_` |
+| `Sharding.applied` | `chain::Chain::applied_inbound_receipts_` |
 | `Receipts.applied` | same as above; isolated for focused check |
 
 A reviewer who is suspicious of a particular invariant can:
