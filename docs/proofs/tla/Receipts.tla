@@ -40,7 +40,10 @@ Init ==
     /\ credit_log = <<>>
 
 \* Apply a block that contains a single inbound_receipt with ID `rid`.
-\* This action models the per-block apply path in chain.cpp lines 420-426:
+\* This action models the per-block apply path in
+\* src/chain/chain.cpp::apply_transactions's inbound-receipt loop
+\* (search for `for (auto& r : b.inbound_receipts)` to locate the
+\* current line range — at ~L1361 as of this revision):
 \*   if (applied_inbound_receipts_.count(key)) continue;  ← idempotency
 \*   accounts_[r.to].balance += r.amount;
 \*   applied_inbound_receipts_.insert(key);

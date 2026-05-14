@@ -87,7 +87,7 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `Consensus.contribs` | `src/node/node.cpp::on_contrib` (Phase-1 commit gather into `pending_contribs_`) |
 | `Consensus.secrets_revealed` | `src/node/node.cpp::on_block_sig` (Phase-2 reveal gate, `pending_block_sigs_` admission) |
 | `Consensus.SeenKCommits` | `src/node/node.cpp::on_contrib` (the `pending_contribs_.size() == current_creator_domains_.size()` check that fires `start_block_sig_phase`) |
-| `Consensus.Finalize` quorum | `src/node/validator.cpp::check_block_sigs` (MD: K-of-K; BFT: ceil(2K/3)) |
+| `Consensus.Finalize` quorum | `src/node/validator.cpp::check_block_sigs` (MD: K-of-K full committee; BFT: Q = ceil(2·k_bft/3) within the shrunk k_bft = ceil(2K/3) committee — two-level shrinkage, see PROTOCOL.md §5.3). The spec uses `Keff = ceil(2K/3)` which only models the first-level shrinkage; this is correct degenerately at K=3 (Q=k_bft=2) and an over-approximation at K>=6 (safe direction for the Inv_OneDigest invariant; see Consensus.tla comment above the Keff definition). |
 | `Sharding.emitted_receipts` | `chain::Block::cross_shard_receipts` field |
 | `Sharding.pending_inbound` | `node::Node::pending_inbound_receipts_` |
 | `Sharding.applied` | `chain::Chain::applied_inbound_receipts_` |
