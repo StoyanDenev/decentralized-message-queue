@@ -506,6 +506,14 @@ This separation provides:
 - **Auditability for operators**: domains have stable, named identities for governance.
 - **Censorship resistance for transfers**: the union-tx-set property applies equally to anonymous transactions.
 
+### 11.3 Identity-anchored federated authentication (v2.25, planned)
+
+The v1.x identity model is sufficient for on-chain action authorization (signing a tx). It does not yet specify a federated authentication ceremony for off-chain services — a service ("relying party" in SSO terms) cannot today challenge a user to prove possession of a domain key in a standardized way, and cannot accept a session token signed by the chain's committee.
+
+v2.25 specifies that ceremony. The K-of-K committee acts as a mutual-distrust identity provider via **T-OPAQUE** (threshold OPAQUE — the modern CFRG aPAKE, instantiated in threshold form across the committee). RPs register on-chain via v2.18 DAPP_REGISTER; users authenticate via OPAQUE against the committee (passwords never leave the user's device, recovery envelopes are precomputation-resistant even if a committee minority colludes); the committee co-signs a SIWE-class assertion of the form `(issuer = chain_id, subject = user_identity, audience = rp_identity, iat, exp, nonce, state_root)` which the RP verifies against the on-chain committee pubkey set via v2.2 state_proof RPC.
+
+v2.26 adds an on-chain `ROTATE_KEY` tx so a compromised key can be retired without losing the identity. Both items are specified in `docs/V2-DESIGN.md` Theme 9.
+
 ---
 
 ## 12. Network Protocol
@@ -642,6 +650,8 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 **Binary wire codec.** Current JSON-over-TCP is convenient but verbose. A future revision will introduce a binary message codec for bandwidth efficiency.
 
 **Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). The full header-only sync flow (light client downloads only block headers + verifies against epoch-boundary committee state) builds on this primitive and is a follow-on RPC track. CLI `determ state-proof --ns <a|s|r|b|k|c> --key <name>` exercises the primitive today.
+
+**Distributed identity provider (DSSO).** The K-of-K committee is structurally a mutual-distrust operator group — a natural fit for distributed-IdP designs in the literature. v2.25 + v2.26 (V2-DESIGN.md Theme 9) specify a "Sign-In With Determ" substrate using **T-OPAQUE** (threshold-OPAQUE, replacing the original SRP in PAKE-as-black-box framework designs) over the committee, paired with on-chain key rotation. RPs register via the existing v2.18 DAPP_REGISTER channel; challenges and signed assertions ride v2.19 DAPP_CALL. The framework's authentication ceremony depends on v2.10 (threshold randomness / BLS infrastructure) and v2.14 (single-server OPAQUE wallet recovery) shipping first. See `docs/V2-DESIGN.md` Theme 9 for the full architecture.
 
 **Equivocation handling — fully closed-loop:**
 

@@ -34,8 +34,10 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.22 Confidential transactions (Bulletproofs) | ⏳ not started | Theme 8 |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
 | v2.24 Audit / compliance hooks | ⏳ not started | Theme 8 |
+| v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
+| v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
-**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 10. Deferred: 2 (v2.13, v2.21+).**
+**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 12. Deferred: 2 (v2.13, v2.21+).**
 
 For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
@@ -421,6 +423,75 @@ Phasing:
 
 ---
 
+## Theme 9 — Distributed identity provider (DSSO over mutual-distrust IdP)
+
+Determ's K-of-K committee is, structurally, a mutual-distrust group of operators. The literature has a natural fit: **distributed identity-provider designs that authenticate users via a black-box augmented PAKE held in threshold form across K cooperating-but-untrusting servers**. Plugging Determ's committee into such a framework yields a federated single-sign-on (DSSO) substrate without re-introducing a centralised identity provider — which would otherwise be a structural mismatch with Determ's threat model.
+
+The framework is exogenous; the substitution choice (and most of the engineering value-add for Determ) is **OPAQUE instead of the original-paper SRP** for the aPAKE primitive. SRP is a 2002-era PAKE designed for a single server; OPAQUE (CFRG draft, RFC 9807-track) is the modern, UC-secure aPAKE that (a) resists offline dictionary attacks against a stolen verifier, (b) hides the password from the server even in plaintext form via OPRF blinding, (c) composes naturally with threshold OPRF to distribute across K operators with a published, analysed security argument. The framework is PAKE-agnostic, so the substitution is value-additive without invalidating any of the original architectural claims.
+
+### v2.25 — Distributed identity provider (DSSO substrate)
+
+**Motivation.** Today there is no Determ-native authentication primitive for off-chain services. Operators wanting to use Determ identities (registered domain or anon address) as the trust anchor for an off-chain service have to roll their own challenge-response protocol against a single Determ node — which centralises trust on whichever node they happen to query. For permissionless DApp deployment the absence of a federated authentication primitive is the missing piece between "Determ as a chain" and "Determ as a usable identity substrate."
+
+A distributed-IdP framework with the K-of-K committee as the operator group + T-OPAQUE as the PAKE gives Determ users a SIWE-class sign-in flow ("Sign-In With Determ") that:
+- Authenticates the user against the chain's identity registry, not any single node.
+- Never exposes the user's password or recovery secret to any single committee member.
+- Survives compromise of any K−1 committee members without leaking auth material (matches the K-of-K mutual-distrust posture already used for consensus).
+- Composes with v2.18 DAPP_REGISTER (the relying party publishes its identity on-chain) and v2.19 DAPP_CALL (challenges and assertions ride the existing message-routing rails).
+
+**Mechanism.** Three layers, each independently specifiable:
+
+1. **Distributed aPAKE.** T-OPAQUE on the K committee members. Each committee member holds an OPRF share. User-side OPAQUE registration and login follow the OPAQUE RFC except the OPRF evaluation is threshold-distributed across the committee — the user collects K (or t-of-K) blinded evaluations and recombines locally. The committee never sees the password, never sees the recovery envelope, and can't precompute a dictionary even by colluding below the threshold.
+
+2. **Signed-assertion token format.** After OPAQUE authenticates the user-committee session, the committee co-signs (Ed25519 today; threshold-signed via v2.10 BLS once it ships) a structured assertion of the form
+   ```
+   { iss = chain_id, sub = user_identity, aud = rp_identity,
+     iat = unix_ts,  exp = iat + ttl,
+     nonce, height, state_root }
+   ```
+   The relying party verifies the committee signature against the on-chain committee pubkey set (resolved via v2.2 state_proof RPC), with no trust in any single Determ node. Identical role to a SIWE message or an OIDC ID token, anchored on the chain instead of a centralised IdP.
+
+3. **Relying-party registration.** Services register as DApps via v2.18 DAPP_REGISTER. The registry record carries the RP's own identity + (optionally) a discovery URL. Users can discover RPs by querying the registry; RPs can authenticate users by emitting a challenge via v2.19 DAPP_CALL and verifying the user's signed response.
+
+**Black-box PAKE invariant.** The framework treats the aPAKE primitive as a black box meeting the standard "authenticate password against verifier without revealing password" property. SRP and OPAQUE both nominally satisfy this; OPAQUE additionally satisfies precomputation-resistance and verifier-secrecy-against-malicious-server, which the framework's security proofs quantify over but do not depend on by name. Hence the substitution is layered cleanly: the architectural contribution survives intact, the security claims tighten.
+
+**Dependencies.**
+
+| Block | Status |
+|---|---|
+| v2.10 threshold randomness (BLS12-381 + DKG) | 🔥 active. Provides the threshold-crypto plumbing the T-OPAQUE share-distribution layer needs. |
+| v2.14 OPAQUE wallet recovery | ⏳ not started. Exercises the single-server OPAQUE primitive in production; de-risks the threshold version. |
+| v2.18 DAPP_REGISTER | ✅ shipped. RP-registration channel. |
+| v2.19 DAPP_CALL | ✅ shipped. Challenge / assertion delivery channel. |
+| v2.26 On-chain key rotation | ⏳ not started. Without rotation, a compromised user key is irrecoverable; precondition for production DSSO. |
+
+**Cost.** ~4-6 weeks of focused work after the precondition blocks land:
+
+| Sub-component | Effort |
+|---|---|
+| T-OPRF + T-OPAQUE library (vendor + harden) | 1-2 weeks |
+| Wallet-side OPAQUE flow (overlaps with v2.14 single-server scope) | 1 week |
+| Server-side per-committee share storage + on-chain state binding | ~1 week |
+| Signed-assertion protocol + token format | ~3-5 days |
+| Reference relying-party DApp + integration test | ~3-5 days |
+| Spec doc + threat-model write-up | ~3-5 days |
+
+**Closes:** new capability — Determ becomes a usable identity-anchor for off-chain services. Removes the "log into this with my Determ identity" gap that prevents Determ from serving as a SIWE-class auth substrate.
+
+### v2.26 — On-chain key rotation
+
+**Motivation.** Today the only way to retire a compromised key is `DEREGISTER` + re-`REGISTER` under a new domain — losing the on-chain identity. For wallet UX this is unacceptable; for a DSSO that anchors user identity on-chain it's catastrophic (one wallet loss = identity loss across every RP that ever accepted that identity).
+
+**Mechanism.** New `ROTATE_KEY` tx type. Payload: new pubkey + old-key signature over `(domain, old_pubkey, new_pubkey, effective_height)`. Validator verifies the old-key signature; apply updates the registry entry to point at the new key from `effective_height` forward. Old key remains valid for the brief grace window so in-flight signatures finalise; rejected after grace.
+
+Optional: rotation cooldown (one rotation per N blocks per domain) to prevent griefing attacks.
+
+**Cost.** 1 week. New tx type + validator path + apply path + wallet CLI verb (`determ rotate-key`) + regression test.
+
+**Closes:** identity continuity. Unblocks v2.25's production posture.
+
+---
+
 ## God-protocol framing for Determ
 
 Determ explicitly does NOT aspire to be a "do-everything" chain. The competitive landscape (Ethereum, Cosmos, Polkadot, Aptos, Sui) saturates that space.
@@ -441,8 +512,9 @@ Under this framing, "god protocol" means **best-in-class at the narrow scope, no
 | Compliance / audit | None | v2.24 view-key disclosure |
 | Fair ordering | None | Deferred (research; v2.13 noted) |
 | DApp surface | None today | Themes 7 + v2.22/23/24 give the substrate |
+| Federated authentication / DSSO | None today | Theme 9 (v2.25 + v2.26): K-of-K committee as mutual-distrust IdP with T-OPAQUE |
 
-Total work to close: **~12-18 months focused engineering beyond what's already in V2-DESIGN.md** (themes 1-7 land in ~12-16 weeks per existing estimate; theme 8 + DApp ecosystem maturation add ~6-12 more months).
+Total work to close: **~13-19 months focused engineering beyond what's already in V2-DESIGN.md** (themes 1-7 land in ~12-16 weeks per existing estimate; theme 8 + theme 9 + DApp ecosystem maturation add ~7-13 more months).
 
 ### What this is NOT
 
