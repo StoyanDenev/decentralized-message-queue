@@ -120,13 +120,13 @@ After this analysis was written, S-033 shipped (Merkle root over canonical state
 
 **Closure scope.**
 
-| Property | Pre-S-033 | Post-S-033 | After v2.7 F2 |
-|---|---|---|---|
-| Two divergent K-of-K-signed instances can be minted | ✓ | ✓ | ✗ |
-| Both instances pass signature verification | ✓ | ✓ | ✗ |
-| Both instances pass apply | ✓ | ✗ (one rejects) | n/a (only one is signed) |
-| State divergence between honest nodes | up to 1 block | 0 blocks (apply-time detection) | 0 blocks |
-| Recovery window | next block's prev_hash | apply-time loud-fail + resync | n/a |
+| Property | Pre-S-033 | Post-S-033 (data layer, S-038 pending) | Post-S-033 + S-038 (apply gate firing) | After v2.7 F2 |
+|---|---|---|---|---|
+| Two divergent K-of-K-signed instances can be minted | ✓ | ✓ | ✓ | ✗ |
+| Both instances pass signature verification | ✓ | ✓ | ✓ | ✗ |
+| Both instances pass apply | ✓ | ✓ (gate skipped — state_root=0) | ✗ (one rejects) | n/a (only one is signed) |
+| State divergence between honest nodes | up to 1 block | up to 1 block (gate dormant) | 0 blocks (apply-time detection) | 0 blocks |
+| Recovery window | next block's prev_hash | next block's prev_hash | apply-time loud-fail + resync | n/a |
 
 **Why this is "partial" closure.** S-033 ensures divergent state cannot apply on an honest node. It does NOT prevent two committee-signed instances from circulating on the gossip layer — they merely fail apply-time verification on whichever instance is non-canonical. The structural claim "≤ 1 finalized block instance per height" (Safety.md §5.3) is preserved at the apply layer; the literal "≤ 1 valid K-of-K signature gathering per height" requires v2.7's consensus-layer fix.
 
