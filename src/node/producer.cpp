@@ -192,7 +192,15 @@ size_t count_round1_aborts(const std::vector<AbortEvent>& aborts) {
 
 size_t required_block_sigs(ConsensusMode mode, size_t committee_size) {
     if (mode == ConsensusMode::MUTUAL_DISTRUST) return committee_size;
-    // BFT: ceil(2K/3)
+    // BFT: Q = ceil(2 * committee_size / 3).
+    //
+    // Note: `committee_size` here is the BFT-shrunk committee (k_bft),
+    // NOT the genesis K. start_new_round (node.cpp ~L768) sets
+    // current_creator_domains_.size() = k_bft = ceil(2K/3) before this
+    // function gets called in BFT mode, so the two-level shrinkage looks
+    // like one level from this function's perspective. The result is
+    // Q = ceil(2·k_bft/3); at K=3 the shrinkage is degenerate (Q=k_bft=2);
+    // at K=6 Q=3 within k_bft=4; at K=9 Q=4 within k_bft=6.
     return (2 * committee_size + 2) / 3;
 }
 

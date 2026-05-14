@@ -1149,8 +1149,14 @@ void Node::handle_contrib_timeout() {
 void Node::handle_block_sig_timeout() {
     // rev.8 mode-aware: in MD mode, finalize only on full K-of-K (today's
     // behavior). In BFT mode, only the designated proposer finalizes, on
-    // ≥ ceil(2K/3) sigs. Designated proposer eliminates the silent-fork
-    // race (different peers picking different K-subsets).
+    // ≥ Q sigs where Q = ceil(2·k_bft/3) within the BFT-shrunk committee
+    // of size k_bft = ceil(2K/3). At K=3 the two-level shrinkage is
+    // degenerate (Q=k_bft=2); at K=6 Q=3 within k_bft=4. The committee
+    // size passed to required_block_sigs is current_creator_domains_.size()
+    // which is already the shrunk k_bft in BFT mode (start_new_round sets
+    // k_use = k_bft when escalation gates fire — see ~L768). Designated
+    // proposer eliminates the silent-fork race (different peers picking
+    // different K-subsets).
     auto mode = current_mode();
     size_t required = required_block_sigs(mode, current_creator_domains_.size());
     if (pending_block_sigs_.size() >= required) {
