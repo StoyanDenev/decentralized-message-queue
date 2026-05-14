@@ -542,13 +542,20 @@ v2.26 adds an on-chain `ROTATE_KEY` tx so a compromised key can be retired witho
 
 ### 12.2 Wire Format
 
-All messages are length-prefixed JSON over TCP:
+All messages are length-prefixed:
 
 ```
-[4 bytes BE length][JSON payload]
+[4 bytes BE length][envelope payload]
 ```
 
-The JSON envelope carries a `type` discriminator. A binary codec (S8) is on the v2 roadmap.
+Two codecs are supported per-pair via the A3 / S8 wire-version negotiation (PROTOCOL.md §16.1):
+
+* `kWireVersionLegacy = 0` — JSON envelope `{type: u8, payload: ...}`, default.
+* `kWireVersionBinary = 1` — compact binary envelope (see `src/net/binary_codec.cpp` for layout).
+
+HELLO advertises each side's `wire_version`; both sides negotiate down to `min(local, remote)` and use the negotiated codec for subsequent messages. HELLO itself is always JSON (it carries the version advertisement). Binary codec gracefully falls back to JSON serialization for any message type it can't encode.
+
+S-022 per-message-type body caps apply at deserialize time regardless of codec: 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. The 16 MB framing-layer ceiling (`kMaxFrameBytes`) is enforced at read time before the per-type check.
 
 ### 12.3 Gossip
 
