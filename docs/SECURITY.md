@@ -923,7 +923,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 **What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/determ.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
 
-**Why this is operational, not a vulnerability.** A bug-free codebase doesn't strictly need unit tests, but their absence makes regression-prevention impossible. Edge cases (`ContribMsg` with invalid `aborts_gen`, delay-worker exception handling, two same-height blocks in different orders, equivocation under network partition) require targeted unit tests; the integration scripts can't drive them.
+**Why this is operational, not a vulnerability.** A bug-free codebase doesn't strictly need unit tests, but their absence makes regression-prevention impossible. Edge cases (`ContribMsg` with invalid `aborts_gen` or same-generation duplicate, two same-height blocks in different orders, equivocation under network partition, V12/V13 cross-shard receipt fuzzing, S-022 per-message-type-cap boundary, S-014 token-bucket interactions across HELLO exemption) require targeted unit tests; the integration scripts can't drive them.
 
 **Resolution options.**
 
