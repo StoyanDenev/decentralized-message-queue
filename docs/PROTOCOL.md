@@ -22,12 +22,18 @@ Two address types coexist:
 A UTF-8 string. Convention: a DNS-style name (`alice.example`, `validator1.network`). No format constraint beyond not starting with `0x` and not being all hex.
 
 ### 2.2 Anonymous bearer wallet
-Key-derived. Format: `0x` + 64 lowercase hex characters (66 chars total).
+Key-derived. Format: `0x` + 64 hex characters (66 chars total).
 ```
 addr = "0x" + hex(ed25519_public_key)
 ```
 
-The `is_anon_address(s)` predicate in [`include/determ/types.hpp`](../include/determ/types.hpp) is canonical: `len == 66 && s[0..2] == "0x" && all hex`.
+**Canonical form is lowercase.** S-028 closure (`include/determ/types.hpp`) admits both cases at the RPC ingress / CLI input layer:
+
+* `is_anon_address(s)` — case-insensitive shape check (accepts `0xABC...` and `0xabc...`).
+* `normalize_anon_address(s)` — returns the lowercase canonical form for valid anon-shape inputs (domain names pass through unchanged, so RPC handlers can apply it uniformly).
+* `make_anon_address(pk)` — always emits lowercase canonical form.
+
+**Wire / storage invariant.** Every `Transaction` on the wire MUST carry the canonical lowercase form for anon-shape `from` and `to`. RPC `submit_tx` rejects non-canonical with a clear `"submitted tx.from is non-canonical (uppercase hex); anon addresses MUST be lowercase"` diagnostic — server-side normalization would invalidate the client's `signing_bytes`-bound signature, so the strict-input rule keeps store-keys unambiguous. Node-authored tx-create paths (`rpc_send`, `rpc_balance`) normalize before storage so users can paste mixed-case addresses without fragmenting balances.
 
 Bearer addresses **cannot** register, stake, or be selected as creators. They can only hold balance and send/receive `TRANSFER`.
 
