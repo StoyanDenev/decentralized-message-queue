@@ -250,7 +250,43 @@ Region matching is exact-string after ASCII-lowercase normalization. The chain's
 If a round accumulates `bft_escalation_threshold` (default 5) round-1 aborts at the same height AND `bft_enabled` is true AND the available pool is < K, the next round produces a `consensus_mode = BFT` block. Required signatures drop to `ceil(2K/3)`. A `bft_proposer` is deterministically chosen as `committee[proposer_idx(seed, abort_events, K)]`. The proposer must sign; up to `K - ceil(2K/3)` other positions may carry sentinel-zero signatures.
 
 ### 5.4 Abort handling
+
 When a member's local timer fires with insufficient contributions, they sign and broadcast an `AbortClaimMsg` naming the first missing creator. **M-1 matching claims** form a quorum certificate (`AbortEvent`) that all peers can adopt to advance the round in lockstep.
+
+```cpp
+struct AbortClaimMsg {
+    uint64    block_index;
+    uint8     round;                  // 1 = CONTRIB phase abort, 2 = BLOCK_SIG phase abort
+    Hash      prev_hash;
+    string    missing_creator;        // first absent committee member in selection order
+    string    claimer;                // this member's domain
+    Signature ed_sig;                 // Ed25519 over make_abort_claim_message(...)
+};
+```
+
+The Ed25519 signature covers a domain-separated commitment:
+```
+abort_claim_message = SHA256(block_index (u64)
+                          || round (u8)
+                          || prev_hash
+                          || missing_creator (length-prefixed UTF-8))
+```
+
+`make_abort_claim_message(block_index, round, prev_hash, missing_creator)` in `src/crypto/random.cpp` is the canonical encoder.
+
+```cpp
+struct AbortEvent {
+    uint8     round;                  // 1 or 2 (matches the underlying claims)
+    string    aborting_node;          // = missing_creator from the claims
+    int64     timestamp;              // first quorum claim's timestamp
+    Hash      event_hash;             // SHA256(round || aborting_node || timestamp || prev_random_state)
+    JSON      claims_json;            // inline array of the M-1 signed AbortClaimMsgs that quorumed
+};
+```
+
+`event_hash` mixes into the next round's randomness (§5.2 committee selection's `rand = SHA256(prev_rand ‖ abort_event.event_hash)`), so different abort sequences yield different committee re-selections — this is what defeats the "cartel keeps picking the same victim" pattern (S-011 closure depends on the rotation here being unpredictable to the cartel).
+
+Quorum semantics: `M - 1` matching claims (where `M = m_creators`, the committee size; one short of unanimity, since the aborting node won't sign a claim against themselves) is the certification threshold. Below quorum, a single claim is informational only and does not advance the round.
 
 ## 6. Equivocation slashing (rev.8 follow-on)
 
