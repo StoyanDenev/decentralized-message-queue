@@ -305,7 +305,12 @@ BASE = 10, MAX = 10000
 
 Only **Phase 1** aborts (`round=1` AbortEvents) count toward suspension. Phase 2 aborts can fire on a healthy creator when its block-sig arrival is delayed past the timer (timing skew); using them would inflate false-positive suspensions and harm liveness without improving censorship guarantees.
 
-A domain that **equivocates** (signs two different `block_digest`s at the same height) is permanently removed from the registry — `inactive_from` is set to the next block. Re-entry requires a fresh REGISTER (with a new Ed25519 key, and in `DOMAIN_INCLUSION` mode a new domain). In `STAKE_INCLUSION` mode the equivocator's stake is also fully forfeited; in `DOMAIN_INCLUSION` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
+A domain that **equivocates** is permanently removed from the registry — `inactive_from` is set to the next block. The protocol detects two equivocation surfaces (both digest-agnostic — the validator's V11 only checks "two distinct hashes signed by the same registered key"):
+
+1. **BlockSigMsg-level (rev.8)**: the validator signs `compute_block_digest(b)` for two different block bodies at the same height. Detection in `Node::apply_block_locked`.
+2. **ContribMsg same-generation (S-006 closure)**: the validator signs `make_contrib_commitment(...)` for two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection in `Node::on_contrib`.
+
+Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to slash all equivocation surfaces. Re-entry requires a fresh REGISTER (with a new Ed25519 key, and in `DOMAIN_INCLUSION` mode a new domain). In `STAKE_INCLUSION` mode the equivocator's stake is also fully forfeited; in `DOMAIN_INCLUSION` mode there's no stake to forfeit, but the registry-level deregistration is the punishment.
 
 ---
 
