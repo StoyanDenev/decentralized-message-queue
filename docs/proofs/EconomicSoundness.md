@@ -220,7 +220,7 @@ No randomness, no external state, no time-dependence. Two honest nodes applying 
 
 - **Fairness of lottery distribution among creators.** When a jackpot fires, the payout is distributed across `b.creators` (the K committee members). Dust (remainder of division by K) goes to `b.creators[0]`. The proof covers issuance schedule, not per-creator distribution equity. A creator's expected fair share is `(block_subsidy / K)` per block on average (same as FLAT).
 - **Inflation/deflation policy.** E4's perpetual-subsidy mode (`subsidy_pool_initial_ == 0`) is inflationary by design; E4 with a finite pool is deflationary post-exhaustion. The proof guarantees neither — they're operator-policy choices encoded at genesis.
-- **NEF formula choice.** The current implementation halves the pool on first-time REGISTER. The plan documents an alternative `nef = pool × 2 / (n × (n+1))` formula — the proof would hold under either since both are sum-preserving.
+- **NEF formula choice.** E1's canonical design is now lottery distribution (`plan.md` §E1): each first-time REGISTER draws against `cumulative_rand` for a fixed `nef_grant` with probability `1/nef_probability_denom`. The proof of A1's unitary-supply invariant holds for any sum-preserving distribution rule (lottery transfers `nef_grant` from pool to registrant on win, no-op on loss — strictly sum-preserving). Earlier geometric (`pool/2`) and harmonic (`pool · 2 / (n · (n+1))`) variants are retired from the design; the shipped geometric implementation in `chain.cpp` is flagged for lottery-rewrite under the E-track reconciliation item.
 - **Genesis-time accounting errors.** If genesis's `initial_balances` + `initial_stakes` + `zeroth_pool_initial` sum to a different value than what the operator intends, the chain enforces whatever `genesis_total_` evaluates to. This is operator responsibility (genesis hash includes all these fields; node refuses to start against a mismatched pinned hash).
 - **Floating-point / overflow at extreme values.** Counters are `uint64_t`. The invariant assertion subtracts `slashed + outbound` from `(genesis + subsidy + inbound)`. If `slashed + outbound` exceeds the positive sum, the underflow wraps — but this scenario requires breaking H1 (validators slashed for more than genesis ever held), which the apply path's per-tx guards (`min(SUSPENSION_SLASH, locked)`) prevent.
 
@@ -242,7 +242,7 @@ No randomness, no external state, no time-dependence. Two honest nodes applying 
 
 A reviewer can confirm soundness by:
 
-1. Running any of the 18 regression tests — the apply-tail assertion throws loudly on any A1 mismatch, so a passing test is a per-block invariant verification.
+1. Running any of the regression tests in `tools/test_*.sh` — the apply-tail assertion throws loudly on any A1 mismatch, so every passing test is a per-block invariant verification across whatever block sequence that test produces.
 2. Grepping for `+=` / `-=` on `accumulated_*` and `genesis_total_`: every mutation site should be inside `apply_transactions` and paired with the corresponding state mutation.
 3. Confirming the snapshot path round-trips all five counters; restore_from_snapshot's `value()` defaults are conservative (zero, equivalent to a fresh chain) so old snapshots load with degraded-but-consistent state.
 
