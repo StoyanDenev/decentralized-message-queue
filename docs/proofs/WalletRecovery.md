@@ -47,7 +47,7 @@ Inputs: `RecoverySetup`, password `P`, guardian indices `G ⊆ {0..N-1}` with `|
 
 ## 2. Theorem statements
 
-**Theorem T-12 (Below-threshold information theoretic security).** Let `k_1, ..., k_{T-1}` be the keys associated with any `T-1` envelopes. Under:
+**Theorem T-15 (Below-threshold information theoretic security).** Let `k_1, ..., k_{T-1}` be the keys associated with any `T-1` envelopes. Under:
 
 - **(SSS)** Shamir's secret sharing over GF(2⁸) with threshold `T` and uniform-random polynomial coefficients.
 
@@ -59,26 +59,26 @@ $$
 
 In plain terms: any `T-1` shares — even with cryptographic keys cleanly recovered — reveal zero bits about the wallet seed.
 
-**Theorem T-13 (AEAD envelope binding).** Under:
+**Theorem T-16 (AEAD envelope binding).** Under:
 
 - **(A1)** Ed25519 EUF-CMA (F0 §2.2)
 - **(AES-GCM)** AES-256-GCM unforgeability — distinguishing a valid (ciphertext, tag) pair from a forged one is `≤ 2⁻¹²⁸ + ε_AES` per attempt, where `ε_AES` is the AES advantage of a chosen-plaintext-and-ciphertext distinguisher (negligible under standard cryptographic assumptions).
 
 For any envelope `env_i` with `k_i` unknown to the adversary, any modification to the ciphertext, AAD, nonce, or tag causes `decrypt(env_i, k_i, aad)` to return failure with probability `≥ 1 - 2⁻¹²⁸`. Equivalently: a bit-flip on a share survives at most negligibly often.
 
-**Theorem T-14 (OPAQUE adapter substitution invariance).** Let `A_stub` (Phase 5) and `A_real` (Phase 6) denote two implementations of the `opaque_adapter` interface satisfying:
+**Theorem T-17 (OPAQUE adapter substitution invariance).** Let `A_stub` (Phase 5) and `A_real` (Phase 6) denote two implementations of the `opaque_adapter` interface satisfying:
 
 - `register_password(P, i) → (record_i, export_key_i)` such that `export_key_i ∈ {0,1}²⁵⁶`.
 - `authenticate_password(P, record_i, i) → export_key_i` iff `P` matches the registration password.
 
 Then any RecoverySetup created with `A_stub` is recoverable under `A_stub` iff under `A_real` (i.e., the recovery flow does not depend on the adapter's *implementation*, only its API contract). The suite-tag mismatch gate prevents cross-adapter recovery (different suite IDs are not interchangeable).
 
-**Theorem T-15 (End-to-end recovery soundness under composite adversary).** Let an adversary `A` simultaneously:
+**Theorem T-18 (End-to-end recovery soundness under composite adversary).** Let an adversary `A` simultaneously:
 
 1. Compromise up to `T-1` guardians (recover their stored `(env_i, record_i)` data).
 2. Mount up to `Q` online authentication attempts against any single uncompromised guardian.
 
-Under T-12, T-13, T-14, and:
+Under T-15, T-16, T-17, and:
 
 - **(OPAQUE-soundness)** Real OPAQUE prevents offline password grind: an adversary holding `record_i` from a single guardian cannot test password guesses without interacting with that guardian (RFC 9807, Theorem 4.1).
 
@@ -92,7 +92,7 @@ where `bits_password` is the password entropy and `|G_active|` is the count of u
 
 For a high-entropy password (`≥ 60 bits`) and modest `Q = 2^16` (rate-limited guardians), the bound is dominated by `2⁻⁴⁴` — strongly negligible for realistic adversary budgets.
 
-**Corollary T-15.1 (Stub-mode degradation).** Under the Phase 5 stub adapter, OPAQUE-soundness does **not** hold: a single compromised guardian who knows `record_i` can offline-grind the password by recomputing `Argon2id(P || i, salt, 32)` for each candidate `P`. The stub's bound degrades to:
+**Corollary T-18.1 (Stub-mode degradation).** Under the Phase 5 stub adapter, OPAQUE-soundness does **not** hold: a single compromised guardian who knows `record_i` can offline-grind the password by recomputing `Argon2id(P || i, salt, 32)` for each candidate `P`. The stub's bound degrades to:
 
 ```
 Pr[A recovers s with 1 compromised guardian] ≤ Q · 2^(-bits_password) / Argon2id_cost
@@ -102,7 +102,7 @@ where `Q` here is the adversary's offline-attempt budget (no longer rate-limited
 
 ---
 
-## 3. Proof of T-12 (Shamir below-threshold ITS)
+## 3. Proof of T-15 (Shamir below-threshold ITS)
 
 By construction of Shamir's secret sharing. For each byte position `b` of `s`, the share value `y_i^{(b)}` is the evaluation of a polynomial:
 
@@ -120,7 +120,7 @@ This is the standard ITS argument for Shamir's SSS; reproduced here for complete
 
 ---
 
-## 4. Proof of T-13 (AEAD binding)
+## 4. Proof of T-16 (AEAD binding)
 
 Direct from AES-256-GCM's strong unforgeability (SUF-CMA). The envelope's tag covers `(nonce, ciphertext, AAD)` via the GCM construction. Any single-bit modification to any of these inputs produces a distinct GHASH evaluation; matching the original tag requires either:
 
@@ -129,11 +129,11 @@ Direct from AES-256-GCM's strong unforgeability (SUF-CMA). The envelope's tag co
 
 Therefore `decrypt(modified_env, k_i, aad) = ⊥` with probability `≥ 1 - 2⁻¹²⁸`. ∎
 
-The wallet's apply-side guards add a second layer: AAD binding includes guardian_id + scheme version. A share modified by re-encrypting under a different (guardian_id, version) tuple has AAD mismatch on decrypt and fails T-13's binding check immediately.
+The wallet's apply-side guards add a second layer: AAD binding includes guardian_id + scheme version. A share modified by re-encrypting under a different (guardian_id, version) tuple has AAD mismatch on decrypt and fails T-16's binding check immediately.
 
 ---
 
-## 5. Proof of T-14 (adapter substitution)
+## 5. Proof of T-17 (adapter substitution)
 
 By the adapter API contract:
 
@@ -148,7 +148,7 @@ Therefore the recovery flow is implementation-substitution invariant under match
 
 ---
 
-## 6. Proof of T-15 (end-to-end composite)
+## 6. Proof of T-18 (end-to-end composite)
 
 Adversary `A` has access to:
 
@@ -159,13 +159,13 @@ To recover `s`, `A` must obtain `T` valid shares. With `T-1` from compromise, `A
 
 **Path 1: Brute-force the password.** Each guardian rate-limits authentication attempts, so `A` is bounded by `Q` attempts total. Each attempt succeeds with probability `1 / 2^{bits_password}` for a uniform random password. Probability of any success: `≤ Q / 2^{bits_password}`.
 
-**Path 2: Forge an AEAD tag on an existing envelope.** By T-13, probability `≤ 2⁻¹²⁸` per envelope, `≤ |G_active| · 2⁻¹²⁸` over all active envelopes.
+**Path 2: Forge an AEAD tag on an existing envelope.** By T-16, probability `≤ 2⁻¹²⁸` per envelope, `≤ |G_active| · 2⁻¹²⁸` over all active envelopes.
 
-**Path 3: Break the Shamir bound (below-threshold leak).** By T-12, probability `= 0` (information-theoretic).
+**Path 3: Break the Shamir bound (below-threshold leak).** By T-15, probability `= 0` (information-theoretic).
 
 Combined: `Pr[A recovers s] ≤ Q · 2^{-bits_password} + |G_active| · 2⁻¹²⁸`. ∎
 
-The dominant term is the brute-force path against the password; this is exactly where OPAQUE-soundness matters. Under real OPAQUE, the adversary cannot accelerate the brute-force via offline computation — every guess requires a fresh online interaction with a rate-limited guardian. Under the stub, this property collapses (T-15.1).
+The dominant term is the brute-force path against the password; this is exactly where OPAQUE-soundness matters. Under real OPAQUE, the adversary cannot accelerate the brute-force via offline computation — every guess requires a fresh online interaction with a rate-limited guardian. Under the stub, this property collapses (T-18.1).
 
 ---
 
@@ -226,7 +226,7 @@ A reviewer can confirm soundness by:
 
 ## 10. Conclusion
 
-T-12 + T-13 + T-14 + T-15 establish that Determ's wallet recovery primitive provides strong information-theoretic + cryptographic guarantees against composite adversary models:
+T-15 + T-16 + T-17 + T-18 establish that Determ's wallet recovery primitive provides strong information-theoretic + cryptographic guarantees against composite adversary models:
 
 - Below-threshold compromise leaks **zero** information about the seed.
 - AEAD prevents undetected share tampering (`2⁻¹²⁸` per attempt).
