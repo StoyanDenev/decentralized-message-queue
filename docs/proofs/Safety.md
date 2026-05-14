@@ -183,5 +183,6 @@ The safety predicate proved here corresponds to the implementation chain:
 | `signing_bytes` injectivity L-1.2 | `src/chain/block.cpp::Block::signing_bytes` |
 | Block digest L-1.2 | `src/node/producer.cpp::compute_block_digest` |
 | Equivocation detection (clause 2) | `src/node/node.cpp::apply_block_locked` (cross-block check) + FA6 |
+| State commitment + apply-time gate (S-033 + S-038, S-030 D1/D2 apply-layer closure) | `src/chain/chain.cpp::compute_state_root` (Merkle root) + `apply_transactions` (`if (b.state_root != zero) verify` gate) + `src/node/node.cpp::try_finalize_round` (producer populates `body.state_root` via tentative-chain dry-run before broadcast — S-038 closure) |
 
 A future reviewer can re-validate the proof by reading the source-level objects in the right column against the predicates in the left.
