@@ -3082,8 +3082,11 @@ json Node::rpc_state_proof(const std::string& ns,
     // ASCII key) are exposed here; composite-key namespaces
     // (i/m/p) are out of scope for this RPC.
     std::vector<uint8_t> k;
-    if (ns == "a" || ns == "s" || ns == "r" || ns == "b" || ns == "k") {
-        // "a:" / "s:" / "r:" / "b:" / "k:" + key string
+    if (ns == "a" || ns == "s" || ns == "r" || ns == "d" || ns == "b" || ns == "k") {
+        // "a:" / "s:" / "r:" / "d:" / "b:" / "k:" + key string
+        // (d: namespace = v2.18 DApp registry; same simple-key pattern
+        // as accounts/stakes/registrants, so the light-client path
+        // V2-DAPP-DESIGN.md §263 describes works as-is.)
         k.reserve(2 + key.size());
         k.push_back(ns[0]);
         k.push_back(':');
@@ -3096,7 +3099,7 @@ json Node::rpc_state_proof(const std::string& ns,
         k.push_back('k'); k.push_back(':');
         k.insert(k.end(), composite.begin(), composite.end());
     } else {
-        return {{"error", "unsupported namespace; use a|s|r|b|k|c"}};
+        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c"}};
     }
 
     auto proof_opt = chain_.state_proof(k);
