@@ -68,6 +68,34 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 
 To bootstrap from a snapshot, set `snapshot_path` in the node's `config.json` and `determ start`. The node will skip per-block replay and install state directly.
 
+## State commitment + light-client RPC (v2.1 + v2.2)
+
+| Command | Purpose |
+|---|---|
+| `determ state-root [--rpc-port N]` | Print the chain's Merkle state root + height + head_hash. Operators can call this against multiple nodes to detect silent state divergence (a real S-030 D1/D2 attack would manifest as same height but different state_root across nodes). |
+| `determ state-proof --ns {a\|s\|r\|b\|k\|c} --key <name> [--rpc-port N]` | Fetch a Merkle inclusion proof for any state entry. Namespaces: `a` = account, `s` = stake, `r` = registry, `b` = beacon-anchor, `k` = applied-inbound-receipt, `c` = merge-state. Light-client primitive: the proof verifies against the current `state_root` (which is committee-signed) without re-executing the chain. |
+
+## DApp substrate RPC (v2.18 + v2.19)
+
+| Command | Purpose |
+|---|---|
+| `determ submit-dapp-register --priv <hex> --from <domain> --dapp-id <name> [--metadata-hex <hex>] [--stake <N>] [--fee <N>] [--rpc-port N]` | Register a DApp on-chain. Idempotent re-register updates metadata. Stake is the anti-spam deposit. |
+| `determ submit-dapp-call --priv <hex> --from <domain> --dapp-id <name> --payload-hex <hex> [--fee <N>] [--rpc-port N]` | Submit a DAPP_CALL routed to the named DApp. Payload is application-specific. |
+| `determ dapp-list [--rpc-port N]` | List registered DApps. |
+| `determ dapp-info <dapp_id> [--rpc-port N]` | Detail for one DApp (owner, metadata, stake, registered_at, inactive_from). |
+| `determ dapp-messages <dapp_id> [--from-height N] [--rpc-port N]` | Poll DAPP_CALL events addressed to a DApp. Pagination via from-height + page-limit (default 256 events per call). |
+
+## In-process tests (test-* CLI subcommands)
+
+These are deterministic, network-free smoke tests embedded as CLI subcommands. They build an in-process chain + node and assert protocol invariants. Each `tools/test_*.sh` shell script invokes the corresponding `determ test-*` subcommand and asserts the result.
+
+| Command | Purpose | Paired shell test |
+|---|---|---|
+| `determ test-atomic-scope` | A9 Phase 2D nested-scope rollback primitive | `tools/test_atomic_scope.sh` |
+| `determ test-composable-batch` | COMPOSABLE_BATCH all-or-nothing semantics under partial failure | `tools/test_composable_batch.sh` |
+| `determ test-dapp-register` | v2.18 DAPP_REGISTER apply path | `tools/test_dapp_register.sh` |
+| `determ test-dapp-call` | v2.19 DAPP_CALL routing + apply path | `tools/test_dapp_call.sh` |
+
 ## Forensics / governance
 
 | Command / RPC | Purpose |
