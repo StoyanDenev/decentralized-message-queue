@@ -124,7 +124,7 @@ If the receiver mis-identifies `Pool_src` (e.g., uses the wrong region filter), 
 | Component | Source |
 |---|---|
 | Per-validator region tag (REGISTER tx payload) | `src/chain/chain.cpp::apply_transactions` REGISTER branch |
-| Per-shard `committee_region` (genesis / manifest) | `src/chain/genesis.cpp::GenesisConfig` |
+| Per-shard `committee_region` (genesis / manifest) | `include/determ/chain/genesis.hpp::GenesisConfig` (loaded by `src/chain/genesis.cpp`) |
 | Region-filtered eligible pool | `src/node/registry.cpp::eligible_in_region` |
 | Validator-side region filter | `src/node/validator.cpp::check_creator_selection` (calls `registry.eligible_in_region(committee_region)` before `select_m_creators`) |
 | Producer-side region filter | `src/node/node.cpp::check_if_selected` (mirrors the same `registry_.eligible_in_region(cfg_.committee_region)` filter the validator uses) |
