@@ -223,20 +223,20 @@ state_root (32 bytes) — bound only when non-zero (S-033 conditional binding: p
 
 ### 4.1.1 `state_root` algorithm (v2.1 / S-033)
 
-`state_root` is a SHA-256 Merkle commitment over ten namespaced state slices. Every leaf is the pair `(namespaced_key_bytes, value_hash)`; leaves are sorted by `namespaced_key_bytes` (lexicographic over raw bytes) before Merkle assembly. Namespace prefixes domain-separate the maps so a same-string key appearing in two maps (e.g., a `domain` that is both an account holder and a registrant) produces two distinct leaves.
+`state_root` is a SHA-256 Merkle commitment over ten logical namespaced state slices encoded into nine physical prefix-byte families. Every leaf is the pair `(namespaced_key_bytes, value_hash)`; leaves are sorted by `namespaced_key_bytes` (lexicographic over raw bytes) before Merkle assembly. Namespace prefixes domain-separate the maps so a same-string key appearing in two maps (e.g., a `domain` that is both an account holder and a registrant) produces two distinct leaves. (The 10th logical namespace — A1 counters — sits inside the `k:` constants prefix as a composite `k:c:` sub-namespace; nine wire-level prefixes, ten conceptual slices.)
 
-| Prefix | Source map | Key suffix | Value hash inputs |
+| Prefix bytes | Source map | Key suffix (raw bytes after prefix) | Value hash inputs |
 |---|---|---|---|
 | `a:` | `accounts_`                  | `domain` (utf8)                   | `balance_u64 ‖ next_nonce_u64` |
 | `s:` | `stakes_`                    | `domain` (utf8)                   | `locked_u64 ‖ unlock_height_u64` |
 | `r:` | `registrants_`               | `domain` (utf8)                   | `ed_pub(32) ‖ registered_at_u64 ‖ active_from_u64 ‖ inactive_from_u64 ‖ region_len_u64 ‖ region_bytes` |
 | `d:` | `dapp_registry_` (v2.18)     | `domain` (utf8)                   | `service_pubkey(32) ‖ registered_at_u64 ‖ active_from_u64 ‖ inactive_from_u64 ‖ endpoint_url ‖ topics[] ‖ retention_u64 ‖ metadata` (length-prefixed) |
-| `i:` | `applied_inbound_receipts_`  | `src_shard_be8 ‖ tx_hash(32)`     | `0x01` (presence marker) |
+| `i:` | `applied_inbound_receipts_`  | `src_shard_be8 ‖ tx_hash(32)`     | `0x01` (presence marker; single byte) |
 | `b:` | `abort_records_` (S-032)     | `domain` (utf8)                   | `count_u64 ‖ last_block_u64` |
 | `m:` | `merge_state_` (R7)          | `shard_id_be4`                    | `partner_id_u64 ‖ refugee_region_len_u64 ‖ refugee_region_bytes` |
 | `p:` | `pending_param_changes_`     | `eff_height_be8 ‖ idx_be4`        | `name_len_u64 ‖ name ‖ value_len_u64 ‖ value_bytes` |
-| `k:` | genesis-pinned constants     | fixed name (`block_subsidy`, `subsidy_pool_initial`, `subsidy_mode`, `lottery_jackpot_multiplier`, `min_stake`, `suspension_slash`, `unstake_delay`, `shard_salt`, ...) | constant-specific (mostly a single `u64`) |
-| `c:` | A1 unitary-balance counters  | fixed name (`genesis_total`, `accumulated_subsidy`, `accumulated_slashed`, `accumulated_inbound`, `accumulated_outbound`) | `value_u64` |
+| `k:` | genesis-pinned constants     | fixed name (`block_subsidy`, `subsidy_pool_initial`, `subsidy_mode`, `lottery_jackpot_multiplier`, `min_stake`, `suspension_slash`, `unstake_delay`, `merge_threshold_blocks`, `revert_threshold_blocks`, `merge_grace_blocks`, `shard_count`, `my_shard_id`, `shard_salt`) | `value_u64` (32B for `shard_salt`) |
+| `k:c:` | A1 unitary-balance counters  | fixed name (`genesis_total`, `accumulated_subsidy`, `accumulated_slashed`, `accumulated_inbound`, `accumulated_outbound`) — counters use the composite `k:c:` prefix per `const_leaf("c:NAME", ...)` in `build_state_leaves`; exposed by `state_proof` RPC as `--ns c` for convenience | `value_u64` |
 
 `be8` = 8-byte big-endian, `be4` = 4-byte big-endian; SHA-256 builder appends multi-byte integers in big-endian (`crypto::SHA256Builder::append(uint64_t)` etc.). The Merkle tree itself is a balanced binary tree with SHA-256 inner nodes (`merkle_root` helper in `src/crypto/merkle.cpp`). Empty slices contribute no leaves; if the entire leaf vector is empty the root is the empty-tree sentinel `Hash{}`.
 
