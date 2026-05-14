@@ -625,27 +625,22 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
   "accumulated_outbound":  <u64>,
 
   // Abort + merge bookkeeping
-  "abort_records": [{"domain", "first_round", "round_count",
-                     "suspended_until", ...}, ...],
-  "merge_state":   [{"shard_id", "partner_id", "merging_shard_region",
-                     "effective_height", "evidence_window_start"}, ...],
+  "abort_records": [{"domain", "count", "last_block"}, ...],
+  "merge_state":   [{"shard_id", "partner_id", "refugee_region"}, ...],
 
   // A5 governance pending PARAM_CHANGEs (staged for effective_height)
   "pending_param_changes": [
     {"effective_height": <u64>,
-     "entries": [{"name", "value_hex"}, ...]}, ...
+     "entries": [{"name", "value": "<hex>"}, ...]}, ...
   ],
-
-  // v2.18 DApp registry (state_root contributes via "d:" namespace)
-  "dapp_registry": [{"domain", "service_pubkey", "endpoint_url",
-                     "topics", "retention", "metadata",
-                     "stake", "registered_at", "inactive_from"}, ...],
 
   // Chain-continuity tail headers + per-header state_root
   "headers": [<Block JSON>, ...]   // last N blocks; each carries its own
                                     // state_root (S-033)
 }
 ```
+
+> **Known gap (tracked).** The on-disk snapshot does **not** currently include `dapp_registry_`, even though it contributes to `state_root` via the `d:` namespace (§4.1.1). A chain with any active DApp registration cannot be restored via `restore_from_snapshot` today — the `state_root` recompute will diverge. Track-A item: add `serialize_state` / `restore_from_snapshot` emission + readback for `dapp_registry_`, plus a regression test that snapshots a DApp-active chain and restores it. The bug is latent because no current test exercises both surfaces together.
 
 ### 11.1 `restore_from_snapshot` verification
 
