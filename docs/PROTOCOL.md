@@ -219,16 +219,24 @@ state_root (32 bytes) — bound only when non-zero (S-033 conditional binding: p
 
 ### 4.1.1 `state_root` algorithm (v2.1 / S-033)
 
-`state_root` is a SHA-256 Merkle commitment over six namespaced state slices:
+`state_root` is a SHA-256 Merkle commitment over ten namespaced state slices. Every leaf is the pair `(namespaced_key_bytes, value_hash)`; leaves are sorted by `namespaced_key_bytes` (lexicographic over raw bytes) before Merkle assembly. Namespace prefixes domain-separate the maps so a same-string key appearing in two maps (e.g., a `domain` that is both an account holder and a registrant) produces two distinct leaves.
 
-- `a:` accounts (balance + nonce)
-- `s:` stakes (locked amount + unlock_height)
-- `r:` registrants (pubkey + region + inactive_from)
-- `b:` beacon-anchor data (per-shard)
-- `k:` applied_inbound_receipts (cross-shard dedup set)
-- `c:` merge_state (R7 under-quorum-merge entries)
+| Prefix | Source map | Key suffix | Value hash inputs |
+|---|---|---|---|
+| `a:` | `accounts_`                  | `domain` (utf8)                   | `balance_u64 ‖ next_nonce_u64` |
+| `s:` | `stakes_`                    | `domain` (utf8)                   | `locked_u64 ‖ unlock_height_u64` |
+| `r:` | `registrants_`               | `domain` (utf8)                   | `ed_pub(32) ‖ registered_at_u64 ‖ active_from_u64 ‖ inactive_from_u64 ‖ region_len_u64 ‖ region_bytes` |
+| `d:` | `dapp_registry_` (v2.18)     | `domain` (utf8)                   | `service_pubkey(32) ‖ registered_at_u64 ‖ active_from_u64 ‖ inactive_from_u64 ‖ endpoint_url ‖ topics[] ‖ retention_u64 ‖ metadata` (length-prefixed) |
+| `i:` | `applied_inbound_receipts_`  | `src_shard_be8 ‖ tx_hash(32)`     | `0x01` (presence marker) |
+| `b:` | `abort_records_` (S-032)     | `domain` (utf8)                   | `count_u64 ‖ last_block_u64` |
+| `m:` | `merge_state_` (R7)          | `shard_id_be4`                    | `partner_id_u64 ‖ refugee_region_len_u64 ‖ refugee_region_bytes` |
+| `p:` | `pending_param_changes_`     | `eff_height_be8 ‖ idx_be4`        | `name_len_u64 ‖ name ‖ value_len_u64 ‖ value_bytes` |
+| `k:` | genesis-pinned constants     | fixed name (`block_subsidy`, `subsidy_pool_initial`, `subsidy_mode`, `lottery_jackpot_multiplier`, `min_stake`, `suspension_slash`, `unstake_delay`, `shard_salt`, ...) | constant-specific (mostly a single `u64`) |
+| `c:` | A1 unitary-balance counters  | fixed name (`genesis_total`, `accumulated_subsidy`, `accumulated_slashed`, `accumulated_inbound`, `accumulated_outbound`) | `value_u64` |
 
-Each slice serializes its entries in deterministic key-sorted order using a fixed-length encoding (e.g., accounts: `SHA-256(balance_le ‖ nonce_le)`). Leaves are namespace-prefixed (`"a:" + key`) and the Merkle tree is built as a binary tree with SHA-256 inner nodes (`merkle_root` helper in `src/crypto/merkle.cpp`). Empty slices contribute the empty-tree sentinel; the overall root binds all six.
+`be8` = 8-byte big-endian, `be4` = 4-byte big-endian; SHA-256 builder appends multi-byte integers in big-endian (`crypto::SHA256Builder::append(uint64_t)` etc.). The Merkle tree itself is a balanced binary tree with SHA-256 inner nodes (`merkle_root` helper in `src/crypto/merkle.cpp`). Empty slices contribute no leaves; if the entire leaf vector is empty the root is the empty-tree sentinel `Hash{}`.
+
+The canonical reference is `src/chain/chain.cpp::build_state_leaves`; light-client `state_proof` (v2.2) and `compute_state_root` share this function so inclusion proofs verify against any block's stored `state_root` without re-deriving the leaf-encoding scheme.
 
 Validators recompute `state_root` after `apply_transactions` and reject blocks whose stored `state_root` doesn't match the recomputed value. Snapshot restore performs the same check against the tail head's stored `state_root`. Inclusion proofs against `state_root` are exposed via the `state_proof` RPC (v2.2) — light clients query any node and verify the returned sibling-hash path locally.
 
