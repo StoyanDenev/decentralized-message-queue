@@ -8,17 +8,19 @@
 #   3. After a TRANSFER applies, state_root differs from the pre-transfer
 #      value (state changed → commitment changed).
 #
-# What this test does NOT verify (deferred to producer-side population +
-# multi-host harness):
-#   * Block.state_root populated by producer.
-#   * Validator rejection of tampered state_root in a finalized block.
-#   * Cross-node state_root agreement at exactly matching heights.
-#     (Single-host tests run all queries sequentially while the chain
-#     advances, making height-synchronization brittle. Cross-node
-#     agreement is exercised structurally by the existing 18 chain
-#     regression tests — if the chains' state ever diverged, those
-#     would fail. The state_root is a deterministic byte-canonical hash
-#     over that state.)
+# Producer-side wiring (S-038 closure, post-this-test): the live
+# state_root RPC value also matches Block.state_root as populated by
+# Node::try_finalize_round via tentative-chain dry-run. The S-038-side
+# verification (snapshot tail head's state_root matches receiver's
+# recomputed value end-to-end) is exercised by tools/test_dapp_snapshot.sh
+# — see assertions 10-12 there.
+#
+# Cross-node state_root agreement at exactly matching heights is
+# exercised structurally by every multi-node test in tools/test_*.sh —
+# if the chains' state ever diverged, those tests would fail at the
+# K-of-K signature-gathering or apply-time state_root-mismatch path.
+# The state_root is a deterministic byte-canonical Merkle root over
+# the post-apply state.
 #
 # Run from repo root: bash tools/test_state_root.sh
 set -u
