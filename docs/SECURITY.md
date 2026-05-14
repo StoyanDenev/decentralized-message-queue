@@ -874,7 +874,7 @@ Net effect: the divergence is closed at all three layers. Option 1 (unified `val
 
 `select_after_abort_m` pins `new_first` at slot 0 of the shuffle buffer (the abort-hash offset is part of the consensus contract) and Fisher-Yates the remaining `m−1` positions.
 
-**Determinism.** Both `K` and `N` are inputs to the function; every node picks the same branch and the same indices. No fork height needed because no chain history sits on the K > N/2 path — current regression tests run with M ≤ 2, K ≤ M, N_registered ≤ 3 and all hit the rejection branch (verified: governance, equivocation, BFT escalation, bearer, atomic_scope, dapp_register all green after the change).
+**Determinism.** Both `K` and `N` are inputs to the function; every node picks the same branch and the same indices. No fork-height management needed because no chain history sits on the K > N/2 path under the current regression suite: most tests use `single_test` (M=K=3, N_registered ≤ 3) which trips the partial-FY branch via `2K > N` when only 3 validators register; `web` / `web_test` (M=3 K=2) and `cluster_test` (M=K=3) similarly run with small N. Tests with explicitly larger pools (`regional_test` M=5 K=4, `global_test` M=7 K=5) exercise both branches depending on how many validators register at boot. All branches share the same SHA-256-derived randomness so committee outputs are deterministic across nodes regardless of which branch fired.
 
 **Effort.** ~40 LOC including comments. Header doc updated in `include/determ/crypto/random.hpp`.
 
