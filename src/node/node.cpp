@@ -974,9 +974,12 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
     // Cost: O(state size) — bounded by the same primitive that closes
     // S-032 (chain.compute_state_root reads cached fields where
     // available). The Chain copy is bounded by std::map heap allocation
-    // for the four primary state maps. A future v2.4 overlay/delta
-    // model removes the copy by computing state_root from the apply
-    // overlay directly.
+    // for the four primary state maps. v2.4 (A9 atomic-apply overlay/
+    // delta model) has shipped and reduces the per-apply copy via lazy
+    // snapshotting + lock-free reader views; the tentative-chain copy
+    // here is the cheaper sibling path used during build-body's
+    // dry-run digest computation, where overlay infrastructure isn't
+    // worth the extra plumbing for a one-shot dry run.
     {
         chain::Chain tentative_chain = chain_;
         // Chain::append() runs apply_transactions internally. It also

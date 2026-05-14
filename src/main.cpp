@@ -1512,7 +1512,7 @@ static int cmd_submit_param_change(int argc, char** argv) {
 // Builds a canonical MergeEvent payload, wraps it in a Transaction
 // from a registered domain, and submits via submit_tx RPC. Operator-
 // driven for v1.x; auto-detection on the beacon (eligible_in_region
-// < 2K observation window) is Phase 6 work.
+// < 2K observation window) is tracked as v2.11 in docs/V2-DESIGN.md.
 static int cmd_submit_merge_event(int argc, char** argv) {
     std::string priv_hex, from_domain, event_str, refugee_region;
     uint32_t shard_id = 0, partner_id = 0;
