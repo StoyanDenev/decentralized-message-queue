@@ -19,7 +19,7 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 
 | Command | Returns |
 |---|---|
-| `determ status [--rpc-port N]` | Chain head, head_hash, role, shard_id, epoch_index, peer_count, mempool, mode counters |
+| `determ status [--rpc-port N]` | Chain head, head_hash, role, shard_id, epoch_index, peer_count, mempool, mode counters + `protections` block (current state of every operator-tunable security/log flag — `rpc_localhost_only`, `rpc_hmac_auth`, `rpc_rate_limit`, `gossip_rate_limit`, `log_quiet`, `bft_enabled`, `sharding_mode`). Monitoring systems can alert on flag drift in production. |
 | `determ peers [--rpc-port N]` | Connected peer addresses |
 | `determ show-block <i> [--rpc-port N]` | Full block JSON at index `i` |
 | `determ chain-summary [--last N] [--rpc-port N]` | Compact view of last `N` blocks (default 10) |
