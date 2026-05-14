@@ -55,6 +55,7 @@ json Config::to_json() const {
     j["abort_claim_ms"]  = abort_claim_ms;
     j["region"]          = region;
     j["committee_region"]= committee_region;
+    j["log_quiet"]       = log_quiet;
     return j;
 }
 
@@ -102,6 +103,7 @@ Config Config::from_json(const json& j) {
     // identical behavior with pre-R1 configs.
     c.region          = j.value("region",          std::string{});
     c.committee_region= j.value("committee_region",std::string{});
+    c.log_quiet       = j.value("log_quiet",        false);
     return c;
 }
 
@@ -1728,8 +1730,15 @@ void Node::apply_block_locked(const chain::Block& b) {
     // on restart — same correctness as pre-fix.
     enqueue_save();
 
-    std::cout << "[node] accepted block #" << b.index
-              << " creators=" << b.creators.size() << "\n";
+    // S-027: gate the per-block accept line behind log_quiet=false. Block
+    // index + creator-count is chain-public state but the line dominates
+    // log volume on a healthy chain (one per ~tx_commit_ms). Operators
+    // who want fewer logs set log_quiet=true; WARN/ERROR diagnostics
+    // continue to surface regardless.
+    if (!cfg_.log_quiet) {
+        std::cout << "[node] accepted block #" << b.index
+                  << " creators=" << b.creators.size() << "\n";
+    }
 
     // rev.9 B5: epoch boundary observability. When this block opens a
     // new epoch (height % epoch_blocks == 1, since the epoch's "rand

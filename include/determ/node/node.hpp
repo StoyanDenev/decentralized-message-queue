@@ -141,6 +141,22 @@ struct Config {
     uint32_t                 block_sig_ms{200};
     uint32_t                 abort_claim_ms{100};
 
+    // S-027: operator log verbosity. When false (default), every
+    // currently-emitted [node]/[gossip]/[rpc] line still surfaces — the
+    // closure documents the per-line content rather than suppressing it
+    // (see SECURITY.md §S-027 for the audit). When true (`log_quiet =
+    // true`), the chatty per-block / per-handshake / per-snapshot lines
+    // ([node] accepted block #N creators=K, [gossip] connected/
+    // disconnected, etc.) are suppressed; WARNING/ERROR diagnostics
+    // continue to surface. Production operators wanting fewer log lines
+    // (and a slightly smaller scrape attack surface against passive
+    // observers) set `log_quiet = true`; default behavior is unchanged.
+    //
+    // No secret material reaches the logs in either mode (audited in
+    // S-027 closure — only chain-public state + peer addresses + timing
+    // markers); the flag is operational hygiene, not a security gate.
+    bool                     log_quiet{false};
+
     nlohmann::json to_json() const;
     static Config  from_json(const nlohmann::json& j);
     static Config  load(const std::string& path);
