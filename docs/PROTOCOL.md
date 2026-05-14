@@ -131,6 +131,11 @@ struct Block {
     CrossShardReceipt[]   cross_shard_receipts;  // outbound (this shard → others)
     CrossShardReceipt[]   inbound_receipts;      // inbound (other shards → this shard)
     GenesisAlloc[]        initial_state;         // genesis only (index == 0)
+    Hash                  state_root;            // v2.1 / S-033: SHA-256 Merkle commitment to the
+                                                 // post-apply canonical state (accounts ∪ stakes ∪
+                                                 // registrants ∪ applied_inbound_receipts ∪
+                                                 // pending_param_changes ∪ merge_state). All zeros
+                                                 // on pre-S-033 blocks (backward-compat shim).
 };
 ```
 
@@ -157,7 +162,25 @@ equivocation_events[i].(equivocator, block_index, digest_a, sig_a, digest_b, sig
 cross_shard_receipts[i].(src_shard, dst_shard, src_block_index, src_block_hash, tx_hash, from, to, amount, fee, nonce) for i
 inbound_receipts[i].(src_shard, dst_shard, src_block_index, tx_hash, to, amount) for i  // narrower binding
 initial_state[i].(domain, ed_pub, balance, stake) for i  // genesis only
+state_root (32 bytes) — bound only when non-zero (S-033 conditional binding: pre-S-033 blocks have zero state_root, preserving byte-identical signing_bytes for backward compat; post-S-033 blocks contribute the field unconditionally).
 ```
+
+### 4.1.1 `state_root` algorithm (v2.1 / S-033)
+
+`state_root` is a SHA-256 Merkle commitment over six namespaced state slices:
+
+- `a:` accounts (balance + nonce)
+- `s:` stakes (locked amount + unlock_height)
+- `r:` registrants (pubkey + region + inactive_from)
+- `b:` beacon-anchor data (per-shard)
+- `k:` applied_inbound_receipts (cross-shard dedup set)
+- `c:` merge_state (R7 under-quorum-merge entries)
+
+Each slice serializes its entries in deterministic key-sorted order using a fixed-length encoding (e.g., accounts: `SHA-256(balance_le ‖ nonce_le)`). Leaves are namespace-prefixed (`"a:" + key`) and the Merkle tree is built as a binary tree with SHA-256 inner nodes (`merkle_root` helper in `src/crypto/merkle.cpp`). Empty slices contribute the empty-tree sentinel; the overall root binds all six.
+
+Validators recompute `state_root` after `apply_transactions` and reject blocks whose stored `state_root` doesn't match the recomputed value. Snapshot restore performs the same check against the tail head's stored `state_root`. Inclusion proofs against `state_root` are exposed via the `state_proof` RPC (v2.2) — light clients query any node and verify the returned sibling-hash path locally.
+
+See `docs/V2-DESIGN.md` v2.1 + v2.3 for the full design rationale; `docs/SECURITY.md` S-033 for the audit-closure path.
 
 ### 4.2 `compute_hash()`
 SHA-256 of `signing_bytes() || creator_block_sigs[0] || ... || creator_block_sigs[K-1]`.
