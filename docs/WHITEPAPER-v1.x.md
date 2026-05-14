@@ -120,12 +120,19 @@ Concrete-security bound: `2⁻²⁵⁶` per selective-abort attempt. See `docs/p
 
 ### 3.3 BFT escalation
 
-When the K-of-K committee cannot complete — typically because a member is offline or partitioned away — phase-1 aborts. After `bft_escalation_threshold` consecutive aborts at the same height (genesis-pinned, default 5), the next round falls back to BFT consensus:
+When the K-of-K committee cannot complete — typically because a member is offline or partitioned away — the round aborts. Four conditions must hold for the next round to fall back to BFT consensus (`src/node/node.cpp::start_new_round`; full spec in PROTOCOL.md §5.3):
+
+1. `bft_enabled = true` (genesis-pinned, default `true`).
+2. `total_aborts ≥ bft_escalation_threshold` (genesis-pinned, default 5; Round-1 and Round-2 aborts both count).
+3. Available pool (registry minus aborted-this-height domains) has dropped below `K`.
+4. Available pool is still ≥ `ceil(2K/3)`. If the pool collapses below this, the shard stalls — under EXTENDED sharding the R4 under-quorum merge mechanism may absorb the shard.
+
+When all four hold, the round runs in BFT mode:
 
 - Committee size shrinks to `ceil(2K/3)` (e.g., K=3 → committee of 2; K=6 → committee of 4).
-- A designated proposer (deterministically derived from `cumulative_rand`) builds a single block and proposes it.
-- The committee runs a one-round BFT vote; `ceil(2K/3)` votes suffice to finalize.
-- The block tags `consensus_mode = BFT` and `bft_proposer` is non-empty.
+- A designated proposer is deterministically chosen from the committee via `proposer_idx(seed, abort_events, |committee|)` where `seed = epoch_committee_seed(epoch_rand, shard_id)` and the inputs are domain-separated by the ASCII tag `"bft-proposer"` (full algorithm in PROTOCOL.md §5.3.1). The proposer must sign; up to `|committee| - ceil(2·|committee|/3)` other slots may carry sentinel-zero signatures.
+- The committee runs a one-round BFT vote; `ceil(2K/3)` signatures suffice to finalize.
+- The block tags `consensus_mode = BFT` and `bft_proposer = <domain>`.
 
 BFT-mode safety is conditional on `f < K_eff/3` (the standard BFT bound), plus economic slashing recovery for any equivocator. See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
 
