@@ -184,10 +184,11 @@ struct Block {
     CrossShardReceipt[]   inbound_receipts;      // inbound (other shards → this shard)
     GenesisAlloc[]        initial_state;         // genesis only (index == 0)
     Hash                  state_root;            // v2.1 / S-033: SHA-256 Merkle commitment to the
-                                                 // post-apply canonical state (accounts ∪ stakes ∪
-                                                 // registrants ∪ applied_inbound_receipts ∪
-                                                 // pending_param_changes ∪ merge_state). All zeros
-                                                 // on pre-S-033 blocks (backward-compat shim).
+                                                 // post-apply canonical state. See §4.1.1 for the
+                                                 // full ten-namespace leaf set (a/s/r/d/i/b/m/p/k/c).
+                                                 // All zeros on pre-S-033 blocks (backward-compat
+                                                 // shim — signing_bytes binds the field only when
+                                                 // non-zero, see §4.1).
 };
 ```
 
