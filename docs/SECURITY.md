@@ -1,6 +1,6 @@
 # Determ Security Posture
 
-**Doc status:** Canonical. Reconciles the rev.7 [SECURITY_AUDIT.md](https://github.com/) findings with the in-tree [OPEN-VULNERABILITIES.md](OPEN-VULNERABILITIES.md) (now superseded by this file) against current code at rev.8 + rev.9 sharding through B6.basic.
+**Doc status:** Canonical. Reconciles the rev.7 security audit findings with the in-tree predecessor `OPEN-VULNERABILITIES.md` (now superseded and removed) against current code at rev.8 + rev.9 sharding through B6.basic.
 
 **Methodology.** Each finding is verified against current source before classification. Findings the rev.7 audit raised that have since been mitigated are listed in §5. New issues visible in rev.9 code (sharding, snapshots) that the audit predates are included as first-class findings. Severity follows the audit's CVSS-style framing.
 
@@ -1180,8 +1180,8 @@ Total remaining: ~2 weeks to "production-deployment-ready" posture. Beyond that 
 - [`docs/PROTOCOL.md`](PROTOCOL.md) — frozen v1 spec; the source of truth for hash inputs, message formats, consensus rules. Where this doc cites a specification claim, PROTOCOL.md is authoritative.
 - [`docs/CLI-REFERENCE.md`](CLI-REFERENCE.md) — operator command surface.
 - [`docs/QUICKSTART.md`](QUICKSTART.md) — operator walkthrough.
-- The original [rev.7 SECURITY_AUDIT.md](https://) is preserved as historical context but **superseded by this file**. Where the audit and this file disagree, this file wins for current code; the audit wins for rev.7 archaeology.
-- [`docs/OPEN-VULNERABILITIES.md`](OPEN-VULNERABILITIES.md) — predecessor of this file, now superseded.
+- The original rev.7 security-audit report (`SECURITY_AUDIT.md`) is preserved out-of-tree as historical context but **superseded by this file**. Where the audit and this file disagree, this file wins for current code; the audit wins for rev.7 archaeology.
+- `OPEN-VULNERABILITIES.md` (predecessor of this file) was superseded and removed.
 
 ---
 
