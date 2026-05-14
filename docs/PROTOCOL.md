@@ -714,7 +714,9 @@ Validator gates (in order):
 3. `event_type ∈ {0, 1}`, `partner_id ≠ shard_id`.
 4. Region charset `[a-z0-9-_]`, ≤ 32 bytes.
 5. `effective_height ≥ block.index + merge_grace_blocks`.
-6. For BEGIN: `evidence_window_start + merge_threshold_blocks ≤ block.index`.
+6. For BEGIN, two consecutive checks (S-036 partial mitigation):
+   a. **Leading past-bound**: `evidence_window_start ≤ block.index`. Catches future-start windows AND prevents an integer-overflow bypass of (6b) — without this check, an attacker setting `evidence_window_start` near `UINT64_MAX` could make the sum in (6b) wrap below `block.index` and falsely pass.
+   b. **Threshold-arithmetic**: `evidence_window_start + merge_threshold_blocks ≤ block.index` — ensures the observation window lies entirely in committed history.
 
 Apply path:
 - BEGIN: insert `(shard_id → {partner_id, refugee_region})` into `Chain::merge_state_` iff `partner_id == (shard_id + 1) mod shard_count_`.
