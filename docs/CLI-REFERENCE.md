@@ -73,17 +73,20 @@ To bootstrap from a snapshot, set `snapshot_path` in the node's `config.json` an
 | Command | Purpose |
 |---|---|
 | `determ state-root [--rpc-port N]` | Print the chain's Merkle state root + height + head_hash. Operators can call this against multiple nodes to detect silent state divergence (a real S-030 D1/D2 attack would manifest as same height but different state_root across nodes). |
-| `determ state-proof --ns {a\|s\|r\|b\|k\|c} --key <name> [--rpc-port N]` | Fetch a Merkle inclusion proof for any state entry. Namespaces: `a` = account, `s` = stake, `r` = registry, `b` = beacon-anchor, `k` = applied-inbound-receipt, `c` = merge-state. Light-client primitive: the proof verifies against the current `state_root` (which is committee-signed) without re-executing the chain. |
+| `determ state-proof --ns {a\|s\|r\|b\|k\|c} --key <name> [--rpc-port N]` | Fetch a Merkle inclusion proof for any state entry. RPC-exposed namespaces: `a` = accounts, `s` = stakes, `r` = registrants, `b` = abort_records (S-032), `k` = genesis-pinned constants, `c` = A1 counters (via the composite `k:c:<name>` lookup). The full ten-namespace state tree (PROTOCOL.md §4.1.1) also has `d/i/m/p` but those use composite keys and aren't surfaced by this RPC in v2.2. Light-client primitive: the proof verifies against the current `state_root` (which is committee-signed) without re-executing the chain. |
 
 ## DApp substrate RPC (v2.18 + v2.19)
 
+The DApp's identity is its owning domain (`tx.from` at registration). There is no separate "dapp_id" — the registered Determ domain IS the dapp identifier. CLI verbs that name a DApp use `--from <domain>` for tx-authoring and `--domain <D>` for queries.
+
 | Command | Purpose |
 |---|---|
-| `determ submit-dapp-register --priv <hex> --from <domain> --dapp-id <name> [--metadata-hex <hex>] [--stake <N>] [--fee <N>] [--rpc-port N]` | Register a DApp on-chain. Idempotent re-register updates metadata. Stake is the anti-spam deposit. |
-| `determ submit-dapp-call --priv <hex> --from <domain> --dapp-id <name> --payload-hex <hex> [--fee <N>] [--rpc-port N]` | Submit a DAPP_CALL routed to the named DApp. Payload is application-specific. |
-| `determ dapp-list [--rpc-port N]` | List registered DApps. |
-| `determ dapp-info <dapp_id> [--rpc-port N]` | Detail for one DApp (owner, metadata, stake, registered_at, inactive_from). |
-| `determ dapp-messages <dapp_id> [--from-height N] [--rpc-port N]` | Poll DAPP_CALL events addressed to a DApp. Pagination via from-height + page-limit (default 256 events per call). |
+| `determ submit-dapp-register --priv <hex> --from <domain> --service-pubkey <64hex> --endpoint-url <url> [--topics t1,t2,t3] [--retention 0\|1] [--metadata-hex <hex>] [--fee <N>] [--rpc-port N]` | Register / update a DApp on the chain. Idempotent — re-registering with the same `--from` updates the entry. `--service-pubkey` is the libsodium box pubkey used for end-to-end DAPP_CALL encryption. `--retention 0` = full retention, `1` = pruneable-after-K. |
+| `determ submit-dapp-register --priv <hex> --from <domain> --deactivate [--fee <N>] [--rpc-port N]` | Deactivate the DApp owned by `--from`. Sets `inactive_from = current_height + DAPP_GRACE_BLOCKS`; in-flight calls finish within the grace window. |
+| `determ submit-dapp-call --priv <hex> --from <sender> --to <dapp-domain> [--topic <T>] [--payload-hex <hex>] [--amount <N>] [--fee <N>] [--rpc-port N]` | Submit a DAPP_CALL routed to `--to`. `--topic` must match one of the DApp's registered topics (or `""`). `--payload-hex` is the application's opaque ciphertext (typically AEAD(`service_pubkey`, plaintext, nonce); ≤ 16 KB). `--amount` is an optional payment credited to the DApp's account. |
+| `determ dapp-list [--prefix P] [--topic T] [--rpc-port N]` | List registered DApps. Optional `--prefix` filters by domain prefix; `--topic` keeps only DApps whose registered topic list contains a match. |
+| `determ dapp-info --domain <D> [--rpc-port N]` | Per-DApp record: `domain`, `service_pubkey`, `endpoint_url`, `topics`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`. |
+| `determ dapp-messages --domain <D> [--from <H>] [--to <H>] [--topic <T>] [--rpc-port N]` | Retrospective DAPP_CALL poll. Returns up to 256 events (`DAPP_MESSAGES_PAGE_LIMIT`) in `[from, to]` addressed to `--domain`, optionally topic-filtered. Use the response's `last_scanned + 1` as the next `--from` to paginate. |
 
 ## In-process tests (test-* CLI subcommands)
 

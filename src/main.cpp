@@ -86,15 +86,22 @@ State commitment + light-client (v2.1 + v2.2):
                                               SMT inclusion proof for any state entry
                                               (light-client primitive against state_root)
 
-DApp substrate (v2.18 + v2.19):
-  determ submit-dapp-register --priv <hex> --from <domain> --dapp-id <name>
-                                              Register a DApp on-chain (idempotent re-register)
-  determ submit-dapp-call --priv <hex> --from <domain> --dapp-id <name> --payload-hex <hex>
-                                              Submit a DAPP_CALL routed to a registered DApp
-  determ dapp-list                            List registered DApps
-  determ dapp-info <dapp_id>                  Per-DApp record
-  determ dapp-messages <dapp_id> [--from-height N]
-                                              Paginated DAPP_CALL event polling
+DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
+  determ submit-dapp-register --priv <hex> --from <domain>
+                              --service-pubkey <64hex> --endpoint-url <url>
+                              [--topics t1,t2,...] [--retention 0|1]
+                              [--metadata-hex <hex>] [--fee N]
+                                              Register or update a DApp (idempotent on --from)
+  determ submit-dapp-register --priv <hex> --from <domain> --deactivate
+                                              Deactivate (defers via DAPP_GRACE_BLOCKS)
+  determ submit-dapp-call --priv <hex> --from <sender> --to <dapp-domain>
+                          [--topic T] [--payload-hex <hex>]
+                          [--amount N] [--fee N]
+                                              Submit a DAPP_CALL routed to --to
+  determ dapp-list [--prefix P] [--topic T]   List registered DApps (optional filters)
+  determ dapp-info --domain <D>               Per-DApp record
+  determ dapp-messages --domain <D> [--from H] [--to H] [--topic T]
+                                              Retrospective DAPP_CALL poll (256 / page)
 
 Governance + sharded operation:
   determ submit-param-change ...              A5 PARAM_CHANGE tx (see CLI-REFERENCE.md §Governance)
