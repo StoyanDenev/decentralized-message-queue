@@ -2371,6 +2371,22 @@ json Node::rpc_status() const {
             j["next_creators"] = next;
         } catch (...) {}
     }
+
+    // Operator-hygiene: a snapshot of which security / operational
+    // features are active on this node, so a monitoring system can
+    // detect drift in production (e.g., a node accidentally started
+    // with rate-limiting disabled, or running in verbose-log mode in
+    // production). Pure config readback; no protocol semantics.
+    j["protections"] = {
+        {"rpc_localhost_only",  cfg_.rpc_localhost_only},
+        {"rpc_hmac_auth",       !cfg_.rpc_auth_secret.empty()},
+        {"rpc_rate_limit",      cfg_.rpc_rate_per_sec > 0.0 && cfg_.rpc_rate_burst > 0.0},
+        {"gossip_rate_limit",   cfg_.gossip_rate_per_sec > 0.0 && cfg_.gossip_rate_burst > 0.0},
+        {"log_quiet",           cfg_.log_quiet},
+        {"bft_enabled",         cfg_.bft_enabled},
+        {"sharding_mode",       to_string(cfg_.sharding_mode)},
+    };
+
     return j;
 }
 
