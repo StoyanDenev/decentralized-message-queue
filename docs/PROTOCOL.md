@@ -743,7 +743,16 @@ A node refusing to start on hash mismatch is the eclipse defense: a peer cannot 
 | `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | Inter-continental, hub-and-spoke |
 | `tactical` | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | Sub-30 ms private link, region-pinned units |
 
-Plus six CI/dev variants that hold round timers at `5 / 5 / 3` and force `M = K = 3`: `single_test` (SINGLE / NONE), `cluster_test` (SINGLE / NONE), `web_test` (SHARD / EXTENDED), `regional_test` (SHARD / CURRENT), `global_test` (SHARD / EXTENDED), `tactical_test` (SHARD / EXTENDED).
+Plus six CI/dev variants that hold round timers at `5 / 5 / 3` (`TEST_*_MS` in `params.hpp`) and otherwise mirror their production sibling's `M / K / role / sharding_mode`:
+
+| Test profile | M / K | role / sharding_mode |
+|---|---|---|
+| `single_test`   | 3 / 3 | SINGLE / NONE |
+| `cluster_test`  | 3 / 3 | BEACON / CURRENT |
+| `web_test`      | 3 / 2 | SHARD / EXTENDED |
+| `regional_test` | 5 / 4 | SHARD / CURRENT |
+| `global_test`   | 7 / 5 | BEACON / EXTENDED |
+| `tactical_test` | 3 / 3 | SHARD / EXTENDED |
 
 Profile is a config-layer concept; the fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` / `m_creators` / `k_block_sigs` / `chain_role` / `sharding_mode`. Operators can also write these fields directly in genesis without `--profile`.
 

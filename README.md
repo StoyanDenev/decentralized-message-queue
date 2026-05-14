@@ -599,16 +599,16 @@ A profile is a **complete deployment archetype**: timing, committee size, chain 
 | `global` | 7 | 5 (hybrid) | 600 | 600 | 300 | BEACON | EXTENDED | ~1.5 s |
 | `tactical` | 3 | 3 (strong) | 20 | 20 | 10 | SHARD | EXTENDED | ~50 ms |
 
-**Test variants** — sub-30 ms rounds for fast CI execution (`tx_commit_ms = block_sig_ms = 5`, `abort_claim_ms = 3`). Pick when running integration tests:
+**Test variants** — sub-30 ms rounds for fast CI execution (`tx_commit_ms = block_sig_ms = 5`, `abort_claim_ms = 3`). Each test profile mirrors its production sibling's M / K / role / sharding_mode:
 
 | Profile | M | K | role | sharding_mode |
 |---|---|---|---|---|
-| `single_test` | 3 | 3 | SINGLE | NONE |
-| `cluster_test` | 3 | 3 | SINGLE | NONE |
-| `web_test` | 3 | 3 | SHARD | EXTENDED |
-| `regional_test` | 3 | 3 | SHARD | CURRENT |
-| `global_test` | 3 | 3 | SHARD | EXTENDED |
-| `tactical_test` | 3 | 3 | SHARD | EXTENDED |
+| `single_test` | 3 | 3 (strong) | SINGLE | NONE |
+| `cluster_test` | 3 | 3 (strong) | BEACON | CURRENT |
+| `web_test` | 3 | 2 (hybrid) | SHARD | EXTENDED |
+| `regional_test` | 5 | 4 (hybrid) | SHARD | CURRENT |
+| `global_test` | 7 | 5 (hybrid) | BEACON | EXTENDED |
+| `tactical_test` | 3 | 3 (strong) | SHARD | EXTENDED |
 
 `ShardingMode` values:
 - **`NONE`** — single-chain deployment, no sharding (test-only).
