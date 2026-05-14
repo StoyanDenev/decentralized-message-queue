@@ -844,3 +844,42 @@ Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for rea
 This document specifies v1. Backward-incompatible changes (new block fields, modified hash inputs, new message types replacing old ones) require a version bump. New optional fields with safe defaults are non-breaking.
 
 The reference implementation tags v1 at the commit corresponding to this document's freeze.
+
+### 16.1 Wire-version negotiation (A3 / S8)
+
+The gossip layer supports per-pair wire-format negotiation, independent of this document's protocol version:
+
+```
+kWireVersionLegacy = 0    # JSON-over-TCP envelope (§9.1 default)
+kWireVersionBinary = 1    # binary codec (src/net/binary_codec.cpp)
+kWireVersionMax    = 1    # highest version this build understands
+```
+
+HELLO carries the sender's `wire_version` field:
+
+```json
+{
+  "domain":       "<peer's domain>",
+  "port":         <u16>,
+  "role":         <u8>,           // ChainRole — 0=SINGLE, 1=BEACON, 2=SHARD
+  "shard_id":     <u32>,
+  "wire_version": <u8>            // sender's kWireVersionMax
+}
+```
+
+On HELLO receipt, each peer sets the negotiated version for the pair to `min(local_max, remote_advertised)`. Subsequent outbound messages on that connection use the negotiated codec.
+
+* Pre-A3 peers omit `wire_version`; the field defaults to `0` (legacy JSON) — backward compat.
+* HELLO itself is **always JSON** regardless of negotiated version: both sides must parse it before any negotiation has happened, and the JSON encoding is what carries the `wire_version` advertisement in the first place.
+* Binary codec falls back to JSON serialization if it cannot encode a particular message type (current binary codec covers the high-volume types; large/rare types stay JSON). Failure is silent and per-message; connection stays alive.
+
+The negotiation is a pure bandwidth optimization. Block content + hash inputs are codec-agnostic — a block serialized JSON and re-serialized binary produces byte-identical bytes after canonicalization.
+
+### 16.2 Protocol-version vs wire-version
+
+| Axis | Version | Bumps when | Backward-compat policy |
+|---|---|---|---|
+| Protocol (this document) | v1 | Block format, hash input, validator rules change | Hard fork — new genesis identity |
+| Wire-version (gossip codec) | 0 → 1 | New codec lands | Soft — old peers stay on JSON, new peers negotiate up |
+
+The v1.x → v2.X work tracked in `docs/V2-DESIGN.md` is mostly protocol-additive (new tx types, new state fields, new optional behaviors) with backward-compat shims (e.g. `state_root` conditional binding — pre-S-033 blocks remain valid). Specific v2 items that do require a flag-day are called out per-item in V2-DESIGN.md.
