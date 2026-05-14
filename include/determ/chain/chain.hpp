@@ -259,12 +259,14 @@ public:
     // applying the same block sequence MUST produce byte-identical
     // state_root values. A divergence indicates a real consensus break.
     //
-    // Future evolution (v2.1 full): replace this single hash with a
-    // sparse Merkle root over the same canonical serialization, paired
-    // with an inclusion-proof API for light-client state queries. The
-    // wire format (32-byte Hash in Block.state_root) stays the same;
-    // only the computation changes. Light clients verify SMT proofs
-    // against this same field.
+    // v2.1 shipped: this is a sorted-leaves balanced binary Merkle tree
+    // (NOT a sparse Merkle tree — leaf position derives from sort order,
+    // not from key-hash addressing) over the ten-namespace leaf set
+    // emitted by build_state_leaves. Inclusion proofs are exposed via
+    // the v2.2 state_proof RPC. A future SMT migration could add
+    // non-membership proofs (currently unsupported); the wire format
+    // (32-byte Hash in Block.state_root) would not change since only
+    // the computation changes.
     Hash compute_state_root() const;
 
     // v2.2 light-client foundation: inclusion proof for any state key.
@@ -274,10 +276,12 @@ public:
     // a StateProof; the light client calls crypto::merkle_verify to
     // confirm the (key, value_hash) pair is committed by state_root.
     //
-    // Key encoding (must match build_state_leaves exactly):
+    // Key encoding (must match build_state_leaves exactly — see
+    // PROTOCOL.md §4.1.1 for the full ten-namespace table):
     //   accounts:                "a:" + domain
     //   stakes:                  "s:" + domain
     //   registrants:             "r:" + domain
+    //   dapp_registry:           "d:" + domain                   (v2.18)
     //   applied_inbound_receipts:"i:" + src_shard_be8 + tx_hash
     //   abort_records:           "b:" + domain
     //   merge_state:             "m:" + shard_id_be4

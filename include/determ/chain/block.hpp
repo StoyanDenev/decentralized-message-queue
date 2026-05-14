@@ -470,11 +470,17 @@ struct Block {
     // entries — but operationally indicate either a producer bug or a
     // mid-chain feature toggle.
     //
-    // The full v2.1 sparse-Merkle-tree extension (inclusion proofs for
-    // light clients, v2.2) replaces this single 32-byte hash with a
-    // Merkle root over the SMT. Wire format stays the same — only the
-    // computation changes. Inclusion proofs are queried via a new RPC
-    // separate from the block format.
+    // v2.1 shipped: this is a sorted-leaves balanced binary Merkle root
+    // (NOT a sparse Merkle tree — see chain.hpp::compute_state_root
+    // documentation for tree shape + leaf encoding). Inclusion proofs
+    // are exposed via the v2.2 state_proof RPC (separate from the
+    // block format). S-038 closure (this session): producer's
+    // Node::try_finalize_round populates this field via a tentative-
+    // chain dry-run before broadcast, so the validator's apply-time
+    // gate (chain.cpp::apply_transactions) actually fires on every
+    // production block. Pre-S-038 the field was zero on gossiped
+    // blocks and the gate short-circuited per the backward-compat
+    // shim ("if state_root != zero verify").
     Hash state_root{};
 
     // Populated only at index 0 (genesis). Encodes the initial accounts /
