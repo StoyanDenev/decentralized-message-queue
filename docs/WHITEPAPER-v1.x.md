@@ -480,7 +480,7 @@ These are intentional non-goals, not roadmap items.
 
 **v2 design space (canonical list in `docs/V2-DESIGN.md` — 26 items across 9 themes):**
 
-- v2.1 State Merkle root — ✅ shipped (`compute_state_root` + `Block.state_root` + `signing_bytes` binding).
+- v2.1 State Merkle root — ✅ shipped (`compute_state_root` Merkle root + `Block.state_root` field + `signing_bytes` conditional binding + S-038 producer wiring populates the field on every finalized block so the apply-time gate fires).
 - v2.2 Light-client headers / state_proof RPC — ✅ foundation shipped (Merkle inclusion-proof RPC + CLI over the sorted-leaves construction in `crypto/merkle.cpp`); header-only sync flow remains as a follow-on.
 - v2.3 Trustless fast sync — ✅ shipped (state_root verified on snapshot restore).
 - v2.4 Atomic block apply (A9) — ✅ shipped (Phase 1-2D + COMPOSABLE_BATCH).
