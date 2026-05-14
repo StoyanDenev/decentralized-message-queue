@@ -1961,7 +1961,9 @@ int main(int argc, char** argv) {
     }
 
     // v2.2 light-client foundation: state-proof CLI.
-    // Usage: determ state-proof --ns <a|s|r|b|k|c> --key <name> [--rpc-port N]
+    // Usage: determ state-proof --ns <a|s|r|d|b|k|c> --key <name> [--rpc-port N]
+    // (`d` = v2.18 DApp registry; the underlying RPC was extended in this
+    // session to surface the d:-namespace alongside accounts/stakes/etc.)
     if (cmd == "state-proof") {
         uint16_t port = get_rpc_port(sub_argc, sub_argv);
         std::string ns, key;
