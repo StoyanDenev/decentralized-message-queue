@@ -379,21 +379,51 @@ Cross-role traffic is restricted by the receiving peer:
 
 JSON-line over TCP on the configured `rpc_port`. Each line is one JSON object: `{"method": "<name>", "params": {...}}`. Response: `{"result": ..., "error": null | "<msg>"}`.
 
-Methods (selected):
+### 10.1 Authentication + rate-limit gates
+
+Two gates run BEFORE method dispatch:
+
+1. **Rate limit (S-014).** If `rpc_rate_per_sec > 0 && rpc_rate_burst > 0` in config, every request consumes one token from the peer-IP bucket (refilled at `rpc_rate_per_sec`/sec up to `rpc_rate_burst`). Bucket empty → `{"result": null, "error": "rate_limited"}`. Check fires **before** JSON parse + auth so rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded.
+
+2. **HMAC auth (v2.16 / S-001).** If `rpc_auth_secret` is set (non-empty hex), every request MUST carry an `auth` field that's `hex(HMAC-SHA-256(secret, method || "|" || params_canonical_json))`. Missing `auth` → `{"error": "auth_required: missing 'auth' field"}`. Wrong `auth` → `{"error": "auth_failed"}`. Constant-time compare against timing side-channels.
+
+External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves `rpc_auth_secret=""`) is flagged at startup with `[WARNING: external bind without HMAC auth — set rpc_auth_secret or enable rpc_localhost_only]`.
+
+### 10.2 Methods
 
 | Method | Params | Returns |
 |---|---|---|
-| `status` | `{}` | head/role/epoch/peers/mempool/mode counters |
+| **Chain / consensus queries** | | |
+| `status` | `{}` | head + head_hash + role + shard_id + epoch_index + peer_count + mempool + MD/BFT counters + `next_creators` preview + **`protections`** block (every operator-tunable security flag — see CLI-REFERENCE.md) |
 | `peers` | `{}` | `[address, ...]` |
 | `block` | `{index}` | full block JSON or null |
 | `chain_summary` | `{last_n}` | array of compact block summaries |
 | `validators` | `{}` | array of pool entries |
 | `committee` | `{}` | current epoch's K-of-K committee |
+| **Account queries (S-028 case-normalised at input)** | | |
 | `account` | `{address}` | balance + nonce + registry + stake |
+| `balance` | `{domain}` | balance only (lock-free path) |
+| `nonce` | `{domain}` | next expected nonce (lock-free path) |
+| `stake_info` | `{domain}` | locked stake + unlock_height |
 | `tx` | `{hash}` | tx + block_index + block_hash + timestamp |
-| `submit_tx` | `{tx}` | `{status: "queued", hash}` |
+| **State commitment / light-client (v2.1 + v2.2)** | | |
+| `state_root` | `{}` | `{state_root: hex, height, head_hash}` — Merkle commitment readback (§4.1.1) |
+| `state_proof` | `{ns, key}` | `{state_root, target_index, leaf_count, value_hash, proof: [hex...]}` — SMT inclusion proof; `ns ∈ {a, s, r, b, k, c}` |
+| **Tx submission** | | |
+| `submit_tx` | `{tx}` | `{status: "queued", hash}`. S-028: anon-shape `tx.from` / `tx.to` MUST be lowercase canonical; non-canonical rejected with diagnostic. |
+| `send` | `{to, amount, fee}` | Node-authored TRANSFER from the RPC host's domain (uses the daemon's own privkey) |
+| `stake` / `unstake` | `{amount, fee}` | Node-authored stake operations |
+| `register` | `{}` | Submit RegisterTx for the daemon's own domain |
+| **Forensics / governance** | | |
 | `submit_equivocation` | `{event}` | `{accepted, equivocator, block_index}` |
-| `snapshot` | `{headers}` | full state snapshot |
+| **DApp substrate (v2.18 + v2.19)** | | |
+| `dapp_list` | `{}` | All registered DApps (active + inactive within grace) |
+| `dapp_info` | `{dapp_id}` | Per-DApp record (owner, service_pubkey, endpoint, topics, retention, metadata, stake, registered_at, inactive_from) |
+| `dapp_messages` | `{dapp_id, from_height?}` | Paginated list of DAPP_CALL events addressed to `dapp_id`; up to 256 events per call (DAPP_MESSAGES_PAGE_LIMIT) |
+| **Snapshot fetch (v2.3 / B6.basic)** | | |
+| `snapshot` | `{headers}` | Full state snapshot + N tail headers for state_root verification |
+
+`submit-param-change`, `submit-merge-event`, `submit-dapp-register`, `submit-dapp-call` are CLI verbs that construct the appropriate tx + submit via `submit_tx`; they're not separate RPC methods.
 
 ## 11. Snapshot format (B6.basic)
 
