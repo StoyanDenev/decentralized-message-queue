@@ -479,7 +479,7 @@ Applications (and light clients) inspect each block's `consensus_mode` and reaso
 | Mode | K | Censorship requires | Liveness requires |
 |---|---|---|---|
 | Strong | M_pool | All M_pool collude | All M_pool live (BFT escalation falls back to ceil(2K/3) on persistent abort) |
-| Hybrid | K < M_pool | All K committee collude | All K committee live; BFT escalation tolerates K-effective drop |
+| Hybrid | K < M_pool | All K committee collude | All K committee live; BFT escalation tolerates dropouts by shrinking the committee to `k_bft = ⌈2K/3⌉` |
 
 ---
 

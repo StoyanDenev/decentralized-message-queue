@@ -104,7 +104,7 @@ A may **not**:
 
 For **safety claims** (no two valid blocks at the same height, no false-positive equivocation slashing, etc.), no upper bound on `f` is assumed. Determ's K-of-K mutual-distrust safety holds even if `f = N` for MD-mode blocks — see Safety theorem (FA1).
 
-For **BFT-mode block safety**: `f < K/3` *within the K-effective BFT committee* is required. See FA5.
+For **BFT-mode block safety**: `f_h < |K_h|/3` *within the shrunk BFT committee* `|K_h| = ⌈2K/3⌉` is required (standard BFT 1/3 bound applied to the smaller committee). See FA5.
 
 For **liveness claims**: at least one all-honest K-committee must form within bounded round retries, under partial synchrony. See FA4.
 
