@@ -83,7 +83,7 @@ Usage:
 State commitment + light-client (v2.1 + v2.2):
   determ state-root                          Chain Merkle state root + height + head_hash
   determ state-proof --ns {a|s|r|b|k|c} --key <name>
-                                              SMT inclusion proof for any state entry
+                                              Merkle inclusion proof for any state entry
                                               (light-client primitive against state_root)
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
