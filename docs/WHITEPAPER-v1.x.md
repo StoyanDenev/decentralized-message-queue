@@ -568,11 +568,15 @@ GenesisConfig {
   inclusion_model: enum                // STAKE_INCLUSION | DOMAIN_INCLUSION
   min_stake: u64                       // STAKE_INCLUSION threshold
   chain_role: enum                     // SINGLE | BEACON | SHARD
+  sharding_mode: enum                  // NONE | CURRENT | EXTENDED
   shard_id: u32                        // 0 for SINGLE/BEACON
   initial_shard_count: u32             // 1 = unsharded; >=3 under EXTENDED
   epoch_blocks: u32                    // E (epoch-relative committee derivation)
   shard_address_salt: 32B              // address-to-shard routing salt
   committee_region: string             // EXTENDED mode pinning (lowercase ASCII)
+  tx_commit_ms: u32                    // Phase-1 round timer (default per profile)
+  block_sig_ms: u32                    // Phase-2 round timer
+  abort_claim_ms: u32                  // abort-claim collection window
   governance_mode: u8                  // 0 = uncontrolled, 1 = governed
   param_keyholders: [PubKey ...]       // founder set (governed mode)
   param_threshold: u32                 // signature count (default N-of-N)
