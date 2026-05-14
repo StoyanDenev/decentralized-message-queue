@@ -292,7 +292,7 @@ struct BlockSigMsg {
 };
 ```
 
-Each receiver verifies that `SHA256(dh_secret ‖ signer.pubkey) == dh_input`. Once K reveals gather, the block's final `delay_output = SHA256(delay_seed ‖ ordered_dh_secrets)` is computed and the block can be finalized. A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **`Q = ⌈2·k_bft/3⌉` of `k_bft = ⌈2K/3⌉`** have (BFT mode after escalation — see §5.3 for the two-level shrinkage; the BFT block carries `k_bft` slots and requires `Q` nonzero sigs, not `⌈2K/3⌉` of the genesis K).
+Each receiver verifies that `SHA256(dh_secret ‖ signer.pubkey) == dh_input`. Once K reveals gather, the block's final `delay_output = SHA256(delay_seed ‖ ordered_dh_secrets)` is computed. The finalizing node (every committee member in MD mode; the designated proposer in BFT mode) then populates `body.state_root = compute_state_root(tentative_chain)` via a tentative-chain dry-run (S-033 v2.1 + S-038 producer-side wiring — see §4.1.1 for the Merkle leaf set), applies the block locally, and broadcasts. Peer apply re-derives state_root and rejects on divergence. A block is final when **K of K** members have published valid `BlockSigMsg` (MD mode) or **`Q = ⌈2·k_bft/3⌉` of `k_bft = ⌈2K/3⌉`** have (BFT mode after escalation — see §5.3 for the two-level shrinkage; the BFT block carries `k_bft` slots and requires `Q` nonzero sigs, not `⌈2K/3⌉` of the genesis K).
 
 ### 5.2 Committee selection
 At each round, the K-committee derives from:
