@@ -974,7 +974,7 @@ These are not bugs — they are **inherent trade-offs** an operator accepts when
 
 **Mitigation guidance.**
 - Choose region boundaries that span multiple jurisdictions where possible (`eu-west` rather than `de-frankfurt`).
-- Use the recommended geographic taxonomy from `README.md §17.5` to avoid jurisdiction-aligned regions for cross-border deployments.
+- Use the recommended geographic taxonomy from `README.md §16.5` to avoid jurisdiction-aligned regions for cross-border deployments.
 - For consortium chains where regional alignment with a regulator is desirable (e.g., a national banking settlement layer), this is a feature, not a bug.
 
 ### T-003 — Network partition during `EXTENDED` deployment (informational)

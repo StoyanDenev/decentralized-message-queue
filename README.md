@@ -686,7 +686,7 @@ The `ShardingMode` axis (pinned per profile) selects the topology:
 - **`CURRENT`** — beacon plus `S` shards; each shard's K-committee drawn from the **global** pool.
 - **`EXTENDED`** — beacon plus `S` shards; each shard's K-committee restricted to validators tagged with that shard's `committee_region`. Per-shard block time bounded by intra-region RTT, not global.
 
-### 17.1 Architecture
+### 16.1 Architecture
 
 ```
        ┌──────────────────────────────────────────┐
@@ -704,9 +704,9 @@ The `ShardingMode` axis (pinned per profile) selects the topology:
 
 The beacon runs MD K-of-K only (no escalation; halts on persistent silent committee member). Shards run MD-default with per-height BFT escalation. Asymmetry rationale: the beacon is the trust anchor — strong unconditional safety on every beacon block, low volume, halt-recoverable. Shards are the throughput layer — needs liveness more than censorship in steady state.
 
-Under `EXTENDED` sharding each shard additionally pins a `committee_region` (operator-defined string, e.g. `"us-east"`, `"eu-west"`). Validators self-declare their region at REGISTER time; the committee for shard `s` is drawn only from validators tagged with `s.committee_region`. The trade is that per-shard censorship resistance becomes regional rather than global — see §17.6.
+Under `EXTENDED` sharding each shard additionally pins a `committee_region` (operator-defined string, e.g. `"us-east"`, `"eu-west"`). Validators self-declare their region at REGISTER time; the committee for shard `s` is drawn only from validators tagged with `s.committee_region`. The trade is that per-shard censorship resistance becomes regional rather than global — see §16.6.
 
-### 17.2 Reusing `cumulative_rand` for shard committees
+### 16.2 Reusing `cumulative_rand` for shard committees
 
 Per epoch (every `E` beacon blocks), each shard's committee is derived from the beacon's `cumulative_rand` plus a per-shard salt:
 
@@ -717,7 +717,7 @@ shard_committee[s] = select_m_creators(shard_seed, validator_pool_size, K_per_sh
 
 The same `select_m_creators` function used in single-chain mode. The salt makes shards' committees independent. The commit-reveal seed binding (§10.3) prevents adversaries from grinding stake placement: the K committed secrets that determine the next epoch's seed are not revealed until the current epoch's blocks finalize.
 
-### 17.3 Account-to-shard assignment
+### 16.3 Account-to-shard assignment
 
 ```
 shard_id(addr) = first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S
@@ -725,7 +725,7 @@ shard_id(addr) = first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S
 
 `genesis_salt` is `GenesisConfig.shard_address_salt`, fixed at chain creation (32 random bytes). Stable for chain lifetime. `S` may grow at epoch boundaries via a beacon governance op (forthcoming).
 
-### 17.4 Cross-shard transactions
+### 16.4 Cross-shard transactions
 
 Two-phase via beacon-mediated receipts:
 
@@ -736,7 +736,7 @@ Two-phase via beacon-mediated receipts:
 
 Cross-shard finality: `~3 × shard block time`. In-shard: `~1 × shard block time`. Atomicity is eventual consistency (debit-then-credit); atomic 2PC with timeout-revert is on the v3 roadmap.
 
-### 17.5 Regional sharding (`EXTENDED` mode)
+### 16.5 Regional sharding (`EXTENDED` mode)
 
 Under `EXTENDED` sharding each shard's genesis pins a `committee_region`. Validators self-declare a `region` at REGISTER time (UTF-8 string, ≤32 bytes — opaque to the protocol). The committee for shard `s` is drawn deterministically from the registry subset matching `s.committee_region`.
 
@@ -773,7 +773,7 @@ Legacy payload (`region_len = 0`, no trailing bytes) is wire-compatible — it m
 
 `shard_id_for_address` is unchanged: `first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S`. Account-region affinity is application-level — addresses can be ground for a target shard if locality matters.
 
-### 17.6 Censorship + safety claims under sharding
+### 16.6 Censorship + safety claims under sharding
 
 Determ's K-conjunction censorship resistance is **per-shard, per-epoch**. An adversary capturing a single shard's K-committee for an epoch can censor that shard's transactions for the epoch. Rotation at the next epoch boundary evicts them. Operator knobs:
 
@@ -793,7 +793,7 @@ Per-block trust is observable via `consensus_mode`:
 
 Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
 
-### 17.7 Under-quorum merge
+### 16.7 Under-quorum merge
 
 When a shard's regional pool drops below `2K`, that shard temporarily merges committee operations with its modular-next neighbor (`partner_id = (shard_id + 1) mod num_shards`). Mechanism:
 
@@ -819,7 +819,7 @@ Determ's design intent is intentionally narrow: a **fork-free L1 payment + ident
 - **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519-pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
 - **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees.
 - **Per-height BFT escalation.** Default mutual-distrust K-of-K; falls back to BFT `ceil(2K/3)` + designated proposer when the eligible pool can't form K-of-K and the abort threshold has been met. Per-block `consensus_mode` tag lets observers reason about per-block trust.
-- **Sharded scaling.** Beacon + S shards with cross-shard receipts. `EXTENDED` sharding mode adds latency-grouped regional shard committees for sub-second in-shard finality on the public internet (§17.5).
+- **Sharded scaling.** Beacon + S shards with cross-shard receipts. `EXTENDED` sharding mode adds latency-grouped regional shard committees for sub-second in-shard finality on the public internet (§16.5).
 
 ### 17.2 Suitable use cases
 
