@@ -95,7 +95,7 @@ Each per-property proof cites:
 A reviewer working bottom-up (code → proof) should be able to:
 
 1. Read a `check_*` function in `src/node/validator.cpp`.
-2. Identify which validity predicate (V1–V14 from F0) it enforces.
+2. Identify which validity predicate (V1–V15 from F0) it enforces.
 3. Trace which FA-track proof depends on that predicate.
 
 A reviewer working top-down (theorem → code) should be able to:

@@ -10,7 +10,7 @@ This document proves Determ's structural censorship-resistance claim: a transact
 
 **Theorem T-2 (Censorship resistance).** Let `B` be the unique valid block at height `h` against chain prefix `B₀, …, B_{h-1}` (existence and uniqueness guaranteed by FA1). Let `t` be a transaction such that:
 
-- `t` is well-formed: passes Preliminaries §5 V14 against the prefix state.
+- `t` is well-formed: passes Preliminaries §5 V15 against the prefix state.
 - At Phase-1 commit time of round `r` at height `h`, at least one honest committee member `v_i ∈ K_{h,r} \ F` (honest set per §4) has `t ∈ mempool(v_i)`.
 
 Under the assumptions of `Preliminaries.md` §2 (SHA-256 collision/preimage, Ed25519 EUF-CMA) plus the honest-behavior definition §4 (specifically H4: deterministic mempool snapshot at Phase-1 start):
@@ -77,10 +77,10 @@ By hypothesis there exists an honest `v_i ∈ K_{h,r} \ F` with `t ∈ mempool(v
 
 **Step 3.** By L-2.1, `t.hash` is in the union `⋃ B.creator_tx_lists[*]` and hash-bound into `B.tx_root` (V7).
 
-**Step 4.** By the body-assembly rule in `src/node/producer.cpp::build_body` (the body-assembly loop, Preliminaries §10): the proposer materializes `B.transactions` by mapping each hash in the union to its tx-store entry. Under V14 (Preliminaries §5), the assembled body's tx_root recomputes to `B.tx_root`. Two outcomes:
+**Step 4.** By the body-assembly rule in `src/node/producer.cpp::build_body` (the body-assembly loop, Preliminaries §10): the proposer materializes `B.transactions` by mapping each hash in the union to its tx-store entry. Under V15 (Preliminaries §5), the assembled body's tx_root recomputes to `B.tx_root`. Two outcomes:
 
 - (a) `t` is in the proposer's tx_store: `t` enters `B.transactions`. ✓
-- (b) `t.hash` is in the union but `t` itself is not in the proposer's tx_store: the assembly skips `t` (the body-assembly loop's lookup-miss branch), the tx_root recomputed from the assembled body diverges from `B.tx_root`, and V14 (transaction apply consistency) plus V7 reject the block.
+- (b) `t.hash` is in the union but `t` itself is not in the proposer's tx_store: the assembly skips `t` (the body-assembly loop's lookup-miss branch), the tx_root recomputed from the assembled body diverges from `B.tx_root`, and V15 (transaction apply consistency) plus V7 reject the block.
 
 Under partial synchrony (Preliminaries §3.1) + gossip propagation + H5 (broadcast everything), `t` reaches the proposer's tx_store within `Δ` of being known to `v_i`. If the proposer is honest, case (a) holds. If the proposer is Byzantine and forces case (b), the block is invalid and never finalizes.
 
@@ -157,7 +157,7 @@ T-2 is per-shard. For a cross-shard TRANSFER (`shard_id_for_address(to) ≠ my_s
 ### 5.4 What this proof does NOT cover
 
 - **Censorship via tx-store eviction.** If `t` is evicted from `mempool(v_i)` before Phase-1 due to mempool size limits (Preliminaries §4 H4's selection rule taking only a subset), the hypothesis fails. Mempool-size DoS is a separate concern (S-008 in SECURITY.md). The proof assumes `t` survives to Phase-1.
-- **Censorship via partition.** If `v_i` is partitioned from the proposer and `t` never reaches the proposer's tx_store, Step 4 (a)→(b) flips: the proposer omits `t`, the block fails V7/V14, the round aborts. Liveness handles this (FA4): eventually the round retries with a connected committee and case (a) holds.
+- **Censorship via partition.** If `v_i` is partitioned from the proposer and `t` never reaches the proposer's tx_store, Step 4 (a)→(b) flips: the proposer omits `t`, the block fails V7/V15, the round aborts. Liveness handles this (FA4): eventually the round retries with a connected committee and case (a) holds.
 - **Selective abort against jackpot blocks.** FA3 (Selective-abort defense) handles the case where a Byzantine member aborts conditionally based on the randomness output. Censorship-via-selective-abort against specific txs is not in this proof's scope — the abort itself, not the tx selection, is the attack vector.
 
 ### 5.5 Concrete-security bound
@@ -180,7 +180,7 @@ T-2.1's `(f/N)^K` bound is a uniform-distribution claim; it assumes `select_m_cr
 |---|---|
 | Union tx_root V7 | `src/node/producer.cpp::compute_tx_root` |
 | Phase-1 commit signing | `src/node/producer.cpp::make_contrib_commitment` |
-| Validator V4 / V7 / V14 | `src/node/validator.cpp::check_creator_tx_commitments`, `check_transactions` |
+| Validator V4 / V7 / V15 | `src/node/validator.cpp::check_creator_tx_commitments`, `check_transactions` |
 | Build-body resolution | `src/node/producer.cpp::build_body` |
 | Mempool snapshot H4 | `src/node/node.cpp::start_contrib_phase` |
 | Committee selection (uniform under ROM) | `src/crypto/random.cpp::select_m_creators` |

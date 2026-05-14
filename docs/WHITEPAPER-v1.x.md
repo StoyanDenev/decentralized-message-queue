@@ -375,7 +375,7 @@ Determ's safety-critical mechanisms have full coverage in two parallel tracks: a
 
 | # | File | Property | Bound |
 |---|---|---|---|
-| F0 | `Preliminaries.md` | Notation, validity predicates V1–V14 | — |
+| F0 | `Preliminaries.md` | Notation, validity predicates V1–V15 | — |
 | FA1 | `Safety.md` | MD-mode K-of-K safety | `2⁻¹²⁸` per fork attempt |
 | FA2 | `Censorship.md` | Union-tx-root censorship resistance | `(f/N)^K` per epoch |
 | FA3 | `SelectiveAbort.md` | Commit-reveal hiding (ROM + std-model) | `2⁻²⁵⁶` per attempt |

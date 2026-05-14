@@ -184,13 +184,15 @@ The number of nonzero signatures must be `≥ K` (MD) or `≥ ⌈2K/3⌉` (BFT).
 
 **V11 — Equivocation events.** Each `ev ∈ B.equivocation_events` carries two distinct signatures `(sig_a, sig_b)` over distinct digests `(digest_a, digest_b)` by the equivocator's registered Ed25519 key, both verifying.
 
-**V12 — Cross-shard receipts** (shards only). `B.cross_shard_receipts` matches the cross-shard subset of `B.transactions` one-for-one; `B.inbound_receipts` is the destination-side credit list, with all entries (a) targeting this chain's `shard_id` and (b) not previously in `applied_inbound_receipts_`.
+**V12 — Cross-shard receipts, source side** (shards only). `B.cross_shard_receipts` matches the cross-shard subset of `B.transactions` one-for-one with field-wise equality, including `(src_shard, dst_shard, tx_hash, from, to, amount, fee, nonce)`. Enforced by `BlockValidator::check_cross_shard_receipts` (`src/node/validator.cpp`). Used in FA7 L-7.1.
 
-**V13 — Timestamp.** `|B.timestamp - now()| ≤ 30s` against the validator's local clock.
+**V13 — Inbound receipts, destination side** (shards only). `B.inbound_receipts` is the destination-side credit list. Each entry must have `dst_shard == my_shard_id`, `src_shard ≠ my_shard_id`, be unique within `B`, and not already be in `chain.applied_inbound_receipts_`. Enforced by `BlockValidator::check_inbound_receipts`. Used in FA7 L-7.2.
 
-**V14 — Transaction apply.** Applying `B.transactions` in canonical order to the chain state derived from `B₀, …, B_{h-1}` produces a consistent state (no negative balances, sequential nonces, valid signatures, etc.).
+**V14 — Timestamp.** `|B.timestamp - now()| ≤ 30s` against the validator's local clock (S-003 closure).
 
-A block is **finalized** when it has passed V1–V14 on at least one honest validator. By V8, finalization implies at least K (MD) or ⌈2K/3⌉ (BFT) committee members have signed the same `block_digest`.
+**V15 — Transaction apply.** Applying `B.transactions` in canonical order to the chain state derived from `B₀, …, B_{h-1}` produces a consistent state (no negative balances, sequential nonces, valid signatures, etc.). Enforced by `BlockValidator::check_transactions` + `Chain::apply_transactions`.
+
+A block is **finalized** when it has passed V1–V15 on at least one honest validator. By V8, finalization implies at least K (MD) or ⌈2K/3⌉ (BFT) committee members have signed the same `block_digest`.
 
 ---
 

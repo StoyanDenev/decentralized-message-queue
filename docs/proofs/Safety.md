@@ -8,7 +8,7 @@ This document proves that Determ's K-of-K mutual-distrust protocol produces at m
 
 ## 1. Theorem statement
 
-**Theorem T-1 (Safety).** Let `B` and `B'` be blocks both passing `BlockValidator::validate` (Preliminaries §5, V1–V14) against the same chain prefix `B₀, …, B_{h-1}` at height `h ≥ 1`. Under the assumptions:
+**Theorem T-1 (Safety).** Let `B` and `B'` be blocks both passing `BlockValidator::validate` (Preliminaries §5, V1–V15) against the same chain prefix `B₀, …, B_{h-1}` at height `h ≥ 1`. Under the assumptions:
 
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2): no polynomial-time adversary forges a signature by an honest key with non-negligible probability.
 - **(A2) SHA-256 collision resistance** (Preliminaries §2.1): no polynomial-time adversary finds `x ≠ y` with `H(x) = H(y)` with non-negligible probability.
@@ -182,7 +182,7 @@ The safety predicate proved here corresponds to the implementation chain:
 
 | Document | Source |
 |---|---|
-| Validation predicate V1–V14 | `src/node/validator.cpp::BlockValidator::validate` |
+| Validation predicate V1–V15 | `src/node/validator.cpp::BlockValidator::validate` |
 | K-of-K quorum check V8 (MD) | `BlockValidator::check_block_sigs` |
 | BFT-mode `K_eff` branch | same, `consensus_mode == BFT` branch |
 | Committee determinism L-1.1 | `BlockValidator::check_creator_selection` + `src/node/node.cpp::check_if_selected` |
