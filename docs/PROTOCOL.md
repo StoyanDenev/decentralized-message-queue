@@ -569,7 +569,7 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | `tx` | `{hash}` | tx + block_index + block_hash + timestamp |
 | **State commitment / light-client (v2.1 + v2.2)** | | |
 | `state_root` | `{}` | `{state_root: hex, height, head_hash}` — Merkle commitment readback (§4.1.1) |
-| `state_proof` | `{ns, key}` | `{state_root, target_index, leaf_count, value_hash, proof: [hex...]}` — SMT inclusion proof; `ns ∈ {a, s, r, b, k, c}` |
+| `state_proof` | `{namespace, key}` | `{state_root, key_bytes, value_hash, target_index, leaf_count, proof: [hex...], height}` — Merkle inclusion proof against `state_root`. `namespace ∈ {a, s, r, b, k, c}` (exposed subset — the full ten-namespace state tree §4.1.1 also has `d/i/m/p`, but those use composite keys and are not surfaced via this RPC in v2.2). Returns `{error: "not_found", ...}` if the key is absent (membership proofs only — non-membership proofs require an SMT migration). |
 | **Tx submission** | | |
 | `submit_tx` | `{tx}` | `{status: "queued", hash}`. S-028: anon-shape `tx.from` / `tx.to` MUST be lowercase canonical; non-canonical rejected with diagnostic. |
 | `send` | `{to, amount, fee}` | Node-authored TRANSFER from the RPC host's domain (uses the daemon's own privkey) |
