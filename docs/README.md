@@ -28,6 +28,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |
+| `test_dapp_snapshot.sh` | S-037 + S-038 joint surface: DApp registry survives snapshot bootstrap; producer's `body.state_root` matches receiver's recomputed root post-restore |
 | `test_account_encrypted.sh` | v2.17 AES-256-GCM keyfile envelope |
 | `test_rpc_hmac_auth.sh` | v2.16 / S-001 HMAC-SHA-256 RPC auth |
 | `test_mempool_bounds.sh` | S-008 mempool admission + fee-priority eviction |
