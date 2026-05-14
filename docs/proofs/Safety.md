@@ -63,17 +63,11 @@ Suppose `B ≠ B'` are valid at height `h` and have the same committee `K_h` (Le
 
 i.e., `v_i` has signed two distinct digests at the same height `h`.
 
-**Proof.** V8 (Preliminaries §5) for `B`: at least K members of `K_h` have signed `compute_block_digest(B)` (exactly K for MD-mode, ≥ ⌈2K/3⌉ for BFT). V8 for `B'`: same, with `compute_block_digest(B')`.
+**Proof.** V8 (Preliminaries §5) for `B`: at least `k := |B.creators|` (MD) or `Q := ⌈2|B.creators|/3⌉` (BFT) members have signed `compute_block_digest(B)`. V8 for `B'`: same, with `compute_block_digest(B')`.
 
-For MD-mode blocks, **all** K members have signed each. So every `v_i ∈ K_h` signed both digests. The two signatures `(σ_a, σ_b)` witnessing this are extracted from `B.creator_block_sigs[i]` and `B'.creator_block_sigs[i]` respectively, both of which verify under V8.
+For MD-mode blocks, `k = K` and **all** K members have signed each. So every `v_i ∈ K_h` signed both digests. The two signatures `(σ_a, σ_b)` witnessing this are extracted from `B.creator_block_sigs[i]` and `B'.creator_block_sigs[i]` respectively, both of which verify under V8.
 
-For BFT-mode blocks with `K_eff = ⌈2K/3⌉`, only at least `K_eff` members signed each. By inclusion-exclusion on K-element sets:
-
-- Let `S(B) ⊂ K_h` be the set that signed `digest(B)`, `|S(B)| ≥ K_eff`.
-- Let `S(B') ⊂ K_h` be the set that signed `digest(B')`, `|S(B')| ≥ K_eff`.
-- `|S(B) ∩ S(B')| ≥ |S(B)| + |S(B')| - K ≥ 2K_eff - K = 2⌈2K/3⌉ - K ≥ K/3 + 1` (since `K_eff ≥ (2K+2)/3`).
-
-So at least `⌈K/3⌉ + 1` members signed both digests. (For BFT-mode `K = 3`, `K_eff = 2`, intersection ≥ 1.)
+For BFT-mode blocks the committee size shrinks to `|K_h| = ⌈2K/3⌉` and the quorum within that smaller committee is `Q = ⌈2|K_h|/3⌉`. By inclusion-exclusion: `|S(B) ∩ S(B')| ≥ 2Q − |K_h|` (≥ 2 in the worked cases K = 3, 6, 9, and growing thereafter). At least the intersection-many members signed both digests. See `BFTSafety.md` (FA5) for the conditional-safety argument that builds on this overlap.
 
 Therefore at least one — and in MD-mode, every — member of `K_h` has produced two valid signatures over distinct digests at `h`.   ∎
 
@@ -148,14 +142,14 @@ This is materially stronger than BFT protocols' `f < N/3` safety claim, which fa
 
 The reduction loses a SHA-256 collision-finding probability (≤ `2⁻¹²⁸`) at L-1.2 and an Ed25519 forgery probability (≤ `2⁻¹²⁸`) at L-1.3. Under standard concrete-security accounting, the safety claim holds with probability `1 - O(2⁻¹²⁸)` per height for an adversary running in polynomial time.
 
-This bound is significantly tighter than the BFT-mode safety claim (FA5), which is conditional on `f < K_eff/3` and degrades sharply above that threshold.
+This bound is significantly tighter than the BFT-mode safety claim (FA5), which is conditional on `f_h < |K_h|/3` within the BFT committee and degrades sharply above that threshold.
 
 ### 5.3 What this proof does NOT cover
 
 - **Liveness.** T-1 says nothing about whether *any* block finalizes — only that no two valid blocks can coexist at the same height. See `Liveness.md` (FA4).
 - **Network model variability.** T-1 is independent of synchrony assumptions. It holds in fully asynchronous networks too. Validity is a local predicate.
 - **Cross-shard atomicity.** T-1 is per-chain. Cross-shard safety (atomicity, no double-credit) is in `CrossShardReceipts.md` (FA7).
-- **BFT-mode conditional safety.** When `B` and `B'` are both BFT-mode blocks (consensus_mode = BFT), Lemma L-1.3 gives only `⌈K/3⌉ + 1` overlap, not full K. BFT-mode safety relies on `f < K_eff/3` in the committee plus equivocation slashing; the full BFT-mode argument is in `BFTSafety.md` (FA5).
+- **BFT-mode conditional safety.** When `B` and `B'` are both BFT-mode blocks (consensus_mode = BFT), the BFT committee has only `|K_h| = ⌈2K/3⌉` members and the V8 quorum is `Q = ⌈2|K_h|/3⌉`, so Lemma L-1.3 gives only `2Q − |K_h|` overlap (≥ 2 across the worked K=3/6/9/12 cases), not full K. BFT-mode safety relies on `f_h < |K_h|/3` within that smaller committee plus equivocation slashing; the full BFT-mode argument is in `BFTSafety.md` (FA5).
 - **"≤ 1 block instance per digest" (S-030 D2).** T-1 says "at most one *digest* finalizes per height" — a single Hash value. It does NOT directly say "at most one *block instance* per height." The K-of-K committee signs `compute_block_digest()`, which is narrower than `Block::signing_bytes()` (it excludes Phase-2-reveal-time fields and several evidence/receipt list fields). Two block instances differing only in those excluded fields share the same digest; both pass K-of-K signature verification.
 
   **Current state (post-S-033, partial closure).** `Block::signing_bytes` now binds `state_root` (when non-zero), which is the Merkle root over canonical state after apply. The validator re-derives state_root at apply time and rejects on mismatch. Two block instances with differing evidence/receipt lists produce different post-apply states → different state_roots → at most one apply-validates on any honest node. The state-divergence window narrows from "one block wide" (pre-S-033, recovered at N+1 via prev_hash) to "zero blocks (detected at apply with a loud diagnostic)."
@@ -184,7 +178,7 @@ The safety predicate proved here corresponds to the implementation chain:
 |---|---|
 | Validation predicate V1–V15 | `src/node/validator.cpp::BlockValidator::validate` |
 | K-of-K quorum check V8 (MD) | `BlockValidator::check_block_sigs` |
-| BFT-mode `K_eff` branch | same, `consensus_mode == BFT` branch |
+| BFT-mode quorum branch (committee `|K_h| = ⌈2K/3⌉`, quorum `Q = ⌈2|K_h|/3⌉`) | same, `consensus_mode == BFT` branch via `producer.cpp::required_block_sigs` |
 | Committee determinism L-1.1 | `BlockValidator::check_creator_selection` + `src/node/node.cpp::check_if_selected` |
 | `signing_bytes` injectivity L-1.2 | `src/chain/block.cpp::Block::signing_bytes` |
 | Block digest L-1.2 | `src/node/producer.cpp::compute_block_digest` |
