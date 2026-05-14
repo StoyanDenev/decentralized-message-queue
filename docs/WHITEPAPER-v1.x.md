@@ -104,6 +104,7 @@ Each block is produced in two phases by a K-member committee selected determinis
 **Finalize.** Once K block-sigs gather:
 - `delay_output` = SHA-256 over `delay_seed ‖ ordered(secret_1, ..., secret_K)` — secrets appear in the same committee-selection order as their `dh_input` commitments, not sorted (`src/node/producer.cpp::compute_block_rand`).
 - `cumulative_rand` = SHA-256 over `prev_cumulative_rand ‖ delay_output`.
+- `state_root` = the v2.1 Merkle commitment over the post-apply canonical state, populated by the finalizing node via a tentative-chain dry-run between body assembly and broadcast (S-038 producer-side wiring; see PROTOCOL.md §4.1.1 + §5.1). Peer apply re-derives and rejects on divergence, enforcing the apply-layer closure of S-030 D1/D2.
 - The block is finalized with `consensus_mode = MUTUAL_DISTRUST`.
 
 ### 3.2 Selective-abort defense
