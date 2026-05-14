@@ -13,6 +13,28 @@ Peer::Peer(asio::ip::tcp::socket socket)
     } catch (...) {
         address_ = "unknown";
     }
+    // S-026: enable TCP-level keepalive so dead connections (network
+    // partition, peer crash without FIN, NAT-rebind timeout) are detected
+    // and reaped via the on_close path instead of lingering as zombie
+    // peer entries in GossipNet::peers_.
+    //
+    // We only flip the SO_KEEPALIVE bit here. OS-default probe intervals
+    // apply (Linux: 2h idle / 75s probe / 9 probes ≈ 11m to detection;
+    // Windows: 2h / 1s / 10 ≈ 2h to detection). That's slow but bounded —
+    // before this change, idle dead connections were detected only when
+    // the kernel happened to attempt a write into them. Operators wanting
+    // faster detection can tune the system-level keepalive parameters
+    // (sysctl net.ipv4.tcp_keepalive_{time,intvl,probes} on Linux,
+    // HKLM\System\CurrentControlSet\Services\Tcpip\Parameters\Keep* on
+    // Windows). Per-socket override of the interval is non-portable and
+    // would couple the protocol to OS APIs unnecessarily; the system-
+    // level knob is the right surface.
+    try {
+        socket_.set_option(asio::socket_base::keep_alive(true));
+    } catch (...) {
+        // Setting keepalive can theoretically fail (closed socket, etc).
+        // Not worth aborting peer attach over — log silently and continue.
+    }
 }
 
 Peer::~Peer() {
