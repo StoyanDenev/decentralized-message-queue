@@ -96,7 +96,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-027 | ✅ Mitigated | Audit-and-document closure: no secret material (privkeys, passphrases, auth tokens) reaches node/RPC logs — verified by grep audit of every `std::cerr` / `std::cout` site; only chain-public state, peer addresses, timing markers. Added `log_quiet` Config flag for operators wanting fewer log lines on healthy chains | `node/node.hpp::Config::log_quiet` + audit in §6.5 closure entry | done |
 | S-028 | ✅ Mitigated | `is_anon_address` now accepts either case; `normalize_anon_address` returns lowercase canonical form; RPC read paths (balance, send) normalize at input; submit_tx REJECTS non-canonical (sig is over signing_bytes which embeds the address byte-for-byte, so server-side mutation would invalidate the sig — strict-input keeps store-keys unambiguous) | `types.hpp` + `node.cpp::rpc_send/balance/submit_tx` | done |
 | S-029 | ✅ Mitigated | `Chain::resolve_fork` ranks by (heaviest sig set, fewer aborts, smallest block hash); deterministic across peers | `chain/chain.cpp::resolve_fork` | done |
-| S-030 | 🟠 Partially mitigated | Block body not authenticated by `block_digest` (D1 effective via S-033 state_root; D2 partial via S-033; F2 view-reconciliation for full D2 closure tracked v2.7) | `node/producer.cpp:206-221` | v2.7 |
+| S-030 | 🟠 Partially mitigated | Block body not authenticated by `block_digest` (D1 effective via S-033 state_root; D2 partial via S-033; F2 view-reconciliation for full D2 closure tracked v2.7) | `node/producer.cpp::compute_block_digest` + the S-030 D2 comment block immediately below the function | v2.7 |
 | S-031 | ✅ Mitigated | shared_mutex + A9 Phase 1-2D atomicity/lazy-snapshot/lock-free reads + async chain.save worker + gossip-out-of-lock (v2.6) — all 6 layers shipped | `node/node.cpp` | done |
 | S-032 | ✅ Mitigated | Incremental registry cache on Chain + snapshot persistence; build_from_chain reads cache, no log walk | `node/registry.cpp::build_from_chain` | done |
 | S-033 | ✅ Mitigated | Merkle tree state commitment + Block.state_root + signing_bytes binding + apply/restore verification | `chain/chain.cpp::compute_state_root` | done |
@@ -176,7 +176,7 @@ This closure required a paired fix to `src/net/binary_codec.cpp::decode_tx_frame
 | 2 | **Verify hash + sig** as a cheap pre-filter (recompute `compute_hash()`, then verify). Same as `rpc_submit_tx` already does. | Subset of #1. |
 | 3 | **Bounded mempool with sig-verify-on-eviction-attempt** (verify lazily but bound size first). | Cheaper at hot-path cost; still leaves the iteration risk. |
 
-**Recommended.** Option 1. Same model `rpc_submit_tx` already uses (`node.cpp:1846` recomputes hash and rejects mismatches). Aligning `on_tx` is mostly copy-paste.
+**Recommended.** Option 1. Same model `rpc_submit_tx` already uses — recomputes `tx.compute_hash()` and rejects mismatches with diagnostic "submitted tx hash mismatch" (grep `src/node/node.cpp::rpc_submit_tx`; current source at ~L2952). Aligning `on_tx` is mostly copy-paste.
 
 ---
 
