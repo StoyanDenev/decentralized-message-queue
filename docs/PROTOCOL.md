@@ -500,6 +500,94 @@ The two gates together close S-012: a tampered snapshot fails one gate or the ot
 
 Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis JSON file; nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense).
 
+### 12.1 Schema
+
+```json
+{
+  // Chain identity
+  "chain_id":       "string",   // free-form, salts the genesis hash
+  "shard_id":       0,          // 0 for SINGLE/BEACON; per-shard for SHARD
+  "chain_role":     0,          // 0 = SINGLE, 1 = BEACON, 2 = SHARD
+  "initial_shard_count": 1,     // S in the sharded deployment
+  "shard_address_salt": "<hex>", // 32B; salts the address→shard hash
+  "committee_region":   "",     // "" = global; else region tag
+
+  // Consensus
+  "m_creators":    3,           // committee size K (genesis-pinned)
+  "k_block_sigs":  3,           // Phase-2 threshold; default = m_creators
+  "bft_enabled":   true,
+  "bft_escalation_threshold": 5,
+
+  // Economics (E1/E3/E4)
+  "block_subsidy":  10,
+  "subsidy_pool_initial": 0,    // E4 finite-fund cap; 0 = infinite
+  "subsidy_mode":   0,          // 0 = FLAT, 1 = LOTTERY
+  "lottery_jackpot_multiplier": 5,  // E3 jackpot multiplier
+  "zeroth_pool_initial": 0,     // E1 NEF seed (Zeroth address balance)
+
+  // Stake / inclusion policy
+  "inclusion_model": 0,         // 0 = STAKE_INCLUSION, 1 = DOMAIN_INCLUSION
+  "min_stake":       1000,
+  "suspension_slash": 10,
+  "unstake_delay":   1000,
+
+  // Sharding mode (genesis-pinned)
+  "sharding_mode":   0,         // 0 = NONE, 1 = CURRENT, 2 = EXTENDED
+  "epoch_blocks":    1000,
+
+  // R7 under-quorum-merge thresholds (EXTENDED mode only)
+  "merge_threshold_blocks":  100,  // BEGIN gate
+  "revert_threshold_blocks": 200,  // END gate (2:1 hysteresis)
+  "merge_grace_blocks":      10,   // effective_height minimum lead
+
+  // A5 governance (controlled mode)
+  "governance_mode":  0,        // 0 = uncontrolled, 1 = governed
+  "param_keyholders": ["<hex pubkey>", ...],
+  "param_threshold":  0,        // default = len(param_keyholders) = N-of-N
+
+  // Round timer overrides (optional; defaults below)
+  "tx_commit_ms":   200,
+  "block_sig_ms":   200,
+  "abort_claim_ms": 100,
+
+  // Allocations
+  "initial_creators": [
+    {"domain":  "node1",
+     "ed_pub":  "<hex>",        // 32B Ed25519 pubkey
+     "initial_stake": 1000,
+     "region":  ""}             // R1; empty = global pool
+    , ...
+  ],
+  "initial_balances": [          // optional account pre-funding
+    {"domain":  "<domain_or_anon_address>",
+     "balance": <u64>},
+    ...
+  ]
+}
+```
+
+### 12.2 Genesis hash
+
+`SHA-256` over the canonical field-by-field encoding (sorted by name; the implementation walks specific fields in a fixed order). Genesis-mix appends optional fields only when non-default — pre-feature genesis files remain byte-identical with their pre-feature hash (backward compat for chains that don't use the newer parameters).
+
+A node refusing to start on hash mismatch is the eclipse defense: a peer cannot trick a fresh node onto a fork by serving a fabricated genesis.
+
+### 12.3 Profile presets
+
+`determ init --profile <name>` writes a config matching one of:
+
+| Profile | `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` | Use case |
+|---|---|---|
+| `cluster` | 100 / 100 / 50 | LAN (~ms-scale RTT) |
+| `web` | 200 / 200 / 100 | Public-internet web profile (default) |
+| `regional` | 500 / 500 / 200 | Regional / continental RTT |
+| `global` | 2000 / 2000 / 1000 | Inter-continental |
+| `tactical` | 40 / 40 / 20 | Sub-50ms private link |
+| `single_test` | (tight) | Single-node CI/dev |
+| `*_test` variants | (matching prod profile w/ smaller stakes) | CI/dev |
+
+Profile is a config-layer concept; the genesis fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` (and `sharding_mode` for `tactical`/etc.). Operators can also write these fields directly in genesis without `--profile`.
+
 ## 13. Governance (A5)
 
 Two genesis-pinned modes:
