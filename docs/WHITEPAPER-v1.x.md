@@ -138,14 +138,19 @@ BFT-mode safety is conditional on `f < K_eff/3` (the standard BFT bound), plus e
 
 ### 3.4 Equivocation slashing
 
-An equivocation occurs when a validator signs two distinct `block_digest`s at the same `block_index` — provable by exhibiting both signatures under the same public key. Any node observing this can construct an `EquivocationEvent` containing the two signatures + digests; when baked into a finalized block, the event triggers:
+An equivocation occurs when a validator signs two distinct hashes under the same registered key at the same height — provable by exhibiting both signatures. The protocol treats this **digest-agnostically**: validator V11 (`docs/proofs/Preliminaries.md` §5) only checks "two distinct hashes both verifying under the equivocator's registered Ed25519 key," so two detection paths feed the same `EquivocationEvent` channel:
+
+- **BlockSigMsg-level (rev.8).** The committee member signs `compute_block_digest(b)` of two different block bodies at the same height. Detection: `Node::apply_block_locked` cross-block check when a duplicate-height block arrives with a different `block_hash`.
+- **ContribMsg same-generation (S-006 closure).** The committee member signs `make_contrib_commitment(block_index, prev_hash, tx_hashes, dh_input)` over two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection: `Node::on_contrib` recomputes commitments when a same-signer duplicate arrives.
+
+Either detection path produces an `EquivocationEvent` containing the two signatures + digests; when baked into a finalized block, the event triggers:
 
 - **STAKE_INCLUSION chains:** full stake forfeiture (zeroes `stakes_[X].locked`) plus registry deregistration.
 - **DOMAIN_INCLUSION chains:** registry deregistration (the stake is already 0).
 
-The slashing path is closed-loop: detection happens on receipt of a duplicate-height BFT block, gossip propagates the evidence (`EQUIVOCATION_EVIDENCE` message type), producers include it in `block.equivocation_events`, validators verify the two-sig proof, and apply commits the slash.
+The slashing pipeline: detection → gossip via `EQUIVOCATION_EVIDENCE` (message type 11) → pool in `pending_equivocation_evidence_` → producer includes in `block.equivocation_events` → validator verifies V11 → apply commits the slash.
 
-Slashing soundness: an honest validator can never be slashed for equivocation. By Ed25519 EUF-CMA, forging two distinct signatures under an honest key is `≤ 2⁻¹²⁸` per attempt. See `docs/proofs/EquivocationSlashing.md` (FA6) for the full one-sided soundness argument.
+Slashing soundness: an honest validator can never be slashed for equivocation. By Ed25519 EUF-CMA, forging two distinct signatures under an honest key is `≤ 2⁻¹²⁸` per attempt. The digest-agnostic V11 means the bound covers both detection paths simultaneously. See `docs/proofs/EquivocationSlashing.md` (FA6) for the full one-sided soundness argument.
 
 ---
 
