@@ -978,7 +978,7 @@ Determ's safety-critical mechanisms are covered by per-property analytic proofs 
 | **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA12: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness, wallet recovery. |
 | **FB-track** (TLA+ specs) | Consensus.tla, Sharding.tla, Receipts.tla + CHECK-RESULTS.md. Model-check transcripts pending TLC installation in CI; specs ready for local validation. |
 
-Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V14 from F0), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
+Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V15 from F0; V12/V13 are the cross-shard receipt source/destination split, V14 is the timestamp bound, V15 is transaction apply consistency), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
 
 Concrete-security bounds: every property holds with probability `≥ 1 − Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. Under Grover (post-quantum), bounds degrade to `Q · 2⁻⁶⁴` for Ed25519 — operationally secure but a PQ-signature migration (Dilithium / Falcon) would restore classical bounds.
 
