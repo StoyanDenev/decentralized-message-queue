@@ -346,7 +346,7 @@ Properties:
 - **Order-sensitive payout, but provably finite.** Earlier registrants receive larger absolute grants; later registrants asymptote toward zero. The total ever distributed is bounded above by `zeroth_pool_initial`.
 - **Sybil-bounded under STAKE_INCLUSION.** A sybil paying `MIN_STAKE` to receive `pool / 2^n` is economically irrational once `pool / 2^n < MIN_STAKE`. Operators choosing `MIN_STAKE` set the natural depth bound.
 
-See `docs/proofs/EconomicSoundness.md` (FA11 T-13) for the supply-neutrality proof; `chain.cpp:821-831` for the apply-site code.
+See `docs/proofs/EconomicSoundness.md` (FA11 T-13) for the supply-neutrality proof (which holds for any sum-preserving NEF rule, including the planned lottery replacement); `chain.cpp:821-831` for the apply-site code. The lottery-based NEF design specified in `plan.md` §E1 (fixed-grant draw against `cumulative_rand` with operator-chosen probability) is the planned v1.x-backlog replacement; geometric pool/2 ships today and is flagged for E-track reconciliation. The replacement is sum-preserving by construction so this section's correctness argument carries over unchanged.
 
 ---
 
