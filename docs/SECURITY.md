@@ -10,7 +10,7 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **1** (S-018) | **1** (S-035 unit-tests/CI; engineering-culture item) | **2** |
+| Open (untouched) | **0** | **0** | **1** (S-018) | **2** (S-035 unit-tests/CI; S-037 dapp_registry snapshot-restore gap, ~1d code patch) | **3** |
 | Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped; Option 1 = v2.7 F2 closes fully) | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **3** |
 | Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **7** (S-021, S-022, S-024, S-026, S-027, S-028, S-029) | **24** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
@@ -18,7 +18,7 @@
 
 (M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound.
+**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 added in this session** during the PROTOCOL.md coherence sweep: `dapp_registry_` is in the `state_root` Merkle but missing from `serialize_state` / `restore_from_snapshot`, so a DApp-active chain fails the state_root gate on snapshot restore. Latent — no test exercises both surfaces. Low/Op (functional bug, not a security regression; restore fails loudly with `"state_root mismatch"` rather than silently accepting bad state). ~1 day code patch.
 
 **Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
@@ -101,6 +101,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
 | S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must lie entirely in past — leading `evidence_window_start ≤ b.index` check added to prevent integer overflow bypassing the threshold-arithmetic check); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `node/validator.cpp::check_transactions` MERGE_EVENT branch | v2.11 |
+| S-037 | 🟢 Op (tracked) | `dapp_registry_` contributes to `state_root` via the `d:` namespace (§4.1.1 of PROTOCOL.md) but `Chain::serialize_state` / `restore_from_snapshot` don't emit/restore the map. A snapshot taken from a DApp-active chain therefore fails the S-033 state_root gate on restore (one of S-033's two cryptographic gates rejects with "state_root mismatch"). Bug is latent today — no test exercises DApp + snapshot together (`test_snapshot_bootstrap.sh` and `test_dapp_*.sh` are disjoint). Closure is a small code patch: emit `snap["dapp_registry"]` in `serialize_state` after the `merge_state` block, add the symmetric readback in `restore_from_snapshot`, plus one regression test that snapshots + restores a DApp-active chain. ~1 day. Discovered during the PROTOCOL.md coherence sweep; `PROTOCOL.md` §11 carries a "Known gap (tracked)" call-out until closed. | `chain/chain.cpp::serialize_state` + `::restore_from_snapshot` | 1d |
 
 ---
 
