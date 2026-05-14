@@ -2,7 +2,24 @@
 
 This document specifies wire formats, hash inputs, and the consensus state machine at a level sufficient for an external implementer to build a compatible client. The reference implementation is in this repository; where implementation behavior diverges from this document, treat the implementation as authoritative and file an issue to reconcile.
 
-**Status:** v1 (rev. 8 + sharding through B6.basic). Frozen for the v1 series.
+**Status:** v1 (rev. 8 + sharding through B6.basic) plus shipped v2 foundation. Frozen for the v1 series.
+
+**Shipped v2 items covered here:** v2.1 state Merkle root (§4.1.1), v2.2 light-client `state_proof` RPC (§10.2), v2.3 snapshot state_root verification (§11.1), v2.4 atomic apply + COMPOSABLE_BATCH (§14.5), v2.5 registry cache (transparent), v2.6 gossip out of lock (transparent), v2.16 HMAC RPC auth (§10.1), v2.17 passphrase keyfile envelopes (§1.2), v2.18 DAPP_REGISTER (§14.5), v2.19 DAPP_CALL (§14.5), A3 binary wire codec + version negotiation (§16.1).
+
+**v2 items NOT yet covered (not yet shipped):** v2.7 F2 view reconciliation (full S-030 D2 closure; `docs/proofs/F2-SPEC.md` is the implementation spec), v2.8 post-quantum signature migration, v2.10 threshold randomness aggregation (`plan.md` A11), v2.14 real OPAQUE wallet recovery (gates on Windows MSVC porting of upstream VLAs), v2.22-v2.24 confidential transactions + cross-chain bridge + audit hooks, v2.25-v2.26 distributed identity provider + on-chain key rotation. See `docs/V2-DESIGN.md` for the full design space.
+
+**Security-closure interop notes covered here:**
+- S-001 (RPC auth) §10.1
+- S-008 (mempool bounds) — implementation-internal; no wire surface
+- S-014 (rate-limit RPC + gossip) §10.1 + framing
+- S-016 partial (cross-shard receipt soak) §8.1
+- S-017 (UNSTAKE three-layer alignment) §3.3
+- S-021 (chain.json head_hash wrap) — storage-side; no wire surface
+- S-022 (per-type message caps) §9.1
+- S-028 (anon address case normalization) §2.2 + §3.3
+- S-029 (resolve_fork) — apply-side; no wire surface
+- S-033 (state_root commitment) §4.1.1
+- S-036 partial (MERGE_BEGIN bounds + leading past-bound) §14
 
 ## 1. Cryptographic primitives
 
