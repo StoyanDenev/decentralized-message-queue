@@ -187,16 +187,24 @@ Grace period (suggested: 100 blocks) prevents abrupt service drop — clients se
 "d:" + domain         → SHA-256(canonical_serialize(DAppEntry))
 ```
 
-Where `canonical_serialize` is:
+Where `canonical_serialize` is (matches the actual shipped encoding in
+`src/chain/chain.cpp::build_state_leaves`'s `d:` branch; canonical
+spec at PROTOCOL.md §4.1.1):
 ```
 service_pubkey || u64_be(registered_at) || u64_be(active_from) || u64_be(inactive_from)
   || u64_be(endpoint_url.size()) || endpoint_url
   || u64_be(topics.size()) || (each: u64_be(topic.size()) || topic)
-  || u8(retention)
+  || u64_be(retention)          // u8 on the wire / in DAppEntry, but
+                                // SHA256Builder::append(uint64_t) writes
+                                // it big-endian when feeding the state-
+                                // root value hash (chain.cpp:324)
   || u64_be(metadata.size()) || metadata
 ```
 
-Light clients prove DApp registration via `state_proof` RPC (just shipped, reuses the existing primitive).
+Light clients prove DApp registration via `state_proof` RPC. The `d:`
+namespace exposure shipped via the state_proof RPC extension (commit
+`36b759d`); the broader v2.2 primitive itself was already in place
+before the v2.18 DApp substrate landed.
 
 ---
 
