@@ -66,19 +66,19 @@ For any block `b` accepted by V12 on shard `src`, and any cross-shard `TRANSFER 
 
 For any sequence of blocks `b_0, b_1, ..., b_n` on shard `dst` accepted in order, no pair `(b_i, b_j)` with `i ≤ j` has the same `(src_shard, tx_hash)` in their respective `inbound_receipts`.
 
-**Proof.** When `b_i` is applied, every `r ∈ b_i.inbound_receipts` is inserted into `applied_inbound_receipts_` (chain.cpp line 424). When `b_j` is validated, V13 rejects any `r` with `chain.inbound_receipt_applied(r.src_shard, r.tx_hash) == true` (validator.cpp line 682). V13 also rejects within-block duplicates via the `seen` set (line 678–681). Thus across all blocks, each `(src_shard, tx_hash)` is credited at most once. ∎
+**Proof.** When `b_i` is applied, every `r ∈ b_i.inbound_receipts` is inserted into `applied_inbound_receipts_` (chain.cpp, inbound-receipt apply loop). When `b_j` is validated, V13 rejects any `r` with `chain.inbound_receipt_applied(r.src_shard, r.tx_hash) == true` (validator.cpp `check_inbound_receipts`). V13 also rejects within-block duplicates via a `seen` set in the same function. Thus across all blocks, each `(src_shard, tx_hash)` is credited at most once. ∎
 
 ### Lemma L-7.3 — Source-side debit precedes receipt emission
 
 In any block `b` on shard `src` accepted by the full validator pipeline, for each `r ∈ b.cross_shard_receipts` the corresponding source-side state transition `accounts_[r.from].balance -= (r.amount + r.fee)` is applied to chain state in the same `apply_transactions` call.
 
-**Proof.** Block apply is atomic: `apply_transactions` either commits all state changes for `b` or none (it is invoked under chain lock, and any throw aborts state writes via the per-block tx loop's local-scope mutations on `accounts_` + the post-loop A1 invariant assertion at chain.cpp line 442). The TRANSFER branch (chain.cpp line 178–198) executes the sender debit before adding to `block_outbound`. The receipt list `b.cross_shard_receipts` was already finalized in the block before apply runs (validator gate). Hence "block finalized" ⇒ "sender debited" ⇒ "receipt embedded in finalized block". ∎
+**Proof.** Block apply is atomic: `apply_transactions` either commits all state changes for `b` or none (it is invoked under chain lock, and any throw aborts state writes via the per-block tx loop's local-scope mutations on `accounts_` + the post-loop A1 invariant assertion at the apply tail). The TRANSFER branch (chain.cpp `case TxType::TRANSFER`) executes the sender debit before adding to `block_outbound`. The receipt list `b.cross_shard_receipts` was already finalized in the block before apply runs (validator gate). Hence "block finalized" ⇒ "sender debited" ⇒ "receipt embedded in finalized block". ∎
 
 ### Lemma L-7.4 — Forging a source block requires breaking FA1
 
-A `CrossShardReceipt` on dst is only credited if it appears in `b.inbound_receipts` on a *finalized* dst block. The producer-side pipeline (`producer.cpp` line 473, `node.cpp::on_cross_shard_receipt_bundle`) only enqueues receipts whose source block carries `K` valid Ed25519 signatures from the source's committee at `src_block_index`.
+A `CrossShardReceipt` on dst is only credited if it appears in `b.inbound_receipts` on a *finalized* dst block. The producer-side pipeline (`producer.cpp::build_body` inbound-receipts admission + `node.cpp::on_cross_shard_receipt_bundle`) only enqueues receipts whose source block carries `K` valid Ed25519 signatures from the source's committee at `src_block_index`.
 
-**Proof.** The receipt bundle gossip path (`net/gossip.cpp::on_cross_shard_receipt_bundle`) hands the source block to `Node::on_cross_shard_receipt_bundle` (node.cpp line 1289), which verifies the K-of-K committee signatures against the beacon-anchored pool view for `src_shard`. Only then is the receipt added to `pending_inbound_receipts_`. Producing a fake K-of-K signed source block requires either:
+**Proof.** The receipt bundle gossip path (`net/gossip.cpp::on_cross_shard_receipt_bundle`) hands the source block to `Node::on_cross_shard_receipt_bundle`, which verifies the K-of-K committee signatures against the beacon-anchored pool view for `src_shard`. Only then is the receipt added to `pending_inbound_receipts_`. Producing a fake K-of-K signed source block requires either:
 
 - Forging at least one honest signature (A1/EUF-CMA), probability `≤ 2⁻¹²⁸`, OR
 - Compromising all K committee members at `src` (which by FA1's T-1.1 is the vacuous case — no honest party in committee, no soundness claim from FA1 directly, but the slashing path FA6 still catches equivocators).

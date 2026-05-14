@@ -80,7 +80,7 @@ By hypothesis there exists an honest `v_i ∈ K_{h,r} \ F` with `t ∈ mempool(v
 **Step 4.** By the body-assembly rule in `src/node/producer.cpp::build_body` (the body-assembly loop, Preliminaries §10): the proposer materializes `B.transactions` by mapping each hash in the union to its tx-store entry. Under V14 (Preliminaries §5), the assembled body's tx_root recomputes to `B.tx_root`. Two outcomes:
 
 - (a) `t` is in the proposer's tx_store: `t` enters `B.transactions`. ✓
-- (b) `t.hash` is in the union but `t` itself is not in the proposer's tx_store: the assembly skips `t` (line 369), the tx_root recomputed from the assembled body diverges from `B.tx_root`, and V14 (transaction apply consistency) plus V7 reject the block.
+- (b) `t.hash` is in the union but `t` itself is not in the proposer's tx_store: the assembly skips `t` (the body-assembly loop's lookup-miss branch), the tx_root recomputed from the assembled body diverges from `B.tx_root`, and V14 (transaction apply consistency) plus V7 reject the block.
 
 Under partial synchrony (Preliminaries §3.1) + gossip propagation + H5 (broadcast everything), `t` reaches the proposer's tx_store within `Δ` of being known to `v_i`. If the proposer is honest, case (a) holds. If the proposer is Byzantine and forces case (b), the block is invalid and never finalizes.
 

@@ -261,7 +261,7 @@ The commit-reveal approach has the property that **no member has unilateral infl
 
 | Document | Source |
 |---|---|
-| `c_i = SHA256(s_i ‖ pk_i)` | `src/node/node.cpp::start_contrib_phase` lines 614-621 |
+| `c_i = SHA256(s_i ‖ pk_i)` | `src/node/node.cpp::start_contrib_phase` (commit-construction block) |
 | `s_i` (Phase-1 secret) | `Node::current_round_secret_` field |
 | Phase-2 reveal `dh_secret` | `src/node/producer.cpp::make_block_sig` |
 | V5 commit-reveal binding check | `src/node/validator.cpp::check_creator_dh_secrets` |

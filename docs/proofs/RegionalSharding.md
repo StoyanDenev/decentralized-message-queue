@@ -85,7 +85,7 @@ Under R-liveness (`|Pool_s| ≥ K_s` and bounded honest fraction), all three hol
 
 T-6's proof is a direct reduction to EUF-CMA: honest validator `v_i ∈ Pool_s \ F_s` cannot have two signatures over distinct digests at the same `(h, round)`. The argument is *per-validator*, not per-pool. Regional pinning narrows which `v_i`s are eligible at `s`; it doesn't weaken the EUF-CMA bound against any individual `v_i`.
 
-Cross-shard slashing (T-6.1) routes through the beacon's committee derivation. The beacon's view of `Pool_s` at the equivocation epoch is reconstructible from beacon-anchored pool state plus the shard manifest's `committee_region` for `s` — exactly what `node.cpp::on_shard_tip` already does (line 1206–1213). ∎
+Cross-shard slashing (T-6.1) routes through the beacon's committee derivation. The beacon's view of `Pool_s` at the equivocation epoch is reconstructible from beacon-anchored pool state plus the shard manifest's `committee_region` for `s` — exactly what `node.cpp::on_shard_tip` already does (its committee re-derivation block). ∎
 
 ### 3.4 FA7 (Cross-shard receipts) survives substitution
 
@@ -126,9 +126,9 @@ If the receiver mis-identifies `Pool_src` (e.g., uses the wrong region filter), 
 | Per-validator region tag (REGISTER tx payload) | `src/chain/chain.cpp::apply_transactions` REGISTER branch |
 | Per-shard `committee_region` (genesis / manifest) | `src/chain/genesis.cpp::GenesisConfig` |
 | Region-filtered eligible pool | `src/node/registry.cpp::eligible_in_region` |
-| Validator-side region filter | `src/node/validator.cpp` (lines 69, 178) |
-| Producer-side region filter | `src/node/node.cpp::next_committee_for_height` (line 1850, 1944) |
-| Beacon-side shard-region view | `src/node/node.cpp::on_shard_tip` (line 1206–1213) |
+| Validator-side region filter | `src/node/validator.cpp::check_creator_selection` + `check_committee_membership` |
+| Producer-side region filter | `src/node/node.cpp::next_committee_for_height` (region-filter branch) |
+| Beacon-side shard-region view | `src/node/node.cpp::on_shard_tip` (committee re-derivation) |
 | Shard manifest (R2 fail-closed under EXTENDED+BEACON) | `src/main.cpp` startup gate; `tools/test_shard_manifest.sh` |
 
 A reviewer can confirm regional pinning is sound by:

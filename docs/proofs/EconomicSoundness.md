@@ -36,7 +36,7 @@ After every block apply:
        − accumulated_slashed − accumulated_outbound
 ```
 
-Enforced via direct C++ assertion at `apply_transactions` tail; mismatch throws with a diagnostic (chain.cpp ~ line 530).
+Enforced via direct C++ assertion at `apply_transactions` tail; mismatch throws with a "unitary-balance invariant violated" diagnostic.
 
 ### E1 NEF flow
 
@@ -169,7 +169,7 @@ if nef > 0:
 
 Δ(Σ balances) = −nef + nef = 0. No counter is touched by the NEF branch. T-12's invariant is preserved trivially.
 
-The Zeroth pool's initial balance is counted in `genesis_total_` at index-0 apply (line 212 of chain.cpp seeds it via `initial_state[]` like any other genesis account). Subsequent NEF distributions move balance within the accounts map without altering `genesis_total_` or any other counter. ∎
+The Zeroth pool's initial balance is counted in `genesis_total_` at index-0 apply (chain.cpp's `b.index == 0` branch seeds it via `initial_state[]` like any other genesis account). Subsequent NEF distributions move balance within the accounts map without altering `genesis_total_` or any other counter. ∎
 
 ---
 
@@ -212,7 +212,7 @@ Every counter mutation is a deterministic function of the block's contents:
 - `block_outbound`, `block_inbound`, `block_slashed`: sums over tx subsets / receipt subsets / event subsets, all in canonical block order.
 - `total_fees`: deterministic sum.
 
-No randomness, no external state, no time-dependence. Two honest nodes applying the same block reach byte-identical counters and accounts/stakes maps. Snapshot serialization includes all counters explicitly (lines 657–661 of chain.cpp), so snapshot-bootstrapped nodes resume with identical state. ∎
+No randomness, no external state, no time-dependence. Two honest nodes applying the same block reach byte-identical counters and accounts/stakes maps. Snapshot serialization includes all counters explicitly (`Chain::serialize_state`), so snapshot-bootstrapped nodes resume with identical state. ∎
 
 ---
 
