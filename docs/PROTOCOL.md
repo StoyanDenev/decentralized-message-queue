@@ -733,19 +733,19 @@ A node refusing to start on hash mismatch is the eclipse defense: a peer cannot 
 
 ### 12.3 Profile presets
 
-`determ init --profile <name>` writes a config matching one of:
+`determ init --profile <name>` writes a config matching one of these production presets (values from `include/determ/chain/params.hpp::PROFILE_*`):
 
-| Profile | `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` | Use case |
-|---|---|---|
-| `cluster` | 100 / 100 / 50 | LAN (~ms-scale RTT) |
-| `web` | 200 / 200 / 100 | Public-internet web profile (default) |
-| `regional` | 500 / 500 / 200 | Regional / continental RTT |
-| `global` | 2000 / 2000 / 1000 | Inter-continental |
-| `tactical` | 40 / 40 / 20 | Sub-50ms private link |
-| `single_test` | (tight) | Single-node CI/dev |
-| `*_test` variants | (matching prod profile w/ smaller stakes) | CI/dev |
+| Profile | `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` | M / K | role / sharding_mode | Use case |
+|---|---|---|---|---|
+| `cluster`  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | LAN, single beacon, ~125 ms blocks |
+| `web` (default) | 200 / 200 / 100 | 3 / 2 (hybrid) | SHARD / EXTENDED | Public-internet, regional shards |
+| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | Regional / continental RTT |
+| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | Inter-continental, hub-and-spoke |
+| `tactical` | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | Sub-30 ms private link, region-pinned units |
 
-Profile is a config-layer concept; the genesis fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` (and `sharding_mode` for `tactical`/etc.). Operators can also write these fields directly in genesis without `--profile`.
+Plus six CI/dev variants that hold round timers at `5 / 5 / 3` and force `M = K = 3`: `single_test` (SINGLE / NONE), `cluster_test` (SINGLE / NONE), `web_test` (SHARD / EXTENDED), `regional_test` (SHARD / CURRENT), `global_test` (SHARD / EXTENDED), `tactical_test` (SHARD / EXTENDED).
+
+Profile is a config-layer concept; the fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` / `m_creators` / `k_block_sigs` / `chain_role` / `sharding_mode`. Operators can also write these fields directly in genesis without `--profile`.
 
 ## 13. Governance (A5)
 
