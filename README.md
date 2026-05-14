@@ -232,7 +232,9 @@ tx_root ‖ delay_seed ‖ delay_output ‖
 consensus_mode ‖ bft_proposer ‖ cumulative_rand ‖
 abort_events[].event_hash ‖
 equivocation_events[] ‖ cross_shard_receipts[] ‖ inbound_receipts[] ‖
-initial_state[]
+initial_state[] ‖
+partner_subset_hash    [bound only when non-zero — R4 Phase 3 backward-compat] ‖
+state_root             [bound only when non-zero — S-033 v2.1 backward-compat]
 ```
 
 This is broader than `block_digest` (§7.4), which is what committee members sign in Phase 2. `block_digest` excludes `delay_output` and `creator_dh_secrets` so members can sign at Phase-2 entry without waiting for the K reveals to gather; `signing_bytes` includes them so the final block identity uniquely binds the post-reveal randomness output.

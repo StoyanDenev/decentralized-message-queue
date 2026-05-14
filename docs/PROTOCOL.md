@@ -216,7 +216,8 @@ abort_events[i].event_hash for i
 equivocation_events[i].(equivocator, block_index, digest_a, sig_a, digest_b, sig_b, shard_id, beacon_anchor_height) for i
 cross_shard_receipts[i].(src_shard, dst_shard, src_block_index, src_block_hash, tx_hash, from, to, amount, fee, nonce) for i
 inbound_receipts[i].(src_shard, dst_shard, src_block_index, tx_hash, to, amount) for i  // narrower binding
-initial_state[i].(domain, ed_pub, balance, stake) for i  // genesis only
+initial_state[i].(domain, ed_pub, balance, stake, region) for i  // genesis only; region appended only if non-empty (R1 backward-compat shim)
+partner_subset_hash (32 bytes) — bound only when non-zero (R4 Phase 3 conditional binding: zero default for non-merged blocks preserves byte-identical signing bytes for pre-R4 history; non-zero binds the partner shard's tx subset commitment into the K-of-K signature on merged blocks).
 state_root (32 bytes) — bound only when non-zero (S-033 conditional binding: pre-S-033 blocks have zero state_root, preserving byte-identical signing_bytes for backward compat; post-S-033 blocks contribute the field unconditionally).
 ```
 
