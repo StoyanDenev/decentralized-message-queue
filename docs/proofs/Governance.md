@@ -178,4 +178,4 @@ T-10 + T-11 + T-10.1 establish that A5 governance is sound:
 
 The proof covers the cryptographic-enforcement layer. The human-trust layer (whether N keyholders should be trusted to coordinate honestly) is not within the scope of formal verification; it is a deployment-time decision codified by the genesis-pinned founder set.
 
-Combined with FA1–FA9, A5 governance soundness completes the formal coverage of every safety-critical mechanism shipped in Determ v1.x.
+Combined with FA1–FA9 (consensus, slashing, sharding, merge safety) plus FA11 (economic soundness) and FA12 (wallet recovery), A5 governance soundness sits alongside the other v1.x analytic proofs to cover every safety-critical mechanism in Determ v1.x. The full FA-track index is in `docs/proofs/README.md`.
