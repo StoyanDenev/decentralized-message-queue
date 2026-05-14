@@ -353,6 +353,12 @@ When a `TRANSFER` on shard X has `shard_id_for_address(tx.to) = Y ≠ X`:
 
 The destination's K-of-K signing of the block is the collective on-chain attestation that the inbound set was valid. Source K-of-K verification happens at receive time on each member.
 
+### 8.1 S-016 partial mitigation — time-ordered admission (`CROSS_SHARD_RECEIPT_LATENCY`)
+
+Step 6 above describes the *eligible* set for inclusion. Reference implementations also wait **`CROSS_SHARD_RECEIPT_LATENCY = 3`** destination-chain blocks between local first-observation of a receipt (via bundle gossip — step 4) and admission to a produced block. The latency gives committee members time to converge on the same eligible set; without it, momentary pool divergence under gossip-async produces different tentative blocks → K-of-K fails → round retries. The soak threshold is a producer-side behavior, not a wire-format requirement; receivers do not validate it. Alternative implementations that skip the soak are still consensus-compatible (they'll just trigger more round retries under load).
+
+The v2.7 F2 (`docs/proofs/F2-SPEC.md`) consensus-layer closure replaces this with a strict-determinism Phase-1 intersection commitment via `ContribMsg.inbound_keys`. Until v2.7 F2 ships, the 3-block soak is the deployed partial mitigation.
+
 ## 9. Wire protocol
 
 ### 9.1 Framing
