@@ -320,11 +320,27 @@ Expected per-block value equals FLAT subsidy — total issuance schedule unchang
 
 ### 8.5 Negative entry fee from Zeroth pool (E1)
 
-A pseudo-account at the canonical all-zero address `0x00…00` is seeded at genesis with `zeroth_pool_initial: u64`. The validator rejects any transaction with `from == ZEROTH_ADDRESS` — no key can sign over the all-zero pubkey, so the pool is provably unsynthesizable.
+A pseudo-account at the canonical all-zero address `0x00…00` is seeded at genesis with `zeroth_pool_initial: u64`. The validator rejects any transaction with `from == ZEROTH_ADDRESS` — no key can sign over the all-zero pubkey, so the pool is provably unsynthesizable. A genesis with `zeroth_pool_initial = 0` disables E1 entirely.
 
-On the first-time REGISTER apply for a new domain, half the current pool balance transfers to the registrant (geometric exhaustion; asymptotes to 0). E1 is a balance transfer, not a mint — supply invariant is preserved trivially.
+On each **first-time** REGISTER apply for a new domain (not re-registrations / key rotations), the pool delivers a **deterministic geometric grant**:
 
-See `docs/proofs/EconomicSoundness.md` (FA11) for the full invariance proofs across E1/E3/E4.
+```
+if first_time_register and pool.balance > 0:
+    nef = pool.balance / 2
+    pool.balance       -= nef
+    accounts[tx.from]  += nef
+```
+
+The mechanism is intentionally minimal: no per-registrant lottery, no per-block randomness gate, no auxiliary genesis parameter beyond `zeroth_pool_initial`. The first registrant after genesis receives half the pool; the second receives a quarter; the n-th receives `pool / 2^n` (asymptotically). Re-registrations of an existing domain (key rotation, region update) do **not** trigger the grant — the apply path checks `registrants_.find(tx.from) == registrants_.end()` before touching the pool. The pool-empty case (`pool.balance == 0 ⇒ nef == 0`) is a silent no-op; no separate disable flag is needed.
+
+Properties:
+
+- **Supply-preserving.** E1 is a balance transfer (pool → registrant), not a mint. The pool's initial balance is included in `genesis_total_` at the index-0 apply, so the A1 unitary-supply invariant holds trivially across the transfer.
+- **Deterministic.** No randomness gate; every validator computes the same `nef` from the post-apply pool balance and the first-time-register predicate. No fork-choice ambiguity.
+- **Order-sensitive payout, but provably finite.** Earlier registrants receive larger absolute grants; later registrants asymptote toward zero. The total ever distributed is bounded above by `zeroth_pool_initial`.
+- **Sybil-bounded under STAKE_INCLUSION.** A sybil paying `MIN_STAKE` to receive `pool / 2^n` is economically irrational once `pool / 2^n < MIN_STAKE`. Operators choosing `MIN_STAKE` set the natural depth bound.
+
+See `docs/proofs/EconomicSoundness.md` (FA11 T-13) for the supply-neutrality proof; `chain.cpp:821-831` for the apply-site code.
 
 ---
 
@@ -563,7 +579,7 @@ GenesisConfig {
   subsidy_pool_initial: u64            // E4 hard cap on cumulative subsidy
   subsidy_mode: u8                     // E3: 0 = FLAT, 1 = LOTTERY
   lottery_jackpot_multiplier: u32      // E3: required when LOTTERY
-  zeroth_pool_initial: u64             // E1: NEF pool seed
+  zeroth_pool_initial: u64             // E1: NEF pool seed; 0 disables NEF (geometric pool/2 per first-time REGISTER)
   initial_creators: [GenesisCreator]
   initial_balances: [GenesisAllocation]
 }
