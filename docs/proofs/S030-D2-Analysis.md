@@ -172,9 +172,9 @@ For permissioned / consortium deployments, S-033's partial closure is the practi
 
 A separate question: should `timestamp` be included in `compute_block_digest()`?
 
-Today it isn't. Honest members' local clocks differ within `±5s` (the validator's window). If `timestamp` were in the digest, two members with clocks differing by 200ms would sign different digests. Spurious rounds aborts.
+Today it isn't. Honest members' local clocks differ within `±30s` (the validator's window). If `timestamp` were in the digest, two members with clocks differing by 200ms would sign different digests. Spurious rounds aborts.
 
-The way to include `timestamp` is to have the assembler propose a specific value at the Phase 1→2 transition and other members verify it's within their `±5s` window before signing. This is doable but interacts with the same view-reconciliation problem above — best handled together.
+The way to include `timestamp` is to have the assembler propose a specific value at the Phase 1→2 transition and other members verify it's within their `±30s` window before signing. This is doable but interacts with the same view-reconciliation problem above — best handled together.
 
 ---
 

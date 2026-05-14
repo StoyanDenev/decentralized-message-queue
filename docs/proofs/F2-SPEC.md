@@ -46,7 +46,7 @@ The fields F2 reconciles over (the ✗-row fields in S030-D2-Analysis.md §1, ex
 | `inbound_receipts` | **Intersection** | Credit-bearing. Conservative: only credit when ALL K members have independently observed the receipt bundle. Reduces risk of double-credit if cross-shard relay is partially corrupted (one bad relayer can't unilaterally cause credit). |
 | `cross_shard_receipts` | **Deterministic from txs** | These are *emitted* from in-block TRANSFER txs on this shard. Once `tx_root` is reconciled (already F2-safe via existing tx_root mechanism), the receipts derive deterministically. No separate reconciliation needed — the receipts list is a pure function of the accepted txs. Validator re-derives and checks. |
 | `partner_subset_hash` | **Deterministic from merge state** | Computed identically on every honest node from the chain's `merge_state` at this height. No view divergence possible; no reconciliation rule needed. Validator re-derives. |
-| `timestamp` | **Assembler-proposes, members-bound-check** | Assembler proposes a value at Phase 1→2 boundary. Other members verify it's within their `±5s` window before signing Phase-2 digest. If out of window, member doesn't sign; round aborts and re-runs. Same pattern as the validate-window in `check_timestamp`. |
+| `timestamp` | **Assembler-proposes, members-bound-check** | Assembler proposes a value at Phase 1→2 boundary. Other members verify it's within their `±30s` window before signing Phase-2 digest. If out of window, member doesn't sign; round aborts and re-runs. Same pattern as the validate-window in `check_timestamp`. |
 
 **Effect:** the three pool-fed fields (equivocation, abort, inbound_receipts) have nontrivial reconciliation; the others are deterministic or proposer-bound.
 
@@ -104,7 +104,7 @@ Specifically, the extended `compute_block_digest` includes:
 - `canonical_inbound_receipts[]` = intersection of K members' `inbound_receipts` (sorted canonically)
 - `canonical_cross_shard_receipts[]` = deterministic from accepted txs
 - `canonical_partner_subset_hash` = deterministic from merge state
-- `canonical_timestamp` = assembler-proposed (validated by each member's `±5s` window before Phase-2 sign)
+- `canonical_timestamp` = assembler-proposed (validated by each member's `±30s` window before Phase-2 sign)
 
 Each member at Phase-2 sign-time:
 1. Receives all K Phase-1 commits (already gathered for current digest computation)
@@ -126,7 +126,7 @@ This is **acceptable under the union rule** for the following reasons:
 
 **Decision: include in v2.7 scope.**
 
-Adding the assembler-proposes-value pattern for timestamp (Q1) is small relative to the rest of F2 work, and the validator-side ±5s window already exists. Adding it now avoids a separate `v2.7.5` scope.
+Adding the assembler-proposes-value pattern for timestamp (Q1) is small relative to the rest of F2 work, and the validator-side ±30s window already exists. Adding it now avoids a separate `v2.7.5` scope.
 
 Wire-format change: `compute_block_digest` extended with `timestamp` (already in `signing_bytes`, just not in digest today).
 
