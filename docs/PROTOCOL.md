@@ -307,7 +307,7 @@ Quorum semantics: `M - 1` matching claims (where `M = m_creators`, the committee
 
 ## 6. Equivocation slashing (rev.8 follow-on)
 
-An `EquivocationEvent` is proof that one Ed25519 key signed two different `block_digest`s at the same height:
+An `EquivocationEvent` is proof that one Ed25519 key signed two different commitments at the same height:
 ```cpp
 struct EquivocationEvent {
     string    equivocator;
@@ -319,11 +319,23 @@ struct EquivocationEvent {
 };
 ```
 
-**Validation:** `digest_a != digest_b`, `sig_a != sig_b`, `equivocator` is registered, both sigs verify.
+**Validation (V11):** `digest_a != digest_b`, `sig_a != sig_b`, `equivocator` is registered, both sigs verify under the equivocator's registered Ed25519 key.
 
-**Apply:** when `EquivocationEvent` is baked into a finalized block, the equivocator's full staked balance is forfeited (locked → 0) and `inactive_from = block.index + 1`.
+**Apply:** when `EquivocationEvent` is baked into a finalized block, the equivocator's full staked balance is forfeited (`locked → 0`) and `inactive_from = block.index + 1` (removed from selection on the next registry build).
 
-External submission: `submit_equivocation` RPC validates the two-sig proof against the equivocator's registered key, gossips for slashing, returns `{accepted, equivocator, block_index}` or `{accepted: false, reason}`.
+### 6.1 Detection sources
+
+The `digest_a` / `digest_b` fields are **digest-agnostic** — V11 only checks "two distinct hashes both signed by the same registered key." Two detection paths feed the same `EquivocationEvent` channel:
+
+* **BlockSigMsg-level (rev.8).** The committee member signs `compute_block_digest(b)` of two different block bodies at the same height. Detection: `Node::apply_block_locked` cross-block check when a duplicate-height block arrives with a different `block_hash`. Both `block_digest`s + the matching `creator_block_sigs[i]` entries form the proof.
+
+* **ContribMsg same-generation (S-006 closure).** The committee member signs `make_contrib_commitment(block_index, prev_hash, tx_hashes, dh_input)` over two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection: `Node::on_contrib` comparing recomputed commitments when a same-signer duplicate arrives. Both contrib commitments + the matching `ContribMsg.ed_sig` entries form the proof.
+
+The two paths use **the same struct + the same validator + the same apply path**. An external implementer building consensus message handling MUST detect both — missing either leaves an equivocation surface unslashable. See `docs/proofs/EquivocationSlashing.md` (FA6) — the soundness proof is digest-agnostic and covers both cases simultaneously.
+
+### 6.2 External submission
+
+`submit_equivocation` RPC (§10.2) validates the two-sig proof against the equivocator's registered key, gossips via `EQUIVOCATION_EVIDENCE` (MsgType 11) for slashing, returns `{accepted, equivocator, block_index}` or `{accepted: false, reason}`. Anyone observing equivocation can submit — committee membership is not required.
 
 ## 7. Sharding (rev.9)
 
