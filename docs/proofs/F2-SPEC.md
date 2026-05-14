@@ -13,7 +13,7 @@
 ## 1. Scope
 
 This spec covers ONLY F2 view reconciliation for `compute_block_digest`. It does NOT cover:
-- S-033 state_root (already shipped; complementary apply-layer closure)
+- S-033 state_root (already shipped; complementary apply-layer closure — gate actually fires now post-S-038 producer wiring)
 - Block-format changes beyond `ContribMsg` extension
 - Wallet / RPC changes (none required)
 - Cross-shard receipt reconciliation across shards (intra-shard only; cross-shard is a v2.X follow-on)

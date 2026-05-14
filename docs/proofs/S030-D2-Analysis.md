@@ -4,7 +4,7 @@ This document is a focused supplementary analysis to FA1 (`Safety.md`). It expla
 
 The honest version: an in-tree implementation attempt landed, broke the equivocation-slashing regression test, and was reverted. This doc records the reasoning so the next attempt doesn't repeat it.
 
-**Status note.** D2 is currently PARTIALLY closed via S-033's state_root binding (Option 4 in `SECURITY.md` S-030 resolution table). See §3.5 below for the comparison between the two closure paths. v2.7 F2 view reconciliation remains the planned full closure (Option 5). This doc was originally written before S-033 shipped; sections below have been updated to reflect the current state.
+**Status note.** D2 is currently PARTIALLY closed via S-033's state_root binding (Option 4 in `SECURITY.md` S-030 resolution table), with the producer-side wiring (S-038 closure) making the gate actually fire on production blocks rather than being dormant. See §3.5 below for the comparison between the two closure paths. v2.7 F2 view reconciliation remains the planned full closure (Option 5). This doc was originally written before S-033 shipped; sections below have been updated to reflect the current state including the S-038 fix.
 
 ---
 
@@ -106,9 +106,9 @@ For `cross_shard_receipts` (emitted by the producing shard) and `inbound_receipt
 
 Total: ~1-2 days focused implementation. Plus design-decision time for the reconciliation rule (union vs intersection vs threshold).
 
-### 3.5 The other closure path: S-033 state_root binding (already shipped, partial)
+### 3.5 The other closure path: S-033 state_root binding (shipped, partial)
 
-After this analysis was written, S-033 shipped (Merkle root over canonical state, bound into `signing_bytes` conditionally). It closes D2 by a different mechanism: not by extending `compute_block_digest` to cover the ✗-row fields, but by adding a NEW field (`state_root`) whose value depends transitively on every apply-affecting field.
+After this analysis was written, S-033 shipped (Merkle root over canonical state, bound into `signing_bytes` conditionally). It closes D2 by a different mechanism: not by extending `compute_block_digest` to cover the ✗-row fields, but by adding a NEW field (`state_root`) whose value depends transitively on every apply-affecting field. **S-038 (later same session)** wired the producer's `Node::try_finalize_round` to populate `body.state_root` via a tentative-chain dry-run before broadcast — pre-S-038 the gate at `chain.cpp::apply_transactions` short-circuited because every gossiped block carried `state_root = 0` (the backward-compat shim). Post-S-038, the gate actually fires on production blocks; the S-033 closure is genuine end-to-end rather than dormant infrastructure.
 
 **Mechanism.** At apply time, the validator computes `state_root = MerkleRoot(canonical_state)` over the post-apply state and rejects if the block's claimed `state_root` doesn't match. Because the apply path is deterministic, only one canonical state_root exists per (starting state, applied block) pair. Two block instances with differing ✗-row fields produce different post-apply states, hence different canonical state_roots — at most one matches the validator's computation.
 
