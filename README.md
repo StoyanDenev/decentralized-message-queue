@@ -369,7 +369,7 @@ Each committee member signs `block_digest` under its Ed25519 key and broadcasts 
 
 `block_digest` is the SHA-256 of `idx ‖ prev_hash ‖ tx_root ‖ delay_seed ‖ consensus_mode ‖ bft_proposer ‖ creators[] ‖ creator_tx_lists ‖ creator_ed_sigs ‖ creator_dh_inputs`. Note it **excludes** `delay_output` and `creator_dh_secrets` so members can sign at Phase-2 entry without waiting for the K reveals to gather; the final `delay_output = SHA256(delay_seed ‖ ordered_secrets)` and the secrets themselves are bound into the block hash via `signing_bytes()` instead.
 
-When all `K` BlockSig messages are present (and all K secrets verify), any node assembles the canonical block body (transactions resolved deterministically from `union(creator_tx_lists)` and the local mempool, sorted by `(from, nonce, hash)`) and applies it.
+When all `K` BlockSig messages are present (and all K secrets verify), the node responsible for finalization assembles the canonical block body (transactions resolved deterministically from `union(creator_tx_lists)` and the local mempool, sorted by `(from, nonce, hash)`), populates `body.state_root` via a tentative-chain dry-run (S-033 v2.1 / S-038 — the post-apply state Merkle root that binds the block to a specific state-after-apply outcome), and applies it. Peer nodes receiving the gossiped block independently re-derive `state_root` over their own apply and reject if the value diverges — this is the apply-layer closure of S-030 D1/D2 (any divergence between honest nodes surfaces immediately rather than silently corrupting state).
 
 ### 7.5 Abort
 
