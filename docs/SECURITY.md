@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **6** | **8** |
+| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **5** | **7** |
 | Partially mitigated | **1** (S-030) | — | — | — | **1** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **4** (S-021, S-022, S-026, S-029) | **21** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **5** (S-021, S-022, S-026, S-028, S-029) | **22** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -46,6 +46,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-021 Chain file integrity not cryptographically verified~~ — closed via wrapping chain.json with `head_hash` + load-time recompute + mismatch reject (O(1) tampering detection before replay).
 - ~~S-022 Permissive 16 MB message cap~~ — closed via per-message-type body-size limit applied after deserialize in `Peer::read_body`; 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT/CHAIN responses.
 - ~~S-026 No connection timeout / keepalive~~ — closed via `SO_KEEPALIVE` on every peer socket in `Peer::Peer`; dead connections reaped via OS-level keepalive probes through the existing on_close path.
+- ~~S-028 Hex parsing only accepts lowercase~~ — closed via case-insensitive `is_anon_address` + `normalize_anon_address` helper + apply at RPC read boundaries (`rpc_balance`, `rpc_send`); `rpc_submit_tx` rejects non-canonical with clear diagnostic (sig is over signing_bytes so server can't mutate).
 - ~~S-029 BFT-mode multi-proposer fork-choice undefined~~ — closed via `Chain::resolve_fork`: heaviest sig set / fewer aborts / smallest hash, deterministic across peers.
 - ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
@@ -88,7 +89,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-025 | ✅ Mitigated | `compute_tx_root_intersection` deleted (in-session); function + header decl removed | `node/producer.cpp` | done |
 | S-026 | ✅ Mitigated | TCP-level keepalive enabled on every peer socket via `socket.set_option(asio::socket_base::keep_alive(true))` in `Peer::Peer`; dead connections detected and reaped via on_close at OS-default keepalive intervals (tunable per-platform) | `net/peer.cpp::Peer::Peer` | done |
 | S-027 | 🟢 Low | Info leakage in logs / verbose error messages | many | docs / runtime flag |
-| S-028 | 🟢 Low | Hex parsing only accepts lowercase | `types.hpp:106-114` (`is_anon_address`) | needs normalization audit, not "trivial" — see §6 entry |
+| S-028 | ✅ Mitigated | `is_anon_address` now accepts either case; `normalize_anon_address` returns lowercase canonical form; RPC read paths (balance, send) normalize at input; submit_tx REJECTS non-canonical (sig is over signing_bytes which embeds the address byte-for-byte, so server-side mutation would invalidate the sig — strict-input keeps store-keys unambiguous) | `types.hpp` + `node.cpp::rpc_send/balance/submit_tx` | done |
 | S-029 | ✅ Mitigated | `Chain::resolve_fork` ranks by (heaviest sig set, fewer aborts, smallest block hash); deterministic across peers | `chain/chain.cpp::resolve_fork` | done |
 | S-030 | 🟠 Partially mitigated | Block body not authenticated by `block_digest` (D1 effective via S-033 state_root; D2 partial via S-033; F2 view-reconciliation for full D2 closure tracked v2.7) | `node/producer.cpp:206-221` | v2.7 |
 | S-031 | ✅ Mitigated | shared_mutex + A9 Phase 1-2D atomicity/lazy-snapshot/lock-free reads + async chain.save worker + gossip-out-of-lock (v2.6) — all 6 layers shipped | `node/node.cpp` | done |
@@ -930,7 +931,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 | S-025 | `compute_tx_root_intersection` is dead code | Delete it or guard under `#ifdef DETERM_INTERSECTION_MODE`. 5 minutes. |
 | S-026 | No connection timeout / keepalive | ✅ **Closed.** `Peer::Peer` constructor now flips `SO_KEEPALIVE` on every accepted/initiated socket via asio's `keep_alive(true)` option. Dead connections (network partition, peer crash without FIN, NAT-rebind timeout) are detected by the kernel at OS-default keepalive intervals and surface through the existing on_close path (which evicts the peer from `GossipNet::peers_`). Detection latency follows the OS defaults — Linux ≈ 11 min, Windows ≈ 2 hr — bounded but slow; operators wanting faster detection tune the system-level knobs (`net.ipv4.tcp_keepalive_*` on Linux, `Tcpip\Parameters\Keep*` registry keys on Windows). Per-socket override of the interval is non-portable so we deliberately use the OS-level knob rather than couple the protocol to platform APIs. |
 | S-027 | Info leakage in logs / error messages reveal state | Configurable log levels; redact in production builds. |
-| S-028 | Hex parsing only accepts lowercase | The "trivial" auditor framing understates the work: relaxing `is_anon_address` alone fragments balances (uppercase + lowercase variants land in different account-map entries). A correct closure needs (a) case-insensitive validation, (b) a `normalize_anon_address(s)` helper that returns lowercase canonical form, (c) application of the helper at every user-input boundary (RPC, CLI, gossip) before storage. Estimate: ~half-day. Status: deferred pending input-layer normalization audit. |
+| S-028 | Hex parsing only accepts lowercase | ✅ **Closed.** Three-part fix per the deferred-closure plan: (a) `is_anon_address` now accepts either case (still rejects malformed shapes), (b) new `normalize_anon_address(s)` helper returns lowercase canonical form for anon-shaped inputs (domain names pass through unchanged), (c) RPC read paths apply normalize at input — `rpc_balance` and `rpc_send` both lowercase the address before storage/lookup so "0xABC..." and "0xabc..." resolve to the same account. `rpc_submit_tx` takes a different approach: it REJECTS non-canonical addresses with a clear diagnostic rather than mutating, because the client's Ed25519 signature is over `signing_bytes` which embeds `tx.from` / `tx.to` byte-for-byte — server-side mutation would invalidate the signature. The strict-input rule keeps store-keys unambiguous without forcing the client to resign. Test: `tools/test_anon_address_case.sh` 3/3 PASS (balance case-insensitive query, send-to-uppercase credits canonical slot, submit_tx rejects non-canonical with diagnostic). |
 | S-029 | BFT-mode multi-proposer fork-choice undefined | ✅ **Closed.** `Chain::resolve_fork` ranks by `(heaviest sig set, fewer abort_events, smallest block hash)`. Deterministic across peers — every node picks the same head when two same-height blocks arrive. |
 
 ---

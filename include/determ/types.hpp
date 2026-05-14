@@ -97,25 +97,56 @@ inline int64_t now_unix() {
 }
 
 // ─── Two-tier identity (rev. 4 / original-spec adoption) ─────────────────────
-// Anonymous account address: "0x" + 64 lowercase hex chars = full Ed25519 pubkey.
+// Anonymous account address: "0x" + 64 hex chars = full Ed25519 pubkey.
 // Anyone holding the corresponding private key can spend from this address —
 // including by physically transferring the key offline (bearer wallet semantics).
 // Account addresses cannot register, stake, or be selected as creators; they
 // only hold balance and can send/receive TRANSFER. Distinguishable from domain
 // names by the unique "0x" + 64-hex shape.
+//
+// S-028: `is_anon_address` accepts EITHER case (upper or lower hex). The
+// **canonical** storage form is always lowercase — `make_anon_address`
+// emits lowercase, and `normalize_anon_address` lowercases any
+// case-mixed input to canonical form. User-input boundaries (RPC + CLI)
+// MUST call `normalize_anon_address` on any incoming address before
+// storage or lookup; otherwise "0xABC..." and "0xabc..." would land in
+// different account-map entries and fragment balances. See
+// SECURITY.md S-028 for the full rationale.
 inline bool is_anon_address(const std::string& s) {
     if (s.size() != 66) return false;
     if (s[0] != '0' || s[1] != 'x') return false;
     for (size_t i = 2; i < 66; ++i) {
         char c = s[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        bool ok = (c >= '0' && c <= '9')
+               || (c >= 'a' && c <= 'f')
+               || (c >= 'A' && c <= 'F');
+        if (!ok) return false;
     }
     return true;
+}
+
+// S-028: lowercase the hex tail of an anon address so the chain stores
+// one canonical spelling per pubkey. Returns the input unchanged if it
+// isn't an anon-address shape (so RPC handlers can apply this uniformly
+// to anything that *might* be an address — domain names pass through
+// untouched). The "0x" prefix and the hex digits 0-9 are unchanged; only
+// A-F → a-f.
+inline std::string normalize_anon_address(const std::string& s) {
+    if (!is_anon_address(s)) return s;
+    std::string out = s;
+    for (size_t i = 2; i < out.size(); ++i) {
+        char c = out[i];
+        if (c >= 'A' && c <= 'F') out[i] = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
 }
 
 inline PubKey parse_anon_pubkey(const std::string& addr) {
     if (!is_anon_address(addr))
         throw std::invalid_argument("not an anon address: " + addr);
+    // from_hex_arr handles either case (std::stoul base 16 is
+    // case-insensitive), so we don't need to normalize here. The
+    // returned PubKey is the same 32 bytes regardless of input case.
     return from_hex_arr<32>(addr.substr(2));
 }
 

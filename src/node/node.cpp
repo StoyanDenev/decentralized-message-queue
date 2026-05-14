@@ -2506,8 +2506,12 @@ json Node::rpc_chain_summary(uint32_t last_n) const {
     return out;
 }
 
-json Node::rpc_send(const std::string& to, uint64_t amount, uint64_t fee) {
+json Node::rpc_send(const std::string& to_in, uint64_t amount, uint64_t fee) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-028: normalize anon-address inputs to lowercase canonical form so
+    // "0xABC..." and "0xabc..." land in the same account-map entry.
+    // Domain names pass through unchanged (is_anon_address rejects them).
+    const std::string to = normalize_anon_address(to_in);
     // S-023: balance pre-check. The chain's apply path silently drops
     // (continues the tx loop) if balance < amount + fee — the user
     // would otherwise get "queued" but their tx would never debit.
@@ -2804,6 +2808,31 @@ json Node::rpc_submit_tx(const json& tx_json) {
     std::unique_lock<std::shared_mutex> lk(state_mutex_);
     chain::Transaction tx = chain::Transaction::from_json(tx_json);
 
+    // S-028: tx.from and tx.to (when anon-shape) must arrive in
+    // canonical lowercase hex form. We can't normalize-then-accept
+    // because the client's Ed25519 signature is over signing_bytes
+    // which embeds tx.from / tx.to byte-for-byte; mutating the case
+    // post-receipt would invalidate that signature. Instead, fail
+    // loud with a clear diagnostic telling the client to lowercase
+    // before signing. (For anon address `from`, the lowercase form
+    // is also the form parse_anon_pubkey would derive a valid
+    // verification key from — uppercase would parse to the SAME
+    // pubkey but the SAME pubkey-bytes encoded as "0xabc..." would
+    // be the store-key. Forcing lowercase at the boundary keeps
+    // store-keys unambiguous.)
+    if (is_anon_address(tx.from) && tx.from != normalize_anon_address(tx.from)) {
+        throw std::runtime_error(
+            "submitted tx.from is non-canonical (uppercase hex); "
+            "anon addresses MUST be lowercase: got '" + tx.from
+          + "', expected '" + normalize_anon_address(tx.from) + "'");
+    }
+    if (is_anon_address(tx.to)   && tx.to   != normalize_anon_address(tx.to)) {
+        throw std::runtime_error(
+            "submitted tx.to is non-canonical (uppercase hex); "
+            "anon addresses MUST be lowercase: got '" + tx.to
+          + "', expected '" + normalize_anon_address(tx.to) + "'");
+    }
+
     // Recompute hash to defend against client-side errors / tampering.
     Hash expected_hash = tx.compute_hash();
     if (tx.hash != expected_hash)
@@ -2897,7 +2926,10 @@ json Node::rpc_snapshot(uint32_t header_count) const {
     return chain_.serialize_state(header_count);
 }
 
-json Node::rpc_balance(const std::string& domain) const {
+json Node::rpc_balance(const std::string& domain_in) const {
+    // S-028: normalize anon-address input so "0xABC..." resolves to the
+    // same account as "0xabc...". Domain names pass through unchanged.
+    const std::string domain = normalize_anon_address(domain_in);
     // A9 Phase 2C-Node: lock-free path. See rpc_nonce above for the
     // semantics — atomic_load of the committed accounts view, no
     // state_mutex_ acquisition. balance is one of the most-hammered
