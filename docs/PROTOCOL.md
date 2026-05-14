@@ -500,6 +500,100 @@ Authentication piggybacks on the enclosing beacon block's K-of-K signatures — 
 
 Soundness proof: `docs/proofs/UnderQuorumMerge.md` (FA9).
 
+## 14.5 Composable batch + DApp transactions
+
+Three additional TxTypes shipped post-rev.9 ground the atomic-apply substrate and the Theme-7 DApp surface.
+
+### `COMPOSABLE_BATCH` tx (TxType = 8)
+
+A4 / v2.4 — atomic execution of multiple inner transactions under one outer envelope. Either all inner txs apply or none do; the outer fee + nonce slot is consumed regardless of inner success (same model as EVM gas).
+
+```
+Payload (canonical, LE where noted):
+  [inner_count: u16 LE]   # 1..MAX_COMPOSABLE_INNER (= 64)
+  inner_count × Transaction   # binary_codec serialised
+```
+
+Validator constraints:
+1. `inner_count ∈ [1, MAX_COMPOSABLE_INNER]`.
+2. Each inner tx must validate independently (shape + sig + known sender for non-bearer types).
+3. Inner txs MUST NOT themselves be `COMPOSABLE_BATCH` (flat, no recursion).
+4. Inner txs MUST have `fee == 0` (outer batch pays the chain fee).
+
+Apply semantics:
+- Outer batch consumes submitter's `next_nonce` (one slot).
+- Outer fee is charged to submitter regardless of inner success (block-space payment).
+- Inner txs are applied in array order via `atomic_scope` (A9 Phase 2D nested-scope primitive).
+- On any inner tx failure: rollback all inner mutations; outer fee still charged; outer nonce still consumed.
+
+Use cases: bid+lock+release patterns (auctions, escrow), bundled transfers with single-fee amortisation, M-of-M parallel-approval multisig.
+
+Test: `tools/test_composable_batch.sh` + in-process `determ test-composable-batch`.
+
+### `DAPP_REGISTER` tx (TxType = 9)
+
+v2.18 (Theme 7 — DApp substrate). Registers / updates / deactivates a DApp service. `tx.from` must already be a Determ registered domain.
+
+```
+Payload (canonical, LE where noted):
+  [op: u8]                 # 0 = create/update, 1 = deactivate
+  if op == 0:
+    [service_pubkey: 32B]  # libsodium box pubkey (E2E encryption to the DApp)
+    [endpoint_url_len: u8]
+    [endpoint_url: utf8]   # primary discovery (https/onion/etc.)
+    [topic_count: u8]      # <= MAX_DAPP_TOPICS
+    topic_count × {
+      [topic_len: u8]
+      [topic: utf8]        # lowercase [a-z0-9._-]+, <= 64 bytes
+    }
+    [retention: u8]        # 0 = full, 1 = pruneable-after-K
+    [metadata_len: u16 LE]
+    [metadata: bytes]      # opaque, <= MAX_DAPP_METADATA
+  if op == 1:
+    (no further bytes — tx.from identifies the entry)
+```
+
+Apply:
+- `op == 0`: inserts/updates `dapp_registry_[tx.from]`.
+- `op == 1`: sets `inactive_from = current_height + DAPP_GRACE_BLOCKS` (deferred deactivation so in-flight calls finish).
+
+The DApp registry contributes a `"d:"` namespace leaf to `state_root` (analogous to `"r:"` for registrants — see §4.1.1).
+
+### `DAPP_CALL` tx (TxType = 10)
+
+v2.19 (Theme 7 Phase 7.2). Authenticated message to a registered DApp. `tx.to` is the DApp's owning domain; `tx.amount` is an optional payment credited to the DApp's account (same model as TRANSFER).
+
+```
+Payload (canonical, LE where noted):
+  [topic_len: u8]
+  [topic: utf8]                  # routing tag; "" or in DApp's registered topics
+  [ciphertext_len: u32 LE]
+  [ciphertext: bytes]            # opaque to chain; <= MAX_DAPP_CALL_PAYLOAD
+```
+
+Validator constraints (v2.19):
+1. `tx.to` is a currently-active DApp in `dapp_registry_`.
+2. `topic == ""` OR `topic ∈ DApp.topics`.
+3. `ciphertext_len` matches remaining payload bytes.
+4. Total payload size ≤ `MAX_DAPP_CALL_PAYLOAD`.
+5. `tx.to` not cross-shard (cross-shard DAPP_CALL is Phase 7.6; v2.19 ships single-shard only).
+
+Apply:
+- Charge `tx.fee` from sender (paid to validators).
+- Debit sender by `tx.amount`, credit DApp by `tx.amount` (S-007 overflow-checked).
+- Advance sender's nonce.
+- Payload itself triggers NO state mutation. The message is recorded in the block stream, `tx_root` commits to it, and DApp operator nodes filter the chain for it.
+
+Off-chain consumption: a DApp operator node reads finalised blocks (via RPC subscription or chain replay), filters `DAPP_CALL` where `tx.to == own_domain`, decrypts the payload via its `service_pubkey`, dispatches to internal handlers.
+
+CLI: `determ submit-dapp-register`, `determ submit-dapp-call`, `determ dapp-list`, `determ dapp-info`, `determ dapp-messages` (see `docs/CLI-REFERENCE.md`).
+
+Full design: `docs/V2-DAPP-DESIGN.md`.
+
+### Reserved: `REGION_CHANGE` (TxType = 5)
+
+Slot reserved for future use. v1.x validators reject any tx with this type with a "REGION_CHANGE tx type is reserved for future use" error. A future v2.X may use the slot for in-place validator region updates (today, changing a registered validator's region requires DEREGISTER + re-REGISTER).
+
 ## 15. Wallet recovery (A2)
 
 Pure client-side feature; no chain protocol changes. The `determ-wallet` binary handles the user's Ed25519 seed offline:
