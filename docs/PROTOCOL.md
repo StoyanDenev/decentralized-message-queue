@@ -429,23 +429,72 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 
 ```json
 {
-  "version": 1,
-  "block_index": 1234,
-  "head_hash": "<hex>",
+  "version":      1,
+  "block_index":  1234,
+  "head_hash":    "<hex>",
+
+  // Mutable account / validator state
   "accounts":     [{"domain", "balance", "next_nonce"}, ...],
   "stakes":       [{"domain", "locked", "unlock_height"}, ...],
-  "registrants":  [{"domain", "ed_pub", "registered_at", "active_from", "inactive_from"}, ...],
+  "registrants":  [{"domain", "ed_pub", "region", "registered_at",
+                    "active_from", "inactive_from"}, ...],
+
+  // Cross-shard dedup set (B3.4 + FA7)
   "applied_inbound_receipts": [{"src_shard", "tx_hash"}, ...],
-  "block_subsidy": 10,
-  "min_stake":     1000,
-  "shard_count":   1,
-  "shard_salt":    "<hex>",
-  "shard_id":      0,
-  "headers":       [<Block JSON>, ...]   // last N blocks for chain continuity
+
+  // Genesis-pinned + governance-mutable economic parameters (A5 whitelist)
+  "block_subsidy":               10,
+  "subsidy_pool_initial":        0,
+  "subsidy_mode":                0,        // 0 = FLAT, 1 = LOTTERY
+  "lottery_jackpot_multiplier":  1,
+  "min_stake":                   1000,
+  "suspension_slash":            10,
+  "unstake_delay":               20,
+
+  // Sharding posture
+  "shard_count": 1,
+  "shard_salt":  "<hex>",
+  "shard_id":    0,
+
+  // A1 unitary-balance counters (FA11)
+  "genesis_total":         <u64>,
+  "accumulated_subsidy":   <u64>,
+  "accumulated_slashed":   <u64>,
+  "accumulated_inbound":   <u64>,
+  "accumulated_outbound":  <u64>,
+
+  // Abort + merge bookkeeping
+  "abort_records": [{"domain", "first_round", "round_count",
+                     "suspended_until", ...}, ...],
+  "merge_state":   [{"shard_id", "partner_id", "merging_shard_region",
+                     "effective_height", "evidence_window_start"}, ...],
+
+  // A5 governance pending PARAM_CHANGEs (staged for effective_height)
+  "pending_param_changes": [
+    {"effective_height": <u64>,
+     "entries": [{"name", "value_hex"}, ...]}, ...
+  ],
+
+  // v2.18 DApp registry (state_root contributes via "d:" namespace)
+  "dapp_registry": [{"domain", "service_pubkey", "endpoint_url",
+                     "topics", "retention", "metadata",
+                     "stake", "registered_at", "inactive_from"}, ...],
+
+  // Chain-continuity tail headers + per-header state_root
+  "headers": [<Block JSON>, ...]   // last N blocks; each carries its own
+                                    // state_root (S-033)
 }
 ```
 
-`restore_from_snapshot` validates `head_hash` against `compute_hash()` of the tail head; rejects on mismatch.
+### 11.1 `restore_from_snapshot` verification
+
+Restore performs **two** cryptographic gates before installing state:
+
+1. **`head_hash` match** (always). Recomputes `compute_hash()` of the tail head block; rejects with `"head_hash mismatch"` on divergence.
+
+2. **`state_root` match** (S-033 post-v2.1). After loading every map / counter / pending-entry, the receiver computes `Chain::compute_state_root()` over the restored state and compares against the tail head's stored `state_root`. Mismatch → `"state_root mismatch"` (rejects the snapshot). Pre-S-033 blocks have zero state_root and skip this gate (backward compat).
+
+The two gates together close S-012: a tampered snapshot fails one gate or the other regardless of what the donor manufactures, because the head's compute_hash binds state_root (signing_bytes §4.1), and state_root binds the entire state Merkle (§4.1.1).
 
 ## 12. Genesis
 
