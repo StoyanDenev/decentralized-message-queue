@@ -73,7 +73,7 @@ The trade-offs:
 |---|---|---|
 | Safety | Unconditional (1 honest in committee suffices) | Conditional `f_h < k_bft/3` + slashing |
 | Liveness | Halts on persistent silent member | Recovers with `ceil(2K/3)` available |
-| Censorship | K-conjunction (`(f/N)^K`) | `(Q − 1)`-conjunction over the BFT committee (i.e., to censor a tx, the adversary must control all but at most `k_bft − Q` slots) |
+| Censorship | K-conjunction (`(f/N)^K`) | `k_bft`-conjunction over the smaller BFT committee. Censorship still requires unanimous Phase-1 omission (the union-tx-root rule applies to all `k_bft` Phase-1 contributions — Phase-2 sentinels only affect signing, not the Phase-1 tx_root). Probability `(f/N)^{k_bft}` per round. |
 | Per-block trust | Tag exposed in `block.consensus_mode` | Tag exposed in `block.consensus_mode` |
 
 Applications choose which blocks they trust by reading the `consensus_mode` tag and the chain's per-block `block_digest`. Most steady-state blocks are MD on both layers (beacon + shards); BFT blocks are the tail-liveness fallback when the chain would otherwise stall.

@@ -466,7 +466,7 @@ An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an a
 | Block type | Safety                                  | Censorship                                |
 |-----------|-----------------------------------------|-------------------------------------------|
 | MD        | **Unconditional** (no honest-fraction assumption — see §2 trust model) | K-conjunction over committee |
-| BFT       | Conditional on `f_h < k_bft/3` in this committee + economic disincentive (`k_bft = ⌈2K/3⌉`) | `(Q − 1)`-conjunction over the smaller committee (`Q = ⌈2·k_bft/3⌉`) |
+| BFT       | Conditional on `f_h < k_bft/3` in this committee + economic disincentive (`k_bft = ⌈2K/3⌉`) | `k_bft`-conjunction over the smaller committee — the union-tx-root rule covers all `k_bft` Phase-1 contributions; Phase-2 sentinels only affect signing |
 
 Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
 
@@ -799,7 +799,7 @@ Per-block trust is observable via `consensus_mode`:
 |---|---|---|
 | Beacon | Unconditional (MD-only, no escalation) | K-conjunction over beacon committee |
 | Shard MD | Unconditional (MD steady-state) | K-conjunction over shard committee |
-| Shard BFT | Conditional `f_h < k_bft/3` + slashing | `(Q − 1)`-conjunction over shard BFT committee |
+| Shard BFT | Conditional `f_h < k_bft/3` + slashing | `k_bft`-conjunction over shard BFT committee (Phase-1 union-tx-root applies; Phase-2 sentinels affect signing only) |
 
 Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
 
