@@ -6,6 +6,10 @@ This document specifies wire formats, hash inputs, and the consensus state machi
 
 ## 1. Cryptographic primitives
 
+### 1.1 Consensus + on-chain crypto
+
+These two primitives + the commit-reveal randomness are the only crypto the consensus protocol relies on. An external implementation needs SHA-256 and Ed25519; nothing else.
+
 | Primitive | Algorithm |
 |---|---|
 | Hash | SHA-256 (NIST FIPS 180-4). 32-byte output. |
@@ -13,6 +17,20 @@ This document specifies wire formats, hash inputs, and the consensus state machi
 | Block randomness | Commit-reveal: each committee member commits to a fresh secret in Phase 1 (`SHA256(secret ‖ pubkey)`) and reveals in Phase 2. The block's `delay_output = SHA256(delay_seed ‖ ordered_secrets)`. |
 
 All multi-byte integers in hash inputs are encoded **big-endian**. Variable-length strings are appended raw (no length prefix) — committee members are expected to use the same string lengths because the inputs are well-typed.
+
+### 1.2 Operational crypto (off-consensus surfaces)
+
+Three additional primitives appear in operator-facing or wallet-side flows but never in the consensus path:
+
+| Primitive | Algorithm | Used in |
+|---|---|---|
+| MAC | HMAC-SHA-256 | v2.16 / S-001 RPC authentication (§10.1) — `auth = hex(HMAC-SHA-256(secret, method ‖ "|" ‖ params_canonical_json))` |
+| AEAD | AES-256-GCM | v2.17 keyfile envelopes (`account create --passphrase`); A2 wallet recovery share envelopes (§15) |
+| KDF (passphrase) | PBKDF2-HMAC-SHA-256, 600 000 iterations | v2.17 keyfile envelopes; A2 wallet recovery (passphrase scheme) |
+| KDF (memory-hard) | Argon2id | A2 wallet recovery OPAQUE adapter (§15; gated to v2.14 for the real `libopaque` integration) |
+| OPRF group + sealed-box | Ristretto255 (libsodium) | A2 wallet recovery OPAQUE adapter; v2.18 DApp `service_pubkey` end-to-end encryption |
+
+These are operationally important but **invisible to consensus** — none of them appear in `signing_bytes()`, `block_digest`, or any validator rule. An implementation that re-implements wallet recovery or DApp encryption against a different curve choice (e.g. P-256 sealed-box) remains consensus-compatible with the reference; only operator-facing tooling needs to match.
 
 ## 2. Address format
 
