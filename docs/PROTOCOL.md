@@ -298,6 +298,28 @@ committee[i]  = pool[indices[i]]
 
 Region matching is exact-string after ASCII-lowercase normalization. The chain's `committee_region` is pinned in `GenesisConfig` and bound into the genesis hash, so two shards with the same `shard_id` but different region claims have distinct chain identities. Validators with no region tag (`region == ""`) are eligible only for chains whose `committee_region == ""`.
 
+### 5.2.1 `select_m_creators` — hybrid algorithm (S-020 closure)
+
+`select_m_creators(seed, N, K)` returns K distinct indices in `[0, N)` deterministically from `seed`. The reference implementation switches between two strategies based on the K/N ratio (S-020 closure):
+
+* **`2K ≤ N` (sparse pick)** — rejection sampling. Repeatedly draw `idx = hash_mod(h, N)` where `h = SHA-256(h ‖ counter)` starts at `h = seed` and increments `counter` on every draw; skip duplicates. Expected `O(K)` hashes.
+
+* **`2K > N` (dense pick)** — partial Fisher-Yates shuffle. Initialise `indices = [0, 1, ..., N-1]`; for `i ∈ [0, K)` derive `h = SHA-256(h ‖ counter)` (counter increments per step), compute `j = i + hash_mod(h, N - i)`, swap `indices[i]` and `indices[j]`. Truncate to first K. Exactly `K` hashes; no rejection spin.
+
+`hash_mod(h, n)` is rejection-sampled to remove bias when `n ∤ 2^64`:
+```
+v     = u64_from_be(h[0..8])
+limit = (UINT64_MAX / n) * n
+while v >= limit:
+    h = SHA-256(h ‖ counter); counter++
+    v = u64_from_be(h[0..8])
+return v mod n
+```
+
+Both branches consume the same SHA-256-derived randomness; both are uniform over K-subsets of `[0, N)` under the random-oracle model on `seed`. The **branch choice is purely a performance optimisation** but it must match the reference exactly — both nodes' committee selection must agree for K-of-K to assemble. An external implementer building rejection sampling alone would produce different indices at `2K > N` and diverge from the reference chain.
+
+The same algorithm appears in `select_after_abort_m` (post-abort recommittee with the first index pinned to a deterministically-shifted slot).
+
 ### 5.3 BFT escalation (rev.8)
 If a round accumulates `bft_escalation_threshold` (default 5) round-1 aborts at the same height AND `bft_enabled` is true AND the available pool is < K, the next round produces a `consensus_mode = BFT` block. Required signatures drop to `ceil(2K/3)`. A `bft_proposer` is deterministically chosen as `committee[proposer_idx(seed, abort_events, K)]`. The proposer must sign; up to `K - ceil(2K/3)` other positions may carry sentinel-zero signatures.
 
