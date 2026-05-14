@@ -297,7 +297,13 @@ The destination's K-of-K signing of the block is the collective on-chain attesta
 ## 9. Wire protocol
 
 ### 9.1 Framing
-Each message is `4-byte big-endian length || JSON envelope`. Max length: 16 MB.
+Each message is `4-byte big-endian length || JSON envelope`.
+
+**Length caps (S-022 closure).** Framing-layer ceiling: `kMaxFrameBytes = 16 MB`. Per-message-type cap is applied after deserialize in `Peer::read_body`:
+* **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
+* **4 MB** — bulk payload: BLOCK, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE.
+* **16 MB** — bootstrap-only: SNAPSHOT_RESPONSE, CHAIN_RESPONSE.
+Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table.
 
 ```
 Envelope: { "type": uint8, "payload": <message-specific JSON> }

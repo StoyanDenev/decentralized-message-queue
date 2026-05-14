@@ -327,6 +327,13 @@ private:
     // S-013: bounded per-signer admission into buffered_block_sigs_.
     // Caller must hold state_mutex_.
     void try_buffer_block_sig(const BlockSigMsg& msg);
+    // S-016 Option 2: filter pending_inbound_receipts_ to those that
+    // have soaked at least CROSS_SHARD_RECEIPT_LATENCY blocks locally,
+    // so all K-committee members converge on the same eligible set
+    // when building tentative blocks (no K-of-K abort from pool
+    // divergence). Caller must hold state_mutex_.
+    std::vector<chain::CrossShardReceipt>
+    inbound_receipts_eligible_for_inclusion() const;
     void on_abort_claim(const AbortClaimMsg& msg);
     void on_abort_event(uint64_t block_index, const Hash& prev_hash,
                          const chain::AbortEvent& ev);
@@ -532,6 +539,27 @@ private:
     // applied receipts and credits `to`).
     std::map<std::pair<ShardId, Hash>, chain::CrossShardReceipt>
         pending_inbound_receipts_;
+
+    // S-016 partial mitigation (Option 2 — time-ordered admission):
+    // first-seen destination-chain height for each pending receipt.
+    // Receipts are only eligible for inclusion in a produced block
+    // once `chain.height() - first_seen >= CROSS_SHARD_RECEIPT_LATENCY`
+    // — gives gossip time to propagate the bundle to every K-committee
+    // member, so all members see the same eligible set when they build
+    // their tentative block (no K-of-K abort from pool divergence).
+    //
+    // The first-seen height is local state and can differ across
+    // committee members by the gossip-propagation lag — at typical
+    // intra-region RTT (<100ms) much less than one block's worth — so
+    // a 3-block latency wraps multiple round-trips of gossip and
+    // drives the round-retry probability to negligible. Not a formal
+    // determinism guarantee (v2.7 F2's Phase-1 intersection rule is
+    // the strict-determinism path); this is the contained partial
+    // mitigation that costs ~12 LOC + a per-receipt tracking entry.
+    //
+    // Erased alongside pending_inbound_receipts_ on receipt apply.
+    std::map<std::pair<ShardId, Hash>, uint64_t>
+        pending_inbound_first_seen_;
 
     asio::steady_timer              contrib_timer_;
     asio::steady_timer              block_sig_timer_;

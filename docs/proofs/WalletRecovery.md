@@ -9,6 +9,8 @@ This document proves that Determ's wallet recovery primitive — distributed Sha
 
 The wallet ships in two modes: passphrase-direct (Phase 3) and OPAQUE-adapter-routed (Phase 7). Real OPAQUE (Phase 6, pending) replaces only the adapter's implementation; the recovery flow's structural argument is identical under stub and real OPAQUE.
 
+**Phase numbering note.** This document uses the wallet's internal `wallet/PHASE6_PORTING_NOTES.md` phase numbers (3 = passphrase-direct, 5 = stub OPAQUE adapter, 6 = real `libopaque` integration pending MSVC porting, 7 = OPAQUE-adapter-routed assembly). The Phase-6 work item maps to **v2.14 (Real OPAQUE wallet recovery)** in `docs/V2-DESIGN.md`. The two naming schemes coexist because the Phase-N numbering is stable across the wallet refactor history and is referenced throughout this proof, while the v2.N numbering is the project's overall roadmap surface. A reader looking at the V2-DESIGN.md status table should read "v2.14 = WalletRecovery.md Phase 6 = real `libopaque`-vendored adapter."
+
 **Companion documents:** `Preliminaries.md` (F0); `EconomicSoundness.md` (FA11) for the chain-side seed-protection context.
 
 ---

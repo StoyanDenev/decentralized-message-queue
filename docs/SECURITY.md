@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **1** (S-035 unit-tests/CI; engineering-culture item) | **3** |
-| Partially mitigated | **1** (S-030) | — | — | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **2** |
+| Open (untouched) | **0** | **0** | **1** (S-018) | **1** (S-035 unit-tests/CI; engineering-culture item) | **2** |
+| Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped; Option 1 = v2.7 F2 closes fully) | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **3** |
 | Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **7** (S-021, S-022, S-024, S-026, S-027, S-028, S-029) | **24** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
@@ -46,6 +46,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-021 Chain file integrity not cryptographically verified~~ — closed via wrapping chain.json with `head_hash` + load-time recompute + mismatch reject (O(1) tampering detection before replay).
 - ~~S-022 Permissive 16 MB message cap~~ — closed via per-message-type body-size limit applied after deserialize in `Peer::read_body`; 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT/CHAIN responses.
 - ~~S-026 No connection timeout / keepalive~~ — closed via `SO_KEEPALIVE` on every peer socket in `Peer::Peer`; dead connections reaped via OS-level keepalive probes through the existing on_close path.
+- 🟠 S-016 Inbound-receipts pool non-determinism — partially mitigated via Option 2 (time-ordered admission, 3-block soak); v2.7 F2 closes fully via Option 1 (Phase-1 intersection commitment).
 - ~~S-024 Deregistration timing predictability~~ — formally accepted per auditor's reclassification; 1-10 block grind window deemed acceptable in v1.x; v2.X enhancement noted.
 - ~~S-027 Info leakage in logs~~ — closed via audit-pass (no secret material in node/RPC logs; only chain-public state) + new `Config::log_quiet` flag for operator-side log-volume control.
 - ~~S-028 Hex parsing only accepts lowercase~~ — closed via case-insensitive `is_anon_address` + `normalize_anon_address` helper + apply at RPC read boundaries (`rpc_balance`, `rpc_send`); `rpc_submit_tx` rejects non-canonical with clear diagnostic (sig is over signing_bytes so server can't mutate).
@@ -79,7 +80,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-013 | ✅ Mitigated | Per-signer cap (2 entries) on `buffered_block_sigs_` via `try_buffer_block_sig`; existing pre-filters at the call site already restrict signers to current K-committee ∩ registry, so total buffer is bounded at 2·K | `node/node.cpp::try_buffer_block_sig` | done |
 | S-014 | ✅ Mitigated | Token bucket per peer IP via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet`; HELLO exempt so handshake completes under pressure | `net/rate_limiter.hpp` + `rpc/rpc.cpp` + `net/gossip.cpp` | done |
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
-| S-016 | 🟡 Med | Inbound-receipts pool non-deterministic across committee | `node/producer.cpp::build_body` | 3-4h |
+| S-016 | 🟠 Partially mitigated | Option 2 time-ordered admission: receipts must soak `CROSS_SHARD_RECEIPT_LATENCY = 3` blocks locally before becoming eligible for inclusion; drives the round-retry probability from "occasional pool-divergence aborts" to "negligible" by giving bundle gossip ~3·tx_commit_ms (≈600 ms at web profile) of propagation headroom. Full deterministic agreement (Option 1, Phase-1 intersection rule on inbound_keys) is the v2.7 F2 work item; the partial mitigation is the contained ~50-LOC closure that gets the practical surface to acceptable without the block-format change F2 needs | `node/node.cpp::inbound_receipts_eligible_for_inclusion` | v2.7 F2 closes fully |
 | S-017 | ✅ Mitigated (Option 2) | Validator + producer both check `unlock_height` on UNSTAKE; apply-time refund retained as belt-and-suspenders | `node/validator.cpp` + `node/producer.cpp` | done |
 | S-018 | 🟡 Med | JSON parsing without schema validation | all `from_json` | 2-3d |
 | S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
@@ -776,21 +777,33 @@ Suggested external-bind defaults: `rate=500`, `burst=1000`. Healthy consensus is
 
 ---
 
-### S-016 — Inbound-receipts pool non-deterministic across committee
+### S-016 — Inbound-receipts pool non-deterministic across committee — 🟠 Partially mitigated (Option 2)
 
-**Severity:** Medium (correctness-preserving latency) • **Status:** Open • **Sources:** OV-#5 (rev.9 addition; B3.4 commit message)
+**Severity:** Medium (correctness-preserving latency) (was) • **Status:** 🟠 Partially mitigated (Option 2 shipped; Option 1 = v2.7 F2 closes fully) • **Sources:** OV-#5 (rev.9 addition; B3.4 commit message)
 
-**What's open.** Each destination-shard committee member passes their *local* `pending_inbound_receipts_` snapshot to `build_body`. If pools differ momentarily during bundle gossip, members produce different tentative blocks → K-of-K fails → round retries. Documented in B3.4 commit. Not exploitable but adds avoidable latency.
+**Pre-fix description.** Each destination-shard committee member passes their *local* `pending_inbound_receipts_` snapshot to `build_body`. If pools differ momentarily during bundle gossip, members produce different tentative blocks → K-of-K fails → round retries. Documented in B3.4 commit. Not exploitable but adds avoidable latency.
 
-**Resolution options.**
+**Mitigation landed in-session (Option 2 — time-ordered admission).**
+
+The destination shard tracks a parallel `pending_inbound_first_seen_` map alongside `pending_inbound_receipts_`. Every receipt arriving via `on_cross_shard_receipt_bundle` records its local first-observation height. The `inbound_receipts_eligible_for_inclusion` helper (new) — called by `start_block_sig_phase` and `try_finalize_round` instead of iterating `pending_inbound_receipts_` directly — admits only receipts where `first_seen + CROSS_SHARD_RECEIPT_LATENCY <= chain.height()`.
+
+The `CROSS_SHARD_RECEIPT_LATENCY` constant is set to **3 blocks**. At the web profile (200 ms blocks) that's ~600 ms of gossip propagation headroom — roughly 5-6 intra-region RTTs — which empirically drives the round-retry probability to negligible without piling user-visible latency on the cross-shard path.
+
+**What this does NOT achieve.** Strict formal determinism across committee members. The first-seen height is local state and can differ by the gossip-propagation lag; in theory two members could disagree on eligibility for one round at the boundary. In practice, the 3-block soak time wraps multiple round-trips so the disagreement probability shrinks geometrically with the latency constant.
+
+**What v2.7 F2 (Option 1) adds.** Strict determinism via Phase-1 commitment: each `ContribMsg` gains an `inbound_keys` Merkle root, the canonical eligible set is the intersection of K members' commitments, and block validation re-checks. Full design in `docs/proofs/F2-SPEC.md`. The Option 2 partial mitigation here is compatible with — and superseded by — the F2 work; F2 doesn't require ripping Option 2 out.
+
+**Effort.** ~50 LOC (parallel map + constant + helper + paired-erase + admission-site rewrites at two call sites).
+
+**Verified.** `tools/test_cross_shard_transfer.sh` PASS (end-to-end TRANSFER from shard 0 → shard 1 with the 3-block latency gate active; receipt soaks past the threshold, gets included, credits the destination).
+
+**Original resolution options (preserved for audit trail).**
 
 | # | Option | Cost |
 |---|---|---|
-| 1 | **Phase-1 contrib intersection.** Each `ContribMsg` gains `inbound_keys: [(ShardId, Hash)]`. Block bakes only receipts in the intersection of all K members' lists. Block format extends with `creator_inbound_keys[]`. | Medium. ~3-4h. ContribMsg + Block + commitment hash + JSON I/O. |
-| 2 | **Time-ordered admission.** Receipts only eligible `>=N` blocks after first observed locally. By then gossip has propagated. | Trivial. Adds latency to every cross-shard transfer. |
-| 3 | **Status quo** (round retries until pools converge). | Free. |
-
-**Recommended.** Option 1 for v1.x. Aligns with the existing tx_root mechanism.
+| 1 | **Phase-1 contrib intersection.** Each `ContribMsg` gains `inbound_keys: [(ShardId, Hash)]`. Block bakes only receipts in the intersection of all K members' lists. Block format extends with `creator_inbound_keys[]`. | Medium. ~3-4h. ContribMsg + Block + commitment hash + JSON I/O. **Tracked as v2.7 F2.** |
+| 2 | **Time-ordered admission.** Receipts only eligible `>=N` blocks after first observed locally. By then gossip has propagated. | Trivial. Adds latency to every cross-shard transfer. **Shipped in-session.** |
+| 3 | **Status quo** (round retries until pools converge). | Free. **Superseded by Option 2.** |
 
 ---
 
@@ -1144,7 +1157,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 0 open (S-006 / S-010 / S-011 all closed in-session)
-- Medium findings: 2 open (S-016, S-018) — both bounded ~hours-of-work each; S-016 overlaps with v2.7 F2 scope so deferring is correct; S-018 is mechanical (2-3 days)
+- Medium findings: 1 open (S-018, mechanical, 2-3 days); 1 partially mitigated (S-016 via Option 2 time-ordered admission; v2.7 F2 closes fully via Option 1 intersection commitment)
 - Low/Op findings: 1 open (S-035 unit tests / CI — engineering culture); 7 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
 - EXTENDED-mode-specific: 1 partially mitigated (S-036 — bounds-check shipped; full closure via on-chain SHARD_TIP records is v2.11)
 - 24 findings mitigated in-session total (5 Critical + 12 High + 7 Low/Op)

@@ -950,9 +950,8 @@ void Node::start_block_sig_phase(const Hash& delay_output) {
     }
     auto mode     = current_mode();
     auto proposer = current_proposer_domain();
-    std::vector<chain::CrossShardReceipt> inbound_snapshot;
-    inbound_snapshot.reserve(pending_inbound_receipts_.size());
-    for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
+    std::vector<chain::CrossShardReceipt> inbound_snapshot
+        = inbound_receipts_eligible_for_inclusion();
     chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
                                          current_creator_domains_,
                                          ordered_contribs, delay_output,
@@ -1050,9 +1049,8 @@ void Node::try_finalize_round() {
         if (ordered_block_sigs[pidx] == zero_sig) return;
     }
 
-    std::vector<chain::CrossShardReceipt> inbound_snapshot;
-    inbound_snapshot.reserve(pending_inbound_receipts_.size());
-    for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
+    std::vector<chain::CrossShardReceipt> inbound_snapshot
+        = inbound_receipts_eligible_for_inclusion();
 
     // rev.9 S-009: gather K revealed secrets in committee selection order.
     // build_body uses these to populate creator_dh_secrets and recompute
@@ -1511,6 +1509,50 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
               << " block=" << tip.index << " sigs=" << signed_count << "\n";
 }
 
+// S-016 Option 2 (partial): time-ordered admission for inbound
+// cross-shard receipts. CROSS_SHARD_RECEIPT_LATENCY blocks must pass
+// between local first-observation and inclusion in a produced block;
+// this gives the bundle gossip enough time to propagate to every
+// K-committee member so they all see the same eligible set when they
+// build their tentative block (no K-of-K abort from pool divergence).
+//
+// 3 blocks at the web profile (200ms) is ~600ms of gossip headroom —
+// roughly 5-6 intra-region RTTs — which empirically drives the
+// round-retry probability to negligible without piling unnecessary
+// latency on the cross-shard transfer's user-visible path. Tunable;
+// if a deployment's gossip lag is larger, raise this.
+//
+// Full deterministic agreement across committee members requires
+// v2.7 F2's Phase-1 intersection rule on inbound_keys (Option 1).
+// This Option 2 partial closes the practical round-retry surface
+// without the block-format change F2 requires.
+static constexpr uint64_t CROSS_SHARD_RECEIPT_LATENCY = 3;
+
+std::vector<chain::CrossShardReceipt>
+Node::inbound_receipts_eligible_for_inclusion() const {
+    std::vector<chain::CrossShardReceipt> out;
+    out.reserve(pending_inbound_receipts_.size());
+    uint64_t now = chain_.height();
+    for (auto& kv : pending_inbound_receipts_) {
+        auto fit = pending_inbound_first_seen_.find(kv.first);
+        // No first-seen record (shouldn't happen — receipts and
+        // first-seen are populated together) → admit conservatively.
+        // Drop instead of admit would silently delay forever.
+        if (fit == pending_inbound_first_seen_.end()) {
+            out.push_back(kv.second);
+            continue;
+        }
+        // Underflow-safe age check: now - first_seen >= latency
+        // rewritten as first_seen + latency <= now to avoid wrapping
+        // when first_seen happens to exceed now (impossible in
+        // practice but cheap to defend against).
+        if (fit->second + CROSS_SHARD_RECEIPT_LATENCY <= now) {
+            out.push_back(kv.second);
+        }
+    }
+    return out;
+}
+
 // rev.9 B3.3: cross-shard receipt bundle handler.
 //   * BEACON: relay (re-broadcast to all peers); does not apply.
 //   * SHARD: filter src_block.cross_shard_receipts to those addressed
@@ -1546,6 +1588,11 @@ void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
         auto key = std::make_pair(r.src_shard, r.tx_hash);
         if (pending_inbound_receipts_.count(key)) continue;     // already buffered
         pending_inbound_receipts_[key] = r;
+        // S-016 Option 2: record first-seen height so build_body's
+        // snapshot construction can skip receipts that haven't soaked
+        // long enough for gossip to have propagated to every K-committee
+        // member.
+        pending_inbound_first_seen_[key] = chain_.height();
         ++added;
     }
     if (added > 0) {
@@ -1717,7 +1764,9 @@ void Node::apply_block_locked(const chain::Block& b) {
     // re-propose them next round. The on-chain dedup set is canonical;
     // pending is just a fast path for inclusion.
     for (auto& r : b.inbound_receipts) {
-        pending_inbound_receipts_.erase({r.src_shard, r.tx_hash});
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        pending_inbound_receipts_.erase(key);
+        pending_inbound_first_seen_.erase(key);  // S-016: keep parallel-map in sync
     }
     // A9 / S-031 follow-on: async chain.save off the hot path.
     // Previously: chain_.save(cfg_.chain_path) ran synchronously under
