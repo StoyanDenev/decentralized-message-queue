@@ -51,11 +51,11 @@ For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — 
 
 Without state commitment, several capabilities are structurally impossible: light clients cannot verify account balances, cross-shard receipts cannot carry inclusion proofs against the destination's state, audit-grade compliance tools cannot independently verify any chain state without re-executing every block.
 
-**Mechanism.** After every block applies, compute `state_root = MerkleRoot(canonical_state)` where `canonical_state` is the byte-canonical serialization of `accounts_`, `stakes_`, `registrants_`, `applied_inbound_receipts_`, `pending_param_changes_`, `merge_state_` in a fixed order. Include `state_root` in `Block.signing_bytes()` so it's bound by the K-of-K committee signatures.
+**Mechanism (shipped).** After every block applies, compute `state_root = MerkleRoot(canonical_state)` where `canonical_state` is the ten-namespace leaf set from `Chain::build_state_leaves` (a / s / r / d / i / b / m / p / k / c — see PROTOCOL.md §4.1.1 for the full namespace table including the d:-namespace v2.18 DApp registry). Include `state_root` in `Block.signing_bytes()` so it's bound by the K-of-K committee signatures.
 
-Validator: re-derives `state_root` post-apply and rejects on mismatch with `block.state_root`. Snapshot: includes the head's `state_root`; receiver re-derives `MerkleRoot(snapshot.state)` and rejects on mismatch.
+Producer: `Node::try_finalize_round` populates `body.state_root` via a tentative-chain dry-run between `build_body` and `apply_block_locked + gossip.broadcast` (this wiring is the S-038 closure that activates the gate; pre-S-038 the producer never populated the field and the gate was dormant). Validator: re-derives `state_root` post-apply and rejects on mismatch with `block.state_root`. Snapshot: includes the head's `state_root`; receiver re-derives `MerkleRoot(snapshot.state)` and rejects on mismatch.
 
-**Tree shape.** Sparse Merkle tree over fixed-length keys (32-byte hashes of account addresses, validator domain names, etc.). Hash function: SHA-256, matching the rest of the protocol. Tree depth: 256 (fits all 32-byte keys). Inclusion proofs: O(log N) sibling hashes.
+**Tree shape.** Sorted-leaves balanced binary Merkle tree (`src/crypto/merkle.cpp::merkle_root`), NOT a sparse Merkle tree. Leaves are SHA-256(0x00 ‖ key_len_BE ‖ key ‖ value_hash); inner nodes are SHA-256(0x01 ‖ left ‖ right). Leaves sorted lex by key; tree depth `O(log N)` where N is the number of populated state entries. Inclusion proofs: `O(log N)` sibling hashes (exposed via `state_proof` RPC, v2.2).
 
 **Cost.** Multi-week. Block format change → not backward-compatible → new chain identity (or a flag-day upgrade with explicit migration). The Merkle re-derivation adds ~50-200ms per block at H=10k mature chain; A9 overlay model (v2.4 below) makes this concurrent with the next block's apply, so the latency cost is amortizable.
 
