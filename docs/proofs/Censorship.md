@@ -77,7 +77,7 @@ By hypothesis there exists an honest `v_i ∈ K_{h,r} \ F` with `t ∈ mempool(v
 
 **Step 3.** By L-2.1, `t.hash` is in the union `⋃ B.creator_tx_lists[*]` and hash-bound into `B.tx_root` (V7).
 
-**Step 4.** By the body-assembly rule in `src/node/producer.cpp::build_body` lines 357-376 (Preliminaries §10): the proposer materializes `B.transactions` by mapping each hash in the union to its tx-store entry (line 367-370). Under V14 (Preliminaries §5), the assembled body's tx_root recomputes to `B.tx_root`. Two outcomes:
+**Step 4.** By the body-assembly rule in `src/node/producer.cpp::build_body` (the body-assembly loop, Preliminaries §10): the proposer materializes `B.transactions` by mapping each hash in the union to its tx-store entry. Under V14 (Preliminaries §5), the assembled body's tx_root recomputes to `B.tx_root`. Two outcomes:
 
 - (a) `t` is in the proposer's tx_store: `t` enters `B.transactions`. ✓
 - (b) `t.hash` is in the union but `t` itself is not in the proposer's tx_store: the assembly skips `t` (line 369), the tx_root recomputed from the assembled body diverges from `B.tx_root`, and V14 (transaction apply consistency) plus V7 reject the block.
@@ -145,7 +145,7 @@ L-2.3's H4 requires: "selection rule applied uniformly to all mempool entries." 
 
 For the proof, H4's natural reading is: any mempool-tx selection rule that doesn't depend on the tx's content (e.g., "first 1000 by fee", "all", "random sample with deterministic seed") counts as honest. Rules that depend on the tx's address or memo content count as censorship (Byzantine).
 
-Implementation note: Determ's current node code uses "all of `tx_store_`" (line 604 in `src/node/node.cpp::start_contrib_phase`). This is the strongest form of H4 — every mempool entry goes into `tx_hashes`. The censorship bound `(f/N)^K` holds unconditionally for honest nodes running this rule.
+Implementation note: Determ's current node code uses "all of `tx_store_`" (the mempool snapshot loop in `src/node/node.cpp::start_contrib_phase`). This is the strongest form of H4 — every mempool entry goes into `tx_hashes`. The censorship bound `(f/N)^K` holds unconditionally for honest nodes running this rule.
 
 ### 5.3 Cross-shard cases
 
@@ -181,8 +181,8 @@ T-2.1's `(f/N)^K` bound is a uniform-distribution claim; it assumes `select_m_cr
 | Union tx_root V7 | `src/node/producer.cpp::compute_tx_root` |
 | Phase-1 commit signing | `src/node/producer.cpp::make_contrib_commitment` |
 | Validator V4 / V7 / V14 | `src/node/validator.cpp::check_creator_tx_commitments`, `check_transactions` |
-| Build-body resolution | `src/node/producer.cpp::build_body` lines 357-376 |
-| Mempool snapshot H4 | `src/node/node.cpp::start_contrib_phase` lines 602-604 |
+| Build-body resolution | `src/node/producer.cpp::build_body` |
+| Mempool snapshot H4 | `src/node/node.cpp::start_contrib_phase` |
 | Committee selection (uniform under ROM) | `src/crypto/random.cpp::select_m_creators` |
 
 A reviewer can re-validate by reading the source-level objects in the right column against the lemmas in the left.

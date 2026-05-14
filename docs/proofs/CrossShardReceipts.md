@@ -191,12 +191,12 @@ Per L-7.4, fabricating an inbound receipt requires forging K signatures, probabi
 | `CrossShardReceipt` struct | `include/determ/chain/block.hpp::CrossShardReceipt` |
 | V12 source-side receipt binding | `src/node/validator.cpp::check_cross_shard_receipts` |
 | V13 destination-side dedup | `src/node/validator.cpp::check_inbound_receipts` |
-| Apply credit + dedup-set update | `src/chain/chain.cpp::apply_transactions` (line ~420) |
-| Source debit + outbound counter | `src/chain/chain.cpp::apply_transactions` TRANSFER branch (line ~178) |
+| Apply credit + dedup-set update | `src/chain/chain.cpp::apply_transactions` (inbound-receipt apply loop) |
+| Source debit + outbound counter | `src/chain/chain.cpp::apply_transactions` (TRANSFER cross-shard arm) |
 | `applied_inbound_receipts_` set | `src/chain/chain.hpp` private member |
 | Receipt bundle gossip + ratification | `src/net/gossip.cpp::on_cross_shard_receipt_bundle`; `src/node/node.cpp::on_cross_shard_receipt_bundle` |
-| Producer-side baking from pending pool | `src/node/producer.cpp::assemble_block` (line ~473) |
-| Per-shard A1 invariant assertion | `src/chain/chain.cpp::apply_transactions` (line ~442) |
+| Producer-side baking from pending pool | `src/node/producer.cpp::build_body` (inbound_receipts admission loop) |
+| Per-shard A1 invariant assertion | `src/chain/chain.cpp::apply_transactions` (A1 invariant assertion tail) |
 
 A reviewer can confirm:
 

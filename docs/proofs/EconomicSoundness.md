@@ -232,13 +232,13 @@ No randomness, no external state, no time-dependence. Two honest nodes applying 
 |---|---|
 | A1 counters declaration | `include/determ/chain/chain.hpp` (`genesis_total_` ... `accumulated_outbound_`) |
 | Genesis-time `genesis_total_` initialization | `src/chain/chain.cpp::apply_transactions` `b.index == 0` branch |
-| Per-block delta tracking | `src/chain/chain.cpp::apply_transactions` (line ~205+) |
-| Apply-tail assertion | `src/chain/chain.cpp::apply_transactions` (line ~530+) |
+| Per-block delta tracking | `src/chain/chain.cpp::apply_transactions` (per-tx delta accumulation) |
+| Apply-tail assertion | `src/chain/chain.cpp::apply_transactions` (A1 invariant assertion at tail) |
 | E1 NEF distribution | REGISTER branch in `apply_transactions` |
 | Zeroth address validator guard | `src/node/validator.cpp::check_transactions` (rejects `from == ZEROTH_ADDRESS`) |
 | E3 lottery branch | subsidy distribution in `apply_transactions` |
 | E4 cap enforcement | same; `min(base_subsidy, remaining)` |
-| Snapshot serialization of all counters | `src/chain/chain.cpp::serialize_state` lines 657+ |
+| Snapshot serialization of all counters | `src/chain/chain.cpp::serialize_state` |
 
 A reviewer can confirm soundness by:
 
