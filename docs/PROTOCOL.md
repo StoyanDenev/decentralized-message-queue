@@ -252,7 +252,11 @@ SHA-256 of `signing_bytes() || creator_block_sigs[0] || ... || creator_block_sig
 This binds creator signatures into the hash so signature equivocation produces a different block hash.
 
 ### 4.3 `block_digest` (what creators sign in Phase 2)
-SHA-256 over `index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]`. **Excludes** `delay_output` and `creator_dh_secrets` so committee members can sign immediately at Phase-2 entry without waiting for the K revealed secrets to gather. The final `delay_output` and `creator_dh_secrets` are bound into the block hash via `signing_bytes()` (§4.1).
+SHA-256 over `index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]` (matches `src/node/producer.cpp::compute_block_digest`).
+
+**Excludes** every other `Block` field — specifically: `timestamp`, `delay_output`, `cumulative_rand`, `creator_dh_secrets`, `abort_events`, `equivocation_events`, `cross_shard_receipts`, `inbound_receipts`, `initial_state`, `partner_subset_hash`, `state_root`. The Phase-2-reveal fields (`delay_output`, `creator_dh_secrets`) are excluded so committee members can sign at Phase-2 entry without waiting for K secrets to gather. The evidence/receipt/timestamp fields are excluded because they depend on gossip-async pool views — see `docs/proofs/S030-D2-Analysis.md` for the analysis (S-030 D1/D2; D1 effective-closed via S-033 state_root binding in `signing_bytes`; D2 partial-closed via the same mechanism with v2.7 F2 view-reconciliation tracked for full closure).
+
+The final values of every excluded field are bound into the **block hash** via `signing_bytes()` (§4.1), so the block's identity uniquely binds the entire post-apply state even though the Phase-2 digest doesn't.
 
 ## 5. Consensus protocol
 
