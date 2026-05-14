@@ -307,9 +307,11 @@ Crash semantics. Between block apply and save completion, the block is in memory
 - Extend the Phase 2C lock-free reader pattern to additional containers as use cases demand (abort_records, merge_state, etc., currently lockless reads aren't needed for these — they're queried only from internal validator paths already holding the lock).
 - One-file-per-block storage. With async save, the saving thread can fall behind apply on bursty workloads (save coalesces but takes O(N) per fire). Switching to per-block files makes save O(1) and the worker can never fall behind. Strict perf improvement, not a correctness fix.
 - C++26 deprecation cleanup for `std::atomic_load/store` free functions on shared_ptr — migrate to `std::atomic<std::shared_ptr<T>>`.
-- `delay_worker_.join()` under the lock — moot since M-F removed the delay-hash worker entirely.
-- `rpc_submit_tx` broadcasts via gossip while holding `unique_lock`. The lock could be released before the broadcast call (the tx is already in `tx_store_` at that point; the broadcast is a network operation that doesn't touch chain state). ~10 LOC, untouched in this commit to keep the change surgical.
-- `delay_worker_.join()` under the lock — moot since M-F removed the delay-hash worker entirely.
+
+**Closed under S-031 since the pre-fix description was written** (kept here as audit trail for the original analysis below):
+
+- ✅ `rpc_submit_tx` broadcasts gossip out of lock — closed by v2.6 (`src/node/node.cpp::rpc_submit_tx` releases `state_mutex_` via `lk.unlock()` before `gossip_.broadcast(...)` at ~L3004). The tx is already in `tx_store_ + tx_by_account_nonce_` before the unlock; peers receiving the broadcast re-validate via `on_tx` (idempotent under replace-by-fee).
+- ✅ `delay_worker_.join()` under the lock — moot since M-F removed the delay-hash worker entirely (commits `14bf3d6` + `1b9b086`).
 
 **Pre-fix description** (preserved for audit trail). `Node` is a god-object protected by one `std::mutex state_mutex_`. 42 references in `node.cpp`. Every critical operation holds this lock:
 - All consensus state mutation
