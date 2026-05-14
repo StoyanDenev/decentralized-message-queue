@@ -131,10 +131,14 @@ if(DETERM_VENDOR_OPRF)
   target_link_libraries(oprf PUBLIC sodium)
 endif()
 
-# ── determ-wallet executable (A2 Phases 1-4) ────────────────────────────────
+# ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────
 # Separate binary so wallet secret material never shares address space with
-# the networked `determ` daemon. Phase 5 will add libopaque on top of
-# libsodium with an in-tree CMake shim (libopaque upstream is autotools).
+# the networked `determ` daemon. Phase 5 (stub OPAQUE adapter using libsodium
+# Argon2id directly) ships today; Phase 6 (real libopaque + liboprf, gated
+# behind -DDETERM_VENDOR_OPRF=ON above) is deferred to v2.14 — see
+# wallet/PHASE6_PORTING_NOTES.md for the MSVC porting status that blocks
+# Phase 6's default-on enablement. Phase 7 (recovery flow routing through
+# the adapter) is also shipped.
 file(GLOB_RECURSE WALLET_SOURCES "wallet/*.cpp")
 add_executable(determ-wallet ${WALLET_SOURCES})
 target_include_directories(determ-wallet PRIVATE
