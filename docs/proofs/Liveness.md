@@ -66,20 +66,20 @@ The number of rounds to the first `X_r = 1` is a Geometric(q) random variable wi
 
 ### Lemma L-4.3 — BFT escalation bound
 
-Under (L3) and the assumption that after `T_threshold` consecutive aborts at the same height, BFT mode engages with effective committee size `M = ⌈2K/3⌉`:
+Under (L3) and the assumption that after `T_threshold` consecutive aborts at the same height, BFT mode engages with the smaller committee `M := |K_h| = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q := ⌈2M/3⌉`:
 
-The probability that a BFT-mode round at height `h` finalizes is at least `(1-p)^M`. Combined with FA5's conditional safety claim, an MD failure cascade is bounded to `T_threshold` rounds before escalation.
+The probability that a BFT-mode round at height `h` finalizes is at least `Pr[≥ Q of M committee members live] · Pr[BFT trigger condition met]`. The trigger requires `M` of `K` original committee members to be live so that a BFT committee can be drawn from the abort-narrowed pool.
 
-**Proof.** When BFT mode engages, the proposer-led committee accepts `M` of `K` signatures; the remaining `K - M` may be sentinel-zero. So liveness in BFT mode requires only `M` of `K` committee members to be live.
+**Proof.** When BFT mode engages, the BFT committee has size `M` (drawn from the eligible pool that survived the abort wave). The block has `M` `creator_block_sigs[]` slots; at least `Q` of them must be nonzero. So:
 
-Pr[M of K live] is computed via the binomial expansion. For `K = 3, M = 2`:
-$$
-\Pr[\text{≥ 2 of 3 live}] = (1-p)^3 + 3 \cdot (1-p)^2 \cdot p = (1-p)^2 \cdot (1 + 2p)
-$$
+- The trigger condition needs `≥ M` of the original `K` to be live (so the abort-narrowed pool has enough to form a BFT committee).
+- Within the `M`-member BFT committee, all `M` must contribute Phase 1 (Phase-1 unanimity is the same rule MD applies, just to a smaller committee), and at least `Q` of them must sign Phase 2.
 
-For `p = 0.20`: `(0.8)² · 1.4 = 0.896` — much higher than MD's `(0.8)³ = 0.512`.
+For `K = 3`, `M = 2`, `Q = 2`: trigger requires 2 of 3 live, and the BFT committee of 2 needs both to sign. Pr[≥ 2 of 3 live] = `(1-p)^3 + 3·(1-p)^2·p = (1-p)^2 · (1 + 2p)`. For `p = 0.20`: `(0.8)² · 1.4 = 0.896` — much higher than MD's `(0.8)^3 = 0.512`.
 
-The BFT-mode probability is monotone non-decreasing in `(1-p)` and strictly higher than MD's all-live probability whenever `K > M ≥ 1`. So BFT escalation strictly improves liveness odds at the cost of conditional safety (FA5).
+For `K = 6`, `M = 4`, `Q = 3`: trigger requires 4 of 6 live; within the BFT committee, at most one sentinel allowed. Pr[BFT finalizes] is correspondingly larger than MD's `(1-p)^6` at the same `p`.
+
+The BFT-mode probability is monotone non-decreasing in `(1-p)` and strictly higher than MD's all-live probability whenever `K > M ≥ 1` (which holds for any `K ≥ 2`). So BFT escalation strictly improves liveness odds at the cost of conditional safety (FA5).
 
 The "bounded to `T_threshold` rounds" claim follows from the protocol-level rule: once `T_threshold` aborts accumulate at the same height, the next round is BFT-mode (Preliminaries §5 V8 + producer's escalation gate in `src/node/node.cpp::check_if_selected`).   ∎
 
