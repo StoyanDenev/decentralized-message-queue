@@ -192,7 +192,7 @@ The number of nonzero signatures must be `≥ k` (MD; no sentinels permitted) or
 
 **V15 — Transaction apply.** Applying `B.transactions` in canonical order to the chain state derived from `B₀, …, B_{h-1}` produces a consistent state (no negative balances, sequential nonces, valid signatures, etc.). Enforced by `BlockValidator::check_transactions` + `Chain::apply_transactions`.
 
-A block is **finalized** when it has passed V1–V15 on at least one honest validator. By V8, finalization implies at least K (MD) or ⌈2K/3⌉ (BFT) committee members have signed the same `block_digest`.
+A block is **finalized** when it has passed V1–V15 on at least one honest validator. By V8, finalization implies at least `k` (MD; full committee) or `Q = ⌈2k/3⌉` (BFT; within-committee 2/3 quorum where `k = k_bft = ⌈2K/3⌉` is the shrunk BFT committee) members have signed the same `block_digest`.
 
 ---
 
