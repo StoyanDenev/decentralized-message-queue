@@ -247,10 +247,10 @@ A cross-shard TRANSFER from `A` on shard `S_a` to `B` on shard `S_b` (where `sha
 2. Source producer appends `r ∈ CrossShardReceipt` to `block_{h_a}.cross_shard_receipts` with fields `{src_shard, dst_shard, src_block_index, src_block_hash, tx_hash, from, to, amount, fee, nonce}`.
 3. Source broadcasts `CROSS_SHARD_RECEIPT_BUNDLE(block_{h_a})`. Beacon relays unchanged.
 4. Destination shard receives the bundle, filters receipts where `r.dst_shard = my_shard`, deduplicates against `pending_inbound_receipts_`, queues by key `(src_shard, tx_hash)`.
-5. Destination producer dequeues + bakes into `block.inbound_receipts`. Validator V12 enforces no duplicates against `applied_inbound_receipts_`.
+5. Destination producer dequeues + bakes into `block.inbound_receipts`. Validator V13 enforces no duplicates against `applied_inbound_receipts_`.
 6. Destination apply credits `B` by `r.amount`; inserts `(src_shard, tx_hash)` into `applied_inbound_receipts_`.
 
-**Idempotency invariant.** For every receipt `r`, the destination shard credits `r.to` by `r.amount` at most once. (Step 6 + V12.)
+**Idempotency invariant.** For every receipt `r`, the destination shard credits `r.to` by `r.amount` at most once. (Step 6 + V13.)
 
 ---
 
