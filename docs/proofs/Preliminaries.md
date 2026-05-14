@@ -322,6 +322,18 @@ The series:
 | `SelectiveAbort.md` (FA3) | Commit-reveal hybrid argument; no member can bias `R` predictively. |
 | `Liveness.md` (FA4) | Probabilistic liveness under (1-p)^K > 0 and synchrony. |
 | `BFTSafety.md` (FA5) | Conditional safety of BFT-mode blocks under `f_h < |K_h|/3` within the BFT committee (`|K_h| = ⌈2K/3⌉`). |
-| `EquivocationSlashing.md` (FA6) | Only Byzantine validators are slashed (no false positives). |
+| `EquivocationSlashing.md` (FA6) | Only Byzantine validators are slashed (no false positives). Covers both block-digest equivocation and `on_contrib` same-generation Phase-1 equivocation (S-006 closure). |
 | `CrossShardReceipts.md` (FA7) | At-most-once + at-least-once (under fairness) credit. |
 | `RegionalSharding.md` (FA8) | Regional-pool corollary of safety + censorship. |
+| `UnderQuorumMerge.md` (FA9) | R7 merge mechanism preserves FA1 + FA7 across BEGIN/END boundaries. |
+| `Governance.md` (FA10) | A5 PARAM_CHANGE multisig soundness (N-of-N whitelist enforcement). |
+| `EconomicSoundness.md` (FA11) | A1 unitary-balance invariant + E1/E3/E4 supply-preservation theorems. |
+| `WalletRecovery.md` (FA12) | A2 distributed-recovery primitive (Shamir + AEAD + OPAQUE adapter). |
+
+**Closure-analysis companion documents (non-FA-track, deep-dives into specific finding closures):**
+
+| File | Scope |
+|---|---|
+| `S002-Mempool-Sig-Verify.md` | S-002 mempool unverified-sig closure (FA1 cross-ref). |
+| `S030-D2-Analysis.md` | S-030 D2 closure analysis (state_root + S-038 producer wiring); v2.7 F2 consensus-layer closure plan. |
+| `F2-SPEC.md` | v2.7 F2 view-reconciliation design specification (consensus-layer S-030 D2 full closure). |
