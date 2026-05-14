@@ -36,14 +36,21 @@ Bearer addresses **cannot** register, stake, or be selected as creators. They ca
 ```cpp
 struct Transaction {
     TxType    type;           // 0=TRANSFER, 1=REGISTER, 2=DEREGISTER, 3=STAKE,
-                              // 4=UNSTAKE, 5=REGION_CHANGE (reserved), 6=PARAM_CHANGE (§13),
-                              // 7=MERGE_EVENT (§14)
-    string    from;           // domain or bearer address
-    string    to;             // TRANSFER only; "" otherwise
-    uint64    amount;         // TRANSFER + STAKE
+                              // 4=UNSTAKE, 5=REGION_CHANGE (reserved — validator rejects),
+                              // 6=PARAM_CHANGE (§13), 7=MERGE_EVENT (§14),
+                              // 8=COMPOSABLE_BATCH (§14.5), 9=DAPP_REGISTER (§14.5),
+                              // 10=DAPP_CALL (§14.5)
+    string    from;           // domain or bearer address (S-028: anon-shape MUST be
+                              //   lowercase canonical at the wire — submit_tx rejects
+                              //   uppercase with a diagnostic; node-authored tx-create
+                              //   paths normalize automatically)
+    string    to;             // TRANSFER + DAPP_CALL; "" otherwise (S-028 same rule)
+    uint64    amount;         // TRANSFER + STAKE + DAPP_CALL
     uint64    fee;            // every type
     uint64    nonce;          // sequential per-account
-    bytes     payload;        // type-specific (see §3.5 for REGISTER, §3.4 for TRANSFER)
+    bytes     payload;        // type-specific (see §3.5 for REGISTER, §3.4 for TRANSFER,
+                              //   §13 for PARAM_CHANGE, §14 for MERGE_EVENT,
+                              //   §14.5 for COMPOSABLE_BATCH / DAPP_REGISTER / DAPP_CALL)
     Signature sig;            // Ed25519 over signing_bytes()
     Hash      hash;           // = compute_hash() = SHA256(signing_bytes() || sig)
 };
@@ -64,6 +71,10 @@ SHA-256 of `signing_bytes() || sig` (binds the signature into the hash).
 - Sequential nonce: a tx is applied only if `tx.nonce == account.next_nonce`. Mismatched nonces are silently skipped.
 - For `TRANSFER`: requires `account.balance >= amount + fee`. Sender debited `amount + fee`; receiver credited `amount`. Fee accumulates to creators.
 - **Cross-shard variant:** if `shard_id_for_address(to) != my_shard`, sender is debited but `to` is **not** credited locally. A `CrossShardReceipt` is emitted instead (see §8).
+- For `UNSTAKE` (S-017 closure): validator + producer + chain layer all enforce `b.index >= chain.stake_unlock_height(tx.from)`. Pre-fix the chain layer was the only gate (with fee refund on too-early); post-fix the validator rejects too-early UNSTAKE at the block-validation layer, the producer skips it during build_body assembly, and the chain layer keeps the fee-refund as belt-and-suspenders. Honest user UX is unchanged; the alignment closes the producer/validator-vs-apply divergence.
+- For `STAKE`: requires `balance >= amount + fee`. Sender debited `amount + fee`; staked locked grows by `amount`. Suspended validators (stake below `min_stake` or in slash-cooldown) skip selection regardless of stake.
+
+S-028 case-normalization rules apply at the RPC ingress layer (see §10.2 `submit_tx`); the on-wire `Transaction` always carries the canonical lowercase form for anon-shape `from` / `to`.
 
 ### 3.4 TRANSFER payload (general-purpose tokenization slot)
 
