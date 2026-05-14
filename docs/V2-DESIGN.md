@@ -11,7 +11,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | Item | Status | Notes |
 |---|---|---|
 | v2.1 State Merkle root | ✅ shipped | `compute_state_root()` + Block.state_root + verification on apply/restore |
-| v2.2 Light-client headers / state_proof RPC | ✅ shipped foundation | SMT inclusion-proof RPC + CLI; full light-client header-sync remains |
+| v2.2 Light-client headers / state_proof RPC | ✅ shipped foundation | Merkle inclusion-proof RPC + CLI (sorted-leaves construction; SMT migration would be future for non-membership proofs); full light-client header-sync remains |
 | v2.3 Trustless fast sync | ✅ shipped | state_root verified on snapshot restore |
 | v2.4 Atomic block apply (A9) | ✅ shipped | A9 Phase 1-2D + COMPOSABLE_BATCH tx |
 | v2.5 Registry cache (S-032) | ✅ shipped | Cached registry view; S-032 closed |
