@@ -159,7 +159,7 @@ print('true' if ok else 'false')
 assert "$sane_indices" "target_index in [0, leaf_count)"
 
 echo
-echo "=== 5. value_hash matches SHA-256(balance_le || nonce_le) ==="
+echo "=== 5. value_hash matches SHA-256(balance_be || nonce_be) ==="
 # build_state_leaves's account leaf encoding (SHA256Builder writes
 # uint64 as BIG-endian; see src/crypto/sha256.cpp::append(uint64_t)):
 #   value_hash = SHA-256(balance: u64 BE || next_nonce: u64 BE)
