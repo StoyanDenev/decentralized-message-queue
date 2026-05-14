@@ -462,42 +462,41 @@ The pattern is **fully implementable today** with existing v2.18 + libsodium. Ad
 
 ## 11. Implementation roadmap
 
-Phased shipping plan, each phase is a single bounded commit:
+Phased shipping plan, each phase is a single bounded commit.
 
-### Phase 7.1 — `DAPP_REGISTER` tx + on-chain DApp registry (~2 days)
+**Status as of this revision:** Phases 7.1, 7.2, 7.3 shipped (v2.18 + v2.19). Phase 7.4 shipped the **polling subset** (`dapp_messages` retrospective RPC); the streaming subscription portion remains open. Phases 7.5+ are ecosystem / future work.
+
+### Phase 7.1 — `DAPP_REGISTER` tx + on-chain DApp registry — ✅ shipped (v2.18)
 
 - New `TxType::DAPP_REGISTER` + `DAppEntry` struct + `dapp_registry_` member on Chain
 - Wire-format encode/decode helpers
 - Validator: shape check + REGISTER-precondition + stake check
 - Apply path: insert/update/deactivate
-- Integration with `build_state_leaves` (new `"d:"` namespace leaf)
+- Integration with `build_state_leaves` (new `"d:"` namespace leaf — note `serialize_state` gap tracked as S-037)
 - Phase 2A/2B lazy-snapshot integration
-- New RPC: `dapp_info(domain)`, `dapp_list()`
-- Regression: in-process CLI test (`determ test-dapp-register`)
+- RPC: `dapp_info(domain)`, `dapp_list(prefix?, topic?)`
+- Regression: `tools/test_dapp_register.sh` + in-process `determ test-dapp-register`
 
-### Phase 7.2 — `DAPP_CALL` tx + payload routing (~2 days)
+### Phase 7.2 — `DAPP_CALL` tx + payload routing — ✅ shipped (v2.19)
 
 - New `TxType::DAPP_CALL` + payload encoding
 - Validator: must-resolve-to-active-DApp + payload size cap + topic match
 - Apply path: amount credit (TRANSFER-like) + nonce advance
 - Anti-spam: chain-wide `DAPP_CALL` min-fee
-- New RPC: `dapp_messages(domain, from_height, to_height, topic)` — paginated retrospective query
-- Regression: in-process CLI test (`determ test-dapp-call`)
-- Wallet CLI: `determ dapp-call`, `determ dapp-info`
+- RPC: `dapp_messages(domain, from_height, to_height, topic)` — paginated retrospective query (256 events / page)
+- Regression: `tools/test_dapp_call.sh` + in-process `determ test-dapp-call`
+- CLI: `determ submit-dapp-call`, `determ dapp-info --domain D`, `determ dapp-messages --domain D`
 
-### Phase 7.3 — Lock-free DApp reader path (~1 day)
+### Phase 7.3 — Lock-free DApp reader path — ✅ shipped
 
-- Extend `CommittedStateBundle` to include `dapp_registry_`
-- `dapp_info_lockfree` accessor on Chain
-- Rewire `dapp_info` RPC to use the lock-free path
-- ~30 LOC, mechanical
+- Extended `CommittedStateBundle` to include `dapp_registry`
+- `dapp_lockfree` accessor on Chain (read path used by `rpc_dapp_info` does not require `state_mutex_`)
+- ~30 LOC, mechanical — landed alongside Phase 7.1
 
-### Phase 7.4 — Streaming subscription RPC (~3 days)
+### Phase 7.4 — Streaming subscription RPC — ⚠️ partial (polling shipped, streaming pending; ~3 days remaining)
 
-- `dapp_subscribe(domain, topic?)` — newline-JSON streaming over the RPC socket
-- Node-side: a per-block hook fires after `enqueue_save`; subscribers' filters check `tx.to == domain` for each DAPP_CALL in the new block
-- Backpressure: bounded per-subscriber queue with disconnect-on-overflow
-- Regression test: spawn 1 DApp-style subscriber, submit a `DAPP_CALL`, verify the event is delivered within K blocks
+- ✅ Polling subset: `dapp_messages(domain, from_height, to_height, topic)` shipped under Phase 7.2 as a retrospective query (caller polls every N seconds with `from = last_scanned + 1`).
+- ⏳ Streaming pending: `dapp_subscribe(domain, topic?)` — newline-JSON streaming over the RPC socket; per-block hook fires after `enqueue_save`; subscribers' filters check `tx.to == domain` for each DAPP_CALL in the new block. Backpressure: bounded per-subscriber queue with disconnect-on-overflow. Regression: spawn 1 DApp-style subscriber, submit a `DAPP_CALL`, verify the event is delivered within K blocks.
 
 ### Phase 7.5 — DApp SDK + reference implementation (~1 week, ecosystem)
 
