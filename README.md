@@ -470,7 +470,7 @@ An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an a
 
 Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
 
-**Slashing**: BFT-mode safety depends on `f < N/3` plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DTM) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
+**Slashing**: BFT-mode safety depends on `f_h < k_bft/3` (standard BFT 1/3 bound applied to the BFT-shrunk committee) plus economic cost on misbehavior. `SUSPENSION_SLASH` (default 10 DTM) is deducted from a validator's stake whenever an `AbortEvent` for round 1 baked into a finalized block names them. Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
 
 **Opt out**: setting `bft_enabled = false` at genesis disables escalation — the chain halts on a persistent silent committee member, by design. Suitable for deployments that prefer unconditional safety on every block over liveness fallback.
 
@@ -682,7 +682,7 @@ The full pipeline:
 6. **Slashing** (`apply_transactions`): each `EquivocationEvent` zeroes the equivocator's `stakes_[X].locked`. Validator's stake-below-MIN_STAKE filter then removes them from selection on the next registry build.
 7. **Dedup**: after a block bakes evidence, that equivocator's entries are removed from the pending pool (no double-baking).
 
-BFT-mode safety claims (conditional on `f < N/3` plus economic disincentive) are now economically meaningful end-to-end.
+BFT-mode safety claims (conditional on `f_h < k_bft/3` within the BFT committee plus economic disincentive) are now economically meaningful end-to-end.
 
 ---
 
