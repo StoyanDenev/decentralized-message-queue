@@ -22,9 +22,10 @@ bash tools/test_zero_trust_cross_chain.sh  # cross-chain gossip plumbing
 bash tools/test_cross_shard_transfer.sh    # cross-shard TRANSFER end-to-end
 bash tools/test_equivocation_slashing.sh   # equivocation closed-loop
 bash tools/test_snapshot_bootstrap.sh      # fast-bootstrap from snapshot
+bash tools/test_dapp_snapshot.sh           # S-037 + S-038: DApp registry survives snapshot bootstrap
 ```
 
-All 8 should print `PASS:`.
+All 9 should print `PASS:`.
 
 ## 3. Run a 3-node single chain by hand
 
