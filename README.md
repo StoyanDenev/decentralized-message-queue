@@ -654,7 +654,7 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP). Under `EXTENDED` sharding a region losing connectivity to the rest of the world stalls cross-shard receipts; in-shard production continues.
 
-**Binary wire codec.** Current JSON-over-TCP is convenient but verbose. A future revision will introduce a binary message codec for bandwidth efficiency.
+**Binary wire codec — shipped (A3 / S8).** Two codecs co-exist per-pair: JSON-over-TCP (legacy, the default), and a compact binary envelope (`src/net/binary_codec.cpp`). HELLO advertises each side's `wire_version`; pairs negotiate to `min(local, remote)`. Pre-A3 peers stay on JSON automatically. PROTOCOL.md §16.1 has the version-negotiation details.
 
 **Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). The full header-only sync flow (light client downloads only block headers + verifies against epoch-boundary committee state) builds on this primitive and is a follow-on RPC track. CLI `determ state-proof --ns <a|s|r|b|k|c> --key <name>` exercises the primitive today.
 
