@@ -105,13 +105,15 @@ The work is straightforward; it just needs to happen together rather than as two
 
 ## 6. Status
 
-- **S-002**: Open. Implementation prepared (`verify_tx_signature_locked()` exists in node.cpp); call sites reverted pending the binary-codec fix.
-- **Binary codec amount/fee/nonce drop**: Pre-existing latent bug, now documented. Tracked as part of S-002 closure.
-- **Bearer regression test**: Reverting S-002 calls restores the test to its previous passing/flaking behavior (TIME_WAIT race remains as the dominant intermittent failure source).
+Both findings shipped together in-session (status as of `docs/SECURITY.md` §S-002):
+
+- **S-002**: ✅ Mitigated. `Node::on_tx` and `Node::rpc_submit_tx` both call `verify_tx_signature_locked()` before admitting any tx into `tx_store_`. Gossip path drops silently on failure (no amplification surface); RPC path throws with a diagnostic so the submitting client can retry.
+- **Binary codec amount/fee/nonce drop**: ✅ Fixed. `decode_tx_frame` now reads `amount`, `fee`, and `nonce` explicitly from the fixed slots at offsets 32–55. Encode/decode round-trip preserves the fields end-to-end.
+- **Regression coverage**: bearer + governance + equivocation-slashing tests all PASS post-fix. A dedicated forged-sig rejection regression remains a follow-on once test-side Ed25519 forge tooling lands (currently requires PyNaCl or a `determ` CLI helper for offline forged-sig construction).
 
 ## 7. Cross-references
 
-- `docs/SECURITY.md` S-002 — original finding.
-- `src/net/binary_codec.cpp::decode_tx_frame` — the bug site.
-- `src/node/node.cpp::verify_tx_signature_locked` — the prepared helper, currently unwired.
-- `src/node/node.cpp::on_tx`, `Node::rpc_submit_tx` — the admission sites that need to call the helper post-codec-fix.
+- `docs/SECURITY.md` S-002 — original finding + closure entry.
+- `src/net/binary_codec.cpp::decode_tx_frame` — the bug site, now correct.
+- `src/node/node.cpp::verify_tx_signature_locked` — the helper, now wired at both admission sites.
+- `src/node/node.cpp::on_tx`, `Node::rpc_submit_tx` — the admission sites that call the helper.
