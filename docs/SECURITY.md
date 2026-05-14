@@ -663,7 +663,9 @@ That's **8 call sites**, several of which fire per block or per gossip message. 
 
 **Severity:** High (architectural omission) • **Status:** Mitigated in-session (Merkle tree commitment landed; inclusion proofs follow-on) • **Sources:** Architectural Analysis §3.3, related to S-012
 
-**Mitigation landed in-session.** Block now carries a `state_root` field; producer populates it from a sorted-leaves Merkle tree (`include/determ/crypto/merkle.hpp`) over every canonical state entry. The root is bound into `signing_bytes` when non-zero (preserving pre-S-033 byte-stable hashes). Apply-time verification re-derives and rejects on mismatch. The chain's `prev_hash` chain transitively authenticates every prior state_root — the chain is now a verifiable state log.
+**Mitigation landed in-session.** Block now carries a `state_root` field; `Chain::compute_state_root` builds it as a sorted-leaves Merkle tree (`include/determ/crypto/merkle.hpp`) over every canonical state entry (the 10-namespace leaf set documented in PROTOCOL.md §4.1.1). The root is bound into `signing_bytes` when non-zero (preserving pre-S-033 byte-stable hashes). Apply-time verification re-derives and rejects on mismatch. The chain's `prev_hash` chain transitively authenticates every prior state_root — the chain is now a verifiable state log.
+
+**The producer-side wiring was S-038's job, closed in the same session.** Pre-S-038, `Node::try_finalize_round` did not populate `body.state_root` before broadcast (every gossiped block carried zero); the apply-time gate short-circuited per the backward-compat shim. Post-S-038, the producer populates the field via a tentative-chain dry-run between `build_body` and `apply_block_locked`, so the S-033 closure is genuinely end-to-end functional. See S-038 below.
 
 Side effects:
 - **S-012 partial closure**: snapshot verifiers can now compare snapshot state's Merkle root against the snapshot's tail-header committed `state_root`. The verification call inside `restore_from_snapshot` is a ~10 LOC follow-on (file slot exists; only the check is missing).
