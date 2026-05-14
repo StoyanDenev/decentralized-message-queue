@@ -985,15 +985,22 @@ static int cmd_genesis_tool_build_sharded(int argc, char** argv) {
             }
         }
 
-        // A6 / S-038 mitigation: an EXTENDED deployment with fewer
-        // than 3 shards is degenerate (the under-quorum merge mechanism
-        // that justifies EXTENDED needs at least 3 shards for the
-        // modular fold to be meaningful). Hard error.
+        // A6 / cascading-merge invariant: an EXTENDED deployment with
+        // fewer than 3 shards is degenerate (the under-quorum merge
+        // mechanism that justifies EXTENDED needs at least 3 shards for
+        // the modular fold to be meaningful). Hard error.
+        //
+        // (Originally drafted as a proposed S-038 mitigation; the S-038
+        // number was later reassigned in SECURITY.md to "state_root
+        // verification gate dormant". The invariant itself is closed by
+        // construction here + documented inline in SECURITY.md §6.5 T-004
+        // and README §16.5.)
         if (mode == ShardingMode::EXTENDED && base.initial_shard_count < 3) {
             std::cerr << "build-sharded: sharding_mode=extended requires "
                          "initial_shard_count >= 3 (got "
                       << base.initial_shard_count
-                      << ", minimum 3) — S-038 mitigation\n";
+                      << ", minimum 3) — cascading-merge invariant "
+                         "(see SECURITY.md §6.5 + README §16.5)\n";
             return 1;
         }
 

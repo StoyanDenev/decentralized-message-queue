@@ -292,17 +292,24 @@ Node::Node(const Config& cfg)
             }
             break;
         case ShardingMode::EXTENDED:
-            // EXTENDED requires the S-038 invariant: a regional shard
-            // deployment with fewer than 3 shards is degenerate (the
-            // under-quorum merge mechanism that justifies the EXTENDED
-            // mode needs at least 3 shards to make a meaningful
-            // modular fold). Re-checked here as defense in depth on
-            // top of the genesis-tool guard.
+            // EXTENDED requires the cascading-merge invariant: a
+            // regional shard deployment with fewer than 3 shards is
+            // degenerate (the under-quorum merge mechanism that
+            // justifies the EXTENDED mode needs at least 3 shards to
+            // make a meaningful modular fold). Re-checked here as
+            // defense in depth on top of the genesis-tool guard.
+            //
+            // Originally drafted as a proposed S-038 mitigation; the
+            // S-038 number in SECURITY.md was later reassigned to
+            // "state_root verification gate dormant". The invariant
+            // itself is documented inline in SECURITY.md §6.5 T-004
+            // and README §16.5.
             if (gcfg.initial_shard_count < 3) {
                 throw std::runtime_error(
                     "sharding_mode=extended requires initial_shard_count "
                     ">= 3 (got " + std::to_string(gcfg.initial_shard_count)
-                    + ") — S-038 mitigation");
+                    + ") — cascading-merge invariant "
+                      "(see SECURITY.md §6.5 + README §16.5)");
             }
             break;
         }
