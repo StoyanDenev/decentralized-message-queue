@@ -1642,6 +1642,30 @@ json Chain::serialize_state(uint32_t header_count) const {
     }
     snap["merge_state"] = merge_arr;
 
+    // S-037 closure: dapp_registry_ contributes to state_root via the
+    // `d:` namespace (build_state_leaves) but was previously absent from
+    // the JSON snapshot. Result: a DApp-active chain failed the S-033
+    // state_root gate on restore. Persist every field that contributes
+    // to the d:-namespace value-hash so the restored chain's
+    // compute_state_root() matches the original tail header.
+    json dapps = json::array();
+    for (auto& [domain, e] : dapp_registry_) {
+        json topics = json::array();
+        for (auto& t : e.topics) topics.push_back(t);
+        dapps.push_back({
+            {"domain",         domain},
+            {"service_pubkey", to_hex(e.service_pubkey)},
+            {"endpoint_url",   e.endpoint_url},
+            {"topics",         topics},
+            {"retention",      e.retention},
+            {"metadata",       to_hex(e.metadata.data(), e.metadata.size())},
+            {"registered_at",  e.registered_at},
+            {"active_from",    e.active_from},
+            {"inactive_from",  e.inactive_from},
+        });
+    }
+    snap["dapp_registry"] = dapps;
+
     json pending = json::array();
     for (auto& [eff, entries] : pending_param_changes_) {
         json bucket = json::array();
@@ -1770,6 +1794,31 @@ Chain Chain::restore_from_snapshot(const json& snap) {
             ar.count      = a.value("count",      uint64_t{0});
             ar.last_block = a.value("last_block", uint64_t{0});
             c.abort_records_[domain] = ar;
+        }
+    }
+    // S-037 closure: restore the v2.18 DApp registry. Pre-v2.18 snapshots
+    // omit the field; the missing-field guard leaves c.dapp_registry_
+    // empty (matches a fresh-chain restore — no DApps registered).
+    // Post-fix, the loaded entries reproduce the exact d:-namespace
+    // leaves that build_state_leaves emitted on the source side, so
+    // compute_state_root() over the restored chain matches the tail
+    // header's stored state_root (the S-033 gate now accepts DApp-active
+    // snapshots).
+    if (snap.contains("dapp_registry")) {
+        for (auto& d : snap["dapp_registry"]) {
+            DAppEntry e;
+            e.service_pubkey = from_hex_arr<32>(d.value("service_pubkey",
+                                                          std::string(64, '0')));
+            e.endpoint_url   = d.value("endpoint_url",  std::string{});
+            for (auto& t : d.value("topics", json::array())) {
+                if (t.is_string()) e.topics.push_back(t.get<std::string>());
+            }
+            e.retention      = d.value("retention",     uint8_t{0});
+            e.metadata       = from_hex(d.value("metadata", std::string{}));
+            e.registered_at  = d.value("registered_at", uint64_t{0});
+            e.active_from    = d.value("active_from",   uint64_t{0});
+            e.inactive_from  = d.value("inactive_from", UINT64_MAX);
+            c.dapp_registry_[d.value("domain", std::string{})] = std::move(e);
         }
     }
     if (snap.contains("pending_param_changes")) {

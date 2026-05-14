@@ -647,13 +647,22 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
      "entries": [{"name", "value": "<hex>"}, ...]}, ...
   ],
 
+  // v2.18 DApp registry (state_root contributes via the "d:" namespace
+  // — see §4.1.1; field added by S-037 closure so DApp-active chains
+  // can be restored without losing the d:-namespace leaves).
+  "dapp_registry": [
+    {"domain", "service_pubkey": "<hex>", "endpoint_url", "topics": [...],
+     "retention": <u8>, "metadata": "<hex>",
+     "registered_at": <u64>, "active_from": <u64>, "inactive_from": <u64>}, ...
+  ],
+
   // Chain-continuity tail headers + per-header state_root
   "headers": [<Block JSON>, ...]   // last N blocks; each carries its own
                                     // state_root (S-033)
 }
 ```
 
-> **Known gap (tracked).** The on-disk snapshot does **not** currently include `dapp_registry_`, even though it contributes to `state_root` via the `d:` namespace (§4.1.1). A chain with any active DApp registration cannot be restored via `restore_from_snapshot` today — the `state_root` recompute will diverge. Track-A item: add `serialize_state` / `restore_from_snapshot` emission + readback for `dapp_registry_`, plus a regression test that snapshots a DApp-active chain and restores it. The bug is latent because no current test exercises both surfaces together.
+> **S-037 closure (shipped).** `serialize_state` + `restore_from_snapshot` now persist and restore `dapp_registry_` with all fields that contribute to the `d:`-namespace value-hash (`service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`). Pre-v2.18 snapshots without the field load via the missing-field guard (`if (snap.contains("dapp_registry"))`). Regression test: `tools/test_dapp_snapshot.sh` exercises register-on-donor → snapshot → restore-on-receiver → verify `dapp-info` + `dapp-list` return the entry post-restore.
 
 ### 11.1 `restore_from_snapshot` verification
 
