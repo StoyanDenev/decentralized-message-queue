@@ -79,6 +79,34 @@ Usage:
                                               Sign a TRANSFER from the anon account
                                               corresponding to <privkey_hex> and submit
                                               via the daemon's submit_tx RPC.
+
+State commitment + light-client (v2.1 + v2.2):
+  determ state-root                          Chain Merkle state root + height + head_hash
+  determ state-proof --ns {a|s|r|b|k|c} --key <name>
+                                              SMT inclusion proof for any state entry
+                                              (light-client primitive against state_root)
+
+DApp substrate (v2.18 + v2.19):
+  determ submit-dapp-register --priv <hex> --from <domain> --dapp-id <name>
+                                              Register a DApp on-chain (idempotent re-register)
+  determ submit-dapp-call --priv <hex> --from <domain> --dapp-id <name> --payload-hex <hex>
+                                              Submit a DAPP_CALL routed to a registered DApp
+  determ dapp-list                            List registered DApps
+  determ dapp-info <dapp_id>                  Per-DApp record
+  determ dapp-messages <dapp_id> [--from-height N]
+                                              Paginated DAPP_CALL event polling
+
+Governance + sharded operation:
+  determ submit-param-change ...              A5 PARAM_CHANGE tx (see CLI-REFERENCE.md §Governance)
+  determ submit-merge-event ...               R7 MERGE_EVENT tx (EXTENDED-mode under-quorum merge)
+
+In-process tests (deterministic, no network):
+  determ test-atomic-scope                    A9 Phase 2D nested-scope rollback primitive
+  determ test-composable-batch                COMPOSABLE_BATCH all-or-nothing semantics
+  determ test-dapp-register                   v2.18 DAPP_REGISTER apply path
+  determ test-dapp-call                       v2.19 DAPP_CALL routing + apply path
+
+For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
 }
 
