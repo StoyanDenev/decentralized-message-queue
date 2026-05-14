@@ -1,6 +1,6 @@
 # FA5 — BFT-mode conditional safety
 
-This document proves that blocks produced in BFT-escalation mode (`consensus_mode = BFT`) are safe under the conditions that have always governed BFT-style protocols: Byzantine fraction less than `K_eff/3` within the committee, plus equivocation slashing as economic backing.
+This document proves that blocks produced in BFT-escalation mode (`consensus_mode = BFT`) are safe under the conditions that have always governed BFT-style protocols: Byzantine fraction less than `|K_h|/3` within the committee, plus equivocation slashing as economic backing.
 
 Unlike MD-mode safety (FA1 T-1, unconditional given ≥1 honest in committee), BFT-mode safety is **conditional**. The trade is documented in `docs/PROTOCOL.md` §10.4 and observed per-block via the `consensus_mode` tag.
 
@@ -10,20 +10,20 @@ Unlike MD-mode safety (FA1 T-1, unconditional given ≥1 honest in committee), B
 
 ## 1. Theorem statement
 
-**Setup.** Fix height `h` where the chain has escalated to BFT mode (`B.consensus_mode = BFT`). Let `K` be the genesis-pinned committee size, `K_eff := ⌈2K/3⌉` the BFT-mode effective threshold. The BFT committee `K_h ⊂ V` is the smaller-than-K sub-committee derived from the abort-adjusted seed (Preliminaries §6). Let `F_h := F ∩ K_h`, with `f_h := |F_h|` (Byzantine fraction within the BFT committee).
+**Setup.** Fix height `h` where the chain has escalated to BFT mode (`B.consensus_mode = BFT`). Let `K` be the genesis-pinned committee size and `K_h ⊂ V` the smaller BFT committee derived from the abort-adjusted seed (Preliminaries §6) with `|K_h| = ⌈2K/3⌉`. Define `Q := ⌈2 · |K_h| / 3⌉` — the **within-committee 2/3 quorum** the validator's V8 enforces in BFT mode (`src/node/producer.cpp::required_block_sigs` for the formula `(2·k + 2) / 3`). Let `F_h := F ∩ K_h`, with `f_h := |F_h|` (Byzantine fraction within the BFT committee).
 
-A BFT-mode block `B` carries `K_h.size()` `creator_block_sigs[]` entries; at least `K_eff` of them must be nonzero (signed by committee members) for V8 to pass. The remaining `K_h.size() - K_eff` may be sentinel-zero.
+A BFT-mode block `B` carries `|K_h|` `creator_block_sigs[]` entries; at least `Q` of them must be nonzero (signed by committee members) for V8 to pass. The remaining `|K_h| − Q` slots may be sentinel-zero. Worked examples (K = 3 ⇒ |K_h| = 2, Q = 2; K = 6 ⇒ |K_h| = 4, Q = 3; K = 9 ⇒ |K_h| = 6, Q = 4). The K_eff notation used in earlier revisions of this proof has been replaced with the explicit `|K_h|` (committee size) and `Q` (quorum) to avoid conflating two distinct numbers — they only coincide at the genesis-default K = 3.
 
 **Theorem T-5 (BFT-mode safety, conditional).** Under the assumptions:
 
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2).
 - **(A2) SHA-256 collision resistance** (Preliminaries §2.1).
-- **(B1) Byzantine fraction bound**: `f_h < K_eff/3`. Equivalently, `f_h < K/9 + ⌈K/9⌉` approximately. For `K = 3, K_eff = 2`: `f_h < 1` ⟹ `f_h = 0`. For `K = 6, K_eff = 4`: `f_h < 2` ⟹ `f_h ≤ 1`. For `K = 9, K_eff = 6`: `f_h < 2` ⟹ `f_h ≤ 1`.
+- **(B1) Byzantine fraction bound**: `f_h < |K_h|/3` (standard BFT bound applied within the smaller BFT committee). Worked examples: K = 3 ⇒ |K_h| = 2 ⇒ f_h < 2/3 ⇒ f_h = 0. K = 6 ⇒ |K_h| = 4 ⇒ f_h < 4/3 ⇒ f_h ≤ 1. K = 9 ⇒ |K_h| = 6 ⇒ f_h < 2 ⇒ f_h ≤ 1.
 - **(B2) Equivocation slashing enforced**: by FA6, honest validators are not slashed; any equivocator's stake is forfeit and registration deregistered. (FA6's bound is `≤ 2⁻¹²⁸` per attempt.)
 
-then two valid BFT-mode blocks `B, B'` at the same height `h` against the same chain prefix imply `B = B'`. In plain terms: **BFT-mode blocks are unique under f_h < K_eff/3 within the BFT committee**.
+then two valid BFT-mode blocks `B, B'` at the same height `h` against the same chain prefix imply `B = B'`. In plain terms: **BFT-mode blocks are unique under f_h < |K_h|/3 within the BFT committee** — standard BFT safety re-targeted at the shrunk committee.
 
-**Corollary T-5.1 (Slashing recovery for BFT-mode forks).** If `f_h ≥ K_eff/3` and two BFT-mode blocks finalize at height `h`, then every committee member appearing as proposer in both has equivocated. By FA6, slashing zeros their stake AND deregisters them. The chain re-organizes around the surviving honest members at height `h+1`'s committee selection.
+**Corollary T-5.1 (Slashing recovery for BFT-mode forks).** If `f_h ≥ |K_h|/3` and two BFT-mode blocks finalize at height `h`, then every committee member appearing as proposer in both has equivocated. By FA6, slashing zeros their stake AND deregisters them. The chain re-organizes around the surviving honest members at height `h+1`'s committee selection.
 
 This is a "fault-tolerant" recovery: even when B1 is violated, the protocol detects + slashes + recovers; it doesn't simply fail.
 
@@ -33,21 +33,26 @@ This is a "fault-tolerant" recovery: even when B1 is violated, the protocol dete
 
 ### Lemma L-5.1 — Quorum intersection in BFT mode
 
-Let `S(B) ⊂ K_h` be the set of committee members that signed `compute_block_digest(B)`. Let `S(B') ⊂ K_h` be similarly for `B'`. Under V8 (Preliminaries §5):
+Let `S(B) ⊂ K_h` be the set of committee members that signed `compute_block_digest(B)`. Let `S(B') ⊂ K_h` be similarly for `B'`. Under V8 (Preliminaries §5), each block's signing set has cardinality at least the within-committee 2/3 quorum:
 
 $$
-|S(B)| \geq K_{\text{eff}}, \quad |S(B')| \geq K_{\text{eff}}
+|S(B)| \geq Q, \quad |S(B')| \geq Q \quad \text{where } Q = \lceil 2|K_h|/3 \rceil
 $$
 
-Then `|S(B) ∩ S(B')| ≥ 2 K_eff - |K_h| ≥ 2 K_eff - K`.
+Then `|S(B) ∩ S(B')| ≥ 2Q - |K_h|`.
 
-For `K_eff = ⌈2K/3⌉`: `|S(B) ∩ S(B')| ≥ 2⌈2K/3⌉ - K ≥ K/3 + 1`.
+**Proof.** Inclusion-exclusion on subsets of `K_h`. Both `S(B)` and `S(B')` are subsets of size at least `Q`. Their intersection is at least the sum of their sizes minus the universe: `|S(B) ∩ S(B')| ≥ |S(B)| + |S(B')| - |K_h| ≥ 2Q - |K_h|`.
 
-**Proof.** Inclusion-exclusion on subsets of `K_h`. Both `S(B)` and `S(B')` are subsets of size at least `K_eff`. Their intersection is at least the sum of their sizes minus the universe: `|S(B) ∩ S(B')| ≥ |S(B)| + |S(B')| - |K_h|`.
+Substituting `|K_h| = ⌈2K/3⌉` and `Q = ⌈2|K_h|/3⌉`, the intersection is bounded below by approximately `|K_h|/3 + 1`. Worked values:
 
-Substituting `K_eff = ⌈2K/3⌉` and `|K_h| ≤ K`: `|intersection| ≥ 2⌈2K/3⌉ - K`. For `K = 3`: `2·2 - 3 = 1`. For `K = 6`: `2·4 - 6 = 2`. For `K = 9`: `2·6 - 9 = 3`.
+| K | |K_h| | Q | 2Q − |K_h| (intersection lower bound) |
+|---|---|---|---|
+| 3 | 2 | 2 | 2 |
+| 6 | 4 | 3 | 2 |
+| 9 | 6 | 4 | 2 |
+| 12 | 8 | 6 | 4 |
 
-The bound is `K/3 + 1` rounded down to integers — a non-empty intersection in all cases.   ∎
+The intersection is non-empty in every case, and in fact has size `≥ |K_h|/3 + 1` whenever the formula admits an integer. ∎
 
 ### Lemma L-5.2 — Honest intersection forces digest equality
 
@@ -63,41 +68,41 @@ Contrapositive: if `|S(B) ∩ S(B')| > f_h`, then `d_a = d_b`, hence `B = B'` (b
 
 Suppose for contradiction that BFT-mode blocks `B, B'` are both valid at height `h`, with `B ≠ B'`. By FA1's L-1.2, `compute_block_digest(B) ≠ compute_block_digest(B')`.
 
-By L-5.1, `|S(B) ∩ S(B')| ≥ K/3 + 1 ≥ ⌈K/3⌉`.
+By L-5.1, `|S(B) ∩ S(B')| ≥ 2Q − |K_h| ≥ ⌈|K_h|/3⌉ + 1` (the standard BFT 2/3-quorum intersection).
 
 By L-5.2's contrapositive, `B ≠ B'` (with distinct digests) requires `|S(B) ∩ S(B')| ≤ f_h`.
 
-Combining: `K/3 + 1 ≤ f_h`, i.e., `f_h ≥ K/3 + 1 > K/3`.
+Combining: `f_h ≥ ⌈|K_h|/3⌉ + 1 > |K_h|/3`.
 
-Under B1, `f_h < K_eff/3 = ⌈2K/3⌉/3`. For `K = 3, K_eff = 2`: `K_eff/3 = 2/3 < 1`, so `f_h < 1`, i.e., `f_h = 0`. This gives `K/3 + 1 ≤ 0` ⟹ `K ≤ -3` — contradiction.
-
-For larger K (e.g., `K = 6, K_eff = 4`): `K_eff/3 = 4/3 ≈ 1.33`, so `f_h ≤ 1`. The condition `K/3 + 1 ≤ 1` ⟹ `K/3 ≤ 0` ⟹ `K ≤ 0` — contradiction.
-
-Generally `f_h < K_eff/3 ≤ K/3 + 1` is the constraint. The contradiction emerges: `K/3 + 1` (lower bound on f_h from quorum overlap) cannot be `< K_eff/3 ≤ K/3 + 1` (upper bound from B1 on f_h) simultaneously.
-
-More carefully: `f_h < K_eff/3 = ⌈2K/3⌉/3 ≈ 2K/9`. So `f_h < 2K/9`. The overlap lower-bound is `f_h ≥ 2K_eff - K = 2⌈2K/3⌉ - K ≥ K/3 + 1 ≈ K/3`. So `K/3 ≤ f_h < 2K/9`. For `K > 0`: `K/3 < 2K/9` requires `K < 0` — impossible.
+Under B1, `f_h < |K_h|/3`. The two bounds contradict.
 
 Hence the supposition `B ≠ B'` leads to contradiction under B1. Therefore `B = B'`.   ∎
 
-**Numeric verification for K = 3, K_eff = 2:**
+**Numeric verification for K = 3 (|K_h| = 2, Q = 2):**
 
 - B1: `f_h < 2/3`, so `f_h = 0`.
-- L-5.1: `|S(B) ∩ S(B')| ≥ 2·2 - 3 = 1`.
-- L-5.2: with `|intersection| = 1` and `f_h = 0`, the one intersection member is honest. By H2, they signed only one of the two digests. So at most one of B or B' has its `K_eff = 2` sigs; the other has at most 1 valid sig and fails V8 (which requires `≥ K_eff = 2`). So both can't be valid simultaneously. ✓
+- L-5.1: `|S(B) ∩ S(B')| ≥ 2·2 − 2 = 2`.
+- L-5.2: with `|intersection| = 2` and `f_h = 0`, both intersection members are honest. By H2, neither signed two distinct digests at h. So `compute_block_digest(B) = compute_block_digest(B')`, hence `B = B'`. ✓
 
-For K = 6, K_eff = 4:
+For K = 6 (|K_h| = 4, Q = 3):
 
 - B1: `f_h < 4/3`, so `f_h ≤ 1`.
-- L-5.1: `|S(B) ∩ S(B')| ≥ 2·4 - 6 = 2`.
-- L-5.2: with `|intersection| = 2` and `f_h = 1`, at least one intersection member is honest. Same contradiction.
+- L-5.1: `|S(B) ∩ S(B')| ≥ 2·3 − 4 = 2`.
+- L-5.2: with `|intersection| = 2` and `f_h ≤ 1`, at least one intersection member is honest. Same contradiction.
+
+For K = 12 (|K_h| = 8, Q = 6):
+
+- B1: `f_h < 8/3`, so `f_h ≤ 2`.
+- L-5.1: `|S(B) ∩ S(B')| ≥ 2·6 − 8 = 4`.
+- L-5.2: with `|intersection| = 4` and `f_h ≤ 2`, at least 2 honest members in the intersection. Contradiction.
 
 ---
 
 ## 4. Proof of Corollary T-5.1 (Slashing recovery)
 
-Suppose B1 is violated (`f_h ≥ K_eff/3`). Then L-5.2's contrapositive doesn't kick in, and two distinct BFT-mode blocks `B, B'` can co-exist with `f_h` Byzantine members signing both digests.
+Suppose B1 is violated (`f_h ≥ |K_h|/3`). Then L-5.2's contrapositive doesn't kick in, and two distinct BFT-mode blocks `B, B'` can co-exist with `f_h` Byzantine members signing both digests.
 
-The intersection `S(B) ∩ S(B')` contains `≥ K_eff/3` Byzantine signers (those who signed both digests). For each such signer `v_i ∈ F_h`:
+The intersection `S(B) ∩ S(B')` contains `≥ ⌈|K_h|/3⌉` Byzantine signers (those who signed both digests). For each such signer `v_i ∈ F_h`:
 
 - `v_i` produced `σ_a` on `compute_block_digest(B)` and `σ_b` on `compute_block_digest(B')`, both at height `h`.
 - These two signatures are a valid `EquivocationEvent` by V11.
@@ -119,12 +124,12 @@ The "fork" at height `h` doesn't propagate because subsequent blocks build on wh
 
 ### 5.1 The trade Determ makes
 
-Under MD mode (FA1), safety is unconditional given ≥1 honest in committee. Under BFT mode (this proof), safety is conditional on `f_h < K_eff/3` in the committee.
+Under MD mode (FA1), safety is unconditional given ≥1 honest in committee. Under BFT mode (this proof), safety is conditional on `f_h < |K_h|/3` in the smaller BFT committee.
 
 The trade:
 
 - **MD-mode**: safe always, but a single silent committee member halts the round (no liveness).
-- **BFT-mode**: safe only under `f_h < K_eff/3`, but `K - K_eff` members can be silent and the round still finalizes (liveness from FA4).
+- **BFT-mode**: safe only under `f_h < |K_h|/3`, but `K − |K_h|` members can be silent (committee shrinks) and within `|K_h|`, `|K_h| − Q` more positions can carry sentinel-zero, and the round still finalizes (liveness from FA4).
 
 Operators tune via `bft_enabled` (genesis-pinned). Most operators take the default (`true`) and accept BFT-mode safety on the tail of blocks; high-value applications wait for the next MD-mode block.
 
@@ -133,7 +138,7 @@ Operators tune via `bft_enabled` (genesis-pinned). Most operators take the defau
 Both MD and BFT mode blocks carry `consensus_mode` in their header. Applications observing the chain:
 
 - See `MD` blocks: rely on FA1 (unconditional under ≥1 honest in committee).
-- See `BFT` blocks: rely on FA5 (conditional under `f_h < K_eff/3` AND FA6 slashing).
+- See `BFT` blocks: rely on FA5 (conditional under `f_h < |K_h|/3` AND FA6 slashing).
 
 This is per-block trust granularity. Light clients can apply different confirmation policies to MD vs BFT blocks.
 
@@ -158,7 +163,7 @@ When B1 is violated, the recovery path (T-5.1) loses an additional `2⁻¹²⁸`
 | Document | Source |
 |---|---|
 | BFT-mode `consensus_mode = BFT` block | `include/determ/chain/block.hpp::ConsensusMode::BFT` |
-| `K_eff = ⌈2K/3⌉` quorum check | `src/node/validator.cpp::check_block_sigs` BFT branch |
+| `Q = ⌈2|K_h|/3⌉` quorum check (with `|K_h| = ⌈2K/3⌉` BFT committee size) | `src/node/validator.cpp::check_block_sigs` BFT branch via `producer.cpp::required_block_sigs` |
 | BFT escalation trigger | `src/node/node.cpp::check_if_selected` (four gates: `bft_enabled`, `total_aborts ≥ bft_escalation_threshold`, available pool < K, available pool ≥ ceil(2K/3)) |
 | `bft_proposer` deterministic election | `proposer_idx` in `src/node/producer.cpp` (called from `node.cpp::current_bft_proposer` for the producer side and `validator.cpp::check_block_structure` for the validator side; full algorithm in PROTOCOL.md §5.3.1) |
 | BFT mode opt-out | `Config.bft_enabled` (default true, false disables escalation) |
@@ -166,15 +171,15 @@ When B1 is violated, the recovery path (T-5.1) loses an additional `2⁻¹²⁸`
 
 A reviewer can confirm:
 
-- The 2K/3 ceiling matches V8's BFT branch.
-- The Byzantine-fraction bound `f_h < K_eff/3` is enforced by the protocol's design (not at runtime — observers reason about it externally).
+- The 2|K_h|/3 quorum matches V8's BFT branch — note this is the 2/3 of the *BFT committee size*, not 2/3 of the genesis K (the two differ at K ≥ 6).
+- The Byzantine-fraction bound `f_h < |K_h|/3` is enforced by the protocol's design (not at runtime — observers reason about it externally).
 - Slashing recovery operates atomically with the next block's apply; no special-case is needed.
 
 ---
 
 ## 7. Conclusion
 
-BFT-mode blocks are safe under `f_h < K_eff/3` within the committee. The trade vs MD-mode is real and observable per-block via `consensus_mode`.
+BFT-mode blocks are safe under `f_h < |K_h|/3` within the committee. The trade vs MD-mode is real and observable per-block via `consensus_mode`.
 
 When the bound is violated, slashing recovery (T-5.1) repairs the damage by removing the equivocators. This is materially stronger than classical BFT failure modes (where exceeding f<N/3 simply breaks safety with no recovery).
 

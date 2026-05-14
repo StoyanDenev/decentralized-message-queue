@@ -170,13 +170,13 @@ B.delay_output = SHA256(B.delay_seed ‖ B.creator_dh_secrets[0]
 
 **V7 — Transaction root.** `B.tx_root = SHA256(union of B.creator_tx_lists in sorted-unique order)`.
 
-**V8 — Block-digest signatures.** Let `d = compute_block_digest(B)`. For every `i ∈ [0, K)`:
+**V8 — Block-digest signatures.** Let `d = compute_block_digest(B)`. Write `k := B.creators.size()` — the round's effective committee size. In MD mode `k = K` (genesis-pinned); in BFT mode `k = k_bft = ⌈2K/3⌉` after the §5.3 committee shrinkage. For every `i ∈ [0, k)`:
 ```
 Verify(pk_{B.creators[i]}, d, B.creator_block_sigs[i]) = 1
    OR
 B.creator_block_sigs[i] = 0⁶⁴   ∧   B.consensus_mode = BFT
 ```
-The number of nonzero signatures must be `≥ K` (MD) or `≥ ⌈2K/3⌉` (BFT).
+The number of nonzero signatures must be `≥ k` (MD; no sentinels permitted) or `≥ ⌈2 k / 3⌉` (BFT; standard 2/3 quorum within the shrunk committee — see `BlockValidator::check_block_sigs` and `producer.cpp::required_block_sigs`). Note: in BFT mode the relevant threshold is taken over the *BFT committee* `k = k_bft`, not over the genesis K — this matters at K ≥ 6 where the two values diverge (e.g., K = 6 ⇒ k_bft = 4, BFT-required-sigs = 3 not 4).
 
 **V9 — Cumulative rand.** `B.cumulative_rand = SHA256(B_{h-1}.cumulative_rand ‖ B.delay_output)`.
 

@@ -340,7 +340,12 @@ The next round produces a `consensus_mode = BFT` block iff **all four** of the f
 3. `available_pool_size < K` — the abort-narrowed pool can no longer field a full K-of-K committee.
 4. `available_pool_size >= ceil(2K/3)` — the pool is still large enough to field a BFT committee. If it falls below this floor the shard simply stalls until the next height (or until R4 under-quorum merge kicks in).
 
-When all four hold, committee size shrinks to `k_bft = ceil(2K/3) = (2K + 2) / 3` and `required_block_sigs` drops from K to k_bft. The proposer must sign; up to `k_bft - ceil(2 · k_bft / 3) = k_bft - required` positions may carry sentinel-zero signatures (all-zero Ed25519 signature; false-positive rate ~2⁻⁵¹².)
+When all four hold, the round runs in BFT mode with two-level shrinkage:
+
+- **Committee size shrinks** from K to `k_bft = ceil(2K/3) = (2K + 2) / 3` — the producer/validator both populate `creators[]` with exactly `k_bft` entries (`src/node/node.cpp` k_use assignment).
+- **Required-signature threshold** is `required = required_block_sigs(BFT, k_bft) = ceil(2 · k_bft / 3) = (2·k_bft + 2) / 3` — standard BFT 2/3 quorum within the smaller committee (`src/node/producer.cpp::required_block_sigs`).
+
+The proposer must sign; up to `k_bft - required` positions may carry sentinel-zero signatures (all-zero Ed25519 signature; false-positive rate ~2⁻⁵¹²). Worked example: at the genesis-default K = 3, `k_bft = 2`, `required = 2` — no sentinels (effectively still K-of-K within the smaller committee). At K = 6, `k_bft = 4`, `required = 3` — one sentinel allowed. At K = 9, `k_bft = 6`, `required = 4` — two sentinels. Safety holds as long as the Byzantine fraction within `k_bft` is `< k_bft/3` (standard BFT bound; see `docs/proofs/BFTSafety.md` FA5).
 
 ### 5.3.1 `proposer_idx` — deterministic BFT proposer selection
 

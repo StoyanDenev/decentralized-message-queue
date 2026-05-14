@@ -127,14 +127,14 @@ When the K-of-K committee cannot complete — typically because a member is offl
 3. Available pool (registry minus aborted-this-height domains) has dropped below `K`.
 4. Available pool is still ≥ `ceil(2K/3)`. If the pool collapses below this, the shard stalls — under EXTENDED sharding the R4 under-quorum merge mechanism may absorb the shard.
 
-When all four hold, the round runs in BFT mode:
+When all four hold, the round runs in BFT mode with two-level shrinkage:
 
-- Committee size shrinks to `ceil(2K/3)` (e.g., K=3 → committee of 2; K=6 → committee of 4).
-- A designated proposer is deterministically chosen from the committee via `proposer_idx(seed, abort_events, |committee|)` where `seed = epoch_committee_seed(epoch_rand, shard_id)` and the inputs are domain-separated by the ASCII tag `"bft-proposer"` (full algorithm in PROTOCOL.md §5.3.1). The proposer must sign; up to `|committee| - ceil(2·|committee|/3)` other slots may carry sentinel-zero signatures.
-- The committee runs a one-round BFT vote; `ceil(2K/3)` signatures suffice to finalize.
+- Committee size shrinks from K to `k_bft = ceil(2K/3)` (e.g., K=3 → committee of 2; K=6 → committee of 4; K=9 → committee of 6).
+- Within that smaller committee, the required-signature threshold is `Q = ceil(2·k_bft/3)` — standard BFT 2/3 quorum applied to `k_bft`, **not** to the genesis K. The two values coincide only at K=3 (Q = k_bft = 2); at K=6, Q = 3 while k_bft = 4; at K=9, Q = 4 while k_bft = 6.
+- A designated proposer is deterministically chosen from the committee via `proposer_idx(seed, abort_events, k_bft)` where `seed = epoch_committee_seed(epoch_rand, shard_id)` and the inputs are domain-separated by the ASCII tag `"bft-proposer"` (full algorithm in PROTOCOL.md §5.3.1). The proposer must sign; up to `k_bft − Q` other slots may carry sentinel-zero signatures.
 - The block tags `consensus_mode = BFT` and `bft_proposer = <domain>`.
 
-BFT-mode safety is conditional on `f < K_eff/3` (the standard BFT bound), plus economic slashing recovery for any equivocator. See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
+BFT-mode safety is conditional on `f_h < k_bft/3` (the standard BFT bound applied to the smaller BFT committee), plus economic slashing recovery for any equivocator. See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
 
 ### 3.4 Equivocation slashing
 
