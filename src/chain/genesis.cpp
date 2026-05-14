@@ -3,6 +3,7 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/sha256.hpp>
+#include <determ/util/json_validate.hpp>
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
@@ -13,6 +14,8 @@ namespace determ::chain {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 using namespace determ::crypto;
+using determ::util::json_require;
+using determ::util::json_require_hex;
 
 // rev.9 R1: region tag normalization. Used at every parse boundary
 // (genesis JSON load, REGISTER tx apply / validate). ASCII tolower;
@@ -225,10 +228,14 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     }
 
     if (j.contains("initial_creators")) {
+        // S-018: each entry has required {domain, ed_pub}. Surface the
+        // field name in the diagnostic so operators editing genesis
+        // JSON files don't have to dig through nlohmann internals on
+        // a typo.
         for (auto& cj : j["initial_creators"]) {
             GenesisCreator gc;
-            gc.domain        = cj["domain"].get<std::string>();
-            gc.ed_pub        = from_hex_arr<32>(cj["ed_pub"].get<std::string>());
+            gc.domain        = json_require<std::string>(cj, "domain");
+            gc.ed_pub        = from_hex_arr<32>(json_require_hex(cj, "ed_pub", 64));
             gc.initial_stake = cj.value("initial_stake", uint64_t{0});
             gc.region        = normalize_region(cj.value("region",
                                                            std::string{}),
@@ -237,9 +244,10 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
         }
     }
     if (j.contains("initial_balances")) {
+        // S-018: `domain` is required; `balance` defaults to 0.
         for (auto& bj : j["initial_balances"]) {
             GenesisAllocation a;
-            a.domain  = bj["domain"].get<std::string>();
+            a.domain  = json_require<std::string>(bj, "domain");
             a.balance = bj.value("balance", uint64_t{0});
             c.initial_balances.push_back(a);
         }

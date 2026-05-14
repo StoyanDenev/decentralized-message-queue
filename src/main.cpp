@@ -16,6 +16,7 @@
 #include <openssl/rand.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <cstdlib>
@@ -113,6 +114,7 @@ In-process tests (deterministic, no network):
   determ test-composable-batch                COMPOSABLE_BATCH all-or-nothing semantics
   determ test-dapp-register                   v2.18 DAPP_REGISTER apply path
   determ test-dapp-call                       v2.19 DAPP_CALL routing + apply path
+  determ test-s018-json-validation            S-018 json_require<T> field-name diagnostics
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -2575,6 +2577,126 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": composable_batch " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-018 regression: exercise json_require<T> and json_require_hex
+    // helpers + the converted from_json paths in block.cpp /
+    // producer.cpp. Verifies that malformed JSON produces a clear
+    // field-name diagnostic instead of an opaque nlohmann error.
+    if (cmd == "test-s018-json-validation") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+        // Helper: expect that calling fn() throws and the message
+        // contains every needle in `needles`. Defends against the
+        // helpers regressing to opaque nlohmann errors.
+        auto expect_throw_with = [&](const char* test_name,
+                                       std::function<void()> fn,
+                                       std::vector<std::string> needles) {
+            try {
+                fn();
+                std::cout << "  FAIL: " << test_name
+                          << " (expected exception, none thrown)\n";
+                fail++;
+            } catch (const std::exception& e) {
+                std::string msg = e.what();
+                bool all = true;
+                for (auto& n : needles) {
+                    if (msg.find(n) == std::string::npos) { all = false; break; }
+                }
+                if (all) {
+                    std::cout << "  PASS: " << test_name << "\n";
+                } else {
+                    std::cout << "  FAIL: " << test_name
+                              << " (got '" << msg << "')\n";
+                    fail++;
+                }
+            }
+        };
+
+        // 1. Happy path: valid Transaction round-trips.
+        {
+            Transaction tx;
+            tx.type     = TxType::TRANSFER;
+            tx.from     = "alice";
+            tx.to       = "bob";
+            tx.amount   = 100;
+            tx.fee      = 1;
+            tx.nonce    = 7;
+            tx.sig      = {}; tx.hash = {};
+            tx.payload  = {};
+            json j      = tx.to_json();
+            Transaction back = Transaction::from_json(j);
+            check(back.from == "alice" && back.amount == 100,
+                  "happy: tx round-trips through to_json/from_json");
+        }
+
+        // 2. Missing required field — should name "amount".
+        expect_throw_with("missing 'amount' names the field", [] {
+            json j = {{"type", 0}, {"from", "a"}, {"to", "b"},
+                      {"nonce", 0}, {"payload", ""},
+                      {"sig",  std::string(128, '0')},
+                      {"hash", std::string(64,  '0')}};
+            Transaction::from_json(j);
+        }, {"S-018", "missing", "'amount'"});
+
+        // 3. Wrong-type field — string where uint64 expected.
+        expect_throw_with("wrong-type 'amount' names the field", [] {
+            json j = {{"type", 0}, {"from", "a"}, {"to", "b"},
+                      {"amount", "not-a-number"}, {"nonce", 0},
+                      {"payload", ""},
+                      {"sig",  std::string(128, '0')},
+                      {"hash", std::string(64,  '0')}};
+            Transaction::from_json(j);
+        }, {"S-018", "'amount'", "wrong type"});
+
+        // 4. Wrong-length hex on a fixed-width field — should name
+        //    "sig" and the expected length (128).
+        expect_throw_with("wrong-hex-length 'sig' names the field", [] {
+            json j = {{"type", 0}, {"from", "a"}, {"to", "b"},
+                      {"amount", 1}, {"nonce", 0}, {"payload", ""},
+                      {"sig",  std::string(100, '0')},   // wrong length
+                      {"hash", std::string(64,  '0')}};
+            Transaction::from_json(j);
+        }, {"S-018", "'sig'", "hex length"});
+
+        // 5. Missing field on AbortEvent — should name 'event_hash'.
+        expect_throw_with("AbortEvent missing 'event_hash'", [] {
+            json j = {{"round", 1}, {"aborting_node", "node1"},
+                      {"timestamp", 0}};
+            AbortEvent::from_json(j);
+        }, {"S-018", "missing", "'event_hash'"});
+
+        // 6. Missing field on EquivocationEvent — should name 'sig_b'.
+        expect_throw_with("EquivocationEvent missing 'sig_b'", [] {
+            json j = {{"equivocator", "node1"}, {"block_index", 5},
+                      {"digest_a", std::string(64, '0')},
+                      {"sig_a",    std::string(128, '0')},
+                      {"digest_b", std::string(64, '1')}};
+            EquivocationEvent::from_json(j);
+        }, {"S-018", "missing", "'sig_b'"});
+
+        // 7. Block missing 'transactions' array — should name the
+        //    field (not produce an opaque iterator exception).
+        expect_throw_with("Block missing 'transactions'", [] {
+            json j = {{"index", 1},
+                      {"prev_hash", std::string(64, '0')},
+                      {"timestamp", 0},
+                      {"creators", json::array()},
+                      {"abort_events", json::array()},
+                      {"cumulative_rand", std::string(64, '0')}};
+            Block::from_json(j);
+        }, {"S-018", "transactions"});
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": s018_json_validation "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
