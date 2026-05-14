@@ -581,9 +581,9 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | **Forensics / governance** | | |
 | `submit_equivocation` | `{event}` | `{accepted, equivocator, block_index}` |
 | **DApp substrate (v2.18 + v2.19)** | | |
-| `dapp_list` | `{}` | All registered DApps (active + inactive within grace) |
-| `dapp_info` | `{dapp_id}` | Per-DApp record (owner, service_pubkey, endpoint, topics, retention, metadata, stake, registered_at, inactive_from) |
-| `dapp_messages` | `{dapp_id, from_height?}` | Paginated list of DAPP_CALL events addressed to `dapp_id`; up to 256 events per call (DAPP_MESSAGES_PAGE_LIMIT) |
+| `dapp_list` | `{prefix?, topic?}` | All registered DApps (active + inactive within grace). Optional `prefix` filters by domain prefix; optional `topic` keeps only DApps whose registered topic list contains a match. |
+| `dapp_info` | `{domain}` | Per-DApp record (`domain`, `service_pubkey`, `endpoint_url`, `topics`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`). |
+| `dapp_messages` | `{domain, from_height?, to_height?, topic?}` | Paginated DAPP_CALL events addressed to `domain` in `[from_height, to_height]` (zeros = chain bounds), optionally filtered by `topic`. Up to 256 events per call (`DAPP_MESSAGES_PAGE_LIMIT`). |
 | **Snapshot fetch (v2.3 / B6.basic)** | | |
 | `snapshot` | `{headers}` | Full state snapshot + N tail headers for state_root verification |
 
