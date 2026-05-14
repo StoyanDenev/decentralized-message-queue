@@ -28,7 +28,7 @@ Chain apply (`apply_transactions`, Preliminaries §9) does:
 **Theorem T-7 (Receipt safety — no double-credit, no fabrication).** Under:
 
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2)
-- **(A3) SHA-256 collision resistance** (Preliminaries §2.3)
+- **(A3) SHA-256 collision resistance** (Preliminaries §2.1)
 - **(H1) Honest validator behavior** (Preliminaries §4) — at least one honest committee member per shard, per height (or the shard's FA1/FA5 safety branch covers full Byzantine via T-1.1's vacuous case)
 
 then for every `(src, tx_h)`:
