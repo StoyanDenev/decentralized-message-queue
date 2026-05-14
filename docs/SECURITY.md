@@ -937,6 +937,31 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 ---
 
+### S-037 — `dapp_registry` snapshot serialize/restore gap
+
+**Severity:** Operational (Low) • **Status:** Tracked, ~1 day code patch • **Source:** discovered during the PROTOCOL.md coherence sweep (this session)
+
+**What's open.** `Chain::build_state_leaves` (`src/chain/chain.cpp:265-`) emits a `d:` namespace leaf for every entry in `dapp_registry_` — the v2.18 DApp substrate ties the registry into the state Merkle commitment so light clients can prove DApp registration. But `Chain::serialize_state` (line 1539-1675) and `Chain::restore_from_snapshot` (line 1677-1840) do not include the map. Concretely:
+
+1. Snapshot taken on a chain with one or more `DAPP_REGISTER` entries omits `dapp_registry`.
+2. Restore on a fresh node starts with `dapp_registry_ = {}`.
+3. `Chain::compute_state_root()` on the restored chain produces a different root than the original (the `d:` slice contributes no leaves on the restored side; the original side had non-empty leaves).
+4. The S-033 state_root gate at `restore_from_snapshot` rejects the snapshot with `"state_root mismatch"`.
+
+**Why this is operational, not a security regression.** The failure mode is fail-loud — restore refuses to install corrupt state. A malicious snapshot can't sneak past, and an honest snapshot from a DApp-active chain can't bootstrap a fresh node via the snapshot path (full chain replay still works). No silent state corruption, no equivocation surface, no funds at risk.
+
+**Why latent.** No regression test exercises DApp activity + snapshot bootstrap together. `tools/test_snapshot_bootstrap.sh` registers no DApps; `tools/test_dapp_*.sh` doesn't take a snapshot. Each surface passes its own test in isolation; the bug ships silently.
+
+**Resolution.**
+
+1. Add `snap["dapp_registry"] = ...` emission to `Chain::serialize_state` after the `merge_state` block (around line 1643). Emit every field that contributes to the `d:` value-hash in `build_state_leaves` (line 310-328): `service_pubkey`, `registered_at`, `active_from`, `inactive_from`, `endpoint_url`, `topics[]`, `retention`, `metadata`. Plus the map key (`domain`).
+2. Add the symmetric readback in `Chain::restore_from_snapshot` — follow the registrants_ restore pattern, guard with `if (snap.contains("dapp_registry"))` so pre-v2.18 snapshots still load.
+3. New regression test (`tools/test_dapp_snapshot.sh` or extend `test_snapshot_bootstrap.sh`): register a DApp on node A, snapshot, restore on node B, verify `dapp_list` matches + `state_root` matches at the same height + a follow-up `DAPP_CALL` applies correctly on B.
+
+PROTOCOL.md §11 carries a "Known gap (tracked)" call-out until the patch lands. Once closed, this entry moves to §6.5 informational-history.
+
+---
+
 ### S-021 through S-029 (quick-fix summary)
 
 | ID | Title | Quick fix |
