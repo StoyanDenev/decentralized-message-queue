@@ -37,7 +37,9 @@ void Peer::read_header() {
                          | (static_cast<uint32_t>(self->header_buf_[1]) << 16)
                          | (static_cast<uint32_t>(self->header_buf_[2]) << 8)
                          |  static_cast<uint32_t>(self->header_buf_[3]);
-            if (len == 0 || len > 16 * 1024 * 1024) {
+            // S-022: framing-layer ceiling (kMaxFrameBytes = 16 MB). The
+            // per-message-type cap fires AFTER deserialize in read_body.
+            if (len == 0 || len > kMaxFrameBytes) {
                 if (self->on_close_) self->on_close_(self);
                 return;
             }
@@ -56,6 +58,21 @@ void Peer::read_body(uint32_t len) {
             }
             try {
                 auto msg = Message::deserialize(self->body_buf_.data(), self->body_buf_.size());
+                // S-022: per-message-type cap. The framing layer accepted
+                // up to kMaxFrameBytes (16 MB) so the only types with a
+                // legitimate need for that ceiling get it; everything else
+                // is bounded much tighter here. Oversize messages indicate
+                // either a peer-side bug or an active flooding attempt;
+                // drop the message and close the connection (same
+                // disposition the framing layer applies).
+                if (self->body_buf_.size() > max_message_bytes(msg.type)) {
+                    std::cerr << "[peer] oversize message from " << self->address_
+                              << " type=" << static_cast<int>(msg.type)
+                              << " size=" << self->body_buf_.size()
+                              << " cap=" << max_message_bytes(msg.type) << "\n";
+                    if (self->on_close_) self->on_close_(self);
+                    return;
+                }
                 if (self->on_msg_) self->on_msg_(self, msg);
             } catch (std::exception& e) {
                 std::cerr << "[peer] message parse error from " << self->address_

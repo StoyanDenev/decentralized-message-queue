@@ -79,6 +79,58 @@ inline constexpr uint8_t kWireVersionLegacy  = 0;
 inline constexpr uint8_t kWireVersionBinary  = 1;
 inline constexpr uint8_t kWireVersionMax     = kWireVersionBinary;
 
+// S-022: wire-level framing ceiling. The peer layer reads this many bytes
+// max before deserialization (drops the connection otherwise). After
+// deserialize, the per-message-type cap (max_message_bytes) is applied —
+// only SNAPSHOT_RESPONSE and CHAIN_RESPONSE actually need the 16 MB
+// ceiling; everything else is bounded much tighter at the type-aware
+// layer, so a flooder cannot use the framing ceiling as an attack vector
+// against a node that's not currently bootstrapping.
+inline constexpr size_t kMaxFrameBytes = 16 * 1024 * 1024;
+
+// S-022: per-message-type body-size cap, applied AFTER `Message::deserialize`
+// in `Peer::read_body`. Messages that exceed their type-specific cap are
+// dropped and the peer connection closed (same disposition as the framing-
+// layer overflow), since an oversize message indicates either a peer-side
+// bug or an active flooding attempt.
+//
+// Caps mirror the audit's guidance + the natural ceiling each message type
+// carries by design:
+//
+//   * 1 MB for the consensus chatter (CONTRIB / BLOCK_SIG / ABORT_CLAIM /
+//     ABORT_EVENT / EQUIVOCATION_EVIDENCE / HELLO / STATUS_*) — every one
+//     of these is a small, fixed-shape struct + a handful of sigs and
+//     hashes. Real traffic is well under 64 KB; 1 MB leaves 16× headroom.
+//   * 4 MB for BLOCK / BEACON_HEADER / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE
+//     — bounded by tx-set × tx-size per block. Mainnet blocks at the
+//     present TRANSFER_PAYLOAD_MAX = 128 cap top out near 2 MB even at
+//     thousands of txs; the 4 MB ceiling absorbs future growth and the
+//     occasional fat block with many receipts.
+//   * 16 MB for SNAPSHOT_RESPONSE / CHAIN_RESPONSE — these are the only
+//     legitimate large-payload channels; bootstrap state can be MBs.
+//   * GET_CHAIN / SNAPSHOT_REQUEST are small request envelopes; 1 MB cap.
+inline constexpr size_t max_message_bytes(MsgType type) {
+    switch (type) {
+    case MsgType::SNAPSHOT_RESPONSE:
+    case MsgType::CHAIN_RESPONSE:
+        return 16 * 1024 * 1024;        // 16 MB
+
+    case MsgType::BLOCK:
+    case MsgType::BEACON_HEADER:
+    case MsgType::SHARD_TIP:
+    case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+        return 4  * 1024 * 1024;        // 4 MB
+
+    // Everything else (consensus chatter, requests, status, tx, hello).
+    // Default branch keeps the cap tight even if new MsgType variants
+    // get added without explicit categorisation — better to be too
+    // strict and catch a regression in review than to let a new
+    // unbounded type slip through unchecked.
+    default:
+        return 1  * 1024 * 1024;        // 1 MB
+    }
+}
+
 struct Message {
     MsgType        type{MsgType::HELLO};
     nlohmann::json payload;

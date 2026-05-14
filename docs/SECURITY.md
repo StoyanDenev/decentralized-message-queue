@@ -10,9 +10,9 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **8** | **10** |
+| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **7** | **9** |
 | Partially mitigated | **1** (S-030) | — | — | — | **1** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **2** (S-021, S-029) | **19** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **3** (S-021, S-022, S-029) | **20** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
@@ -44,6 +44,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-017 Producer/chain UNSTAKE divergence~~ — closed via Option 2: validator + producer both gain the `unlock_height` check; apply-time refund retained as belt-and-suspenders.
 - ~~S-020 Rejection sampling O(K²) at K/N → 1~~ — closed via hybrid selector (rejection sampling at 2K ≤ N, partial Fisher-Yates shuffle at 2K > N — bounded O(N) regardless of ratio).
 - ~~S-021 Chain file integrity not cryptographically verified~~ — closed via wrapping chain.json with `head_hash` + load-time recompute + mismatch reject (O(1) tampering detection before replay).
+- ~~S-022 Permissive 16 MB message cap~~ — closed via per-message-type body-size limit applied after deserialize in `Peer::read_body`; 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT/CHAIN responses.
 - ~~S-029 BFT-mode multi-proposer fork-choice undefined~~ — closed via `Chain::resolve_fork`: heaviest sig set / fewer aborts / smallest hash, deterministic across peers.
 - ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
@@ -80,7 +81,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
 | S-020 | ✅ Mitigated | Hybrid Fisher-Yates: rejection sampling at K/N ≤ 0.5, partial FY shuffle at K/N > 0.5 — bounded O(N) regardless of ratio | `crypto/random.cpp::select_m_creators` + `select_after_abort_m` | done |
 | S-021 | ✅ Mitigated | `chain.json` is now a wrapping object `{head_hash, blocks}`; load recomputes head digest and rejects on mismatch (O(1) tampering detection before replay) | `chain/chain.cpp::save` + `::load` | done |
-| S-022 | 🟢 Low | 16 MB message limit too permissive (modulo snapshots) | `net/peer.cpp:38` | nuanced |
+| S-022 | ✅ Mitigated | Per-message-type cap applied in `Peer::read_body` post-deserialize: 1 MB consensus chatter, 4 MB blocks/headers/bundles, 16 MB only for SNAPSHOT_RESPONSE/CHAIN_RESPONSE; oversize closes the connection | `include/determ/net/messages.hpp::max_message_bytes` + `net/peer.cpp::read_body` | done |
 | S-023 | ✅ Mitigated | RPC send/stake/unstake balance pre-check throws clear diagnostic on insufficient balance | `node/node.cpp::rpc_send/stake/unstake` | done |
 | S-024 | 🟢 Low | Deregistration timing predictability | `chain/chain.cpp::derive_delay` | low priority |
 | S-025 | ✅ Mitigated | `compute_tx_root_intersection` deleted (in-session); function + header decl removed | `node/producer.cpp` | done |
@@ -922,7 +923,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 | ID | Title | Quick fix |
 |---|---|---|
 | S-021 | Chain file integrity not cryptographically verified | ✅ **Closed.** `chain.json` is now a wrapping JSON object `{head_hash, blocks}`. `head_hash` is hex of the latest block's `compute_hash()`, which transitively covers every prior block via the `prev_hash` chain + committee signatures. On load, after parsing + replay, the recomputed head digest is compared to the stored `head_hash`; mismatch → throw `"chain file: head_hash mismatch (tampering or corruption?)"`. Legacy array-form chain.json is still accepted (no-op fallback); the next save() upgrades the format. Test: `tools/test_chain_integrity.sh` 4/4 PASS. |
-| S-022 | 16 MB message limit too permissive — but snapshots use it | Per-message-type limits: 1 MB for CONTRIB/BLOCK_SIG; 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. |
+| S-022 | 16 MB message limit too permissive — but snapshots use it | ✅ **Closed.** `Peer::read_body` retains the 16 MB framing-layer ceiling (`kMaxFrameBytes` — needed for SNAPSHOT_RESPONSE / CHAIN_RESPONSE), then applies a per-message-type cap from `max_message_bytes(MsgType)` after deserialization. Caps: 1 MB for consensus chatter (CONTRIB / BLOCK_SIG / ABORT_CLAIM / ABORT_EVENT / EQUIVOCATION_EVIDENCE / HELLO / STATUS_* / TRANSACTION / GET_CHAIN / SNAPSHOT_REQUEST); 4 MB for BLOCK / BEACON_HEADER / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE; 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. Oversize messages drop + close the connection (same disposition as framing-layer overflow). The default branch in the switch keeps the cap tight at 1 MB so a future MsgType variant added without explicit categorisation cannot slip through unbounded. |
 | S-023 | RPC `send`/`stake` skip balance check | Pre-check balance before queueing. ~1h. |
 | S-024 | Deregistration timing predictability (1-10 block grind window) | Acceptable per auditor's own re-classification. v2 could mix in a future block hash. |
 | S-025 | `compute_tx_root_intersection` is dead code | Delete it or guard under `#ifdef DETERM_INTERSECTION_MODE`. 5 minutes. |
