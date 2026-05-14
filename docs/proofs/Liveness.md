@@ -228,8 +228,8 @@ Together: BFT escalation chooses liveness over safety; operators accept this tra
 | Phase-1 timeout → abort | `src/node/node.cpp::handle_contrib_timeout` |
 | Phase-2 timeout → abort | `src/node/node.cpp::handle_block_sig_timeout` |
 | Abort quorum formation | `src/node/node.cpp::on_abort_claim` |
-| BFT escalation trigger | `src/node/node.cpp::check_if_selected` BFT branch |
-| Committee rotation per round | `src/node/node.cpp::check_if_selected` lines [select_m_creators call] |
+| BFT escalation trigger | `src/node/node.cpp::check_if_selected` BFT branch (four gates: `bft_enabled`, `total_aborts ≥ bft_escalation_threshold`, available pool < K, available pool ≥ ceil(2K/3) — see PROTOCOL.md §5.3) |
+| Committee rotation per round | `src/node/node.cpp::check_if_selected` (`select_m_creators` call after the `rand`-mixing loop over `current_aborts_`) |
 | Round retry after abort | `src/node/node.cpp::reset_round` + `start_contrib_phase` |
 
 A reviewer can confirm the protocol's liveness story by reading these source paths and verifying:
