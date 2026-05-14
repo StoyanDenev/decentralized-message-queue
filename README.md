@@ -897,7 +897,7 @@ A lost Ed25519 private key today means permanent loss of the registered domain a
 - Loss of any (N − T) of N guardians (threshold reconstruction survives partial unavailability).
 - Compromise of any (T − 1) guardians (information-theoretic: zero bits of the seed leak below threshold).
 - Tampering with any individual envelope (AEAD detects single-bit modifications with probability ≥ 1 − 2⁻¹²⁸).
-- Offline password grind against an isolated record (real OPAQUE only; the Phase 5 stub adapter is gated against production use).
+- Offline password grind against an isolated record (real OPAQUE only — gated to v2.14; the development-stub adapter is offline-grindable and is `is_stub()`-flagged against production use).
 
 **Layered design.** Each layer addresses a distinct threat:
 
@@ -946,7 +946,7 @@ determ-wallet opaque-handshake --mode {register|authenticate}
 determ-wallet oprf-smoke                           Verify libsodium primitives wired
 ```
 
-**Phase status.** v1.x ships Phases 1–5 + 7 (greenfield wallet binary, all crypto layers wired against libsodium, OPAQUE adapter interface locked, recovery flow routed through the adapter). Phase 6 (vendor real libopaque + liboprf to replace the stub adapter implementation) is multi-cycle Windows MSVC porting work; the wallet's `is_stub()` flag gates production deployment until that lands. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis covering both stub and real-OPAQUE bounds.
+**Wallet adapter status.** v1.x ships Phases 1–5 + 7 of the wallet's internal phase plan (greenfield wallet binary, all crypto layers wired against libsodium, OPAQUE adapter interface locked, recovery flow routed through the adapter). The Phase-6 work item — vendor real `libopaque` + `liboprf` to replace the stub adapter implementation, multi-cycle Windows MSVC porting work — is tracked as **v2.14 (Real OPAQUE wallet recovery)** in `docs/V2-DESIGN.md`; the wallet's `is_stub()` flag gates production deployment until v2.14 lands. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis covering both stub and real-OPAQUE bounds, plus the Phase-numbering-↔-v2.14 mapping note at the top of that file.
 
 **Binary isolation.** `determ-wallet` is a separate executable from the `determ` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
 

@@ -502,9 +502,9 @@ Recovery setup JSON (canonical, persisted to disk):
 
 Envelope: AES-256-GCM, 12-byte nonce, 16-byte tag, AAD binds `DWR1‖guardian_id‖version`.
 
-OPAQUE adapter (Phase 5 stub today; Phase 6 real libopaque pending Windows MSVC porting): `register_password(pw, gid) → (record, export_key)`; `authenticate_password(pw, record, gid) → export_key`. The `export_key` becomes the AEAD password for that guardian's envelope. The `is_stub()` flag gates production use until Phase 6.1 lands.
+OPAQUE adapter (development stub today; **v2.14** ships the real `libopaque`-vendored adapter, gated on the Windows MSVC porting of upstream VLAs — see `wallet/PHASE6_PORTING_NOTES.md`): `register_password(pw, gid) → (record, export_key)`; `authenticate_password(pw, record, gid) → export_key`. The `export_key` becomes the AEAD password for that guardian's envelope. The `is_stub()` flag gates production use until v2.14 lands.
 
-Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for real OPAQUE: `Q · 2^-bits_password + N · 2^-128` (rate-limited online grind only). For the Phase 5 stub: offline-grindable, NOT for production.
+Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for real OPAQUE (v2.14): `Q · 2^-bits_password + N · 2^-128` (rate-limited online grind only). For the stub adapter: offline-grindable, NOT for production.
 
 ### Cross-references
 
