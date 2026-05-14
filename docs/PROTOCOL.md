@@ -321,7 +321,43 @@ Both branches consume the same SHA-256-derived randomness; both are uniform over
 The same algorithm appears in `select_after_abort_m` (post-abort recommittee with the first index pinned to a deterministically-shifted slot).
 
 ### 5.3 BFT escalation (rev.8)
-If a round accumulates `bft_escalation_threshold` (default 5) round-1 aborts at the same height AND `bft_enabled` is true AND the available pool is < K, the next round produces a `consensus_mode = BFT` block. Required signatures drop to `ceil(2K/3)`. A `bft_proposer` is deterministically chosen as `committee[proposer_idx(seed, abort_events, K)]`. The proposer must sign; up to `K - ceil(2K/3)` other positions may carry sentinel-zero signatures.
+
+The next round produces a `consensus_mode = BFT` block iff **all four** of the following are true at re-selection time (`src/node/node.cpp::start_new_round`, ~L760–L770):
+
+1. `bft_enabled = true` (genesis-pinned).
+2. `total_aborts >= bft_escalation_threshold` (default 5; round-1 and round-2 aborts both count toward the threshold — any abort indicates a stuck round).
+3. `available_pool_size < K` — the abort-narrowed pool can no longer field a full K-of-K committee.
+4. `available_pool_size >= ceil(2K/3)` — the pool is still large enough to field a BFT committee. If it falls below this floor the shard simply stalls until the next height (or until R4 under-quorum merge kicks in).
+
+When all four hold, committee size shrinks to `k_bft = ceil(2K/3) = (2K + 2) / 3` and `required_block_sigs` drops from K to k_bft. The proposer must sign; up to `k_bft - ceil(2 · k_bft / 3) = k_bft - required` positions may carry sentinel-zero signatures (all-zero Ed25519 signature; false-positive rate ~2⁻⁵¹².)
+
+### 5.3.1 `proposer_idx` — deterministic BFT proposer selection
+
+`proposer_idx` (`src/node/producer.cpp:172`) returns the committee slot whose member is the designated BFT proposer for the next round:
+
+```
+proposer_idx(seed, abort_events, committee_size) :=
+    if committee_size == 0: return 0
+    H := SHA256(seed
+              ‖ abort_events[0].event_hash
+              ‖ abort_events[1].event_hash
+              ‖ ...
+              ‖ "bft-proposer")             // 12-byte ASCII domain separator
+    v := big-endian uint64 of H[0..8]
+    return v mod committee_size
+```
+
+Both the producer (`node.cpp::current_bft_proposer`) and the independent validator path (`validator.cpp::check_block_structure`) compute this identically and reject any block whose `bft_proposer` field disagrees, or whose sentinel-zero signature falls on the proposer slot.
+
+**Inputs.**
+
+- `seed = epoch_committee_seed(epoch_rand, shard_id)` — the same per-epoch, per-shard seed used by `select_m_creators` (the parameter is named `prev_cum_rand` inside the function for historical reasons; semantically it is the committee seed).
+- `abort_events` — the same vector that mixes into committee re-selection in §5.2 (the `for ae in current_aborts_: rand = SHA256(rand ‖ ae.event_hash)` loop). Every additional abort in a stuck height changes both the committee *and* `proposer_idx`'s input, so the proposer rotates deterministically across abort retries within an epoch.
+- `committee_size` — the K-of-K or k_bft size of the current round's committee.
+
+**Modulo-bias note.** `proposer_idx` uses straight modulo (unlike `select_m_creators` in §5.2.1, which uses rejection sampling via `hash_mod`). Bias is `≤ (2⁶⁴ mod K) / 2⁶⁴`, which for any practical committee size (K ≤ 256) is bounded above by `K / 2⁶⁴ ≤ 2⁻⁵⁶`. This is negligible compared to the cryptographic security margin of the surrounding system, and proposer-slot fairness is not a consensus-safety invariant (the proposer can be anyone in the committee; the rest of BFT verification — `ceil(2K/3)` threshold — does the heavy lifting).
+
+**Why the "bft-proposer" domain separator.** Ensures `proposer_idx`'s input domain is disjoint from the committee-selection input domain. Without the separator, `seed ‖ abort_events.event_hashes` would collide with hash inputs already produced by the §5.2 committee-rand chain, opening the door to grinding attacks that try to align proposer-index outcomes with attacker preferences. The 12-byte ASCII tag is the same construction pattern used elsewhere in the protocol (e.g., epoch_committee_seed's per-shard salt).
 
 ### 5.4 Abort handling
 
