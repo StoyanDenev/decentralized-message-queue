@@ -4,14 +4,21 @@
 # Verifies:
 #   1. state_proof RPC returns the full verification-input tuple for
 #      an "a:" (account) key — present-key path.
-#   2. The returned value_hash equals SHA-256(balance_le8 || nonce_le8)
-#      for the queried account (matches build_state_leaves's encoding).
+#   2. The returned value_hash equals SHA-256(balance_be8 || nonce_be8)
+#      for the queried account (matches build_state_leaves's encoding;
+#      SHA256Builder appends multi-byte integers big-endian).
 #   3. state_proof returns {"error": "not_found"} for an absent key —
 #      missing-key path.
 #   4. state_proof and state_root reported at the same instant agree
 #      (state_root in the proof response matches the corresponding
 #      RPC's state_root) — sanity check that the proof RPC isn't
 #      reading from a stale snapshot.
+#   5. state_proof("d", domain) returns a valid inclusion proof after a
+#      DAPP_REGISTER applies — covers the v2.18 d: namespace that
+#      V2-DAPP-DESIGN.md §263 documents as the light-client path for
+#      DApp metadata.
+#   6. state_proof("d", absent_key) returns {error: not_found} — same
+#      missing-key path as for accounts.
 #
 # Run from repo root: bash tools/test_state_proof.sh
 set -u
@@ -182,6 +189,56 @@ try:
 except: print('false')
 " 2>/dev/null || echo "false")
 assert "$is_not_found" "absent key returns {error: not_found}"
+
+echo
+echo "=== 7. state_proof for v2.18 'd:' namespace (DApp registry) ==="
+# Register a DApp on node1 so the 'd:' namespace has at least one leaf.
+N1_PRIV=$(python -c "
+import json
+with open('$T/n1/node_key.json') as f:
+    k = json.load(f)
+print(k.get('priv_seed') or k.get('priv') or k.get('seed') or '')")
+SVC_PUBKEY="$(python -c "print('aa' * 32)")"
+$DETERM submit-dapp-register --rpc-port 8771 \
+  --priv "$N1_PRIV" --from node1 \
+  --service-pubkey "$SVC_PUBKEY" \
+  --endpoint-url "https://sp.example" \
+  --topics "chat" \
+  --retention 0 > /dev/null 2>&1
+
+# Wait for the DAPP_REGISTER to apply.
+for _ in $(seq 1 60); do
+  INFO=$($DETERM dapp-info --rpc-port 8771 --domain node1 2>/dev/null)
+  if echo "$INFO" | python -c "
+import sys,json
+try:
+    j = json.load(sys.stdin)
+    sys.exit(0 if j.get('endpoint_url') == 'https://sp.example' else 1)
+except: sys.exit(1)" 2>/dev/null; then break; fi
+  sleep 0.3
+done
+
+# Present 'd:' key
+D_PROOF=$($DETERM state-proof --rpc-port 8771 --ns d --key "node1" 2>/dev/null)
+echo "$D_PROOF" > $T/d_proof.json
+d_has_required=$(python -c "
+import json
+p = json.load(open('$T/d_proof.json'))
+needed = ['namespace','key','key_bytes','value_hash','target_index','leaf_count','proof','state_root','height']
+print('true' if all(k in p for k in needed) and p.get('namespace') == 'd' else 'false')
+" 2>/dev/null || echo "false")
+assert "$d_has_required" "state_proof('d', 'node1') returns full verification tuple post-register"
+
+# Absent 'd:' key
+D_MISS=$($DETERM state-proof --rpc-port 8771 --ns d --key "nonexistent-dapp" 2>/dev/null)
+d_is_not_found=$(echo "$D_MISS" | python -c "
+import sys, json
+try:
+    j = json.load(sys.stdin)
+    print('true' if j.get('error') == 'not_found' else 'false')
+except: print('false')
+" 2>/dev/null || echo "false")
+assert "$d_is_not_found" "absent 'd:' key returns {error: not_found}"
 
 echo
 echo "=== Test summary ==="
