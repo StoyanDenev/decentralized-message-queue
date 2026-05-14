@@ -211,15 +211,14 @@ echo "  snapshot block_index: $SNAP_BLOCK_IDX"
 echo "  snapshot head_hash:   ${SNAP_HEAD:0:24}..."
 echo "  snapshot state_root:  ${SNAP_SR:0:24}..."
 
-# Note: the snapshot's tail head may have state_root field omitted from
-# JSON because the producer (build_body) does not populate Block.state_root
-# on the finalized body — only the dry-run tentative path does. That's a
-# pre-existing latent issue separate from S-037 scope: the S-033 gate at
-# restore time is effectively bypassed when the head block's stored
-# state_root is zero. The receiver's *live* compute_state_root() over the
-# restored state is still well-defined, and assertion 10 below confirms it
-# is non-zero. The actual S-037 closure proof is functional (dapp-info /
-# dapp-list returning the restored entry — see assertions 11+).
+# Post S-038 closure: the producer's try_finalize_round path now populates
+# body.state_root before broadcast, so the snapshot's tail head SHOULD
+# carry a non-zero state_root. If empty/missing, the producer regressed
+# (S-038 reopened) and the S-033 gate at restore time would be silently
+# bypassed again.
+[ -n "$SNAP_SR" ] && [ "$SNAP_SR" != "0000000000000000000000000000000000000000000000000000000000000000" ] \
+  && assert true "snapshot tail head's state_root populated (S-038: producer wires state_root into broadcast body)" \
+  || assert false "snapshot head state_root empty or zero — S-038 regression"
 
 # Verify the snapshot file actually contains a dapp_registry array.
 SNAP_DAPP_COUNT=$(python -c "
@@ -334,12 +333,15 @@ echo "  receiver head_hash:  ${RECV_HEAD:0:24}..."
   && assert true "receiver head_hash matches snapshot's frozen head_hash" \
   || assert false "receiver head_hash mismatch (recv=${RECV_HEAD:0:24}, snap=${SNAP_HEAD:0:24})"
 
-# The receiver's live compute_state_root() over the restored state
-# must be non-zero — proves the state Merkle tree is populated,
-# including the d: namespace leaves for dapp_registry_.
-[ -n "$RECV_SR" ] && [ "$RECV_SR" != "0000000000000000000000000000000000000000000000000000000000000000" ] \
-  && assert true "receiver state_root non-zero (state Merkle includes restored maps)" \
-  || assert false "receiver state_root unexpectedly zero or empty"
+# Post S-038: receiver's compute_state_root() over the restored state
+# must EXACTLY match the snapshot tail head's stored state_root. This is
+# the heart of the S-033 verification path (gate is now actually firing
+# because the producer populates the field). If dapp_registry_ was not
+# restored (S-037 regression) OR any other state map was wrong, this
+# would mismatch.
+[ -n "$RECV_SR" ] && [ "$RECV_SR" = "$SNAP_SR" ] \
+  && assert true "receiver state_root EXACTLY matches snapshot tail head's (S-033 gate validates the full state Merkle including d:-namespace)" \
+  || assert false "receiver state_root mismatch (recv=${RECV_SR:0:24}, snap_head=${SNAP_SR:0:24}) — S-037 or S-038 regression"
 
 echo
 echo "=== 11. Verify receiver's dapp-info returns the DApp entry ==="

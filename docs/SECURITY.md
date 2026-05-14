@@ -12,13 +12,13 @@
 |---|---|---|---|---|---|
 | Open (untouched) | **0** | **0** | **1** (S-018) | **1** (S-035 unit-tests/CI; engineering-culture item) | **2** |
 | Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped; Option 1 = v2.7 F2 closes fully) | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **3** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **8** (S-021, S-022, S-024, S-026, S-027, S-028, S-029, S-037) | **25** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **13** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033, S-038) | — | **8** (S-021, S-022, S-024, S-026, S-027, S-028, S-029, S-037) | **26** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
 (M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 closed in this session** — added serialize / restore handling for `dapp_registry_` so DApp-active chains survive snapshot bootstrap intact; new regression `tools/test_dapp_snapshot.sh` (11/11 PASS) exercises register → snapshot → restore → `dapp-info` end-to-end.
+**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 closed in this session** — added serialize / restore handling for `dapp_registry_` so DApp-active chains survive snapshot bootstrap intact; new regression `tools/test_dapp_snapshot.sh` (12/12 PASS) exercises register → snapshot → restore → `dapp-info` end-to-end. **S-038 closed in this session** — `Node::try_finalize_round` now populates `body.state_root` via a tentative-chain dry-run before broadcast, so the S-033 verification gate at apply time actually fires (pre-fix the field was zero on every gossiped block, short-circuiting the gate). S-033's documented "shipped" status is now genuine end-to-end; the apply-layer mitigation of S-030 D1/D2 is no longer dormant.
 
 **Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
@@ -53,8 +53,9 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-029 BFT-mode multi-proposer fork-choice undefined~~ — closed via `Chain::resolve_fork`: heaviest sig set / fewer aborts / smallest hash, deterministic across peers.
 - ~~S-031 Global mutex serialization~~ — closed via 6 architectural layers (shared_mutex + A9 Phase 1-2D + async chain.save + gossip-out-of-lock).
 - ~~S-032 O(N) registry rebuild~~ — closed via incremental registry cache.
-- ~~S-033 No state commitment~~ — closed via Merkle root in `Block.state_root` + signing_bytes binding.
-- ~~S-037 dapp_registry snapshot serialize/restore gap~~ — closed via `dapp_registry` field added to `Chain::serialize_state` + `restore_from_snapshot` (with `if (snap.contains(...))` guard for pre-v2.18 backward compat); new regression `tools/test_dapp_snapshot.sh` (11/11 PASS) exercises register → snapshot → restore → `dapp-info` verification end-to-end.
+- ~~S-033 No state commitment~~ — closed via Merkle root in `Block.state_root` + signing_bytes binding. (S-038 closure makes the gate actually fire on production blocks.)
+- ~~S-037 dapp_registry snapshot serialize/restore gap~~ — closed via `dapp_registry` field added to `Chain::serialize_state` + `restore_from_snapshot` (with `if (snap.contains(...))` guard for pre-v2.18 backward compat); new regression `tools/test_dapp_snapshot.sh` (12/12 PASS) exercises register → snapshot → restore → `dapp-info` verification end-to-end.
+- ~~S-038 state_root gate dormant on production blocks~~ — closed by populating `body.state_root` in `Node::try_finalize_round` (tentative-chain dry-run, same pattern as the digest dry-run above it) before `apply_block_locked` + `gossip_.broadcast`. The S-033 verification gate at `chain.cpp::apply_transactions` (which already correctly compared `b.state_root` to `compute_state_root()` when non-zero) now fires on every produced block, so peer nodes reject any divergent body. K-of-K BlockSig signatures unaffected (`compute_block_digest` already excludes `state_root` per §4.3); `block_hash` (compute_hash via signing_bytes) now binds the field. Backward-compat: pre-fix chains with `state_root = 0` in stored blocks remain valid (the gate skips zero per the S-033 backward-compat shim). The S-038 fix is the "actually shipped" half of the S-033 mitigation — pre-fix, the data layer worked but the gate was bypassed.
 
 **Production-readiness bar:** with the in-session closures, no fully-open Critical findings remain. v2.7 F2 (for D2 full closure) is the last architectural item between current state and "permissionless-deployment-ready"; everything else is operational polish or new-feature work.
 
@@ -102,7 +103,8 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
 | S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must lie entirely in past — leading `evidence_window_start ≤ b.index` check added to prevent integer overflow bypassing the threshold-arithmetic check); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `node/validator.cpp::check_transactions` MERGE_EVENT branch | v2.11 |
-| S-037 | ✅ Mitigated | `dapp_registry` field now emitted by `Chain::serialize_state` (after merge_state block) and read back by `restore_from_snapshot` with `if (snap.contains("dapp_registry"))` guard for pre-v2.18 backward compat. Every field that contributes to the `d:` value-hash in `build_state_leaves` is round-tripped: `service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`, plus the map key. Regression: `tools/test_dapp_snapshot.sh` register → snapshot → restore → `dapp-info` verification end-to-end (11/11 PASS). | `chain/chain.cpp::serialize_state` + `::restore_from_snapshot` | done |
+| S-037 | ✅ Mitigated | `dapp_registry` field now emitted by `Chain::serialize_state` (after merge_state block) and read back by `restore_from_snapshot` with `if (snap.contains("dapp_registry"))` guard for pre-v2.18 backward compat. Every field that contributes to the `d:` value-hash in `build_state_leaves` is round-tripped: `service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`, plus the map key. Regression: `tools/test_dapp_snapshot.sh` register → snapshot → restore → `dapp-info` verification end-to-end (12/12 PASS). | `chain/chain.cpp::serialize_state` + `::restore_from_snapshot` | done |
+| S-038 | ✅ Mitigated | S-033 verification gate was dormant on production blocks because `Node::try_finalize_round` did not populate `body.state_root` before broadcast; the gate skipped on `state_root = 0` per the backward-compat shim. `try_finalize_round` now sets `body.state_root` via a tentative-chain dry-run between `build_body` and `apply_block_locked` (mirrors the digest-dry-run pattern in `start_block_sig_phase`). The gate now fires on every block — peer nodes reject any block whose stored `state_root` doesn't match the locally-recomputed value over their own apply of the same transactions. `compute_block_digest` already excludes `state_root` (§4.3) so K-of-K signatures are unaffected. Discovered while writing the S-037 test (snapshot tail head's `state_root` field was empty in JSON, exposing this latent gap). | `node/node.cpp::try_finalize_round` | done |
 
 ---
 
@@ -250,9 +252,9 @@ This finding has two structurally distinct dimensions, addressed by different me
 
 - **D2 — Non-tx-payload field mismatch.** The digest also doesn't cover `abort_events`, `equivocation_events`, `inbound_receipts`, `cross_shard_receipts`, `partner_subset_hash`, `timestamp`, `cumulative_rand`, `delay_output`, `creator_dh_secrets`, `initial_state`, or `state_root`. Two members with differing pool views (gossip-async) produce different evidence/receipt lists but the same digest.
 
-**D1 status — effective closure via S-033.** With state_root in `signing_bytes` (Block.compute_hash), divergent `b.transactions` produces divergent post-apply state → divergent state_root → divergent block_hash. The validator's apply-time `compute_state_root() != b.state_root` check (chain.cpp:~900) loud-fails on the inconsistent node, surfacing the bug rather than silently corrupting state. Single canonical block per height is enforced at apply, even though K-of-K signatures (over the narrower digest) don't directly bind tx payloads.
+**D1 status — effective closure via S-033 + S-038.** With state_root in `signing_bytes` (Block.compute_hash) AND the producer now populating `body.state_root` before broadcast (S-038 closure — pre-fix, the field was zero on every gossiped block and the gate short-circuited), divergent `b.transactions` produces divergent post-apply state → divergent state_root → divergent block_hash. The validator's apply-time `compute_state_root() != b.state_root` check in `chain.cpp::apply_transactions` (~L1430) loud-fails on the inconsistent node, surfacing the bug rather than silently corrupting state. Single canonical block per height is enforced at apply, even though K-of-K signatures (over the narrower digest) don't directly bind tx payloads.
 
-**D2 status — partial closure via S-033.** Same mechanism: divergent evidence/receipt lists produce divergent post-apply state → state_root mismatch → block rejected at apply. Closure is "partial" because:
+**D2 status — partial closure via S-033 + S-038.** Same mechanism: divergent evidence/receipt lists produce divergent post-apply state → state_root mismatch → block rejected at apply (now actually firing post-S-038). Closure is "partial" because:
 - Two K-of-K-signed block instances can still both circulate at the gossip layer (signatures are valid for both — the digest covers neither's evidence list).
 - The apply-time check picks one canonical instance via state_root match. Honest nodes converge on the canonical one; nodes that received the wrong one resync from peers.
 - A fully Byzantine committee can mint two valid-looking K-of-K instances. Detection is deferred to gossip-level reconciliation against the chain's actual state log.
@@ -947,7 +949,7 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 1. Snapshot taken on a chain with one or more `DAPP_REGISTER` entries omitted `dapp_registry`.
 2. Restore on a fresh node started with `dapp_registry_ = {}`.
 3. `dapp-info` / `dapp-list` on the restored chain returned empty even for DApps that were live on the donor.
-4. `Chain::compute_state_root()` over the restored state diverges from what the donor computed (the `d:` slice contributes no leaves on the restored side). The S-033 gate at `restore_from_snapshot` would reject the snapshot with `"state_root mismatch"` once production blocks routinely populate `Block.state_root` (the gate is currently bypassed when the head's stored field is zero — a pre-existing separate latent issue, not S-037 scope).
+4. `Chain::compute_state_root()` over the restored state diverges from what the donor computed (the `d:` slice contributes no leaves on the restored side). The S-033 gate at `restore_from_snapshot` rejects the snapshot with `"state_root mismatch"` (now that S-038 also closed in this session, the gate actually fires on production blocks rather than being dormant).
 
 **Why this was operational, not a security regression.** Fail-loud — restore would refuse the snapshot in the full S-033 case. No silent state corruption, no equivocation surface, no funds at risk. The pragmatic harm was "can't bootstrap a DApp-active chain via snapshot" — full chain replay still worked.
 
@@ -958,6 +960,58 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 3. Regression test `tools/test_dapp_snapshot.sh` (11/11 PASS) exercises the full surface: 3-node donor chain advances, donor1 registers a DApp, snapshot taken from donor1, donors stopped, fresh receiver starts with `snapshot_path` set + no genesis + no peers. Asserts: (a) snapshot file contains the `dapp_registry` array with 1 entry, (b) receiver boots without `state_root mismatch` error, (c) `dapp-info(donor1)` on the receiver returns the same `endpoint_url`/`topics`/`metadata` as on the donor, (d) `dapp-list` reports the DApp post-restore. Backward-compat verified: existing `tools/test_snapshot_bootstrap.sh` (which produces a no-DApp snapshot) still passes — the guard correctly handles the absent-field case.
 
 **Test coverage delta.** From "disjoint" (snapshot tests skipped DApps; DApp tests skipped snapshots) to "joint" — the new regression closes the specific co-surface that hid this bug.
+
+---
+
+### S-038 — S-033 state_root verification gate dormant on production blocks — ✅ Mitigated in-session
+
+**Severity:** High (consensus-integrity gap; documented mitigation was non-functional) • **Status:** ✅ Mitigated • **Source:** discovered during the S-037 closure test (snapshot tail-head's `state_root` field was empty in JSON, exposing this latent gap; same session as the closure)
+
+**Pre-fix description.** S-033 mitigation claims to bind the post-apply state Merkle root into the block via `Block.state_root`, with a verification gate in `Chain::apply_transactions` (~chain.cpp:1430) that rejects any block whose stored `state_root` doesn't match the locally-recomputed root. The gate has correct logic but is guarded by `if (b.state_root != zero) verify` — a backward-compat shim that skips the check on pre-S-033 blocks (zero state_root field).
+
+**The latent gap.** `src/node/producer.cpp::build_body` does NOT populate `state_root` on the produced block. `Node::start_block_sig_phase` builds a *tentative* copy and populates state_root on it for the digest dry-run (`compute_block_digest` doesn't include state_root anyway, so this was just consistency), but the FINAL body broadcast by `Node::try_finalize_round` was built afresh via a second `build_body` call and left `state_root = Hash{}` (zero default). Result:
+
+- Every gossiped block had `state_root = 0`.
+- The S-033 gate at apply time short-circuited on every block.
+- Peer nodes accepted any committee-signed body regardless of its state-after-apply.
+
+This means the S-030 D1 "effective-closed via S-033" claim was actually unenforced in production. The gate's infrastructure was correct; the producer just wasn't feeding it.
+
+**Why this isn't an attack surface today.** The K-of-K committee structure still prevents forks (every member must sign the same digest, and the digest covers the tx set deterministically). Two distinct state outcomes from the same tx set would require nondeterministic apply, which the protocol doesn't allow. So the gate's bypass didn't enable concrete attacks — but it did make the documented S-033 mitigation a no-op, which would silently degrade safety against any future bug introducing apply-time nondeterminism.
+
+**Mitigation shipped.**
+
+`Node::try_finalize_round` now populates `body.state_root` immediately after `build_body` and before `apply_block_locked`:
+
+```cpp
+chain::Block body = build_body(...);
+body.creator_block_sigs = std::move(ordered_block_sigs);
+
+// S-038 closure
+{
+    chain::Chain tentative_chain = chain_;
+    tentative_chain.append(body);  // state_root still zero, verify short-circuits inside append
+    body.state_root = tentative_chain.compute_state_root();
+}
+
+apply_block_locked(body);
+gossip_.broadcast(net::make_block(body));
+```
+
+Notes on safety + compatibility:
+
+- `compute_block_digest` (what committee members sign in Phase 2) **excludes** `state_root` per §4.3 of PROTOCOL.md. So the K-of-K signatures gathered before `try_finalize_round` runs are unaffected by populating the field afterward. No re-signing required.
+- `compute_hash` (block_hash, via `signing_bytes`) **includes** `state_root` when non-zero. So the block_hash of post-fix blocks is different from what it would have been pre-fix. But: pre-fix blocks ALL had `state_root = 0`, so their block_hashes computed without the state_root contribution. Post-fix blocks have `state_root` populated and compute their hash WITH the contribution. Each block's hash is internally consistent with its own state_root field — no rolling break.
+- Backward-compat: chains with pre-fix blocks already in their history retain their zero-state_root blocks unchanged. The gate skips zero per the existing backward-compat shim. Only blocks produced after the fix carry populated state_root.
+
+**Test.** `tools/test_dapp_snapshot.sh` (12/12 PASS) now strictly verifies that the snapshot tail-head's stored `state_root` matches the receiver's freshly-computed `compute_state_root()` post-restore. Pre-fix, this assertion would have failed because the snapshot tail head's `state_root` field was empty in JSON. Post-fix, the field is populated and the comparison succeeds — proving the gate is wired through end-to-end.
+
+**Effect on S-030 D1/D2.** S-030's apply-layer closure is now actually shipped end-to-end:
+
+- D1 (resolved tx-payload mismatch): two committee members applying different tx sets reach different state_roots → different block_hashes → divergent stored state, but only one matches the locally-recomputed root at any honest peer → fork rejected at apply.
+- D2 (non-tx-payload field mismatch): same mechanism — divergent abort_events/equivocation_events/inbound_receipts/etc. produce divergent post-apply state, caught at apply.
+
+D2 is still "partial" because the gate is apply-layer (rejection after some peers might have signed the divergent body), not consensus-layer (prevention at signature-gathering). v2.7 F2 view reconciliation is still the long-term consensus-layer closure. But the apply-layer S-033 path is now real.
 
 ---
 

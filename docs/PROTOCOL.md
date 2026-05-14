@@ -242,7 +242,7 @@ state_root (32 bytes) — bound only when non-zero (S-033 conditional binding: p
 
 The canonical reference is `src/chain/chain.cpp::build_state_leaves`; light-client `state_proof` (v2.2) and `compute_state_root` share this function so inclusion proofs verify against any block's stored `state_root` without re-deriving the leaf-encoding scheme.
 
-Validators recompute `state_root` after `apply_transactions` and reject blocks whose stored `state_root` doesn't match the recomputed value. Snapshot restore performs the same check against the tail head's stored `state_root`. Inclusion proofs against `state_root` are exposed via the `state_proof` RPC (v2.2) — light clients query any node and verify the returned sibling-hash path locally.
+Validators recompute `state_root` after `apply_transactions` and reject blocks whose stored `state_root` doesn't match the recomputed value (`src/chain/chain.cpp::apply_transactions` ~L1430). Snapshot restore performs the same check against the tail head's stored `state_root`. The producer's `Node::try_finalize_round` populates `body.state_root` from a tentative-chain dry-run before broadcasting the finalized block (S-038 closure — pre-fix the producer never populated the field, leaving the gate dormant). Pre-S-033/S-038 blocks have zero state_root and skip the gate (backward-compat shim). Inclusion proofs against `state_root` are exposed via the `state_proof` RPC (v2.2) — light clients query any node and verify the returned sibling-hash path locally.
 
 See `docs/V2-DESIGN.md` v2.1 + v2.3 for the full design rationale; `docs/SECURITY.md` S-033 for the audit-closure path.
 
@@ -670,7 +670,7 @@ Restore performs **two** cryptographic gates before installing state:
 
 1. **`head_hash` match** (always). Recomputes `compute_hash()` of the tail head block; rejects with `"head_hash mismatch"` on divergence.
 
-2. **`state_root` match** (S-033 post-v2.1). After loading every map / counter / pending-entry, the receiver computes `Chain::compute_state_root()` over the restored state and compares against the tail head's stored `state_root`. Mismatch → `"state_root mismatch"` (rejects the snapshot). Pre-S-033 blocks have zero state_root and skip this gate (backward compat).
+2. **`state_root` match** (S-033 post-v2.1, S-038 post-fix). After loading every map / counter / pending-entry, the receiver computes `Chain::compute_state_root()` over the restored state and compares against the tail head's stored `state_root`. Mismatch → `"state_root mismatch"` (rejects the snapshot). Pre-S-033/S-038 blocks have zero state_root and skip this gate (backward compat); post-S-038 blocks have `state_root` populated by `Node::try_finalize_round` before broadcast, so the gate actually fires.
 
 The two gates together close S-012: a tampered snapshot fails one gate or the other regardless of what the donor manufactures, because the head's compute_hash binds state_root (signing_bytes §4.1), and state_root binds the entire state Merkle (§4.1.1).
 

@@ -1080,6 +1080,29 @@ void Node::try_finalize_round() {
                                     ordered_secrets);
     body.creator_block_sigs = std::move(ordered_block_sigs);
 
+    // S-038 closure: populate body.state_root with the post-apply state
+    // commitment so the S-033 verification gate actually fires for this
+    // block. Pre-S-038, build_body left body.state_root = Hash{} (zero
+    // default), and chain.cpp's apply-time check at line ~1430 short-
+    // circuited the comparison ("if (b.state_root != zero) verify"). The
+    // S-033 mitigation was data-layer-ready (compute_state_root works,
+    // state_proof RPC works, snapshot tail-header carries it via
+    // signing_bytes when non-zero) but the gate was dormant because the
+    // producer never put a non-zero value in the field.
+    //
+    // The state_root must reflect the post-apply state. We compute it on
+    // a tentative chain copy (same pattern as the digest dry-run above)
+    // because apply_block_locked needs the field populated BEFORE it
+    // runs its compare-against-local-recompute check. Note that
+    // block_digest excludes state_root (§4.3) so the K committee sigs
+    // already gathered are unaffected by this assignment; only the
+    // block_hash (compute_hash, via signing_bytes) binds it.
+    {
+        chain::Chain tentative_chain = chain_;
+        tentative_chain.append(body);  // body.state_root still zero, so verify short-circuits inside append
+        body.state_root = tentative_chain.compute_state_root();
+    }
+
     apply_block_locked(body);
     gossip_.broadcast(net::make_block(body));
 }
