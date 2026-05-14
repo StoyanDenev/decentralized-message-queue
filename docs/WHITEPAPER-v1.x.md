@@ -26,7 +26,7 @@ This positioning suits applications where safety failures are intolerable (payme
 
 ### 1.2 Contributions
 
-- **K-of-K mutual-distrust consensus** with per-height BFT escalation: a per-block consensus-mode tag exposes the safety guarantee to applications. MD blocks have unconditional safety; BFT blocks have `f < K_eff/3` conditional safety plus economic slashing recovery.
+- **K-of-K mutual-distrust consensus** with per-height BFT escalation: a per-block consensus-mode tag exposes the safety guarantee to applications. MD blocks have unconditional safety; BFT blocks have `f_h < k_bft/3` conditional safety (where `k_bft = ⌈2K/3⌉` is the shrunk BFT committee size) plus economic slashing recovery.
 - **SHA-256 commit-reveal randomness**: defeats selective-abort by information-theoretic construction. Committee members commit to their secrets in phase 1 before observing any block content; reveal in phase 2 produces a uniform random output bound to the committee but unpredictable at commit time.
 - **Union transaction root**: censorship requires unanimous collusion of every validator that ever rotates onto a committee — structurally impossible without full registry capture.
 - **Regional sharding (EXTENDED mode)** with under-quorum merge: shards group validators by region tag for intra-region RTT block times; when a regional pool drops below safety threshold, the protocol transparently merges committee operations with the modular-next shard.
@@ -64,16 +64,16 @@ We consider three composable adversary capabilities:
 ### 2.3 Safety claims under the adversary model
 
 - **Unconditional safety** (MD-mode blocks): Determ's K-of-K committee structure means a single non-Byzantine member of any committee suffices to prevent forks at that height. This is structurally weaker than BFT's "f < N/3" assumption — it requires only `1 ≤ |V \ F|`, not `|V \ F| > 2N/3`.
-- **Conditional safety** (BFT-mode blocks): when the K-of-K committee cannot complete (e.g., a member is offline), the protocol escalates to a `ceil(2K/3)` BFT consensus mode with a designated proposer. Safety is now conditional on `f < K_eff/3` for that single block, plus economic slashing recovery for any equivocator (full stake forfeiture + deregistration).
+- **Conditional safety** (BFT-mode blocks): when the K-of-K committee cannot complete (e.g., a member is offline), the protocol escalates to a BFT consensus mode in which the committee shrinks to `k_bft = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q = ⌈2·k_bft/3⌉` suffices. Safety is now conditional on `f_h < k_bft/3` for that single block, plus economic slashing recovery for any equivocator (full stake forfeiture + deregistration).
 - **Censorship resistance**: an honest validator anywhere in the K committee proposes its transaction list in phase 1; the canonical block's transaction set is the union of all K lists. Censorship requires unanimous collusion of all K members at every block where the targeted transaction is pending — `(f/|V|)^K` capture probability per epoch boundary.
 
 The trade-offs:
 
 | Property | MD-mode | BFT-mode |
 |---|---|---|
-| Safety | Unconditional (1 honest in committee suffices) | Conditional `f < K_eff/3` + slashing |
+| Safety | Unconditional (1 honest in committee suffices) | Conditional `f_h < k_bft/3` + slashing |
 | Liveness | Halts on persistent silent member | Recovers with `ceil(2K/3)` available |
-| Censorship | K-conjunction (`(f/N)^K`) | `(1 + K_eff/3)`-conjunction |
+| Censorship | K-conjunction (`(f/N)^K`) | `(Q − 1)`-conjunction over the BFT committee (i.e., to censor a tx, the adversary must control all but at most `k_bft − Q` slots) |
 | Per-block trust | Tag exposed in `block.consensus_mode` | Tag exposed in `block.consensus_mode` |
 
 Applications choose which blocks they trust by reading the `consensus_mode` tag and the chain's per-block `block_digest`. Most steady-state blocks are MD on both layers (beacon + shards); BFT blocks are the tail-liveness fallback when the chain would otherwise stall.
@@ -401,7 +401,7 @@ Determ's safety-critical mechanisms have full coverage in two parallel tracks: a
 | FA2 | `Censorship.md` | Union-tx-root censorship resistance | `(f/N)^K` per epoch |
 | FA3 | `SelectiveAbort.md` | Commit-reveal hiding (ROM + std-model) | `2⁻²⁵⁶` per attempt |
 | FA4 | `Liveness.md` | Bounded-round termination | Geometric in `p_honest` |
-| FA5 | `BFTSafety.md` | BFT-mode conditional safety | `f < K_eff/3` + slashing recovery |
+| FA5 | `BFTSafety.md` | BFT-mode conditional safety | `f_h < |K_h|/3` + slashing recovery |
 | FA6 | `EquivocationSlashing.md` | No false-positive slashing | `2⁻¹²⁸` per fabrication |
 | FA7 | `CrossShardReceipts.md` | No double-credit, atomicity | `K · 2⁻¹²⁸` per fabrication |
 | FA8 | `RegionalSharding.md` | Properties under regional pinning | Same as FA1/FA4/FA5/FA6/FA7 |

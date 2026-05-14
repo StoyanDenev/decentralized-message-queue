@@ -321,7 +321,7 @@ The series:
 | `Censorship.md` (FA2) | K-conjunction censorship resistance. |
 | `SelectiveAbort.md` (FA3) | Commit-reveal hybrid argument; no member can bias `R` predictively. |
 | `Liveness.md` (FA4) | Probabilistic liveness under (1-p)^K > 0 and synchrony. |
-| `BFTSafety.md` (FA5) | Conditional safety of BFT-mode blocks under f < K_eff/3. |
+| `BFTSafety.md` (FA5) | Conditional safety of BFT-mode blocks under `f_h < |K_h|/3` within the BFT committee (`|K_h| = ⌈2K/3⌉`). |
 | `EquivocationSlashing.md` (FA6) | Only Byzantine validators are slashed (no false positives). |
 | `CrossShardReceipts.md` (FA7) | At-most-once + at-least-once (under fairness) credit. |
 | `RegionalSharding.md` (FA8) | Regional-pool corollary of safety + censorship. |

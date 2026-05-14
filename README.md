@@ -458,7 +458,7 @@ An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an a
 
 1. **Default state**: each round runs in **MUTUAL_DISTRUST** mode — full K-of-K Phase 2 unanimity, every block is unconditionally fork-free.
 2. **Trigger** (all four must hold — see PROTOCOL.md §5.3 for the exact gates): `bft_enabled = true` AND in-flight round at height `h` accumulates `bft_escalation_threshold` aborts (Round 1 + Round 2 both count) AND the available pool (registry minus aborted-this-height domains) has dropped below `K` AND the available pool is still ≥ `ceil(2K/3)`. If the available pool falls below `ceil(2K/3)` the shard stalls — there's not enough to form a BFT committee either; under EXTENDED sharding the R4 under-quorum merge mechanism may absorb the shard.
-3. **BFT mode**: committee shrinks to `ceil(2K/3)` selected from the available pool. A deterministic **designated proposer** (chosen from the committee via `proposer_idx(seed, abort_events, |committee|)` with `seed = epoch_committee_seed(epoch_rand, shard_id)` plus an 12-byte `"bft-proposer"` ASCII domain separator — see PROTOCOL.md §5.3.1 for the full algorithm) is the only node that builds a block at this height. Phase 1 still requires unanimity within the smaller committee; Phase 2 finalizes on `ceil(2K_eff/3)` sigs collected by the proposer. The block carries `consensus_mode = BFT` and `bft_proposer = <domain>`.
+3. **BFT mode**: committee shrinks to `k_bft = ceil(2K/3)` selected from the available pool. A deterministic **designated proposer** (chosen from the committee via `proposer_idx(seed, abort_events, k_bft)` with `seed = epoch_committee_seed(epoch_rand, shard_id)` plus a 12-byte `"bft-proposer"` ASCII domain separator — see PROTOCOL.md §5.3.1 for the full algorithm) is the only node that builds a block at this height. Phase 1 still requires unanimity within the smaller committee; Phase 2 finalizes on `Q = ceil(2·k_bft/3)` sigs collected by the proposer (the standard BFT 2/3 quorum applied to the shrunk committee, not to the genesis K — the two coincide only at K=3). The block carries `consensus_mode = BFT` and `bft_proposer = <domain>`.
 4. **Reset**: after the escalated block finalizes, height `h+1` resets to MD by default.
 
 **Per-block trust claim:**
@@ -466,7 +466,7 @@ An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an a
 | Block type | Safety                                  | Censorship                                |
 |-----------|-----------------------------------------|-------------------------------------------|
 | MD        | **Unconditional** (no honest-fraction assumption — see §2 trust model) | K-conjunction over committee |
-| BFT       | Conditional on `f < N/3` in this committee + economic disincentive | (1+K_eff/3)-conjunction over the smaller committee |
+| BFT       | Conditional on `f_h < k_bft/3` in this committee + economic disincentive (`k_bft = ⌈2K/3⌉`) | `(Q − 1)`-conjunction over the smaller committee (`Q = ⌈2·k_bft/3⌉`) |
 
 Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
 
@@ -799,7 +799,7 @@ Per-block trust is observable via `consensus_mode`:
 |---|---|---|
 | Beacon | Unconditional (MD-only, no escalation) | K-conjunction over beacon committee |
 | Shard MD | Unconditional (MD steady-state) | K-conjunction over shard committee |
-| Shard BFT | Conditional `f < N/3` + slashing | (1+K_eff/3)-conjunction over shard committee |
+| Shard BFT | Conditional `f_h < k_bft/3` + slashing | `(Q − 1)`-conjunction over shard BFT committee |
 
 Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
 

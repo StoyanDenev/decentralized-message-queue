@@ -22,7 +22,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA2 | [Censorship.md](Censorship.md) | Censorship resistance: union-tx-root inclusion of any honest mempool tx | ✓ |
 | FA3 | [SelectiveAbort.md](SelectiveAbort.md) | Selective-abort resistance: commit-reveal hides delay_output until phase-2 | ✓ |
 | FA4 | [Liveness.md](Liveness.md) | Liveness: finalized block within geometric-bounded rounds | ✓ |
-| FA5 | [BFTSafety.md](BFTSafety.md) | BFT-mode safety under f < K_eff/3; slashing recovery otherwise | ✓ |
+| FA5 | [BFTSafety.md](BFTSafety.md) | BFT-mode safety under `f_h < |K_h|/3` within the BFT committee (`|K_h| = ⌈2K/3⌉`); slashing recovery otherwise | ✓ |
 | FA6 | [EquivocationSlashing.md](EquivocationSlashing.md) | Slashing soundness: honest never slashed for equivocation | ✓ |
 | FA7 | [CrossShardReceipts.md](CrossShardReceipts.md) | Cross-shard atomicity: no double-credit, A1 invariant composes | ✓ |
 | FA8 | [RegionalSharding.md](RegionalSharding.md) | Regional pinning preserves FA1/FA4/FA5/FA6/FA7 | ✓ |
@@ -119,7 +119,7 @@ Per-property bounds:
 | FA1 safety fork | 2⁻¹²⁸ | 2⁻⁶⁸ |
 | FA2 censorship | 2⁻¹²⁸ (tx_root preimage) | 2⁻⁶⁸ |
 | FA3 selective abort | 2⁻²⁵⁶ (commit preimage) | 2⁻¹⁹⁶ |
-| FA5 BFT fork | 2⁻¹²⁸ · K_eff (forge intersection) | 2⁻⁶² for K_eff ≤ 64 |
+| FA5 BFT fork | 2⁻¹²⁸ · |K_h| (forge intersection within BFT committee) | 2⁻⁶² for |K_h| ≤ 64 |
 | FA6 false-positive slash | 2⁻¹²⁸ | 2⁻⁶⁸ |
 | FA7 receipt fabrication | K · 2⁻¹²⁸ | 2⁻⁶² for K ≤ 64 |
 | FA10 unauthorized PARAM_CHANGE | 2⁻¹²⁸·(N−1) for N keyholders | 2⁻⁴⁵² for N = 5 |

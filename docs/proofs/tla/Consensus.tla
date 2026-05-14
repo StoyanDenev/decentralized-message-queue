@@ -146,7 +146,10 @@ SignByzantine(v, d) ==
                    finalized, aborted_rounds>>
 
 \* Finalize: digest d has K signatures and all validators are in BLOCK_SIG.
-\* In BFT mode, K_eff = ceil(2K/3) sigs suffice.
+\* In BFT mode, the committee shrinks to k_bft = ceil(2K/3) and the
+\* within-committee 2/3 quorum Q = ceil(2*k_bft/3) sigs suffice. The
+\* spec's BFTThreshold parameter is the abort count that triggers
+\* escalation, not the post-escalation sig quorum.
 Keff == IF mode = "BFT" THEN (2*K + 2) \div 3 ELSE K
 
 Finalize(d) ==

@@ -211,10 +211,10 @@ In practice, monitoring at the operator level: if expected rounds per block exce
 
 ### 5.5 Connection to BFT-mode safety (FA5)
 
-T-4 establishes BFT escalation as a *liveness* mechanism. FA5 establishes that BFT-mode blocks are safe under `f < K_eff/3` Byzantine within the BFT committee. These are complementary:
+T-4 establishes BFT escalation as a *liveness* mechanism. FA5 establishes that BFT-mode blocks are safe under `f_h < |K_h|/3` Byzantine within the smaller BFT committee (`|K_h| = ⌈2K/3⌉`). These are complementary:
 
 - T-4 says: BFT escalation increases the probability that *some* block finalizes.
-- FA5 says: BFT blocks are safe under conditions tighter than MD-mode (need ≥ `K - K_eff/3` honest in committee, vs ≥ 1 in MD).
+- FA5 says: BFT blocks are safe under conditions tighter than MD-mode (need ≥ `|K_h| − f_h` honest in the BFT committee with `f_h < |K_h|/3`, vs ≥ 1 in MD).
 
 Together: BFT escalation chooses liveness over safety; operators accept this trade for the small fraction of blocks that need it.
 
