@@ -5,6 +5,7 @@
 #include <determ/crypto/keys.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
+#include <determ/util/json_validate.hpp>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -14,6 +15,8 @@ namespace determ::node {
 
 using namespace determ::crypto;
 using namespace determ::chain;
+using determ::util::json_require;
+using determ::util::json_require_hex;
 using json = nlohmann::json;
 
 // ─── ContribMsg JSON ─────────────────────────────────────────────────────────
@@ -33,16 +36,21 @@ json ContribMsg::to_json() const {
 }
 
 ContribMsg ContribMsg::from_json(const json& j) {
+    // S-018: typed/required-field extraction. A malformed CONTRIB
+    // message produces a "missing/wrong-type field 'X'" diagnostic
+    // rather than a nlohmann-internal type error that an operator
+    // would have to dig through a stack trace to associate with a
+    // field name.
     ContribMsg m;
-    m.block_index = j["block_index"].get<uint64_t>();
-    m.signer      = j["signer"].get<std::string>();
-    m.prev_hash   = from_hex_arr<32>(j["prev_hash"].get<std::string>());
+    m.block_index = json_require<uint64_t>(j, "block_index");
+    m.signer      = json_require<std::string>(j, "signer");
+    m.prev_hash   = from_hex_arr<32>(json_require_hex(j, "prev_hash", 64));
     m.aborts_gen  = j.value("aborts_gen", uint64_t{0});
     if (j.contains("tx_hashes"))
         for (auto& h : j["tx_hashes"])
             m.tx_hashes.push_back(from_hex_arr<32>(h.get<std::string>()));
-    m.dh_input = from_hex_arr<32>(j["dh_input"].get<std::string>());
-    m.ed_sig   = from_hex_arr<64>(j["ed_sig"].get<std::string>());
+    m.dh_input = from_hex_arr<32>(json_require_hex(j, "dh_input", 64));
+    m.ed_sig   = from_hex_arr<64>(json_require_hex(j, "ed_sig", 128));
     return m;
 }
 
@@ -60,13 +68,14 @@ json AbortClaimMsg::to_json() const {
 }
 
 AbortClaimMsg AbortClaimMsg::from_json(const json& j) {
+    // S-018: typed/required-field extraction. See ContribMsg::from_json.
     AbortClaimMsg m;
-    m.block_index     = j["block_index"].get<uint64_t>();
-    m.round           = j["round"].get<uint8_t>();
-    m.prev_hash       = from_hex_arr<32>(j["prev_hash"].get<std::string>());
-    m.missing_creator = j["missing_creator"].get<std::string>();
-    m.claimer         = j["claimer"].get<std::string>();
-    m.ed_sig          = from_hex_arr<64>(j["ed_sig"].get<std::string>());
+    m.block_index     = json_require<uint64_t>(j, "block_index");
+    m.round           = json_require<uint8_t>(j, "round");
+    m.prev_hash       = from_hex_arr<32>(json_require_hex(j, "prev_hash", 64));
+    m.missing_creator = json_require<std::string>(j, "missing_creator");
+    m.claimer         = json_require<std::string>(j, "claimer");
+    m.ed_sig          = from_hex_arr<64>(json_require_hex(j, "ed_sig", 128));
     return m;
 }
 
@@ -111,14 +120,15 @@ json BlockSigMsg::to_json() const {
 }
 
 BlockSigMsg BlockSigMsg::from_json(const json& j) {
+    // S-018: typed/required-field extraction. See ContribMsg::from_json.
     BlockSigMsg m;
-    m.block_index  = j["block_index"].get<uint64_t>();
-    m.signer       = j["signer"].get<std::string>();
-    m.delay_output = from_hex_arr<32>(j["delay_output"].get<std::string>());
+    m.block_index  = json_require<uint64_t>(j, "block_index");
+    m.signer       = json_require<std::string>(j, "signer");
+    m.delay_output = from_hex_arr<32>(json_require_hex(j, "delay_output", 64));
     // rev.9 S-009: dh_secret defaulted to zero for old-format messages.
     if (j.contains("dh_secret"))
         m.dh_secret = from_hex_arr<32>(j["dh_secret"].get<std::string>());
-    m.ed_sig       = from_hex_arr<64>(j["ed_sig"].get<std::string>());
+    m.ed_sig       = from_hex_arr<64>(json_require_hex(j, "ed_sig", 128));
     return m;
 }
 

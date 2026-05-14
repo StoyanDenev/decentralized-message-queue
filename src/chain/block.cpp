@@ -2,10 +2,13 @@
 // Copyright 2026 Determ Contributors
 #include <determ/chain/block.hpp>
 #include <determ/crypto/sha256.hpp>
+#include <determ/util/json_validate.hpp>
 
 namespace determ::chain {
 
 using namespace determ::crypto;
+using determ::util::json_require;
+using determ::util::json_require_hex;
 using json = nlohmann::json;
 
 // ─── Transaction ─────────────────────────────────────────────────────────────
@@ -44,16 +47,21 @@ json Transaction::to_json() const {
 }
 
 Transaction Transaction::from_json(const json& j) {
+    // S-018: every required field is fetched via json_require<T> /
+    // json_require_hex so missing or wrong-type fields throw with
+    // clear field-name diagnostics rather than opaque
+    // nlohmann-internal type errors. Optional fields (`fee`) keep the
+    // existing `j.value(...)` defaults.
     Transaction tx;
-    tx.type    = static_cast<TxType>(j["type"].get<int>());
-    tx.from    = j["from"].get<std::string>();
-    tx.to      = j["to"].get<std::string>();
-    tx.amount  = j["amount"].get<uint64_t>();
+    tx.type    = static_cast<TxType>(json_require<int>(j, "type"));
+    tx.from    = json_require<std::string>(j, "from");
+    tx.to      = json_require<std::string>(j, "to");
+    tx.amount  = json_require<uint64_t>(j, "amount");
     tx.fee     = j.value("fee", uint64_t{0});
-    tx.nonce   = j["nonce"].get<uint64_t>();
-    tx.payload = from_hex(j["payload"].get<std::string>());
-    tx.sig     = from_hex_arr<64>(j["sig"].get<std::string>());
-    tx.hash    = from_hex_arr<32>(j["hash"].get<std::string>());
+    tx.nonce   = json_require<uint64_t>(j, "nonce");
+    tx.payload = from_hex(json_require<std::string>(j, "payload"));
+    tx.sig     = from_hex_arr<64>(json_require_hex(j, "sig", 128));
+    tx.hash    = from_hex_arr<32>(json_require_hex(j, "hash", 64));
     return tx;
 }
 
@@ -93,11 +101,12 @@ json AbortEvent::to_json() const {
 }
 
 AbortEvent AbortEvent::from_json(const json& j) {
+    // S-018: clear field-name diagnostics on malformed AbortEvent.
     AbortEvent ae;
-    ae.round         = j["round"].get<uint8_t>();
-    ae.aborting_node = j["aborting_node"].get<std::string>();
-    ae.timestamp     = j["timestamp"].get<int64_t>();
-    ae.event_hash    = from_hex_arr<32>(j["event_hash"].get<std::string>());
+    ae.round         = json_require<uint8_t>(j, "round");
+    ae.aborting_node = json_require<std::string>(j, "aborting_node");
+    ae.timestamp     = json_require<int64_t>(j, "timestamp");
+    ae.event_hash    = from_hex_arr<32>(json_require_hex(j, "event_hash", 64));
     ae.claims_json   = j.value("claims", json::array());
     return ae;
 }
@@ -118,13 +127,17 @@ json EquivocationEvent::to_json() const {
 }
 
 EquivocationEvent EquivocationEvent::from_json(const json& j) {
+    // S-018: clear field-name diagnostics on malformed EquivocationEvent.
+    // (External submission via submit_equivocation RPC is the primary
+    // attack surface — a clear error makes the forensic tool's job
+    // easier when an operator types a bad hash.)
     EquivocationEvent e;
-    e.equivocator          = j["equivocator"].get<std::string>();
-    e.block_index          = j["block_index"].get<uint64_t>();
-    e.digest_a             = from_hex_arr<32>(j["digest_a"].get<std::string>());
-    e.sig_a                = from_hex_arr<64>(j["sig_a"].get<std::string>());
-    e.digest_b             = from_hex_arr<32>(j["digest_b"].get<std::string>());
-    e.sig_b                = from_hex_arr<64>(j["sig_b"].get<std::string>());
+    e.equivocator          = json_require<std::string>(j, "equivocator");
+    e.block_index          = json_require<uint64_t>(j, "block_index");
+    e.digest_a             = from_hex_arr<32>(json_require_hex(j, "digest_a", 64));
+    e.sig_a                = from_hex_arr<64>(json_require_hex(j, "sig_a", 128));
+    e.digest_b             = from_hex_arr<32>(json_require_hex(j, "digest_b", 64));
+    e.sig_b                = from_hex_arr<64>(json_require_hex(j, "sig_b", 128));
     e.shard_id             = j.value("shard_id",             uint32_t{0});
     e.beacon_anchor_height = j.value("beacon_anchor_height", uint64_t{0});
     return e;
@@ -428,13 +441,25 @@ json Block::to_json() const {
 }
 
 Block Block::from_json(const json& j) {
+    // S-018: required Block fields fetched through json_require<T> /
+    // json_require_hex so a malformed BLOCK gossip message produces a
+    // diagnostic naming the failing field. Optional fields keep the
+    // existing `j.contains(...)` guards (already structured; not the
+    // S-018 surface).
     Block b;
-    b.index         = j["index"].get<uint64_t>();
-    b.prev_hash     = from_hex_arr<32>(j["prev_hash"].get<std::string>());
-    b.timestamp     = j["timestamp"].get<int64_t>();
+    b.index         = json_require<uint64_t>(j, "index");
+    b.prev_hash     = from_hex_arr<32>(json_require_hex(j, "prev_hash", 64));
+    b.timestamp     = json_require<int64_t>(j, "timestamp");
 
+    if (!j.contains("transactions") || !j.at("transactions").is_array())
+        throw std::runtime_error(
+            "S-018: BLOCK missing or non-array 'transactions' field");
     for (auto& tx : j["transactions"])
         b.transactions.push_back(Transaction::from_json(tx));
+
+    if (!j.contains("creators") || !j.at("creators").is_array())
+        throw std::runtime_error(
+            "S-018: BLOCK missing or non-array 'creators' field");
     for (auto& c : j["creators"])
         b.creators.push_back(c.get<std::string>());
 
@@ -474,7 +499,10 @@ Block Block::from_json(const json& j) {
             b.creator_block_sigs.push_back(from_hex_arr<64>(s.get<std::string>()));
     }
 
-    b.cumulative_rand = from_hex_arr<32>(j["cumulative_rand"].get<std::string>());
+    b.cumulative_rand = from_hex_arr<32>(json_require_hex(j, "cumulative_rand", 64));
+    if (!j.contains("abort_events") || !j.at("abort_events").is_array())
+        throw std::runtime_error(
+            "S-018: BLOCK missing or non-array 'abort_events' field");
     for (auto& ae : j["abort_events"])
         b.abort_events.push_back(AbortEvent::from_json(ae));
 
