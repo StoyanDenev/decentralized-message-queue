@@ -61,11 +61,12 @@ static size_t hash_mod(const Hash& h, size_t n) {
 // entire K → N range.
 //
 // Determinism: every node sees the same K, N, random_state and so picks
-// the same branch and the same indices. No fork height needed because no
-// chain history sits on the K > N/2 path — current regression tests run
-// with M ≤ 2, K ≤ M, N_registered ≤ 3, and they all hit the rejection
-// branch (m·2 ≤ N when M=1, N≥2; M=2, N=3 borderline below). Future
-// production deployments with larger M, K will exercise the FY branch.
+// the same branch and the same indices. No fork-height management is
+// needed because both branches consume the same SHA-256-derived randomness;
+// the branch choice is purely a performance optimization. Production
+// profiles range from M=K=3 (cluster / single_test / tactical) up to
+// M=7 K=5 (global / global_test), so larger pools naturally exercise
+// the partial-FY branch once N exceeds 2M.
 std::vector<size_t> select_m_creators(const Hash& random_state, size_t node_count, size_t m) {
     if (node_count < m)
         throw std::runtime_error("Not enough registered nodes for M creators");
