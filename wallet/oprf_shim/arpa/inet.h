@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+//
 // A2 Phase 6: Windows MSVC portability stub for liboprf.
 //
 // liboprf's source files #include <arpa/inet.h> for htons/htonl/etc.
