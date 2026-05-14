@@ -99,7 +99,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-033 | ✅ Mitigated | Merkle tree state commitment + Block.state_root + signing_bytes binding + apply/restore verification | `chain/chain.cpp::compute_state_root` | done |
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
-| S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must be in past); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `chain/chain.cpp::check_transactions` MERGE_BEGIN branch | v2.11 |
+| S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must lie entirely in past — leading `evidence_window_start ≤ b.index` check added to prevent integer overflow bypassing the threshold-arithmetic check); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `node/validator.cpp::check_transactions` MERGE_EVENT branch | v2.11 |
 
 ---
 

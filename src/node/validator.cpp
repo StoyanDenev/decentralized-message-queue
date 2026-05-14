@@ -761,6 +761,20 @@ BlockValidator::Result BlockValidator::check_transactions(
                 // history. Reject obviously-forged windows (future
                 // start, or window extending past the containing
                 // block).
+                //
+                // S-036 tighten: check `evidence_window_start <= b.index`
+                // up-front so the threshold-arithmetic check that
+                // follows cannot be bypassed by integer overflow
+                // (an attacker setting evidence_window_start near
+                // UINT64_MAX could make the sum wrap below b.index
+                // and falsely pass the original check; this leading
+                // bound rejects that case before the addition).
+                if (ev->evidence_window_start > b.index) {
+                    return {false, "MERGE_EVENT BEGIN evidence_window_start "
+                                 + std::to_string(ev->evidence_window_start)
+                                 + " is in the future (block height "
+                                 + std::to_string(b.index) + ")"};
+                }
                 if (threshold > 0
                     && ev->evidence_window_start + threshold > b.index) {
                     return {false, "MERGE_EVENT BEGIN evidence window "
