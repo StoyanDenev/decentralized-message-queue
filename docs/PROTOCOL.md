@@ -510,7 +510,7 @@ The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry i
 | 5  | GET_CHAIN                 | sync              | 1 MB  | `{from, count}` |
 | 6  | CHAIN_RESPONSE            | sync              | 16 MB | `{blocks, has_more}` (bootstrap-only) |
 | 7  | STATUS_REQUEST            | sync              | 1 MB  | `{}` |
-| 8  | STATUS_RESPONSE           | sync              | 1 MB  | `{height, genesis, head_hash, role, shard_id, wire_version, ...}` |
+| 8  | STATUS_RESPONSE           | sync              | 1 MB  | `{height, genesis}` (peer-discovery only; role/shard_id come from HELLO) |
 | 9  | ABORT_CLAIM               | committee         | 1 MB  | `AbortClaimMsg` JSON |
 | 10 | ABORT_EVENT               | gossip            | 1 MB  | `{block_index, prev_hash, event}` (event carries inline signed claims) |
 | 11 | EQUIVOCATION_EVIDENCE     | gossip            | 1 MB  | `EquivocationEvent` JSON |
