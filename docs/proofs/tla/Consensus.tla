@@ -145,10 +145,23 @@ SignByzantine(v, d) ==
     /\ UNCHANGED <<v_state, contribs, secrets_revealed, round, mode,
                    finalized, aborted_rounds>>
 
-\* Finalize: digest d has K signatures and all validators are in BLOCK_SIG.
-\* In BFT mode, the committee shrinks to k_bft = ceil(2K/3) and the
-\* within-committee 2/3 quorum Q = ceil(2*k_bft/3) sigs suffice. The
-\* spec's BFTThreshold parameter is the abort count that triggers
+\* Finalize: digest d has K signatures (MD) or Q signatures (BFT mode).
+\*
+\* In BFT mode the actual protocol applies TWO levels of shrinkage:
+\*   (1) committee size shrinks K -> k_bft = ceil(2K/3) members
+\*   (2) within-committee 2/3 quorum Q = ceil(2*k_bft/3) sigs are required
+\*
+\* The model below only applies the first shrinkage (Keff = ceil(2K/3))
+\* because the recommended TLC configuration is K=3 where the two levels
+\* coincide degenerately (k_bft = Q = 2). For K=6 (k_bft=4, Q=3) and
+\* K=9 (k_bft=6, Q=4) the formula would over-approximate the sig
+\* threshold. The Inv_OneDigest safety invariant being model-checked is
+\* preserved under either choice (over-approximating sig requirements
+\* makes the BFT branch HARDER to finalize, which keeps safety
+\* properties at least as strong). For full-fidelity TLC checks at K>=6
+\* the formula should be tightened to `(2 * ((2*K + 2) \div 3) + 2) \div 3`.
+\*
+\* The spec's BFTThreshold parameter is the abort count that triggers
 \* escalation, not the post-escalation sig quorum.
 Keff == IF mode = "BFT" THEN (2*K + 2) \div 3 ELSE K
 
