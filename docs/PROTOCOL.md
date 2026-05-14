@@ -934,6 +934,8 @@ seed → Shamir SSS (T-of-N, GF(2^8)) → per-share AEAD envelope
                               keyed by OPAQUE adapter export_key (Phase 7)
 ```
 
+> *Phase numbers above refer to the wallet's internal phase plan (see `wallet/PHASE6_PORTING_NOTES.md`): Phase 3 = passphrase-direct AEAD; Phase 5 = stub OPAQUE adapter (shipped in v1.x as a development scaffold); Phase 6 = real `libopaque`-vendored adapter (deferred to **v2.14** — gated on the Windows MSVC porting of upstream VLAs); Phase 7 = wallet flow that routes through the adapter (shipped). Both schemes share Phase 7's flow. See `docs/proofs/WalletRecovery.md` §Phase-numbering-note for the full mapping.*
+
 Recovery setup JSON (canonical, persisted to disk):
 ```
 { "version": 1,
