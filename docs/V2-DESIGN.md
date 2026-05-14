@@ -114,7 +114,7 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 
 ### v2.5 — Registry cache + persistence (S-032 closure)
 
-**Motivation.** Closes S-032. Already-recommended audit fix. Outlined in detail in `SECURITY.md` and the recent analysis. **Targeted for v1.5 ahead of full v2** because it's a pure runtime refactor with no wire-format change.
+**Motivation.** Closed S-032. Already-recommended audit fix. Outlined in detail in `SECURITY.md` and the recent analysis. Shipped as part of the v2 foundation (no wire-format change required — pure runtime refactor).
 
 **Mechanism.** Cache `registry_view_` on `Chain`. Update incrementally in `apply_transactions` for REGISTER/STAKE/UNSTAKE/DEREGISTER and the equivocation-slashing path. Persist in snapshot. Replace 8 call sites of `build_from_chain` with `chain.registry_view()`.
 

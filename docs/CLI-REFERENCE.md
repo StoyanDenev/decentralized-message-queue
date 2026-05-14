@@ -128,12 +128,12 @@ Separate executable from the `determ` daemon. Secret material never enters the c
 | Command | Purpose |
 |---|---|
 | `determ-wallet oprf-smoke` | Smoke-test libsodium primitives (ristretto255 scalar/point ops + Argon2id). Outputs sample scalars + a blinded point + a stretched key. |
-| `determ-wallet opaque-handshake --mode {register\|authenticate} --password <str> --guardian-id <0..255> [--record <hex>]` | Exercise the OPAQUE adapter directly. Stub adapter today (Phase 5); real libopaque pending Phase 6.1 MSVC porting (see `wallet/PHASE6_PORTING_NOTES.md`). |
+| `determ-wallet opaque-handshake --mode {register\|authenticate} --password <str> --guardian-id <0..255> [--record <hex>]` | Exercise the OPAQUE adapter directly. Currently the **development stub** adapter; the real `libopaque` integration is tracked as **v2.14** (real OPAQUE wallet recovery) in `docs/V2-DESIGN.md`. See `wallet/PHASE6_PORTING_NOTES.md` for the MSVC porting status that gates the v2.14 ship. |
 | `determ-wallet version` | Print version banner including current adapter suite name. |
 
-### Phase status check
+### Adapter status check
 
-The wallet's `is_stub()` flag exposes whether the linked OPAQUE adapter is the development stub (Phase 5) or the real libopaque implementation (Phase 6+). The stub is offline-grindable against a compromised guardian — see `docs/proofs/WalletRecovery.md` (FA12) for the concrete-security bounds and `wallet/PHASE6_PORTING_NOTES.md` for the integration status. The wallet binary's `version` command surfaces the active suite tag.
+The wallet's `is_stub()` flag exposes whether the linked OPAQUE adapter is the development stub or the real `libopaque` implementation (v2.14). The stub is offline-grindable against a compromised guardian — see `docs/proofs/WalletRecovery.md` (FA12) for the concrete-security bounds. The v2.14 ship replaces the stub with the real construction; once that lands, this `is_stub()` returns `false` for production builds. The wallet binary's `version` command surfaces the active suite tag.
 
 ## Exit codes
 

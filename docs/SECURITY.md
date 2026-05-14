@@ -10,8 +10,8 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **2** (S-035, plus T-001..T-004 informational) | **4** |
-| Partially mitigated | **1** (S-030) | — | — | — | **1** |
+| Open (untouched) | **0** | **0** | **2** (S-016, S-018) | **1** (S-035 unit-tests/CI; engineering-culture item) | **3** |
+| Partially mitigated | **1** (S-030) | — | — | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **2** |
 | Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **12** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033) | — | **7** (S-021, S-022, S-024, S-026, S-027, S-028, S-029) | **24** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
@@ -99,6 +99,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-033 | ✅ Mitigated | Merkle tree state commitment + Block.state_root + signing_bytes binding + apply/restore verification | `chain/chain.cpp::compute_state_root` | done |
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
 | S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
+| S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must be in past); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `chain/chain.cpp::check_transactions` MERGE_BEGIN branch | v2.11 |
 
 ---
 
@@ -996,7 +997,7 @@ These findings have been addressed in current code. Listed for completeness so a
 
 **rev.8 added** `EquivocationEvent` (two valid Ed25519 sigs over distinct digests at the same height by the same key) → `pending_equivocation_evidence_` → baked into next block → `apply_transactions` zeroes equivocator's stake AND sets `inactive_from = h+1`. External-submission path via `submit_equivocation` RPC. Verified end-to-end in [`tools/test_equivocation_slashing.sh`](../tools/test_equivocation_slashing.sh).
 
-The narrower ContribMsg-level case is still open as S-006.
+The narrower ContribMsg-level case is now also closed (S-006 closure in-session): `on_contrib` detects a same-generation duplicate with a different commitment, builds an `EquivocationEvent` from the two contrib commitments + their Ed25519 sigs, and routes it through the same `pending_equivocation_evidence_` buffer the block-level path uses. No new wire format or validator rule was needed — the existing `EquivocationEvent` struct and `check_equivocation_events` validator are digest-agnostic ("two distinct digests, both sigs verify under the equivocator's registered key"), so the contrib commitments slot in cleanly.
 
 ### M-B — Hybrid-mode K-of-M liveness gap → BFT escalation (was Audit 2.1)
 
@@ -1142,18 +1143,22 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
-- High findings: 0 open (S-010 + S-011 closed via stake-pricing formula + FA6 equivocation slashing bound)
-- Medium findings: 2 open (S-016, S-018) — both bounded ~hours-of-work each; S-016 overlaps with v2.7 F2 scope so deferring is correct
+- High findings: 0 open (S-006 / S-010 / S-011 all closed in-session)
+- Medium findings: 2 open (S-016, S-018) — both bounded ~hours-of-work each; S-016 overlaps with v2.7 F2 scope so deferring is correct; S-018 is mechanical (2-3 days)
+- Low/Op findings: 1 open (S-035 unit tests / CI — engineering culture); 7 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
+- EXTENDED-mode-specific: 1 partially mitigated (S-036 — bounds-check shipped; full closure via on-chain SHARD_TIP records is v2.11)
+- 24 findings mitigated in-session total (5 Critical + 12 High + 7 Low/Op)
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)
+- v2.25 + v2.26 added to design (Theme 9 DSSO — distributed IdP w/ T-OPAQUE; depends on v2.10 + v2.14)
 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
 1. ~~Track A small items~~ — **complete in-session**.
 2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
 3. v2.10 threshold randomness aggregation per plan.md A11 (~1 week, includes BLS12-381 vendoring + DKG).
 
-Total remaining: ~2 weeks to "production-deployment-ready" posture.
+Total remaining: ~2 weeks to "production-deployment-ready" posture. Beyond that (v2.X), Theme 8 (privacy + interop) + Theme 9 (DSSO) extend the design space toward god-protocol completeness for Determ's lane.
 
 ---
 
