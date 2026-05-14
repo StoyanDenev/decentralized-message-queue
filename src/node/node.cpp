@@ -519,6 +519,9 @@ chain_loaded:
     gossip_.set_chain_identity(cfg_.chain_role, cfg_.shard_id);
     // S-014 (gossip side): per-peer-IP token bucket. 0/0 disables (default).
     gossip_.set_rate_limit(cfg_.gossip_rate_per_sec, cfg_.gossip_rate_burst);
+    // S-027: propagate operator log-volume flag to the gossip layer
+    // so the chatty per-connection diagnostic lines respect it.
+    gossip_.set_log_quiet(cfg_.log_quiet);
     gossip_.on_block         = [this](auto& b)   { on_block(b); };
     gossip_.on_tx            = [this](auto& tx)  { on_tx(tx); };
     gossip_.on_contrib       = [this](auto& c)   { on_contrib(c); };
@@ -1595,7 +1598,7 @@ void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
         pending_inbound_first_seen_[key] = chain_.height();
         ++added;
     }
-    if (added > 0) {
+    if (added > 0 && !cfg_.log_quiet) {
         std::cout << "[node] inbound receipt bundle: src_shard=" << src_shard
                   << " block=" << src_block.index
                   << " accepted=" << added

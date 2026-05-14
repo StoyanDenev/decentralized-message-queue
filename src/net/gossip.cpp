@@ -49,7 +49,9 @@ void GossipNet::accept_loop() {
 void GossipNet::connect(const std::string& host, uint16_t port) {
     async_connect(io_, host, port,
         [this, host, port](std::shared_ptr<Peer> peer) {
-            std::cout << "[gossip] connected to " << host << ":" << port << "\n";
+            if (!log_quiet_) {
+                std::cout << "[gossip] connected to " << host << ":" << port << "\n";
+            }
             attach(peer);
             if (!our_domain_.empty())
                 // rev.9 fix: outbound HELLO must carry our role + shard_id so
@@ -275,7 +277,9 @@ void GossipNet::handle_peer_closed(std::shared_ptr<Peer> peer) {
     std::lock_guard<std::mutex> lk(peers_mutex_);
     peers_.erase(std::remove_if(peers_.begin(), peers_.end(),
         [&](auto& p) { return p.get() == peer.get(); }), peers_.end());
-    std::cout << "[gossip] peer disconnected: " << peer->address() << "\n";
+    if (!log_quiet_) {
+        std::cout << "[gossip] peer disconnected: " << peer->address() << "\n";
+    }
 }
 
 void GossipNet::broadcast(const Message& msg) {

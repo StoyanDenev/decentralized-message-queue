@@ -33,6 +33,14 @@ public:
     //   gossip (a single node sends a few msgs/s steady-state; bursts
     //   on round transitions). Adjust upward for high-throughput shards.
     void set_rate_limit(double per_sec, double burst);
+
+    // S-027 operator hygiene: gate the chatty per-connection
+    // diagnostic lines (`[gossip] connected to ...`,
+    // `[gossip] peer disconnected: ...`) behind `quiet=true`.
+    // WARN/ERROR diagnostics surface regardless. Default `false`
+    // preserves the current verbose-listen behavior.
+    void set_log_quiet(bool quiet) { log_quiet_ = quiet; }
+
     // rev.9 B2c.5: this node's chain identity, included in HELLOs we
     // send so peers can tag us. Default SINGLE/0 preserves rev.7/8
     // behavior on chains where roles aren't used.
@@ -101,6 +109,11 @@ private:
     // S-014 (gossip side): per-peer-IP token bucket, keyed on bare IP
     // (port stripped). Shared limiter type with RpcServer.
     RateLimiter                              rate_limiter_;
+
+    // S-027: operator log-volume flag for the chatty per-connection
+    // diagnostic lines. Default `false` (verbose); operators set via
+    // `set_log_quiet(true)` on init.
+    bool                                     log_quiet_{false};
 };
 
 } // namespace determ::net
