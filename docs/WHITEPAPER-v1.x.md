@@ -94,7 +94,7 @@ Each block is produced in two phases by a K-member committee selected determinis
 
 **Phase 1 → 2 transition.** Once K phase-1 commits gather:
 - `tx_root` = SHA-256 over the union of all K transaction lists in canonical order.
-- `delay_seed` = SHA-256 over `prev_hash ‖ tx_root ‖ sorted(dh_input_1, ..., dh_input_K)`.
+- `delay_seed` = SHA-256 over `block_index ‖ prev_hash ‖ tx_root ‖ ordered(dh_input_1, ..., dh_input_K)` — the `dh_input`s appear in committee-selection order (i.e., `creators[i]`'s commitment at position `i`), not sorted; both producer and validator iterate the K committee members in the same fixed order so the hash matches across nodes (`src/node/producer.cpp::compute_delay_seed`).
 
 **Phase 2 (BlockSig).** Each committee member:
 1. Reveals `secret_i` via `BlockSigMsg{block_index, signer, delay_output, dh_secret, ed_sig}` where `dh_secret = secret_i`.
@@ -102,7 +102,7 @@ Each block is produced in two phases by a K-member committee selected determinis
 3. Receivers verify `SHA-256(dh_secret ‖ pubkey_i) == sender's dh_input`. Mismatch rejects the message; the committee member is treated as offline for this round.
 
 **Finalize.** Once K block-sigs gather:
-- `delay_output` = SHA-256 over `delay_seed ‖ sorted(secret_1, ..., secret_K)`.
+- `delay_output` = SHA-256 over `delay_seed ‖ ordered(secret_1, ..., secret_K)` — secrets appear in the same committee-selection order as their `dh_input` commitments, not sorted (`src/node/producer.cpp::compute_block_rand`).
 - `cumulative_rand` = SHA-256 over `prev_cumulative_rand ‖ delay_output`.
 - The block is finalized with `consensus_mode = MUTUAL_DISTRUST`.
 
