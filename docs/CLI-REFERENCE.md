@@ -79,6 +79,40 @@ To bootstrap from a snapshot, set `snapshot_path` in the node's `config.json` an
 | `determ state-proof --ns {a\|s\|r\|d\|b\|k\|c} --key <name> [--rpc-port N]` | Fetch a Merkle inclusion proof for any state entry. RPC-exposed namespaces: `a` = accounts, `s` = stakes, `r` = registrants, `d` = DApp registry (v2.18, key = DApp's owning domain), `b` = abort_records (S-032), `k` = genesis-pinned constants, `c` = A1 counters (via the composite `k:c:<name>` lookup). The full ten-namespace state tree (PROTOCOL.md §4.1.1) also has `i/m/p` but those use composite keys and aren't surfaced by this RPC in v2.2. Light-client primitive: the proof verifies against the current `state_root`, which is committed into the head block's `block_hash` (compute_hash via signing_bytes; the chain's `prev_hash` chain transitively authenticates it forward). |
 | `determ verify-state-proof [--in <file>] [--state-root <hex64>]` | Local light-client demonstrator: verifies a state-proof response via `crypto::merkle_verify` without trusting the responding node. Reads JSON from `--in` or stdin. Optional `--state-root <hex64>` pins an externally-trusted root (real light-client mode); without it, the proof's self-claimed root is used (self-consistency check). Prints `OK` + structured summary on success; `FAIL` + reason on tampering / mismatch. Pair with `state-proof`: `determ state-proof --ns a --key alice \| determ verify-state-proof --state-root <trusted-hex>`. |
 
+### Complete v2.2 trustless light-client verification flow
+
+The seven CLIs above (`state-root`, `headers`, `verify-headers`, `verify-block-sigs`, `state-proof`, `verify-state-proof`, plus `validators --json` / `committee --json` for committee pubkey export) compose into an end-to-end trustless verification pipeline. Each step verifies a different property locally without trusting the responding node, gated only by an externally-pinned `--state-root` / committee pubkey set:
+
+```bash
+# 1. Fetch recent headers (untrusted full node OK; we'll verify them).
+$DETERM headers --rpc-port 8771 --from 0 --count 100 > headers.json
+
+# 2. Verify the prev_hash chain (catches re-ordered / spliced headers).
+$DETERM verify-headers --in headers.json   # OK on valid chain
+
+# 3. Get the committee pubkeys for K-of-K signature verification.
+#    For genesis-pinned light clients, the operator hard-codes this set;
+#    for chains using key rotation, derive from a previously-verified
+#    state-proof of the registrants_ map (namespace `r`).
+$DETERM validators --rpc-port 8771 --json > committee.json
+
+# 4. Verify K-of-K committee signatures on each header.
+$DETERM verify-block-sigs --header headers.json --committee committee.json
+
+# 5. Extract a verified state_root from one of the headers (any will do
+#    since we've verified the chain links + signatures).
+STATE_ROOT=$(jq -r '.headers[-1].state_root' headers.json)
+
+# 6. Verify any state field against the pinned state_root.
+$DETERM state-proof --rpc-port 8771 --ns a --key alice > proof.json
+$DETERM verify-state-proof --in proof.json --state-root "$STATE_ROOT"
+
+# 7. (Alternative for whole-state) Verify a downloaded snapshot.
+$DETERM snapshot inspect --in snapshot.json --state-root "$STATE_ROOT"
+```
+
+What this proves: a malicious full node serving headers / state-proofs / snapshots is caught at one of these checks. The trust chain bottoms out at the externally-pinned committee + the chain-of-hashes link from the verified header forward; the state_root anchor defeats fabricated-root attacks; the committee-sig check defeats forged-header attacks; the prev_hash chain check defeats spliced-header attacks.
+
 ## DApp substrate RPC (v2.18 + v2.19)
 
 The DApp's identity is its owning domain (`tx.from` at registration). There is no separate "dapp_id" — the registered Determ domain IS the dapp identifier. CLI verbs that name a DApp use `--from <domain>` for tx-authoring and `--domain <D>` for queries.
