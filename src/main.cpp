@@ -8,6 +8,7 @@
 #include <determ/chain/params.hpp>
 #include <determ/crypto/keys.hpp>
 #include <determ/crypto/merkle.hpp>
+#include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
@@ -154,6 +155,9 @@ In-process tests (deterministic, no network):
   determ test-s018-json-validation            S-018 json_require<T> field-name diagnostics
   determ test-merkle                          v2.1 Merkle primitives (root, proof, verify,
                                               tampering detection, domain separation)
+  determ test-committee-selection             Committee-selection primitives (S-020 hybrid
+                                              select_m_creators + select_after_abort_m
+                                              + epoch_committee_seed determinism)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -3399,6 +3403,128 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": merkle " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the committee-
+    // selection primitives. Exercises crypto::select_m_creators
+    // (S-020 hybrid rejection/Fisher-Yates) and select_after_abort_m
+    // (deterministic abort-shifted re-selection). These are the
+    // foundation of FA1 (safety), FA2 (censorship), FA5 (BFT safety),
+    // and FA8 (regional sharding) — every committee at every round
+    // is derived through these functions.
+    if (cmd == "test-committee-selection") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a deterministic random_state seed for tests.
+        auto seed = [](uint64_t i) {
+            SHA256Builder b; b.append(i); return b.finalize();
+        };
+
+        // 1. Determinism: same (rand, N, K) → same indices.
+        {
+            auto a = select_m_creators(seed(1), 100, 5);
+            auto b = select_m_creators(seed(1), 100, 5);
+            check(a == b, "same (rand, N, K) -> identical indices");
+        }
+
+        // 2. Different seed → different indices (cryptographic
+        //    determinism: deterministic from the seed, but seed-
+        //    sensitive).
+        {
+            auto a = select_m_creators(seed(1), 100, 5);
+            auto b = select_m_creators(seed(2), 100, 5);
+            check(a != b, "different seed -> different indices");
+        }
+
+        // 3. All indices are distinct (without-replacement
+        //    sampling).
+        {
+            auto v = select_m_creators(seed(42), 100, 7);
+            std::set<size_t> uniq(v.begin(), v.end());
+            check(uniq.size() == v.size() && v.size() == 7,
+                  "select_m_creators returns K distinct indices");
+        }
+
+        // 4. All indices are in range [0, N).
+        {
+            auto v = select_m_creators(seed(42), 50, 10);
+            bool in_range = true;
+            for (size_t i : v) if (i >= 50) { in_range = false; break; }
+            check(in_range, "all selected indices in [0, N)");
+        }
+
+        // 5. Rejection-sampling branch (2K ≤ N): exercised at K=3, N=20.
+        //    The S-020 closure switches branches at this threshold.
+        {
+            auto v = select_m_creators(seed(7), 20, 3);
+            check(v.size() == 3, "rejection-sampling branch (2K<=N): K=3, N=20 returns 3");
+        }
+
+        // 6. Partial-Fisher-Yates branch (2K > N): exercised at K=8, N=10.
+        //    K/N > 0.5 forces the FY branch. Output must still be K
+        //    distinct in-range indices.
+        {
+            auto v = select_m_creators(seed(11), 10, 8);
+            std::set<size_t> uniq(v.begin(), v.end());
+            bool ok = v.size() == 8 && uniq.size() == 8;
+            for (size_t i : v) if (i >= 10) { ok = false; break; }
+            check(ok, "partial-FY branch (2K>N): K=8, N=10 returns 8 distinct in-range");
+        }
+
+        // 7. Edge case: K = N (all validators on the committee).
+        //    Should return every index 0..N-1 in some order.
+        {
+            auto v = select_m_creators(seed(99), 5, 5);
+            std::set<size_t> uniq(v.begin(), v.end());
+            bool covers_all = uniq.size() == 5;
+            for (size_t i = 0; i < 5; ++i)
+                if (uniq.count(i) != 1) { covers_all = false; break; }
+            check(covers_all, "K=N: returns every index 0..N-1");
+        }
+
+        // 8. Edge case: K = 1 → single index in [0, N).
+        {
+            auto v = select_m_creators(seed(1), 100, 1);
+            check(v.size() == 1 && v[0] < 100,
+                  "K=1: returns one in-range index");
+        }
+
+        // 9. select_after_abort_m: abort-shifted re-selection is
+        //    deterministic + distinct.
+        {
+            auto original = select_m_creators(seed(7), 20, 3);
+            // Build an abort hash from a synthesized event.
+            Hash abort_h = compute_abort_hash(1, "node_x", 1234, seed(7));
+            auto shifted = select_after_abort_m(original, abort_h, 20);
+            // Same call again with same inputs → identical result.
+            auto shifted2 = select_after_abort_m(original, abort_h, 20);
+            check(shifted == shifted2,
+                  "select_after_abort_m is deterministic");
+            check(shifted.size() == original.size(),
+                  "select_after_abort_m preserves committee size");
+            std::set<size_t> uniq(shifted.begin(), shifted.end());
+            check(uniq.size() == shifted.size(),
+                  "select_after_abort_m returns distinct indices");
+        }
+
+        // 10. epoch_committee_seed is deterministic + seed-sensitive.
+        {
+            Hash s1 = epoch_committee_seed(seed(1), ShardId{0});
+            Hash s2 = epoch_committee_seed(seed(1), ShardId{0});
+            Hash s3 = epoch_committee_seed(seed(1), ShardId{1});
+            check(s1 == s2, "epoch_committee_seed is deterministic");
+            check(s1 != s3, "epoch_committee_seed varies by shard_id");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": committee-selection " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

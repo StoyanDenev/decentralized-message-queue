@@ -45,9 +45,10 @@
 #                         (no multi-node clusters, no network). These
 #                         are the `determ test-*` subcommand wrappers:
 #                         atomic_scope, composable_batch, dapp_register,
-#                         dapp_call, s018_json_validation, merkle.
-#                         Each runs in <5s with no flakes. Useful for
-#                         quick iteration during development.
+#                         dapp_call, s018_json_validation, merkle,
+#                         committee_selection. Each runs in <5s with
+#                         no flakes. Useful for quick iteration during
+#                         development.
 
 set -u
 cd "$(dirname "$0")/.."
@@ -72,7 +73,7 @@ ONLY_PATTERN="${ONLY_PATTERN:-}"
 # These are wrappers around `determ test-*` subcommands — no network,
 # no clusters, <5s each, no flakes. Useful for dev iteration.
 if [ "${FAST:-0}" = "1" ]; then
-    ONLY_PATTERN='test_(atomic_scope|composable_batch|dapp_register|dapp_call|s018_json_validation|merkle)\.sh$'
+    ONLY_PATTERN='test_(atomic_scope|composable_batch|dapp_register|dapp_call|s018_json_validation|merkle|committee_selection)\.sh$'
     echo "FAST=1 mode: ONLY_PATTERN set to in-process tests only"
     echo
 fi
