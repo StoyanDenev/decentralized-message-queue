@@ -63,7 +63,7 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 | Command | Purpose |
 |---|---|
 | `determ snapshot create [--out FILE] [--headers N] [--rpc-port N]` | Dump current chain state (accounts/stakes/registrants/dedup + tail headers) |
-| `determ snapshot inspect --in FILE` | Validate + summarize a snapshot file (round-trip via `restore_from_snapshot`) |
+| `determ snapshot inspect --in FILE [--state-root <hex64>]` | Validate + summarize a snapshot file (round-trip via `restore_from_snapshot` — S-033 + S-038 gates fire on tampered state). Prints `block_index`, `head_hash`, `state_root`, account/stake/registrant counts, and chain parameters. Optional `--state-root` pins an externally-trusted root for trustless-fast-sync verification: prints `✓ matches --state-root` on agreement; exits non-zero with `FAIL` diagnostic if the snapshot's state_root doesn't match the supplied root (defeats a tampered snapshot pointed at a chain the operator doesn't trust). |
 | `determ snapshot fetch --peer host:port --out FILE [--headers N]` | Pull a snapshot from a running node over the gossip wire |
 
 To bootstrap from a snapshot, set `snapshot_path` in the node's `config.json` and `determ start`. The node will skip per-block replay and install state directly.

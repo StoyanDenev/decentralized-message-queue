@@ -62,7 +62,10 @@ Usage:
   determ show-account <address>              Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash>                      Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
-  determ snapshot inspect --in f             Validate + summarize a snapshot file (round-trip check)
+  determ snapshot inspect --in f [--state-root <hex64>]
+                                              Validate + summarize a snapshot file (round-trip check);
+                                              optional --state-root pins an externally-trusted root for
+                                              trustless-fast-sync verification
   determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
   determ peers                               List connected peers
   determ balance [<domain>]                  Show domain balance
@@ -644,17 +647,31 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
     }
 }
 
-// determ snapshot inspect --in file.json
+// determ snapshot inspect --in file.json [--state-root <hex64>]
 //   Round-trips a snapshot through Chain::restore_from_snapshot and
 //   prints a human-readable summary. Validates JSON format, version,
-//   and head_hash consistency (rejects loudly on mismatch). Useful
+//   head_hash consistency, AND post-restore state_root (S-033 + S-038
+//   gates: restore_from_snapshot already rejects on mismatch). Useful
 //   before staging a snapshot for fast-bootstrap of a new node.
+//
+//   Optional --state-root <hex64>: pin an externally-trusted state
+//   root. Inspection succeeds only if the snapshot's tail-head
+//   state_root matches. This is the trustless-fast-sync gate from a
+//   light-client POV: a client that has verified the head's state
+//   commitment via header-sync can use this to confirm a snapshot it
+//   downloaded matches that commitment, with zero trust in the
+//   snapshot's origin (S-033 + S-038 closure path; complements
+//   `determ verify-state-proof` for per-field queries).
 static int cmd_snapshot_inspect(int argc, char** argv) {
     std::string in_path;
-    for (int i = 0; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--in") in_path = argv[i + 1];
+    std::string expected_state_root_hex;
+    for (int i = 0; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--in")          in_path = argv[i + 1];
+        else if (std::string(argv[i]) == "--state-root") expected_state_root_hex = argv[i + 1];
+    }
     if (in_path.empty()) {
-        std::cerr << "Usage: determ snapshot inspect --in <file>\n";
+        std::cerr << "Usage: determ snapshot inspect --in <file> "
+                     "[--state-root <hex64>]\n";
         return 1;
     }
     try {
@@ -662,12 +679,21 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
         if (!f) { std::cerr << "Cannot open " << in_path << "\n"; return 1; }
         json snap = json::parse(f);
         chain::Chain c = chain::Chain::restore_from_snapshot(snap);
+
+        // Compute the snapshot's restored state_root for display +
+        // optional comparison against an externally-trusted root.
+        // restore_from_snapshot already verified the snapshot-stored
+        // state_root matches the recomputed one (S-033 + S-038 gate);
+        // this is the read-out + the external-pin comparison.
+        Hash restored_root = c.compute_state_root();
+
         std::cout << "snapshot OK: " << in_path << "\n";
         std::cout << "  block_index : "
                   << (c.empty() ? 0 : c.head().index) << "\n";
         std::cout << "  head_hash   : "
                   << (c.empty() ? std::string{} : to_hex(c.head_hash()))
                   << "\n";
+        std::cout << "  state_root  : " << to_hex(restored_root) << "\n";
         std::cout << "  accounts    : " << c.accounts().size()    << "\n";
         std::cout << "  stakes      : " << c.stakes().size()      << "\n";
         std::cout << "  registrants : " << c.registrants().size() << "\n";
@@ -676,6 +702,30 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
         std::cout << "  shard_count : " << c.shard_count()        << "\n";
         std::cout << "  shard_id    : " << c.my_shard_id()        << "\n";
         std::cout << "  tail headers: " << c.height()             << "\n";
+
+        // External-trusted-root pin (trustless-fast-sync gate).
+        if (!expected_state_root_hex.empty()) {
+            if (expected_state_root_hex.size() != 64) {
+                std::cerr << "Error: --state-root must be 64 hex chars "
+                             "(32 bytes), got "
+                          << expected_state_root_hex.size() << "\n";
+                return 1;
+            }
+            Hash expected = from_hex_arr<32>(expected_state_root_hex);
+            if (expected != restored_root) {
+                std::cerr << "FAIL: snapshot state_root does NOT match "
+                             "supplied --state-root\n";
+                std::cerr << "  snapshot's state_root: "
+                          << to_hex(restored_root) << "\n";
+                std::cerr << "  supplied state_root:   "
+                          << to_hex(expected) << "\n";
+                std::cerr << "  (snapshot may have been tampered with, "
+                             "or was produced against a different chain "
+                             "than the one you trust)\n";
+                return 1;
+            }
+            std::cout << "  trusted root: ✓ matches --state-root\n";
+        }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
