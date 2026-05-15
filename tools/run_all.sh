@@ -41,6 +41,13 @@
 #   ONLY_PATTERN='regex'  Only run tests whose path matches.
 #   QUIET=1               Suppress per-test stdout; only print
 #                         summary at the end.
+#   FAST=1                Run ONLY the deterministic in-process tests
+#                         (no multi-node clusters, no network). These
+#                         are the `determ test-*` subcommand wrappers:
+#                         atomic_scope, composable_batch, dapp_register,
+#                         dapp_call, s018_json_validation. Each runs
+#                         in <5s with no flakes. Useful for quick
+#                         iteration during development.
 
 set -u
 cd "$(dirname "$0")/.."
@@ -60,6 +67,15 @@ START_TIME=$(date +%s)
 
 SKIP_PATTERN="${SKIP_PATTERN:-}"
 ONLY_PATTERN="${ONLY_PATTERN:-}"
+
+# FAST=1 short-circuits to the deterministic in-process subset.
+# These are wrappers around `determ test-*` subcommands — no network,
+# no clusters, <5s each, no flakes. Useful for dev iteration.
+if [ "${FAST:-0}" = "1" ]; then
+    ONLY_PATTERN='test_(atomic_scope|composable_batch|dapp_register|dapp_call|s018_json_validation)\.sh$'
+    echo "FAST=1 mode: ONLY_PATTERN set to in-process tests only"
+    echo
+fi
 
 for t in tools/test_*.sh; do
     # Filtering knobs.
