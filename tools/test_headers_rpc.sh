@@ -17,6 +17,10 @@
 #      starting at index N.
 #   5. Out-of-range --from returns empty headers array (not error).
 #   6. Server caps count at 256 (request 1000 → max 256).
+#   7. Each header carries `block_hash` (server-computed since
+#      signing_bytes uses the heavy fields the client doesn't have),
+#      and the prev_hash chain links correctly between consecutive
+#      headers: header[i].prev_hash == header[i-1].block_hash.
 #
 # Run from repo root: bash tools/test_headers_rpc.sh
 set -u
@@ -204,6 +208,25 @@ r = json.load(open('$T/hdrs4.json'))
 print('true' if r['count'] <= 256 else 'false')
 ")
 assert "$cap_ok" "count clamped at 256 server-side"
+
+echo
+echo "=== 9. Each header has block_hash + prev_hash chain links ==="
+chain_ok=$(python -c "
+import json
+r = json.load(open('$T/hdrs.json'))
+hdrs = r['headers']
+if len(hdrs) < 2:
+    print('true')  # too short to test chain; pass
+else:
+    ok = True
+    for i in range(1, len(hdrs)):
+        if 'block_hash' not in hdrs[i-1]:
+            ok = False; break
+        if hdrs[i]['prev_hash'] != hdrs[i-1]['block_hash']:
+            ok = False; break
+    print('true' if ok else 'false')
+")
+assert "$chain_ok" "block_hash present + prev_hash links to previous block_hash"
 
 echo
 echo "=== Test summary ==="

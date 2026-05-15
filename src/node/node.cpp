@@ -2458,7 +2458,8 @@ json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
     if (from_index < height) {
         uint64_t end = std::min<uint64_t>(from_index + count, height);
         for (uint64_t i = from_index; i < end; ++i) {
-            json h = chain_.at(i).to_json();
+            const auto& blk = chain_.at(i);
+            json h = blk.to_json();
             // Heavy collections — stripped for header-only sync.
             // These are precisely the fields the v2.2 light client
             // doesn't need (it queries individual tx data via
@@ -2469,6 +2470,15 @@ json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
             h.erase("cross_shard_receipts");
             h.erase("inbound_receipts");
             h.erase("initial_state");
+            // Light clients need block_hash to verify the prev_hash
+            // chain (each subsequent header's prev_hash should equal
+            // this header's block_hash). compute_hash uses
+            // signing_bytes which includes the heavy fields the client
+            // doesn't have, so the server-side hash is included
+            // explicitly here. The client trusts this value indirectly
+            // via committee signatures on compute_block_digest (which
+            // *is* recomputable from header fields alone).
+            h["block_hash"] = to_hex(blk.compute_hash());
             headers.push_back(std::move(h));
         }
     }
