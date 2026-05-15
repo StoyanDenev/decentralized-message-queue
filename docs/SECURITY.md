@@ -1285,7 +1285,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 0 open (S-006 / S-010 / S-011 all closed in-session)
 - Medium findings: 0 fully open; 1 mitigated in-session (S-018 — every attack-relevant wire-format consumer hardened via `json_require<T>` / `json_require_hex` helpers); 1 partially mitigated (S-016 via Option 2 time-ordered admission; v2.7 F2 closes S-016 fully via Option 1 intersection commitment)
-- Low/Op findings: 1 open (S-035 unit tests / CI — engineering culture); 7 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
+- Low/Op findings: 0 fully open; 1 partially mitigated (S-035 — Option 3 path-portability shipped in-session via `tools/common.sh`; Options 1 [gtest seed] + 2 [deterministic-simulation framework] outstanding as v1.x quality work, not blocking); 8 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
 - EXTENDED-mode-specific: 1 partially mitigated (S-036 — bounds-check shipped; full closure via on-chain SHARD_TIP records is v2.11)
 - 27 findings mitigated in-session total (5 Critical + 13 High + 1 Medium + 8 Low/Op)
 - Track A remaining: **none — Track A complete**
