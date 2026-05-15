@@ -20,9 +20,9 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 | Command | Returns |
 |---|---|
 | `determ status [--rpc-port N]` | Chain head, head_hash, role, shard_id, epoch_index, peer_count, mempool, mode counters + `protections` block (current state of every operator-tunable security/log flag — `rpc_localhost_only`, `rpc_hmac_auth`, `rpc_rate_limit`, `gossip_rate_limit`, `log_quiet`, `bft_enabled`, `sharding_mode`). Monitoring systems can alert on flag drift in production. |
-| `determ peers [--rpc-port N]` | Connected peer addresses |
+| `determ peers [--json] [--rpc-port N]` | Connected peer addresses. Default: one host:port per line. `--json` emits the raw RPC array (`["host:port", ...]`). |
 | `determ show-block <i> [--rpc-port N]` | Full block JSON at index `i` |
-| `determ chain-summary [--last N] [--rpc-port N]` | Compact view of last `N` blocks (default 10) |
+| `determ chain-summary [--last N] [--json] [--rpc-port N]` | Compact view of last `N` blocks (default 10). `--json` emits the raw RPC response (`{blocks: [...], height, total_supply, genesis_total, accumulated_subsidy, accumulated_inbound, accumulated_slashed, accumulated_outbound}` — the A1 unitary-supply counters). |
 | `determ validators [--json] [--rpc-port N]` | Registered validator pool (domain, ed_pub, stake, active_from). Default: human-readable table. `--json` emits the raw RPC array verbatim — feeds directly into `verify-block-sigs --committee` for light-client K-of-K verification. |
 | `determ committee [--json] [--rpc-port N]` | Current epoch's K-of-K committee (deterministic from chain state). `--json` flag same as for `validators` — emits the raw RPC array shape `verify-block-sigs --committee` consumes. |
 | `determ show-account <addr> [--rpc-port N]` | Balance + nonce + registry record + stake for any address |

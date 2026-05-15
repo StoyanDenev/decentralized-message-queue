@@ -823,19 +823,28 @@ static int cmd_validators(int argc, char** argv) {
     return 0;
 }
 
-// determ chain-summary [--last N] [--rpc-port N]
+// determ chain-summary [--last N] [--json] [--rpc-port N]
 //   Prints a compact summary of the last N blocks (default 10).
+//   Default output is human-readable; --json emits the raw RPC
+//   response verbatim (the {blocks, height, total_supply, ...}
+//   object including A1 supply counters).
 static int cmd_chain_summary(int argc, char** argv) {
     uint32_t last_n = 10;
-    for (int i = 0; i < argc - 1; ++i) {
-        if (std::string(argv[i]) == "--last") {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--last" && i + 1 < argc)
             last_n = static_cast<uint32_t>(std::stoul(argv[i + 1]));
-        }
+        else if (a == "--json") json_out = true;
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         json params = {{"last_n", last_n}};
         auto result = rpc::rpc_call("127.0.0.1", port, "chain_summary", params);
+        if (json_out) {
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
         // A1: chain_summary now returns an object {blocks: [...], total_supply,
         // genesis_total, expected_total, accumulated_*}. Backward-compat note:
         // an array result (legacy server) is still accepted as the blocks list.
@@ -1216,10 +1225,21 @@ static int cmd_show_tx(int argc, char** argv) {
     return 0;
 }
 
+// determ peers [--json] [--rpc-port N]
+//   List connected peers. Default: one host:port per line. --json
+//   emits the raw RPC array verbatim (one JSON array of strings).
 static int cmd_peers(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "peers");
+        if (json_out) {
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
         if (result.empty()) { std::cout << "(no peers connected)\n"; return 0; }
         for (auto& p : result) std::cout << "  " << p.get<std::string>() << "\n";
     } catch (std::exception& e) {
