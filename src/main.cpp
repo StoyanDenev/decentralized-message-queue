@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/node/node.hpp>
+#include <determ/node/producer.hpp>
 #include <determ/rpc/rpc.hpp>
 #include <determ/chain/chain.hpp>
 #include <determ/chain/block.hpp>
@@ -114,6 +115,14 @@ State commitment + light-client (v2.1 + v2.2):
                                               (for extending a previously-verified range).
                                               Pure chain-of-hashes integrity check; does
                                               not verify committee signatures.
+  determ verify-block-sigs --header <file>   Verify K-of-K committee Ed25519 signatures
+                           --committee <f>   on a single block header against a supplied
+                           [--bft]           committee pubkey map. --header accepts a
+                                              single-block JSON or `determ headers`
+                                              envelope. --committee is a JSON array of
+                                              {domain, ed_pub} entries (or {members: [...]}
+                                              shape). --bft allows sentinel-zero slots
+                                              for BFT-mode threshold = ceil(2K/3).
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
   determ submit-dapp-register --priv <hex> --from <domain>
@@ -377,6 +386,219 @@ static int cmd_show_block(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// v2.2 light-client committee-signature verifier.
+//
+// Usage: determ verify-block-sigs --header <file> --committee <file>
+//                                  [--bft]
+//
+// Reads a single block header (from `determ headers` or `show-block`)
+// and a committee pubkey map, then verifies that each `creators[i]`'s
+// `creator_block_sigs[i]` is a valid Ed25519 signature over
+// `compute_block_digest(b)` under the pubkey associated with that
+// creator's domain.
+//
+// The committee file is a JSON object with a `members` array — same
+// shape the `committee` RPC returns:
+//
+//   {
+//     "members": [
+//       {"domain": "node1", "ed_pub": "<64-char hex>"},
+//       {"domain": "node2", "ed_pub": "<64-char hex>"},
+//       ...
+//     ]
+//   }
+//
+// (Or accept the raw committee RPC response directly — the response is
+// the array itself.)
+//
+// Optional `--bft`: in BFT mode the required threshold is
+// Q = ceil(2 * |creators| / 3) instead of full K-of-K. Without this
+// flag, every creators[i] must have a non-zero verifying signature
+// (MD-mode K-of-K).
+//
+// Returns 0 on success with a structured summary; non-zero with a FAIL
+// diagnostic on signature mismatch or missing committee member.
+//
+// Pure committee-signature check. Does NOT verify the prev_hash chain
+// (use `verify-headers` for that) or the state_root (compute_state_root
+// can't be re-derived without the full state — use the verified header
+// to anchor verify-state-proof / snapshot inspect --state-root).
+static int cmd_verify_block_sigs(int argc, char** argv) {
+    std::string header_path;
+    std::string committee_path;
+    bool bft_mode = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--header"    && i + 1 < argc) header_path    = argv[i + 1];
+        else if (a == "--committee" && i + 1 < argc) committee_path = argv[i + 1];
+        else if (a == "--bft") bft_mode = true;
+    }
+    if (header_path.empty() || committee_path.empty()) {
+        std::cerr << "Usage: determ verify-block-sigs --header <file> "
+                     "--committee <file> [--bft]\n";
+        return 1;
+    }
+
+    // Read header + committee.
+    nlohmann::json hjson, cjson;
+    try {
+        std::ifstream hf(header_path);
+        if (!hf) throw std::runtime_error("cannot open header: " + header_path);
+        hjson = nlohmann::json::parse(hf);
+        std::ifstream cf(committee_path);
+        if (!cf) throw std::runtime_error("cannot open committee: " + committee_path);
+        cjson = nlohmann::json::parse(cf);
+    } catch (std::exception& e) {
+        std::cerr << "verify-block-sigs: parse error: " << e.what() << "\n";
+        return 1;
+    }
+
+    // If the header file is actually a `determ headers` response
+    // (`{headers: [...], ...}`), pull out the first header.
+    if (hjson.contains("headers") && hjson["headers"].is_array()) {
+        if (hjson["headers"].empty()) {
+            std::cerr << "verify-block-sigs: header file has empty "
+                         "headers array — nothing to verify\n";
+            return 1;
+        }
+        hjson = hjson["headers"][0];
+    }
+
+    // Pad stripped header back to a Block-parseable shape: the heavy
+    // collections that the `headers` RPC erases (transactions,
+    // cross_shard_receipts, inbound_receipts, initial_state) are
+    // NOT in compute_block_digest's input, so empty arrays are
+    // semantically equivalent for our purposes.
+    if (!hjson.contains("transactions"))         hjson["transactions"]         = nlohmann::json::array();
+    if (!hjson.contains("cross_shard_receipts")) hjson["cross_shard_receipts"] = nlohmann::json::array();
+    if (!hjson.contains("inbound_receipts"))     hjson["inbound_receipts"]     = nlohmann::json::array();
+    if (!hjson.contains("initial_state"))        hjson["initial_state"]        = nlohmann::json::array();
+
+    chain::Block b;
+    try {
+        b = chain::Block::from_json(hjson);
+    } catch (std::exception& e) {
+        std::cerr << "verify-block-sigs: malformed header: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // Build domain → pubkey lookup from the committee JSON. Accept
+    // both `{members: [...]}` (shape with envelope) and raw array.
+    nlohmann::json members;
+    if (cjson.is_array()) members = cjson;
+    else if (cjson.contains("members") && cjson["members"].is_array())
+        members = cjson["members"];
+    else {
+        std::cerr << "verify-block-sigs: committee file must be a JSON "
+                     "array or an object with a 'members' array\n";
+        return 1;
+    }
+
+    std::map<std::string, PubKey> pubkey_of;
+    try {
+        for (auto& m : members) {
+            std::string domain = m.value("domain", std::string{});
+            std::string ed_hex = m.value("ed_pub", std::string{});
+            if (domain.empty() || ed_hex.empty()) continue;
+            if (ed_hex.size() != 64) {
+                throw std::runtime_error(
+                    "committee member '" + domain
+                    + "' has malformed ed_pub (expected 64 hex chars, got "
+                    + std::to_string(ed_hex.size()) + ")");
+            }
+            pubkey_of[domain] = from_hex_arr<32>(ed_hex);
+        }
+    } catch (std::exception& e) {
+        std::cerr << "verify-block-sigs: " << e.what() << "\n";
+        return 1;
+    }
+    if (pubkey_of.empty()) {
+        std::cerr << "verify-block-sigs: committee file has no valid "
+                     "members\n";
+        return 1;
+    }
+
+    // Sanity: every creator in the block must be in the committee.
+    for (auto& d : b.creators) {
+        if (pubkey_of.find(d) == pubkey_of.end()) {
+            std::cerr << "FAIL: creator '" << d << "' is not in the "
+                         "supplied committee — cannot verify their "
+                         "signature\n";
+            return 1;
+        }
+    }
+    if (b.creator_block_sigs.size() != b.creators.size()) {
+        std::cerr << "FAIL: creator_block_sigs.size (" << b.creator_block_sigs.size()
+                  << ") != creators.size (" << b.creators.size() << ")\n";
+        return 1;
+    }
+
+    // Compute the digest that the committee signed.
+    Hash digest = node::compute_block_digest(b);
+
+    // Verify each creator's signature. In MD mode, every creator must
+    // have a valid sig (sentinel-zero NOT allowed). In BFT mode, count
+    // non-zero verifying sigs and check against Q = ceil(2K/3).
+    Signature zero_sig{};
+    size_t valid = 0;
+    std::vector<std::string> failures;
+    for (size_t i = 0; i < b.creators.size(); ++i) {
+        const auto& sig = b.creator_block_sigs[i];
+        if (sig == zero_sig) {
+            if (!bft_mode) {
+                failures.push_back("creator[" + std::to_string(i) + "] '"
+                                    + b.creators[i] + "': sentinel-zero "
+                                    "signature not allowed in MD mode");
+            }
+            // BFT: zero is a valid sentinel slot; just don't count.
+            continue;
+        }
+        const auto& pk = pubkey_of.at(b.creators[i]);
+        bool ok = crypto::verify(pk, digest.data(), digest.size(), sig);
+        if (ok) {
+            valid++;
+        } else {
+            failures.push_back("creator[" + std::to_string(i) + "] '"
+                                + b.creators[i] + "': signature does NOT "
+                                "verify against compute_block_digest");
+        }
+    }
+
+    size_t required = bft_mode
+        ? (2 * b.creators.size() + 2) / 3   // ceil(2K/3)
+        : b.creators.size();                 // full K-of-K
+
+    if (valid >= required && failures.empty()) {
+        std::cout << "OK\n";
+        std::cout << "  block_index:    " << b.index << "\n";
+        std::cout << "  mode:           "
+                  << (bft_mode ? "BFT (threshold "
+                                + std::to_string(required) + "/"
+                                + std::to_string(b.creators.size())
+                                + ")"
+                              : "MD (full K-of-K)") << "\n";
+        std::cout << "  verified sigs:  " << valid << "/"
+                  << b.creators.size() << "\n";
+        std::cout << "  digest:         " << to_hex(digest) << "\n";
+        if (!b.state_root.empty() || b.state_root != Hash{}) {
+            std::cout << "  state_root:     " << to_hex(b.state_root)
+                      << "\n";
+        }
+        return 0;
+    } else {
+        std::cerr << "FAIL: committee-signature verification\n";
+        std::cerr << "  block_index:   " << b.index << "\n";
+        std::cerr << "  mode:          "
+                  << (bft_mode ? "BFT" : "MD") << "\n";
+        std::cerr << "  verified sigs: " << valid << "/"
+                  << b.creators.size()
+                  << " (required " << required << ")\n";
+        for (auto& f : failures) std::cerr << "  " << f << "\n";
+        return 1;
+    }
 }
 
 // v2.2 light-client header-chain verifier.
@@ -2133,6 +2355,7 @@ int main(int argc, char** argv) {
     if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
     if (cmd == "headers")       return cmd_headers(sub_argc, sub_argv);
     if (cmd == "verify-headers") return cmd_verify_headers(sub_argc, sub_argv);
+    if (cmd == "verify-block-sigs") return cmd_verify_block_sigs(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
