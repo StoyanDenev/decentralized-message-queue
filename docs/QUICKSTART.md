@@ -158,11 +158,81 @@ grep "restored from snapshot" $T/receiver/log
 $DETERM status --rpc-port 8799   # head_hash matches snapshot
 ```
 
-## 7. Cross-shard deployment (optional)
+## 7. Light-client trustless verification (v2.2)
+
+Demonstrates the full v2.2 trustless verification chain — fetch any state from an untrusted full node, verify locally against a pinned trusted root. Four CLIs compose:
+
+```bash
+# 1. Fetch a slice of block headers (Block JSON minus heavy
+#    collections; light-client header-sync primitive).
+$DETERM headers --rpc-port 8771 --from 0 --count 10 > headers.json
+
+# 2. Verify the prev_hash chain (chain-of-hashes integrity).
+#    Optional --genesis-hash pins the genesis when starting at 0.
+$DETERM verify-headers --in headers.json
+#   → OK
+#     verified 10 header(s) 0..9
+
+# 3. Verify K-of-K committee signatures on a header.
+#    The committee file is a JSON array of {domain, ed_pub} — the
+#    same shape `determ committee` returns; for the QUICKSTART
+#    fixture, p1/p2/p3.json already have this shape and can be
+#    concatenated by hand.
+python -c "
+import json
+members = []
+for n in [1,2,3]:
+    with open('$T/p%d.json' % n) as f: p = json.load(f)
+    members.append({'domain': p['domain'], 'ed_pub': p['ed_pub']})
+with open('committee.json','w') as f: json.dump(members, f)
+"
+$DETERM verify-block-sigs --header headers.json --committee committee.json
+#   → OK
+#     block_index: 1
+#     mode: MD (full K-of-K)
+#     verified sigs: 3/3
+
+# 4. Pin a verified state_root and verify any state field against it.
+#    Step 1 returned headers with state_root in each; pick one.
+STATE_ROOT=$(python -c "
+import json
+hdrs = json.load(open('headers.json'))['headers']
+# Pick the last header that has a state_root populated.
+for h in reversed(hdrs):
+    if 'state_root' in h:
+        print(h['state_root']); break")
+
+# Fetch a state-proof for an account, then verify against the pinned
+# state_root.
+$DETERM state-proof --rpc-port 8771 --ns a --key treasury > proof.json
+$DETERM verify-state-proof --in proof.json --state-root "$STATE_ROOT"
+#   → OK
+#     state_root: <hex>
+#     key: a:treasury
+#     value_hash: <hex>
+#     proof depth: N sibling hashes
+```
+
+**What this proves:**
+- The full node serving the headers might be tampering with them; the chain-of-hashes check catches re-ordered/spliced headers.
+- The full node might supply forged committee signatures; `verify-block-sigs` catches them by verifying against the pinned committee pubkeys.
+- The full node might fabricate a state_root that's self-consistent with its tampered state; pinning `--state-root` from a verified header forces the proof to verify against the *trusted* root, defeating that attack.
+
+The pinned committee pubkeys are the bootstrap-trust anchor: a light client obtains them from a trusted source (registry snapshot signed by the founders, baked-in genesis pubkeys, etc.) and then chains verification forward via the four CLIs above.
+
+**Snapshot-level trustless verification** complements the per-field state-proof path:
+
+```bash
+# Verify a downloaded snapshot's whole state Merkle against a pinned root.
+$DETERM snapshot inspect --in $T/snap.json --state-root "$STATE_ROOT"
+#   → snapshot OK + "trusted root: ✓ matches --state-root"
+```
+
+## 8. Cross-shard deployment (optional)
 
 For a beacon + S-shard deployment, see `tools/test_cross_shard_transfer.sh` — it spins up 1 beacon + 2 shards (M=K=1), grinds bearer wallets that route to each shard, and asserts a TRANSFER from shard 0 → shard 1 credits the destination.
 
-## 8. Submit equivocation evidence (forensics)
+## 9. Submit equivocation evidence (forensics)
 
 ```bash
 # Synthesize off-chain via Python (Ed25519 signing) — see
@@ -181,7 +251,7 @@ print(s.recv(4096).decode().strip())
 
 The next finalized block bakes the evidence; on apply, the equivocator's stake is fully forfeited and they're deregistered from the validator pool.
 
-## 9. Governance: change a chain-wide parameter (A5)
+## 10. Governance: change a chain-wide parameter (A5)
 
 Deploy a chain with `governance_mode = 1` and N founder keyholders. Then any time a quorum of keyholders agrees, they can change a whitelisted parameter mid-chain:
 
@@ -213,7 +283,7 @@ $DETERM submit-param-change \
 
 After block 50 finalizes, `snapshot inspect` shows `min_stake: 2000`. Whitelist of mutable parameters: see `docs/PROTOCOL.md` §13. Off-list parameters (committee size K, sharding mode) require a new chain genesis.
 
-## 10. Wallet recovery (A2)
+## 11. Wallet recovery (A2)
 
 The `determ-wallet` binary is separate from the chain daemon. Generate a recovery setup for any 32-byte secret (typically your Ed25519 seed):
 
@@ -237,7 +307,7 @@ SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 For under-quorum compromise resistance against guardians, use `--scheme opaque`. The development-stub adapter (default today) is offline-grindable from any single compromised guardian; the wallet's `is_stub()` flag reports this and `docs/proofs/WalletRecovery.md` (FA12) documents the bound degradation. Production deployments should wait for **v2.14 — Real OPAQUE wallet recovery** (real `libopaque` integration; tracked in `docs/V2-DESIGN.md`; status gated on the upstream-VLA MSVC porting work in `wallet/PHASE6_PORTING_NOTES.md`).
 
-## 11. Under-quorum merge (R4, EXTENDED mode only)
+## 12. Under-quorum merge (R4, EXTENDED mode only)
 
 When a regional shard's validator pool drops below 2K, the protocol can absorb it into the modular-next shard's committee. v1.x is operator-driven; v1.1 will auto-detect on the beacon.
 
