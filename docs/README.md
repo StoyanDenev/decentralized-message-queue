@@ -45,7 +45,9 @@ Run the full suite with:
 for t in tools/test_*.sh; do bash "$t"; done
 ```
 
-Note: multi-node tests share fixed ports (7771-3 / 8771-3 / 779x / 8830 / etc.) and have a documented Windows TIME_WAIT flake on back-to-back runs. In-process tests (state_root, atomic_scope, composable_batch, dapp_register, chain_integrity) are deterministic and complete in under 5 seconds each.
+Note: multi-node tests share fixed ports (7771-3 / 8771-3 / 779x / 8830 / etc.) and have a documented Windows TIME_WAIT flake on back-to-back runs. In-process tests (state_root, atomic_scope, composable_batch, dapp_register, chain_integrity, s018_json_validation) are deterministic and complete in under 5 seconds each.
+
+**Portability (S-035 Path 3 — shipped).** Every test sources `tools/common.sh` which platform-detects the determ + determ-wallet binaries (Windows MSVC multi-config, Linux/Mac single-config) and resolves `PROJECT_ROOT` to a Windows-style absolute path on Git Bash via `pwd -W`. Override via `DETERM_BIN=/path/to/determ` env var for CI runners with custom build layouts. The 49-test suite is now runnable on Linux/Mac/Windows from the repo root with no per-platform editing.
 
 ## Out of scope
 
