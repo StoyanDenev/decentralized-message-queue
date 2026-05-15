@@ -99,6 +99,13 @@ State commitment + light-client (v2.1 + v2.2):
                                               externally-trusted root (real light-client
                                               mode); without it, the proof's claimed root
                                               is used (self-consistency check).
+  determ headers [--from N] [--count M]      Fetch a slice of block headers (Block JSON
+                                              minus transactions / receipts / initial_state).
+                                              Light-client header-sync primitive: the
+                                              returned headers carry committee signatures
+                                              and state_root for verify-state-proof
+                                              anchoring. Default: --from 0 --count 16;
+                                              server caps count at 256.
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
   determ submit-dapp-register --priv <hex> --from <domain>
@@ -362,6 +369,39 @@ static int cmd_show_block(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// v2.2 light-client header-sync CLI.
+//
+// Usage: determ headers --from N [--count M] [--rpc-port P]
+//
+// Returns a slice of block headers — the same Block JSON shape that
+// `show-block` emits, but with the heavy `transactions`,
+// `cross_shard_receipts`, `inbound_receipts`, and `initial_state`
+// fields stripped. Light clients use this to verify committee
+// signatures + extract state_root for verify-state-proof anchoring,
+// without the bandwidth cost of fetching every tx.
+//
+// Defaults: --from 0, --count 16. Server caps count at 256.
+static int cmd_headers(int argc, char** argv) {
+    uint64_t from_index = 0;
+    uint32_t count = 16;
+    for (int i = 0; i < argc - 1; ++i) {
+        std::string a = argv[i];
+        if      (a == "--from")  from_index = std::stoull(argv[i + 1]);
+        else if (a == "--count") count = static_cast<uint32_t>(
+                                            std::stoul(argv[i + 1]));
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"from", from_index}, {"count", count}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "headers", params);
+        std::cout << result.dump(2) << "\n";
+        return 0;
+    } catch (std::exception& e) {
+        std::cerr << "headers query failed: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // determ validators [--rpc-port N]
@@ -1934,6 +1974,7 @@ int main(int argc, char** argv) {
     if (cmd == "status")        return cmd_status(sub_argc, sub_argv);
     if (cmd == "peers")         return cmd_peers(sub_argc, sub_argv);
     if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
+    if (cmd == "headers")       return cmd_headers(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);

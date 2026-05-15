@@ -251,6 +251,9 @@ json RpcServer::dispatch(const json& req) {
             params.value("topic",       std::string{}));
     if (method == "block")
         return node_.rpc_block(params.value("index", uint64_t{0}));
+    if (method == "headers")
+        return node_.rpc_headers(params.value("from",  uint64_t{0}),
+                                    params.value("count", uint32_t{16}));
     if (method == "chain_summary")
         return node_.rpc_chain_summary(params.value("last_n", uint32_t{10}));
     if (method == "validators")

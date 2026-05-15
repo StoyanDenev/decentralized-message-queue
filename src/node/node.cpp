@@ -2437,6 +2437,50 @@ json Node::rpc_block(uint64_t index) const {
     return chain_.at(index).to_json();
 }
 
+// v2.2 light-client header-sync foundation. Strips the four heavy
+// collections from each block in the requested range; everything else
+// (committee, signatures, dh commitments, tx_root, delay seed/output,
+// cumulative_rand, abort_events, equivocation_events,
+// partner_subset_hash, state_root) stays so a light client can verify
+// committee signatures + extract state_root. Output shape:
+//   { "headers": [<header-JSON>, ...], "from": <from_index>,
+//     "count":   <actual count returned> }
+// `count` is the *actual* number returned (clamped at the chain tail
+// and capped at HEADERS_PAGE_MAX to bound response size).
+json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
+    constexpr uint32_t HEADERS_PAGE_MAX = 256;
+    if (count > HEADERS_PAGE_MAX) count = HEADERS_PAGE_MAX;
+
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    uint64_t height = chain_.height();
+
+    json headers = json::array();
+    if (from_index < height) {
+        uint64_t end = std::min<uint64_t>(from_index + count, height);
+        for (uint64_t i = from_index; i < end; ++i) {
+            json h = chain_.at(i).to_json();
+            // Heavy collections — stripped for header-only sync.
+            // These are precisely the fields the v2.2 light client
+            // doesn't need (it queries individual tx data via
+            // dapp_messages / show_tx, and individual state via
+            // state_proof; the header is for committee-sig + state_root
+            // anchoring).
+            h.erase("transactions");
+            h.erase("cross_shard_receipts");
+            h.erase("inbound_receipts");
+            h.erase("initial_state");
+            headers.push_back(std::move(h));
+        }
+    }
+
+    return {
+        {"headers", headers},
+        {"from",    from_index},
+        {"count",   headers.size()},
+        {"height",  height},
+    };
+}
+
 json Node::rpc_account(const std::string& addr) const {
     // A9 Phase 2C-Node bundled path. Grab the committed view ONCE
     // and read all four fields (balance, next_nonce, stake,

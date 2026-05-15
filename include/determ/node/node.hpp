@@ -186,6 +186,17 @@ public:
     // rev.9: block explorer primitive. Returns the full block at the
     // given index (block 0 = genesis). Returns null if out of range.
     nlohmann::json rpc_block(uint64_t index)                        const;
+    // v2.2 light-client header-sync foundation. Returns a slice of
+    // recent block headers (Block JSON minus the heavy collections —
+    // `transactions`, `cross_shard_receipts`, `inbound_receipts`,
+    // `initial_state`). The remaining fields are exactly what a
+    // light client needs to (a) verify committee signatures against
+    // a known committee (via the K creator_ed_sigs / creator_block_sigs
+    // fields), (b) chain headers together via prev_hash, and (c)
+    // extract the trusted state_root for subsequent verify-state-proof
+    // calls. Returns {headers: [...], from, count} where count is the
+    // actual returned count (≤ requested; smaller at tail boundaries).
+    nlohmann::json rpc_headers(uint64_t from_index, uint32_t count) const;
     // rev.9: chain summary — last N blocks with index, hash, mode,
     // tx_count, creators (compact). Useful for ops dashboards.
     nlohmann::json rpc_chain_summary(uint32_t last_n = 10)          const;

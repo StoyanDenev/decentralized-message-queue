@@ -571,6 +571,7 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | `status` | `{}` | head + head_hash + role + shard_id + epoch_index + peer_count + mempool + MD/BFT counters + `next_creators` preview + **`protections`** block (every operator-tunable security flag — see CLI-REFERENCE.md) |
 | `peers` | `{}` | `[address, ...]` |
 | `block` | `{index}` | full block JSON or null |
+| `headers` | `{from, count}` | `{headers: [<header>], from, count, height}` — v2.2 light-client header slice. Each header is the Block JSON minus `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` (the heavy fields a light client doesn't need for committee-sig verification or state_root extraction). Server caps `count` at 256; out-of-range `from` returns empty `headers` array. |
 | `chain_summary` | `{last_n}` | array of compact block summaries |
 | `validators` | `{}` | array of pool entries |
 | `committee` | `{}` | current epoch's K-of-K committee |
