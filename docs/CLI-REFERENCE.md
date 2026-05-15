@@ -11,7 +11,7 @@ All `determ` subcommands. Run `determ --help` for the canonical built-in help.
 | `determ init [--data-dir D] [--profile P]` | Generate config + Ed25519 keypair in a fresh data dir |
 | `determ start --config FILE` | Run the node daemon (foreground) |
 
-Profiles: `cluster` (LAN), `web` (default), `regional`, `global` — differ in round timer durations (`tx_commit_ms`, `block_sig_ms`, `abort_claim_ms`).
+Profiles: `cluster` (LAN), `web` (default), `regional`, `global`, `tactical` (mobile-unit swarm; sub-30 ms blocks), plus `*_test` variants (`single_test`, `cluster_test`, `web_test`, `regional_test`, `global_test`, `tactical_test`) with sub-30 ms timers for CI execution mirroring each prod sibling's (chain_role, sharding_mode, M, K). Differ in round timer durations (`tx_commit_ms`, `block_sig_ms`, `abort_claim_ms`) + committee size (M, K) + chain_role + sharding_mode. See `include/determ/chain/params.hpp` for the full profile-constant set.
 
 ## Inspection (block-explorer)
 
