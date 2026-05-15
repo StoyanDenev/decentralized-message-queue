@@ -603,7 +603,7 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 | S-033 (no state commitment) | v2.1 Merkle root + Block.state_root | ✅ shipped |
 | S-036 (witness-window) | v2.11 beacon-side auto-detect | ⏳ open |
 
-**Findings closure status:** 17 fully closed in-session + 1 partially closed (S-030 D2 via S-033 apply-layer; v2.7 F2 closes at consensus layer) + 2 still open Medium (S-016 overlaps with v2.7 F2 scope; S-018 mechanical JSON schema). All open High findings closed in-session via S-010 stake-pricing formula + S-011 economic-bound argument. The "12 of 24 close in v2" original target has been substantially overshot in-session.
+**Findings closure status:** 27 fully closed in-session (5 Critical + 13 High + 1 Medium [S-018] + 8 Low/Op — see SECURITY.md §1) + 1 partially closed (S-030 D2 via S-033 + S-038 apply-layer; v2.7 F2 closes at consensus layer) + 1 still partial Medium (S-016 overlaps with v2.7 F2 scope) + 1 partial Low/Op (S-036 EXTENDED-mode-only — v2.11 closes). Zero open Critical, zero open High, zero open Medium. All open High findings closed in-session via S-010 stake-pricing formula + S-011 economic-bound argument; final open Medium (S-018 JSON schema) closed via `json_require<T>` / `json_require_hex` helpers in `include/determ/util/json_validate.hpp`. The "12 of 24 close in v2" original target has been substantially overshot in-session.
 
 ---
 
