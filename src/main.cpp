@@ -164,6 +164,9 @@ In-process tests (deterministic, no network):
   determ test-ed25519                         Ed25519 sign/verify (foundation for every
                                               signature claim in the protocol; determinism,
                                               tampering rejection, cross-key rejection)
+  determ test-sha256                          SHA-256 wrapper + SHA256Builder (NIST FIPS
+                                              180-4 vectors; Preliminaries §1.3 big-endian
+                                              uint64_t encoding for protocol determinism)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -3752,6 +3755,186 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": ed25519 " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the SHA-256
+    // wrapper + SHA256Builder. Pins NIST FIPS 180-4 test vectors
+    // AND the protocol-critical big-endian uint64_t encoding that
+    // every signing_bytes / compute_block_digest / merkle_leaf_hash
+    // path depends on (Preliminaries §1.3).
+    //
+    // A regression in SHA-256 itself would break literally every
+    // cryptographic claim in the protocol. A regression in
+    // SHA256Builder::append(uint64_t)'s big-endian encoding would
+    // make signing_bytes produce different hashes on little-endian
+    // vs big-endian machines, silently breaking consensus across
+    // platforms — which is why the BE convention is in
+    // Preliminaries §1.3 as a hard requirement.
+    if (cmd == "test-sha256") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. NIST FIPS 180-4 §A.1: SHA-256("") =
+        //    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        {
+            Hash h = sha256(nullptr, 0);
+            check(to_hex(h) ==
+                  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                  "NIST vector: SHA-256('') matches FIPS 180-4 §A.1");
+        }
+
+        // 2. NIST FIPS 180-4 §A.1: SHA-256("abc") =
+        //    ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        {
+            std::string s = "abc";
+            Hash h = sha256(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+            check(to_hex(h) ==
+                  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                  "NIST vector: SHA-256('abc') matches FIPS 180-4 §A.1");
+        }
+
+        // 3. NIST FIPS 180-4 §A.2: SHA-256 of the 56-byte ASCII
+        //    "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" =
+        //    248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+        //    (this exercises a >55-byte input — different padding path
+        //    in the SHA-256 final block — so it catches a regression
+        //    in the BIO/EVP wrapper's input-length handling.)
+        {
+            std::string s = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+            Hash h = sha256(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+            check(to_hex(h) ==
+                  "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+                  "NIST vector: SHA-256 56-byte input (FIPS 180-4 §A.2)");
+        }
+
+        // 4. SHA256Builder's incremental construction matches one-shot
+        //    SHA-256. Critical because every signing_bytes / digest
+        //    site uses the Builder — if it diverged from sha256()
+        //    for the same byte stream, downstream verification would
+        //    silently fail.
+        {
+            std::string s = "the quick brown fox jumps over the lazy dog";
+            Hash one_shot = sha256(reinterpret_cast<const uint8_t*>(s.data()),
+                                    s.size());
+            SHA256Builder b;
+            b.append(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+            Hash builder_hash = b.finalize();
+            check(one_shot == builder_hash,
+                  "SHA256Builder one-shot matches sha256()");
+        }
+
+        // 5. SHA256Builder appending in pieces matches one-shot
+        //    over the concatenated input. Catches any state drift
+        //    inside the incremental Builder.
+        {
+            std::string a = "the quick brown ";
+            std::string b = "fox jumps over ";
+            std::string c = "the lazy dog";
+            std::string full = a + b + c;
+            Hash one_shot = sha256(
+                reinterpret_cast<const uint8_t*>(full.data()), full.size());
+            SHA256Builder bld;
+            bld.append(a);
+            bld.append(b);
+            bld.append(c);
+            check(one_shot == bld.finalize(),
+                  "SHA256Builder 3-piece append matches concat one-shot");
+        }
+
+        // 6. SHA256Builder::append(uint64_t) is BIG-ENDIAN. This is
+        //    the protocol-critical convention from Preliminaries §1.3
+        //    ("Multi-byte integers in hash inputs are encoded big-
+        //    endian"). EVERY consensus hash — signing_bytes,
+        //    compute_block_digest, merkle_leaf_hash — relies on this.
+        //    A regression to little-endian would silently fork the
+        //    protocol on any cross-platform deployment.
+        //
+        //    Verify by hashing a known integer through the Builder
+        //    AND through manual big-endian bytes; the hashes must
+        //    match.
+        {
+            uint64_t v = 0x0123456789ABCDEFULL;
+            // Manual big-endian: high byte first.
+            uint8_t be_bytes[8] = {0x01, 0x23, 0x45, 0x67,
+                                    0x89, 0xAB, 0xCD, 0xEF};
+            Hash manual = sha256(be_bytes, 8);
+            SHA256Builder b;
+            b.append(v);
+            Hash builder = b.finalize();
+            check(manual == builder,
+                  "SHA256Builder::append(uint64_t) encodes BIG-ENDIAN "
+                  "(Preliminaries §1.3 convention)");
+        }
+
+        // 7. SHA256Builder::append(int64_t) — same BE encoding,
+        //    handles negative values via two's-complement layout.
+        {
+            int64_t v = -1;  // two's complement: 0xFFFFFFFFFFFFFFFF
+            uint8_t be_bytes[8] = {0xFF, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF, 0xFF};
+            Hash manual = sha256(be_bytes, 8);
+            SHA256Builder b;
+            b.append(v);
+            Hash builder = b.finalize();
+            check(manual == builder,
+                  "SHA256Builder::append(int64_t) encodes BIG-ENDIAN "
+                  "two's-complement");
+        }
+
+        // 8. sha256(Hash a, Hash b) helper matches manual
+        //    concat-then-sha256.
+        {
+            Hash a{}; a[0] = 0xAA;
+            Hash b{}; b[0] = 0xBB;
+            std::vector<uint8_t> concat;
+            concat.insert(concat.end(), a.begin(), a.end());
+            concat.insert(concat.end(), b.begin(), b.end());
+            Hash manual = sha256(concat.data(), concat.size());
+            Hash helper = sha256(a, b);
+            check(manual == helper,
+                  "sha256(Hash, Hash) helper matches concat-then-sha256");
+        }
+
+        // 9. sha256(Hash, string) helper matches manual concat-then-
+        //    sha256. (Used by sha256_genesis-style hash composition
+        //    in random.cpp.)
+        {
+            Hash a{}; a[0] = 0xAA;
+            std::string s = "domain-separator";
+            std::vector<uint8_t> concat;
+            concat.insert(concat.end(), a.begin(), a.end());
+            concat.insert(concat.end(),
+                            reinterpret_cast<const uint8_t*>(s.data()),
+                            reinterpret_cast<const uint8_t*>(s.data()) + s.size());
+            Hash manual = sha256(concat.data(), concat.size());
+            Hash helper = sha256(a, s);
+            check(manual == helper,
+                  "sha256(Hash, string) helper matches concat-then-sha256");
+        }
+
+        // 10. Determinism: same input → same hash, across two
+        //     independent Builder instances + a one-shot call.
+        {
+            std::string s = "determ";
+            SHA256Builder b1, b2;
+            b1.append(s);
+            b2.append(s);
+            Hash h1 = b1.finalize();
+            Hash h2 = b2.finalize();
+            Hash h3 = sha256(reinterpret_cast<const uint8_t*>(s.data()),
+                                s.size());
+            check(h1 == h2 && h2 == h3,
+                  "sha256 is deterministic across instances + one-shot");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": sha256 " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
