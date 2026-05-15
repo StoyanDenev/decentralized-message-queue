@@ -42,6 +42,15 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 Run the full suite with:
 
 ```bash
+bash tools/run_all.sh                          # all tests + PASS/FAIL summary
+bash tools/run_all.sh QUIET=1                  # summary only (no per-test stdout)
+ONLY_PATTERN='test_dapp' bash tools/run_all.sh # subset by regex
+SKIP_PATTERN='test_equiv' bash tools/run_all.sh # skip known-flaky on a platform
+```
+
+`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention, and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
+
+```bash
 for t in tools/test_*.sh; do bash "$t"; done
 ```
 
