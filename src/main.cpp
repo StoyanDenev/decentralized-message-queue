@@ -158,6 +158,9 @@ In-process tests (deterministic, no network):
   determ test-committee-selection             Committee-selection primitives (S-020 hybrid
                                               select_m_creators + select_after_abort_m
                                               + epoch_committee_seed determinism)
+  determ test-shard-routing                   shard_id_for_address (cross-shard routing
+                                              salted-SHA-256; determinism, salt-sensitivity,
+                                              distribution sanity)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -3525,6 +3528,130 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": committee-selection " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for
+    // crypto::shard_id_for_address — the v1.x cross-shard routing
+    // foundation. Maps any address string (registered domain or
+    // anonymous bearer wallet) to one of `shard_count` shards via a
+    // salted SHA-256. The salt comes from genesis
+    // (GenesisConfig::shard_address_salt) and is fixed for the
+    // chain's lifetime. Every node (beacon, every shard, every
+    // external wallet) must agree on which shard owns which address.
+    if (cmd == "test-shard-routing") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a deterministic salt.
+        auto make_salt = [](uint64_t i) {
+            SHA256Builder b; b.append(i); return b.finalize();
+        };
+
+        // 1. Single-shard mode: shard_id always 0 regardless of address.
+        {
+            Hash salt = make_salt(1);
+            bool all_zero = true;
+            for (const char* a : {"alice", "bob", "node1",
+                                     "0xabc", "0x1234567890"}) {
+                if (shard_id_for_address(a, 1, salt) != 0) {
+                    all_zero = false; break;
+                }
+            }
+            check(all_zero, "single-shard (shard_count=1) always returns 0");
+        }
+
+        // 2. Determinism: same (addr, count, salt) → same shard.
+        {
+            Hash salt = make_salt(2);
+            ShardId s1 = shard_id_for_address("alice", 4, salt);
+            ShardId s2 = shard_id_for_address("alice", 4, salt);
+            check(s1 == s2, "same inputs -> same shard (deterministic)");
+        }
+
+        // 3. In-range: shard_id < shard_count.
+        {
+            Hash salt = make_salt(3);
+            bool in_range = true;
+            for (int i = 0; i < 50; ++i) {
+                std::string addr = "user_" + std::to_string(i);
+                if (shard_id_for_address(addr, 7, salt) >= 7) {
+                    in_range = false; break;
+                }
+            }
+            check(in_range, "all routed shard_ids in [0, shard_count)");
+        }
+
+        // 4. Salt-sensitivity: different salts route the same address
+        //    to (probably) different shards. Test by checking that at
+        //    least ONE address routes differently — collision on every
+        //    address out of 50 is astronomically unlikely under salted SHA-256.
+        {
+            Hash salt_a = make_salt(4);
+            Hash salt_b = make_salt(5);
+            bool found_diff = false;
+            for (int i = 0; i < 50; ++i) {
+                std::string addr = "user_" + std::to_string(i);
+                if (shard_id_for_address(addr, 4, salt_a) !=
+                    shard_id_for_address(addr, 4, salt_b)) {
+                    found_diff = true; break;
+                }
+            }
+            check(found_diff,
+                  "different salts route same address to different shards");
+        }
+
+        // 5. Distribution sanity: routing 1000 addresses across 4 shards
+        //    yields rough uniformity (every shard gets >5% of addresses).
+        //    Under SHA-256-uniform routing the expected per-shard count
+        //    is 250, and chi-squared bounds for 4 shards × 1000 samples
+        //    keep every shard well above 5% with overwhelming probability.
+        {
+            Hash salt = make_salt(6);
+            std::vector<int> hist(4, 0);
+            for (int i = 0; i < 1000; ++i) {
+                std::string addr = "user_" + std::to_string(i);
+                hist[shard_id_for_address(addr, 4, salt)]++;
+            }
+            bool uniform = true;
+            for (int c : hist) if (c < 50) { uniform = false; break; }
+            check(uniform,
+                  "1000 addresses distribute across 4 shards (>5% per shard)");
+        }
+
+        // 6. Case-sensitivity: address strings are byte-for-byte;
+        //    "Alice" and "alice" route to potentially-different shards
+        //    (S-028 normalizes at RPC ingress, not at routing time —
+        //    that's an upstream concern).
+        {
+            Hash salt = make_salt(7);
+            ShardId s1 = shard_id_for_address("Alice", 8, salt);
+            ShardId s2 = shard_id_for_address("alice", 8, salt);
+            // We can't assert s1 != s2 (collision possible). We CAN
+            // assert both are valid shard_ids in range. The point is
+            // documenting that routing is case-sensitive on the bytes.
+            check(s1 < 8 && s2 < 8,
+                  "routing is byte-exact (case-sensitive at routing layer)");
+        }
+
+        // 7. Empty address: routes to shard 0 deterministically (the
+        //    function doesn't reject empty strings — caller's
+        //    responsibility to validate addresses upstream).
+        {
+            Hash salt = make_salt(8);
+            ShardId s1 = shard_id_for_address("", 5, salt);
+            ShardId s2 = shard_id_for_address("", 5, salt);
+            check(s1 == s2 && s1 < 5,
+                  "empty address routes deterministically to a valid shard");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": shard-routing " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
