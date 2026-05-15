@@ -27,9 +27,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=C:/sauromatae/build/Release/determ.exe
+source tools/common.sh
 T=test_xshard
-TABS=C:/sauromatae/$T
+TABS=$PROJECT_ROOT/$T
 
 declare -a NODE_PIDS
 

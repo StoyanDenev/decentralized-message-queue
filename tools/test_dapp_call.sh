@@ -19,7 +19,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 
 echo "=== v2.19 DAPP_CALL apply semantics ==="
 OUT=$($DETERM test-dapp-call 2>&1)

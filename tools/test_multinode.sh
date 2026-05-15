@@ -7,7 +7,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_mn
 
 cleanup() {
@@ -60,7 +60,7 @@ EOF
 $DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 # determ.exe is a native Windows binary; use Windows-native paths in configs.
-GPATH="C:/sauromatae/$T/gen.json"
+GPATH="$PROJECT_ROOT/$T/gen.json"
 echo "Genesis path: $GPATH"
 
 echo
@@ -82,9 +82,9 @@ c['bootstrap_peers']  = $peers_json
 c['genesis_path']     = '$GPATH'
 c['genesis_hash']     = '$GHASH'
 # Windows-native paths for the native binary.
-c['chain_path']       = 'C:/sauromatae/$T/n$n/chain.json'
-c['key_path']         = 'C:/sauromatae/$T/n$n/node_key.json'
-c['data_dir']         = 'C:/sauromatae/$T/n$n'
+c['chain_path']       = '$PROJECT_ROOT/$T/n$n/chain.json'
+c['key_path']         = '$PROJECT_ROOT/$T/n$n/node_key.json'
+c['data_dir']         = '$PROJECT_ROOT/$T/n$n'
 # Extra-generous timeouts for the test environment (Windows multi-process,
 # loopback gossip, placeholder VDF). Production values should match the
 # selected profile.

@@ -9,8 +9,8 @@
 # Run from repo root: bash tools/test_weak_mode.sh
 set -u
 cd "$(dirname "$0")/.."
+source tools/common.sh
 
-DETERM=build/Release/determ.exe
 T=test_weak
 
 declare -a NODE_PIDS
@@ -76,7 +76,7 @@ $(cat $T/p4.json | tr -d '\n')
 EOF
 $DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
-GPATH="C:/sauromatae/$T/gen.json"
+GPATH="$PROJECT_ROOT/$T/gen.json"
 
 echo
 echo "=== 4. Configure 4 nodes (4-mesh, ports 7771-7774, rpc 8771-8774) ==="
@@ -96,9 +96,9 @@ c['rpc_port']         = $rpc
 c['bootstrap_peers']  = $peers_json
 c['genesis_path']     = '$GPATH'
 c['genesis_hash']     = '$GHASH'
-c['chain_path']       = 'C:/sauromatae/$T/n$n/chain.json'
-c['key_path']         = 'C:/sauromatae/$T/n$n/node_key.json'
-c['data_dir']         = 'C:/sauromatae/$T/n$n'
+c['chain_path']       = '$PROJECT_ROOT/$T/n$n/chain.json'
+c['key_path']         = '$PROJECT_ROOT/$T/n$n/node_key.json'
+c['data_dir']         = '$PROJECT_ROOT/$T/n$n'
 c['tx_commit_ms']     = 2000
 c['block_sig_ms']     = 2000
 c['abort_claim_ms']   = 1000

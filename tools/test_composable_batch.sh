@@ -17,7 +17,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 
 echo "=== v2.4 composable_batch apply semantics ==="
 OUT=$($DETERM test-composable-batch 2>&1)

@@ -37,7 +37,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 
 echo "=== S-018 JSON schema validation ==="
 OUT=$($DETERM test-s018-json-validation 2>&1)

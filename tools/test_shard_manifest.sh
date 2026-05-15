@@ -20,7 +20,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_shard_manifest
 
 declare -a NODE_PIDS
@@ -122,11 +122,11 @@ c['listen_port'] = $listen
 c['rpc_port'] = $rpc
 c['bootstrap_peers'] = $peers
 c['$cross_field'] = $cross_peers
-c['genesis_path'] = 'C:/sauromatae/$T/$gen'
+c['genesis_path'] = '$PROJECT_ROOT/$T/$gen'
 c['genesis_hash'] = '$ghash'
-c['chain_path'] = 'C:/sauromatae/$T/$dir/chain.json'
-c['key_path'] = 'C:/sauromatae/$T/$dir/node_key.json'
-c['data_dir'] = 'C:/sauromatae/$T/$dir'
+c['chain_path'] = '$PROJECT_ROOT/$T/$dir/chain.json'
+c['key_path'] = '$PROJECT_ROOT/$T/$dir/node_key.json'
+c['data_dir'] = '$PROJECT_ROOT/$T/$dir'
 with open('$T/$dir/config.json','w') as f: json.dump(c,f,indent=2)
 "
 }
@@ -192,11 +192,11 @@ $DETERM init --data-dir $T/beacon_no_manifest --profile global_test 2>&1 > /dev/
 python -c "
 import json
 with open('$T/beacon_no_manifest/config.json') as f: c = json.load(f)
-c['genesis_path'] = 'C:/sauromatae/$T/beacon_gen.json'
+c['genesis_path'] = '$PROJECT_ROOT/$T/beacon_gen.json'
 c['genesis_hash'] = '$BEACON_GHASH'
-c['chain_path']   = 'C:/sauromatae/$T/beacon_no_manifest/chain.json'
-c['key_path']     = 'C:/sauromatae/$T/beacon_no_manifest/node_key.json'
-c['data_dir']     = 'C:/sauromatae/$T/beacon_no_manifest'
+c['chain_path']   = '$PROJECT_ROOT/$T/beacon_no_manifest/chain.json'
+c['key_path']     = '$PROJECT_ROOT/$T/beacon_no_manifest/node_key.json'
+c['data_dir']     = '$PROJECT_ROOT/$T/beacon_no_manifest'
 c['listen_port']  = 7799
 c['rpc_port']     = 8799
 with open('$T/beacon_no_manifest/config.json','w') as f: json.dump(c,f,indent=2)

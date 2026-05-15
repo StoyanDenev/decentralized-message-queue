@@ -10,15 +10,15 @@
 
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
-| Open (untouched) | **0** | **0** | **0** | **1** (S-035 unit-tests/CI; engineering-culture item) | **1** |
-| Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped + v2.7 F2 closes Option 1) | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **3** |
+| Open (untouched) | **0** | **0** | **0** | **0** | **0** |
+| Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped + v2.7 F2 closes Option 1) | **2** (S-035 Option 3 path-portability shipped; Options 1+2 outstanding. S-036 EXTENDED-mode-only; v2.11 closes) | **4** |
 | Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **13** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033, S-038) | **1** (S-018) | **8** (S-021, S-022, S-024, S-026, S-027, S-028, S-029, S-037) | **27** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
 (M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 closed in this session** — added serialize / restore handling for `dapp_registry_` so DApp-active chains survive snapshot bootstrap intact; new regression `tools/test_dapp_snapshot.sh` (12/12 PASS) exercises register → snapshot → restore → `dapp-info` end-to-end. **S-038 closed in this session** — `Node::try_finalize_round` now populates `body.state_root` via a tentative-chain dry-run before broadcast, so the S-033 verification gate at apply time actually fires (pre-fix the field was zero on every gossiped block, short-circuiting the gate). S-033's documented "shipped" status is now genuine end-to-end; the apply-layer mitigation of S-030 D1/D2 is no longer dormant. **Open Medium findings: zero** — S-018 closed via `json_require<T>` / `json_require_hex` helpers (`include/determ/util/json_validate.hpp`) across every attack-relevant wire-format consumer (gossip envelope, Transaction/Block/AbortEvent/EquivocationEvent/GenesisAlloc, ContribMsg/AbortClaimMsg/BlockSigMsg, GenesisConfig, node_key.json loader); new regression `tools/test_s018_json_validation.sh` (9/9 PASS) exercises field-name diagnostics for missing-field / wrong-type / wrong-hex-length errors. S-016 remains partially mitigated (Option 2 time-ordered admission shipped; Option 1 intersection commitment ships with v2.7 F2).
+**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 closed in this session** — added serialize / restore handling for `dapp_registry_` so DApp-active chains survive snapshot bootstrap intact; new regression `tools/test_dapp_snapshot.sh` (12/12 PASS) exercises register → snapshot → restore → `dapp-info` end-to-end. **S-038 closed in this session** — `Node::try_finalize_round` now populates `body.state_root` via a tentative-chain dry-run before broadcast, so the S-033 verification gate at apply time actually fires (pre-fix the field was zero on every gossiped block, short-circuiting the gate). S-033's documented "shipped" status is now genuine end-to-end; the apply-layer mitigation of S-030 D1/D2 is no longer dormant. **Open Medium findings: zero** — S-018 closed via `json_require<T>` / `json_require_hex` helpers (`include/determ/util/json_validate.hpp`) across every attack-relevant wire-format consumer (gossip envelope, Transaction/Block/AbortEvent/EquivocationEvent/GenesisAlloc, ContribMsg/AbortClaimMsg/BlockSigMsg, GenesisConfig, node_key.json loader); new regression `tools/test_s018_json_validation.sh` (9/9 PASS) exercises field-name diagnostics for missing-field / wrong-type / wrong-hex-length errors. S-016 remains partially mitigated (Option 2 time-ordered admission shipped; Option 1 intersection commitment ships with v2.7 F2). **Open Low/Op findings: zero fully-open** — S-035 Option 3 (path portability) shipped this session via `tools/common.sh` helper + 49-test `sed` conversion; Options 1 (gtest seed) + 2 (deterministic-simulation framework) remain as v1.x quality work but don't block deployment.
 
 **Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
@@ -102,7 +102,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-032 | ✅ Mitigated | Incremental registry cache on Chain + snapshot persistence; build_from_chain reads cache, no log walk | `node/registry.cpp::build_from_chain` | done |
 | S-033 | ✅ Mitigated | Merkle tree state commitment + Block.state_root + signing_bytes binding + apply/restore verification | `chain/chain.cpp::compute_state_root` | done |
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
-| S-035 | 🟢 Op | No unit tests, no CI, no deterministic simulation framework | `tools/` | engineering culture |
+| S-035 | 🟠 Partially mitigated | No unit tests, no CI, no deterministic simulation framework — Option 3 path-portability shipped (all 49 tests source `tools/common.sh` + use `$PROJECT_ROOT` / `$DETERM`; portable to Linux/Mac builds); Options 1 (gtest/Catch2 unit tests) + 2 (deterministic-simulation framework) remain | `tools/common.sh` + `tools/test_*.sh` (path layer); CI workflow file is operator policy | Option 1: 1-2w; Option 2: 3-4w |
 | S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must lie entirely in past — leading `evidence_window_start ≤ b.index` check added to prevent integer overflow bypassing the threshold-arithmetic check); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `node/validator.cpp::check_transactions` MERGE_EVENT branch | v2.11 |
 | S-037 | ✅ Mitigated | `dapp_registry` field now emitted by `Chain::serialize_state` (after merge_state block) and read back by `restore_from_snapshot` with `if (snap.contains("dapp_registry"))` guard for pre-v2.18 backward compat. Every field that contributes to the `d:` value-hash in `build_state_leaves` is round-tripped: `service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`, plus the map key. Regression: `tools/test_dapp_snapshot.sh` register → snapshot → restore → `dapp-info` verification end-to-end (12/12 PASS). | `chain/chain.cpp::serialize_state` + `::restore_from_snapshot` | done |
 | S-038 | ✅ Mitigated | S-033 verification gate was dormant on production blocks because `Node::try_finalize_round` did not populate `body.state_root` before broadcast; the gate skipped on `state_root = 0` per the backward-compat shim. `try_finalize_round` now sets `body.state_root` via a tentative-chain dry-run between `build_body` and `apply_block_locked` (mirrors the digest-dry-run pattern in `start_block_sig_phase`). The gate now fires on every block — peer nodes reject any block whose stored `state_root` doesn't match the locally-recomputed value over their own apply of the same transactions. `compute_block_digest` already excludes `state_root` (§4.3) so K-of-K signatures are unaffected. Discovered while writing the S-037 test (snapshot tail head's `state_root` field was empty in JSON, exposing this latent gap). | `node/node.cpp::try_finalize_round` | done |
@@ -957,23 +957,34 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 ## 6. Low findings (open)
 
-### S-035 — No unit tests, no CI, no deterministic simulation framework
+### S-035 — No unit tests, no CI, no deterministic simulation framework — 🟠 Partially mitigated
 
-**Severity:** Operational • **Status:** Open • **Sources:** Architectural Analysis §4.1, §4.2
+**Severity:** Operational • **Status:** 🟠 Partially mitigated (Option 3 path portability shipped in-session — all 49 tests now portable; Option 1 + Option 2 outstanding) • **Sources:** Architectural Analysis §4.1, §4.2
 
-**What's open.** The project ships with bash integration tests and zero unit tests. No gtest/Catch2/doctest. No GitHub Actions / GitLab CI. Tests hardcode Windows paths (`C:/sauromatae/...`, `build/Release/determ.exe`); no Linux/Mac CI ever ran. No deterministic-simulation framework — no clock mock, no controlled message delivery (drop / reorder / delay), no partition injector. Byzantine behavior cannot be tested systematically.
+**Path portability shipped in-session (Option 3, ~1d).** Every test under `tools/test_*.sh` now sources `tools/common.sh` which detects the determ + determ-wallet binaries across platforms (Windows MSVC multi-config `build/Release/determ.exe`, Linux/Mac single-config `build/determ`, etc.) and resolves `PROJECT_ROOT` to a Windows-style absolute path on Git Bash via `pwd -W` (with `cygpath -m` fallback for Cygwin). Hard-coded `C:/sauromatae/...` references in test scripts are replaced with `$PROJECT_ROOT/...`; hard-coded `build/Release/determ.exe` is replaced with `$DETERM`. Override hooks: set `DETERM_BIN=/path/to/determ` or `DETERM_WALLET_BIN=/path/to/determ-wallet` to use a custom build layout (CI runners can point at any installed binary without editing tests).
+
+Verified end-to-end with the converted tests:
+
+- `test_bearer.sh` — 3-node gossip TRANSFER round-trip PASS
+- `test_zero_trust_cross_chain.sh` — beacon + shard cross-chain PASS
+- `test_state_proof.sh` — TABS-using snapshot path PASS (7/7)
+- `test_atomic_scope.sh`, `test_s018_json_validation.sh` — in-process tests PASS
+
+The change is mechanical (49 file `sed` + a 25-line `common.sh` helper) and zero-cost on Windows: the existing tests continue to find `build/Release/determ.exe` and resolve `$PROJECT_ROOT = C:/sauromatae` exactly as the prior hard-coded values did. The portability gain is the new ability to run the same scripts on Linux/Mac (binary discovery via `build/determ`, `pwd` returns the native path) and the new `DETERM_BIN` override hook for CI flexibility.
+
+**What's still open.** No unit-test framework (no gtest/Catch2/doctest); no GitHub Actions / GitLab CI workflow committed; no deterministic-simulation framework (no clock mock, no controlled message delivery, no partition injector). Byzantine behavior still cannot be tested systematically. Path portability unblocks running the existing bash suite on Linux/Mac, but the deeper "regression-prevention via unit tests + simulation" gap remains.
 
 **Why this is operational, not a vulnerability.** A bug-free codebase doesn't strictly need unit tests, but their absence makes regression-prevention impossible. Edge cases (`ContribMsg` with invalid `aborts_gen` or same-generation duplicate, two same-height blocks in different orders, equivocation under network partition, V12/V13 cross-shard receipt fuzzing, S-022 per-message-type-cap boundary, S-014 token-bucket interactions across HELLO exemption) require targeted unit tests; the integration scripts can't drive them.
 
 **Resolution options.**
 
-| # | Option | Cost |
-|---|---|---|
-| 1 | **Add gtest/Catch2** for crypto, serialization, state transitions, validator rules. CMake + Linux CI. | 1-2w to seed + ongoing per-feature. |
-| 2 | **Deterministic simulation framework** — virtual clock + virtual network + scriptable Byzantine actors. | 3-4w. Substantial but the right tool for testing consensus. |
-| 3 | **Path portability** — replace Windows-specific test paths with platform-agnostic ones; add Linux/Mac CI. | 1d. |
+| # | Option | Cost | Status |
+|---|---|---|---|
+| 1 | **Add gtest/Catch2** for crypto, serialization, state transitions, validator rules. CMake + Linux CI. | 1-2w to seed + ongoing per-feature. | ⏳ outstanding |
+| 2 | **Deterministic simulation framework** — virtual clock + virtual network + scriptable Byzantine actors. | 3-4w. Substantial but the right tool for testing consensus. | ⏳ outstanding |
+| 3 | **Path portability** — replace Windows-specific test paths with platform-agnostic ones; add Linux/Mac CI. | 1d. | ✅ shipped (path layer; CI workflow file remains operator-policy) |
 
-**Recommended.** Option 3 immediately (gets the existing tests running on Linux/Mac CI). Option 1 incrementally (add unit tests for new code; backfill gradually). Option 2 is v1.x quality work.
+**Recommended next.** Option 1 incrementally (add unit tests for new code as it lands; backfill gradually). Option 2 is v1.x quality work — substantial but precisely the right tool for testing consensus invariants. The committed-to-CI workflow file is intentionally not auto-generated (operator picks the platform + Cron schedule).
 
 ---
 

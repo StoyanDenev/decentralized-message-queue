@@ -22,8 +22,9 @@
 # Run from repo root: bash tools/test_wallet_opaque_adapter.sh
 set -u
 cd "$(dirname "$0")/.."
+source tools/common.sh
 
-WALLET=build/Release/determ-wallet.exe
+WALLET="$DETERM_WALLET"
 PW="myp4ssphr4se"
 GID=3
 

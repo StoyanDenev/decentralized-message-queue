@@ -16,9 +16,9 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_dapp_e2e
-TABS=C:/sauromatae/$T
+TABS=$PROJECT_ROOT/$T
 
 declare -a NODE_PIDS
 

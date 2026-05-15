@@ -14,7 +14,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_tactical
 
 declare -a NODE_PIDS

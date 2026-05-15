@@ -24,7 +24,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 
 echo "=== A9 Phase 2D atomic_scope semantics ==="
 OUT=$($DETERM test-atomic-scope 2>&1)

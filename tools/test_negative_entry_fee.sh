@@ -27,7 +27,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_nef
 ZEROTH=0x0000000000000000000000000000000000000000000000000000000000000000
 
@@ -84,7 +84,7 @@ $(cat $T/p3.json | tr -d '\n')
 EOF
 $DETERM genesis-tool build $T/gen.json | tail -1
 GHASH=$(cat $T/gen.json.hash)
-GPATH="C:/sauromatae/$T/gen.json"
+GPATH="$PROJECT_ROOT/$T/gen.json"
 
 # Build a second genesis with a different pool size to verify the field
 # is bound into the chain config (different pool ⇒ different account state).
@@ -110,9 +110,9 @@ c['rpc_port'] = $rpc
 c['bootstrap_peers'] = $peers
 c['genesis_path'] = '$GPATH'
 c['genesis_hash'] = '$GHASH'
-c['chain_path'] = 'C:/sauromatae/$T/n$n/chain.json'
-c['key_path'] = 'C:/sauromatae/$T/n$n/node_key.json'
-c['data_dir'] = 'C:/sauromatae/$T/n$n'
+c['chain_path'] = '$PROJECT_ROOT/$T/n$n/chain.json'
+c['key_path'] = '$PROJECT_ROOT/$T/n$n/node_key.json'
+c['data_dir'] = '$PROJECT_ROOT/$T/n$n'
 with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)
 "
 }

@@ -17,7 +17,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_account_enc
 mkdir -p $T
 rm -f $T/*

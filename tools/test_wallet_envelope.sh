@@ -14,8 +14,9 @@
 # Run from repo root: bash tools/test_wallet_envelope.sh
 set -u
 cd "$(dirname "$0")/.."
+source tools/common.sh
 
-WALLET=build/Release/determ-wallet.exe
+WALLET="$DETERM_WALLET"
 PLAIN="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PW="hunter2"
 ITERS=10000   # keep low for test speed; production uses 600000

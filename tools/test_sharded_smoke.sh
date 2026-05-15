@@ -21,7 +21,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 T=test_sharded
 
 declare -a NODE_PIDS
@@ -134,11 +134,11 @@ c['domain'] = '$domain'
 c['listen_port'] = $listen
 c['rpc_port'] = $rpc
 c['bootstrap_peers'] = $peers
-c['genesis_path'] = 'C:/sauromatae/$gen_path'
+c['genesis_path'] = '$PROJECT_ROOT/$gen_path'
 c['genesis_hash'] = '$gen_hash'
-c['chain_path'] = 'C:/sauromatae/$T/$chain/n$n/chain.json'
-c['key_path'] = 'C:/sauromatae/$T/$chain/n$n/node_key.json'
-c['data_dir'] = 'C:/sauromatae/$T/$chain/n$n'
+c['chain_path'] = '$PROJECT_ROOT/$T/$chain/n$n/chain.json'
+c['key_path'] = '$PROJECT_ROOT/$T/$chain/n$n/node_key.json'
+c['data_dir'] = '$PROJECT_ROOT/$T/$chain/n$n'
 c['tx_commit_ms'] = 2000
 c['block_sig_ms'] = 2000
 c['abort_claim_ms'] = 1000

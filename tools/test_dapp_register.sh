@@ -16,7 +16,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DETERM=build/Release/determ.exe
+source tools/common.sh
 
 echo "=== v2.18 DAPP_REGISTER apply semantics ==="
 OUT=$($DETERM test-dapp-register 2>&1)

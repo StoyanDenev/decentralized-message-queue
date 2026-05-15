@@ -18,8 +18,9 @@
 # Run from repo root: bash tools/test_wallet_opaque_recovery.sh
 set -u
 cd "$(dirname "$0")/.."
+source tools/common.sh
 
-WALLET=build/Release/determ-wallet.exe
+WALLET="$DETERM_WALLET"
 T_DIR=test_opaque_recovery
 SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PW="myp4ssphr4se"

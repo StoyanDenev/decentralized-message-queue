@@ -20,8 +20,8 @@
 # Run from repo root: bash tools/test_zero_trust_cross_chain.sh
 set -u
 cd "$(dirname "$0")/.."
+source tools/common.sh
 
-DETERM=build/Release/determ.exe
 T=test_ztcc
 
 declare -a NODE_PIDS
@@ -99,8 +99,8 @@ $DETERM genesis-tool build $T/shard_gen.json | tail -1
 
 BEACON_HASH=$(cat $T/beacon_gen.json.hash)
 SHARD_HASH=$(cat $T/shard_gen.json.hash)
-BEACON_GEN="C:/sauromatae/$T/beacon_gen.json"
-SHARD_GEN="C:/sauromatae/$T/shard_gen.json"
+BEACON_GEN="$PROJECT_ROOT/$T/beacon_gen.json"
+SHARD_GEN="$PROJECT_ROOT/$T/shard_gen.json"
 
 echo "  beacon hash: $BEACON_HASH"
 echo "  shard  hash: $SHARD_HASH"
@@ -120,9 +120,9 @@ c['bootstrap_peers'] = $own_peers
 c['$cross_kind'] = $cross_peers
 c['genesis_path'] = '$gen_path'
 c['genesis_hash'] = '$gen_hash'
-c['chain_path'] = 'C:/sauromatae/$T/$chain/n$n/chain.json'
-c['key_path'] = 'C:/sauromatae/$T/$chain/n$n/node_key.json'
-c['data_dir'] = 'C:/sauromatae/$T/$chain/n$n'
+c['chain_path'] = '$PROJECT_ROOT/$T/$chain/n$n/chain.json'
+c['key_path'] = '$PROJECT_ROOT/$T/$chain/n$n/node_key.json'
+c['data_dir'] = '$PROJECT_ROOT/$T/$chain/n$n'
 c['tx_commit_ms'] = 2000
 c['block_sig_ms'] = 2000
 c['abort_claim_ms'] = 1000
