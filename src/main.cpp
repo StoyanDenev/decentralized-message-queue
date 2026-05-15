@@ -6,8 +6,10 @@
 #include <determ/chain/block.hpp>
 #include <determ/chain/params.hpp>
 #include <determ/crypto/keys.hpp>
+#include <determ/crypto/merkle.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
+#include <determ/util/json_validate.hpp>
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
 // Lives in wallet/envelope.cpp, also linked into determ binary.
 #include "envelope.hpp"
@@ -87,6 +89,13 @@ State commitment + light-client (v2.1 + v2.2):
                                               Merkle inclusion proof for any state entry
                                               (light-client primitive against state_root;
                                               d = v2.18 DApp registry by owning domain)
+  determ verify-state-proof [--in file] [--state-root <hex64>]
+                                              Verify a state-proof response locally via
+                                              crypto::merkle_verify. Reads JSON from --in
+                                              or stdin. Optional --state-root pins an
+                                              externally-trusted root (real light-client
+                                              mode); without it, the proof's claimed root
+                                              is used (self-consistency check).
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
   determ submit-dapp-register --priv <hex> --from <domain>
@@ -1965,6 +1974,148 @@ int main(int argc, char** argv) {
             return 0;
         } catch (std::exception& e) {
             std::cerr << "dapp-list query failed: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
+    // v2.2 light-client demonstrator: verify a state-proof response
+    // locally via crypto::merkle_verify, without trusting the
+    // responding node. Pair with `determ state-proof` (which fetches
+    // the proof from a full node) — a light client that has an
+    // independently-trusted state_root (e.g., from a block header it
+    // accepted via header-sync, or a snapshot it verified) can use
+    // this to confirm any state field's current value with zero
+    // additional trust in the full node.
+    //
+    // Usage:
+    //   determ state-proof --ns a --key alice --rpc-port 8771 > proof.json
+    //   determ verify-state-proof --in proof.json
+    //
+    // Or pipe directly:
+    //   determ state-proof --ns a --key alice | determ verify-state-proof
+    //
+    // Optional --state-root <hex64>: verify against an externally-
+    // provided root rather than the root the proof itself reports.
+    // (Useful for confirming the proof matches a root the client
+    // already trusts; without this flag, this command just sanity-
+    // checks that the proof is internally consistent.)
+    if (cmd == "verify-state-proof") {
+        std::string in_path;
+        std::string expected_root_hex;
+        for (int i = 0; i < sub_argc; ++i) {
+            std::string a = sub_argv[i];
+            if      (a == "--in"          && i + 1 < sub_argc) in_path          = sub_argv[++i];
+            else if (a == "--state-root"  && i + 1 < sub_argc) expected_root_hex= sub_argv[++i];
+        }
+
+        // Read JSON proof from file or stdin.
+        nlohmann::json proof_json;
+        try {
+            if (!in_path.empty()) {
+                std::ifstream f(in_path);
+                if (!f) throw std::runtime_error("cannot open: " + in_path);
+                proof_json = nlohmann::json::parse(f);
+            } else {
+                proof_json = nlohmann::json::parse(std::cin);
+            }
+        } catch (std::exception& e) {
+            std::cerr << "verify-state-proof: parse error: "
+                      << e.what() << "\n";
+            return 1;
+        }
+
+        // Surface "not_found" responses explicitly — the server told
+        // us the key isn't in the tree, so there's nothing to verify.
+        if (proof_json.contains("error")) {
+            std::cerr << "verify-state-proof: RPC error in proof: "
+                      << proof_json["error"].dump() << "\n";
+            return 1;
+        }
+
+        // Extract proof fields. Each field validated by name for
+        // clear diagnostics (mirrors S-018 patterns).
+        Hash claimed_root;
+        std::vector<uint8_t> key_bytes;
+        Hash value_hash;
+        size_t target_index = 0;
+        size_t leaf_count = 0;
+        std::vector<Hash> proof_sibs;
+        try {
+            using determ::util::json_require;
+            using determ::util::json_require_hex;
+            using determ::util::json_require_array;
+            claimed_root = from_hex_arr<32>(
+                json_require_hex(proof_json, "state_root", 64));
+            std::string kb_hex = json_require<std::string>(proof_json, "key_bytes");
+            key_bytes = from_hex(kb_hex);
+            value_hash = from_hex_arr<32>(
+                json_require_hex(proof_json, "value_hash", 64));
+            target_index = json_require<size_t>(proof_json, "target_index");
+            leaf_count   = json_require<size_t>(proof_json, "leaf_count");
+            for (auto& h : json_require_array(proof_json, "proof")) {
+                proof_sibs.push_back(
+                    from_hex_arr<32>(h.get<std::string>()));
+            }
+        } catch (std::exception& e) {
+            std::cerr << "verify-state-proof: malformed proof: "
+                      << e.what() << "\n";
+            return 1;
+        }
+
+        // If the operator supplied an external trusted root, swap it
+        // in (this is the real light-client mode — the proof's own
+        // claimed root is server-supplied and not trusted).
+        Hash verify_root = claimed_root;
+        if (!expected_root_hex.empty()) {
+            if (expected_root_hex.size() != 64) {
+                std::cerr << "verify-state-proof: --state-root must be "
+                             "64 hex chars (32 bytes), got "
+                          << expected_root_hex.size() << "\n";
+                return 1;
+            }
+            try {
+                verify_root = from_hex_arr<32>(expected_root_hex);
+            } catch (std::exception& e) {
+                std::cerr << "verify-state-proof: --state-root parse error: "
+                          << e.what() << "\n";
+                return 1;
+            }
+            if (verify_root != claimed_root) {
+                std::cerr << "verify-state-proof: WARNING — supplied "
+                             "--state-root "
+                          << to_hex(verify_root).substr(0, 16)
+                          << "... does NOT match proof's claimed root "
+                          << to_hex(claimed_root).substr(0, 16)
+                          << "...\n";
+                std::cerr << "  (verifying against the supplied --state-root; "
+                             "if the proof was fetched against the same "
+                             "trusted root this should match)\n";
+            }
+        }
+
+        bool ok = crypto::merkle_verify(verify_root, key_bytes, value_hash,
+                                          target_index, leaf_count, proof_sibs);
+        if (ok) {
+            std::cout << "OK\n";
+            std::cout << "  state_root:   " << to_hex(verify_root) << "\n";
+            std::cout << "  key:          "
+                      << (proof_json.contains("namespace")
+                          ? proof_json["namespace"].get<std::string>() + ":"
+                          : std::string{})
+                      << proof_json.value("key", std::string{}) << "\n";
+            std::cout << "  value_hash:   " << to_hex(value_hash) << "\n";
+            std::cout << "  proof depth:  " << proof_sibs.size()
+                      << " sibling hashes\n";
+            std::cout << "  leaf_count:   " << leaf_count
+                      << " (target_index=" << target_index << ")\n";
+            return 0;
+        } else {
+            std::cerr << "FAIL: merkle_verify rejected the proof\n";
+            std::cerr << "  state_root:   " << to_hex(verify_root) << "\n";
+            std::cerr << "  expected leaf at index " << target_index
+                      << " of " << leaf_count << " to combine with the "
+                      << proof_sibs.size() << " sibling hashes to produce "
+                      << "the state_root, but it did not.\n";
             return 1;
         }
     }

@@ -11,7 +11,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **49 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **50 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
@@ -25,6 +25,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_snapshot_bootstrap.sh` | Receiver fast-bootstraps from donor's snapshot with no genesis required |
 | `test_state_root.sh` | S-033 Merkle-root state commitment changes when state changes |
 | `test_state_proof.sh` | v2.2 state_proof inclusion-proof RPC + leaf-hash validation |
+| `test_verify_state_proof.sh` | v2.2 light-client demonstrator — fetches state-proof, verifies locally via `crypto::merkle_verify`; asserts tampered value_hash / sibling-hash / mismatched --state-root all FAIL while valid proofs PASS |
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |
