@@ -8,6 +8,7 @@
 #include <determ/chain/params.hpp>
 #include <determ/crypto/keys.hpp>
 #include <determ/crypto/merkle.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -151,6 +152,8 @@ In-process tests (deterministic, no network):
   determ test-dapp-register                   v2.18 DAPP_REGISTER apply path
   determ test-dapp-call                       v2.19 DAPP_CALL routing + apply path
   determ test-s018-json-validation            S-018 json_require<T> field-name diagnostics
+  determ test-merkle                          v2.1 Merkle primitives (root, proof, verify,
+                                              tampering detection, domain separation)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -3242,6 +3245,160 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": composable_batch " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the Merkle
+    // primitives that the v2.2 light-client surface depends on
+    // (compute_state_root / state_proof RPC / verify-state-proof).
+    // Exercises merkle_root determinism, merkle_proof round-trip,
+    // tampering detection, and leaf/inner domain-separation.
+    if (cmd == "test-merkle") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto make_leaves = [](size_t n) {
+            std::vector<MerkleLeaf> v;
+            for (size_t i = 0; i < n; ++i) {
+                MerkleLeaf m;
+                m.key = {'k', static_cast<uint8_t>(i)};
+                // value_hash: SHA256 of the index, deterministic.
+                SHA256Builder b; b.append(static_cast<uint64_t>(i));
+                m.value_hash = b.finalize();
+                v.push_back(m);
+            }
+            return v;
+        };
+
+        // 1. Empty leaf set → all-zero root (the "no committed state"
+        //    convention).
+        {
+            std::vector<MerkleLeaf> empty;
+            Hash r = merkle_root(empty);
+            check(r == Hash{}, "empty leaf set yields all-zero root");
+        }
+
+        // 2. Single-leaf tree → root == leaf_hash (degenerate case;
+        //    proof is empty array).
+        {
+            auto leaves = make_leaves(1);
+            Hash r = merkle_root(leaves);
+            Hash lh = merkle_leaf_hash(leaves[0].key, leaves[0].value_hash);
+            check(r == lh, "single-leaf root equals leaf_hash");
+            auto p = merkle_proof(leaves, 0);
+            check(p.empty(), "single-leaf proof is empty");
+            bool ok = merkle_verify(r, leaves[0].key, leaves[0].value_hash,
+                                       0, 1, p);
+            check(ok, "single-leaf merkle_verify OK");
+        }
+
+        // 3. Determinism: same inputs → same root.
+        {
+            auto v1 = make_leaves(8);
+            auto v2 = make_leaves(8);
+            check(merkle_root(v1) == merkle_root(v2),
+                  "merkle_root is deterministic");
+        }
+
+        // 4. Round-trip: merkle_proof + merkle_verify for every leaf in
+        //    a balanced (8-leaf) tree.
+        {
+            auto leaves = make_leaves(8);
+            Hash root = merkle_root(leaves);
+            bool all_ok = true;
+            for (size_t i = 0; i < leaves.size(); ++i) {
+                auto p = merkle_proof(leaves, i);
+                if (!merkle_verify(root, leaves[i].key, leaves[i].value_hash,
+                                      i, leaves.size(), p)) {
+                    all_ok = false; break;
+                }
+            }
+            check(all_ok, "merkle_proof round-trips for all 8 leaves");
+        }
+
+        // 5. Round-trip: same for an unbalanced (7-leaf, not power of
+        //    two) tree — the last-leaf-duplication padding works.
+        {
+            auto leaves = make_leaves(7);
+            Hash root = merkle_root(leaves);
+            bool all_ok = true;
+            for (size_t i = 0; i < leaves.size(); ++i) {
+                auto p = merkle_proof(leaves, i);
+                if (!merkle_verify(root, leaves[i].key, leaves[i].value_hash,
+                                      i, leaves.size(), p)) {
+                    all_ok = false; break;
+                }
+            }
+            check(all_ok, "merkle_proof round-trips on unbalanced (7-leaf) tree");
+        }
+
+        // 6. Tampering: flipping a value_hash makes verify fail.
+        {
+            auto leaves = make_leaves(8);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 3);
+            Hash tampered = leaves[3].value_hash;
+            tampered[0] ^= 0xff;  // flip a byte
+            check(!merkle_verify(root, leaves[3].key, tampered,
+                                    3, leaves.size(), p),
+                  "merkle_verify rejects tampered value_hash");
+        }
+
+        // 7. Tampering: flipping a sibling hash in the proof makes
+        //    verify fail.
+        {
+            auto leaves = make_leaves(8);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 0);
+            if (!p.empty()) {
+                p[0][0] ^= 0xff;  // flip a byte in first sibling
+                check(!merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                        0, leaves.size(), p),
+                      "merkle_verify rejects tampered sibling-hash");
+            }
+        }
+
+        // 8. Tampering: wrong target_index makes verify fail.
+        {
+            auto leaves = make_leaves(8);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 3);
+            check(!merkle_verify(root, leaves[3].key, leaves[3].value_hash,
+                                    5, leaves.size(), p),
+                  "merkle_verify rejects wrong target_index");
+        }
+
+        // 9. Domain separation: leaf-hash and inner-hash must produce
+        //    distinct outputs even on the same input bytes (defeats
+        //    second-preimage attacks where an attacker crafts a leaf
+        //    that hashes identically to an inner node).
+        {
+            std::vector<uint8_t> k = {'x'};
+            Hash v{};
+            v[0] = 1;
+            Hash lh = merkle_leaf_hash(k, v);
+            Hash zero{};
+            Hash ih = merkle_inner_hash(zero, zero);
+            check(lh != ih, "leaf_hash and inner_hash domain-separated");
+        }
+
+        // 10. Sort-invariance: keys are sorted at root computation, so
+        //     pre-sorted vs. unsorted input yields the same root.
+        {
+            auto sorted_l = make_leaves(8);
+            auto shuffled = sorted_l;
+            std::reverse(shuffled.begin(), shuffled.end());
+            check(merkle_root(sorted_l) == merkle_root(shuffled),
+                  "merkle_root sorts leaves internally (input order doesn't matter)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merkle " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

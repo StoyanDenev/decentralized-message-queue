@@ -137,6 +137,7 @@ These are deterministic, network-free smoke tests embedded as CLI subcommands. T
 | `determ test-dapp-register` | v2.18 DAPP_REGISTER apply path | `tools/test_dapp_register.sh` |
 | `determ test-dapp-call` | v2.19 DAPP_CALL routing + apply path | `tools/test_dapp_call.sh` |
 | `determ test-s018-json-validation` | S-018 closure: `json_require<T>` / `json_require_hex` / `json_require_array` helpers + converted `from_json` paths across `chain/block.cpp` + `node/producer.cpp` + `chain/genesis.cpp` + `net/messages.cpp` + `crypto/keys.cpp` surface clear field-name diagnostics on malformed gossip / RPC / snapshot / keyfile input (10 assertions including the new `json_require_array` "expected array, got X" path) | `tools/test_s018_json_validation.sh` |
+| `determ test-merkle` | v2.1 Merkle primitives (S-035 Option 1 seed): `crypto::merkle_root` + `merkle_proof` + `merkle_verify` + `merkle_leaf_hash` + `merkle_inner_hash` over balanced + unbalanced + edge-case (empty / single-leaf) leaf sets. 12 assertions covering round-trip, tampering detection (value_hash / sibling-hash / target_index), domain separation (leaf vs inner), determinism, and sort-invariance | `tools/test_merkle.sh` |
 
 ## Forensics / governance
 

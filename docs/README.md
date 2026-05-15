@@ -11,7 +11,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **53 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **54 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
@@ -29,6 +29,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_headers_rpc.sh` | v2.2 light-client header-sync — `headers` RPC + `determ headers` CLI + `determ verify-headers` chain-integrity CLI; asserts response shape, light-client field set present, heavy fields stripped, pagination, out-of-range handling, server-side count cap (256), `block_hash` field + prev_hash chain links, verify-headers OK on valid chains and FAIL on tampered prev_hash / wrong --prev-hash anchor |
 | `test_verify_block_sigs.sh` | v2.2 light-client committee-signature verifier — `determ verify-block-sigs`; asserts K-of-K committee Ed25519 signatures verify against `compute_block_digest`, tampered signature / wrong committee pubkey / missing committee member all FAIL, accepts `determ headers` envelope shape |
 | `test_json_cli.sh` | `--json` flag on info CLIs (validators / committee / peers / chain-summary); asserts each returns the expected JSON shape, validators --json entries are verify-block-sigs-compatible, default output is NOT JSON (--json required for machine consumption), and validators --json pipes directly into verify-block-sigs --committee for end-to-end light-client verification |
+| `test_merkle.sh` | v2.1 Merkle primitives unit test (S-035 Option 1 seed) — in-process `crypto::merkle_root` + `merkle_proof` + `merkle_verify` + `merkle_leaf_hash` + `merkle_inner_hash`; 12 assertions covering empty-set, single-leaf, balanced + unbalanced trees, tampering detection (value_hash / sibling-hash / target_index), domain separation (leaf vs inner), determinism, and sort-invariance |
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |
@@ -53,7 +54,7 @@ ONLY_PATTERN='test_dapp' bash tools/run_all.sh # subset by regex
 SKIP_PATTERN='test_equiv' bash tools/run_all.sh # skip known-flaky on a platform
 ```
 
-`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention, and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. **`FAST=1`** short-circuits to the deterministic in-process subset (`determ test-*` subcommand wrappers): atomic_scope, composable_batch, dapp_register, dapp_call, s018_json_validation. ~3 seconds total, no clusters, no network, no flakes — useful for dev iteration. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
+`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention, and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. **`FAST=1`** short-circuits to the deterministic in-process subset (`determ test-*` subcommand wrappers): atomic_scope, composable_batch, dapp_register, dapp_call, s018_json_validation, merkle. ~3 seconds total, no clusters, no network, no flakes — useful for dev iteration. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
 
 ```bash
 for t in tools/test_*.sh; do bash "$t"; done
