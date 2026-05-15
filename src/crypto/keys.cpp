@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/crypto/keys.hpp>
+#include <determ/util/json_validate.hpp>
 #include <openssl/evp.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -10,6 +11,7 @@
 namespace determ::crypto {
 
 using json = nlohmann::json;
+using determ::util::json_require_hex;
 namespace fs = std::filesystem;
 
 NodeKey generate_node_key() {
@@ -44,9 +46,14 @@ NodeKey load_node_key(const std::string& path) {
     std::ifstream f(path);
     if (!f) throw std::runtime_error("Cannot open key file: " + path);
     json j = json::parse(f);
+    // S-018: name the failing field if `pubkey` or `priv_seed` is
+    // missing / wrong-typed / wrong-length. Operators occasionally
+    // hand-edit node_key.json (e.g., to swap keys between deployments)
+    // and the prior nlohmann-internal "type must be string, but is
+    // null" error didn't tell them which field they botched.
     NodeKey key;
-    key.pub       = from_hex_arr<32>(j["pubkey"].get<std::string>());
-    key.priv_seed = from_hex_arr<32>(j["priv_seed"].get<std::string>());
+    key.pub       = from_hex_arr<32>(json_require_hex(j, "pubkey",    64));
+    key.priv_seed = from_hex_arr<32>(json_require_hex(j, "priv_seed", 64));
     return key;
 }
 

@@ -78,8 +78,11 @@ json GenesisAlloc::to_json() const {
 }
 
 GenesisAlloc GenesisAlloc::from_json(const json& j) {
+    // S-018: `domain` is required (parses genesis initial_state from
+    // chain.json + snapshot.json); other fields have sensible
+    // defaults via `j.value(...)`.
     GenesisAlloc a;
-    a.domain  = j["domain"].get<std::string>();
+    a.domain  = json_require<std::string>(j, "domain");
     a.ed_pub  = from_hex_arr<32>(j.value("ed_pub", std::string(64, '0')));
     a.balance = j.value("balance", uint64_t{0});
     a.stake   = j.value("stake",   uint64_t{0});
@@ -483,16 +486,20 @@ Block Block::from_json(const json& j) {
             b.creator_dh_secrets.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
 
+    // S-018: optional fields with wrong-type detection. The
+    // `j.contains(...)` guard handles the missing case; if present,
+    // json_require_hex surfaces a clear diagnostic on length mismatch
+    // or wrong inner type.
     if (j.contains("tx_root"))
-        b.tx_root = from_hex_arr<32>(j["tx_root"].get<std::string>());
+        b.tx_root = from_hex_arr<32>(json_require_hex(j, "tx_root", 64));
     if (j.contains("delay_seed"))
-        b.delay_seed = from_hex_arr<32>(j["delay_seed"].get<std::string>());
+        b.delay_seed = from_hex_arr<32>(json_require_hex(j, "delay_seed", 64));
     if (j.contains("delay_output"))
-        b.delay_output = from_hex_arr<32>(j["delay_output"].get<std::string>());
+        b.delay_output = from_hex_arr<32>(json_require_hex(j, "delay_output", 64));
     if (j.contains("consensus_mode"))
-        b.consensus_mode = static_cast<ConsensusMode>(j["consensus_mode"].get<uint8_t>());
+        b.consensus_mode = static_cast<ConsensusMode>(json_require<uint8_t>(j, "consensus_mode"));
     if (j.contains("bft_proposer"))
-        b.bft_proposer = j["bft_proposer"].get<std::string>();
+        b.bft_proposer = json_require<std::string>(j, "bft_proposer");
 
     if (j.contains("creator_block_sigs")) {
         for (auto& s : j["creator_block_sigs"])
@@ -527,10 +534,10 @@ Block Block::from_json(const json& j) {
 
     if (j.contains("partner_subset_hash"))
         b.partner_subset_hash =
-            from_hex_arr<32>(j["partner_subset_hash"].get<std::string>());
+            from_hex_arr<32>(json_require_hex(j, "partner_subset_hash", 64));
     if (j.contains("state_root"))
         b.state_root =
-            from_hex_arr<32>(j["state_root"].get<std::string>());
+            from_hex_arr<32>(json_require_hex(j, "state_root", 64));
 
     return b;
 }

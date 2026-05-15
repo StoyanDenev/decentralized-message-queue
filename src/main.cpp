@@ -2694,6 +2694,29 @@ int main(int argc, char** argv) {
             Block::from_json(j);
         }, {"S-018", "transactions"});
 
+        // 8. GenesisAlloc missing 'domain' — protects snapshot
+        //    `initial_state` + genesis-tool initial_balances paths.
+        expect_throw_with("GenesisAlloc missing 'domain'", [] {
+            json j = {{"balance", 100}, {"stake", 0}};
+            GenesisAlloc::from_json(j);
+        }, {"S-018", "missing", "'domain'"});
+
+        // 9. Block optional 'state_root' field with wrong hex length
+        //    — guards the S-033 state_root snapshot-restore path
+        //    against a malformed snapshot tail-header (the field is
+        //    optional, but if present must be exactly 32 bytes).
+        expect_throw_with("Block 'state_root' wrong hex length", [] {
+            json j = {{"index", 1},
+                      {"prev_hash", std::string(64, '0')},
+                      {"timestamp", 0},
+                      {"transactions", json::array()},
+                      {"creators", json::array()},
+                      {"abort_events", json::array()},
+                      {"cumulative_rand", std::string(64, '0')},
+                      {"state_root", std::string(60, 'a')}};  // wrong length
+            Block::from_json(j);
+        }, {"S-018", "'state_root'", "hex length"});
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": s018_json_validation "
                   << (fail == 0 ? "all assertions" : "had failures")

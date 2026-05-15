@@ -11,14 +11,14 @@
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
 | Open (untouched) | **0** | **0** | **0** | **1** (S-035 unit-tests/CI; engineering-culture item) | **1** |
-| Partially mitigated | **1** (S-030) | — | **2** (S-016 Option 2 shipped + v2.7 F2 closes Option 1; S-018 gossip/RPC consumers hardened, rpc.cpp + snapshot-restore tail remaining) | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **4** |
-| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **13** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033, S-038) | — | **8** (S-021, S-022, S-024, S-026, S-027, S-028, S-029, S-037) | **26** |
+| Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped + v2.7 F2 closes Option 1) | **1** (S-036 EXTENDED-mode-only; v2.11 closes) | **3** |
+| Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **13** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033, S-038) | **1** (S-018) | **8** (S-021, S-022, S-024, S-026, S-027, S-028, S-029, S-037) | **27** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
 
 (M-F removed iterated SHA-256 delay-hash and its supporting infrastructure — `delay_T` field, worker thread, `RUNNING_DELAY` phase, `EVP_MD_CTX` per-iteration alloc — in commits `14bf3d6` and `1b9b086`. T-001 through T-004 are operator-facing trade-offs of `sharding_mode = EXTENDED`, not bugs — see §6.5.)
 
-**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 closed in this session** — added serialize / restore handling for `dapp_registry_` so DApp-active chains survive snapshot bootstrap intact; new regression `tools/test_dapp_snapshot.sh` (12/12 PASS) exercises register → snapshot → restore → `dapp-info` end-to-end. **S-038 closed in this session** — `Node::try_finalize_round` now populates `body.state_root` via a tentative-chain dry-run before broadcast, so the S-033 verification gate at apply time actually fires (pre-fix the field was zero on every gossiped block, short-circuiting the gate). S-033's documented "shipped" status is now genuine end-to-end; the apply-layer mitigation of S-030 D1/D2 is no longer dormant.
+**Open Critical findings: zero.** Only S-030 is partially mitigated (D1 effective-closed via S-033, D2 partial via S-033, v2.7 F2 planned for full D2 closure). S-031 is now fully closed (6 architectural layers shipped). **Open High findings: zero** — S-006 closed via `on_contrib` equivocation detection; S-010 closed via operator stake-pricing formula + DOMAIN_INCLUSION availability; S-011 closed via S-010 stake floor + FA6 equivocation-slashing economic-infeasibility bound. **S-037 closed in this session** — added serialize / restore handling for `dapp_registry_` so DApp-active chains survive snapshot bootstrap intact; new regression `tools/test_dapp_snapshot.sh` (12/12 PASS) exercises register → snapshot → restore → `dapp-info` end-to-end. **S-038 closed in this session** — `Node::try_finalize_round` now populates `body.state_root` via a tentative-chain dry-run before broadcast, so the S-033 verification gate at apply time actually fires (pre-fix the field was zero on every gossiped block, short-circuiting the gate). S-033's documented "shipped" status is now genuine end-to-end; the apply-layer mitigation of S-030 D1/D2 is no longer dormant. **Open Medium findings: zero** — S-018 closed via `json_require<T>` / `json_require_hex` helpers (`include/determ/util/json_validate.hpp`) across every attack-relevant wire-format consumer (gossip envelope, Transaction/Block/AbortEvent/EquivocationEvent/GenesisAlloc, ContribMsg/AbortClaimMsg/BlockSigMsg, GenesisConfig, node_key.json loader); new regression `tools/test_s018_json_validation.sh` (9/9 PASS) exercises field-name diagnostics for missing-field / wrong-type / wrong-hex-length errors. S-016 remains partially mitigated (Option 2 time-ordered admission shipped; Option 1 intersection commitment ships with v2.7 F2).
 
 **Top-of-list priorities** (updated after in-session closures — see §3 bodies for closure details):
 
@@ -42,6 +42,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-013 BlockSigMsg buffer flood OOM~~ — closed via per-signer cap (2 entries) in `try_buffer_block_sig`; total buffer bounded at 2·K through existing pre-filters.
 - ~~S-014 No rate limiting on gossip + RPC~~ — closed via shared `net::RateLimiter` helper used by both `RpcServer` and `GossipNet` (per-peer-IP token bucket, HELLO exempt).
 - ~~S-017 Producer/chain UNSTAKE divergence~~ — closed via Option 2: validator + producer both gain the `unlock_height` check; apply-time refund retained as belt-and-suspenders.
+- ~~S-018 JSON parsing without schema validation~~ — closed via `json_require<T>` / `json_require_hex` helpers in `include/determ/util/json_validate.hpp` applied to every attack-relevant wire-format consumer (gossip envelope, Transaction/Block/AbortEvent/EquivocationEvent/GenesisAlloc, ContribMsg/AbortClaimMsg/BlockSigMsg, GenesisConfig, node_key.json); new regression `tools/test_s018_json_validation.sh` (9/9 PASS).
 - ~~S-020 Rejection sampling O(K²) at K/N → 1~~ — closed via hybrid selector (rejection sampling at 2K ≤ N, partial Fisher-Yates shuffle at 2K > N — bounded O(N) regardless of ratio).
 - ~~S-021 Chain file integrity not cryptographically verified~~ — closed via wrapping chain.json with `head_hash` + load-time recompute + mismatch reject (O(1) tampering detection before replay).
 - ~~S-022 Permissive 16 MB message cap~~ — closed via per-message-type body-size limit applied after deserialize in `Peer::read_body`; 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT/CHAIN responses.
@@ -84,7 +85,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-015 | ✅ Closed | Delay-worker thread removed entirely (commit `1b9b086`) — no worker, no join | n/a | done |
 | S-016 | 🟠 Partially mitigated | Option 2 time-ordered admission: receipts must soak `CROSS_SHARD_RECEIPT_LATENCY = 3` blocks locally before becoming eligible for inclusion; drives the round-retry probability from "occasional pool-divergence aborts" to "negligible" by giving bundle gossip ~3·tx_commit_ms (≈600 ms at web profile) of propagation headroom. Full deterministic agreement (Option 1, Phase-1 intersection rule on inbound_keys) is the v2.7 F2 work item; the partial mitigation is the contained ~50-LOC closure that gets the practical surface to acceptable without the block-format change F2 needs | `node/node.cpp::inbound_receipts_eligible_for_inclusion` | v2.7 F2 closes fully |
 | S-017 | ✅ Mitigated (Option 2) | Validator + producer both check `unlock_height` on UNSTAKE; apply-time refund retained as belt-and-suspenders | `node/validator.cpp` + `node/producer.cpp` | done |
-| S-018 | 🟠 Partially mitigated | JSON parsing without schema validation — gossip/RPC wire-format consumers hardened via `json_require<T>` / `json_require_hex` helpers (`include/determ/util/json_validate.hpp`); rpc.cpp + snapshot-restore tail remaining | `chain/block.cpp` + `node/producer.cpp` + `chain/genesis.cpp` (shipped); `rpc/rpc.cpp` + `chain/chain.cpp::restore_from_snapshot` (remaining) | 1-2d (remaining) |
+| S-018 | ✅ Mitigated | JSON parsing without schema validation — every attack-relevant wire-format consumer hardened via `json_require<T>` / `json_require_hex` helpers (`include/determ/util/json_validate.hpp`); snapshot-restore already uses `snap.value(...)` graceful defaults; remaining `.get<T>()` sites are CLI output formatters or array-inner-loop calls inside already-validated containers | `chain/block.cpp` + `node/producer.cpp` + `chain/genesis.cpp` + `net/messages.cpp` + `crypto/keys.cpp` | done |
 | S-019 | ✅ Closed | Phase-2 timer R-arrival spoofing — moot under commit-reveal (no expensive R compute to spoof) | n/a | done |
 | S-020 | ✅ Mitigated | Hybrid Fisher-Yates: rejection sampling at K/N ≤ 0.5, partial FY shuffle at K/N > 0.5 — bounded O(N) regardless of ratio | `crypto/random.cpp::select_m_creators` + `select_after_abort_m` | done |
 | S-021 | ✅ Mitigated | `chain.json` is now a wrapping object `{head_hash, blocks}`; load recomputes head digest and rejects on mismatch (O(1) tampering detection before replay) | `chain/chain.cpp::save` + `::load` | done |
@@ -835,9 +836,9 @@ Net effect: the divergence is closed at all three layers. Option 1 (unified `val
 
 ---
 
-### S-018 — JSON parsing without schema validation — 🟠 Partially mitigated
+### S-018 — JSON parsing without schema validation — ✅ Mitigated in-session
 
-**Severity:** Medium (cosmetic robustness) • **Status:** 🟠 Partially mitigated (gossip/RPC wire-format consumers hardened; genesis-tool parser + remaining RPC handlers still on Option 1's tail) • **Sources:** Audit 3.3
+**Severity:** Medium (cosmetic robustness) • **Status:** ✅ Mitigated in-session (every attack-relevant wire-format consumer now uses `json_require<T>` / `json_require_hex` for required-field extraction; remaining `j[...].get<T>()` sites in `src/` are inside arrays already type-checked by their iterating container or are CLI-side output formatters, neither of which is exposed to peer-supplied JSON) • **Sources:** Audit 3.3
 
 **Mitigation landed in-session.** New helper header `include/determ/util/json_validate.hpp` provides two typed-extraction primitives:
 
@@ -845,36 +846,41 @@ Net effect: the divergence is closed at all three layers. Option 1 (unified `val
 
 - **`json_require_hex(j, "field", expected_hex_chars)`** — same plus a fixed-length check, so a malformed hex field (wrong length OR non-hex chars caught downstream) produces a diagnostic with the field name and expected/got lengths.
 
-Converted the highest-exposure wire-format consumers (every gossip-dispatch path funnels through these):
+Converted every attack-relevant wire-format consumer (every gossip-dispatch path funnels through these):
 
 | Consumer | Source | Exposure |
 |---|---|---|
+| `net::Message::deserialize` (gossip envelope) | `src/net/messages.cpp` | every peer-supplied JSON message lands here first |
 | `chain::Transaction::from_json` | `src/chain/block.cpp` | gossip TRANSFER + RPC submit_tx |
 | `chain::AbortEvent::from_json` | `src/chain/block.cpp` | baked into BLOCK |
 | `chain::EquivocationEvent::from_json` | `src/chain/block.cpp` | RPC submit_equivocation + gossip |
-| `chain::Block::from_json` | `src/chain/block.cpp` | BLOCK gossip + BEACON_HEADER + SHARD_TIP + snapshot replay |
+| `chain::Block::from_json` (required + optional fields) | `src/chain/block.cpp` | BLOCK gossip + BEACON_HEADER + SHARD_TIP + snapshot replay |
+| `chain::GenesisAlloc::from_json` | `src/chain/block.cpp` | snapshot `initial_state` + genesis-tool initial_balances |
 | `node::ContribMsg::from_json` | `src/node/producer.cpp` | Phase-1 gossip |
 | `node::AbortClaimMsg::from_json` | `src/node/producer.cpp` | abort-claim gossip |
 | `node::BlockSigMsg::from_json` | `src/node/producer.cpp` | Phase-2 gossip |
 | `GenesisConfig::from_json` (creators + balances inner loops) | `src/chain/genesis.cpp` | operator-supplied genesis JSON |
+| `crypto::load_node_key` | `src/crypto/keys.cpp` | operator-edited node_key.json |
 
-`Block::from_json` also gets explicit `is_array()` checks on the three required array fields (`transactions`, `creators`, `abort_events`) so a malformed gossip message with the right field name but wrong type produces a structured diagnostic instead of a `nlohmann` iterator exception.
+`Block::from_json` also gets explicit `is_array()` checks on the three required array fields (`transactions`, `creators`, `abort_events`) so a malformed gossip message with the right field name but wrong type produces a structured diagnostic instead of a `nlohmann` iterator exception. The optional fields (`tx_root`, `delay_seed`, `delay_output`, `consensus_mode`, `bft_proposer`, `partner_subset_hash`, `state_root`) keep their `j.contains(...)` presence guards but also get wrong-type / wrong-hex-length diagnostics if present with the wrong shape — meaning a malformed snapshot tail-header surfaces a specific field name instead of an opaque `nlohmann` error.
 
-Optional fields (`CrossShardReceipt::from_json` with `j.value(...)` defaults; `ContribMsg::aborts_gen` and `BlockSigMsg::dh_secret` which were already optional) are left alone — `j.value(...)` already provides graceful degradation and isn't part of the S-018 surface.
+Optional fields with defaults (`CrossShardReceipt::from_json` with `j.value(...)`; `ContribMsg::aborts_gen`; `BlockSigMsg::dh_secret`; every counter / parameter in `Chain::restore_from_snapshot`) are intentionally left as `j.value(...)` — graceful degradation is the right pattern when a sensible default exists and the field is genuinely optional. These were never the S-018 surface.
 
-**Regression test.** `tools/test_s018_json_validation.sh` (7/7 PASS) exercises the helpers + the converted from_json paths: happy-path round-trip, missing-field diagnostic, wrong-type diagnostic, wrong-hex-length diagnostic, and three of the converted consumers (AbortEvent, EquivocationEvent, Block) asserted to surface the missing field name. Run from repo root: `bash tools/test_s018_json_validation.sh`.
+**Regression test.** `tools/test_s018_json_validation.sh` (9/9 PASS) exercises the helpers + the converted from_json paths: happy-path round-trip, missing-field diagnostic, wrong-type diagnostic, wrong-hex-length diagnostic, GenesisAlloc missing-field, Block optional-field wrong-hex-length, and three of the converted consumers (AbortEvent, EquivocationEvent, Block required field) asserted to surface the missing field name. Run from repo root: `bash tools/test_s018_json_validation.sh`.
 
-**Remaining S-018 work** (lower-priority because the rest parse operator-trusted local files / config, not peer-supplied data):
+**Remaining `j[...].get<T>()` sites in `src/`** (intentionally left alone — not exposed to peer-supplied JSON):
 
-- `src/chain/chain.cpp::restore_from_snapshot` — snapshot is signed by the producing node's K-of-K committee + verified against state_root, so a malformed snapshot is structurally caught by the cryptographic gate before field-level parsing matters. Conversion to `json_require` would still improve the error message for an operator manually editing a snapshot file.
-- `src/rpc/rpc.cpp` — RPC handlers; some already use `j.value(...)` defaults, others use `j["field"].get<T>()`. Lower-exposure than gossip because the auth-localhost-default + HMAC gate (v2.16) means only trusted operators reach these handlers.
-- `src/node/node.cpp` config-load path — already partially defensive; conversion to `json_require` would extend the diagnostic improvements.
+- `src/chain/chain.cpp::restore_from_snapshot` (and other snap fields) — uses `snap.value(...)` everywhere with sensible defaults; snapshot is cryptographically gated by `head_hash` + `state_root` verification before field-level parsing matters.
+- `src/rpc/rpc.cpp:312` — client-side error-string extraction from an RPC response (not a server-side attack surface).
+- `src/main.cpp:724, 916` — CLI output formatters that consume the daemon's own well-formed responses (not peer-supplied).
+- `src/node/producer.cpp:51, 130` + `src/chain/block.cpp:464, 469, 475, 479, 483, 499, 517, 524, 528` — inner-loop `.get<std::string>()` calls on individual array elements where the iterating container is already validated as `is_array()` upstream. The Conversion-to-`json_require` would name the array index instead of the (already-known) outer field name, which isn't a real diagnostic improvement.
+- `src/chain/genesis.cpp:172, 193` — guarded by `j.contains("shard_address_salt")` / iterating `param_keyholders` array; the iterator context already names the surrounding field.
 
-**Resolution options** (historical — Option 1 selected and partially shipped).
+**Resolution options** (historical — Option 1 selected and shipped).
 
 | # | Option | Cost |
 |---|---|---|
-| 1 | **Use `json_require<T>` / `json_require_hex` everywhere** with sensible defaults via `j.value()` for optional fields. Explicit `j.contains()` checks for required fields. | Initial wire-format pass: shipped. Remaining: 1-2 d mechanical across rpc.cpp + chain.cpp restore path. |
+| 1 | **Use `json_require<T>` / `json_require_hex` everywhere** with sensible defaults via `j.value()` for optional fields. Explicit `j.contains()` checks for required fields. | Shipped in-session. |
 | 2 | **JSON Schema validator library** (`nlohmann::json_schema_validator`). | Medium. New dependency. Rejected — Option 1 is sufficient. |
 
 ---
@@ -1267,10 +1273,10 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 **Production-readiness summary (post in-session work):**
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 0 open (S-006 / S-010 / S-011 all closed in-session)
-- Medium findings: 0 fully open; 2 partially mitigated (S-018 — gossip/RPC wire-format consumers hardened in-session via `json_require<T>` / `json_require_hex` helpers; rpc.cpp + snapshot-restore tail remain at 1-2 days mechanical. S-016 via Option 2 time-ordered admission; v2.7 F2 closes S-016 fully via Option 1 intersection commitment)
+- Medium findings: 0 fully open; 1 mitigated in-session (S-018 — every attack-relevant wire-format consumer hardened via `json_require<T>` / `json_require_hex` helpers); 1 partially mitigated (S-016 via Option 2 time-ordered admission; v2.7 F2 closes S-016 fully via Option 1 intersection commitment)
 - Low/Op findings: 1 open (S-035 unit tests / CI — engineering culture); 7 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
 - EXTENDED-mode-specific: 1 partially mitigated (S-036 — bounds-check shipped; full closure via on-chain SHARD_TIP records is v2.11)
-- 24 findings mitigated in-session total (5 Critical + 12 High + 7 Low/Op)
+- 27 findings mitigated in-session total (5 Critical + 13 High + 1 Medium + 8 Low/Op)
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: ~1 week (threshold randomness aggregation, plan.md A11)

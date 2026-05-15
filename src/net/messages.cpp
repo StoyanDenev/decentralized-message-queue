@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/net/messages.hpp>
+#include <determ/util/json_validate.hpp>
 #include <stdexcept>
 
 namespace determ::net {
+
+using determ::util::json_require;
 
 std::vector<uint8_t> Message::serialize() const {
     nlohmann::json envelope;
@@ -32,8 +35,19 @@ Message Message::deserialize(const uint8_t* data, size_t len) {
         return decode_binary(data, len);
     }
     nlohmann::json envelope = nlohmann::json::parse(data, data + len);
+    // S-018: the gossip envelope is the outermost wire-format consumer
+    // — every peer-supplied JSON message lands here. Field-name
+    // diagnostics let the operator triage a malformed peer's traffic
+    // without resorting to packet capture + nlohmann stack-trace
+    // archaeology.
     Message m;
-    m.type    = static_cast<MsgType>(envelope["type"].get<uint8_t>());
+    m.type    = static_cast<MsgType>(json_require<uint8_t>(envelope, "type"));
+    if (!envelope.contains("payload")) {
+        throw std::runtime_error(
+            "S-018: gossip envelope missing required 'payload' field "
+            "(msg type "
+            + std::to_string(static_cast<int>(m.type)) + ")");
+    }
     m.payload = envelope["payload"];
     return m;
 }
