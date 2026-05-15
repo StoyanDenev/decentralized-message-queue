@@ -161,6 +161,9 @@ In-process tests (deterministic, no network):
   determ test-shard-routing                   shard_id_for_address (cross-shard routing
                                               salted-SHA-256; determinism, salt-sensitivity,
                                               distribution sanity)
+  determ test-ed25519                         Ed25519 sign/verify (foundation for every
+                                              signature claim in the protocol; determinism,
+                                              tampering rejection, cross-key rejection)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -3652,6 +3655,103 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": shard-routing " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Ed25519
+    // sign + verify. This is the foundation under EVERY signature
+    // claim in the protocol:
+    //   - V4 Phase-1 commit signatures (creator_ed_sigs[i])
+    //   - V8 Phase-2 block-digest signatures (creator_block_sigs[i])
+    //   - Transaction.sig (every TRANSFER, REGISTER, ...)
+    //   - V11 equivocation_events sig_a / sig_b
+    //   - AbortClaimMsg.ed_sig
+    //   - ContribMsg.ed_sig, BlockSigMsg.ed_sig
+    //   - A5 PARAM_CHANGE keyholder signatures
+    // FA1, FA2, FA5, FA6, FA7, FA10 all reduce their cryptographic
+    // failure probability to Ed25519 EUF-CMA — so any silent
+    // regression in the wrapper would cascade across every safety
+    // claim. A dedicated unit test catches that loudly.
+    if (cmd == "test-ed25519") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. Key generation produces a 32-byte pubkey + a 32-byte
+        //    secret-seed.
+        auto key = generate_node_key();
+        check(key.pub.size() == 32 && key.priv_seed.size() == 32,
+              "generate_node_key produces 32-byte pub + 32-byte priv_seed");
+
+        // 2. Sign / verify round-trip on a representative message.
+        std::vector<uint8_t> msg = {'h','e','l','l','o',' ','d','e','t','e','r','m'};
+        Signature sig = sign(key, msg.data(), msg.size());
+        check(verify(key.pub, msg.data(), msg.size(), sig),
+              "sign + verify round-trip succeeds on a 12-byte message");
+
+        // 3. Verify with a tampered message fails (EUF-CMA bound).
+        auto msg_tampered = msg;
+        msg_tampered[0] ^= 0xff;
+        check(!verify(key.pub, msg_tampered.data(), msg_tampered.size(), sig),
+              "verify rejects sig under tampered message");
+
+        // 4. Verify with a tampered signature fails.
+        Signature sig_tampered = sig;
+        sig_tampered[0] ^= 0xff;
+        check(!verify(key.pub, msg.data(), msg.size(), sig_tampered),
+              "verify rejects tampered signature");
+
+        // 5. Verify with the wrong public key fails. Generate a
+        //    second key to provide a real wrong-key.
+        auto other = generate_node_key();
+        check(!verify(other.pub, msg.data(), msg.size(), sig),
+              "verify rejects sig under the wrong pubkey");
+
+        // 6. Determinism: signing the same message with the same key
+        //    twice produces the same signature. Ed25519 (RFC 8032)
+        //    is deterministic by construction — this is the property
+        //    F2 (selective-abort defense, FA3) leans on, and the
+        //    property that lets equivocation slashing detect
+        //    contradictory signatures as evidence rather than as
+        //    benign duplicates.
+        Signature sig2 = sign(key, msg.data(), msg.size());
+        check(sig == sig2,
+              "Ed25519 is deterministic: same key + msg -> same sig");
+
+        // 7. Empty message: still sign-able and verify-able.
+        Signature sig_empty = sign(key, nullptr, 0);
+        check(verify(key.pub, nullptr, 0, sig_empty),
+              "sign/verify works on empty (zero-byte) message");
+
+        // 8. Distinct keys produce distinct signatures on the same
+        //    message. (If two distinct keys produce the same sig on
+        //    the same msg, the EUF-CMA reduction is broken; the
+        //    probability of accident is negligible.)
+        Signature sig_other = sign(other, msg.data(), msg.size());
+        check(sig != sig_other,
+              "distinct keys produce distinct signatures on same message");
+
+        // 9. Cross-verify rejection: sig from key1 doesn't verify
+        //    under key2's pubkey, and vice-versa.
+        check(!verify(other.pub, msg.data(), msg.size(), sig)
+              && !verify(key.pub,  msg.data(), msg.size(), sig_other),
+              "cross-key verify rejected in both directions");
+
+        // 10. Long-message sign/verify: 4 KB random-ish bytes
+        //     exercises the streaming path (vs. the short-message
+        //     fast path inside libssl).
+        std::vector<uint8_t> big(4096);
+        for (size_t i = 0; i < big.size(); ++i) big[i] = static_cast<uint8_t>(i);
+        Signature sig_big = sign(key, big.data(), big.size());
+        check(verify(key.pub, big.data(), big.size(), sig_big),
+              "sign/verify works on 4 KB message");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": ed25519 " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
