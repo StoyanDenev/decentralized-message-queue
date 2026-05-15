@@ -113,23 +113,12 @@ done
 echo "  chain height: $H"
 
 echo
-echo "=== 3. Fetch header for block 1 + build committee from peer-info ==="
+echo "=== 3. Fetch header for block 1 + committee via determ validators --json ==="
 # Use rpc_call directly so we can grab header for block 1 only.
 $DETERM headers --rpc-port 8771 --from 1 --count 1 > $T/hdr.json 2>&1
-# Build committee.json from the peer-info files used at genesis time.
-# These have the {domain, ed_pub} shape verify-block-sigs expects.
-# (`determ validators` outputs a human-readable table, not JSON —
-# constructing from peer-info gives us a clean JSON committee here.)
-python -c "
-import json
-members = []
-for n in [1, 2, 3]:
-    with open('$T/p%d.json' % n) as f:
-        p = json.load(f)
-    members.append({'domain': p['domain'], 'ed_pub': p['ed_pub']})
-with open('$T/committee.json','w') as f:
-    json.dump(members, f, indent=2)
-"
+# `determ validators --json` emits the raw RPC array verbatim — feeds
+# directly into verify-block-sigs --committee. No transformation needed.
+$DETERM validators --rpc-port 8771 --json > $T/committee.json 2>&1
 
 echo
 echo "=== 4. verify-block-sigs OK against the real committee ==="

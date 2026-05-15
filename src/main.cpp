@@ -783,13 +783,24 @@ static int cmd_headers(int argc, char** argv) {
     }
 }
 
-// determ validators [--rpc-port N]
+// determ validators [--json] [--rpc-port N]
 //   Lists the current validator pool (registered + active + staked +
-//   not suspended) with each entry's domain, pubkey, stake, active_from.
+//   not suspended). Default output is a human-readable table; --json
+//   emits the raw RPC array verbatim, suitable for feeding directly
+//   into `verify-block-sigs --committee` or any other machine
+//   consumer.
 static int cmd_validators(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "validators");
+        if (json_out) {
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
         if (!result.is_array() || result.empty()) {
             std::cout << "(no eligible validators)\n";
             return 0;
@@ -854,14 +865,25 @@ static int cmd_chain_summary(int argc, char** argv) {
     return 0;
 }
 
-// determ committee [--rpc-port N]
+// determ committee [--json] [--rpc-port N]
 //   Print the current epoch's K-of-K committee (the creators producing
 //   blocks right now). Pure function of chain state — deterministic
-//   across all nodes on the same chain at the same height.
+//   across all nodes on the same chain at the same height. Default
+//   output is a human-readable table; --json emits the raw RPC array
+//   verbatim, suitable for feeding directly into `verify-block-sigs
+//   --committee` for light-client K-of-K signature verification.
 static int cmd_committee(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "committee");
+        if (json_out) {
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
         if (!result.is_array() || result.empty()) {
             std::cout << "(empty committee — chain has no eligible validators yet)\n";
             return 0;

@@ -174,18 +174,9 @@ $DETERM verify-headers --in headers.json
 #     verified 10 header(s) 0..9
 
 # 3. Verify K-of-K committee signatures on a header.
-#    The committee file is a JSON array of {domain, ed_pub} — the
-#    same shape `determ committee` returns; for the QUICKSTART
-#    fixture, p1/p2/p3.json already have this shape and can be
-#    concatenated by hand.
-python -c "
-import json
-members = []
-for n in [1,2,3]:
-    with open('$T/p%d.json' % n) as f: p = json.load(f)
-    members.append({'domain': p['domain'], 'ed_pub': p['ed_pub']})
-with open('committee.json','w') as f: json.dump(members, f)
-"
+#    `determ validators --json` emits the {domain, ed_pub} array
+#    that verify-block-sigs expects, no transformation needed.
+$DETERM validators --rpc-port 8771 --json > committee.json
 $DETERM verify-block-sigs --header headers.json --committee committee.json
 #   → OK
 #     block_index: 1
