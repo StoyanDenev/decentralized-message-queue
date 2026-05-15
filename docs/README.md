@@ -26,7 +26,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_state_root.sh` | S-033 Merkle-root state commitment changes when state changes |
 | `test_state_proof.sh` | v2.2 state_proof inclusion-proof RPC + leaf-hash validation |
 | `test_verify_state_proof.sh` | v2.2 light-client demonstrator — fetches state-proof, verifies locally via `crypto::merkle_verify`; asserts tampered value_hash / sibling-hash / mismatched --state-root all FAIL while valid proofs PASS |
-| `test_headers_rpc.sh` | v2.2 light-client header-sync — `headers` RPC + `determ headers` CLI; asserts response shape, light-client field set present, heavy fields stripped, pagination, out-of-range handling, server-side count cap (256) |
+| `test_headers_rpc.sh` | v2.2 light-client header-sync — `headers` RPC + `determ headers` CLI + `determ verify-headers` chain-integrity CLI; asserts response shape, light-client field set present, heavy fields stripped, pagination, out-of-range handling, server-side count cap (256), `block_hash` field + prev_hash chain links, verify-headers OK on valid chains and FAIL on tampered prev_hash / wrong --prev-hash anchor |
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |

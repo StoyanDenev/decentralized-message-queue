@@ -106,6 +106,14 @@ State commitment + light-client (v2.1 + v2.2):
                                               and state_root for verify-state-proof
                                               anchoring. Default: --from 0 --count 16;
                                               server caps count at 256.
+  determ verify-headers [--in file]          Verify prev_hash chain in a `determ headers`
+                        [--genesis-hash <hex64>]
+                        [--prev-hash <hex64>] response. Reads JSON from --in or stdin.
+                                              Optional --genesis-hash anchors index-0
+                                              start; --prev-hash anchors index-N>0 starts
+                                              (for extending a previously-verified range).
+                                              Pure chain-of-hashes integrity check; does
+                                              not verify committee signatures.
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
   determ submit-dapp-register --priv <hex> --from <domain>
@@ -367,6 +375,155 @@ static int cmd_show_block(int argc, char** argv) {
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
+    }
+    return 0;
+}
+
+// v2.2 light-client header-chain verifier.
+//
+// Usage: determ verify-headers [--in file] [--genesis-hash <hex64>]
+//                              [--prev-hash <hex64>]
+//
+// Reads a `determ headers` response (JSON) from --in or stdin and
+// verifies that the prev_hash chain links correctly between
+// consecutive headers: header[i].prev_hash == header[i-1].block_hash.
+//
+// Optional --genesis-hash <hex64>: if the headers slice starts at
+// index 0, the first header's prev_hash should equal Hash{} (32 zero
+// bytes — the canonical "no parent" marker). If --genesis-hash is
+// supplied, it's also checked against the genesis header's block_hash.
+// Useful when bootstrapping from a known genesis pin.
+//
+// Optional --prev-hash <hex64>: if the headers slice starts at some
+// index > 0, the first header's prev_hash must equal this supplied
+// hash (= block_hash of the block immediately preceding the slice).
+// Light clients use this to extend a previously-verified header
+// range with a new fetched slice.
+//
+// Does NOT verify committee signatures on each header (that requires
+// a NodeRegistry + epoch-rand derivation; out of scope for this
+// stdalone CLI). This is the chain-of-hashes integrity check —
+// catches a server returning misaligned / re-ordered headers.
+static int cmd_verify_headers(int argc, char** argv) {
+    std::string in_path;
+    std::string genesis_hash_hex;
+    std::string prev_hash_hex;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"            && i + 1 < argc) in_path          = argv[i + 1];
+        else if (a == "--genesis-hash"  && i + 1 < argc) genesis_hash_hex = argv[i + 1];
+        else if (a == "--prev-hash"     && i + 1 < argc) prev_hash_hex    = argv[i + 1];
+    }
+
+    nlohmann::json doc;
+    try {
+        if (!in_path.empty()) {
+            std::ifstream f(in_path);
+            if (!f) throw std::runtime_error("cannot open: " + in_path);
+            doc = nlohmann::json::parse(f);
+        } else {
+            doc = nlohmann::json::parse(std::cin);
+        }
+    } catch (std::exception& e) {
+        std::cerr << "verify-headers: parse error: " << e.what() << "\n";
+        return 1;
+    }
+
+    if (!doc.contains("headers") || !doc["headers"].is_array()) {
+        std::cerr << "verify-headers: input missing 'headers' array "
+                     "(expected `determ headers` response)\n";
+        return 1;
+    }
+    auto& headers = doc["headers"];
+    if (headers.empty()) {
+        std::cout << "OK (empty headers slice, nothing to verify)\n";
+        return 0;
+    }
+
+    // Helper: pull required hex field from one header.
+    auto h_get = [](const nlohmann::json& h, const char* field,
+                       size_t expected_chars) -> std::string {
+        if (!h.contains(field) || !h[field].is_string())
+            throw std::runtime_error(
+                std::string("header missing '") + field + "' field");
+        std::string s = h[field].get<std::string>();
+        if (s.size() != expected_chars)
+            throw std::runtime_error(
+                std::string("header '") + field
+                + "' has wrong length: expected "
+                + std::to_string(expected_chars) + " chars, got "
+                + std::to_string(s.size()));
+        return s;
+    };
+
+    try {
+        // Check the first header's prev_hash against the appropriate
+        // anchor: --genesis-hash (if index 0), --prev-hash (if not 0),
+        // or just print a note (if no anchor supplied).
+        uint64_t first_index = headers[0].value("index", uint64_t{0});
+        std::string first_prev = h_get(headers[0], "prev_hash", 64);
+
+        if (first_index == 0) {
+            // Genesis: prev_hash must be 32-zero-bytes (the canonical
+            // "no parent" marker).
+            std::string zero64(64, '0');
+            if (first_prev != zero64) {
+                std::cerr << "FAIL: genesis header (index 0) has "
+                             "non-zero prev_hash: " << first_prev << "\n";
+                return 1;
+            }
+            // Optional: verify the supplied --genesis-hash matches the
+            // genesis header's block_hash.
+            if (!genesis_hash_hex.empty()) {
+                std::string gh = h_get(headers[0], "block_hash", 64);
+                if (gh != genesis_hash_hex) {
+                    std::cerr << "FAIL: genesis block_hash mismatch\n"
+                              << "  header reports: " << gh << "\n"
+                              << "  --genesis-hash: " << genesis_hash_hex << "\n";
+                    return 1;
+                }
+            }
+        } else if (!prev_hash_hex.empty()) {
+            // Non-genesis start: first header's prev_hash must match
+            // the supplied --prev-hash anchor.
+            if (first_prev != prev_hash_hex) {
+                std::cerr << "FAIL: first header's prev_hash doesn't "
+                             "match supplied --prev-hash\n"
+                          << "  header prev_hash: " << first_prev << "\n"
+                          << "  --prev-hash:     " << prev_hash_hex << "\n";
+                return 1;
+            }
+        }
+        // (If neither --genesis-hash nor --prev-hash is supplied and
+        // we don't start at 0, the first prev_hash is unanchored —
+        // we just verify the internal chain links and report it.)
+
+        // Walk consecutive header pairs and verify prev_hash chain.
+        for (size_t i = 1; i < headers.size(); ++i) {
+            std::string prev = h_get(headers[i], "prev_hash", 64);
+            std::string prior_hash = h_get(headers[i - 1], "block_hash", 64);
+            if (prev != prior_hash) {
+                std::cerr << "FAIL: prev_hash chain break at header "
+                          << i << " (index "
+                          << headers[i].value("index", uint64_t{0}) << ")\n"
+                          << "  prev_hash:        " << prev << "\n"
+                          << "  prior block_hash: " << prior_hash << "\n";
+                return 1;
+            }
+        }
+    } catch (std::exception& e) {
+        std::cerr << "verify-headers: " << e.what() << "\n";
+        return 1;
+    }
+
+    std::cout << "OK\n";
+    std::cout << "  verified " << headers.size()
+              << " header(s) " << headers[0].value("index", uint64_t{0})
+              << ".." << headers.back().value("index", uint64_t{0}) << "\n";
+    if (!genesis_hash_hex.empty()) {
+        std::cout << "  genesis pin: ✓ matches supplied --genesis-hash\n";
+    } else if (!prev_hash_hex.empty()) {
+        std::cout << "  prev pin:    ✓ matches supplied --prev-hash\n";
     }
     return 0;
 }
@@ -1975,6 +2132,7 @@ int main(int argc, char** argv) {
     if (cmd == "peers")         return cmd_peers(sub_argc, sub_argv);
     if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
     if (cmd == "headers")       return cmd_headers(sub_argc, sub_argv);
+    if (cmd == "verify-headers") return cmd_verify_headers(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);

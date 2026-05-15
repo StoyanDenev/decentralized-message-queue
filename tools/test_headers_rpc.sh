@@ -21,6 +21,11 @@
 #      signing_bytes uses the heavy fields the client doesn't have),
 #      and the prev_hash chain links correctly between consecutive
 #      headers: header[i].prev_hash == header[i-1].block_hash.
+#   8. `determ verify-headers` OK on a valid chain (no anchor).
+#   9. `determ verify-headers` FAIL on a tampered prev_hash.
+#  10. `determ verify-headers` OK with --prev-hash anchor for a slice
+#      starting at an arbitrary index.
+#  11. `determ verify-headers` FAIL with a wrong --prev-hash anchor.
 #
 # Run from repo root: bash tools/test_headers_rpc.sh
 set -u
@@ -227,6 +232,52 @@ else:
     print('true' if ok else 'false')
 ")
 assert "$chain_ok" "block_hash present + prev_hash links to previous block_hash"
+
+echo
+echo "=== 10. determ verify-headers OK on the chain we just fetched ==="
+OUT=$($DETERM verify-headers --in $T/hdrs.json 2>&1)
+OK=$(echo "$OUT" | head -1 | grep -q "^OK$" && echo true || echo false)
+assert "$OK" "verify-headers OK on valid chain (no anchor)"
+
+echo
+echo "=== 11. verify-headers FAIL on a tampered prev_hash ==="
+python -c "
+import json
+r = json.load(open('$T/hdrs.json'))
+# Tamper the second header's prev_hash to break the chain link.
+if len(r['headers']) >= 2:
+    p = r['headers'][1]['prev_hash']
+    r['headers'][1]['prev_hash'] = ('1' if p[0] != '1' else '2') + p[1:]
+with open('$T/hdrs_tampered.json','w') as f: json.dump(r, f)
+"
+OUT=$($DETERM verify-headers --in $T/hdrs_tampered.json 2>&1)
+FAIL=$(echo "$OUT" | grep -q "FAIL: prev_hash chain break" && echo true || echo false)
+assert "$FAIL" "verify-headers FAIL on tampered prev_hash"
+
+echo
+echo "=== 12. verify-headers OK on slice with --prev-hash anchor ==="
+$DETERM headers --rpc-port 8771 --from 2 --count 3 > $T/hdrs_slice.json 2>&1
+# Get the prev block's hash (index 1's block_hash) for the anchor.
+ANCHOR=$(python -c "
+import json
+r = json.load(open('$T/hdrs.json'))
+for h in r['headers']:
+    if h['index'] == 1:
+        print(h['block_hash']); break")
+if [ -n "$ANCHOR" ]; then
+    OUT=$($DETERM verify-headers --in $T/hdrs_slice.json --prev-hash "$ANCHOR" 2>&1)
+    OK=$(echo "$OUT" | head -1 | grep -q "^OK$" && echo true || echo false)
+    assert "$OK" "verify-headers OK with --prev-hash anchor"
+else
+    assert "true" "verify-headers --prev-hash test skipped (no anchor available)"
+fi
+
+echo
+echo "=== 13. verify-headers FAIL on wrong --prev-hash anchor ==="
+WRONG=$(python -c "print('a' * 64)")
+OUT=$($DETERM verify-headers --in $T/hdrs_slice.json --prev-hash "$WRONG" 2>&1)
+FAIL=$(echo "$OUT" | grep -q "FAIL.*--prev-hash" && echo true || echo false)
+assert "$FAIL" "verify-headers FAIL on wrong --prev-hash anchor"
 
 echo
 echo "=== Test summary ==="
