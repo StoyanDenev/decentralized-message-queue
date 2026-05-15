@@ -71,4 +71,34 @@ inline std::string json_require_hex(const nlohmann::json& j,
     return s;
 }
 
+// Require a JSON array field. Throws with field-name context on
+// missing-field OR wrong-type. Returns a const-ref to the array so
+// the caller can iterate without an extra `j.at("field")` lookup.
+//
+// Example: `for (auto& tx : json_require_array(j, "transactions")) ...`
+//
+// Cleaner than the two-step pattern:
+//   if (!j.contains("transactions") || !j.at("transactions").is_array())
+//       throw std::runtime_error("...");
+//   for (auto& tx : j["transactions"]) ...
+//
+// Use when the array is required. Optional arrays (where empty/absent
+// should produce an empty vector) keep using `if (j.contains(...))`.
+inline const nlohmann::json& json_require_array(const nlohmann::json& j,
+                                                   const char* field) {
+    if (!j.contains(field)) {
+        throw std::runtime_error(
+            std::string("S-018: missing required JSON field '") + field
+            + "' (expected array)");
+    }
+    auto& v = j.at(field);
+    if (!v.is_array()) {
+        throw std::runtime_error(
+            std::string("S-018: JSON field '") + field
+            + "' has wrong type: expected array, got "
+            + std::string(v.type_name()));
+    }
+    return v;
+}
+
 } // namespace determ::util

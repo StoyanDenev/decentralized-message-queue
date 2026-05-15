@@ -9,6 +9,7 @@ namespace determ::chain {
 using namespace determ::crypto;
 using determ::util::json_require;
 using determ::util::json_require_hex;
+using determ::util::json_require_array;
 using json = nlohmann::json;
 
 // ─── Transaction ─────────────────────────────────────────────────────────────
@@ -454,16 +455,10 @@ Block Block::from_json(const json& j) {
     b.prev_hash     = from_hex_arr<32>(json_require_hex(j, "prev_hash", 64));
     b.timestamp     = json_require<int64_t>(j, "timestamp");
 
-    if (!j.contains("transactions") || !j.at("transactions").is_array())
-        throw std::runtime_error(
-            "S-018: BLOCK missing or non-array 'transactions' field");
-    for (auto& tx : j["transactions"])
+    for (auto& tx : json_require_array(j, "transactions"))
         b.transactions.push_back(Transaction::from_json(tx));
 
-    if (!j.contains("creators") || !j.at("creators").is_array())
-        throw std::runtime_error(
-            "S-018: BLOCK missing or non-array 'creators' field");
-    for (auto& c : j["creators"])
+    for (auto& c : json_require_array(j, "creators"))
         b.creators.push_back(c.get<std::string>());
 
     if (j.contains("creator_tx_lists")) {
@@ -507,10 +502,7 @@ Block Block::from_json(const json& j) {
     }
 
     b.cumulative_rand = from_hex_arr<32>(json_require_hex(j, "cumulative_rand", 64));
-    if (!j.contains("abort_events") || !j.at("abort_events").is_array())
-        throw std::runtime_error(
-            "S-018: BLOCK missing or non-array 'abort_events' field");
-    for (auto& ae : j["abort_events"])
+    for (auto& ae : json_require_array(j, "abort_events"))
         b.abort_events.push_back(AbortEvent::from_json(ae));
 
     if (j.contains("equivocation_events")) {

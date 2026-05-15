@@ -8,7 +8,7 @@
 # malformed JSON produces a clear field-name diagnostic instead of an
 # opaque nlohmann-internal type error.
 #
-# Assertions covered (9 total):
+# Assertions covered (10 total):
 #   1. Happy path: Transaction round-trips through to_json/from_json
 #   2. Missing required field 'amount' names the field
 #   3. Wrong-type 'amount' (string where uint64 expected) names the
@@ -22,6 +22,8 @@
 #      initial_state + genesis-tool initial_balances paths)
 #   9. Block optional 'state_root' wrong hex length names the field
 #      (covers S-033 state_root snapshot-restore path)
+#  10. Block 'transactions' present-but-non-array (e.g., string)
+#      surfaces json_require_array's "expected array" diagnostic
 #
 # Coverage scope: chain::Transaction, chain::AbortEvent,
 # chain::EquivocationEvent, chain::Block (required + optional fields),

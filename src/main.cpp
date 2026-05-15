@@ -2717,6 +2717,22 @@ int main(int argc, char** argv) {
             Block::from_json(j);
         }, {"S-018", "'state_root'", "hex length"});
 
+        // 10. Block 'transactions' present but non-array (e.g., string)
+        //     — exercises json_require_array's wrong-type diagnostic
+        //     so a malformed BLOCK gossip message with a stringified
+        //     transactions field gets a clear "expected array, got X"
+        //     error.
+        expect_throw_with("Block 'transactions' non-array", [] {
+            json j = {{"index", 1},
+                      {"prev_hash", std::string(64, '0')},
+                      {"timestamp", 0},
+                      {"transactions", "not-an-array"},  // string, not array
+                      {"creators", json::array()},
+                      {"abort_events", json::array()},
+                      {"cumulative_rand", std::string(64, '0')}};
+            Block::from_json(j);
+        }, {"S-018", "'transactions'", "expected array"});
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": s018_json_validation "
                   << (fail == 0 ? "all assertions" : "had failures")
