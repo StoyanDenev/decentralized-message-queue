@@ -324,29 +324,47 @@ Optional cap on cumulative subsidy: `subsidy_pool_initial: u64`. When non-zero, 
 
 Expected per-block value equals FLAT subsidy — total issuance schedule unchanged. Variance trades for incentive concentration. Pairs cleanly with E4: when the pool is near exhaustion, jackpot payouts cap at remaining.
 
-### 8.5 Negative entry fee from Zeroth pool (E1)
+### 8.5 Negative entry fee from Zeroth pool (E1) — lottery distribution
 
 A pseudo-account at the canonical all-zero address `0x00…00` is seeded at genesis with `zeroth_pool_initial: u64`. The validator rejects any transaction with `from == ZEROTH_ADDRESS` — no key can sign over the all-zero pubkey, so the pool is provably unsynthesizable. A genesis with `zeroth_pool_initial = 0` disables E1 entirely.
 
-On each **first-time** REGISTER apply for a new domain (not re-registrations / key rotations), the pool delivers a **deterministic geometric grant**:
+On each **first-time** REGISTER apply for a new domain (not re-registrations / key rotations), a per-registrant lottery seeded by `block.cumulative_rand` decides whether the registrant wins a fixed grant from the pool. An optional per-block win cap bounds worst-case drain rate:
 
 ```
-if first_time_register and pool.balance > 0:
-    nef = pool.balance / 2
-    pool.balance       -= nef
-    accounts[tx.from]  += nef
+if first_time_register:
+    lottery_seed = first 8 bytes of SHA256(b.cumulative_rand || tx.from || "NEF")
+    won_lottery  = (lottery_seed % nef_probability_denom == 0)
+
+    if won_lottery
+       AND pool.balance >= nef_grant
+       AND (nef_max_wins_per_block == 0 OR block_nef_wins < nef_max_wins_per_block):
+        pool.balance       -= nef_grant
+        accounts[tx.from]  += nef_grant
+        block_nef_wins     += 1
+    # else: no-op (REGISTER itself still applies normally)
 ```
 
-The mechanism is intentionally minimal: no per-registrant lottery, no per-block randomness gate, no auxiliary genesis parameter beyond `zeroth_pool_initial`. The first registrant after genesis receives half the pool; the second receives a quarter; the n-th receives `pool / 2^n` (asymptotically). Re-registrations of an existing domain (key rotation, region update) do **not** trigger the grant — the apply path checks `registrants_.find(tx.from) == registrants_.end()` before touching the pool. The pool-empty case (`pool.balance == 0 ⇒ nef == 0`) is a silent no-op; no separate disable flag is needed.
+`block_nef_wins` is a transient per-block counter — initialized to 0 at the start of each block apply, never persisted in state, never appears in snapshots or state_root. Re-registrations of an existing domain (key rotation, region update) do **not** draw the lottery — the apply path checks `registrants_.find(tx.from) == registrants_.end()` first, mirroring the pre-lottery behavior. Pool-empty and cap-hit cases are silent no-ops; no separate disable flag is needed beyond `zeroth_pool_initial = 0`.
+
+Genesis fields:
+
+- `zeroth_pool_initial: u64` — pool seed; 0 disables NEF.
+- `nef_grant: u64` — fixed payout per winner.
+- `nef_probability_denom: u64` — M; per-registrant win probability = 1/M; minimum 2.
+- `nef_max_wins_per_block: u64` — hard cap on wins paid per block (default 0 = unlimited).
+
+Expected payout per registrant = `nef_grant / M`. Expected total winners before pool exhaustion = `zeroth_pool_initial / nef_grant`. Worst-case per-block drain = `nef_max_wins_per_block · nef_grant` (when cap is set; otherwise unbounded by pool/grant). Minimum pool lifetime in blocks = `zeroth_pool_initial / (nef_max_wins_per_block · nef_grant)` (when cap is set).
 
 Properties:
 
-- **Supply-preserving.** E1 is a balance transfer (pool → registrant), not a mint. The pool's initial balance is included in `genesis_total_` at the index-0 apply, so the A1 unitary-supply invariant holds trivially across the transfer.
-- **Deterministic.** No randomness gate; every validator computes the same `nef` from the post-apply pool balance and the first-time-register predicate. No fork-choice ambiguity.
-- **Order-sensitive payout, but provably finite.** Earlier registrants receive larger absolute grants; later registrants asymptote toward zero. The total ever distributed is bounded above by `zeroth_pool_initial`.
-- **Sybil-bounded under STAKE_INCLUSION.** A sybil paying `MIN_STAKE` to receive `pool / 2^n` is economically irrational once `pool / 2^n < MIN_STAKE`. Operators choosing `MIN_STAKE` set the natural depth bound.
+- **Supply-preserving.** E1 is a balance transfer (pool → registrant) on win, no-op otherwise. The pool's initial balance is included in `genesis_total_` at the index-0 apply, so the A1 unitary-supply invariant holds trivially across all branches.
+- **Deterministic.** Both the lottery outcome (function of `cumulative_rand`, `tx.from`) and the cap check (function of in-block ordering) are deterministic given the block; every validator computes the same result.
+- **Order-independent in expectation.** Every registrant has the same expected payout regardless of registration order. The cap introduces order-dependence only when the per-block win count exceeds the cap — bounded and observable.
+- **Race-free.** No formula gradient that rewards a specific position; no first-mover premium.
+- **Sybil-bounded.** Per-registrant EV is `nef_grant / M`. Set genesis so `MIN_STAKE > nef_grant / M` and each sybil is net-negative in expectation against the locked stake requirement. With `nef_max_wins_per_block > 0`, worst-case per-block sybil burst extraction is capped at `nef_max_wins_per_block · nef_grant` regardless of how many REGISTERs the attacker submits in that block.
+- **Pool-lifetime guaranteed.** With cap set, operator knows the minimum number of blocks the subsidy program will last (`zeroth_pool_initial / (nef_max_wins_per_block · nef_grant)`).
 
-See `docs/proofs/EconomicSoundness.md` (FA11 T-13) for the supply-neutrality proof (which holds for any sum-preserving NEF rule, including the planned lottery replacement); `chain.cpp:821-831` for the apply-site code. The lottery-based NEF design specified in `plan.md` §E1 (fixed-grant draw against `cumulative_rand` with operator-chosen probability) is the planned v1.x-backlog replacement; geometric pool/2 ships today and is flagged for E-track reconciliation. The replacement is sum-preserving by construction so this section's correctness argument carries over unchanged.
+See `docs/proofs/EconomicSoundness.md` (FA11 T-13) for the supply-neutrality proof — the proof generalizes over any sum-preserving NEF rule, lottery + cap included. The shipped `chain.cpp:825` implementation still uses the historical geometric `pool/2` formula and is flagged for lottery + cap re-implementation under the E-track reconciliation item in `plan.md` §E1.
 
 ---
 
@@ -488,7 +506,7 @@ These are intentional non-goals, not roadmap items.
 - v2.6 Gossip out of state-lock — ✅ shipped.
 - A3/v2.X Binary message codec — ✅ shipped (`src/net/binary_codec.cpp`; per-pair `wire_version` negotiated via HELLO; legacy JSON remains the default until both sides advertise v1).
 - v2.7 F2 view reconciliation (full S-030 D2 closure) — ⏳ spec'd in `docs/proofs/F2-SPEC.md`, ~3-4 days.
-- v2.10 Threshold randomness aggregation — 🔥 active, ~1 week (BLS12-381 + DKG); defeats residual selective-abort.
+- v2.10 Threshold randomness aggregation — 🔥 active, **~3-4 weeks** (BLS12-381 `blst` + FROST-BLS DKG per Option C in `docs/proofs/v2.10-DKG-SPEC.md`: epoch-boundary trustless DKG with proactive secret-sharing refresh); defeats residual selective-abort. DKG infrastructure shared with v2.22 / v2.25.
 - Stake-weighted creator selection — design item, parallel-representation analysis required first.
 - v2.8 Post-quantum signature migration (Dilithium / Falcon) — ⏳ not started.
 - v2.14 OPAQUE wallet recovery (real `libopaque`) — ⏳ not started; gated on the MSVC porting of upstream VLAs.
@@ -508,7 +526,7 @@ Determ demonstrates that fork-free, immediately-final consensus is achievable at
 
 The protocol is intentionally minimal: two consensus message types per block, one signature scheme, one hash function, no exotic cryptography or external dependencies. This makes it auditable, implementable, and amenable to formal verification of its core safety property: no two valid blocks at the same height. The v1.x specification covers consensus, sharding (CURRENT + EXTENDED with regional pinning and under-quorum merge), governance (uncontrolled + governed modes with N-of-N keyholder PARAM_CHANGE), economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and distributed wallet recovery via Shamir + AEAD + OPAQUE composition.
 
-Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in ~17 KLOC of C++ across the chain daemon and wallet binary, with 58 shell-driven integration test suites in `tools/test_*.sh` covering every protocol feature (consensus, sharding, equivocation slashing, governance PARAM_CHANGE, A1 unitary balance, A9 atomic apply, S-008 mempool bounds, S-014 rate-limit on both RPC and gossip, S-018 JSON field-name diagnostics, S-021 chain-file integrity, S-022 per-message-type caps, S-026 TCP keepalive, S-028 anon-address case normalization, v2.18 / v2.19 DApp substrate, S-037 DApp-active snapshot bootstrap, v2.2 light-client `verify-state-proof` + `headers` RPC + `verify-headers` + `verify-block-sigs` demonstrator chain + `--json` flag coverage on info CLIs + cryptographic-primitive unit tests for v2.1 Merkle + committee-selection (S-020 hybrid + epoch_committee_seed) + shard-routing + Ed25519 sign/verify (foundation for every signature claim) + SHA-256 wrapper (NIST FIPS 180-4 vectors + Preliminaries §1.3 big-endian uint64_t encoding), OPAQUE wallet recovery via stub adapter, and end-to-end cross-shard transfer + under-quorum merge).
+Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in ~17 KLOC of C++ across the chain daemon and wallet binary, with 59 shell-driven integration test suites in `tools/test_*.sh` covering every protocol feature (consensus, sharding, equivocation slashing, governance PARAM_CHANGE, A1 unitary balance, A9 atomic apply, S-008 mempool bounds, S-014 rate-limit on both RPC and gossip, S-018 JSON field-name diagnostics, S-021 chain-file integrity, S-022 per-message-type caps, S-026 TCP keepalive, S-028 anon-address case normalization, v2.18 / v2.19 DApp substrate, S-037 DApp-active snapshot bootstrap, v2.2 light-client `verify-state-proof` + `headers` RPC + `verify-headers` + `verify-block-sigs` demonstrator chain + `--json` flag coverage on info CLIs + cryptographic-primitive unit tests for v2.1 Merkle + committee-selection (S-020 hybrid + epoch_committee_seed) + shard-routing + Ed25519 sign/verify (foundation for every signature claim) + SHA-256 wrapper (NIST FIPS 180-4 vectors + Preliminaries §1.3 big-endian uint64_t encoding) + anon-address helpers (S-028 case-insensitive parsing), OPAQUE wallet recovery via stub adapter, and end-to-end cross-shard transfer + under-quorum merge).
 
 Determ's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than BFT-family protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an occasional stall.
 
@@ -589,7 +607,10 @@ GenesisConfig {
   subsidy_pool_initial: u64            // E4 hard cap on cumulative subsidy
   subsidy_mode: u8                     // E3: 0 = FLAT, 1 = LOTTERY
   lottery_jackpot_multiplier: u32      // E3: required when LOTTERY
-  zeroth_pool_initial: u64             // E1: NEF pool seed; 0 disables NEF (geometric pool/2 per first-time REGISTER)
+  zeroth_pool_initial: u64             // E1: NEF pool seed; 0 disables NEF
+  nef_grant: u64                       // E1: fixed lottery payout per winner
+  nef_probability_denom: u64           // E1: 1/M win probability per registrant; >= 2
+  nef_max_wins_per_block: u64          // E1: per-block win cap; 0 = unlimited (default)
   initial_creators: [GenesisCreator]
   initial_balances: [GenesisAllocation]
 }

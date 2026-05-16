@@ -167,6 +167,10 @@ In-process tests (deterministic, no network):
   determ test-sha256                          SHA-256 wrapper + SHA256Builder (NIST FIPS
                                               180-4 vectors; Preliminaries §1.3 big-endian
                                               uint64_t encoding for protocol determinism)
+  determ test-anon-address                    is_anon_address / normalize_anon_address /
+                                              parse_anon_pubkey / make_anon_address
+                                              (S-028 case-insensitive parsing + canonical
+                                              lowercase storage form)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -3935,6 +3939,137 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": sha256 " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the anon-
+    // address helpers (S-028 surface): is_anon_address,
+    // normalize_anon_address, parse_anon_pubkey, make_anon_address.
+    //
+    // These are the boundary between the wire/RPC-supplied address
+    // string and the internal PubKey bytes used for signature
+    // verification. The S-028 closure makes `is_anon_address` accept
+    // either case (upper/lower hex) so operators don't get errors
+    // for case mismatches, but stores canonical lowercase form so
+    // store-keys are unambiguous. A regression here would silently
+    // break anon-account routing (RPC paths normalize at input;
+    // submit_tx REJECTS non-canonical to preserve sig binding).
+    //
+    // Tested at the unit level here in addition to
+    // tools/test_anon_address_case.sh (which exercises the same
+    // surface end-to-end through the 3-node RPC path). Unit-level
+    // catches regressions ~100x faster.
+    if (cmd == "test-anon-address") {
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. is_anon_address: canonical lowercase form.
+        {
+            std::string a = "0x" + std::string(64, 'a');
+            check(is_anon_address(a),
+                  "is_anon_address accepts lowercase 0x + 64 hex");
+        }
+
+        // 2. is_anon_address: uppercase form (S-028 closure — accepts
+        //    either case).
+        {
+            std::string a = "0x" + std::string(64, 'A');
+            check(is_anon_address(a),
+                  "is_anon_address accepts uppercase 0x + 64 hex");
+        }
+
+        // 3. is_anon_address: mixed-case form.
+        {
+            std::string a = "0xAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCd";
+            check(is_anon_address(a),
+                  "is_anon_address accepts mixed-case 0x + 64 hex");
+        }
+
+        // 4. is_anon_address: missing 0x prefix → rejects.
+        {
+            std::string a = std::string(64, 'a');
+            check(!is_anon_address(a),
+                  "is_anon_address rejects missing 0x prefix");
+        }
+
+        // 5. is_anon_address: wrong length → rejects.
+        {
+            std::string a = "0x" + std::string(63, 'a');
+            check(!is_anon_address(a),
+                  "is_anon_address rejects wrong length (63 hex chars)");
+        }
+
+        // 6. is_anon_address: non-hex char → rejects.
+        {
+            std::string a = "0x" + std::string(63, 'a') + "g";
+            check(!is_anon_address(a),
+                  "is_anon_address rejects non-hex char");
+        }
+
+        // 7. is_anon_address: registered domain name (no 0x) →
+        //    rejects.
+        {
+            check(!is_anon_address("alice"),
+                  "is_anon_address rejects registered-domain name");
+        }
+
+        // 8. normalize_anon_address: uppercase → lowercase canonical.
+        {
+            std::string upper = "0xABCDEF" + std::string(58, 'F');
+            std::string norm = normalize_anon_address(upper);
+            std::string expected = "0xabcdef" + std::string(58, 'f');
+            check(norm == expected,
+                  "normalize_anon_address lowercases hex but preserves 0x prefix");
+        }
+
+        // 9. normalize_anon_address: registered domain name →
+        //    unchanged (only anon addresses get normalized).
+        {
+            check(normalize_anon_address("alice") == "alice",
+                  "normalize_anon_address preserves registered domain unchanged");
+        }
+
+        // 10. parse_anon_pubkey: round-trip with make_anon_address.
+        //     Pubkey -> address -> pubkey must be byte-identical.
+        {
+            PubKey pk{};
+            for (size_t i = 0; i < 32; ++i) pk[i] = static_cast<uint8_t>(i * 7);
+            std::string addr = make_anon_address(pk);
+            PubKey back = parse_anon_pubkey(addr);
+            check(pk == back,
+                  "make_anon_address + parse_anon_pubkey round-trip");
+        }
+
+        // 11. parse_anon_pubkey: uppercase address yields same
+        //     pubkey as lowercase (case-insensitive parsing).
+        {
+            std::string lower = "0x" + std::string(64, 'a');
+            std::string upper = "0x" + std::string(64, 'A');
+            PubKey p1 = parse_anon_pubkey(lower);
+            PubKey p2 = parse_anon_pubkey(upper);
+            check(p1 == p2,
+                  "parse_anon_pubkey is case-insensitive (S-028)");
+        }
+
+        // 12. make_anon_address: output is always lowercase canonical.
+        {
+            PubKey pk{};
+            for (size_t i = 0; i < 32; ++i) pk[i] = 0xAB;
+            std::string addr = make_anon_address(pk);
+            bool all_lower = true;
+            for (size_t i = 2; i < addr.size(); ++i) {  // skip "0x"
+                if (addr[i] >= 'A' && addr[i] <= 'F') { all_lower = false; break; }
+            }
+            check(all_lower && addr.substr(0, 2) == "0x" && addr.size() == 66,
+                  "make_anon_address always emits lowercase canonical 0x+64");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": anon-address " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

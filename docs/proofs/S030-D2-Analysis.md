@@ -184,9 +184,9 @@ Recording this carefully because:
 
 1. The naive fix is genuinely tempting — it looks like a 30-line change.
 2. The failure mode under naive fix is subtle (gossip-async view divergence) and might not surface in single-host test environments with low-latency gossip.
-3. The correct fix (v2.7 F2) is structurally bigger and needs design decisions (reconciliation rule choice, per-field semantics, view-hash format) that warrant explicit deliberation, not "let's just patch the digest." See `F2-SPEC.md` for the design-decision specification that should precede any v2.7 implementation attempt.
+3. The correct fix (v2.7 F2) is structurally bigger and needs design decisions (reconciliation rule choice, per-field semantics, view-hash format) that warrant explicit deliberation, not "let's just patch the digest." See `F2-SPEC.md` for the formal resolution of all 9 historical open design questions (per-field union/intersection rules with V10/V11 verifiability constraints, Merkle-root wire format, Phase-2 signature semantics over reconciled canonical lists, flag-day migration plan). Implementation should proceed against F2-SPEC.md's §3 work units after the pre-implementation review of §6.
 4. S-033's state_root binding closed most of the practical D2 surface via a different mechanism (apply-layer rather than consensus-layer). Understanding this dual-path closure is essential when triaging future S-030-class findings: the question "is the digest closed?" is distinct from "is two-instance divergence prevented?", and the answer depends on which mechanism you're asking about.
-5. Marking S-030 D2 as "Partially mitigated (S-033) + v2.7 F2 planned for full closure" is more useful than the previous "Open, fix scoped" framing — current and planned status are both pinned.
+5. Marking S-030 D2 as "Partially mitigated (S-033 apply-layer, shipped) + v2.7 F2 spec resolved (F2-SPEC.md) and implementation pending review for full consensus-layer closure" is more useful than the previous "Open, fix scoped" framing — current state, design state, and implementation state are all pinned.
 
 ---
 

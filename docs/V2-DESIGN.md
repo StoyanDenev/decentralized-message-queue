@@ -16,10 +16,10 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.4 Atomic block apply (A9) | ✅ shipped | A9 Phase 1-2D + COMPOSABLE_BATCH tx |
 | v2.5 Registry cache (S-032) | ✅ shipped | Cached registry view; S-032 closed |
 | v2.6 Gossip broadcast out of lock | ✅ shipped | All 5 broadcast sites release unique_lock before broadcast |
-| v2.7 F2 view reconciliation | ⏳ not started | S-030 D2 closure |
+| v2.7 F2 view reconciliation | ⏳ spec resolved, implementation pending | S-030 D2 closure. F2-SPEC.md per-field rules formalized: union (+V11) for evidence, union (+V10) for aborts, intersection for inbound_receipts, deterministic for the rest. ~3-4d to ship from spec-review acceptance |
 | v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
 | v2.9 Distributed VRF for committee selection | ⏳ not started | |
-| v2.10 Threshold randomness aggregation | 🔥 **active** | Promoted to defeat residual selective-abort attack. See plan.md A11 for active task brief |
+| v2.10 Threshold randomness aggregation | 🔥 **active** | Promoted to defeat residual selective-abort attack. DKG spec resolved per Option C (epoch-boundary trustless DKG + PSS refresh + BLS12-381 + FROST-BLS) in `docs/proofs/v2.10-DKG-SPEC.md`; cost revised to ~3-4 weeks. See plan.md A11 for active task brief |
 | v2.11 Auto-detection beacon-side trigger (R4 v1.1) | ⏳ not started | |
 | v2.12 Cross-shard atomic primitives | ⏳ not started | |
 | v2.13 Fair-ordering primitive | 🔒 deferred (research) | Open research area; not on v2 critical path |
@@ -31,9 +31,9 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.19 DAPP_CALL tx + payload routing | ✅ shipped | Theme 7 substrate |
 | v2.20 Streaming subscription RPC | ⚠️ partial | Polling shipped; full streaming pending |
 | v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
-| v2.22 Confidential transactions (Bulletproofs) | ⏳ not started | Theme 8 |
+| v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over BLS12-381 (shares v2.10's curve), ephemeral-DH amount handshake, dual-mode audit disclosure. ~3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
-| v2.24 Audit / compliance hooks | ⏳ not started | Theme 8 |
+| v2.24 Audit / compliance hooks | ⏳ not started | Theme 8. Simplified post-v2.22 spec — most infrastructure delivered by v2.22; v2.24 reduces to `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference tool. ~1-2 weeks |
 | v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
 | v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
@@ -142,31 +142,41 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 
 **v2.7's value-add over S-033.** Closes the consensus-layer gap directly: signatures gather only around one canonical view, so two instances cannot both be K-of-K-signed in the first place. For permissionless deployments wanting the literal "≤ 1 finalized K-of-K signature gathering per height," this is the structural fix.
 
-**Mechanism.** Phase-1 view reconciliation. Each member's `ContribMsg` (Phase 1 commit) includes a hash of their view of:
-- `equivocation_events` pool
-- `inbound_receipts` pool
-- `abort_events` from local observation
-- `partner_subset_hash` if in a merge
+**Mechanism.** Phase-1 view reconciliation with **per-field heterogeneous rules** (Option D). Each member's `ContribMsg` (Phase 1 commit) embeds both per-field Merkle-root hashes AND the actual lists for three pool-fed fields. The K signed Phase-1 commits canonicalize per-field via the rules below; Phase-2 signatures cover the reconciled canonical lists.
 
-The K signed Phase-1 commits canonicalize via a reconciliation rule (intersection / union / threshold — design choice, see `F2-SPEC.md` for per-field analysis). Phase-2 signatures cover the reconciled canonical lists (via `compute_block_digest` extended with these fields).
+| Field | Reconciliation rule | Why this rule |
+|---|---|---|
+| `equivocation_events` | **Union** (with per-event V11 verifiability check) | Slashing-bearing; censorship-resistance principle ("one honest observer suffices") applies. Each event is cryptographically self-verifiable via V11 (two conflicting sigs over different digests), so union doesn't expand attack surface. |
+| `abort_events` | **Union** (with per-event V10 verifiability check) | Same as equivocation. Aborts are individually verifiable; any single observer suffices. V10 bounds over-inclusion. |
+| `inbound_receipts` | **Intersection** | Credit-bearing; conservative posture. Only credit when ALL K members independently observed the receipt — reduces double-credit risk if a cross-shard relay is partially corrupted. |
+| `cross_shard_receipts` | Deterministic from accepted txs | No reconciliation needed; pure function of in-block TRANSFERs. Validator re-derives and checks. |
+| `partner_subset_hash` | Deterministic from merge state | Computed identically on every honest node from `merge_state` at this height. No view divergence possible. |
+| `timestamp` | Assembler-proposes, members-bound-check ±30s | Assembler proposes a value at Phase 1→2 boundary; members verify against their local `±30s` window before signing Phase-2. Out-of-window → round aborts and re-runs. |
 
-**Open design questions before implementation.** The prior in-tree attempt at a naive extension broke the equivocation-slashing regression test under gossip-async view divergence (`docs/proofs/S030-D2-Analysis.md` §2). A second attempt requires resolving:
-1. Per-field reconciliation rule (different rules for evidence vs receipts)
-2. Pool snapshot timing semantics
-3. Wire format for view hashes (full list vs Merkle root)
-4. Phase-1 commit binding scope (combined vs per-field)
-5. Phase-2 signature semantics under union rule (binding evidence Phase-1 didn't see)
-6. Timestamp inclusion (in v2.7 scope or separate)
-7. Validator-side reconciliation caching
-8. Monitoring metrics for view-divergence rate
-9. FA1 proof update
+**Status: spec resolved, awaiting review and implementation.** `docs/proofs/F2-SPEC.md` contains the formal resolutions for all 9 historical open design questions (per-field rules, pool snapshot timing, wire format, Phase-1 binding scope, Phase-2 signature semantics under union, timestamp inclusion, validator-side caching, monitoring metrics, FA1 proof update). The prior in-tree attempt at a naive extension broke equivocation-slashing under gossip-async (`docs/proofs/S030-D2-Analysis.md` §2); F2-SPEC's per-field rules + per-event V11 re-verifiability constraint address the failure mode directly.
 
-See `docs/proofs/F2-SPEC.md` for resolutions / recommendations on each.
+**Resolved sub-questions, summary:**
+1. Per-field rule: per-field heterogeneous (table above). ✅
+2. Pool snapshot timing: each member snapshots at their own Phase-1 commit instant; no coordinated snapshot. ✅
+3. Wire format: per-field Merkle root (32B) + full list per member in `ContribMsg`; suggested cap 64 events per type per member. ✅
+4. Phase-1 commit binding: `make_contrib_commitment` extended with three new view roots; single Ed25519 sig binds all three. ✅
+5. Phase-2 sig semantics: Phase-2 signs over the reconciled canonical lists, not any member's individual view. Members may sign over evidence they didn't personally observe, but each event must individually pass V10/V11 verification. ✅
+6. Timestamp inclusion: in v2.7 scope (assembler-proposes-members-bound-check). ✅
+7. Validator-side caching: none in initial ship (K × pool-size work is bounded constant). ✅
+8. Monitoring metrics: 4 counters/gauges (`f2_view_divergence_count`, `f2_round_aborts_attributed_to_view_drift`, `f2_canonical_list_size_per_field`, `f2_evidence_inclusion_latency_blocks`). ✅
+9. FA1 proof update: textual only (no structural proof change); D2 footnote removed from `Safety.md` §5.3; "≤ 1 block instance per height" replaces "≤ 1 digest per height + footnote." ✅
 
-**Cost.**
-- Specification: half day (resolve the 9 design questions; write `F2-SPEC.md`).
-- Implementation given a final specification: 1-2 days.
-- Wire-format change to `ContribMsg`. Validator re-derivation logic. Reconciliation rule(s) documented.
+See `docs/proofs/F2-SPEC.md` for the full per-question rationale, wire-format details, implementation work units, regression-test plan, and rollback plan.
+
+**Cost (revised, spec already in tree).**
+- Specification: **shipped** (F2-SPEC.md exists; review pending).
+- Implementation: 1-2 days focused work given the spec.
+- Testing: 0.5-1 day for the 5 regression test cases.
+- Migration tooling + genesis update: 0.5 day.
+- Documentation refresh (Safety.md §5.3 D2 footnote removal, S030-D2-Analysis.md status update): 0.5 day.
+- **Total to ship: ~3-4 days from spec-review acceptance.**
+
+Wire-format change to `ContribMsg` (3 new hashes + 3 new lists). Validator re-derivation logic. Reconciliation rule(s) formalized in F2-SPEC.md.
 
 **Closes:** S-030 D2 fully (consensus-layer). FA1's "≤ 1 block instance per digest" becomes literally provable at the consensus layer, not just at apply. Removes the partial-closure footnote (Safety.md §5.3).
 
@@ -232,15 +242,47 @@ Defenses today (`SUSPENSION_SLASH = 10` per abort + BFT escalation) make the att
 | Adversary chooses to reveal/abort based on whether R favors them | Adversary cannot prevent R; their choice is irrelevant |
 | Bias possible by paying SUSPENSION_SLASH per abort | Bias requires controlling ≥ K-t+1 members — standard Byzantine bound |
 
-**Cost.** ~1 week per plan.md A11 cost estimate. Foundation: vendored threshold-signature library (BLS12-381 reference impl or alternate, ~2-3 days). Integration with existing commit-reveal phases (~2-3 days). DKG (distributed key generation) tooling for genesis-time threshold-key setup (~1 day). Tests + docs (~1-2 days).
+**DKG design: Option C — epoch-boundary trustless DKG with proactive refresh.** v2.10's threshold signatures require each committee member to hold a share of a threshold private key. The shares are generated and refreshed via per-epoch FROST-BLS DKG; no trusted dealer; new validators acquire shares natively via the next epoch's DKG round; share refreshes preserve forward secrecy.
 
-**Wire-format implications.** `creator_dh_secrets` becomes `creator_partial_sigs`. Not backward-compatible with v1 chains — flag-day upgrade required.
+| DKG sub-decision | Resolved choice | Why |
+|---|---|---|
+| Ceremony placement | **Epoch-boundary runtime DKG** | Supports permissionless validator rotation natively; reuses existing epoch-boundary sync point |
+| Trust model | **Trustless (no dealer)** | Matches K-of-K mutual-distrust posture; trusted dealer reintroduces operator privilege |
+| Rotation support | **Native via per-epoch DKG** | New validators acquire shares in next epoch's ceremony; departing validators simply don't participate |
+| Share refresh | **Proactive secret sharing (PSS)** in membership-unchanged case; fresh DKG on committee change | Forward secrecy at zero cost when membership stable; clean transition when committee changes |
+| Threshold scheme | **BLS12-381** | Most mature DKG protocols target it; production-grade `blst` implementation; shared with v2.22/v2.25 |
+| DKG protocol | **FROST-BLS** | Most actively maintained DKG protocol; two-round; tolerates ⌊(K-1)/3⌋ malicious participants during ceremony |
+| Per-profile timing | **R=5 blocks at tactical/cluster, R=3 at web/regional/global** | Sized to absorb network jitter while staying ≤5% of epoch duration |
 
-**Composes with v2.9** (distributed VRF): VRF unbiasability + threshold randomness aggregation together close the entire randomness attack surface. Either alone is good; both together is best.
+See `docs/proofs/v2.10-DKG-SPEC.md` for the full design specification, protocol description, wire-format details, implementation work units, failure-mode handling, regression-test plan, and rollback plan.
+
+**Cost (revised after DKG spec).** ~3-4 weeks focused work. The prior "~1 week" estimate implicitly assumed Option B (genesis-time static DKG), which would compromise the mutual-distrust property v2.10 is meant to deliver. Option C breakdown:
+
+| Sub-component | Effort |
+|---|---|
+| BLS12-381 library vendoring (`blst`) | 3-5 days |
+| FROST-BLS DKG protocol | 1-1.5 weeks |
+| Epoch-boundary orchestration | 3-5 days |
+| Threshold-signature integration | 3-5 days |
+| Failure-mode handling | 3-5 days |
+| Regression tests | 3-5 days |
+| Migration tooling | 2-3 days |
+| Documentation refresh | 2-3 days |
+
+The 3-4x expansion vs. the prior estimate is the cost of delivering v2.10's threat-model property under genuine mutual distrust. Alternatives (genesis-time static, or trusted-dealer) ship faster but compromise the property.
+
+**Wire-format implications.** `creator_dh_secrets` becomes `creator_partial_sigs` (per the v2.10 design). Three new gossip-layer message types for the DKG ceremony (`DKGCommitMsg`, `DKGShareMsg`, `DKGComplaintMsg`). Three new on-chain block fields (`epoch_public_key`, `dkg_status`, `dkg_excluded`). Not backward-compatible with v1 chains — flag-day upgrade required.
+
+**Composes with v2.9** (distributed VRF): VRF unbiasability + threshold randomness aggregation together close the entire randomness attack surface. Either alone is good; both together is best. v2.9 itself would build on the same BLS12-381 + DKG infrastructure shipped here.
+
+**Cascades to downstream items.** The BLS12-381 + DKG infrastructure shipped for v2.10 is a **shared foundation** for the threshold-cryptography layer of v2 + Theme 9:
+- **v2.25 T-OPAQUE OPRF** (Theme 9 DSSO) reuses the same curve and the same per-epoch share-distribution infrastructure (different label, same underlying secret sharing). Without v2.10's DKG, T-OPAQUE has no trust-minimized share-distribution path.
+- **v2.22 confidential transactions** (Theme 8) can share the BLS12-381 curve if Bulletproofs are instantiated over the same group, reducing total cryptographic-stack expansion.
+- **v2.9 distributed VRF** (deferred) is natural follow-on once DKG infrastructure exists.
 
 **Closes:** residual selective-abort bias in randomness (the only remaining randomness-bias vector after commit-reveal closed the broader class). Strengthens FA3 information-theoretic argument from "K-of-K commit-reveal" to "t-of-K threshold aggregation," which is the strongest possible bound (matches Byzantine takeover threshold).
 
-Full task brief: `plan.md` §A11.
+Full task brief: `plan.md` §A11. Full DKG specification: `docs/proofs/v2.10-DKG-SPEC.md`.
 
 ### v2.11 — Auto-detection beacon-side trigger (R4 v1.1)
 
@@ -386,16 +428,49 @@ Determ stays in its lane (payment + identity). But "best-in-class at that lane" 
 
 ### v2.22 — Confidential transactions (Pedersen commitments + Bulletproofs)
 
-**Motivation.** Today every TRANSFER amount is public on-chain. For payment use cases — payroll, vendor payments, B2B settlement, retail — this is incompatible with normal commercial confidentiality. The alternative (every user using a mixer DApp) doesn't compose with audit-grade compliance.
+**Motivation.** Today every TRANSFER amount is public on-chain. For payment use cases — payroll, vendor payments, B2B settlement, retail, regulated gambling — this is incompatible with normal commercial confidentiality. The alternative (every user using a mixer DApp) doesn't compose with audit-grade compliance.
 
-**Mechanism.** Replace TRANSFER's clear-text `amount: u64` with a Pedersen commitment `C = aG + bH` where `a` is the amount and `b` is a blinding factor. Sender attaches a Bulletproof range-proof that `0 <= a <= 2^64` (so amounts can't underflow), and a balance-conservation proof binding inputs and outputs. Recipient learns `a` via a Diffie-Hellman handshake with the sender's view key.
+**Mechanism.** Replace TRANSFER's clear-text `amount: u64` with a Pedersen commitment `C = aG + bH` (where `a` is the amount and `b` is a blinding factor). Sender attaches a Bulletproof range proof that `0 ≤ a < 2^64` (no underflow) and a balance-conservation proof binding inputs and outputs. Recipient learns `a` via an ephemeral Diffie-Hellman handshake against the recipient's published `view_master_pk`; per-tx amount-encryption key derives via HKDF.
 
-Optional view-key disclosure: account holders can publish a per-account or per-block view key that lets a designated auditor decrypt amounts. Solves the regulated-counterparty problem without forcing global transparency.
+**Design resolved per Option C (per-epoch automatic rotation via HKDF derivation).** Full spec: `docs/proofs/v2.22-PRIVACY-SPEC.md`. The four interlinked sub-questions are resolved as follows:
 
+| Sub-decision | Resolved choice | Why |
+|---|---|---|
+| View-key rotation cadence | **Per-epoch automatic rotation via HKDF** | Bounded exposure per epoch; zero on-chain rotation cost; maps to regulator audit cadence; no rotation discipline required |
+| Range-proof construction | **Bulletproofs over BLS12-381** | Curve already vendored via v2.10 DKG (`blst`); no second cryptographic primitive family; mature; aggregation-friendly; no trusted setup |
+| Sender-recipient handshake | **Ephemeral DH against recipient's `view_master_pk` + HKDF + XChaCha20-Poly1305 AEAD** | One-shot tx submission (no bidirectional interaction); forward secrecy via ephemeral; libsodium primitives already in tree |
+| Audit integration (v2.24) | **Dual-mode disclosure: `view_master_sk` (full) or per-epoch `vk_epoch_n` (scoped)** | Master = in-house compliance; per-epoch = external regulator with bounded audit window; maps to real regulator workflows |
 
-**Cost.** 2-3 months. Bulletproofs implementation (curve25519 + range-proof aggregation) + view-key key-derivation + wallet integration + RPC schema. Sender + receiver code paths. Audit-mode docs.
+Each account has a long-term `view_master` keypair. Per-epoch view keys derive deterministically: `vk_epoch_n = HKDF(view_master_sk, "VK" || chain_id || account_addr || epoch_n)`. Recipients and auditors recompute the same derivation to decrypt amounts within epoch n. Compromised epoch keys expose only that epoch's amounts; subsequent epochs unaffected.
 
-**Closes:** new capability (no existing finding). Enables real-world payment use cases that today need a separate privacy chain.
+**Tx-level encryption.** Sender generates ephemeral `eph_sk`; computes shared secret `ss = eph_sk · view_master_pk` (DH on BLS12-381 G1); derives `aek = HKDF(ss, "AMT" || epoch_n || tx_hash)`; encrypts amount as `amount_ct = AEAD(aek, amount_bytes, AAD = "TX-AMT" || tx_hash)`. Tx carries: commitment, range proof, `eph_pk`, `amount_ct`. Recipient (or auditor with master) decrypts via the same DH.
+
+**Emergency master compromise recovery.** `ROTATE_VIEW_MASTER` tx (analogous to v2.26 `ROTATE_KEY`) allows one-time recovery from catastrophic master compromise. Not for routine rotation (Option C handles routine rotation via HKDF) — only for emergency.
+
+**Cost (refined per spec).** ~3 months focused work. Breakdown:
+
+| Sub-component | Effort |
+|---|---|
+| Bulletproofs over BLS12-381 (vendor + port from curve25519 reference) | 4-6 weeks |
+| Pedersen commitment integration | 2-3 weeks |
+| View-master + per-epoch HKDF derivation | 2 weeks |
+| Sender-recipient DH handshake (libsodium AEAD) | 1 week |
+| `ROTATE_VIEW_MASTER` tx | 1 week |
+| Audit-mode tooling + v2.24 integration | 2-3 weeks |
+| Tests + docs | 2 weeks |
+| Migration tooling | 1 week |
+
+**Shared infrastructure savings.** BLS12-381 library already vendored for v2.10 DKG — saves ~1 week of vendoring effort otherwise required for curve25519 Bulletproofs. Cascade benefit from v2.10's Option C choice.
+
+**Composes with.**
+- **v2.24 audit hooks** — concrete dual-mode disclosure mechanism (master vs per-epoch). v2.24 reduces to "add `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference auditor tool"; v2.22 provides the underlying view-key infrastructure.
+- **v2.26 key rotation** — `ROTATE_VIEW_MASTER` and `ROTATE_AUDIT_KEY` follow the same pattern as v2.26 `ROTATE_KEY`; shared cooldown semantics.
+- **v2.10 DKG infrastructure** — BLS12-381 + `blst` already vendored.
+- **v2.25 DSSO (Theme 9)** — DSSO assertions can carry encrypted account-history summaries scoped to the RP via per-tx ephemeral DH (future composition; not in v2.22's scope).
+
+**Closes:** new capability (no existing finding). Enables real-world payment use cases that today need a separate privacy chain — including the gambling-industry deployments where high-roller bankroll confidentiality is a regulatory requirement.
+
+**Full design spec:** `docs/proofs/v2.22-PRIVACY-SPEC.md` (resolves all 4 interlinked sub-questions; implementation work units; failure-mode handling; rollback plan; 5-point pre-implementation review checklist).
 
 ### v2.23 — Cross-chain bridge (IBC-style light-client verification)
 
@@ -417,11 +492,29 @@ Phasing:
 
 **Motivation.** Privacy by default (v2.22) needs an explicit opt-in for regulated deployments to expose amounts/parties to designated auditors (KYC/AML/tax authorities). Without this, Determ is unusable for any payment business with counterparty-disclosure obligations.
 
-**Mechanism.** Per-account `audit_view_key`: a Diffie-Hellman public key whose holder can decrypt the account's amounts. Genesis-pinned default (`""` = no auditor). Optionally rotatable via REGISTER-style tx jointly signed by the audit-key-holder and the account holder. Audit-mode operators run a special node that consumes the audit log + auditor view keys + produces compliance reports.
+**Mechanism (simplified post-v2.22 spec).** v2.22 already delivers the view-key infrastructure (`view_master_pk` per account + per-epoch HKDF derivation + ephemeral-DH amount encryption). v2.24 adds:
 
-**Cost.** 2-3 weeks. Audit-key field on accounts + view-key handshake + audit-mode RPC + auditor-tooling reference impl.
+1. **`audit_view_master_pk` field on Account** — optional; absent = no standing auditor; present = named auditor has standing pre-authorization to derive view keys via DH against the auditor's published pubkey.
+2. **`ROTATE_AUDIT_KEY` tx** — analogous to v2.26 `ROTATE_KEY`; rotation cooldown applies.
+3. **Audit-mode RPC** — `audit_decrypt_tx(tx_hash, vk_epoch_n) → amount` for off-chain auditor tooling.
+4. **`LOG_AUDIT_ACCESS` tx** (optional) — on-chain record of disclosure events for deployments requiring auditable audit access.
+5. **Reference auditor tool** — takes `view_master_sk` (or per-epoch keys) + audit-mode RPC; produces compliance reports (CSV / JSON).
 
-**Closes:** removes the "Determ is unusable for regulated payments" objection. Composes cleanly with v2.22's privacy.
+Two disclosure modes (defined in v2.22 spec §2.Q4):
+- **Master mode**: auditor receives `view_master_sk` — full access to all amounts to/from this account, ever. For in-house compliance officers with permanent audit relationships.
+- **Per-epoch mode**: auditor receives `vk_epoch_n` for specific epochs — bounded access. For external regulators with quarterly/annual audit windows.
+
+**Cost (reduced post-v2.22 spec).** ~1-2 weeks (vs. prior 2-3 week estimate). v2.22 delivers the view-key infrastructure; v2.24 adds the auditor-facing tx types + tooling on top.
+
+| Sub-component | Effort |
+|---|---|
+| `audit_view_master_pk` field on Account + apply path | 2-3 days |
+| `ROTATE_AUDIT_KEY` tx (analogous to v2.26) | 3-5 days |
+| Audit-mode RPC | 2-3 days |
+| `LOG_AUDIT_ACCESS` tx (optional) | 2 days |
+| Reference auditor tool | 3-5 days |
+
+**Closes:** removes the "Determ is unusable for regulated payments" objection. Composes cleanly with v2.22's privacy infrastructure — see `docs/proofs/v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6 for the integration spec.
 
 ---
 
@@ -597,7 +690,7 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 | S-011 (abort-claim cartel) | S-010 stake floor + FA6 equivocation slashing bound | ✅ shipped (no code change needed; closed by economic argument + existing slashing) |
 | S-012 (snapshot trust) | v2.1 state_root + v2.3 snapshot verification | ✅ shipped |
 | S-030 D1 (validate-apply) | v2.1 state_root indirect closure (via signing_bytes + apply-time check) | ✅ effective |
-| S-030 D2 (block_digest) | v2.1 state_root partial closure + v2.7 F2 for full | 🟠 partial |
+| S-030 D2 (block_digest) | v2.1 state_root apply-layer closure (shipped) + v2.7 F2 consensus-layer closure (spec resolved in F2-SPEC.md; implementation ~3-4d) | 🟠 partial (apply-layer ✅; consensus-layer awaits F2 implementation) |
 | S-031 (global mutex) | v2.4 A9 + v2.5 + v2.6 + async chain.save | ✅ shipped (all 6 layers) |
 | S-032 (registry rebuild) | v2.5 incremental cache | ✅ shipped |
 | S-033 (no state commitment) | v2.1 Merkle root + Block.state_root | ✅ shipped |
@@ -616,12 +709,104 @@ Layer-level estimates with shipped vs remaining split:
 | Trust minimization (v2.1–v2.3) | State Merkle root + light clients + trustless fast sync | 4-6 weeks | ✅ all 3 shipped (foundation; full header-only-sync flow still pending) | ~1 week (light-client header sync flow) |
 | Scale & concurrency (v2.4–v2.6) | A9 overlay, registry cache, gossip-out-of-lock | 2 weeks | ✅ all 3 shipped (A9 Phase 1-2D, registry cache, gossip-out-of-lock) | 0 |
 | Cryptographic hardening (v2.7–v2.8) | F2 view reconciliation, Dilithium migration | 2-3 weeks | F2 spec'd in F2-SPEC.md, code not started; Dilithium not started | 2-3 weeks |
-| Liveness (v2.10, v2.11) | Threshold randomness aggregation 🔥 active, beacon auto-detect | 1.5 weeks | 0 (v2.10 promoted to active A11) | 1.5 weeks |
+| Liveness (v2.10, v2.11) | Threshold randomness aggregation 🔥 active (with DKG infrastructure per v2.10-DKG-SPEC.md), beacon auto-detect | ~4 weeks | 0 (v2.10 promoted to active A11) | ~4 weeks |
 | Composability (v2.12) | Cross-shard atomic primitives | 1 week | 0 (foundation: A9 Phase 2D atomic_scope shipped; cross-shard 2PC pending) | 1 week |
 | Wallet/operator (v2.14–v2.17) | OPAQUE port, HD derivation, RPC auth, encrypted keyfiles | 2 weeks | ✅ v2.16 + v2.17 shipped; v2.14 + v2.15 not started | ~1 week |
 | Application layer (v2.18–v2.20) | DApp substrate (registry + call + RPC + polling) | (was implicit, now itemized) ~1 week | ✅ v2.18 + v2.19 shipped, v2.20 polling shipped (streaming pending) | ~3 days for streaming |
-| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** | 0 | 3-5 months |
+| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** | 0 (v2.22 spec resolved per `v2.22-PRIVACY-SPEC.md`; v2.24 scope reduced to ~1-2 weeks; BLS12-381 vendoring savings cascade from v2.10) | 3-5 months |
 
 **Themes 1-7 status:** ~6 weeks of work remaining (vs 12-16 weeks at start of session). Major absorbed: v2.1, v2.2 (foundation), v2.3, v2.4 (full A9), v2.5, v2.6, v2.16, v2.17, v2.18, v2.19, v2.20 polling.
 
 **Total to complete v2 with Theme 8:** ~4-6 months from current state (down from 6-9 months estimate at the start of v2 work).
+
+---
+
+## Recommended sequencing — v2 + Theme 9
+
+Canonical execution order for the remaining work. Sequencing reflects critical-path dependencies (precondition before consumer), risk shape (highest-uncertainty items earliest within each phase), and commercial priority (privacy unblocks the largest deployment class).
+
+### Phase A — v2-completing sprint (~8-9 weeks sequential)
+
+Single contiguous sprint that lands v2 Themes 1-7 fully. Items inside the phase can parallelize freely; the phase boundary is the synchronization point. Revised from prior ~6-week estimate after v2.10 DKG spec (Option C) raised A.4 from ~1 week to ~3-4 weeks — the increase reflects the genuine cost of trustless per-epoch DKG with PSS refresh, which is the cost of delivering v2.10's threat-model property under mutual distrust.
+
+| Order | Item | Effort | Why this order |
+|---|---|---|---|
+| A.1 | C3 gossip-out-of-lock, C6 BFT threshold bump | ~1.5 days | Smallest items; clears C-track to "all shipped." |
+| A.2 | R5 `tools/test_regional_shards.sh`, R6 README §17.6 update | ~1 day | Closes the R-track verification gap from the in-session sharding work. |
+| A.3 | E1 NEF lottery rewrite | ~2-3 days | Reconciles shipped geometric `pool/2` with the canonical lottery design (plan.md §E1). Independent of all other work. |
+| A.4 | A11 / v2.10 threshold randomness aggregation (incl. DKG infrastructure) | ~3-4 weeks | **Theme-9 precondition + shared foundation for v2.22/v2.25.** DKG spec resolved per Option C in `docs/proofs/v2.10-DKG-SPEC.md`; revised cost reflects epoch-boundary trustless DKG + PSS refresh + BLS12-381 + FROST-BLS. Largest single item in Phase A; land first so any DKG / BLS vendoring surprises surface early. |
+| A.5 | A2 / v2.14 OPAQUE wallet finisher | ~5-7 days | **Theme-9 precondition.** Single-server OPAQUE exercises the adapter shape T-OPAQUE will reuse. |
+| A.6 | A7 randomness binding RPC + reference DApp | ~1.5 days | Unlocks fair-lottery DApp + general application-layer randomness consumption. |
+| A.7 | A8 IdP-directory finisher | ~2-3 days | Builds on shipped v2.18/v2.19; light follow-on. |
+| A.8 | v2.7 F2 view reconciliation | ~3-4 days total | **Spec resolved (F2-SPEC.md, per-field rules per Option D).** Awaiting pre-implementation review of the 5 decisions called out in F2-SPEC.md §6. Closes S-030 D2 at consensus layer. |
+| A.9 | v2.8 Dilithium PQC migration | ~1-2 weeks | Largest cryptographic surface addition; wire-format break — flag-day. |
+| A.10 | v2.11 beacon-side auto-detect | ~2-3 days | Closes S-036 fully. |
+| A.11 | v2.12 cross-shard 2PC | ~1 week | Builds on shipped A9 Phase 2D atomic_scope. |
+| A.12 | v2.15 HD derivation + multi-sig | ~1 week | Wallet UX completer; orthogonal to consensus changes. |
+| A.13 | v2.20 streaming subscription RPC | ~3 days | Final Theme-7 polish. |
+
+**Phase-A exit criterion:** Themes 1-7 fully shipped; v2.10 + v2.14 (Theme-9 preconditions) in tree; all SECURITY.md findings closed or formally deferred.
+
+### Phase B — Theme 8 (privacy + interop, 3-5 months, partly parallel)
+
+Theme 8 is the largest remaining work block. Internal sequencing prioritizes the item that unblocks the largest commercial deployment class.
+
+| Order | Item | Effort | Why this order |
+|---|---|---|---|
+| B.1 | v2.22 confidential transactions (per `v2.22-PRIVACY-SPEC.md`) | ~3 months | Unblocks all real-world payment use cases (B2B, payroll, retail, regulated gambling) that today need a separate privacy chain. Highest commercial leverage. Spec resolved per Option C — curve choice (BLS12-381) cascades from v2.10. |
+| B.2 (parallel with B.1) | v2.23 cross-chain bridge, Determ-to-Determ first | 1 month | Lowest-uncertainty bridge variant; uses Determ's own light-client + state_root machinery. Independent of v2.22. |
+| B.3 (after B.2) | v2.23 cross-chain bridge, Cosmos IBC | 2 months | Standardized spec; deferred from B.2 to avoid blocking confidential-tx work. |
+| B.4 (after B.1) | v2.24 audit / compliance hooks (per `v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6) | 1-2 weeks | **Reduced scope** post-v2.22 spec — v2.22 delivers the view-key infrastructure; v2.24 adds `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference auditor tool. Composes cleanly with v2.22's dual-mode disclosure. |
+
+Defer indefinitely: v2.23 Bitcoin SPV bridge (2 months, low priority), v2.23 Ethereum bridge (6+ months, blocked on SNARK-of-Ethereum-light-client tooling maturity).
+
+**Phase-B exit criterion:** Confidential payments + Determ-to-Determ + Cosmos IBC + audit hooks shipped. Determ becomes commercially deployable for regulated payment workloads.
+
+### Phase C — Theme 9 DSSO (6-9 weeks, after preconditions land in Phase A)
+
+Strictly sequential after Phase A. v2.26 ships first as a v2.25 prerequisite (key rotation is irrecoverable-loss mitigation for DSSO).
+
+| Order | Item | Effort | Why this order |
+|---|---|---|---|
+| C.1 | v2.26 on-chain key rotation | ~1 week | Identity-continuity precondition for v2.25 production posture. |
+| C.2 | v2.25 DSSO substrate — T-OPAQUE adapter | 1-2 weeks | Vendor + harden T-OPRF + T-OPAQUE library. Reuses single-server OPAQUE adapter shape from v2.14. |
+| C.3 | v2.25 wallet client + committee-side share handler | ~2 weeks | Wallet side overlaps with v2.14's single-server work. |
+| C.4 | v2.25 signed-assertion protocol + token format | ~1 week | JWT-compatible vs custom binary — decide at start of C.4. |
+| C.5 | v2.25 reference RP DApp + integration test | ~1 week | Validates the end-to-end flow via Theme-7 DAPP_REGISTER + DAPP_CALL substrate. |
+| C.6 | v2.25 spec doc + threat-model write-up | ~3-5 days | DSSO-SPEC.md, mirrors F2-SPEC.md style. |
+
+**Phase-C exit criterion:** Determ becomes a usable federated-identity anchor for off-chain services without trust in any single Determ node.
+
+### Total combined
+
+| Phase | Window | Cumulative wall-clock |
+|---|---|---|
+| Phase A (v2 Themes 1-7) | ~8-9 weeks | ~8-9 weeks |
+| Phase B (Theme 8) | 3-5 months | ~5-7 months |
+| Phase C (Theme 9) | 4-6 weeks (DKG infrastructure shared with Phase A — Theme 9 effort reduced), partially parallel with later Phase B | ~6-9 months total (unchanged at the outer envelope; v2.10 work absorbed into Phase A) |
+
+NH-track items run in parallel without gating any phase. NH1 (C99 rewrite, A10 Stage 1 entry) is a multi-month engineering bet; NH4 (military certification) is a calendar/operator-policy track; NH5 (dynamic BFT threshold) lands at C6 in Phase A; NH6 (regulatory mapping) lands incrementally with v2.24 in Phase B.
+
+### What is explicitly NOT in this sequencing
+
+- **v2.13 fair ordering** — see "v2.13 fair ordering scope" below for the explicit deferral rationale.
+- **v2.21+ DApp ecosystem items** — community/ecosystem track, not core protocol.
+- **Beaconless v2 architecture** — separate v2.x direction with 6 substantial open design questions; not on this sequencing.
+
+### v2.13 fair ordering — scope clarification
+
+v2.13 is **descoped from the v2 sequencing above, but not abandoned from Determ's design space.** The distinction matters:
+
+**Why it's not in Phase A/B/C.** Three independent reasons:
+1. **Underlying problem is not load-bearing for Determ's stated scope.** Fair ordering exists to mitigate producer-level MEV (frontrunning, sandwich attacks). MEV is a real concern for DEXes and order-book applications — neither of which is a Determ-native use case. Payment + identity workloads do not exhibit the MEV-extractable patterns fair ordering targets. The cost/benefit ratio is wrong for v2.
+2. **The solution is open research, not engineering.** Fair-ordering rules (Aequitas, Themis, Pompē, etc.) are active research areas with no consensus on the right primitive. Implementing v2.13 means picking a rule that may be obsolete by ship date. By contrast, every other v2 item has a known-correct mechanism; only the engineering remains.
+3. **Implementation cost is multi-week on top of solving the rule.** Per-block commit-reveal on tx ordering, Phase-1 + Phase-2 binding of ordering hashes, fair-aggregation rule integration — this is consensus-layer work as heavy as v2.7 F2 or v2.10 threshold randomness, with the additional cost of solving an open-research design question first.
+
+**Why it's not permanently out of scope.** Determ's protocol shape is compatible with adding fair ordering later as a Theme. The mechanism would extend `ContribMsg` (Phase-1) with a tx-ordering hash and `compute_block_digest` with the canonical ordering rule — a wire-format change but not a structural rearchitecture. If Determ ever serves a DEX-class workload, or if the fair-ordering research consolidates on a canonical primitive, v2.13 can be reopened.
+
+**Reframing.** The honest position is:
+- **In scope as a capability** Determ could deliver under its existing protocol shape.
+- **Out of scope for v2** because the use cases that need it are not currently Determ-native and the solution is not engineering-ready.
+- **Tracked indefinitely deferred** rather than rejected. Flagged for future protocol families built on Determ, or for a v3-class effort once the research consolidates.
+
+This is the same disposition Bitcoin takes toward smart-contract execution: not "we will never do this" but "this is not what we are optimizing for in this protocol generation, and the cost of doing it now is higher than the benefit." That framing preserves both the design's narrow lane (payment + identity) and the option to expand later without breaking changes.

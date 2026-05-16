@@ -11,7 +11,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **58 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **59 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
@@ -34,6 +34,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_shard_routing.sh` | v2.1 cross-shard routing primitive unit test (S-035 Option 1 seed) — in-process `crypto::shard_id_for_address`; 7 assertions covering single-shard degenerate case, determinism, in-range invariant, salt-sensitivity, distribution uniformity (1000 addresses across 4 shards >5% per shard), case-sensitivity, empty-address handling. Foundation test for FA7 cross-shard receipt atomicity — every cross-shard tx's destination is derived through this function |
 | `test_ed25519.sh` | Ed25519 sign/verify unit test (S-035 Option 1 seed) — in-process `crypto::sign` / `crypto::verify` / `generate_node_key`; 10 assertions covering key-shape, sign+verify round-trip, tampered-message rejection, tampered-signature rejection, wrong-pubkey rejection, RFC-8032 determinism (same key+msg → same sig), empty-message edge case, distinct-key distinct-sig, cross-key verify rejection, 4 KB long-message streaming. Foundation test for FA1 / FA2 / FA5 / FA6 / FA7 / FA10 — every signature claim in the protocol reduces to Ed25519 EUF-CMA |
 | `test_sha256.sh` | SHA-256 wrapper + Big-Endian encoding unit test (S-035 Option 1 seed) — in-process `crypto::sha256` + `SHA256Builder`; 10 assertions covering NIST FIPS 180-4 test vectors (empty input, "abc", 56-byte input exercising the >55-byte padding path), incremental Builder ↔ one-shot equivalence, multi-piece append correctness, **and the Preliminaries §1.3 big-endian uint64_t / int64_t encoding** that every signing_bytes / compute_block_digest / merkle_leaf_hash path depends on for cross-platform protocol determinism. Foundation test under every hash claim in the entire codebase |
+| `test_anon_address.sh` | Anon-address helpers unit test (S-035 Option 1 seed) — in-process `is_anon_address` / `normalize_anon_address` / `parse_anon_pubkey` / `make_anon_address`; 12 assertions covering case-insensitive acceptance (S-028 closure), invalid-input rejection (missing 0x, wrong length, non-hex), case-normalization to canonical lowercase, round-trip via make_anon_address ↔ parse_anon_pubkey, registered-domain pass-through. Faster unit-level counterpart to test_anon_address_case.sh (which exercises the same surface end-to-end through 3-node RPC — 1+ minute vs ~1 second) |
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |
@@ -58,7 +59,7 @@ ONLY_PATTERN='test_dapp' bash tools/run_all.sh # subset by regex
 SKIP_PATTERN='test_equiv' bash tools/run_all.sh # skip known-flaky on a platform
 ```
 
-`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention, and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. **`FAST=1`** short-circuits to the deterministic in-process subset (`determ test-*` subcommand wrappers): atomic_scope, composable_batch, dapp_register, dapp_call, s018_json_validation, merkle, committee_selection, shard_routing, ed25519, sha256. ~5 seconds total, no clusters, no network, no flakes — useful for dev iteration. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
+`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention, and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. **`FAST=1`** short-circuits to the deterministic in-process subset (`determ test-*` subcommand wrappers): atomic_scope, composable_batch, dapp_register, dapp_call, s018_json_validation, merkle, committee_selection, shard_routing, ed25519, sha256, anon_address. ~5 seconds total, no clusters, no network, no flakes — useful for dev iteration. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
 
 ```bash
 for t in tools/test_*.sh; do bash "$t"; done
