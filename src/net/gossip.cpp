@@ -119,9 +119,12 @@ static bool peer_message_allowed(const Peer& peer, MsgType type,
             || peer.chain_role() == ChainRole::SHARD;
     case MsgType::SNAPSHOT_REQUEST:
     case MsgType::SNAPSHOT_RESPONSE:
-        // Snapshot fetch is role-agnostic: any peer with chain state
-        // can serve, any peer can request. Bootstrap clients (CLI
-        // fetchers) typically tag themselves as SINGLE.
+    case MsgType::HEADERS_REQUEST:
+    case MsgType::HEADERS_RESPONSE:
+        // Snapshot fetch + v2.2 light-client header-sync are
+        // role-agnostic: any peer with chain state can serve, any
+        // peer can request. Light clients (header-sync only,
+        // typically) tag themselves as SINGLE.
         return true;
     default:
         // Intra-chain messages: source peer must be on the same chain
@@ -238,6 +241,19 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
         case MsgType::SNAPSHOT_RESPONSE:
             if (on_snapshot_response) {
                 on_snapshot_response(msg.payload);
+            }
+            break;
+        case MsgType::HEADERS_REQUEST:
+            if (on_headers_request) {
+                on_headers_request(
+                    msg.payload.value("from",  uint64_t{0}),
+                    msg.payload.value("count", uint32_t{16}),
+                    peer);
+            }
+            break;
+        case MsgType::HEADERS_RESPONSE:
+            if (on_headers_response) {
+                on_headers_response(msg.payload);
             }
             break;
         case MsgType::GET_CHAIN:

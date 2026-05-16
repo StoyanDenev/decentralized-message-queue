@@ -67,6 +67,18 @@ enum class MsgType : uint8_t {
     // chain state can serve.
     SNAPSHOT_REQUEST  = 15,
     SNAPSHOT_RESPONSE = 16,
+    // v2.2 light-client header-sync. A light client peers with full
+    // nodes via the gossip layer (no RPC binding) and requests a
+    // slice of recent headers. The full node replies with a
+    // HEADERS_RESPONSE carrying the same {headers, from, count,
+    // height} shape that Node::rpc_headers returns — each header is
+    // the Block JSON minus the heavy collections (transactions /
+    // cross_shard_receipts / inbound_receipts / initial_state) plus
+    // an explicit `block_hash` field for prev_hash chain
+    // verification. Allowed across roles — any node with chain
+    // state can serve.
+    HEADERS_REQUEST   = 17,
+    HEADERS_RESPONSE  = 18,
 };
 
 // A3 / S8: per-pair wire-version negotiation.
@@ -119,13 +131,21 @@ inline constexpr size_t max_message_bytes(MsgType type) {
     case MsgType::BEACON_HEADER:
     case MsgType::SHARD_TIP:
     case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
+    case MsgType::HEADERS_RESPONSE:
+        // 4 MB matches BLOCK because a HEADERS_RESPONSE carries
+        // server-capped 256 headers max (rpc_headers's
+        // HEADERS_PAGE_MAX), each header is bounded by the same
+        // committee + sig + commit structure as a Block minus the
+        // heavy collections (transactions / receipts /
+        // initial_state). At 256 headers × ~16 KB each ≤ 4 MB.
         return 4  * 1024 * 1024;        // 4 MB
 
     // Everything else (consensus chatter, requests, status, tx, hello).
-    // Default branch keeps the cap tight even if new MsgType variants
-    // get added without explicit categorisation — better to be too
-    // strict and catch a regression in review than to let a new
-    // unbounded type slip through unchecked.
+    // HEADERS_REQUEST is a tiny {from, count} envelope — same 1 MB
+    // default applies. Default branch keeps the cap tight even if
+    // new MsgType variants get added without explicit categorisation
+    // — better to be too strict and catch a regression in review
+    // than to let a new unbounded type slip through unchecked.
     default:
         return 1  * 1024 * 1024;        // 1 MB
     }
@@ -229,6 +249,18 @@ inline Message make_snapshot_request(uint32_t header_count = 16) {
 }
 inline Message make_snapshot_response(const nlohmann::json& snapshot) {
     return {MsgType::SNAPSHOT_RESPONSE, snapshot};
+}
+// v2.2 light-client header-sync over gossip. Request a slice of
+// headers starting at `from` (inclusive); server responds with up to
+// `count` headers (bounded by HEADERS_PAGE_MAX = 256 server-side).
+inline Message make_headers_request(uint64_t from_index = 0, uint32_t count = 16) {
+    return {MsgType::HEADERS_REQUEST, {{"from", from_index}, {"count", count}}};
+}
+// v2.2 HEADERS_RESPONSE wraps the same {headers, from, count, height}
+// shape that Node::rpc_headers produces. The caller passes the RPC
+// result through unchanged — same JSON over gossip vs RPC.
+inline Message make_headers_response(const nlohmann::json& headers_envelope) {
+    return {MsgType::HEADERS_RESPONSE, headers_envelope};
 }
 inline Message make_cross_shard_receipt_bundle(ShardId src_shard,
                                                   const chain::Block& src_block) {

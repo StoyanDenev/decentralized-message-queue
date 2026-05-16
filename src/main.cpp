@@ -103,12 +103,16 @@ State commitment + light-client (v2.1 + v2.2):
                                               mode); without it, the proof's claimed root
                                               is used (self-consistency check).
   determ headers [--from N] [--count M]      Fetch a slice of block headers (Block JSON
-                                              minus transactions / receipts / initial_state).
-                                              Light-client header-sync primitive: the
+                  [--peer host:port            minus transactions / receipts / initial_state).
+                   | --rpc-port P]             Light-client header-sync primitive: the
                                               returned headers carry committee signatures
                                               and state_root for verify-state-proof
                                               anchoring. Default: --from 0 --count 16;
-                                              server caps count at 256.
+                                              server caps count at 256. Default fetch path
+                                              is RPC (--rpc-port); --peer host:port
+                                              alternative uses the gossip-layer
+                                              HEADERS_REQUEST/RESPONSE wire messages
+                                              (no RPC required on the peer side).
   determ verify-headers [--in file]          Verify prev_hash chain in a `determ headers`
                         [--genesis-hash <hex64>]
                         [--prev-hash <hex64>] response. Reads JSON from --in or stdin.
@@ -772,7 +776,24 @@ static int cmd_verify_headers(int argc, char** argv) {
 
 // v2.2 light-client header-sync CLI.
 //
-// Usage: determ headers --from N [--count M] [--rpc-port P]
+// Two fetch paths:
+//
+//   1. RPC fetch (default):
+//        determ headers [--from N] [--count M] [--rpc-port P]
+//      Connects to a local node's RPC port. Returns the same
+//      {headers, from, count, height} envelope `rpc_headers`
+//      produces.
+//
+//   2. Gossip-layer fetch (light-client mode):
+//        determ headers --peer host:port [--from N] [--count M]
+//      Connects directly to a remote node's gossip port, exchanges
+//      HELLO + HEADERS_REQUEST, waits for HEADERS_RESPONSE. No RPC
+//      binding required — peers don't have to expose RPC for light
+//      clients to consume headers. This is the missing v2.2
+//      gossip-layer piece (HEADERS_REQUEST / HEADERS_RESPONSE wire
+//      messages); same envelope shape, same content as the RPC
+//      path so all downstream verifier CLIs (verify-headers,
+//      verify-block-sigs) work identically.
 //
 // Returns a slice of block headers — the same Block JSON shape that
 // `show-block` emits, but with the heavy `transactions`,
@@ -785,12 +806,77 @@ static int cmd_verify_headers(int argc, char** argv) {
 static int cmd_headers(int argc, char** argv) {
     uint64_t from_index = 0;
     uint32_t count = 16;
+    std::string peer_str;
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
         if      (a == "--from")  from_index = std::stoull(argv[i + 1]);
         else if (a == "--count") count = static_cast<uint32_t>(
                                             std::stoul(argv[i + 1]));
+        else if (a == "--peer")  peer_str = argv[i + 1];
     }
+
+    // Path 2: gossip-layer fetch via --peer host:port.
+    if (!peer_str.empty()) {
+        auto colon = peer_str.find(':');
+        if (colon == std::string::npos) {
+            std::cerr << "--peer must be host:port\n";
+            return 1;
+        }
+        std::string host = peer_str.substr(0, colon);
+        uint16_t port = static_cast<uint16_t>(
+            std::stoi(peer_str.substr(colon + 1)));
+        try {
+            asio::io_context io;
+            asio::ip::tcp::resolver resolver(io);
+            auto endpoints = resolver.resolve(host, std::to_string(port));
+            asio::ip::tcp::socket socket(io);
+            asio::connect(socket, endpoints);
+
+            auto write_msg = [&](const net::Message& msg) {
+                auto buf = msg.serialize();
+                asio::write(socket, asio::buffer(buf));
+            };
+
+            // HELLO + HEADERS_REQUEST. Tag ourselves SINGLE/0 since
+            // light clients don't claim a chain identity (matches
+            // the snapshot-fetcher pattern).
+            write_msg(net::make_hello("headers-fetcher", 0,
+                                        ChainRole::SINGLE, 0));
+            write_msg(net::make_headers_request(from_index, count));
+
+            // Read framed messages until HEADERS_RESPONSE arrives.
+            // Skip any others (peer might be gossiping blocks /
+            // headers / etc. concurrently).
+            std::array<uint8_t, 4> hdr;
+            for (int spin = 0; spin < 200; ++spin) {
+                asio::read(socket, asio::buffer(hdr));
+                uint32_t len = (uint32_t(hdr[0]) << 24)
+                             | (uint32_t(hdr[1]) << 16)
+                             | (uint32_t(hdr[2]) <<  8)
+                             |  uint32_t(hdr[3]);
+                if (len == 0 || len > 16 * 1024 * 1024) {
+                    std::cerr << "headers fetch: bad frame length "
+                              << len << "\n";
+                    return 1;
+                }
+                std::vector<uint8_t> body(len);
+                asio::read(socket, asio::buffer(body));
+                net::Message m = net::Message::deserialize(body.data(),
+                                                              body.size());
+                if (m.type != net::MsgType::HEADERS_RESPONSE) continue;
+                std::cout << m.payload.dump(2) << "\n";
+                return 0;
+            }
+            std::cerr << "headers fetch: timed out waiting for "
+                         "HEADERS_RESPONSE\n";
+            return 1;
+        } catch (std::exception& e) {
+            std::cerr << "headers fetch error: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
+    // Path 1: RPC fetch (default).
     uint16_t port = get_rpc_port(argc, argv);
     try {
         json params = {{"from", from_index}, {"count", count}};

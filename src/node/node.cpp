@@ -547,6 +547,9 @@ chain_loaded:
     gossip_.on_snapshot_request = [this](auto headers, auto peer) {
         on_snapshot_request(headers, peer);
     };
+    gossip_.on_headers_request = [this](auto from, auto count, auto peer) {
+        on_headers_request(from, count, peer);
+    };
     gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
                                   { on_get_chain(idx, cnt, peer); };
     gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
@@ -1661,6 +1664,26 @@ void Node::on_snapshot_request(uint32_t header_count,
               << (peer ? peer->address() : std::string("?"))
               << " (block_index=" << snap.value("block_index", uint64_t{0})
               << ")\n";
+}
+
+// v2.2 light-client header-sync over gossip. Reuses rpc_headers
+// (which already handles the slicing + stripping + block_hash
+// computation + 256-element cap) so the gossip path and the RPC
+// path return byte-identical envelopes. Lock is held inside
+// rpc_headers (shared_lock); we don't need to re-acquire here.
+void Node::on_headers_request(uint64_t from_index, uint32_t count,
+                                  std::shared_ptr<net::Peer> peer) {
+    if (!peer) return;
+    nlohmann::json envelope = rpc_headers(from_index, count);
+    peer->send(net::make_headers_response(envelope));
+    if (!cfg_.log_quiet) {
+        std::cout << "[node] served headers to peer "
+                  << peer->address()
+                  << " (from=" << from_index
+                  << " requested=" << count
+                  << " returned=" << envelope.value("count", uint64_t{0})
+                  << ")\n";
+    }
 }
 
 void Node::reset_round() {

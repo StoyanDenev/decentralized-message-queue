@@ -540,6 +540,8 @@ The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry i
 | 14 | CROSS_SHARD_RECEIPT_BUNDLE| shard↔beacon      | 4 MB  | `{src_shard, src_block}` (full source block for independent K-of-K verify) |
 | 15 | SNAPSHOT_REQUEST          | client→peer       | 1 MB  | `{headers}` |
 | 16 | SNAPSHOT_RESPONSE         | peer→client       | 16 MB | serialized chain-state JSON (bootstrap-only) |
+| 17 | HEADERS_REQUEST           | client→peer       | 1 MB  | `{from, count}` — v2.2 light-client header-slice request |
+| 18 | HEADERS_RESPONSE          | peer→client       | 4 MB  | `{headers, from, count, height}` — same envelope as the `headers` RPC; light clients consume gossip vs RPC interchangeably |
 
 ### 9.3 Role-based filter
 Cross-role traffic is restricted by the receiving peer:
@@ -571,7 +573,7 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | `status` | `{}` | head + head_hash + role + shard_id + epoch_index + peer_count + mempool + MD/BFT counters + `next_creators` preview + **`protections`** block (every operator-tunable security flag — see CLI-REFERENCE.md) |
 | `peers` | `{}` | `[address, ...]` |
 | `block` | `{index}` | full block JSON or null |
-| `headers` | `{from, count}` | `{headers: [<header>], from, count, height}` — v2.2 light-client header slice. Each header is the Block JSON minus `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` (the heavy fields a light client doesn't need for committee-sig verification or state_root extraction), plus an explicit `block_hash` field (server-computed: signing_bytes-based `compute_hash` uses the heavy fields the client doesn't have, so the server includes the hash so the client can verify the prev_hash chain links between consecutive headers). Server caps `count` at 256; out-of-range `from` returns empty `headers` array. |
+| `headers` | `{from, count}` | `{headers: [<header>], from, count, height}` — v2.2 light-client header slice. Each header is the Block JSON minus `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` (the heavy fields a light client doesn't need for committee-sig verification or state_root extraction), plus an explicit `block_hash` field (server-computed: signing_bytes-based `compute_hash` uses the heavy fields the client doesn't have, so the server includes the hash so the client can verify the prev_hash chain links between consecutive headers). Server caps `count` at 256; out-of-range `from` returns empty `headers` array. Also available as gossip-layer `HEADERS_REQUEST` (MsgType 17) / `HEADERS_RESPONSE` (MsgType 18) wire messages — the gossip envelope is byte-identical so any downstream verifier (verify-headers, verify-block-sigs) works against gossip-fetched headers identically. |
 | `chain_summary` | `{last_n}` | array of compact block summaries |
 | `validators` | `{}` | array of pool entries |
 | `committee` | `{}` | current epoch's K-of-K committee |

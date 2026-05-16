@@ -377,6 +377,13 @@ private:
     // pointer.
     void on_snapshot_request(uint32_t header_count,
                                 std::shared_ptr<net::Peer> peer);
+    // v2.2 light-client header-sync over gossip. Server-side handler:
+    // build the same {headers, from, count, height} envelope that
+    // rpc_headers produces, ship it back via the peer pointer in a
+    // HEADERS_RESPONSE. Light clients fetch headers without needing
+    // to hold an RPC connection.
+    void on_headers_request(uint64_t from_index, uint32_t count,
+                                std::shared_ptr<net::Peer> peer);
     void on_get_chain(uint64_t from_index, uint16_t count,
                       std::shared_ptr<net::Peer> peer);
     void on_chain_response(const std::vector<chain::Block>& blocks,

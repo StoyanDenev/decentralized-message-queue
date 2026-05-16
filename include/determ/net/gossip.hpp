@@ -81,6 +81,14 @@ public:
     std::function<void(uint32_t /*header_count*/,
                        std::shared_ptr<Peer>)>      on_snapshot_request;
     std::function<void(const nlohmann::json&)>      on_snapshot_response;
+    // v2.2 light-client header-sync. Server handler builds a header
+    // slice via Node::rpc_headers and replies via the peer pointer.
+    // Client handler ingests the {headers, from, count, height}
+    // envelope — same shape `determ headers` CLI consumes from the
+    // RPC version.
+    std::function<void(uint64_t /*from*/, uint32_t /*count*/,
+                       std::shared_ptr<Peer>)>      on_headers_request;
+    std::function<void(const nlohmann::json&)>      on_headers_response;
     std::function<void(uint64_t /*from_index*/, uint16_t /*count*/,
                        std::shared_ptr<Peer>)>      on_get_chain;
     std::function<void(const std::vector<chain::Block>& /*blocks*/,
