@@ -360,6 +360,11 @@ In-process tests (deterministic, no network):
                                               across every protocol commitment
                                               hash + S-033/S-038 state_root
                                               exclusion-fence proofs
+  determ test-tx-signing-bytes                Transaction::signing_bytes
+                                              byte-layout invariant — golden
+                                              vectors for type byte / null
+                                              terminators / BE u64 encoding /
+                                              payload position
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -11670,6 +11675,220 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": domain-separation " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for
+    // `Transaction::signing_bytes` byte-layout invariant. The
+    // wire-format layout is:
+    //
+    //   [type: 1 byte]
+    //   [from: utf-8 bytes][0x00 terminator]
+    //   [to: utf-8 bytes][0x00 terminator]
+    //   [amount: 8 bytes big-endian]
+    //   [fee:    8 bytes big-endian]
+    //   [nonce:  8 bytes big-endian]
+    //   [payload: variable]
+    //
+    // A regression that changes any byte ordering, terminator
+    // position, or BE-vs-LE encoding would silently break sig
+    // verification across versions — clients running old code
+    // would sign over a different layout than the validator
+    // recomputes. test-transaction covers high-level signing_bytes
+    // determinism + field sensitivity; this test locks in the
+    // EXACT byte layout via golden vectors.
+    if (cmd == "test-tx-signing-bytes") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Empty-tx golden vector ===
+
+        // 1. Empty Transaction (defaults, no payload): exact byte
+        //    sequence. Type=0 (TRANSFER), empty from + to, amount=
+        //    fee=nonce=0, no payload.
+        //
+        // Layout:
+        //   [0x00]                       type=TRANSFER
+        //   [0x00]                       from = "" + terminator
+        //   [0x00]                       to   = "" + terminator
+        //   [0x00..0x00] 8 bytes         amount = 0 BE
+        //   [0x00..0x00] 8 bytes         fee    = 0 BE
+        //   [0x00..0x00] 8 bytes         nonce  = 0 BE
+        //
+        // Total: 1 + 1 + 1 + 24 = 27 bytes, all zero.
+        {
+            Transaction tx;
+            auto sb = tx.signing_bytes();
+            check(sb.size() == 27,
+                  "empty tx signing_bytes: 27 bytes (1 type + 1 from-term + 1 to-term + 24 BE u64s)");
+            bool all_zero = true;
+            for (auto b : sb) {
+                if (b != 0) { all_zero = false; break; }
+            }
+            check(all_zero,
+                  "empty tx signing_bytes: all 27 bytes zero (default-Transaction encoding)");
+        }
+
+        // === Type-byte position ===
+
+        // 2. Type byte at offset 0. TxType discriminator is the
+        //    first byte. Verify by mutating type and observing
+        //    byte-0 changes.
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            auto sb0 = tx.signing_bytes();
+
+            tx.type = TxType::REGISTER;
+            auto sb1 = tx.signing_bytes();
+
+            check(sb0[0] == 0x00,
+                  "signing_bytes[0] == 0x00 for TRANSFER");
+            check(sb1[0] == 0x01,
+                  "signing_bytes[0] == 0x01 for REGISTER");
+            // Tail bytes unchanged (only type differs).
+            bool tail_same = true;
+            for (size_t i = 1; i < sb0.size(); ++i) {
+                if (sb0[i] != sb1[i]) { tail_same = false; break; }
+            }
+            check(tail_same,
+                  "signing_bytes: only byte 0 differs between TRANSFER/REGISTER (type is at offset 0)");
+        }
+
+        // === From string + 0x00 terminator ===
+
+        // 3. From string follows type at offset 1, terminated by
+        //    null byte. Layout: [type][f1, f2, ..., 0x00][...]
+        {
+            Transaction tx;
+            tx.from = "ab";
+            auto sb = tx.signing_bytes();
+            check(sb[0] == 0x00, "from layout: type at offset 0");
+            check(sb[1] == 'a',  "from layout: 'a' at offset 1");
+            check(sb[2] == 'b',  "from layout: 'b' at offset 2");
+            check(sb[3] == 0x00, "from layout: null terminator at offset 3");
+        }
+
+        // === To string + 0x00 terminator ===
+
+        // 4. To string follows from-terminator, also null-terminated.
+        {
+            Transaction tx;
+            tx.from = "x";
+            tx.to = "y";
+            auto sb = tx.signing_bytes();
+            // Offsets: 0=type, 1='x', 2=0x00, 3='y', 4=0x00
+            check(sb[1] == 'x',  "to layout: from char at offset 1");
+            check(sb[2] == 0x00, "to layout: from terminator at offset 2");
+            check(sb[3] == 'y',  "to layout: to char at offset 3");
+            check(sb[4] == 0x00, "to layout: to terminator at offset 4");
+        }
+
+        // === Big-endian u64 encoding for amount/fee/nonce ===
+
+        // 5. amount = 0x01 → BE bytes = [0,0,0,0,0,0,0,1]. The
+        //    big-endian encoding puts the most-significant byte
+        //    first. (Preliminaries §1.3 protocol convention.)
+        {
+            Transaction tx;
+            tx.from = "";
+            tx.to = "";
+            tx.amount = 1;
+            tx.fee = 0;
+            tx.nonce = 0;
+            auto sb = tx.signing_bytes();
+            // Offsets: 0=type, 1=from-term, 2=to-term, 3..10=amount BE
+            check(sb[3] == 0x00,
+                  "amount BE: byte 3 (MSB) == 0x00 for value 1");
+            check(sb[4] == 0x00, "amount BE: byte 4 == 0x00");
+            check(sb[5] == 0x00, "amount BE: byte 5 == 0x00");
+            check(sb[6] == 0x00, "amount BE: byte 6 == 0x00");
+            check(sb[7] == 0x00, "amount BE: byte 7 == 0x00");
+            check(sb[8] == 0x00, "amount BE: byte 8 == 0x00");
+            check(sb[9] == 0x00, "amount BE: byte 9 == 0x00");
+            check(sb[10] == 0x01,
+                  "amount BE: byte 10 (LSB) == 0x01 (big-endian convention)");
+        }
+
+        // 6. amount = 0x0102030405060708 → BE pattern.
+        {
+            Transaction tx;
+            tx.amount = 0x0102030405060708ULL;
+            auto sb = tx.signing_bytes();
+            check(sb[3]  == 0x01, "amount BE: byte 3 (MSB) == 0x01");
+            check(sb[4]  == 0x02, "amount BE: byte 4 == 0x02");
+            check(sb[5]  == 0x03, "amount BE: byte 5 == 0x03");
+            check(sb[6]  == 0x04, "amount BE: byte 6 == 0x04");
+            check(sb[7]  == 0x05, "amount BE: byte 7 == 0x05");
+            check(sb[8]  == 0x06, "amount BE: byte 8 == 0x06");
+            check(sb[9]  == 0x07, "amount BE: byte 9 == 0x07");
+            check(sb[10] == 0x08, "amount BE: byte 10 (LSB) == 0x08");
+        }
+
+        // 7. fee follows amount at offsets [11..18]. fee = 0xFF
+        //    → BE bytes = [0,0,0,0,0,0,0,FF].
+        {
+            Transaction tx;
+            tx.amount = 0;
+            tx.fee = 0xFF;
+            tx.nonce = 0;
+            auto sb = tx.signing_bytes();
+            check(sb[11] == 0x00, "fee BE: byte 11 (MSB) == 0x00");
+            check(sb[12] == 0x00, "fee BE: byte 12 == 0x00");
+            check(sb[18] == 0xFF,
+                  "fee BE: byte 18 (LSB) == 0xFF — fee at offset [11..18]");
+        }
+
+        // 8. nonce follows fee at offsets [19..26]. nonce = 0x42
+        //    → BE bytes.
+        {
+            Transaction tx;
+            tx.amount = 0;
+            tx.fee = 0;
+            tx.nonce = 0x42;
+            auto sb = tx.signing_bytes();
+            check(sb[19] == 0x00, "nonce BE: byte 19 (MSB) == 0x00");
+            check(sb[26] == 0x42,
+                  "nonce BE: byte 26 (LSB) == 0x42 — nonce at offset [19..26]");
+        }
+
+        // === Payload position ===
+
+        // 9. Payload appended at offset 27 (after 1+1+1+24 = 27 byte
+        //    prefix for empty from/to).
+        {
+            Transaction tx;
+            tx.payload = {0xDE, 0xAD, 0xBE, 0xEF};
+            auto sb = tx.signing_bytes();
+            check(sb.size() == 27 + 4,
+                  "payload position: empty from/to + 4-byte payload → 31 total bytes");
+            check(sb[27] == 0xDE, "payload[0] at offset 27 == 0xDE");
+            check(sb[28] == 0xAD, "payload[1] at offset 28 == 0xAD");
+            check(sb[29] == 0xBE, "payload[2] at offset 29 == 0xBE");
+            check(sb[30] == 0xEF, "payload[3] at offset 30 == 0xEF");
+        }
+
+        // 10. Empty payload: signing_bytes size is exactly 27 + 0
+        //     for empty from/to/payload + extra for from/to strings
+        //     beyond zero length.
+        {
+            Transaction tx;
+            tx.from = "alice";   // 5 bytes
+            tx.to = "bob";       // 3 bytes
+            auto sb = tx.signing_bytes();
+            // 1 (type) + 5 (from) + 1 (from term) + 3 (to) + 1 (to term)
+            // + 24 (BE u64s) = 35 bytes.
+            check(sb.size() == 35,
+                  "size: 'alice'+'bob' no-payload → 1+5+1+3+1+24 = 35 bytes");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": tx-signing-bytes " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
