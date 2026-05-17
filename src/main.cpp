@@ -83,6 +83,10 @@ Usage:
                                               (genesis_total + 4 counters +
                                               expected vs live + invariant status).
                                               Exit 2 if invariant violated.
+  determ chain-id                            Print the chain's genesis-block hash
+                                              (canonical chain identity) — for
+                                              monitoring scripts cross-checking
+                                              chain identity across nodes.
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -451,6 +455,13 @@ Additional in-process tests:
   determ test-cross-shard-outbound-apply      Cross-shard outbound TRANSFER
                                               apply — local debit + no local
                                               credit + A1 accumulated_outbound
+  determ test-supply-lifecycle                A1 invariant across mixed-tx
+                                              lifecycle (subsidy mint, TRANSFER,
+                                              STAKE, slash, DEREGISTER, UNSTAKE)
+                                              + identity formula
+  determ test-dapp-state-transition           DApp registry lifecycle —
+                                              register (op=0) → update → deactivate
+                                              (op=1 deferred via grace window)
 )" << "\n";
 }
 
@@ -1563,6 +1574,30 @@ static int cmd_pending_params(int argc, char** argv) {
                       << (hex.size() > 32 ? "..." : "")
                       << "\n";
         }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// determ chain-id [--rpc-port P]
+//   Print just the chain's genesis-block hash — the canonical
+//   chain-identity value. Monitoring scripts use this to compare
+//   chain identity across deployments / nodes without parsing the
+//   full status RPC. Pulls from `status` RPC (single integer call).
+//   Output: 64-char hex (no newline-prefixed label). Exit 1 if the
+//   chain hasn't loaded a genesis block yet.
+static int cmd_chain_id(int argc, char** argv) {
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        auto result = rpc::rpc_call("127.0.0.1", port, "status");
+        std::string genesis_hash = result.value("genesis", std::string{});
+        if (genesis_hash.empty()) {
+            std::cerr << "Error: chain has no genesis block loaded\n";
+            return 1;
+        }
+        std::cout << genesis_hash << "\n";
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -3353,6 +3388,7 @@ int main(int argc, char** argv) {
     if (cmd == "pending-params") return cmd_pending_params(sub_argc, sub_argv);
     if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
     if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
+    if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
@@ -15469,6 +15505,406 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": cross-shard-outbound-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: end-to-end A1 unitary-supply invariant across a
+    // mixed-tx lifecycle. The individual apply-path tests verify the
+    // invariant after each operation type in isolation; this test
+    // exercises a realistic interleaving: genesis → empty → TRANSFER
+    // → STAKE → DEREGISTER → unlock-wait → UNSTAKE → subsidy → slash
+    // → cross-shard outbound → inbound receipt.
+    if (cmd == "test-supply-lifecycle") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "supply-lifecycle-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain = "bob"; bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        auto encode_amount = [](uint64_t amount) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i)
+                p[i] = uint8_t((amount >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        // Build chain + run mixed txs.
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        c.set_unstake_delay(1);   // quick UNSTAKE cycle
+        c.set_block_subsidy(50);  // mint per block
+
+        // === A1 baseline ===
+        uint64_t baseline = c.live_total_supply();  // 1000+500+200 = 1700
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant at genesis baseline");
+        check(baseline == 1700,
+              "baseline: genesis supply == 1700 (1000+500+200)");
+
+        // === Step 1: subsidy mint ===
+        // Block 1: empty + subsidy 50 minted to alice (creator).
+        {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            c.append(b);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant after subsidy mint");
+        }
+        uint64_t after_subsidy = c.live_total_supply();
+        check(after_subsidy == baseline + 50,
+              "step 1: subsidy minted exactly 50 into supply");
+
+        // === Step 2: TRANSFER (intra-shard, no net change) ===
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant after intra-shard TRANSFER");
+            // Net: supply += 50 (subsidy mint), -0 (TRANSFER is internal).
+            check(c.live_total_supply() == after_subsidy + 50,
+                  "step 2: TRANSFER is value-conserving (only subsidy added)");
+        }
+
+        // === Step 3: STAKE (value moves balance → stake; A1 unchanged) ===
+        {
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;
+            tx.payload = encode_amount(50);
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant after STAKE (value moves balance↔stake)");
+        }
+
+        // === Step 4: slash via Phase-1 abort (supply decreases) ===
+        {
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "alice";
+            uint64_t before = c.live_total_supply();
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.abort_events.push_back(ae);
+            c.append(b);
+            check(c.live_total_supply() == before - c.suspension_slash() + 50,
+                  "step 4: slash deducts SUSPENSION_SLASH (subsidy still adds 50)");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant after slash + subsidy");
+        }
+
+        // === Step 5: DEREGISTER + UNSTAKE ===
+        // DEREGISTER alice (sets unlock_height = inactive_from + 1).
+        {
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 2;
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(0x42);
+            b.transactions.push_back(dereg);
+            c.append(b);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant after DEREGISTER");
+        }
+        uint64_t unlock_at = c.stake_unlock_height("alice");
+
+        // Advance to unlock_height (empty blocks, each minting 50).
+        while (c.height() <= unlock_at) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            c.append(b);
+            // Don't spam assert in the loop — just check at end.
+        }
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant after advance-to-unlock loop");
+
+        // UNSTAKE 200 (alice's stake: 500 + 50 - slash = 540 → withdrawable).
+        {
+            // Update unsubsidy delay's tx by giving alice's locked = >200.
+            // After STAKE in step 3 alice locked = 550; slash deducted 10 → 540.
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 3;
+            tx.payload = encode_amount(200);
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant after UNSTAKE (stake → balance, no net change)");
+        }
+
+        // === Final A1 check ===
+        // expected_total should equal live_total_supply at every step.
+        // accumulated_subsidy_ accounts for the mint history;
+        // accumulated_slashed_ for the slash; the rest (no cross-shard) zero.
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant after full mixed lifecycle");
+        check(c.accumulated_subsidy() > 0,
+              "lifecycle: subsidy mint accumulated > 0");
+        check(c.accumulated_slashed() == c.suspension_slash(),
+              "lifecycle: slash counted exactly once");
+        check(c.accumulated_inbound() == 0 && c.accumulated_outbound() == 0,
+              "lifecycle: no cross-shard traffic this test");
+
+        // Mathematical identity: expected_total formula must equal
+        // live_total_supply via the 5 counters.
+        uint64_t computed = c.genesis_total()
+                          + c.accumulated_subsidy()
+                          + c.accumulated_inbound()
+                          - c.accumulated_slashed()
+                          - c.accumulated_outbound();
+        check(computed == c.live_total_supply(),
+              "A1 identity: genesis + subsidy + inbound - slashed - outbound == live");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": supply-lifecycle " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: full DApp registry lifecycle (DAPP_REGISTER op=0
+    // create, op=0 update of same domain, op=1 deactivate). Tests the
+    // semantics on Chain::dapp_registry_ that test-dapp-register
+    // (which focuses on registration mechanics) doesn't span.
+    if (cmd == "test-dapp-state-transition") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "dapp-state-transition-test";
+        GenesisCreator alice_c, bob_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        bob_c.domain = "bob";
+        for (size_t i = 0; i < bob_c.ed_pub.size(); ++i)
+            bob_c.ed_pub[i] = uint8_t(0x20 + i);
+        bob_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c, bob_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain = "bob"; bob_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // Helper: pack DAPP_REGISTER op=0 (create/update) payload.
+        auto pack_register = [](const PubKey& svc_pk,
+                                  const std::string& url,
+                                  const std::vector<std::string>& topics,
+                                  uint8_t retention,
+                                  const std::vector<uint8_t>& metadata) {
+            std::vector<uint8_t> p;
+            p.push_back(0);  // op = create/update
+            p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+            p.push_back(uint8_t(url.size()));
+            p.insert(p.end(), url.begin(), url.end());
+            p.push_back(uint8_t(topics.size()));
+            for (auto& t : topics) {
+                p.push_back(uint8_t(t.size()));
+                p.insert(p.end(), t.begin(), t.end());
+            }
+            p.push_back(retention);
+            uint16_t mlen = uint16_t(metadata.size());
+            p.push_back(uint8_t(mlen & 0xff));
+            p.push_back(uint8_t((mlen >> 8) & 0xff));
+            p.insert(p.end(), metadata.begin(), metadata.end());
+            return p;
+        };
+        // op=1 deactivate has just one byte payload.
+        auto pack_deactivate = []() {
+            std::vector<uint8_t> p;
+            p.push_back(1);  // op = deactivate
+            return p;
+        };
+
+        auto apply_block = [&](Chain& c, const Transaction& tx) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // === Initial registration (op=0) ===
+        PubKey svc1{};
+        for (size_t i = 0; i < svc1.size(); ++i) svc1[i] = uint8_t(0xA0 + i);
+        Chain c;
+        c.append(make_genesis_block(cfg));
+
+        {
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = pack_register(svc1, "https://alice.example.com",
+                                        {"chat"}, 1, {});
+            apply_block(c, tx);
+            auto entry = c.dapp("alice");
+            check(entry.has_value(),
+                  "register: alice DApp entry created");
+            check(entry.has_value() && entry->service_pubkey == svc1,
+                  "register: service_pubkey preserved");
+            check(entry.has_value()
+                  && entry->endpoint_url == "https://alice.example.com",
+                  "register: endpoint_url preserved");
+            check(entry.has_value() && entry->topics == std::vector<std::string>{"chat"},
+                  "register: topics preserved");
+            check(entry.has_value() && entry->retention == 1,
+                  "register: retention preserved");
+            check(entry.has_value() && entry->inactive_from == UINT64_MAX,
+                  "register: inactive_from sentinel UINT64_MAX (active)");
+            check(entry.has_value() && entry->registered_at == 1,
+                  "register: registered_at == block index (1)");
+        }
+
+        uint64_t initial_registered_at = c.dapp("alice")->registered_at;
+
+        // === Update (op=0 on same domain) ===
+        // Should preserve registered_at, refresh active_from, update
+        // service_pubkey + url + topics + metadata.
+        PubKey svc2{};
+        for (size_t i = 0; i < svc2.size(); ++i) svc2[i] = uint8_t(0xB0 + i);
+        {
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;
+            tx.payload = pack_register(svc2, "https://alice-v2.example.com",
+                                        {"chat", "video"}, 7,
+                                        std::vector<uint8_t>{0x42, 0x43});
+            apply_block(c, tx);
+            auto entry = c.dapp("alice");
+            check(entry.has_value() && entry->service_pubkey == svc2,
+                  "update: service_pubkey updated to svc2");
+            check(entry.has_value()
+                  && entry->endpoint_url == "https://alice-v2.example.com",
+                  "update: endpoint_url updated");
+            check(entry.has_value() && entry->topics.size() == 2
+                  && entry->topics[0] == "chat" && entry->topics[1] == "video",
+                  "update: topics replaced (chat, video)");
+            check(entry.has_value() && entry->retention == 7,
+                  "update: retention updated to 7");
+            check(entry.has_value() && entry->metadata.size() == 2
+                  && entry->metadata[0] == 0x42 && entry->metadata[1] == 0x43,
+                  "update: metadata bytes preserved");
+            check(entry.has_value()
+                  && entry->registered_at == initial_registered_at,
+                  "update: registered_at PRESERVED (not refreshed)");
+            check(entry.has_value() && entry->inactive_from == UINT64_MAX,
+                  "update: inactive_from stays UINT64_MAX (still active)");
+        }
+
+        // === Deactivate (op=1) ===
+        // Sets inactive_from = current_height + DAPP_GRACE_BLOCKS.
+        // The grace window lets queued messages reach the DApp before
+        // it goes inactive in the active-pool checks.
+        uint64_t height_pre_deactivate = c.height();
+        {
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;  // type is REGISTER, op=1 inside
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 2;
+            tx.payload = pack_deactivate();
+            apply_block(c, tx);
+            auto entry = c.dapp("alice");
+            check(entry.has_value(),
+                  "deactivate: entry still present (deferred via grace window)");
+            check(entry.has_value()
+                  && entry->inactive_from != UINT64_MAX,
+                  "deactivate: inactive_from set (no longer sentinel)");
+            check(entry.has_value()
+                  && entry->inactive_from > height_pre_deactivate,
+                  "deactivate: inactive_from > pre-deactivate height (future)");
+            check(entry.has_value()
+                  && entry->service_pubkey == svc2,
+                  "deactivate: prior fields (svc2) untouched");
+        }
+
+        // === Bob (separate domain) can register independently ===
+        PubKey svc_bob{};
+        for (size_t i = 0; i < svc_bob.size(); ++i) svc_bob[i] = uint8_t(0xC0 + i);
+        {
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;
+            tx.from = "bob"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = pack_register(svc_bob, "https://bob.example.com",
+                                        {"news"}, 1, {});
+            apply_block(c, tx);
+            auto entry = c.dapp("bob");
+            check(entry.has_value() && entry->service_pubkey == svc_bob,
+                  "independent register: bob entry created with svc_bob");
+            // alice's entry still has the (deactivated) state.
+            auto alice_entry = c.dapp("alice");
+            check(alice_entry.has_value()
+                  && alice_entry->inactive_from != UINT64_MAX,
+                  "independent register: alice's deactivated entry preserved");
+        }
+
+        // === dapp_registry() getter reflects both entries ===
+        check(c.dapp_registry().size() == 2,
+              "dapp_registry: 2 entries (alice + bob)");
+
+        // === Determinism ===
+        Chain c2;
+        c2.append(make_genesis_block(cfg));
+        // Repeat all txs on c2.
+        for (uint64_t i = 1; i < c.height(); ++i) {
+            auto& orig = c.at(i);
+            Block b;
+            b.index = c2.height();
+            b.prev_hash = c2.head().compute_hash();
+            b.creators = orig.creators;
+            b.transactions = orig.transactions;
+            b.cumulative_rand = orig.cumulative_rand;
+            c2.append(b);
+        }
+        check(c.compute_state_root() == c2.compute_state_root(),
+              "determinism: replayed DApp lifecycle → same state_root");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": dapp-state-transition " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

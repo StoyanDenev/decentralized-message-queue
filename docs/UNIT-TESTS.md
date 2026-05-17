@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-56 subcommands; 1199 assertions; runs in <30s with no flakes.
+58 subcommands; 1238 assertions; runs in <31s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -122,6 +122,8 @@ during development. Each new test wrapper must be added to the
 | `determ test-subsidy-distribution` | Apply-side handling of E1/E3/E4 subsidy distribution (17 assertions across 8 blocks). FLAT mode (subsidy 100 / 1 creator = 100, / 2 creators = 50/50 split, / 2 creators 101 = 50+50+1 dust to creator[0]); LOTTERY mode (jackpot when `cumulative_rand[0..7]` BE % M == 0; miss → 0); E4 finite pool (full → partial → drained as `accumulated_subsidy_` reaches `subsidy_pool_initial_`); A1 invariant (subsidy mints exactly `subsidy_this_block` into live supply); empty-creators no-op (A1-safe). | `tools/test_subsidy_distribution.sh` | E1/E3/E4 economics |
 | `determ test-merge-event-apply` | Apply-side handling of MERGE_EVENT — R7 under-quorum-merge state machine (15 assertions across 9 blocks). BEGIN inserts `(shard_id → {partner_id, refugee_region})` into `merge_state_`; `is_shard_merged` predicate matches; END removes entry on partner match; END with wrong partner = no-op; BEGIN with wrong partner_id (violates `(shard_id+1) % shard_count` ring constraint) = no entry created; single-shard chains (shard_count=1) no-op; two distinct merges tracked independently; `shards_absorbed_by(partner)` inverse-lookup returns `(shard_id, region)` pairs; determinism. | `tools/test_merge_event_apply.sh` | R7 / EXTENDED-mode merge |
 | `determ test-cross-shard-outbound-apply` | Cross-shard outbound TRANSFER apply (rev.9 B3 source side) (11 assertions across 5 blocks). TRANSFER with cross-shard `to` debits sender (amount + fee, fee returns via creator); dst NOT credited locally (credit happens on destination via inbound receipt); nonce++; A1 `accumulated_outbound` += amount (fee stays); live supply decreases by exactly `amount`; expected == live; single-shard fallback (shard_count=1) → `is_cross_shard` always false; determinism. | `tools/test_cross_shard_outbound_apply.sh` | rev.9 B3 / cross-shard source |
+| `determ test-supply-lifecycle` | End-to-end A1 unitary-supply invariant across a mixed-tx lifecycle (17 assertions). genesis → subsidy mint → intra-shard TRANSFER → STAKE → Phase-1 abort + slash → DEREGISTER → unlock-wait → UNSTAKE → final A1 identity formula (`genesis + subsidy + inbound - slashed - outbound == live`). Verifies per-step + post-loop + final invariant + 3 counter-state assertions + identity formula. The interaction test catching regressions where individually-correct apply paths don't compose correctly. | `tools/test_supply_lifecycle.sh` | A1 / cross-cutting |
+| `determ test-dapp-state-transition` | Full DApp registry lifecycle — DAPP_REGISTER op=0 create / op=0 update / op=1 deactivate (22 assertions across 5 blocks). Initial registration preserves all fields + `inactive_from = UINT64_MAX` sentinel; update on same domain REPLACES service_pubkey/url/topics/retention/metadata but PRESERVES `registered_at` (creation-time invariant); deactivate sets `inactive_from = current_height + DAPP_GRACE_BLOCKS` (deferred via grace window — entry stays in registry); independent domain registration; `dapp_registry()` size; replayed lifecycle → same state_root. Complements network-level `test_dapp_register.sh` + `test_dapp_call.sh`. | `tools/test_dapp_state_transition.sh` | v2.18 DApp lifecycle |
 
 ### 2.3 Randomness + consensus arithmetic + tx-root
 
