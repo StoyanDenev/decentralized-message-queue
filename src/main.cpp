@@ -339,6 +339,11 @@ In-process tests (deterministic, no network):
                                               (genesis + subsidy + inbound -
                                               slashed - outbound) — formula
                                               depends only on 5 counters
+  determ test-enum-values                     Protocol-level enum integer
+                                              encodings — TxType / MsgType /
+                                              ConsensusMode / ChainRole /
+                                              ShardingMode / InclusionModel
+                                              wire-format discriminators
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -10768,6 +10773,167 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": supply-invariant " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the protocol-
+    // level enum integer encodings:
+    //   * TxType (chain/block.hpp)
+    //   * MsgType (net/messages.hpp)
+    //   * ConsensusMode (chain/block.hpp)
+    //   * ChainRole (types.hpp)
+    //   * ShardingMode (types.hpp)
+    //   * InclusionModel (chain/genesis.hpp)
+    //
+    // Every enum integer is a WIRE-FORMAT discriminator. Transaction::
+    // signing_bytes prepends `static_cast<uint8_t>(type)`, so a TxType
+    // reorder silently corrupts every tx hash. compute_block_digest
+    // includes `static_cast<uint8_t>(consensus_mode)`. MsgType is the
+    // gossip envelope's type byte.
+    //
+    // A regression that reorders these enums — even just one slot —
+    // would silently fork the wire format. Operator wouldn't see an
+    // error; transactions from old binaries would simply fail to
+    // verify against new ones.
+    if (cmd == "test-enum-values") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === TxType wire-format integers (chain/block.hpp) ===
+
+        // 1-11. Every TxType value is locked at its documented integer.
+        check(static_cast<uint8_t>(TxType::TRANSFER) == 0,
+              "TxType::TRANSFER == 0 (wire-format discriminator)");
+        check(static_cast<uint8_t>(TxType::REGISTER) == 1,
+              "TxType::REGISTER == 1");
+        check(static_cast<uint8_t>(TxType::DEREGISTER) == 2,
+              "TxType::DEREGISTER == 2");
+        check(static_cast<uint8_t>(TxType::STAKE) == 3,
+              "TxType::STAKE == 3");
+        check(static_cast<uint8_t>(TxType::UNSTAKE) == 4,
+              "TxType::UNSTAKE == 4");
+        check(static_cast<uint8_t>(TxType::REGION_CHANGE) == 5,
+              "TxType::REGION_CHANGE == 5 (reserved for v2 epoch-boundary rebalancing)");
+        check(static_cast<uint8_t>(TxType::PARAM_CHANGE) == 6,
+              "TxType::PARAM_CHANGE == 6 (A5 governance)");
+        check(static_cast<uint8_t>(TxType::MERGE_EVENT) == 7,
+              "TxType::MERGE_EVENT == 7 (R4 under-quorum merge)");
+        check(static_cast<uint8_t>(TxType::COMPOSABLE_BATCH) == 8,
+              "TxType::COMPOSABLE_BATCH == 8 (v2.4 atomic batches)");
+        check(static_cast<uint8_t>(TxType::DAPP_REGISTER) == 9,
+              "TxType::DAPP_REGISTER == 9 (v2.18 DApp registry)");
+        check(static_cast<uint8_t>(TxType::DAPP_CALL) == 10,
+              "TxType::DAPP_CALL == 10 (v2.19 DApp messaging)");
+
+        // === MsgType wire-format integers (net/messages.hpp) ===
+
+        // 12-30. Every MsgType value locked at its documented integer.
+        //        Each is a gossip envelope's type byte.
+        check(static_cast<uint8_t>(MsgType::HELLO) == 0,
+              "MsgType::HELLO == 0");
+        check(static_cast<uint8_t>(MsgType::BLOCK) == 1,
+              "MsgType::BLOCK == 1");
+        check(static_cast<uint8_t>(MsgType::TRANSACTION) == 2,
+              "MsgType::TRANSACTION == 2");
+        check(static_cast<uint8_t>(MsgType::BLOCK_SIG) == 3,
+              "MsgType::BLOCK_SIG == 3 (Phase 2)");
+        check(static_cast<uint8_t>(MsgType::CONTRIB) == 4,
+              "MsgType::CONTRIB == 4 (Phase 1)");
+        check(static_cast<uint8_t>(MsgType::GET_CHAIN) == 5,
+              "MsgType::GET_CHAIN == 5");
+        check(static_cast<uint8_t>(MsgType::CHAIN_RESPONSE) == 6,
+              "MsgType::CHAIN_RESPONSE == 6");
+        check(static_cast<uint8_t>(MsgType::STATUS_REQUEST) == 7,
+              "MsgType::STATUS_REQUEST == 7");
+        check(static_cast<uint8_t>(MsgType::STATUS_RESPONSE) == 8,
+              "MsgType::STATUS_RESPONSE == 8");
+        check(static_cast<uint8_t>(MsgType::ABORT_CLAIM) == 9,
+              "MsgType::ABORT_CLAIM == 9");
+        check(static_cast<uint8_t>(MsgType::ABORT_EVENT) == 10,
+              "MsgType::ABORT_EVENT == 10");
+        check(static_cast<uint8_t>(MsgType::EQUIVOCATION_EVIDENCE) == 11,
+              "MsgType::EQUIVOCATION_EVIDENCE == 11");
+        check(static_cast<uint8_t>(MsgType::BEACON_HEADER) == 12,
+              "MsgType::BEACON_HEADER == 12 (B2c.1 beacon → shard)");
+        check(static_cast<uint8_t>(MsgType::SHARD_TIP) == 13,
+              "MsgType::SHARD_TIP == 13 (B2c.3 shard → beacon)");
+        check(static_cast<uint8_t>(MsgType::CROSS_SHARD_RECEIPT_BUNDLE) == 14,
+              "MsgType::CROSS_SHARD_RECEIPT_BUNDLE == 14 (B3.3)");
+        check(static_cast<uint8_t>(MsgType::SNAPSHOT_REQUEST) == 15,
+              "MsgType::SNAPSHOT_REQUEST == 15");
+        check(static_cast<uint8_t>(MsgType::SNAPSHOT_RESPONSE) == 16,
+              "MsgType::SNAPSHOT_RESPONSE == 16");
+        check(static_cast<uint8_t>(MsgType::HEADERS_REQUEST) == 17,
+              "MsgType::HEADERS_REQUEST == 17 (v2.2 light-client)");
+        check(static_cast<uint8_t>(MsgType::HEADERS_RESPONSE) == 18,
+              "MsgType::HEADERS_RESPONSE == 18 (v2.2 light-client)");
+
+        // === ConsensusMode (chain/block.hpp) ===
+
+        // 31-32. ConsensusMode values — bound into compute_block_digest
+        //        via `static_cast<uint8_t>(b.consensus_mode)`.
+        check(static_cast<uint8_t>(ConsensusMode::MUTUAL_DISTRUST) == 0,
+              "ConsensusMode::MUTUAL_DISTRUST == 0 (default; K-of-K)");
+        check(static_cast<uint8_t>(ConsensusMode::BFT) == 1,
+              "ConsensusMode::BFT == 1 (ceil(2K/3) + proposer)");
+
+        // === ChainRole (types.hpp) ===
+
+        // 33-35. ChainRole values — operator-config + HELLO envelope
+        //        carry these as uint8_t.
+        check(static_cast<uint8_t>(ChainRole::SINGLE) == 0,
+              "ChainRole::SINGLE == 0 (unsharded; rev.7/8 default)");
+        check(static_cast<uint8_t>(ChainRole::BEACON) == 1,
+              "ChainRole::BEACON == 1 (sharded: trust anchor)");
+        check(static_cast<uint8_t>(ChainRole::SHARD) == 2,
+              "ChainRole::SHARD == 2 (sharded: throughput layer)");
+
+        // === ShardingMode (types.hpp) ===
+
+        // 36-38. ShardingMode values.
+        check(static_cast<uint8_t>(ShardingMode::NONE) == 0,
+              "ShardingMode::NONE == 0 (single-chain)");
+        check(static_cast<uint8_t>(ShardingMode::CURRENT) == 1,
+              "ShardingMode::CURRENT == 1 (rev.9 B-series sharding)");
+        check(static_cast<uint8_t>(ShardingMode::EXTENDED) == 2,
+              "ShardingMode::EXTENDED == 2 (R1-R7 regional + merge)");
+
+        // === InclusionModel (chain/genesis.hpp) ===
+
+        // 39-40. InclusionModel values — genesis-pinned.
+        check(static_cast<uint8_t>(InclusionModel::STAKE_INCLUSION) == 0,
+              "InclusionModel::STAKE_INCLUSION == 0 (stake-based; rev.7/8 default)");
+        check(static_cast<uint8_t>(InclusionModel::DOMAIN_INCLUSION) == 1,
+              "InclusionModel::DOMAIN_INCLUSION == 1 (domain-registration; min_stake=0)");
+
+        // === Cross-domain non-collision sanity ===
+
+        // 41. ChainRole and ShardingMode share the underlying uint8_t
+        //     space but are semantically distinct types. C++ enum class
+        //     prevents accidental cross-assignment. Validate the values
+        //     don't ALL collide (a defensive sanity check; real
+        //     compilers wouldn't let this slip through).
+        check(sizeof(ChainRole) == sizeof(uint8_t),
+              "ChainRole is uint8_t wide (wire-format invariant)");
+        check(sizeof(ShardingMode) == sizeof(uint8_t),
+              "ShardingMode is uint8_t wide (wire-format invariant)");
+        check(sizeof(TxType) == sizeof(uint8_t),
+              "TxType is uint8_t wide (wire-format invariant)");
+        check(sizeof(MsgType) == sizeof(uint8_t),
+              "MsgType is uint8_t wide (wire-format invariant)");
+        check(sizeof(ConsensusMode) == sizeof(uint8_t),
+              "ConsensusMode is uint8_t wide (wire-format invariant)");
+        check(sizeof(InclusionModel) == sizeof(uint8_t),
+              "InclusionModel is uint8_t wide (wire-format invariant)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": enum-values " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

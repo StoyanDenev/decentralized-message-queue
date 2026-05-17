@@ -183,7 +183,10 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
     c.epoch_blocks             = j.value("epoch_blocks",             uint32_t{1000});
     if (j.contains("shard_address_salt")) {
-        c.shard_address_salt = from_hex_arr<32>(j["shard_address_salt"].get<std::string>());
+        // S-018 defense-in-depth: optional field but if present
+        // must be a 64-char hex string. Wrong-length or non-string
+        // throws clean S-018 diagnostic naming the field.
+        c.shard_address_salt = from_hex_arr<32>(json_require_hex(j, "shard_address_salt", 64));
     }
     // rev.9 R1: committee_region is normalized at load. Empty (or absent
     // for legacy genesis files) preserves byte-identical hashing.
