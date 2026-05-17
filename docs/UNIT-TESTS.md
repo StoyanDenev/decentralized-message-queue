@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-20 subcommands; 362 assertions; runs in <14s with no flakes.
+21 subcommands; 372 assertions; runs in <14s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -118,6 +118,12 @@ during development. Each new test wrapper must be added to the
 | Subcommand | What it tests | Wrapper | FA-track |
 |---|---|---|---|
 | `determ test-envelope` | `wallet/envelope.hpp` AES-256-GCM + PBKDF2-HMAC-SHA-256 AEAD wrapping primitive (A2 Phase 2 wallet recovery share envelopes + S-004 option 2 passphrase-encrypted keyfiles; 27 assertions). Encrypt/decrypt round-trip + envelope shape (salt + nonce + tag sizes); AEAD safety properties (wrong-pw / empty-pw / mismatched-AAD / tampered-ct / tampered-tag all fail; fresh salt + nonce per encryption → distinct ciphertexts from same plaintext+passphrase — defeats artifact-correlation attacks); serialize/deserialize canonical hex round-trip with bad-input rejection; empty-plaintext + empty-AAD edge cases. A regression here would silently weaken at-rest security for every encrypted wallet artifact. | `tools/test_envelope.sh` | A2 / S-004 |
+
+### 2.7 Fork resolution
+
+| Subcommand | What it tests | Wrapper | FA-track |
+|---|---|---|---|
+| `determ test-resolve-fork` | `Chain::resolve_fork` (S-029 BFT-mode fork-choice rule; 10 assertions). When two K-of-K-signed blocks are observed at the same height (only possible in BFT mode where the gather-quorum is ceil(2K/3) rather than K, so signature subsets can differ), resolve_fork picks the canonical tip deterministically: (1) heaviest sig set wins (max non-zero `creator_block_sigs`); (2) tie → fewer `abort_events` wins; (3) tie → smallest block_hash (lexicographic, deterministic across peers). Plus edge cases: identical blocks return first arg, zero-sigs still resolves without crash, sentinel-zero handling in BFT mode (zeros don't count toward weight), abort-tie-break beats hash-tie-break. A regression would either silently let the wrong block win (FA1 violation: peers diverge on canonical tip) or make resolution non-deterministic across nodes. | `tools/test_resolve_fork.sh` | S-029 / FA1 |
 
 ---
 

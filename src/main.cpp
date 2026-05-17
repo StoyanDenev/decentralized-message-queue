@@ -158,7 +158,7 @@ DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ doma
   determ dapp-messages --domain <D> [--from H] [--to H] [--topic T]
                                               Retrospective DAPP_CALL poll (256 / page)
 
-Governance + sharded operation:
+)" << R"(Governance + sharded operation:
   determ submit-param-change ...              A5 PARAM_CHANGE tx (see CLI-REFERENCE.md §Governance)
   determ submit-merge-event ...               R7 MERGE_EVENT tx (EXTENDED-mode under-quorum merge)
 
@@ -255,6 +255,11 @@ In-process tests (deterministic, no network):
                                               binding + serialize round-trip
                                               (A2 Phase 2 wallet recovery
                                               share wrapping)
+  determ test-resolve-fork                    Chain::resolve_fork (S-029
+                                              BFT-mode fork-choice: heaviest
+                                              sigs / fewer aborts / smallest
+                                              hash; deterministic across
+                                              peers)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -7420,6 +7425,161 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": envelope " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Chain::resolve_fork
+    // (S-029 closure: fork-choice rule for the BFT-mode fast-finalize
+    // path when two K-of-K-signed blocks at the same height are
+    // observed). The rule is:
+    //
+    //   1. Heaviest sig set wins (max non-zero creator_block_sigs).
+    //   2. Tie → fewer abort_events wins.
+    //   3. Tie → smallest block_hash (deterministic across peers).
+    //
+    // A regression here would either silently let the wrong block win
+    // (safety violation: peers diverge on canonical tip) or make the
+    // resolution non-deterministic across nodes (peers pick different
+    // winners → fork). Both break FA1.
+    if (cmd == "test-resolve-fork") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+        auto patterned_sig = [](uint8_t base) {
+            Signature s{};
+            for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(base + i);
+            return s;
+        };
+
+        // Helper: build a block with a deterministic shape. Differing
+        // sigs/aborts/index let us isolate the resolution branches.
+        auto make_block = [&](uint64_t index, size_t n_sigs, size_t n_aborts,
+                                uint8_t variant) {
+            Block b;
+            b.index    = index;
+            b.prev_hash = patterned_hash(0x10);
+            b.timestamp = 1000;
+            b.tx_root   = patterned_hash(0x20 + variant);  // distinct
+            b.delay_seed = patterned_hash(0x30);
+            b.consensus_mode = ConsensusMode::BFT;  // resolve_fork is BFT-only
+            b.bft_proposer = "alice";
+            b.creators = {"alice", "bob", "carol"};
+            // Populate exactly n_sigs non-zero signatures; rest are zero
+            // (sentinel slots in BFT mode).
+            b.creator_block_sigs.resize(3);
+            for (size_t i = 0; i < n_sigs; ++i)
+                b.creator_block_sigs[i] = patterned_sig(0x50 + variant);
+            // n_aborts AbortEvents.
+            for (size_t i = 0; i < n_aborts; ++i) {
+                AbortEvent ae;
+                ae.round = 1;
+                ae.event_hash = patterned_hash(0x70 + i + variant);
+                b.abort_events.push_back(ae);
+            }
+            return b;
+        };
+
+        // 1. Heaviest sig set wins. Block A has 3 sigs, B has 2.
+        {
+            Block a = make_block(5, 3, 0, /*variant=*/0);
+            Block b = make_block(5, 2, 0, /*variant=*/1);
+            check(&Chain::resolve_fork(a, b) == &a,
+                  "resolve_fork: heavier sigs wins (3 sigs > 2 sigs)");
+            check(&Chain::resolve_fork(b, a) == &a,
+                  "resolve_fork: arg order doesn't matter (symmetric on sigs)");
+        }
+
+        // 2. Fewer aborts breaks sig tie. Both have 3 sigs; A has 1
+        //    abort, B has 2.
+        {
+            Block a = make_block(5, 3, 1, /*variant=*/0);
+            Block b = make_block(5, 3, 2, /*variant=*/1);
+            check(&Chain::resolve_fork(a, b) == &a,
+                  "resolve_fork: same sigs → fewer aborts wins");
+            check(&Chain::resolve_fork(b, a) == &a,
+                  "resolve_fork: arg order doesn't matter (symmetric on aborts)");
+        }
+
+        // 3. Smallest block_hash breaks both ties. Both have 3 sigs +
+        //    0 aborts; only the variant byte differs in tx_root.
+        //    compute_hash will yield different hashes; resolve_fork
+        //    picks the lexicographically smaller one.
+        {
+            Block a = make_block(5, 3, 0, /*variant=*/0);
+            Block b = make_block(5, 3, 0, /*variant=*/1);
+            Hash ha = a.compute_hash();
+            Hash hb = b.compute_hash();
+            // The smaller hash should win.
+            bool a_smaller = false;
+            for (size_t i = 0; i < 32; ++i) {
+                if (ha[i] != hb[i]) { a_smaller = (ha[i] < hb[i]); break; }
+            }
+            const Block& winner = Chain::resolve_fork(a, b);
+            const Block& expected = a_smaller ? a : b;
+            check(&winner == &expected,
+                  "resolve_fork: tied sigs + aborts → smallest block_hash wins");
+            // And it must be deterministic (calling in both orders
+            // gives the same winner).
+            const Block& winner_rev = Chain::resolve_fork(b, a);
+            check(&winner == &winner_rev || winner.compute_hash() == winner_rev.compute_hash(),
+                  "resolve_fork: tie-break is symmetric across arg order");
+        }
+
+        // 4. Identical blocks: returns one of them (the FIRST arg per
+        //    the documented contract, since all comparison branches
+        //    yield equal results — the final `return a` is the
+        //    deterministic tie-break).
+        {
+            Block a = make_block(5, 3, 0, /*variant=*/0);
+            Block b = a;  // identical copy
+            const Block& winner = Chain::resolve_fork(a, b);
+            check(&winner == &a,
+                  "resolve_fork: identical blocks → returns first arg (a)");
+        }
+
+        // 5. Pathological case: zero sigs on both. Both are equally
+        //    unsigned, so tie-break falls through to aborts → hash.
+        {
+            Block a = make_block(5, 0, 0, /*variant=*/0);
+            Block b = make_block(5, 0, 0, /*variant=*/1);
+            const Block& winner = Chain::resolve_fork(a, b);
+            // Some block must win — just verify the function doesn't
+            // crash or return a meaningless reference.
+            check(&winner == &a || &winner == &b,
+                  "resolve_fork: zero-sigs case still resolves (no crash)");
+        }
+
+        // 6. Different number of zero sigs counts NOT as a tie. A has
+        //    2 real sigs + 1 zero (sentinel); B has 1 real sig + 2
+        //    zero. A wins on sig count.
+        {
+            Block a = make_block(5, 2, 0, /*variant=*/0);
+            Block b = make_block(5, 1, 0, /*variant=*/1);
+            check(&Chain::resolve_fork(a, b) == &a,
+                  "resolve_fork: sentinel-zero sigs don't count toward weight");
+        }
+
+        // 7. Same sig count, different abort sizes: fewer wins
+        //    regardless of which is heavier in hash space.
+        {
+            Block a = make_block(5, 2, 5, /*variant=*/0);
+            Block b = make_block(5, 2, 1, /*variant=*/1);
+            check(&Chain::resolve_fork(a, b) == &b,
+                  "resolve_fork: abort tie-break beats hash tie-break (b has fewer)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": resolve-fork " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
