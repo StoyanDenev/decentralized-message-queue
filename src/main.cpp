@@ -7056,6 +7056,41 @@ int main(int argc, char** argv) {
             check(ok, "make_contrib produces sig that verifies under signer's pubkey");
         }
 
+        // === Sign/verify integration: make_abort_claim produces a sig
+        //     that verifies under the signer's pubkey over
+        //     make_abort_claim_message ===
+        {
+            NodeKey k = generate_node_key();
+            AbortClaimMsg m = make_abort_claim(k, "alice", 42, 1, PREV, "dan");
+            Hash msg = make_abort_claim_message(42, 1, PREV, "dan");
+            bool ok = verify(k.pub, msg.data(), msg.size(), m.ed_sig);
+            check(ok, "make_abort_claim produces sig that verifies under signer's pubkey");
+            // Data fields preserved.
+            check(m.block_index == 42,
+                  "make_abort_claim: block_index preserved");
+            check(m.round == 1,
+                  "make_abort_claim: round preserved");
+            check(m.prev_hash == PREV,
+                  "make_abort_claim: prev_hash preserved");
+            check(m.missing_creator == "dan",
+                  "make_abort_claim: missing_creator preserved");
+            check(m.claimer == "alice",
+                  "make_abort_claim: claimer preserved");
+        }
+
+        // === Tampered round: a sig produced for round=1 does NOT
+        //     verify against the message for round=2. (Round binding
+        //     is the cross-phase replay defense — a Phase-1 abort
+        //     claim must not be replayable as a Phase-2 claim.) ===
+        {
+            NodeKey k = generate_node_key();
+            AbortClaimMsg m = make_abort_claim(k, "alice", 42, 1, PREV, "dan");
+            Hash msg_round2 = make_abort_claim_message(42, 2, PREV, "dan");
+            bool ok = verify(k.pub, msg_round2.data(), msg_round2.size(), m.ed_sig);
+            check(!ok,
+                  "make_abort_claim: round-1 sig does NOT verify against round-2 message (replay defense)");
+        }
+
         // === S-018 defense-in-depth: ContribMsg::from_json rejects
         //     wrong-type tx_hashes (e.g., a peer sending the field
         //     as a scalar instead of an array). Previously this would
