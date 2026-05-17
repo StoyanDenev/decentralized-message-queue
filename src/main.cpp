@@ -64,7 +64,10 @@ Usage:
   determ status                              Chain head, node count, next creators
   determ show-block <index>                  Print block at index (full JSON)
   determ chain-summary [--last N]            Compact summary of last N blocks
-  determ validators                          List the current validator pool
+  determ validators [--filter-region R] [--json]
+                                              List the current validator pool;
+                                              --filter-region R filters to
+                                              validators in region R (rev.9 R1)
   determ committee                           List the current epoch's K-of-K committee
   determ pending-params [--at-height N] [--json]
                                               A5 staged PARAM_CHANGE entries
@@ -423,6 +426,13 @@ Additional in-process tests:
                                               full stake forfeit +
                                               deregistration (inactive_from)
                                               + A1 invariant
+  determ test-unstake-deregister-apply        UNSTAKE + DEREGISTER apply —
+                                              stake-lifecycle complement;
+                                              fee refund on failure; A1
+                                              moves value (no supply change)
+  determ test-cross-shard-receipt-apply       Inbound receipt apply (rev.9
+                                              B3.4) — credit + dedup-set
+                                              + A1 accumulated_inbound
 )" << "\n";
 }
 
@@ -1291,31 +1301,71 @@ static int cmd_headers(int argc, char** argv) {
 //   emits the raw RPC array verbatim, suitable for feeding directly
 //   into `verify-block-sigs --committee` or any other machine
 //   consumer.
+// determ validators [--filter-region R] [--json] [--rpc-port N]
+//   List the registered validator pool. Default columns:
+//     domain | stake | active_from | region | ed_pub (truncated)
+//
+//   --filter-region R post-filters to validators with region == R
+//   (case-sensitive exact match; empty filter = no filter). Useful in
+//   regional deployments to inspect just the locally-eligible pool
+//   (rev.9 R1 + region-pinned committee selection).
+//
+//   --json passes the (filtered) RPC array through verbatim — same
+//   shape `verify-block-sigs --committee` consumes.
 static int cmd_validators(int argc, char** argv) {
     bool json_out = false;
+    std::string filter_region;
+    bool have_filter = false;
     for (int i = 0; i < argc; ++i) {
-        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--filter-region" && i + 1 < argc) {
+            have_filter = true;
+            filter_region = argv[i + 1];
+        }
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "validators");
+
+        // Post-filter on region. The RPC always returns the full pool
+        // (sorted); we drop entries whose region doesn't match.
+        if (have_filter) {
+            json filtered = json::array();
+            for (auto& v : result) {
+                if (v.value("region", std::string{}) == filter_region) {
+                    filtered.push_back(v);
+                }
+            }
+            result = std::move(filtered);
+        }
+
         if (json_out) {
             std::cout << result.dump(2) << "\n";
             return 0;
         }
         if (!result.is_array() || result.empty()) {
-            std::cout << "(no eligible validators)\n";
+            if (have_filter) {
+                std::cout << "(no eligible validators in region '"
+                          << filter_region << "')\n";
+            } else {
+                std::cout << "(no eligible validators)\n";
+            }
             return 0;
         }
         std::cout << std::left
                   << std::setw(25) << "domain"
                   << std::setw(10) << "stake"
                   << std::setw(15) << "active_from"
+                  << std::setw(12) << "region"
                   << "ed_pub\n";
         for (auto& v : result) {
+            std::string region = v.value("region", std::string{});
+            if (region.empty()) region = "(global)";
             std::cout << std::setw(25) << v.value("domain", std::string{})
                       << std::setw(10) << v.value("stake", uint64_t{0})
                       << std::setw(15) << v.value("active_from", uint64_t{0})
+                      << std::setw(12) << region.substr(0, 11)
                       << v.value("ed_pub", std::string{}).substr(0, 24) << "...\n";
         }
     } catch (std::exception& e) {
@@ -13991,6 +14041,494 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": equivocation-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: apply-side handling of UNSTAKE + DEREGISTER —
+    // the stake-lifecycle complement to STAKE (covered in
+    // test-chain-apply-block). DEREGISTER sets a randomized
+    // inactive_from on the registry entry + an unlock_height on the
+    // stake (= inactive_from + unstake_delay_); UNSTAKE then releases
+    // stake to balance once the unlock_height is reached.
+    if (cmd == "test-unstake-deregister-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Shared fixture: alice as creator with balance + stake.
+        GenesisConfig cfg;
+        cfg.chain_id = "unstake-deregister-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Helper: build an 8-byte LE payload encoding `amount`.
+        auto encode_amount = [](uint64_t amount) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i)
+                p[i] = uint8_t((amount >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        // === UNSTAKE: too-early (height < unlock_height) ===
+
+        // 1. UNSTAKE before unlock_height: fails silently. unlock_height
+        //    sentinel UINT64_MAX (never-unlocked) means the check fires.
+        //    Fee is REFUNDED on failed UNSTAKE (apply.cpp: "honest users
+        //    aren't penalized for a too-early request").
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice";
+            tx.fee = 1;
+            tx.nonce = 0;
+            tx.payload = encode_amount(100);
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+
+            check(c.stake("alice") == 500,
+                  "UNSTAKE too early: stake unchanged");
+            check(c.balance("alice") == 1000,
+                  "UNSTAKE too early: balance unchanged (fee refunded)");
+            check(c.next_nonce("alice") == 1,
+                  "UNSTAKE too early: nonce++ (tx ran, just refused)");
+        }
+
+        // === DEREGISTER: sets inactive_from + unlock_height ===
+
+        // 2. DEREGISTER sets a randomized inactive_from on registrant +
+        //    unlock_height = inactive_from + unstake_delay_ on stake.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::DEREGISTER;
+            tx.from = "alice";
+            tx.fee = 1;
+            tx.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);  // non-zero seed
+            b1.transactions.push_back(tx);
+            c.append(b1);
+
+            auto reg = c.registrant("alice");
+            check(reg.has_value() && reg->inactive_from > 1
+                  && reg->inactive_from != UINT64_MAX,
+                  "DEREGISTER: inactive_from = height(1) + derive_delay(>0)");
+            // unlock_height = inactive_from + unstake_delay_ (default 1000).
+            uint64_t expected = reg->inactive_from + c.unstake_delay();
+            check(c.stake_unlock_height("alice") == expected,
+                  "DEREGISTER: stake unlock_height = inactive_from + unstake_delay");
+            check(c.next_nonce("alice") == 1,
+                  "DEREGISTER: alice next_nonce 0 → 1");
+        }
+
+        // 3. DEREGISTER on a domain WITHOUT registry: charge fee + nonce++
+        //    but no state mutation beyond that.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // Seed bob with balance for the fee.
+            Transaction seed;
+            seed.type = TxType::TRANSFER;
+            seed.from = "alice"; seed.to = "bob";
+            seed.amount = 100; seed.fee = 1; seed.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(seed);
+            c.append(b1);
+
+            // Now bob (no registry entry) calls DEREGISTER.
+            Transaction tx;
+            tx.type = TxType::DEREGISTER;
+            tx.from = "bob";
+            tx.fee = 1;
+            tx.nonce = 0;
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.transactions.push_back(tx);
+            c.append(b2);
+
+            check(c.next_nonce("bob") == 1,
+                  "DEREGISTER on non-registrant: nonce++ (defensive no-op)");
+            check(!c.registrant("bob").has_value(),
+                  "DEREGISTER on non-registrant: still no registry entry");
+        }
+
+        // === UNSTAKE: succeeds AFTER unlock_height ===
+
+        // 4. UNSTAKE after unlock_height: stake reduced + balance credited.
+        //    To synthesize "after unlock_height" without burning 1000+
+        //    blocks: directly set unstake_delay to a small value, then
+        //    DEREGISTER → wait 1 block → UNSTAKE.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1);  // unlock 1 block after DEREGISTER inactive_from
+
+            // Block 1: DEREGISTER alice (sets inactive_from + unlock_height).
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions.push_back(dereg);
+            c.append(b1);
+
+            uint64_t unlock_at = c.stake_unlock_height("alice");
+
+            // Advance to the unlock height with empty blocks (creators=alice
+            // so A1 stays balanced).
+            for (uint64_t h = 2; h <= unlock_at; ++h) {
+                Block bx;
+                bx.index = h; bx.prev_hash = c.head().compute_hash();
+                bx.creators = {"alice"};
+                c.append(bx);
+            }
+            check(c.height() == unlock_at + 1,
+                  "advance to unlock_height: chain height == unlock_at + 1");
+
+            // UNSTAKE 200 of alice's 500 stake.
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;  // after DEREGISTER
+            tx.payload = encode_amount(200);
+            Block bN;
+            bN.index = unlock_at + 1; bN.prev_hash = c.head().compute_hash();
+            bN.creators = {"alice"};
+            bN.transactions.push_back(tx);
+
+            uint64_t bal_before = c.balance("alice");
+            c.append(bN);
+
+            check(c.stake("alice") == 300,
+                  "UNSTAKE post-unlock: stake 500 - 200 = 300");
+            // Balance: bal_before - fee + amount + fee(back from creator) = bal + amount
+            check(c.balance("alice") == bal_before + 200,
+                  "UNSTAKE post-unlock: balance += unstake amount (fee net-zero with creator)");
+        }
+
+        // === UNSTAKE: insufficient locked ===
+
+        // 5. UNSTAKE more than locked: silently fails, fee refunded.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1);
+
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions.push_back(dereg);
+            c.append(b1);
+
+            uint64_t unlock_at = c.stake_unlock_height("alice");
+            for (uint64_t h = 2; h <= unlock_at; ++h) {
+                Block bx;
+                bx.index = h; bx.prev_hash = c.head().compute_hash();
+                bx.creators = {"alice"};
+                c.append(bx);
+            }
+
+            // UNSTAKE 10000 (> alice's 500 stake).
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;
+            tx.payload = encode_amount(10000);
+            Block bN;
+            bN.index = c.height(); bN.prev_hash = c.head().compute_hash();
+            bN.creators = {"alice"};
+            bN.transactions.push_back(tx);
+
+            uint64_t bal_before = c.balance("alice");
+            uint64_t stake_before = c.stake("alice");
+            c.append(bN);
+
+            check(c.stake("alice") == stake_before,
+                  "UNSTAKE insufficient locked: stake unchanged");
+            check(c.balance("alice") == bal_before,
+                  "UNSTAKE insufficient locked: balance unchanged (fee refunded)");
+        }
+
+        // === A1 invariant across UNSTAKE flow ===
+
+        // 6. A1 invariant: UNSTAKE moves value from stake → balance, so
+        //    total supply unchanged. Verify across the full DEREGISTER +
+        //    advance + UNSTAKE flow.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1);
+            uint64_t baseline = c.live_total_supply();
+
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions.push_back(dereg);
+            c.append(b1);
+
+            uint64_t unlock_at = c.stake_unlock_height("alice");
+            for (uint64_t h = 2; h <= unlock_at; ++h) {
+                Block bx;
+                bx.index = h; bx.prev_hash = c.head().compute_hash();
+                bx.creators = {"alice"};
+                c.append(bx);
+            }
+
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;
+            tx.payload = encode_amount(200);
+            Block bN;
+            bN.index = c.height(); bN.prev_hash = c.head().compute_hash();
+            bN.creators = {"alice"};
+            bN.transactions.push_back(tx);
+            c.append(bN);
+
+            check(c.live_total_supply() == baseline,
+                  "A1: UNSTAKE moves value (no net supply change)");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after full UNSTAKE flow");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": unstake-deregister-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: apply-side handling of cross-shard inbound
+    // receipts (rev.9 B3.4). Each receipt baked into a finalized
+    // block credits `to` with `amount` (sender debit + fee already
+    // happened on the source shard). Idempotent on (src_shard,
+    // tx_hash) — duplicate would be rejected by the validator, but
+    // the dedup guard makes apply safe under chain replay. Updates
+    // accumulated_inbound_ (A1 counter).
+    if (cmd == "test-cross-shard-receipt-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice (this shard's creator, has stake) + bob
+        // (pure-balance recipient that will receive inbound).
+        GenesisConfig cfg;
+        cfg.chain_id = "cross-shard-receipt-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        GenesisAllocation bob_bal;
+        bob_bal.domain = "bob"; bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // Helper: build an inbound CrossShardReceipt to credit `to`
+        // with `amount`. tx_hash distinguishes receipts in dedup.
+        auto make_receipt = [](const std::string& to_domain,
+                                uint64_t amount,
+                                uint8_t tx_hash_seed) {
+            CrossShardReceipt r;
+            r.src_shard = 1;       // some other shard
+            r.dst_shard = 0;       // this chain
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = tx_hash_seed;  // distinguish receipts
+            r.from = "sender_on_src_shard";
+            r.to = to_domain;
+            r.amount = amount;
+            r.fee = 0;
+            r.nonce = 0;
+            return r;
+        };
+
+        // === Basic inbound receipt: credit + dedup-set entry ===
+
+        // 1. Inbound receipt credits the `to` account.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 50, 0x01));
+            c.append(b1);
+
+            check(c.balance("bob") == 250,
+                  "inbound receipt: bob 200 + 50 = 250");
+        }
+
+        // 2. A1 accumulated_inbound counter bumped by the receipt amount.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 50, 0x02));
+            c.append(b1);
+
+            check(c.accumulated_inbound() == 50,
+                  "A1: accumulated_inbound bumped by receipt amount");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after inbound credit");
+        }
+
+        // === Dedup: same (src_shard, tx_hash) applied twice ===
+
+        // 3. Duplicate inbound receipt (same src_shard + tx_hash) is
+        //    silently skipped on the second apply. This is the
+        //    exactly-once-credit guarantee.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            // Block 1: receipt with tx_hash[0]=0x03 credits bob 50.
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 50, 0x03));
+            c.append(b1);
+            check(c.balance("bob") == 250,
+                  "dedup setup: bob credited 50 from first receipt");
+
+            // Block 2: SAME (src_shard, tx_hash) — apply must skip.
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.inbound_receipts.push_back(make_receipt("bob", 50, 0x03));
+            c.append(b2);
+            check(c.balance("bob") == 250,
+                  "dedup: duplicate (src_shard, tx_hash) NOT re-credited");
+            check(c.accumulated_inbound() == 50,
+                  "dedup: accumulated_inbound NOT double-counted");
+        }
+
+        // === Multiple distinct receipts in a single block ===
+
+        // 4. Two receipts with distinct tx_hash → both credited.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 30, 0x04));
+            b1.inbound_receipts.push_back(make_receipt("bob", 70, 0x05));
+            c.append(b1);
+
+            check(c.balance("bob") == 300,  // 200 + 30 + 70
+                  "two distinct receipts: bob 200 + 30 + 70 = 300");
+            check(c.accumulated_inbound() == 100,
+                  "two receipts: accumulated_inbound += 30+70 = 100");
+        }
+
+        // === Receipt to non-existent account creates entry ===
+
+        // 5. Receipt to a domain not yet in accounts_: new entry created.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("brand_new_domain", 42, 0x06));
+            c.append(b1);
+
+            check(c.balance("brand_new_domain") == 42,
+                  "receipt to new domain: account created with credit");
+        }
+
+        // === inbound_receipt_applied predicate ===
+
+        // 6. Public predicate `inbound_receipt_applied` reflects the
+        //    dedup-set membership.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Hash tx_hash{};
+            tx_hash[0] = 0x07;
+            check(!c.inbound_receipt_applied(1, tx_hash),
+                  "predicate: receipt not yet applied = false");
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 10, 0x07));
+            c.append(b1);
+
+            check(c.inbound_receipt_applied(1, tx_hash),
+                  "predicate: post-apply receipt detected (idempotency hook)");
+        }
+
+        // === Determinism ===
+
+        // 7. Two chains see same receipt → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Block b1;
+            b1.index = 1; b1.prev_hash = c1.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 99, 0x08));
+            c1.append(b1);
+            Block b2 = b1;
+            c2.append(b2);
+            check(c1.balance("bob") == c2.balance("bob")
+                  && c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: two chains apply same receipt → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": cross-shard-receipt-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
