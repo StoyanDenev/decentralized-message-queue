@@ -220,6 +220,19 @@ In-process tests (deterministic, no network):
                                               AbortEvent + EquivocationEvent +
                                               GenesisAlloc; field-preservation +
                                               S-018 strict-rejection lock-in
+  determ test-transaction                     Transaction::signing_bytes +
+                                              compute_hash + Ed25519 sign/verify
+                                              + JSON round-trip for all TxType
+                                              variants + S-018 strict-rejection
+  determ test-merge-event-codec               MergeEvent::encode / ::decode
+                                              (R4 under-quorum merge wire
+                                              format) — round-trip, field
+                                              sensitivity, rejection paths
+  determ test-consensus-msgs                  ContribMsg + BlockSigMsg +
+                                              AbortClaimMsg + their commitment
+                                              hashes (make_contrib_commitment +
+                                              make_abort_claim_message);
+                                              domain-separation + sign/verify
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -6044,6 +6057,623 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": wire-types " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Transaction (the
+    // smallest authentic wire unit on the chain). Locks in:
+    //   * signing_bytes byte-layout (Preliminaries §1.3 BE encoding)
+    //   * compute_hash determinism
+    //   * sign/verify round-trip via Ed25519 (every field affects sig)
+    //   * JSON round-trip for representative TxType variants
+    //   * S-018 strict-rejection contract
+    //
+    // Every transaction on the chain — TRANSFER, REGISTER, DEREGISTER,
+    // STAKE, UNSTAKE, PARAM_CHANGE, MERGE_EVENT, COMPOSABLE_BATCH,
+    // DAPP_REGISTER, DAPP_CALL — passes through these paths. A
+    // regression here would either silently break sender authentication
+    // (sig verifies with tampered tx) OR break wire-format
+    // interoperability (gossip round-trip drops a field).
+    if (cmd == "test-transaction") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::crypto;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === signing_bytes determinism + field coverage ===
+
+        auto make_tx = []() {
+            Transaction tx;
+            tx.type    = TxType::TRANSFER;
+            tx.from    = "alice";
+            tx.to      = "bob";
+            tx.amount  = 100;
+            tx.fee     = 1;
+            tx.nonce   = 5;
+            tx.payload = {0xDE, 0xAD, 0xBE, 0xEF};
+            return tx;
+        };
+
+        // 1. signing_bytes determinism.
+        {
+            Transaction tx = make_tx();
+            auto sb1 = tx.signing_bytes();
+            auto sb2 = tx.signing_bytes();
+            check(sb1 == sb2, "Transaction::signing_bytes deterministic");
+        }
+
+        // 2. Every Transaction core field affects signing_bytes.
+        {
+            Transaction t1 = make_tx();
+            auto base = t1.signing_bytes();
+
+            Transaction t2 = make_tx();
+            t2.type = TxType::REGISTER;
+            check(t2.signing_bytes() != base, "signing_bytes: type sensitivity");
+
+            t2 = make_tx(); t2.from = "carol";
+            check(t2.signing_bytes() != base, "signing_bytes: from sensitivity");
+
+            t2 = make_tx(); t2.to = "dan";
+            check(t2.signing_bytes() != base, "signing_bytes: to sensitivity");
+
+            t2 = make_tx(); t2.amount = 200;
+            check(t2.signing_bytes() != base, "signing_bytes: amount sensitivity");
+
+            t2 = make_tx(); t2.fee = 99;
+            check(t2.signing_bytes() != base, "signing_bytes: fee sensitivity");
+
+            t2 = make_tx(); t2.nonce = 999;
+            check(t2.signing_bytes() != base, "signing_bytes: nonce sensitivity");
+
+            t2 = make_tx(); t2.payload = {0xCA, 0xFE};
+            check(t2.signing_bytes() != base, "signing_bytes: payload sensitivity");
+        }
+
+        // 3. signing_bytes excludes sig + hash (sender signs over
+        //    signing_bytes, not over their own sig — would be circular).
+        {
+            Transaction t1 = make_tx();
+            Transaction t2 = make_tx();
+            for (size_t i = 0; i < t2.sig.size(); ++i) t2.sig[i] = uint8_t(i);
+            for (size_t i = 0; i < t2.hash.size(); ++i) t2.hash[i] = uint8_t(i);
+            check(t1.signing_bytes() == t2.signing_bytes(),
+                  "signing_bytes excludes sig and hash fields");
+        }
+
+        // 4. compute_hash determinism.
+        {
+            Transaction tx = make_tx();
+            check(tx.compute_hash() == tx.compute_hash(),
+                  "Transaction::compute_hash deterministic");
+        }
+
+        // 5. compute_hash == SHA-256 of signing_bytes (the documented
+        //    contract).
+        {
+            Transaction tx = make_tx();
+            auto sb = tx.signing_bytes();
+            Hash expected = sha256(sb.data(), sb.size());
+            check(tx.compute_hash() == expected,
+                  "compute_hash == SHA-256(signing_bytes)");
+        }
+
+        // === Ed25519 sign/verify integration ===
+
+        // 6. sign/verify round-trip: a tx signed by a real Ed25519 key
+        //    verifies under that key.
+        {
+            NodeKey k = generate_node_key();
+            Transaction tx = make_tx();
+            auto sb = tx.signing_bytes();
+            tx.sig = sign(k, sb.data(), sb.size());
+            bool ok = verify(k.pub, sb.data(), sb.size(), tx.sig);
+            check(ok, "sign(signing_bytes) verifies under signer's pubkey");
+        }
+
+        // 7. Tampered tx: change one byte after signing, verify fails.
+        {
+            NodeKey k = generate_node_key();
+            Transaction tx = make_tx();
+            auto sb = tx.signing_bytes();
+            tx.sig = sign(k, sb.data(), sb.size());
+
+            // Mutate amount AFTER signing. signing_bytes changes; sig
+            // no longer covers the new bytes.
+            tx.amount = 999;
+            auto sb_tampered = tx.signing_bytes();
+            bool ok = verify(k.pub, sb_tampered.data(), sb_tampered.size(), tx.sig);
+            check(!ok, "verify rejects sig over tampered tx (amount changed)");
+        }
+
+        // === JSON round-trip ===
+
+        // 8. JSON round-trip for TRANSFER (the most common type).
+        {
+            Transaction tx = make_tx();
+            tx.hash = tx.compute_hash();
+            NodeKey k = generate_node_key();
+            auto sb = tx.signing_bytes();
+            tx.sig = sign(k, sb.data(), sb.size());
+
+            json j = tx.to_json();
+            Transaction back = Transaction::from_json(j);
+
+            check(back.type == tx.type,         "TRANSFER round-trip: type");
+            check(back.from == tx.from,         "TRANSFER round-trip: from");
+            check(back.to == tx.to,             "TRANSFER round-trip: to");
+            check(back.amount == tx.amount,     "TRANSFER round-trip: amount");
+            check(back.fee == tx.fee,           "TRANSFER round-trip: fee");
+            check(back.nonce == tx.nonce,       "TRANSFER round-trip: nonce");
+            check(back.payload == tx.payload,   "TRANSFER round-trip: payload");
+            check(back.sig == tx.sig,           "TRANSFER round-trip: sig");
+            check(back.hash == tx.hash,         "TRANSFER round-trip: hash");
+        }
+
+        // 9. JSON round-trip for each representative TxType (REGISTER,
+        //    STAKE, UNSTAKE, DAPP_REGISTER). Verifies type field encodes
+        //    + decodes correctly across the enum range.
+        {
+            for (TxType t : {TxType::REGISTER, TxType::DEREGISTER,
+                              TxType::STAKE, TxType::UNSTAKE,
+                              TxType::PARAM_CHANGE, TxType::MERGE_EVENT,
+                              TxType::COMPOSABLE_BATCH, TxType::DAPP_REGISTER,
+                              TxType::DAPP_CALL}) {
+                Transaction tx;
+                tx.type = t;
+                tx.from = "alice";
+                tx.to   = "";          // not all types use 'to'
+                tx.nonce = 1;
+                tx.payload = {0x01, 0x02};
+                tx.hash = tx.compute_hash();
+                json j = tx.to_json();
+                Transaction back = Transaction::from_json(j);
+                check(back.type == tx.type,
+                      ("Transaction round-trip TxType=" +
+                       std::to_string(int(t))).c_str());
+            }
+        }
+
+        // === S-018 strict-rejection ===
+
+        // 10. from_json rejects missing required field 'amount'.
+        {
+            json bad = {
+                {"type", 0}, {"from", "alice"}, {"to", "bob"},
+                /* amount missing */ {"fee", 1}, {"nonce", 5},
+                {"payload", ""}, {"sig", std::string(128, '0')},
+                {"hash", std::string(64, '0')}
+            };
+            bool threw = false;
+            std::string what;
+            try { (void)Transaction::from_json(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("amount") != std::string::npos,
+                  "Transaction::from_json rejects missing 'amount' with field-name diagnostic");
+        }
+
+        // 11. from_json rejects wrong-length sig.
+        {
+            json bad = {
+                {"type", 0}, {"from", "alice"}, {"to", "bob"},
+                {"amount", 100}, {"fee", 1}, {"nonce", 5},
+                {"payload", ""},
+                {"sig", "deadbeef"},   // 4 bytes — wrong length for sig
+                {"hash", std::string(64, '0')}
+            };
+            bool threw = false;
+            try { (void)Transaction::from_json(bad); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "Transaction::from_json rejects wrong-length 'sig' hex");
+        }
+
+        // 12. Hash distinct from signing_bytes when tx fields differ:
+        //     two semantically-different txs have distinct hashes.
+        {
+            Transaction t1 = make_tx();
+            Transaction t2 = make_tx();
+            t2.nonce = 6;  // increment nonce
+            check(t1.compute_hash() != t2.compute_hash(),
+                  "Two txs differing in nonce have distinct compute_hash");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": transaction " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for MergeEvent
+    // encode/decode (R4 under-quorum merge wire format).
+    //
+    // MergeEvent is the canonical payload for TxType::MERGE_EVENT —
+    // emitted by beacon when a shard's eligible-validator pool drops
+    // below 2K and the shard merges with its modular-next neighbor.
+    // Wire format must round-trip byte-for-byte across all node
+    // implementations or the apply path diverges across shards.
+    if (cmd == "test-merge-event-codec") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto make_event = [](MergeEvent::Type t,
+                              uint32_t shard, uint32_t partner,
+                              uint64_t eff, uint64_t evws,
+                              const std::string& region) {
+            MergeEvent ev;
+            ev.event_type = t;
+            ev.shard_id   = shard;
+            ev.partner_id = partner;
+            ev.effective_height       = eff;
+            ev.evidence_window_start  = evws;
+            ev.merging_shard_region   = region;
+            return ev;
+        };
+
+        // 1. BEGIN round-trip.
+        {
+            MergeEvent ev = make_event(MergeEvent::BEGIN, 3, 4, 1000, 950, "us-east");
+            auto bytes = ev.encode();
+            auto back = MergeEvent::decode(bytes);
+            check(back.has_value(), "BEGIN: decode returns value");
+            check(back->event_type == ev.event_type,
+                  "BEGIN round-trip: event_type");
+            check(back->shard_id   == ev.shard_id,
+                  "BEGIN round-trip: shard_id");
+            check(back->partner_id == ev.partner_id,
+                  "BEGIN round-trip: partner_id");
+            check(back->effective_height == ev.effective_height,
+                  "BEGIN round-trip: effective_height");
+            check(back->evidence_window_start == ev.evidence_window_start,
+                  "BEGIN round-trip: evidence_window_start");
+            check(back->merging_shard_region == ev.merging_shard_region,
+                  "BEGIN round-trip: merging_shard_region");
+        }
+
+        // 2. END round-trip with empty region (END semantics).
+        {
+            MergeEvent ev = make_event(MergeEvent::END, 3, 4, 1500, 0, "");
+            auto bytes = ev.encode();
+            auto back = MergeEvent::decode(bytes);
+            check(back.has_value(), "END: decode returns value");
+            check(back->event_type == MergeEvent::END,
+                  "END round-trip: event_type");
+            check(back->merging_shard_region.empty(),
+                  "END round-trip: empty region preserved");
+        }
+
+        // 3. Size invariant: BEGIN with region 'us-east' is 26 + 7.
+        {
+            MergeEvent ev = make_event(MergeEvent::BEGIN, 0, 1, 0, 0, "us-east");
+            check(ev.encode().size() == 26 + 7,
+                  "encode size == 26 + region_len");
+        }
+
+        // 4. Reject too-short payload.
+        {
+            std::vector<uint8_t> too_short(20, 0);
+            check(!MergeEvent::decode(too_short).has_value(),
+                  "decode rejects payload < 26 bytes");
+        }
+
+        // 5. Reject invalid event_type (> 1).
+        {
+            MergeEvent ev = make_event(MergeEvent::BEGIN, 0, 1, 0, 0, "");
+            auto bytes = ev.encode();
+            bytes[0] = 2;  // out-of-range event_type
+            check(!MergeEvent::decode(bytes).has_value(),
+                  "decode rejects event_type > 1");
+        }
+
+        // 6. Reject oversize region (rlen > 32).
+        {
+            std::vector<uint8_t> bad(26 + 33, 0);
+            bad[0] = 0;        // BEGIN
+            bad[25] = 33;      // region_len > 32
+            // payload size matches header's claim (26 + 33 = 59), so the
+            // length-check passes; the >32 region cap is the one that
+            // rejects.
+            check(!MergeEvent::decode(bad).has_value(),
+                  "decode rejects region_len > 32");
+        }
+
+        // 7. Reject size mismatch (claimed region_len doesn't match
+        //    payload size).
+        {
+            std::vector<uint8_t> bad(26 + 5, 0);  // payload has 5 region bytes
+            bad[25] = 10;                          // claims region_len=10
+            check(!MergeEvent::decode(bad).has_value(),
+                  "decode rejects size != 26 + claimed region_len");
+        }
+
+        // 8. Determinism: encoding the same event twice yields the
+        //    same bytes (matters for cross-node hash consistency on
+        //    MERGE_EVENT-bearing blocks).
+        {
+            MergeEvent ev = make_event(MergeEvent::BEGIN, 7, 0, 200, 150, "eu-west");
+            auto b1 = ev.encode();
+            auto b2 = ev.encode();
+            check(b1 == b2, "MergeEvent::encode deterministic");
+        }
+
+        // 9. Field sensitivity: changing any field changes the encoded
+        //    bytes (no accidental field-drop).
+        {
+            MergeEvent base = make_event(MergeEvent::BEGIN, 1, 2, 100, 50, "test");
+            auto bb = base.encode();
+
+            MergeEvent v = base; v.event_type = MergeEvent::END;
+            check(v.encode() != bb, "encode: event_type sensitivity");
+
+            v = base; v.shard_id = 99;
+            check(v.encode() != bb, "encode: shard_id sensitivity");
+
+            v = base; v.partner_id = 99;
+            check(v.encode() != bb, "encode: partner_id sensitivity");
+
+            v = base; v.effective_height = 9999;
+            check(v.encode() != bb, "encode: effective_height sensitivity");
+
+            v = base; v.evidence_window_start = 9999;
+            check(v.encode() != bb, "encode: evidence_window_start sensitivity");
+
+            v = base; v.merging_shard_region = "different";
+            check(v.encode() != bb, "encode: region sensitivity");
+        }
+
+        // 10. Maximum-region (32 bytes) round-trips.
+        {
+            std::string max_region(32, 'a');
+            MergeEvent ev = make_event(MergeEvent::BEGIN, 1, 2, 100, 50, max_region);
+            auto bytes = ev.encode();
+            auto back = MergeEvent::decode(bytes);
+            check(back.has_value() && back->merging_shard_region.size() == 32,
+                  "encode/decode round-trip at max region size (32 bytes)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merge-event-codec " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the three consensus
+    // message types (ContribMsg / BlockSigMsg / AbortClaimMsg) and their
+    // commitment-hash helpers. These messages are signed by committee
+    // members in Phase 1 / Phase 2 / abort-path respectively; a
+    // regression in their wire format or commitment binding would
+    // either break interoperability or open a replay attack surface.
+    if (cmd == "test-consensus-msgs") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        using namespace determ::crypto;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+        auto patterned_sig = [](uint8_t base) {
+            Signature s{};
+            for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(base + i);
+            return s;
+        };
+
+        // === make_contrib_commitment ===
+        Hash PREV = patterned_hash(0x10);
+        std::vector<Hash> TXH = {
+            patterned_hash(0x20), patterned_hash(0x21)};
+        Hash DH = patterned_hash(0x30);
+
+        Hash commit_base = make_contrib_commitment(42, PREV, TXH, DH);
+
+        // 1. Determinism.
+        {
+            Hash again = make_contrib_commitment(42, PREV, TXH, DH);
+            check(again == commit_base,
+                  "make_contrib_commitment deterministic");
+        }
+
+        // 2. block_index sensitivity.
+        {
+            Hash diff = make_contrib_commitment(43, PREV, TXH, DH);
+            check(diff != commit_base,
+                  "make_contrib_commitment: block_index sensitivity");
+        }
+
+        // 3. prev_hash sensitivity.
+        {
+            Hash diff = make_contrib_commitment(42, patterned_hash(0xFE), TXH, DH);
+            check(diff != commit_base,
+                  "make_contrib_commitment: prev_hash sensitivity");
+        }
+
+        // 4. tx_hashes sensitivity (value).
+        {
+            std::vector<Hash> TXH2 = TXH;
+            TXH2[0] = patterned_hash(0xFD);
+            Hash diff = make_contrib_commitment(42, PREV, TXH2, DH);
+            check(diff != commit_base,
+                  "make_contrib_commitment: tx_hashes value sensitivity");
+        }
+
+        // 5. tx_hashes ORDER sensitivity. The commitment binds to a
+        //    specific order; reorder must change the hash. (This pairs
+        //    with the convention "sorted ascending" — a member who
+        //    sorts incorrectly produces a different commit than peers.)
+        {
+            std::vector<Hash> TXH2 = TXH;
+            std::swap(TXH2[0], TXH2[1]);
+            Hash diff = make_contrib_commitment(42, PREV, TXH2, DH);
+            check(diff != commit_base,
+                  "make_contrib_commitment: tx_hashes ORDER sensitivity");
+        }
+
+        // 6. dh_input sensitivity.
+        {
+            Hash diff = make_contrib_commitment(42, PREV, TXH, patterned_hash(0xFC));
+            check(diff != commit_base,
+                  "make_contrib_commitment: dh_input sensitivity");
+        }
+
+        // === make_abort_claim_message ===
+        Hash abort_base = make_abort_claim_message(42, 1, PREV, "carol");
+
+        // 7. Determinism.
+        {
+            Hash again = make_abort_claim_message(42, 1, PREV, "carol");
+            check(again == abort_base,
+                  "make_abort_claim_message deterministic");
+        }
+
+        // 8. block_index sensitivity.
+        {
+            Hash diff = make_abort_claim_message(43, 1, PREV, "carol");
+            check(diff != abort_base,
+                  "make_abort_claim_message: block_index sensitivity");
+        }
+
+        // 9. round sensitivity (round=1 vs round=2 must differ; defeats
+        //    cross-phase replay).
+        {
+            Hash diff = make_abort_claim_message(42, 2, PREV, "carol");
+            check(diff != abort_base,
+                  "make_abort_claim_message: round sensitivity");
+        }
+
+        // 10. prev_hash sensitivity.
+        {
+            Hash diff = make_abort_claim_message(42, 1, patterned_hash(0xFE), "carol");
+            check(diff != abort_base,
+                  "make_abort_claim_message: prev_hash sensitivity");
+        }
+
+        // 11. missing_creator sensitivity.
+        {
+            Hash diff = make_abort_claim_message(42, 1, PREV, "dan");
+            check(diff != abort_base,
+                  "make_abort_claim_message: missing_creator sensitivity");
+        }
+
+        // 12. Domain separation: contrib commit and abort claim hash
+        //     must differ for the same anchor inputs (no cross-domain
+        //     collision).
+        {
+            // Use the same block_index + prev_hash for both.
+            Hash contrib = make_contrib_commitment(42, PREV, {}, Hash{});
+            Hash abort   = make_abort_claim_message(42, 1, PREV, "");
+            check(contrib != abort,
+                  "make_contrib_commitment vs make_abort_claim_message domain-separated");
+        }
+
+        // === ContribMsg JSON round-trip ===
+        {
+            ContribMsg m;
+            m.block_index = 42;
+            m.signer = "alice";
+            m.prev_hash = PREV;
+            m.aborts_gen = 0;
+            m.tx_hashes = TXH;
+            m.dh_input = DH;
+            m.ed_sig = patterned_sig(0x70);
+
+            json j = m.to_json();
+            ContribMsg back = ContribMsg::from_json(j);
+
+            check(back.block_index == m.block_index,
+                  "ContribMsg round-trip: block_index");
+            check(back.signer == m.signer,
+                  "ContribMsg round-trip: signer");
+            check(back.prev_hash == m.prev_hash,
+                  "ContribMsg round-trip: prev_hash");
+            check(back.aborts_gen == m.aborts_gen,
+                  "ContribMsg round-trip: aborts_gen");
+            check(back.tx_hashes == m.tx_hashes,
+                  "ContribMsg round-trip: tx_hashes");
+            check(back.dh_input == m.dh_input,
+                  "ContribMsg round-trip: dh_input");
+            check(back.ed_sig == m.ed_sig,
+                  "ContribMsg round-trip: ed_sig");
+        }
+
+        // === BlockSigMsg JSON round-trip ===
+        {
+            BlockSigMsg m;
+            m.block_index = 42;
+            m.signer = "alice";
+            m.delay_output = patterned_hash(0x40);
+            m.dh_secret = patterned_hash(0x50);
+            m.ed_sig = patterned_sig(0x60);
+
+            json j = m.to_json();
+            BlockSigMsg back = BlockSigMsg::from_json(j);
+
+            check(back.block_index == m.block_index,
+                  "BlockSigMsg round-trip: block_index");
+            check(back.signer == m.signer,
+                  "BlockSigMsg round-trip: signer");
+            check(back.delay_output == m.delay_output,
+                  "BlockSigMsg round-trip: delay_output");
+            check(back.dh_secret == m.dh_secret,
+                  "BlockSigMsg round-trip: dh_secret");
+            check(back.ed_sig == m.ed_sig,
+                  "BlockSigMsg round-trip: ed_sig");
+        }
+
+        // === AbortClaimMsg JSON round-trip ===
+        {
+            AbortClaimMsg m;
+            m.block_index = 42;
+            m.round = 1;
+            m.prev_hash = PREV;
+            m.missing_creator = "dan";
+            m.claimer = "alice";
+            m.ed_sig = patterned_sig(0x80);
+
+            json j = m.to_json();
+            AbortClaimMsg back = AbortClaimMsg::from_json(j);
+
+            check(back.block_index == m.block_index,
+                  "AbortClaimMsg round-trip: block_index");
+            check(back.round == m.round,
+                  "AbortClaimMsg round-trip: round");
+            check(back.prev_hash == m.prev_hash,
+                  "AbortClaimMsg round-trip: prev_hash");
+            check(back.missing_creator == m.missing_creator,
+                  "AbortClaimMsg round-trip: missing_creator");
+            check(back.claimer == m.claimer,
+                  "AbortClaimMsg round-trip: claimer");
+            check(back.ed_sig == m.ed_sig,
+                  "AbortClaimMsg round-trip: ed_sig");
+        }
+
+        // === Sign/verify integration: a make_contrib produces a sig
+        //     that verifies under the signer's pubkey ===
+        {
+            NodeKey k = generate_node_key();
+            ContribMsg m = make_contrib(k, "alice", 42, PREV, 0, TXH, DH);
+            Hash commit = make_contrib_commitment(42, PREV, TXH, DH);
+            bool ok = verify(k.pub, commit.data(), commit.size(), m.ed_sig);
+            check(ok, "make_contrib produces sig that verifies under signer's pubkey");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": consensus-msgs " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
