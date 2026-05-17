@@ -183,6 +183,12 @@ In-process tests (deterministic, no network):
                                               algebra (S-033 / v2.1) — determinism,
                                               purity, per-namespace sensitivity, order
                                               independence, invertibility
+  determ test-block-rand                      V8 randomness primitives —
+                                              compute_delay_seed + compute_block_rand
+                                              + proposer_idx + required_block_sigs
+                                              + count_round1_aborts (FA1 + FA5
+                                              foundation; commit-reveal contract +
+                                              BFT quorum arithmetic)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -4582,6 +4588,277 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-root " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the V8 randomness
+    // primitives — compute_delay_seed, compute_block_rand,
+    // proposer_idx, required_block_sigs, count_round1_aborts. These
+    // are the FA1 / FA5 / FA8 foundation: every committee selection at
+    // every future height depends on compute_block_rand's output being
+    // (a) deterministic, (b) order-sensitive in the committee-selection
+    // order so reordering is detectable, and (c) domain-separated from
+    // delay_seed so the two-stage commit/reveal contract holds.
+    //
+    // The S030-D2 analysis explicitly relies on these functions being
+    // byte-deterministic; a regression here would either silently fork
+    // randomness across nodes (different committee selections per node
+    // → safety failure) OR allow a producer to reorder reveals to bias
+    // future randomness (FA1 violation).
+    if (cmd == "test-block-rand") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helpers: deterministic Hash builders so the test is byte-stable.
+        auto fill_hash = [](uint8_t fill) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = fill;
+            return h;
+        };
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i)
+                h[i] = uint8_t(base + i);
+            return h;
+        };
+
+        // === compute_delay_seed (Phase-1 inputs commitment) ===
+        const uint64_t IDX = 42;
+        const Hash PREV = fill_hash(0x11);
+        const Hash TXR  = fill_hash(0x22);
+        std::vector<Hash> DH = {
+            patterned_hash(0x30), patterned_hash(0x40), patterned_hash(0x50)};
+
+        Hash seed_baseline = compute_delay_seed(IDX, PREV, TXR, DH);
+
+        // 1. Determinism: identical inputs → identical hash.
+        {
+            Hash again = compute_delay_seed(IDX, PREV, TXR, DH);
+            check(seed_baseline == again, "compute_delay_seed deterministic");
+        }
+
+        // 2. block_index sensitivity: incrementing height yields a
+        //    different seed (the height field is the cross-block
+        //    monotonic anchor).
+        {
+            Hash diff = compute_delay_seed(IDX + 1, PREV, TXR, DH);
+            check(seed_baseline != diff,
+                  "compute_delay_seed: block_index sensitivity");
+        }
+
+        // 3. prev_hash sensitivity (chain history anchor).
+        {
+            Hash diff = compute_delay_seed(IDX, fill_hash(0xFE), TXR, DH);
+            check(seed_baseline != diff,
+                  "compute_delay_seed: prev_hash sensitivity");
+        }
+
+        // 4. tx_root sensitivity (block-content anchor).
+        {
+            Hash diff = compute_delay_seed(IDX, PREV, fill_hash(0xFD), DH);
+            check(seed_baseline != diff,
+                  "compute_delay_seed: tx_root sensitivity");
+        }
+
+        // 5. creator_dh_inputs sensitivity: replacing one input changes
+        //    the seed.
+        {
+            auto DH2 = DH;
+            DH2[1] = fill_hash(0xFC);  // different from patterned_hash(0x40)
+            Hash diff = compute_delay_seed(IDX, PREV, TXR, DH2);
+            check(seed_baseline != diff,
+                  "compute_delay_seed: creator_dh_inputs value sensitivity");
+        }
+
+        // 6. Order sensitivity (the COMMITTEE-SELECTION-ORDER invariant):
+        //    swapping two inputs must produce a different seed. Without
+        //    this, a Phase-1 reorder by a malicious gather wouldn't be
+        //    detectable post-Phase-2.
+        {
+            auto DH2 = DH;
+            std::swap(DH2[0], DH2[2]);
+            Hash diff = compute_delay_seed(IDX, PREV, TXR, DH2);
+            check(seed_baseline != diff,
+                  "compute_delay_seed: creator_dh_inputs ORDER sensitivity");
+        }
+
+        // 7. Empty creator_dh_inputs: algebraically still defined (just
+        //    hashes the anchors). The "all-aborted-Phase-1" edge case.
+        {
+            std::vector<Hash> empty;
+            Hash e1 = compute_delay_seed(IDX, PREV, TXR, empty);
+            Hash e2 = compute_delay_seed(IDX, PREV, TXR, empty);
+            check(e1 == e2,
+                  "compute_delay_seed: deterministic on empty creator_dh_inputs");
+            check(e1 != seed_baseline,
+                  "compute_delay_seed: empty inputs distinct from non-empty");
+        }
+
+        // === compute_block_rand (Phase-2 output) ===
+        std::vector<Hash> SECRETS = {
+            patterned_hash(0x60), patterned_hash(0x70), patterned_hash(0x80)};
+        Hash rand_baseline = compute_block_rand(seed_baseline, SECRETS);
+
+        // 8. Determinism.
+        {
+            Hash again = compute_block_rand(seed_baseline, SECRETS);
+            check(rand_baseline == again, "compute_block_rand deterministic");
+        }
+
+        // 9. delay_seed sensitivity: different Phase-1 commitment yields
+        //    different randomness output even with same secrets.
+        {
+            Hash diff_seed = fill_hash(0x99);
+            Hash diff = compute_block_rand(diff_seed, SECRETS);
+            check(rand_baseline != diff,
+                  "compute_block_rand: delay_seed sensitivity");
+        }
+
+        // 10. ordered_secrets sensitivity (value).
+        {
+            auto S2 = SECRETS;
+            S2[1] = fill_hash(0xFB);
+            Hash diff = compute_block_rand(seed_baseline, S2);
+            check(rand_baseline != diff,
+                  "compute_block_rand: ordered_secrets value sensitivity");
+        }
+
+        // 11. ordered_secrets ORDER sensitivity: swapping two secrets
+        //     must change the output. This pairs with assertion 6 to
+        //     enforce the same-order contract between Phase-1 inputs
+        //     and Phase-2 reveals.
+        {
+            auto S2 = SECRETS;
+            std::swap(S2[0], S2[2]);
+            Hash diff = compute_block_rand(seed_baseline, S2);
+            check(rand_baseline != diff,
+                  "compute_block_rand: ordered_secrets ORDER sensitivity");
+        }
+
+        // 12. Domain separation: compute_delay_seed and compute_block_rand
+        //     emit different hashes even when feeding "equivalent" inputs.
+        //     Without separation, an attacker might engineer a delay_seed
+        //     to collide with a future block_rand and bias selection.
+        //     (Trivially true here because of differing input shapes,
+        //     but we lock in the contract.)
+        {
+            std::vector<Hash> empty;
+            Hash d = compute_delay_seed(0, Hash{}, Hash{}, empty);
+            Hash r = compute_block_rand(Hash{}, empty);
+            check(d != r, "compute_delay_seed and compute_block_rand domain-separated");
+        }
+
+        // === proposer_idx (BFT-mode designated proposer) ===
+
+        // 13. Determinism.
+        {
+            std::vector<AbortEvent> aborts;
+            size_t a = proposer_idx(seed_baseline, aborts, 6);
+            size_t b = proposer_idx(seed_baseline, aborts, 6);
+            check(a == b, "proposer_idx deterministic");
+        }
+
+        // 14. In-range invariant: result < committee_size for several
+        //     committee sizes.
+        {
+            bool all_ok = true;
+            for (size_t k : {1ull, 2ull, 3ull, 6ull, 9ull, 100ull}) {
+                size_t idx = proposer_idx(seed_baseline, {}, k);
+                if (idx >= k) { all_ok = false; break; }
+            }
+            check(all_ok, "proposer_idx in-range for k = 1, 2, 3, 6, 9, 100");
+        }
+
+        // 15. Empty committee edge case: returns 0 (the documented
+        //     short-circuit; prevents modulo-by-zero).
+        {
+            size_t idx = proposer_idx(seed_baseline, {}, 0);
+            check(idx == 0, "proposer_idx returns 0 on empty committee");
+        }
+
+        // 16. abort-sensitivity: feeding a single AbortEvent in produces
+        //     a (probably-different) proposer index for the same prev_cum_rand.
+        //     This is the rotation mechanism — abort retries advance the
+        //     proposer index even when the seed hasn't moved.
+        {
+            AbortEvent ae;
+            ae.round = 1;
+            ae.event_hash = fill_hash(0xAB);
+            std::vector<AbortEvent> aborts = {ae};
+            // Probabilistic sensitivity — try a couple of seeds; at least
+            // one of them must produce a different idx with the abort
+            // event factored in.
+            bool found_diff = false;
+            for (uint8_t seed_byte : {0x00, 0x01, 0x02, 0x03, 0x04}) {
+                Hash s = fill_hash(seed_byte);
+                size_t no_aborts = proposer_idx(s, {}, 8);
+                size_t with_aborts = proposer_idx(s, aborts, 8);
+                if (no_aborts != with_aborts) { found_diff = true; break; }
+            }
+            check(found_diff,
+                  "proposer_idx: abort events change output (rotation)");
+        }
+
+        // === required_block_sigs ===
+
+        // 17. MUTUAL_DISTRUST returns committee_size unconditionally.
+        {
+            bool all_ok =
+                required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 1)  == 1 &&
+                required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 3)  == 3 &&
+                required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 6)  == 6 &&
+                required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 9)  == 9 &&
+                required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 100) == 100;
+            check(all_ok, "required_block_sigs(MD, K) == K for all K");
+        }
+
+        // 18. BFT returns ceil(2K/3). Concrete vectors:
+        //     K=1 → 1; K=2 → 2; K=3 → 2; K=4 → 3; K=6 → 4; K=9 → 6; K=12 → 8.
+        //     This is Q within the BFT-shrunk committee (k_bft), not Q
+        //     within genesis K — see required_block_sigs comment.
+        {
+            bool all_ok =
+                required_block_sigs(ConsensusMode::BFT, 1)  == 1 &&
+                required_block_sigs(ConsensusMode::BFT, 2)  == 2 &&
+                required_block_sigs(ConsensusMode::BFT, 3)  == 2 &&
+                required_block_sigs(ConsensusMode::BFT, 4)  == 3 &&
+                required_block_sigs(ConsensusMode::BFT, 6)  == 4 &&
+                required_block_sigs(ConsensusMode::BFT, 9)  == 6 &&
+                required_block_sigs(ConsensusMode::BFT, 12) == 8;
+            check(all_ok, "required_block_sigs(BFT, k) == ceil(2k/3) for k = 1..12");
+        }
+
+        // === count_round1_aborts ===
+
+        // 19. Empty list → 0.
+        {
+            std::vector<AbortEvent> empty;
+            check(count_round1_aborts(empty) == 0,
+                  "count_round1_aborts on empty list returns 0");
+        }
+
+        // 20. Mixed-round filter: counts only round=1, ignores round=2.
+        //     (Round-2 aborts are clock-skew noisy and don't count
+        //     toward suspension or BFT escalation per the protocol.)
+        {
+            AbortEvent r1a; r1a.round = 1; r1a.event_hash = fill_hash(0xA1);
+            AbortEvent r2a; r2a.round = 2; r2a.event_hash = fill_hash(0xA2);
+            AbortEvent r1b; r1b.round = 1; r1b.event_hash = fill_hash(0xA3);
+            AbortEvent r2b; r2b.round = 2; r2b.event_hash = fill_hash(0xA4);
+            AbortEvent r1c; r1c.round = 1; r1c.event_hash = fill_hash(0xA5);
+            std::vector<AbortEvent> mixed = {r1a, r2a, r1b, r2b, r1c};
+            check(count_round1_aborts(mixed) == 3,
+                  "count_round1_aborts filters to round-1 only (3/5)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-rand " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
