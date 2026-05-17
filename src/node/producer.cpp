@@ -46,9 +46,23 @@ ContribMsg ContribMsg::from_json(const json& j) {
     m.signer      = json_require<std::string>(j, "signer");
     m.prev_hash   = from_hex_arr<32>(json_require_hex(j, "prev_hash", 64));
     m.aborts_gen  = j.value("aborts_gen", uint64_t{0});
-    if (j.contains("tx_hashes"))
+    // S-018 defense-in-depth: tx_hashes is optional (Phase-1 contribs
+    // can be sent before any txs are queued), but when present it MUST
+    // be a JSON array. A peer sending `"tx_hashes": "scalar"` or
+    // `"tx_hashes": 42` would otherwise throw an opaque nlohmann
+    // internal error rather than a clean "tx_hashes must be array"
+    // diagnostic. The field name was previously absent from the
+    // S-018 error path; now mirrors Block::from_json's
+    // json_require_array pattern.
+    if (j.contains("tx_hashes")) {
+        if (!j["tx_hashes"].is_array()) {
+            throw std::runtime_error(
+                "S-018: CONTRIB field 'tx_hashes' must be a JSON array "
+                "(got " + std::string(j["tx_hashes"].type_name()) + ")");
+        }
         for (auto& h : j["tx_hashes"])
             m.tx_hashes.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
     m.dh_input = from_hex_arr<32>(json_require_hex(j, "dh_input", 64));
     m.ed_sig   = from_hex_arr<64>(json_require_hex(j, "ed_sig", 128));
     return m;

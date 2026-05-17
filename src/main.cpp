@@ -6960,6 +6960,29 @@ int main(int argc, char** argv) {
             check(ok, "make_contrib produces sig that verifies under signer's pubkey");
         }
 
+        // === S-018 defense-in-depth: ContribMsg::from_json rejects
+        //     wrong-type tx_hashes (e.g., a peer sending the field
+        //     as a scalar instead of an array). Previously this would
+        //     throw an opaque nlohmann error; now it surfaces a clean
+        //     "tx_hashes must be array" S-018 diagnostic. ===
+        {
+            json bad = {
+                {"block_index", 42}, {"signer", "alice"},
+                {"prev_hash",   std::string(64, '0')},
+                {"tx_hashes",   "not_an_array"},  // wrong type
+                {"dh_input",    std::string(64, '0')},
+                {"ed_sig",      std::string(128, '0')}
+            };
+            bool threw = false;
+            std::string what;
+            try { (void)ContribMsg::from_json(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "ContribMsg::from_json rejects non-array 'tx_hashes' (S-018 defense-in-depth)");
+            check(what.find("tx_hashes") != std::string::npos,
+                  "ContribMsg S-018 error message mentions 'tx_hashes' field name");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": consensus-msgs " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
