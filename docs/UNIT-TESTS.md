@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-14 subcommands; 231 assertions; runs in <12s with no flakes.
+19 subcommands; 335 assertions; runs in <14s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -88,14 +88,24 @@ during development. Each new test wrapper must be added to the
 | `determ test-state-root` | `Chain::compute_state_root()` commitment algebra (13 assertions): determinism (K-of-K consensus precondition), purity (no internal-state leak between calls), non-zero baseline (k: leaves always present), per-field sensitivity for every public `set_*()` that maps into a k:-namespace leaf, invertibility (change-then-revert returns to original root), cross-namespace distinction (no accidental collisions), order independence (setter call order doesn't affect root — leaves sorted internally). S-033 / v2.1 / S-037 / S-038 surface. | `tools/test_state_root_unit.sh` | FA1 (state commitment) |
 | `determ test-block-digest` | `compute_block_digest` (FA1 Phase-2 signature target) (19 assertions): INCLUSION contract (every digested field — index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators, creator_tx_lists, creator_ed_sigs, creator_dh_inputs — changes the digest when mutated) + EXCLUSION contract (S-030 D2 / Phase-2-reveal / v2.7 F2 territory fields MUST NOT change the digest: delay_output, creator_dh_secrets, cumulative_rand, abort_events, equivocation_events, state_root, partner_subset_hash, timestamp). "Fences" the digest at exactly the surface FA1 / S-030 D2 / v2.7 F2 assume. | `tools/test_block_digest.sh` | FA1 (signature target) |
 | `determ test-block-hash` | `Block::signing_bytes()` + `Block::compute_hash()` — FA1 chain-anchor identity (16 assertions). compute_hash binds EVERY consensus-relevant field of the block including Phase-2-reveal fields and apply-time-recomputed state_root, so its output becomes prev_hash on every subsequent block. Covers determinism + purity, field-sensitivity for timestamp / delay_output / creator_dh_secrets / cumulative_rand / creator_block_sigs, zero-skip backward-compat for partner_subset_hash (R4 Phase 3) and state_root (S-033) — both bound only when non-zero so pre-feature blocks retain byte-identical hashes, creators[] ORDER sensitivity, and S-030 D2 chain-anchor distinction (two same-digest blocks differing in equivocation_events have different compute_hash outputs). | `tools/test_block_hash.sh` | FA1 (chain identity) |
+| `determ test-genesis` | `compute_genesis_hash` + `make_genesis_block` — chain identity origin (19 assertions). Locks in chain_id sensitivity + the **S-039 diagnostic-UX gap** (m_creators / k_block_sigs / block_subsidy / min_stake / initial_shard_count / bft_enabled NOT bound into hash → discovered during test authoring; fix is wire-compat break, deferred to coordinated migration). Fields that ARE bound: shard_id, chain_role, suspension_slash + merge_threshold_blocks (when non-default), genesis_message, committee_region (when non-empty). make_genesis_block invariants (index 0, prev_hash zero, compute_hash matches). JSON round-trip preserves identity hash; oversized genesis_message rejected. | `tools/test_genesis.sh` | chain identity + S-039 |
 
-### 2.3 Randomness + consensus arithmetic
+### 2.3 Randomness + consensus arithmetic + tx-root
 
 | Subcommand | What it tests | Wrapper | FA-track |
 |---|---|---|---|
 | `determ test-block-rand` | V8 randomness primitives (21 assertions): `compute_delay_seed` (Phase-1 inputs commitment), `compute_block_rand` (Phase-2 output), `proposer_idx` (BFT-mode designated proposer), `required_block_sigs` (MD vs BFT quorum), `count_round1_aborts` (suspension + escalation tally). Determinism + every-input-field sensitivity + creator_dh_inputs / ordered_secrets ORDER sensitivity (the committee-selection-order contract pairing Phase-1 commits with Phase-2 reveals — without this, a malicious gather could reorder reveals to bias future randomness), domain separation between the two hash functions, proposer_idx in-range invariant + abort-rotation mechanism + empty-committee short-circuit, required_block_sigs golden vectors for MD = K and BFT = ceil(2K/3) (K = 1..12), count_round1_aborts round-2 filter. | `tools/test_block_rand.sh` | FA1 / FA5 / FA8 |
+| `determ test-tx-root` | `compute_tx_root` — K-committee union-of-tx-hashes commitment (10 assertions). Union semantics ({A,B} ∪ {B,C} == {A,B,C}, NOT intersection {B}), dedup, list permutation invariance, within-list order invariance, empty inner list invariance, sensitivity to added tx. **The FA2 censorship-resistance primitive** — regression to intersection (note S-025 deletion: intersection variant was removed) would silently let one member exclude txs. | `tools/test_tx_root.sh` | FA2 (censorship) |
 
-### 2.4 Network surface
+### 2.4 Consensus message surface
+
+| Subcommand | What it tests | Wrapper | FA-track |
+|---|---|---|---|
+| `determ test-transaction` | `Transaction::signing_bytes` + `compute_hash` + Ed25519 sign/verify + JSON round-trip (28 assertions). signing_bytes determinism + per-field sensitivity for all 8 core fields, sig/hash EXCLUSION (would be circular — sender signs over their OWN signing bytes), compute_hash == SHA-256(signing_bytes) golden contract, real Ed25519 sign + tampered-tx-fails-verify round-trip, full JSON round-trip for TRANSFER + type-preservation for all 9 other TxType variants, S-018 strict-rejection, unique-tx-identity contract. | `tools/test_transaction.sh` | tx-level FA1 + S-018 |
+| `determ test-merge-event-codec` | `MergeEvent::encode` / `::decode` (R4 under-quorum merge wire format; 19 assertions). BEGIN + END round-trips with empty-region preservation, size invariant, decode rejection paths (too-short / invalid event_type / region_len > 32 / size mismatch), determinism + per-field sensitivity, maximum-region (32 bytes) round-trip. | `tools/test_merge_event_codec.sh` | R4 / FA8 |
+| `determ test-consensus-msgs` | ContribMsg + BlockSigMsg + AbortClaimMsg + their commitment-hash helpers (`make_contrib_commitment` + `make_abort_claim_message`); 28 assertions. Per-helper determinism + per-input sensitivity (including tx_hashes ORDER for contrib — sorted-ascending contract); round sensitivity in abort claim (defeats Phase-1 vs Phase-2 replay); domain separation between commitment hashes; full JSON round-trip for all three message types; make_contrib produces a sig that verifies under signer's pubkey via real Ed25519. | `tools/test_consensus_msgs.sh` | FA1 (consensus messages) |
+
+### 2.5 Network surface
 
 | Subcommand | What it tests | Wrapper | FA-track |
 |---|---|---|---|
@@ -114,10 +124,9 @@ during development. Each new test wrapper must be added to the
 | Equivocation event verification | `validator::check_equivocation_events` | FA6 closure surface | ~1d (requires partial NodeRegistry fixture) |
 | Bounded mempool | `Node::mempool_admit_check` / `mempool_make_room_for` (S-008) | Admission/eviction policy invariants | ~1d (needs partial Node fixture) |
 | AbortClaimMsg verification | `validator::verify_abort_claim` | FA3 surface | ~½d |
-| Genesis loader | `genesis_from_config` | Identity hash + initial-state contract | ~½d |
-| Transaction signing_bytes / signature | `Transaction::signing_bytes` + Ed25519 sign | wire-format integrity at the leaf level | ~½d |
-| MergeEvent encode/decode | `MergeEvent::encode` / `decode` (R4 wire format) | merge-mode integrity invariant | ~½d |
-| ContribMsg / BlockSigMsg / AbortClaimMsg signing | `make_contrib` / signing_bytes for each | consensus message signature target | ~1d |
+| genesis_from_config end-to-end | full initial_state install + chain state seeding | Identity hash + seeded-state contract | ~½d (now that `test-genesis` covers compute_genesis_hash) |
+| S-039 fix (operational params binding) | bind m_creators / k_block_sigs / etc. into compute_genesis_hash | Diagnostic-UX gap closure — fix is wire-compat break needing coordinated migration | ~½d code + coordinated rollout |
+| Param-change application | `Chain::apply_param_change` (A5 governance) | governance correctness | ~1d |
 
 ### 3.2 Mid-level invariants
 

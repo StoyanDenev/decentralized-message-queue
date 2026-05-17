@@ -234,6 +234,15 @@ In-process tests (deterministic, no network):
                                               hashes (make_contrib_commitment +
                                               make_abort_claim_message);
                                               domain-separation + sign/verify
+  determ test-tx-root                         compute_tx_root union semantics
+                                              (FA2 censorship resistance:
+                                              {A,B} ∪ {B,C} == {A,B,C}, NOT
+                                              intersection); dedup + order
+                                              invariance
+  determ test-genesis                         compute_genesis_hash +
+                                              make_genesis_block — chain
+                                              identity origin + S-039
+                                              diagnostic-UX gap lock-in
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -6734,6 +6743,347 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": consensus-msgs " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for compute_tx_root —
+    // the K-committee union-of-tx-hashes commitment. This is the
+    // censorship-resistance primitive: a tx is included iff ANY of K
+    // committee members proposed it (union semantics). A regression
+    // here would either let one member silently exclude txs (if
+    // intersection were used by mistake) OR scramble the canonical
+    // tx_root across nodes (if the dedup/sort weren't deterministic).
+    if (cmd == "test-tx-root") {
+        using namespace determ;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+
+        // 1. Empty input: well-defined hash (zero-input SHA-256).
+        {
+            std::vector<std::vector<Hash>> empty;
+            Hash r = compute_tx_root(empty);
+            // Just check it's deterministic — exact value is documented
+            // by the SHA256(empty) golden vector elsewhere.
+            check(compute_tx_root(empty) == r,
+                  "compute_tx_root: empty input deterministic");
+        }
+
+        // 2. Single list, single hash: produces a specific value.
+        {
+            std::vector<std::vector<Hash>> v = {{patterned_hash(0x10)}};
+            Hash r1 = compute_tx_root(v);
+            Hash r2 = compute_tx_root(v);
+            check(r1 == r2, "compute_tx_root: deterministic on single tx");
+        }
+
+        // 3. Union semantics: {A,B}, {B,C} → {A,B,C} canonical, NOT
+        //    intersection {B}. A regression to intersection would
+        //    silently break censorship resistance.
+        {
+            Hash A = patterned_hash(0x10);
+            Hash B = patterned_hash(0x20);
+            Hash C = patterned_hash(0x30);
+            std::vector<std::vector<Hash>> two_lists = {{A, B}, {B, C}};
+            Hash r_union = compute_tx_root(two_lists);
+
+            // Comparison: a single list containing {A, B, C} should
+            // produce the same hash (union semantics).
+            std::vector<std::vector<Hash>> single = {{A, B, C}};
+            Hash r_single = compute_tx_root(single);
+            check(r_union == r_single,
+                  "compute_tx_root: union semantics ({A,B} ∪ {B,C} == {A,B,C})");
+
+            // Sanity: intersection would be {B} — different hash.
+            std::vector<std::vector<Hash>> intersection = {{B}};
+            Hash r_intersection = compute_tx_root(intersection);
+            check(r_union != r_intersection,
+                  "compute_tx_root: result is NOT the intersection {B}");
+        }
+
+        // 4. Deduplication: the same hash in multiple lists is counted
+        //    once. Defeats committee members from inflating tx_root by
+        //    re-including the same tx multiple times.
+        {
+            Hash A = patterned_hash(0x10);
+            std::vector<std::vector<Hash>> v1 = {{A}};
+            std::vector<std::vector<Hash>> v2 = {{A}, {A}, {A}};
+            check(compute_tx_root(v1) == compute_tx_root(v2),
+                  "compute_tx_root: deduplicates identical hashes across lists");
+        }
+
+        // 5. Order independence at the list level: which committee
+        //    member proposes which subset doesn't affect the canonical
+        //    root.
+        {
+            Hash A = patterned_hash(0x10);
+            Hash B = patterned_hash(0x20);
+            Hash C = patterned_hash(0x30);
+            std::vector<std::vector<Hash>> v1 = {{A, B}, {C}};
+            std::vector<std::vector<Hash>> v2 = {{C}, {A, B}};
+            std::vector<std::vector<Hash>> v3 = {{B}, {A, C}};
+            Hash r1 = compute_tx_root(v1);
+            Hash r2 = compute_tx_root(v2);
+            Hash r3 = compute_tx_root(v3);
+            check(r1 == r2 && r2 == r3,
+                  "compute_tx_root: list permutation invariance (same union → same hash)");
+        }
+
+        // 6. Order independence within a list: dedup is via std::set
+        //    which sorts internally, so within-list order doesn't
+        //    affect the root either.
+        {
+            Hash A = patterned_hash(0x10);
+            Hash B = patterned_hash(0x20);
+            std::vector<std::vector<Hash>> v1 = {{A, B}};
+            std::vector<std::vector<Hash>> v2 = {{B, A}};
+            check(compute_tx_root(v1) == compute_tx_root(v2),
+                  "compute_tx_root: within-list tx order doesn't affect root");
+        }
+
+        // 7. Adding any tx changes the root. (Sensitivity check —
+        //    couldn't silently drop a tx via a bookkeeping bug.)
+        {
+            Hash A = patterned_hash(0x10);
+            Hash B = patterned_hash(0x20);
+            std::vector<std::vector<Hash>> v1 = {{A}};
+            std::vector<std::vector<Hash>> v2 = {{A, B}};
+            check(compute_tx_root(v1) != compute_tx_root(v2),
+                  "compute_tx_root: adding a tx changes the root");
+        }
+
+        // 8. Empty inner lists don't break: a committee member with
+        //    nothing to contribute is valid; their empty list doesn't
+        //    inflate or scramble the root.
+        {
+            Hash A = patterned_hash(0x10);
+            std::vector<std::vector<Hash>> v1 = {{A}};
+            std::vector<std::vector<Hash>> v2 = {{A}, {}};
+            std::vector<std::vector<Hash>> v3 = {{A}, {}, {}};
+            check(compute_tx_root(v1) == compute_tx_root(v2),
+                  "compute_tx_root: empty inner list doesn't affect root");
+            check(compute_tx_root(v2) == compute_tx_root(v3),
+                  "compute_tx_root: multiple empty inner lists don't affect root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": tx-root " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for genesis_from_config
+    // — the chain identity origin. Every node MUST compute the same
+    // genesis_hash from the same GenesisConfig or the chain identity
+    // diverges (operators see "genesis_hash mismatch" at startup). The
+    // hash inputs include every consensus-critical genesis parameter,
+    // so changing ANY of them must produce a different identity.
+    if (cmd == "test-genesis") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto make_base_cfg = []() {
+            GenesisConfig c;
+            c.chain_id        = "test-genesis";
+            c.m_creators      = 3;
+            c.k_block_sigs    = 3;
+            c.block_subsidy   = 100;
+            c.subsidy_pool_initial = 10000;
+            c.min_stake       = 1000;
+            c.suspension_slash = 10;
+            c.unstake_delay   = 500;
+            c.bft_enabled     = true;
+            c.bft_escalation_threshold = 5;
+            c.shard_id        = 0;
+            c.initial_shard_count = 1;
+            c.epoch_blocks    = 1000;
+            return c;
+        };
+
+        Hash base_hash = compute_genesis_hash(make_base_cfg());
+
+        // 1. Determinism: two identical configs produce identical hashes.
+        {
+            check(compute_genesis_hash(make_base_cfg()) == base_hash,
+                  "compute_genesis_hash deterministic");
+        }
+
+        // 2. chain_id sensitivity. The primary chain-identity anchor —
+        //    different chain_ids MUST produce different genesis hashes.
+        {
+            GenesisConfig c = make_base_cfg();
+            c.chain_id = "different-chain-id";
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: chain_id sensitivity");
+        }
+
+        // === Documented GAP: operational params NOT in genesis hash ===
+        //
+        // Discovered during this test's authoring: the following config
+        // fields contribute NOTHING to compute_genesis_hash, by current
+        // design (make_genesis_block only mixes chain_id + chain_role +
+        // shard_id + committee_region + genesis_message + creators'
+        // ed_pubs + governance fields + suspension_slash/unstake_delay +
+        // merge thresholds):
+        //
+        //   * m_creators            — committee size K
+        //   * k_block_sigs          — Phase-2 quorum within committee
+        //   * block_subsidy         — E1 economics
+        //   * subsidy_pool_initial  — E1 economics
+        //   * subsidy_mode          — E1 economics
+        //   * min_stake             — economics + Sybil-cost
+        //   * initial_shard_count   — sharding topology
+        //   * bft_enabled           — BFT escalation gate
+        //   * bft_escalation_threshold
+        //   * epoch_blocks          — committee-selection epoch length
+        //   * shard_address_salt    — sharding routing salt
+        //
+        // Diagnostic-UX impact: if two operators run the same chain_id
+        // with different m_creators, the chain fails to advance
+        // (different K-committees per node → signature gathering
+        // never converges), but they don't see "your config doesn't
+        // match the chain's m_creators" — only cryptic consensus
+        // failures.
+        //
+        // Wire-compat impact: making any of these consensus-critical,
+        // and binding them into compute_genesis_hash, would change
+        // every existing chain's genesis hash → wire-compat break.
+        // Not in this commit's scope; tracked as a forward-dev item.
+        //
+        // Test lock-in: assert the CURRENT no-effect behavior so we
+        // notice if it changes accidentally (e.g., someone adds one
+        // of these to the hash without a coordinated migration).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.m_creators = 5;
+            check(compute_genesis_hash(c) == base_hash,
+                  "compute_genesis_hash: m_creators NOT in hash (current — diagnostic-UX gap)");
+            c = make_base_cfg(); c.k_block_sigs = 2;
+            check(compute_genesis_hash(c) == base_hash,
+                  "compute_genesis_hash: k_block_sigs NOT in hash (current — diagnostic-UX gap)");
+            c = make_base_cfg(); c.block_subsidy = 200;
+            check(compute_genesis_hash(c) == base_hash,
+                  "compute_genesis_hash: block_subsidy NOT in hash (current — diagnostic-UX gap)");
+            c = make_base_cfg(); c.min_stake = 2000;
+            check(compute_genesis_hash(c) == base_hash,
+                  "compute_genesis_hash: min_stake NOT in hash (current — diagnostic-UX gap)");
+            c = make_base_cfg(); c.initial_shard_count = 4;
+            check(compute_genesis_hash(c) == base_hash,
+                  "compute_genesis_hash: initial_shard_count NOT in hash (current — diagnostic-UX gap)");
+            c = make_base_cfg(); c.bft_enabled = false;
+            check(compute_genesis_hash(c) == base_hash,
+                  "compute_genesis_hash: bft_enabled NOT in hash (current — diagnostic-UX gap)");
+        }
+
+        // === Fields that ARE bound into the genesis hash ===
+
+        // 7. shard_id sensitivity (different shards on the same
+        //    deployment have distinct chain identities — they should
+        //    never be confused for each other).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.shard_id = 1;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: shard_id sensitivity");
+        }
+
+        // 8. chain_role sensitivity (BEACON vs SHARD vs SINGLE genesis
+        //    blocks at the same chain_id + shard_id must differ).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.chain_role = ChainRole::BEACON;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: chain_role sensitivity");
+        }
+
+        // 9. suspension_slash sensitivity (non-default value is mixed
+        //    in per make_genesis_block lines 400-403).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.suspension_slash = 999;  // non-default; mixes
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: suspension_slash sensitivity (non-default → mixed)");
+        }
+
+        // 10. merge_threshold_blocks sensitivity (non-default mixes per
+        //     lines 405-412).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.merge_threshold_blocks = 999;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: merge_threshold_blocks sensitivity (non-default → mixed)");
+        }
+
+        // 11. genesis_message sensitivity (S-035 seed already covers
+        //     this in test-genesis-message, but redundant lock-in here
+        //     proves the integration through compute_genesis_hash).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.genesis_message = "Custom inscription";
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: genesis_message sensitivity (S-035 cross-check)");
+        }
+
+        // 12. committee_region sensitivity (R1 — only mixed when
+        //     non-empty per make_genesis_block lines 367-370).
+        {
+            GenesisConfig c = make_base_cfg();
+            c.committee_region = "us-east";
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: committee_region sensitivity (non-empty → mixed)");
+        }
+
+        // 13. make_genesis_block: produces a Block 0 with index = 0
+        //     and consistent compute_hash.
+        {
+            GenesisConfig c = make_base_cfg();
+            Block g = make_genesis_block(c);
+            check(g.index == 0, "make_genesis_block: index == 0");
+            check(g.prev_hash == Hash{},
+                  "make_genesis_block: prev_hash == zero (genesis has no parent)");
+            // Identity hash should match compute_genesis_hash.
+            check(g.compute_hash() == compute_genesis_hash(c),
+                  "make_genesis_block: compute_hash matches compute_genesis_hash");
+        }
+
+        // 14. JSON round-trip preserves genesis identity. A config
+        //     loaded from JSON should compute the same hash as the
+        //     original.
+        {
+            GenesisConfig c = make_base_cfg();
+            auto j = c.to_json();
+            GenesisConfig back = GenesisConfig::from_json(j);
+            check(compute_genesis_hash(back) == base_hash,
+                  "GenesisConfig JSON round-trip preserves identity hash");
+        }
+
+        // 15. Oversized genesis_message rejected at JSON-load.
+        {
+            GenesisConfig c = make_base_cfg();
+            auto j = c.to_json();
+            j["genesis_message"] = std::string(GENESIS_MESSAGE_MAX_BYTES + 1, 'x');
+            bool threw = false;
+            try { (void)GenesisConfig::from_json(j); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "GenesisConfig::from_json rejects oversized genesis_message");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": genesis " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
