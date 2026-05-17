@@ -764,7 +764,39 @@ Genesis is block 0 with `initial_state` carrying creator/account allocations. It
 
 A node refusing to start on hash mismatch is the eclipse defense: a peer cannot trick a fresh node onto a fork by serving a fabricated genesis.
 
-### 12.3 Profile presets
+### 12.3 Genesis block builder invariants
+
+`make_genesis_block(GenesisConfig)` (in `src/chain/genesis.cpp`) materializes block 0 from a `GenesisConfig`. The output Block satisfies an exact bootstrap contract that every chain instance depends on:
+
+**Structural defaults:**
+- `index == 0`
+- `prev_hash == zero` (orphans root — no parent)
+- `timestamp == 0` (genesis is timeless; downstream nodes must not interpret it as wall-clock)
+- `transactions[]` empty (genesis has no tx semantics; `initial_state` carries the allocations)
+- `creator_tx_lists`, `creator_ed_sigs`, `creator_dh_inputs`, `creator_dh_secrets`, `creator_block_sigs` all empty (no committee signatures at genesis)
+- `tx_root == zero` (empty transactions → empty union)
+- `delay_seed`, `delay_output`, `cumulative_rand` all zero (no Phase-1 / Phase-2 / V8 inputs at genesis)
+- `consensus_mode == MUTUAL_DISTRUST`; `bft_proposer == ""` (no BFT escalation at genesis)
+- `abort_events`, `equivocation_events`, `cross_shard_receipts`, `inbound_receipts` all empty
+
+**Creator-list invariants:**
+- `creators[]` populated from `GenesisConfig.initial_creators[].domain` (domain-only)
+- `creators[]` sorted **alphabetically** regardless of `initial_creators[]` insertion order. This is the determinism contract: two operators running `determ init` against the same `GenesisConfig` from different working directories produce byte-identical genesis blocks. Block-1's first committee selection draws from this sorted list via `cumulative_rand`.
+
+**`initial_state` population:**
+- One entry per `initial_creators[]`, preserving `domain` / `ed_pub` / `stake` / `region` (R1). `balance` defaults to 0 unless overridden by an `initial_balances` merge.
+
+**`initial_balances` merge semantics:**
+- For each entry in `initial_balances[]`: if the domain already exists in `initial_state` (i.e., it's an initial creator), the balance is **added** to that entry's `balance` field — in-place merge, no duplicate entry.
+- For each entry whose domain is **not** in `initial_creators[]`: a new `initial_state` entry is created with `domain` + `balance` set, `stake == 0`, `ed_pub == zero`, `region == ""`. These are pure-balance recipients — faucet wallets, treasury accounts, pre-mine allocations — that receive funds at genesis but aren't validators.
+- At apply time (`Chain::apply_transactions` index-0 branch), pure-balance entries skip the registrant + stake creation (`if (ed_pub != zero) ...` and `if (stake > 0) ...`), so an entry with default `ed_pub` and `stake == 0` ends up as a plain `AccountState` only.
+
+**Determinism:**
+- Same `GenesisConfig` → byte-identical `Block` on every call. No wall-clock, no `/dev/urandom`, no map-iteration-order leak. Critical for cross-node genesis agreement: a node that loads the same JSON file from disk and a peer that receives the same JSON over gossip must compute the same `compute_genesis_hash` and the same block-0 hash.
+
+Test surface: `tools/test_make_genesis_block.sh` exercises every invariant above (34 in-process assertions).
+
+### 12.4 Profile presets
 
 `determ init --profile <name>` writes a config matching one of these production presets (values from `include/determ/chain/params.hpp::PROFILE_*`):
 

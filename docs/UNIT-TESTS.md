@@ -290,6 +290,42 @@ assertions cover>
 Verified: FAST=1 suite N/N PASS in <Ts>.
 ```
 
+### 4.8 Byte-layout golden-vector pattern
+
+Three existing tests lock the exact byte layout of wire-format payloads via concrete golden vectors rather than just sensitivity assertions:
+
+- **`test-tx-signing-bytes`** — `Transaction::signing_bytes` (40 assertions)
+- **`test-merge-event-bytes`** — `MergeEvent::encode` (48 assertions)
+- **`test-block-rand`** (partial) — `compute_delay_seed` / `compute_block_rand` field-ordering
+
+Use this pattern when a new wire-format surface enters the codebase. Sensitivity tests catch "this field changes the output" regressions but miss "the byte position of this field shifted by N" or "endianness flipped from BE to LE" regressions. A clean BE-vs-LE flip would still pass every sensitivity assertion but silently fork the protocol across versions.
+
+**Recipe:**
+
+1. **Pick a minimal input** with default values for every field except the one(s) under test. The output should be a known byte sequence (usually all-zero or a specific small pattern).
+
+2. **Assert the byte at each significant offset.** For example, if `amount` lives at offset 19 in `signing_bytes` as big-endian u64:
+   ```cpp
+   Transaction t; t.amount = 1;
+   auto sb = t.signing_bytes();
+   check(sb[19] == 0 && sb[20] == 0 && /* ... */ && sb[26] == 1,
+         "amount=1: BE u64 at offsets [19..26], LSB at 26");
+   ```
+
+3. **Pick a non-zero pattern** like `0x0102030405060708` that uniquely identifies each byte position. The assertion verifies every byte:
+   ```cpp
+   t.amount = 0x0102030405060708ULL;
+   sb = t.signing_bytes();
+   check(sb[19] == 0x01 && sb[20] == 0x02 && /* ... */ && sb[26] == 0x08,
+         "amount=0x0102030405060708: BE byte pattern at [19..26]");
+   ```
+
+4. **Combined-field golden vector.** A single Transaction / MergeEvent with EVERY field non-default; one omnibus assertion verifies every byte position together. Catches subtle field-reorder regressions that single-field tests might miss.
+
+5. **Endian contrast (when applicable).** Document the BE vs LE choice in the test's comment header. Transaction uses BE (cross-platform hash-input convention per Preliminaries §1.3); MergeEvent uses LE (native memory layout for x86/ARM wire targets). Locking the EXACT byte position via golden vector is the only mechanism that catches a silent endian-flip.
+
+This pattern is mechanical to extend: any new wire-format type with documented byte positions gains a paired `test-<feature>-bytes` test alongside its sensitivity test.
+
 ---
 
 ## 5. Test discipline
