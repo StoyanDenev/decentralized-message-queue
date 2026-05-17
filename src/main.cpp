@@ -319,6 +319,10 @@ In-process tests (deterministic, no network):
                                               values + UINT64_MAX sentinel
                                               semantics (protocol-critical
                                               "active until concrete event")
+  determ test-validator-config                BlockValidator setters
+                                              (K / M / BFT / region / mode /
+                                              governance) + validate() genesis
+                                              short-circuit invariant
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -10073,6 +10077,237 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-types " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for BlockValidator's
+    // public configuration API + the validate() short-circuit on
+    // genesis blocks.
+    //
+    // BlockValidator's check_* helpers are private (need Chain +
+    // NodeRegistry fixtures to exercise meaningfully), but the
+    // public API surface — setters + validate() — has invariants
+    // worth locking in: setters must accept their documented values
+    // without throwing; validate() on a genesis block (index 0)
+    // must return OK regardless of validator config (genesis trust
+    // comes from the pinned genesis hash, not signature checks).
+    if (cmd == "test-validator-config") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. Default-constructed BlockValidator: no throw.
+        {
+            bool ok = true;
+            try { BlockValidator v; (void)v; }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "BlockValidator default-construct succeeds");
+        }
+
+        // 2. set_k_block_sigs accepts a range of values.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_k_block_sigs(1);
+                v.set_k_block_sigs(3);
+                v.set_k_block_sigs(7);
+                v.set_k_block_sigs(100);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_k_block_sigs accepts K = 1, 3, 7, 100 without throw");
+        }
+
+        // 3. set_m_pool accepts a range of values.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_m_pool(1);
+                v.set_m_pool(3);
+                v.set_m_pool(10);
+                v.set_m_pool(1000);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_m_pool accepts M = 1, 3, 10, 1000 without throw");
+        }
+
+        // 4. set_bft_enabled toggles.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_bft_enabled(true);
+                v.set_bft_enabled(false);
+                v.set_bft_enabled(true);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_bft_enabled toggles true/false without throw");
+        }
+
+        // 5. set_bft_escalation_threshold accepts realistic values.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_bft_escalation_threshold(0);
+                v.set_bft_escalation_threshold(5);
+                v.set_bft_escalation_threshold(100);
+                v.set_bft_escalation_threshold(UINT32_MAX);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_bft_escalation_threshold accepts 0..UINT32_MAX without throw");
+        }
+
+        // 6. set_epoch_blocks accepts a range.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_epoch_blocks(1);
+                v.set_epoch_blocks(1000);
+                v.set_epoch_blocks(10000);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_epoch_blocks accepts 1..10000 without throw");
+        }
+
+        // 7. set_shard_id round-trips a ShardId.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_shard_id(ShardId{0});
+                v.set_shard_id(ShardId{1});
+                v.set_shard_id(ShardId{7});
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_shard_id accepts 0, 1, 7 without throw");
+        }
+
+        // 8. set_committee_region accepts an empty + non-empty region.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_committee_region("");
+                v.set_committee_region("us-east");
+                v.set_committee_region("eu-west");
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_committee_region accepts empty + valid region without throw");
+        }
+
+        // 9. set_sharding_mode accepts every enum variant.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_sharding_mode(ShardingMode::NONE);
+                v.set_sharding_mode(ShardingMode::CURRENT);
+                v.set_sharding_mode(ShardingMode::EXTENDED);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_sharding_mode accepts NONE / CURRENT / EXTENDED without throw");
+        }
+
+        // 10. set_governance_mode accepts 0 (uncontrolled) and 1 (governed).
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_governance_mode(0);
+                v.set_governance_mode(1);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_governance_mode accepts 0 + 1 without throw");
+        }
+
+        // 11. set_param_keyholders accepts empty + populated vectors.
+        {
+            BlockValidator v;
+            std::vector<PubKey> empty;
+            std::vector<PubKey> three(3, PubKey{});
+            bool ok = true;
+            try {
+                v.set_param_keyholders(empty);
+                v.set_param_keyholders(three);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_param_keyholders accepts empty + 3-element vector without throw");
+        }
+
+        // 12. set_param_threshold accepts a range.
+        {
+            BlockValidator v;
+            bool ok = true;
+            try {
+                v.set_param_threshold(0);
+                v.set_param_threshold(1);
+                v.set_param_threshold(3);
+                v.set_param_threshold(255);
+            } catch (const std::exception&) { ok = false; }
+            check(ok, "set_param_threshold accepts 0, 1, 3, 255 without throw");
+        }
+
+        // === validate() short-circuit on genesis ===
+
+        // 13. validate() on a genesis block (index 0) returns OK
+        //     regardless of validator config — genesis trust is
+        //     anchored in the pinned genesis hash, not signature
+        //     checks. This is the documented short-circuit at
+        //     validator.cpp:24.
+        {
+            BlockValidator v;
+            v.set_k_block_sigs(3);
+            v.set_m_pool(3);
+            Chain c;
+            NodeRegistry reg;
+            Block b;
+            b.index = 0;  // genesis
+            b.prev_hash = Hash{};
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+            auto r = v.validate(b, c, reg);
+            check(r.ok, "validate() short-circuits OK on genesis (index 0)");
+            check(r.error.empty(), "validate(genesis): no error message");
+        }
+
+        // 14. validate() on genesis with default-constructed
+        //     validator (no setters called) — also short-circuits OK.
+        //     Validates that the short-circuit doesn't depend on
+        //     prior setter calls.
+        {
+            BlockValidator v;
+            Chain c;
+            NodeRegistry reg;
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 0;
+            b.cumulative_rand = Hash{};
+            auto r = v.validate(b, c, reg);
+            check(r.ok,
+                  "validate() short-circuits OK on genesis with default validator");
+        }
+
+        // 15. validate() on genesis still works even when validator
+        //     config is "unusual" (BFT disabled, all-1 thresholds,
+        //     EXTENDED sharding) — the short-circuit is unconditional.
+        {
+            BlockValidator v;
+            v.set_k_block_sigs(1);
+            v.set_m_pool(1);
+            v.set_bft_enabled(false);
+            v.set_bft_escalation_threshold(0);
+            v.set_sharding_mode(ShardingMode::EXTENDED);
+            v.set_committee_region("us-east");
+            Chain c;
+            NodeRegistry reg;
+            Block b;
+            b.index = 0;
+            auto r = v.validate(b, c, reg);
+            check(r.ok,
+                  "validate() short-circuits OK on genesis under EXTENDED sharding + BFT-disabled config");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": validator-config " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
