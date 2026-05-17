@@ -6,6 +6,7 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/merkle.hpp>
+#include <determ/util/json_validate.hpp>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
@@ -17,6 +18,7 @@ namespace determ::chain {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 using determ::crypto::sha256;
+using determ::util::json_require_array;
 
 // Registration / deregistration randomized delay window. Kept in sync with
 // node/registry.hpp REGISTRATION_DELAY_WINDOW; we duplicate the constant here
@@ -1734,8 +1736,17 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     // genesis_total deferred until after accounts/stakes load so legacy
     // snapshots (without the field) can fall back to live sum.
 
+    // S-018 defense-in-depth: each optional snapshot collection
+    // uses json_require_array inside its contains() guard. Missing
+    // field = empty default (preserves backward-compat with legacy
+    // snapshots that omit optional fields); wrong-type field
+    // (peer sent scalar instead of array) throws a clean S-018
+    // diagnostic instead of an opaque nlohmann mid-iteration error.
+    // Snapshots arrive via SNAPSHOT_RESPONSE gossip (16 MB cap, an
+    // attack-relevant channel) and via operator-pinned files on
+    // disk.
     if (snap.contains("accounts")) {
-        for (auto& a : snap["accounts"]) {
+        for (auto& a : json_require_array(snap, "accounts")) {
             AccountState s;
             s.balance    = a.value("balance",    uint64_t{0});
             s.next_nonce = a.value("next_nonce", uint64_t{0});
@@ -1743,7 +1754,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
     if (snap.contains("stakes")) {
-        for (auto& s : snap["stakes"]) {
+        for (auto& s : json_require_array(snap, "stakes")) {
             StakeEntry e;
             e.locked        = s.value("locked",        uint64_t{0});
             e.unlock_height = s.value("unlock_height", UINT64_MAX);
@@ -1751,7 +1762,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
     if (snap.contains("registrants")) {
-        for (auto& r : snap["registrants"]) {
+        for (auto& r : json_require_array(snap, "registrants")) {
             RegistryEntry e;
             e.ed_pub        = from_hex_arr<32>(r.value("ed_pub",
                                                           std::string(64, '0')));
@@ -1765,7 +1776,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
     if (snap.contains("applied_inbound_receipts")) {
-        for (auto& a : snap["applied_inbound_receipts"]) {
+        for (auto& a : json_require_array(snap, "applied_inbound_receipts")) {
             ShardId src    = a.value("src_shard", ShardId{0});
             Hash    txhash = from_hex_arr<32>(
                                 a.value("tx_hash", std::string(64, '0')));
@@ -1773,7 +1784,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
     if (snap.contains("merge_state")) {
-        for (auto& m : snap["merge_state"]) {
+        for (auto& m : json_require_array(snap, "merge_state")) {
             ShardId s = m.value("shard_id",   ShardId{0});
             Chain::MergePartnerInfo info;
             info.partner_id     = m.value("partner_id", ShardId{0});
@@ -1788,7 +1799,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     // cache as "no suspensions on file," and any post-restore aborts
     // will increment the cache normally.
     if (snap.contains("abort_records")) {
-        for (auto& a : snap["abort_records"]) {
+        for (auto& a : json_require_array(snap, "abort_records")) {
             std::string domain = a.value("domain", std::string{});
             Chain::AbortRecord ar;
             ar.count      = a.value("count",      uint64_t{0});
@@ -1805,7 +1816,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     // header's stored state_root (the S-033 gate now accepts DApp-active
     // snapshots).
     if (snap.contains("dapp_registry")) {
-        for (auto& d : snap["dapp_registry"]) {
+        for (auto& d : json_require_array(snap, "dapp_registry")) {
             DAppEntry e;
             e.service_pubkey = from_hex_arr<32>(d.value("service_pubkey",
                                                           std::string(64, '0')));
@@ -1822,7 +1833,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
     if (snap.contains("pending_param_changes")) {
-        for (auto& b : snap["pending_param_changes"]) {
+        for (auto& b : json_require_array(snap, "pending_param_changes")) {
             uint64_t eff = b.value("effective_height", uint64_t{0});
             for (auto& e : b.value("entries", json::array())) {
                 std::string name = e.value("name", std::string{});
