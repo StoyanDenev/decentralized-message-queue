@@ -7360,6 +7360,49 @@ int main(int argc, char** argv) {
                   "GenesisConfig::from_json rejects oversized genesis_message");
         }
 
+        // S-018 defense-in-depth lock-in (genesis.cpp hardening). Each
+        // optional-collection field in GenesisConfig (param_keyholders /
+        // initial_creators / initial_balances) MUST be a JSON array if
+        // present; a genesis file with `"initial_creators": "scalar"`
+        // throws a clean S-018 diagnostic naming the field.
+        {
+            GenesisConfig c;
+            c.chain_id = "test";
+            json j = c.to_json();
+            j["initial_creators"] = "scalar";
+            bool threw = false;
+            std::string what;
+            try { (void)GenesisConfig::from_json(j); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("initial_creators") != std::string::npos,
+                  "GenesisConfig::from_json rejects non-array 'initial_creators' (S-018)");
+        }
+        {
+            GenesisConfig c;
+            c.chain_id = "test";
+            json j = c.to_json();
+            j["initial_balances"] = 42;
+            bool threw = false;
+            std::string what;
+            try { (void)GenesisConfig::from_json(j); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("initial_balances") != std::string::npos,
+                  "GenesisConfig::from_json rejects non-array 'initial_balances' (S-018)");
+        }
+        {
+            GenesisConfig c;
+            c.chain_id = "test";
+            c.governance_mode = 0;  // uncontrolled mode permits absent keyholders
+            json j = c.to_json();
+            j["param_keyholders"] = json::object();
+            bool threw = false;
+            std::string what;
+            try { (void)GenesisConfig::from_json(j); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("param_keyholders") != std::string::npos,
+                  "GenesisConfig::from_json rejects non-array 'param_keyholders' (S-018)");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": genesis " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";

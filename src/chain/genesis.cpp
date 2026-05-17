@@ -16,6 +16,7 @@ namespace fs = std::filesystem;
 using namespace determ::crypto;
 using determ::util::json_require;
 using determ::util::json_require_hex;
+using determ::util::json_require_array;
 
 // rev.9 R1: region tag normalization. Used at every parse boundary
 // (genesis JSON load, REGISTER tx apply / validate). ASCII tolower;
@@ -201,7 +202,12 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
             + " (0=uncontrolled, 1=governed)");
     }
     if (j.contains("param_keyholders")) {
-        for (auto& kj : j["param_keyholders"]) {
+        // S-018 defense-in-depth: param_keyholders is optional but if
+        // present MUST be an array. A genesis with `"param_keyholders":
+        // "scalar"` previously threw an opaque nlohmann error mid-
+        // iteration; now throws a clean S-018 diagnostic naming the
+        // field.
+        for (auto& kj : json_require_array(j, "param_keyholders")) {
             c.param_keyholders.push_back(
                 from_hex_arr<32>(kj.get<std::string>()));
         }
@@ -244,8 +250,9 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
         // S-018: each entry has required {domain, ed_pub}. Surface the
         // field name in the diagnostic so operators editing genesis
         // JSON files don't have to dig through nlohmann internals on
-        // a typo.
-        for (auto& cj : j["initial_creators"]) {
+        // a typo. Outer wrap with json_require_array adds wrong-type
+        // diagnostic if the field is scalar/object instead of array.
+        for (auto& cj : json_require_array(j, "initial_creators")) {
             GenesisCreator gc;
             gc.domain        = json_require<std::string>(cj, "domain");
             gc.ed_pub        = from_hex_arr<32>(json_require_hex(cj, "ed_pub", 64));
@@ -258,7 +265,8 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
     }
     if (j.contains("initial_balances")) {
         // S-018: `domain` is required; `balance` defaults to 0.
-        for (auto& bj : j["initial_balances"]) {
+        // Wrong-type initial_balances field throws clean diagnostic.
+        for (auto& bj : json_require_array(j, "initial_balances")) {
             GenesisAllocation a;
             a.domain  = json_require<std::string>(bj, "domain");
             a.balance = bj.value("balance", uint64_t{0});
