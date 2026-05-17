@@ -309,6 +309,11 @@ In-process tests (deterministic, no network):
                                               via encode_binary / decode_binary)
                                               — S-002 fixed-slot amount/fee/
                                               nonce path + trailer overflow
+  determ test-chain-append                    Chain::append + head + at +
+                                              head_hash mutation invariants
+                                              — prev_hash continuity (central
+                                              chain-integrity invariant);
+                                              empty-chain rejection paths
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -9696,6 +9701,189 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-binary-codec " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Chain's append +
+    // head + at + head_hash invariants. Chain::append is the
+    // public mutation entry point — every block transitions through
+    // it (apply path during sync, replay during chain load,
+    // tentative-chain compute_state_root during finalize). The
+    // prev_hash continuity check (`b.prev_hash != head_hash()`) is
+    // the central chain-integrity invariant; without it a peer
+    // could insert a block at the wrong height and silently
+    // corrupt state.
+    if (cmd == "test-chain-append") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a minimal Block with given index + prev_hash.
+        auto make_block = [](uint64_t index, const Hash& prev) {
+            Block b;
+            b.index = index;
+            b.prev_hash = prev;
+            b.timestamp = 1000 + int64_t(index);
+            b.cumulative_rand = Hash{};
+            return b;
+        };
+
+        // === Empty Chain invariants ===
+
+        // 1. Default Chain: head() throws "Empty chain"
+        {
+            Chain c;
+            bool threw = false;
+            std::string what;
+            try { (void)c.head(); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("Empty chain") != std::string::npos,
+                  "head() on empty Chain throws 'Empty chain'");
+        }
+
+        // 2. Default Chain: head_hash() throws (via head()).
+        {
+            Chain c;
+            bool threw = false;
+            try { (void)c.head_hash(); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "head_hash() on empty Chain throws");
+        }
+
+        // 3. Default Chain: at(0) throws "out of range"
+        {
+            Chain c;
+            bool threw = false;
+            std::string what;
+            try { (void)c.at(0); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("out of range") != std::string::npos,
+                  "at(0) on empty Chain throws 'out of range'");
+        }
+
+        // === append at index 0 (genesis-like) ===
+
+        // 4. append a block at index 0 with prev_hash=zero succeeds
+        //    (genesis bootstrap). After append, height=1 + non-empty.
+        {
+            Chain c;
+            Block b0 = make_block(0, Hash{});
+            c.append(b0);
+            check(c.height() == 1, "after first append: height == 1");
+            check(!c.empty(), "after first append: empty() == false");
+            check(c.head().index == 0,
+                  "after first append: head().index == 0");
+        }
+
+        // === append at index 1 with correct prev_hash ===
+
+        // 5. append a block at index 1 with prev_hash = head_hash()
+        //    succeeds.
+        {
+            Chain c;
+            c.append(make_block(0, Hash{}));
+            Hash head0 = c.head_hash();
+            Block b1 = make_block(1, head0);
+            c.append(b1);
+            check(c.height() == 2, "after second append: height == 2");
+            check(c.head().index == 1,
+                  "after second append: head().index == 1");
+            check(c.head().prev_hash == head0,
+                  "after second append: head().prev_hash == previous head");
+        }
+
+        // === append with wrong prev_hash ===
+
+        // 6. append a block at index 1 with WRONG prev_hash throws
+        //    "Block prev_hash mismatch" (the central chain-integrity
+        //    invariant — defeats out-of-order or fork-graft attempts).
+        {
+            Chain c;
+            c.append(make_block(0, Hash{}));
+            Hash bad{};
+            for (size_t i = 0; i < bad.size(); ++i) bad[i] = 0xFF;
+            Block b1_bad = make_block(1, bad);
+            bool threw = false;
+            std::string what;
+            try { c.append(b1_bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("prev_hash mismatch") != std::string::npos,
+                  "append with wrong prev_hash throws 'prev_hash mismatch'");
+        }
+
+        // 7. append at index 1 with prev_hash=zero (instead of real
+        //    head hash) also rejected.
+        {
+            Chain c;
+            c.append(make_block(0, Hash{}));
+            Block b1_zero = make_block(1, Hash{});
+            bool threw = false;
+            try { c.append(b1_zero); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "append at index 1 with zero prev_hash rejected (must match head)");
+        }
+
+        // === Multi-block chain ===
+
+        // 8. Build a 5-block chain, each with correct prev_hash.
+        //    Verify height + at(i) + head() consistent throughout.
+        {
+            Chain c;
+            c.append(make_block(0, Hash{}));
+            for (uint64_t i = 1; i < 5; ++i) {
+                Hash prev = c.head_hash();
+                c.append(make_block(i, prev));
+            }
+            check(c.height() == 5,
+                  "5-block chain: height == 5");
+            check(c.at(0).index == 0,
+                  "5-block chain: at(0).index == 0");
+            check(c.at(4).index == 4,
+                  "5-block chain: at(4).index == 4");
+            check(c.head().index == 4,
+                  "5-block chain: head().index == 4");
+
+            // 9. at(5) out of range.
+            bool threw = false;
+            try { (void)c.at(5); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "5-block chain: at(5) out of range");
+        }
+
+        // === head_hash transitivity (prev_hash chain) ===
+
+        // 10. Each block's prev_hash equals the prior block's
+        //     compute_hash(). This is the chain-anchor invariant.
+        {
+            Chain c;
+            c.append(make_block(0, Hash{}));
+            std::vector<Hash> hashes;
+            hashes.push_back(c.head_hash());
+
+            for (uint64_t i = 1; i < 4; ++i) {
+                Hash prev = c.head_hash();
+                c.append(make_block(i, prev));
+                hashes.push_back(c.head_hash());
+            }
+
+            bool all_ok = true;
+            for (uint64_t i = 1; i < c.height(); ++i) {
+                if (c.at(i).prev_hash != hashes[i - 1]) {
+                    all_ok = false;
+                    break;
+                }
+            }
+            check(all_ok,
+                  "prev_hash chain: every block's prev_hash matches prior block's compute_hash");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-append " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
