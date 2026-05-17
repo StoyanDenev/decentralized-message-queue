@@ -17,6 +17,7 @@
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
 // Lives in wallet/envelope.cpp, also linked into determ binary.
 #include "envelope.hpp"
+#include "shamir.hpp"
 #include <asio.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -260,6 +261,11 @@ In-process tests (deterministic, no network):
                                               sigs / fewer aborts / smallest
                                               hash; deterministic across
                                               peers)
+  determ test-shamir                          Shamir's Secret Sharing over
+                                              GF(2^8) (wallet/shamir.cpp, A2
+                                              Phase 1) — T-of-N reconstruction
+                                              + share-shape invariants +
+                                              threshold safety
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -7580,6 +7586,222 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": resolve-fork " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Shamir's Secret
+    // Sharing over GF(2^8) — A2 Phase 1 wallet recovery primitive.
+    //
+    // shamir::split divides a secret into N shares such that any T of
+    // them reconstruct the secret, but T-1 or fewer reveal nothing
+    // (information-theoretic security). The wallet recovery flow
+    // wraps each share in an AEAD envelope keyed off the user's
+    // recovery password + a per-guardian OPRF key.
+    //
+    // A regression here would either silently weaken the threshold
+    // (e.g., T-1 shares enable reconstruction → information leak), or
+    // break reconstruction so the user can't recover their wallet.
+    if (cmd == "test-shamir") {
+        using namespace determ::wallet::shamir;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        const std::vector<uint8_t> SECRET = {
+            0x01, 0x02, 0x03, 0x04, 0x05, 0xCA, 0xFE, 0xBA, 0xBE,
+            0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x42};
+
+        // 1. T-of-N split + combine round-trip (3-of-5).
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            check(shares.size() == 5, "split: 5 shares produced for n=5");
+            // Combine the first 3 shares — should yield the secret.
+            std::vector<Share> first3(shares.begin(), shares.begin() + 3);
+            auto recovered = combine(first3);
+            check(recovered.has_value() && *recovered == SECRET,
+                  "3-of-5 reconstruction yields original secret");
+        }
+
+        // 2. Any T-subset of N shares reconstructs the secret. Try
+        //    several distinct subsets.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            bool all_ok = true;
+            // Try every 3-subset of {0..4}.
+            for (size_t i = 0; i < 5 && all_ok; ++i) {
+                for (size_t j = i + 1; j < 5 && all_ok; ++j) {
+                    for (size_t k = j + 1; k < 5 && all_ok; ++k) {
+                        std::vector<Share> sub = {shares[i], shares[j], shares[k]};
+                        auto r = combine(sub);
+                        if (!r || *r != SECRET) all_ok = false;
+                    }
+                }
+            }
+            check(all_ok, "all C(5, 3) = 10 subsets of 3 shares reconstruct");
+        }
+
+        // 3. T+1 shares also work (more than threshold is fine).
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            std::vector<Share> first4(shares.begin(), shares.begin() + 4);
+            auto recovered = combine(first4);
+            check(recovered.has_value() && *recovered == SECRET,
+                  "4-of-5 reconstruction (T+1) yields original secret");
+        }
+
+        // 4. T-1 shares do NOT reconstruct — should yield a different
+        //    value (or fail). SSS information-theoretic property:
+        //    fewer than T shares is indistinguishable from any other
+        //    same-length secret.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            std::vector<Share> first2(shares.begin(), shares.begin() + 2);
+            auto recovered = combine(first2);
+            // combine() trusts the caller — fewer shares yield garbage,
+            // not std::nullopt. Verify it doesn't accidentally yield
+            // the original secret.
+            check(!recovered || *recovered != SECRET,
+                  "2-of-5 shares do NOT reconstruct (T-1 below threshold)");
+        }
+
+        // 5. Distinct x-coordinates across shares. The wire format
+        //    relies on each share having a unique x.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            std::set<uint8_t> xs;
+            for (auto& s : shares) xs.insert(s.x);
+            check(xs.size() == 5,
+                  "split: all 5 shares have distinct x-coordinates");
+        }
+
+        // 6. Non-zero x-coordinates. x = 0 would be "the secret itself"
+            //  (Lagrange interpolation evaluates at x=0); split must
+            //  never produce a share at x=0.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            bool any_zero = false;
+            for (auto& s : shares) if (s.x == 0) any_zero = true;
+            check(!any_zero,
+                  "split: no share has x=0 (would leak secret)");
+        }
+
+        // 7. Share y-vector size matches secret size.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            bool all_ok = true;
+            for (auto& s : shares) {
+                if (s.y.size() != SECRET.size()) { all_ok = false; break; }
+            }
+            check(all_ok, "split: every share has y-vector matching secret size");
+        }
+
+        // 8. Different splits produce different shares (uses fresh
+        //    randomness internally).
+        {
+            auto s1 = split(SECRET, /*t=*/3, /*n=*/5);
+            auto s2 = split(SECRET, /*t=*/3, /*n=*/5);
+            // At least one share must differ — otherwise the split
+            // would be deterministic (and reveal the secret given
+            // the share's x + the structure).
+            bool any_different = false;
+            for (size_t i = 0; i < s1.size(); ++i) {
+                if (s1[i].y != s2[i].y) { any_different = true; break; }
+            }
+            check(any_different,
+                  "split: two independent splits produce different shares (fresh polynomial)");
+        }
+
+        // 9. T=1 degenerate case: every share IS the secret (1-of-N).
+        {
+            auto shares = split(SECRET, /*t=*/1, /*n=*/3);
+            check(shares.size() == 3, "split(t=1, n=3): 3 shares produced");
+            // Any single share reconstructs.
+            std::vector<Share> single = {shares[0]};
+            auto r = combine(single);
+            check(r.has_value() && *r == SECRET,
+                  "1-of-N reconstruction works with single share");
+        }
+
+        // 10. T=N degenerate case: ALL shares required.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/3);
+            auto r = combine(shares);
+            check(r.has_value() && *r == SECRET,
+                  "T=N: all shares reconstruct the secret");
+            std::vector<Share> partial(shares.begin(), shares.begin() + 2);
+            auto r2 = combine(partial);
+            check(!r2 || *r2 != SECRET,
+                  "T=N: T-1 shares don't reconstruct");
+        }
+
+        // 11. Empty secret behavior: split produces shares (with
+        //     empty y-vectors) but combine REJECTS empty-y shares
+        //     with std::nullopt — the documented edge-case behavior
+        //     in combine() lines 93-94. There's no information to
+        //     reconstruct from zero-length shares; failing loud is
+        //     the safer default vs. returning an empty vector.
+        {
+            std::vector<uint8_t> empty;
+            auto shares = split(empty, /*t=*/2, /*n=*/3);
+            check(shares.size() == 3,
+                  "split(empty, t=2, n=3): produces 3 shares");
+            check(shares[0].y.empty(),
+                  "split(empty): shares have empty y-vector");
+            std::vector<Share> first2(shares.begin(), shares.begin() + 2);
+            auto r = combine(first2);
+            check(!r.has_value(),
+                  "combine(empty-y shares): returns nullopt (documented edge case)");
+        }
+
+        // 12. Invalid params throw. Threshold == 0 is invalid.
+        {
+            bool threw = false;
+            try { (void)split(SECRET, /*t=*/0, /*n=*/3); }
+            catch (const std::invalid_argument&) { threw = true; }
+            check(threw, "split: threshold=0 throws invalid_argument");
+        }
+
+        // 13. Threshold > share_count is invalid.
+        {
+            bool threw = false;
+            try { (void)split(SECRET, /*t=*/5, /*n=*/3); }
+            catch (const std::invalid_argument&) { threw = true; }
+            check(threw,
+                  "split: threshold > share_count throws invalid_argument");
+        }
+
+        // 14. combine() rejects empty share list.
+        {
+            std::vector<Share> empty_shares;
+            auto r = combine(empty_shares);
+            check(!r.has_value(),
+                  "combine: empty share list returns std::nullopt");
+        }
+
+        // 15. combine() rejects duplicate x-coordinates (would yield
+        //     a singular Lagrange matrix).
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            std::vector<Share> dup = {shares[0], shares[0], shares[1]};
+            auto r = combine(dup);
+            check(!r.has_value(),
+                  "combine: duplicate x-coordinates rejected");
+        }
+
+        // 16. combine() rejects mismatched y-vector sizes.
+        {
+            auto shares = split(SECRET, /*t=*/3, /*n=*/5);
+            shares[1].y.push_back(0xFF);  // make sizes inconsistent
+            std::vector<Share> sub(shares.begin(), shares.begin() + 3);
+            auto r = combine(sub);
+            check(!r.has_value(),
+                  "combine: mismatched y-vector sizes rejected");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": shamir " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

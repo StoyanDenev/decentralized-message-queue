@@ -51,6 +51,11 @@ file(GLOB_RECURSE SOURCES "src/*.cpp")
 # at rest. No wallet-state is shared between binaries — only the
 # crypto primitive code.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
+# S-035 Option 1 seed: the `determ test-shamir` subcommand
+# exercises wallet/shamir.cpp directly (in-process unit test of
+# the A2 Phase 1 secret-sharing primitive). Link it into the main
+# binary so the test command can call shamir::split / ::combine.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
 
 add_executable(determ ${SOURCES})
 

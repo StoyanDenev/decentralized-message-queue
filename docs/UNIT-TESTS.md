@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-21 subcommands; 372 assertions; runs in <14s with no flakes.
+22 subcommands; 390 assertions; runs in <14s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -118,6 +118,7 @@ during development. Each new test wrapper must be added to the
 | Subcommand | What it tests | Wrapper | FA-track |
 |---|---|---|---|
 | `determ test-envelope` | `wallet/envelope.hpp` AES-256-GCM + PBKDF2-HMAC-SHA-256 AEAD wrapping primitive (A2 Phase 2 wallet recovery share envelopes + S-004 option 2 passphrase-encrypted keyfiles; 27 assertions). Encrypt/decrypt round-trip + envelope shape (salt + nonce + tag sizes); AEAD safety properties (wrong-pw / empty-pw / mismatched-AAD / tampered-ct / tampered-tag all fail; fresh salt + nonce per encryption → distinct ciphertexts from same plaintext+passphrase — defeats artifact-correlation attacks); serialize/deserialize canonical hex round-trip with bad-input rejection; empty-plaintext + empty-AAD edge cases. A regression here would silently weaken at-rest security for every encrypted wallet artifact. | `tools/test_envelope.sh` | A2 / S-004 |
+| `determ test-shamir` | Shamir's Secret Sharing over GF(2^8) (`wallet/shamir.cpp`; A2 Phase 1 wallet recovery primitive; 18 assertions). T-of-N reconstruction (3-of-5 round-trip; all C(5,3) = 10 subsets verified; T+1 also works; T-1 doesn't reconstruct — the information-theoretic security property); share-shape invariants (distinct x-coordinates; no x=0 since Lagrange evaluates at x=0; y-size matches secret; fresh polynomial per split — two independent splits produce different shares); degenerate thresholds (T=1 = every share is the secret; T=N = all shares required); empty-secret edge case (split produces empty-y shares; combine rejects with nullopt per documented behavior); invalid-input rejection (threshold=0, threshold > share_count, empty share list, duplicate x, mismatched y-sizes). Unit-level counterpart to the network-level `test_wallet_shamir.sh` (wallet-binary CLI smoke test); both lock in the A2 Phase 1 primitive at different layers. | `tools/test_shamir.sh` | A2 Phase 1 |
 
 ### 2.7 Fork resolution
 
