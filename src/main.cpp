@@ -329,6 +329,11 @@ In-process tests (deterministic, no network):
                                               + single_test (operator-facing
                                               M/K + chain_role + sharding_mode +
                                               round timing lock-in)
+  determ test-params-constants                chain/params.hpp protocol-level
+                                              constants — MIN_STAKE /
+                                              UNSTAKE_DELAY / SUSPENSION_SLASH /
+                                              REGISTER payload geometry /
+                                              TRANSFER memo cap / ZEROTH_ADDRESS
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -10468,6 +10473,137 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": timing-profiles " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the protocol-
+    // level constants in `include/determ/chain/params.hpp`.
+    //
+    // These constants are deployment-critical:
+    //   * MIN_STAKE / UNSTAKE_DELAY / SUSPENSION_SLASH are the
+    //     stake-economy defaults (per-chain governance can mutate
+    //     these via A5 PARAM_CHANGE, but the build-time defaults
+    //     are what operators get when they don't override).
+    //   * REGISTER_PAYLOAD_PUBKEY_SIZE = 32 — Ed25519 pubkey size,
+    //     validated by every REGISTER tx apply path.
+    //   * REGISTER_REGION_MAX = 32 — rev.9 R1 region tag cap.
+    //   * REGISTER_PAYLOAD_MIN_SIZE / _MAX_SIZE — validator bounds.
+    //   * TRANSFER_PAYLOAD_MAX = 128 — operator-visible memo cap.
+    //   * ZEROTH_ADDRESS — E1 NEF pool's pseudo-account (low-order
+    //     curve25519 point; signature production infeasible).
+    //
+    // A silent change to any of these would shift consensus
+    // behavior across every chain that doesn't override them via
+    // genesis or PARAM_CHANGE — operators wouldn't see an error,
+    // just different limits.
+    if (cmd == "test-params-constants") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Stake-economy defaults ===
+
+        // 1. MIN_STAKE = 1000 (the documented default).
+        check(MIN_STAKE == 1000, "MIN_STAKE == 1000 (documented default)");
+
+        // 2. UNSTAKE_DELAY = 1000 blocks. A validator who DEREGISTERS
+        //    waits this many blocks past `inactive_from` before
+        //    UNSTAKE can release `locked` back to balance.
+        check(UNSTAKE_DELAY == 1000,
+              "UNSTAKE_DELAY == 1000 blocks (documented default)");
+
+        // 3. SUSPENSION_SLASH = 10. Deducted from validator's stake
+        //    on each baked AbortEvent. At MIN_STAKE=1000, 100
+        //    suspensions exits a minimally-staked validator (the
+        //    BFT-safety economic-disincentive accounting).
+        check(SUSPENSION_SLASH == 10,
+              "SUSPENSION_SLASH == 10 (rev.8 disincentive default)");
+
+        // === REGISTER payload geometry ===
+
+        // 4. REGISTER_PAYLOAD_PUBKEY_SIZE = 32 (Ed25519 pubkey size).
+        check(REGISTER_PAYLOAD_PUBKEY_SIZE == 32,
+              "REGISTER_PAYLOAD_PUBKEY_SIZE == 32 (Ed25519 pubkey size)");
+
+        // 5. REGISTER_REGION_MAX = 32 (rev.9 R1 region tag cap).
+        check(REGISTER_REGION_MAX == 32,
+              "REGISTER_REGION_MAX == 32 (rev.9 R1 region cap)");
+
+        // 6. REGISTER_PAYLOAD_MIN_SIZE = 32 (legacy pubkey-only path).
+        check(REGISTER_PAYLOAD_MIN_SIZE == 32,
+              "REGISTER_PAYLOAD_MIN_SIZE == 32 (legacy pubkey-only payload)");
+
+        // 7. REGISTER_PAYLOAD_MAX_SIZE = 32 + 1 + 32 = 65 (full
+        //    pubkey + region_len byte + max region bytes).
+        check(REGISTER_PAYLOAD_MAX_SIZE == 65,
+              "REGISTER_PAYLOAD_MAX_SIZE == 65 (32 pubkey + 1 len + 32 region)");
+
+        // 8. REGISTER_PAYLOAD_SIZE legacy alias matches the
+        //    pubkey-only path (32 bytes). Pre-R1 callers use this
+        //    for exact-size validation of region-less REGISTER txs.
+        check(REGISTER_PAYLOAD_SIZE == REGISTER_PAYLOAD_PUBKEY_SIZE,
+              "REGISTER_PAYLOAD_SIZE == REGISTER_PAYLOAD_PUBKEY_SIZE (legacy alias)");
+
+        // 9. REGISTER_PAYLOAD_MAX_SIZE arithmetic — len byte + region
+        //    cap properly accounted for.
+        check(REGISTER_PAYLOAD_MAX_SIZE ==
+              REGISTER_PAYLOAD_PUBKEY_SIZE + 1 + REGISTER_REGION_MAX,
+              "REGISTER_PAYLOAD_MAX_SIZE arithmetic: pubkey + len_byte + region_max");
+
+        // === TRANSFER memo cap ===
+
+        // 10. TRANSFER_PAYLOAD_MAX = 128 (A4 memo cap). Operator-
+        //     visible — TRANSFER txs with payload > 128 bytes are
+        //     rejected by the validator.
+        check(TRANSFER_PAYLOAD_MAX == 128,
+              "TRANSFER_PAYLOAD_MAX == 128 (A4 operator-visible memo cap)");
+
+        // === E1 NEF zeroth-pool address ===
+
+        // 11. ZEROTH_ADDRESS is well-formed anon-address (0x prefix
+        //     + 64 hex chars) and all-zeros.
+        {
+            std::string z = ZEROTH_ADDRESS;
+            check(z.size() == 66,
+                  "ZEROTH_ADDRESS: 66 chars (0x + 64 hex)");
+            check(z.substr(0, 2) == "0x",
+                  "ZEROTH_ADDRESS: starts with 0x");
+            bool all_zero = true;
+            for (size_t i = 2; i < z.size(); ++i) {
+                if (z[i] != '0') { all_zero = false; break; }
+            }
+            check(all_zero,
+                  "ZEROTH_ADDRESS: all-zero hex tail (low-order curve25519 point)");
+        }
+
+        // 12. ZEROTH_ADDRESS parses as a valid anon address (via
+        //     is_anon_address from types.hpp). Cross-check the
+        //     E1 NEF pool's pseudo-account is wire-format compatible.
+        {
+            check(is_anon_address(ZEROTH_ADDRESS),
+                  "ZEROTH_ADDRESS: passes is_anon_address (wire-compatible)");
+        }
+
+        // === Cross-arithmetic invariants ===
+
+        // 13. SUSPENSION_SLASH × 100 == MIN_STAKE. The economic
+        //     accounting: 100 baked aborts on a minimally-staked
+        //     validator zeros their stake → ejection. This ratio
+        //     is the BFT-safety economic-disincentive sizing.
+        check(SUSPENSION_SLASH * 100 == MIN_STAKE,
+              "SUSPENSION_SLASH × 100 == MIN_STAKE (BFT-safety accounting)");
+
+        // 14. UNSTAKE_DELAY >= 1 block (sane lower bound — instant
+        //     unstake would defeat the suspension-window invariant).
+        check(UNSTAKE_DELAY >= 1,
+              "UNSTAKE_DELAY >= 1 block (sane lower bound)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": params-constants " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
