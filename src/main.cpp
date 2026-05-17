@@ -132,6 +132,13 @@ State commitment + light-client (v2.1 + v2.2):
                                               envelope. --committee is a JSON array of
                                               {domain, ed_pub} entries (or {members: [...]}
                                               shape). --bft allows sentinel-zero slots
+  determ verify-genesis --in genesis.json   Standalone genesis.json validator. Loads,
+                          [--expected-hash  applies sane-bounds checks, computes
+                           <hex64>] [--json] compute_genesis_hash, prints a structured
+                                              summary (incl. operational params NOT bound
+                                              to identity hash per S-039). Optional
+                                              --expected-hash pins against external value;
+                                              --json emits machine-readable output.
                                               for BFT-mode threshold = ceil(2K/3).
 
 DApp substrate (v2.18 + v2.19) — the DApp's identity is its owning Determ domain:
@@ -507,6 +514,156 @@ static int cmd_show_block(int argc, char** argv) {
 //
 // Optional `--bft`: in BFT mode the required threshold is
 // Q = ceil(2 * |creators| / 3) instead of full K-of-K. Without this
+// determ verify-genesis --in genesis.json [--json] [--expected-hash HEX]
+//   Standalone genesis.json validator. Loads the file, applies the
+//   same parsing + sane-bounds checks as `determ start`, computes the
+//   chain-identity hash via compute_genesis_hash, prints a structured
+//   summary (human-readable by default, single-line JSON with --json).
+//   Optional --expected-hash compares the computed identity against an
+//   externally-trusted pin; exits non-zero with a clear diagnostic
+//   when they differ.
+//
+// Useful workflows:
+//   * Pre-deployment: verify the genesis.json hashes to the value the
+//     operator expects (defeats config-rewrite-attacks where a
+//     deployment template smuggles in a different chain identity).
+//   * Cross-team coordination: each team independently computes the
+//     hash from their checked-in genesis.json and compares.
+//   * Cluster onboarding: a new operator's genesis must match the
+//     existing cluster's pinned hash.
+//
+// Note re: S-039 (Low/Op diagnostic-UX gap, see docs/SECURITY.md §S-039):
+// `compute_genesis_hash` does NOT bind operational params like
+// m_creators, k_block_sigs, block_subsidy, min_stake, initial_shard_count,
+// bft_enabled. Two genesis.json files differing ONLY in those fields
+// produce the same identity hash. This command prints those fields
+// explicitly in the output so operators can spot mismatches via direct
+// inspection even though the hash itself doesn't catch them.
+static int cmd_verify_genesis(int argc, char** argv) {
+    std::string in_path;
+    std::string expected_hash_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--in") in_path = argv[i + 1];
+        else if (std::string(argv[i]) == "--expected-hash") expected_hash_hex = argv[i + 1];
+    }
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") json_out = true;
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ verify-genesis --in <genesis.json> "
+                     "[--expected-hash <hex64>] [--json]\n";
+        return 1;
+    }
+
+    auto emit_error = [&](const std::string& code, const std::string& msg) {
+        if (json_out) {
+            json err = {{"status", "error"}, {"code", code}, {"message", msg}};
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "FAIL: " << msg << "\n";
+        }
+    };
+
+    try {
+        std::ifstream f(in_path);
+        if (!f) {
+            emit_error("cannot_open", "cannot open " + in_path);
+            return 1;
+        }
+        json j = json::parse(f);
+        chain::GenesisConfig cfg = chain::GenesisConfig::from_json(j);
+
+        // compute_genesis_hash (the identity contract). The from_json
+        // path above already applied sane-bounds checks for subsidy
+        // overflow + genesis_message size + LOTTERY multiplier
+        // constraints — those throw at parse time.
+        Hash hash = chain::compute_genesis_hash(cfg);
+
+        // Build the result + optionally compare against external pin.
+        json result = {
+            {"status",                "ok"},
+            {"path",                  in_path},
+            {"genesis_hash",          to_hex(hash)},
+            {"chain_id",              cfg.chain_id},
+            {"chain_role",            static_cast<uint8_t>(cfg.chain_role)},
+            {"shard_id",              cfg.shard_id},
+            {"initial_creators",      cfg.initial_creators.size()},
+            {"initial_balances",      cfg.initial_balances.size()},
+            // Operational params NOT in compute_genesis_hash (S-039).
+            // Emit them so operators can spot mismatches manually.
+            {"m_creators",            cfg.m_creators},
+            {"k_block_sigs",          cfg.k_block_sigs},
+            {"block_subsidy",         cfg.block_subsidy},
+            {"min_stake",             cfg.min_stake},
+            {"initial_shard_count",   cfg.initial_shard_count},
+            {"bft_enabled",           cfg.bft_enabled},
+            // Fields that ARE in the hash:
+            {"genesis_message_is_default",
+                cfg.genesis_message == chain::DEFAULT_GENESIS_MESSAGE},
+            {"genesis_message_bytes", cfg.genesis_message.size()},
+            {"committee_region",      cfg.committee_region},
+        };
+
+        // Optional external-pin comparison.
+        bool pin_match = true;
+        if (!expected_hash_hex.empty()) {
+            if (expected_hash_hex.size() != 64) {
+                emit_error("invalid_expected_hash_length",
+                    "expected-hash must be 64 hex chars, got "
+                    + std::to_string(expected_hash_hex.size()));
+                return 1;
+            }
+            Hash expected = from_hex_arr<32>(expected_hash_hex);
+            pin_match = (expected == hash);
+            result["expected_hash_match"] = pin_match;
+        }
+
+        if (json_out) {
+            std::cout << result.dump() << "\n";
+        } else {
+            std::cout << "genesis OK: " << in_path << "\n";
+            std::cout << "  genesis_hash       : " << to_hex(hash) << "\n";
+            std::cout << "  chain_id           : " << cfg.chain_id << "\n";
+            std::cout << "  chain_role         : "
+                      << static_cast<int>(cfg.chain_role) << "\n";
+            std::cout << "  shard_id           : " << cfg.shard_id << "\n";
+            std::cout << "  initial_creators   : " << cfg.initial_creators.size() << "\n";
+            std::cout << "  initial_balances   : " << cfg.initial_balances.size() << "\n";
+            std::cout << "  --- operational params (S-039: NOT bound to identity hash) ---\n";
+            std::cout << "  m_creators         : " << cfg.m_creators << "\n";
+            std::cout << "  k_block_sigs       : " << cfg.k_block_sigs << "\n";
+            std::cout << "  block_subsidy      : " << cfg.block_subsidy << "\n";
+            std::cout << "  min_stake          : " << cfg.min_stake << "\n";
+            std::cout << "  initial_shard_count: " << cfg.initial_shard_count << "\n";
+            std::cout << "  bft_enabled        : "
+                      << (cfg.bft_enabled ? "true" : "false") << "\n";
+            std::cout << "  --- identity-bound fields ---\n";
+            std::cout << "  genesis_message    : "
+                      << (cfg.genesis_message == chain::DEFAULT_GENESIS_MESSAGE
+                              ? "(default)"
+                              : "(custom, " + std::to_string(cfg.genesis_message.size()) + " bytes)")
+                      << "\n";
+            std::cout << "  committee_region   : "
+                      << (cfg.committee_region.empty() ? "(none)" : cfg.committee_region)
+                      << "\n";
+            if (!expected_hash_hex.empty()) {
+                if (pin_match) {
+                    std::cout << "  expected hash      : ✓ matches\n";
+                } else {
+                    std::cerr << "FAIL: genesis_hash does NOT match --expected-hash\n";
+                    std::cerr << "  computed: " << to_hex(hash) << "\n";
+                    std::cerr << "  expected: " << expected_hash_hex << "\n";
+                }
+            }
+        }
+        return pin_match ? 0 : 1;
+    } catch (std::exception& e) {
+        emit_error("parse_or_validation_error", e.what());
+        return 1;
+    }
+}
+
 // flag, every creators[i] must have a non-zero verifying signature
 // (MD-mode K-of-K).
 //
@@ -2631,6 +2788,7 @@ int main(int argc, char** argv) {
     if (cmd == "headers")       return cmd_headers(sub_argc, sub_argv);
     if (cmd == "verify-headers") return cmd_verify_headers(sub_argc, sub_argv);
     if (cmd == "verify-block-sigs") return cmd_verify_block_sigs(sub_argc, sub_argv);
+    if (cmd == "verify-genesis") return cmd_verify_genesis(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
