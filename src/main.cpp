@@ -81,7 +81,10 @@ Usage:
   determ unstake <amount> [--fee <n>]        Release stake (after deregister + delay)
   determ nonce [<domain>]                    Show next account nonce
   determ stake_info [<domain>]               Show locked stake and unlock height
-  determ genesis-tool peer-info <domain>     Print this node's creator entry (JSON)
+  determ genesis-tool peer-info <domain> [--stake N] [--region T]
+                                              Print this node's creator entry (JSON);
+                                              --region T tags the entry for R1
+                                              EXTENDED-mode region-pinned shards
                                               for inclusion in a genesis config.
   determ genesis-tool build <config.json>    Build a genesis from peer-info entries
   determ genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
@@ -1828,15 +1831,20 @@ static int cmd_nonce(int argc, char** argv) {
 //   signed by the same key), so no separate proof-of-possession is emitted here.
 static int cmd_genesis_tool_peer_info(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: determ genesis-tool peer-info <domain> [--data-dir <dir>] [--stake <n>]\n";
+        std::cerr << "Usage: determ genesis-tool peer-info <domain> "
+                     "[--data-dir <dir>] [--stake <n>] [--region <tag>]\n";
         return 1;
     }
     std::string domain   = argv[0];
     std::string data_dir = default_data_dir();
     uint64_t    stake    = chain::MIN_STAKE;
+    std::string region;  // rev.9 R1: optional region tag for EXTENDED-mode
+                          // region-pinned shard deployments. Empty (default)
+                          // → global pool member (CURRENT-mode + legacy).
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--data-dir") data_dir = argv[i + 1];
         if (std::string(argv[i]) == "--stake")    stake    = std::stoull(argv[i + 1]);
+        if (std::string(argv[i]) == "--region")   region   = argv[i + 1];
     }
 
     std::string kpath = data_dir + "/node_key.json";
@@ -1852,6 +1860,16 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
         {"ed_pub",        to_hex(key.pub)},
         {"initial_stake", stake}
     };
+    // Only emit the region field when non-empty. Empty region (the
+    // default) preserves byte-identical output with pre-R1 callers —
+    // existing CURRENT-mode deployments + tooling that built against
+    // the legacy 3-field shape don't see a behavioral change. Operators
+    // building EXTENDED-mode region-pinned shards now have a simple
+    // `--region <tag>` switch instead of needing to hand-edit the
+    // peer-info JSON before passing it to `genesis-tool build`.
+    if (!region.empty()) {
+        entry["region"] = region;
+    }
     std::cout << entry.dump(2) << "\n";
     return 0;
 }
