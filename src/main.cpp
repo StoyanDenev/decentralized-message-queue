@@ -444,6 +444,13 @@ Additional in-process tests:
   determ test-subsidy-distribution            Subsidy distribution apply —
                                               FLAT, E3 LOTTERY (jackpot seed),
                                               E4 finite pool drain, A1 mint
+  determ test-merge-event-apply               MERGE_EVENT apply — R7 under-
+                                              quorum-merge state machine
+                                              (BEGIN inserts, END removes,
+                                              partner-ring constraint)
+  determ test-cross-shard-outbound-apply      Cross-shard outbound TRANSFER
+                                              apply — local debit + no local
+                                              credit + A1 accumulated_outbound
 )" << "\n";
 }
 
@@ -15031,6 +15038,437 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": subsidy-distribution " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: MERGE_EVENT apply (R7 under-quorum merge state
+    // machine). BEGIN inserts (shard_id → {partner_id, refugee_region})
+    // into merge_state_; END removes the entry when partner matches.
+    // Only applies when shard_count > 1 AND partner_id == ((shard_id+1) %
+    // shard_count) — the "next shard in the ring" partner constraint.
+    // Validator already enforces deeper checks (evidence-window, threshold);
+    // this test pins the apply-side state-machine semantics.
+    if (cmd == "test-merge-event-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "merge-event-apply-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Helper: build a MERGE_EVENT tx whose payload encodes the
+        // event. shard_id = refugee, partner_id = absorber.
+        auto make_merge_tx = [](uint8_t event_type, ShardId shard_id,
+                                  ShardId partner_id, const std::string& region,
+                                  uint64_t nonce) {
+            MergeEvent ev;
+            ev.event_type = event_type;
+            ev.shard_id   = shard_id;
+            ev.partner_id = partner_id;
+            ev.effective_height = 100;
+            ev.evidence_window_start = 0;
+            ev.merging_shard_region = region;
+            Transaction tx;
+            tx.type = TxType::MERGE_EVENT;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = nonce;
+            tx.payload = ev.encode();
+            return tx;
+        };
+
+        auto apply_block = [&](Chain& c, const std::vector<Transaction>& txs) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions = txs;
+            c.append(b);
+        };
+
+        // === BEGIN inserts entry ===
+
+        // 1. MERGE_BEGIN with valid partner (shard_count=4, partner=(shard+1)%4):
+        //    merge_state gains an entry with the refugee_region.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+
+            // shard 1 → partner 2 (= (1+1)%4) valid
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{1}, ShardId{2},
+                                          "us-east", 0)});
+
+            const auto& ms = c.merge_state();
+            check(ms.size() == 1 && ms.count(ShardId{1}) == 1,
+                  "MERGE_BEGIN: merge_state has entry for shard 1");
+            check(ms.at(ShardId{1}).partner_id == ShardId{2},
+                  "MERGE_BEGIN: partner_id == 2 (= (1+1) % 4)");
+            check(ms.at(ShardId{1}).refugee_region == "us-east",
+                  "MERGE_BEGIN: refugee_region preserved");
+        }
+
+        // 2. is_shard_merged predicate matches the apply state.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{1}, ShardId{2}, "", 0)});
+
+            ShardId out_partner = 99;
+            bool merged = c.is_shard_merged(ShardId{1}, &out_partner);
+            check(merged && out_partner == ShardId{2},
+                  "is_shard_merged(1) → true, out_partner = 2");
+            check(!c.is_shard_merged(ShardId{0}),
+                  "is_shard_merged(0) → false (not merged)");
+        }
+
+        // === END removes entry when partner matches ===
+
+        // 3. MERGE_END removes the entry.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{1}, ShardId{2}, "us-east", 0)});
+            check(c.merge_state().size() == 1,
+                  "setup: merge_state has 1 entry after BEGIN");
+
+            apply_block(c, {make_merge_tx(MergeEvent::END,
+                                          ShardId{1}, ShardId{2}, "us-east", 1)});
+            check(c.merge_state().empty(),
+                  "MERGE_END: matching partner → entry removed");
+        }
+
+        // === END with wrong partner: no-op ===
+
+        // 4. MERGE_END for shard 1 with partner=3 (wrong): no-op.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{1}, ShardId{2}, "", 0)});
+
+            // partner=3 doesn't match recorded partner=2, AND fails
+            // (1+1)%4 == 3 constraint anyway → both checks block it.
+            apply_block(c, {make_merge_tx(MergeEvent::END,
+                                          ShardId{1}, ShardId{3}, "", 1)});
+            check(c.merge_state().size() == 1,
+                  "MERGE_END w/ wrong partner: entry untouched");
+        }
+
+        // === Partner constraint enforcement at BEGIN ===
+
+        // 5. BEGIN with wrong partner_id ((shard+1) % count != partner):
+        //    NO entry created.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            // shard 0 → partner should be 1, but we pass 3 (wrong)
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{0}, ShardId{3}, "", 0)});
+            check(c.merge_state().empty(),
+                  "MERGE_BEGIN w/ wrong partner: NO entry created");
+        }
+
+        // === Single-shard chains: NO merge events ===
+
+        // 6. shard_count=1: BEGIN is a no-op (no inter-shard merge possible).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // shard_count default = 1 (no set_shard_routing call)
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{1}, ShardId{0}, "", 0)});
+            check(c.merge_state().empty(),
+                  "shard_count=1: MERGE_BEGIN no-op (no inter-shard merge)");
+        }
+
+        // === Multiple distinct merges ===
+
+        // 7. Two distinct shards merge in same chain → both tracked.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            apply_block(c, {
+                make_merge_tx(MergeEvent::BEGIN, ShardId{1}, ShardId{2}, "us", 0),
+            });
+            apply_block(c, {
+                make_merge_tx(MergeEvent::BEGIN, ShardId{3}, ShardId{0}, "eu", 1),
+            });
+            check(c.merge_state().size() == 2,
+                  "two distinct merges: merge_state has 2 entries");
+            check(c.merge_state().at(ShardId{1}).refugee_region == "us"
+                  && c.merge_state().at(ShardId{3}).refugee_region == "eu",
+                  "two distinct merges: regions preserved per entry");
+        }
+
+        // === shards_absorbed_by helper ===
+
+        // 8. shards_absorbed_by(N) inverse-lookup returns absorbed shards.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            apply_block(c, {
+                make_merge_tx(MergeEvent::BEGIN, ShardId{1}, ShardId{2}, "us", 0),
+            });
+            apply_block(c, {
+                make_merge_tx(MergeEvent::BEGIN, ShardId{3}, ShardId{0}, "eu", 1),
+            });
+            auto absorbed_by_0 = c.shards_absorbed_by(ShardId{0});
+            check(absorbed_by_0.size() == 1
+                  && absorbed_by_0[0].first == ShardId{3}
+                  && absorbed_by_0[0].second == "eu",
+                  "shards_absorbed_by(0) → [(3, 'eu')]");
+            auto absorbed_by_2 = c.shards_absorbed_by(ShardId{2});
+            check(absorbed_by_2.size() == 1
+                  && absorbed_by_2[0].first == ShardId{1},
+                  "shards_absorbed_by(2) → [(1, 'us')]");
+        }
+
+        // === Determinism ===
+
+        // 9. Two chains apply same MERGE_BEGIN → same merge_state.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Hash salt{};
+            c1.set_shard_routing(4, salt, ShardId{0});
+            c2.set_shard_routing(4, salt, ShardId{0});
+            apply_block(c1, {make_merge_tx(MergeEvent::BEGIN,
+                                            ShardId{1}, ShardId{2}, "us", 0)});
+            apply_block(c2, {make_merge_tx(MergeEvent::BEGIN,
+                                            ShardId{1}, ShardId{2}, "us", 0)});
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same merge → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merge-event-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: cross-shard outbound TRANSFER apply (rev.9 B3).
+    // When a TRANSFER's `to` address routes (via shard_id_for_address)
+    // to a different shard, the sender is debited locally but the
+    // receiver is NOT credited here — the credit happens on the dst
+    // shard via the inbound-receipt path (covered by
+    // test-cross-shard-receipt-apply). amount + fee leave this shard's
+    // accounted supply; fee accrues to creators on this side.
+    // accumulated_outbound_ bumps by the amount (A1 counter).
+    if (cmd == "test-cross-shard-outbound-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "cross-shard-outbound-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;  // no stake — simpler A1 math
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Helper: probe shard_id_for_address to find an anon-like address
+        // that routes to a shard DIFFERENT from `my_shard_id`. Returns
+        // the first found (deterministic search). Throws if no match
+        // (shouldn't happen with 4 shards).
+        auto find_cross_shard_address = [](uint32_t shard_count,
+                                            const Hash& salt,
+                                            ShardId my_shard_id) {
+            for (int i = 0; i < 256; ++i) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "addr%02x", i);
+                std::string addr = buf;
+                auto routed = crypto::shard_id_for_address(addr, shard_count, salt);
+                if (routed != my_shard_id) return addr;
+            }
+            return std::string{};  // unreachable in practice
+        };
+
+        // === Cross-shard outbound: debit only, no local credit ===
+
+        // 1. TRANSFER to cross-shard address: sender debited
+        //    (amount + fee), receiver NOT credited locally.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+            check(!remote.empty() && c.is_cross_shard(remote),
+                  "fixture: found a cross-shard address");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            // Sender debited (amount + fee = 101); fee returns to creator (alice).
+            // Net: alice 1000 - 101 + 1 = 900.
+            check(c.balance("alice") == 900,
+                  "outbound TRANSFER: alice debited 100 + 1 fee, fee returns via creator");
+            check(c.balance(remote) == 0,
+                  "outbound TRANSFER: dst address NOT credited locally (credit via inbound receipt)");
+            check(c.next_nonce("alice") == 1,
+                  "outbound TRANSFER: alice nonce 0 → 1");
+        }
+
+        // === A1: accumulated_outbound bumps by amount ===
+
+        // 2. accumulated_outbound counter bumps by exactly the amount.
+        //    Fee stays in this shard (no impact on outbound counter).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = 75; tx.fee = 1; tx.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.accumulated_outbound() == 75,
+                  "A1: accumulated_outbound = amount (fee stays)");
+        }
+
+        // === A1 invariant: live supply decreases by exactly amount ===
+
+        // 3. Live supply decreases by amount (not amount + fee) because
+        //    the fee returns to the creator on this shard.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            uint64_t baseline = c.live_total_supply();
+
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.live_total_supply() == baseline - 50,
+                  "A1: live supply decreases by amount (fee returns via creator)");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after outbound");
+        }
+
+        // === Same-shard fallback (negative test) ===
+
+        // 4. In single-shard mode (shard_count=1), is_cross_shard always
+        //    returns false → TRANSFER credits locally (no outbound debit).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // shard_count defaults to 1 (no set_shard_routing) → no
+            // address is cross-shard.
+            check(!c.is_cross_shard("any_address"),
+                  "shard_count=1: is_cross_shard always false");
+
+            // Sanity: TRANSFER to an arbitrary domain credits locally.
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "local_recipient";
+            tx.amount = 30; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            check(c.balance("local_recipient") == 30,
+                  "single-shard fallback: local credit happens");
+            check(c.accumulated_outbound() == 0,
+                  "single-shard fallback: accumulated_outbound unchanged");
+        }
+
+        // === Determinism ===
+
+        // 5. Two chains apply same outbound TRANSFER → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Hash salt{};
+            c1.set_shard_routing(4, salt, ShardId{0});
+            c2.set_shard_routing(4, salt, ShardId{0});
+
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = 25; tx.fee = 1; tx.nonce = 0;
+
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same outbound TRANSFER → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": cross-shard-outbound-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

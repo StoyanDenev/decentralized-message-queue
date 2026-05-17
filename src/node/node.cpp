@@ -2418,6 +2418,14 @@ json Node::rpc_status() const {
             n += bucket.size();
         j["pending_param_changes"] = n;
     }
+    // R1 / rev.9: this node's configured committee_region. Empty
+    // string = global pool (the default and pre-R1 behavior). In
+    // regional EXTENDED-mode deployments, the region tag determines
+    // which shard's eligible pool this node draws from. Surfacing
+    // here lets operators in multi-region clusters confirm a node's
+    // region assignment from the status RPC alone — avoids needing
+    // to read the config file from disk.
+    j["committee_region"] = cfg_.committee_region;
 
     // Block-mode + tx counters across the full chain. Useful for ops
     // dashboards and test assertions ("did the chain actually escalate?").

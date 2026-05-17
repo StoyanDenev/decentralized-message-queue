@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-54 subcommands; 1173 assertions; runs in <29s with no flakes.
+56 subcommands; 1199 assertions; runs in <30s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -120,6 +120,8 @@ during development. Each new test wrapper must be added to the
 | `determ test-cross-shard-receipt-apply` | Apply-side handling of `CrossShardReceipt` — rev.9 B3.4 inbound credit (12 assertions across 7 blocks). Basic credit, A1 `accumulated_inbound` counter + invariant, **dedup contract** (duplicate `(src_shard, tx_hash)` NOT re-credited under chain replay — exactly-once-credit guarantee), multiple distinct receipts in single block, receipt to non-existent domain creates entry, `inbound_receipt_applied(src_shard, tx_hash)` predicate reflects dedup-set membership, determinism across two chains. | `tools/test_cross_shard_receipt_apply.sh` | rev.9 B3.4 / cross-shard credit |
 | `determ test-param-change-apply` | Apply-side handling of A5 Phase 2 PARAM_CHANGE — stage → activate-at-effective_height (16 assertions across 8 blocks). Staging contract (field unchanged pre-activation; pending map populated); activation at apply entry (chain field mutated; pending drained); effective_height=0 activates at first non-genesis apply; multi-param same-height (all activate in apply order); multi-param different-heights (sequential activation); unknown name = silent chain-storage no-op but `param_changed_hook_` still fires (Node-side validator-field forwarding path); known param fires hook AND mutates field; determinism. | `tools/test_param_change_apply.sh` | A5 governance apply |
 | `determ test-subsidy-distribution` | Apply-side handling of E1/E3/E4 subsidy distribution (17 assertions across 8 blocks). FLAT mode (subsidy 100 / 1 creator = 100, / 2 creators = 50/50 split, / 2 creators 101 = 50+50+1 dust to creator[0]); LOTTERY mode (jackpot when `cumulative_rand[0..7]` BE % M == 0; miss → 0); E4 finite pool (full → partial → drained as `accumulated_subsidy_` reaches `subsidy_pool_initial_`); A1 invariant (subsidy mints exactly `subsidy_this_block` into live supply); empty-creators no-op (A1-safe). | `tools/test_subsidy_distribution.sh` | E1/E3/E4 economics |
+| `determ test-merge-event-apply` | Apply-side handling of MERGE_EVENT — R7 under-quorum-merge state machine (15 assertions across 9 blocks). BEGIN inserts `(shard_id → {partner_id, refugee_region})` into `merge_state_`; `is_shard_merged` predicate matches; END removes entry on partner match; END with wrong partner = no-op; BEGIN with wrong partner_id (violates `(shard_id+1) % shard_count` ring constraint) = no entry created; single-shard chains (shard_count=1) no-op; two distinct merges tracked independently; `shards_absorbed_by(partner)` inverse-lookup returns `(shard_id, region)` pairs; determinism. | `tools/test_merge_event_apply.sh` | R7 / EXTENDED-mode merge |
+| `determ test-cross-shard-outbound-apply` | Cross-shard outbound TRANSFER apply (rev.9 B3 source side) (11 assertions across 5 blocks). TRANSFER with cross-shard `to` debits sender (amount + fee, fee returns via creator); dst NOT credited locally (credit happens on destination via inbound receipt); nonce++; A1 `accumulated_outbound` += amount (fee stays); live supply decreases by exactly `amount`; expected == live; single-shard fallback (shard_count=1) → `is_cross_shard` always false; determinism. | `tools/test_cross_shard_outbound_apply.sh` | rev.9 B3 / cross-shard source |
 
 ### 2.3 Randomness + consensus arithmetic + tx-root
 
