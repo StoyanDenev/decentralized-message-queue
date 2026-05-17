@@ -351,6 +351,9 @@ In-process tests (deterministic, no network):
                                               + field accessor invariants +
                                               value preservation across every
                                               field of the central wire struct
+  determ test-make-block-sig                  make_block_sig Phase-2 BlockSigMsg
+                                              producer — sign/verify integration +
+                                              key binding + RFC 8032 determinism
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -11193,6 +11196,200 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-accessors " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for
+    // `make_block_sig` — the Phase-2 BlockSigMsg producer helper
+    // in producer.hpp. Complements test-consensus-msgs (which
+    // covers `make_contrib` + `make_abort_claim`) with the third
+    // production helper.
+    //
+    // make_block_sig produces a BlockSigMsg containing:
+    //   - block_index + signer + delay_output + dh_secret (data fields)
+    //   - ed_sig: Ed25519 signature over `block_digest` under the
+    //     signer's key
+    //
+    // This is the Phase-2 K-of-K signing step: each committee
+    // member signs the block_digest (compute_block_digest output),
+    // and K gathered signatures finalize the block. A regression in
+    // make_block_sig would either silently fork the signing path
+    // (wrong message → no peer can verify) or produce a sig that
+    // verifies against the wrong content.
+    if (cmd == "test-make-block-sig") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+
+        // 1. make_block_sig produces a BlockSigMsg with all data
+        //    fields preserved as passed.
+        {
+            NodeKey k = generate_node_key();
+            Hash delay_output = patterned_hash(0x40);
+            Hash block_digest = patterned_hash(0x50);
+            Hash dh_secret    = patterned_hash(0x60);
+            BlockSigMsg m = make_block_sig(k, "alice", 42, delay_output,
+                                             block_digest, dh_secret);
+            check(m.block_index == 42,
+                  "make_block_sig: block_index preserved");
+            check(m.signer == "alice",
+                  "make_block_sig: signer preserved");
+            check(m.delay_output == delay_output,
+                  "make_block_sig: delay_output preserved");
+            check(m.dh_secret == dh_secret,
+                  "make_block_sig: dh_secret preserved");
+        }
+
+        // 2. The signature verifies under the signer's pubkey when
+        //    presented with the same block_digest. This is the
+        //    central sign/verify contract — every committee member's
+        //    Phase-2 signature must verify against compute_block_digest.
+        {
+            NodeKey k = generate_node_key();
+            Hash delay_output = patterned_hash(0x70);
+            Hash block_digest = patterned_hash(0x80);
+            Hash dh_secret    = patterned_hash(0x90);
+            BlockSigMsg m = make_block_sig(k, "alice", 99, delay_output,
+                                             block_digest, dh_secret);
+            bool ok = verify(k.pub, block_digest.data(), block_digest.size(),
+                              m.ed_sig);
+            check(ok,
+                  "make_block_sig: signature verifies under signer's pubkey over block_digest");
+        }
+
+        // 3. Tampered block_digest: signature fails verification
+        //    against the tampered digest. (Defends against a peer
+        //    swapping the digest after sig collection — the sig
+        //    binds to the specific digest at sign time.)
+        {
+            NodeKey k = generate_node_key();
+            Hash delay_output = patterned_hash(0xA0);
+            Hash block_digest = patterned_hash(0xB0);
+            Hash dh_secret    = patterned_hash(0xC0);
+            BlockSigMsg m = make_block_sig(k, "alice", 1, delay_output,
+                                             block_digest, dh_secret);
+            Hash tampered = block_digest;
+            tampered[0] ^= 0xFF;
+            bool ok = verify(k.pub, tampered.data(), tampered.size(),
+                              m.ed_sig);
+            check(!ok,
+                  "make_block_sig: tampered block_digest fails verification");
+        }
+
+        // 4. Different signer keys produce distinct sigs even when
+        //    signing the same digest. (Sanity: each committee
+        //    member contributes their own ed25519 sig — the K-of-K
+        //    threshold is K *distinct* sigs.)
+        {
+            NodeKey k1 = generate_node_key();
+            NodeKey k2 = generate_node_key();
+            Hash digest = patterned_hash(0xD0);
+            Hash delay = patterned_hash(0xD1);
+            Hash secret = patterned_hash(0xD2);
+            BlockSigMsg m1 = make_block_sig(k1, "alice", 1, delay, digest, secret);
+            BlockSigMsg m2 = make_block_sig(k2, "bob",   1, delay, digest, secret);
+            check(m1.ed_sig != m2.ed_sig,
+                  "make_block_sig: distinct signers produce distinct sigs");
+        }
+
+        // 5. Cross-key rejection: signer A's signature does NOT
+        //    verify under signer B's pubkey. (Sig binds to a
+        //    specific keypair.)
+        {
+            NodeKey k1 = generate_node_key();
+            NodeKey k2 = generate_node_key();
+            Hash digest = patterned_hash(0xE0);
+            Hash delay = patterned_hash(0xE1);
+            Hash secret = patterned_hash(0xE2);
+            BlockSigMsg m1 = make_block_sig(k1, "alice", 1, delay, digest, secret);
+            bool ok_under_k2 = verify(k2.pub, digest.data(), digest.size(),
+                                       m1.ed_sig);
+            check(!ok_under_k2,
+                  "make_block_sig: signer A's sig does NOT verify under signer B's pubkey");
+        }
+
+        // 6. Determinism on same key + same digest: Ed25519 is RFC
+        //    8032 deterministic, so two calls with the same inputs
+        //    produce the same signature. (This is the EUF-CMA
+        //    invariant under the deterministic Ed25519 variant the
+        //    protocol uses — defends against any future regression
+        //    that introduces nondeterministic Ed25519 such as a
+        //    libsodium ed25519ph variant.)
+        {
+            NodeKey k = generate_node_key();
+            Hash digest = patterned_hash(0xF0);
+            Hash delay = patterned_hash(0xF1);
+            Hash secret = patterned_hash(0xF2);
+            BlockSigMsg m1 = make_block_sig(k, "alice", 1, delay, digest, secret);
+            BlockSigMsg m2 = make_block_sig(k, "alice", 1, delay, digest, secret);
+            check(m1.ed_sig == m2.ed_sig,
+                  "make_block_sig: deterministic (RFC 8032) — same inputs produce same sig");
+        }
+
+        // 7. block_index doesn't affect the sig (the sig is over
+        //    block_digest only — block_digest already encodes
+        //    block_index via compute_block_digest's inputs, so
+        //    re-binding here would be redundant). This documents
+        //    the contract: a different block_index with the same
+        //    digest produces the SAME signature.
+        {
+            NodeKey k = generate_node_key();
+            Hash digest = patterned_hash(0x10);
+            Hash delay = patterned_hash(0x11);
+            Hash secret = patterned_hash(0x12);
+            BlockSigMsg m1 = make_block_sig(k, "alice", 1,  delay, digest, secret);
+            BlockSigMsg m2 = make_block_sig(k, "alice", 99, delay, digest, secret);
+            check(m1.ed_sig == m2.ed_sig,
+                  "make_block_sig: sig binds to block_digest only (not block_index directly)");
+            check(m1.block_index != m2.block_index,
+                  "make_block_sig: block_index field still preserved per-message");
+        }
+
+        // 8. signer field doesn't affect the sig (same reasoning —
+        //    sig is over block_digest, signer string is metadata).
+        {
+            NodeKey k = generate_node_key();
+            Hash digest = patterned_hash(0x20);
+            Hash delay = patterned_hash(0x21);
+            Hash secret = patterned_hash(0x22);
+            BlockSigMsg m1 = make_block_sig(k, "alice", 1, delay, digest, secret);
+            BlockSigMsg m2 = make_block_sig(k, "bob",   1, delay, digest, secret);
+            check(m1.ed_sig == m2.ed_sig,
+                  "make_block_sig: sig binds to block_digest only (signer string is metadata)");
+        }
+
+        // 9. delay_output + dh_secret carried through but don't
+        //    affect the sig (they're carried for Phase-2 reveal
+        //    transmission; the sig domain is block_digest only).
+        {
+            NodeKey k = generate_node_key();
+            Hash digest = patterned_hash(0x30);
+            Hash secret_a = patterned_hash(0x31);
+            Hash secret_b = patterned_hash(0x32);
+            BlockSigMsg m1 = make_block_sig(k, "alice", 1, secret_a, digest, secret_a);
+            BlockSigMsg m2 = make_block_sig(k, "alice", 1, secret_b, digest, secret_b);
+            check(m1.ed_sig == m2.ed_sig,
+                  "make_block_sig: delay_output + dh_secret don't affect sig (binds to digest)");
+            check(m1.delay_output != m2.delay_output,
+                  "make_block_sig: delay_output field still distinguishable per-message");
+            check(m1.dh_secret != m2.dh_secret,
+                  "make_block_sig: dh_secret field still distinguishable per-message");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": make-block-sig " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
