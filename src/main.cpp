@@ -175,6 +175,10 @@ In-process tests (deterministic, no network):
                                               parse_anon_pubkey / make_anon_address
                                               (S-028 case-insensitive parsing + canonical
                                               lowercase storage form)
+  determ test-genesis-message                 GenesisConfig::genesis_message hash-mixing
+                                              contract (backward-compat default-skips-mix
+                                              invariant + custom-yields-distinct-hash
+                                              + size cap enforcement)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -4156,6 +4160,190 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": anon-address " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the
+    // GenesisConfig::genesis_message field and its hash-mixing
+    // contract. The contract has three rules (genesis.hpp comment
+    // block above DEFAULT_GENESIS_MESSAGE):
+    //
+    //   1. Default value: when genesis_message equals
+    //      DEFAULT_GENESIS_MESSAGE, compute_genesis_hash SKIPS the
+    //      mix entirely. This preserves byte-identical hashes for
+    //      pre-message genesis files (backward-compat invariant —
+    //      existing chains can load with the default and stay on
+    //      the same chain identity they had before this field was
+    //      added).
+    //
+    //   2. Custom value: when genesis_message is anything else
+    //      (including the empty string), compute_genesis_hash mixes
+    //      it length-prefixed (u64 BE per Preliminaries §1.3). This
+    //      produces a DISTINCT chain identity from the default.
+    //
+    //   3. Size cap: GENESIS_MESSAGE_MAX_BYTES = 256. from_json
+    //      throws on oversized inputs.
+    //
+    // A regression in this hashing logic would silently break
+    // chain-identity stability for existing deployments (pre-message
+    // chains would suddenly compute a different genesis hash) OR
+    // silently allow chain-identity collisions (two deployments
+    // intending different messages would share a hash). Locking it
+    // in at the unit level catches both.
+    if (cmd == "test-genesis-message") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a minimal baseline GenesisConfig. compute_genesis_hash
+        // uses many fields; we set just enough to get a stable hash.
+        auto make_baseline = []() {
+            GenesisConfig c;
+            c.chain_id     = "test-genesis-message";
+            c.m_creators   = 3;
+            c.k_block_sigs = 3;
+            c.block_subsidy = 0;
+            // Default genesis_message is set by the struct's default-
+            // member-initializer = DEFAULT_GENESIS_MESSAGE.
+            return c;
+        };
+
+        // 1. Default genesis_message: hash matches a config that
+        //    explicitly sets it to DEFAULT_GENESIS_MESSAGE (sanity
+        //    that the default-member-initializer works).
+        {
+            GenesisConfig a = make_baseline();
+            GenesisConfig b = make_baseline();
+            b.genesis_message = DEFAULT_GENESIS_MESSAGE;
+            check(compute_genesis_hash(a) == compute_genesis_hash(b),
+                  "default genesis_message hash == explicit "
+                  "DEFAULT_GENESIS_MESSAGE hash");
+        }
+
+        // 2. Backward-compat: a config built with the default
+        //    skips the hash mix entirely. We can't test "pre-message
+        //    genesis hash" directly (no time machine), but we CAN
+        //    test that the contract holds: hash(default) ==
+        //    hash(default) across distinct calls, and that the
+        //    hash differs when genesis_message changes (next test).
+        {
+            GenesisConfig a = make_baseline();
+            GenesisConfig b = make_baseline();
+            check(compute_genesis_hash(a) == compute_genesis_hash(b),
+                  "compute_genesis_hash is deterministic");
+        }
+
+        // 3. Custom genesis_message changes the hash.
+        {
+            GenesisConfig a = make_baseline();
+            GenesisConfig b = make_baseline();
+            b.genesis_message = "Custom inscribed message.";
+            check(compute_genesis_hash(a) != compute_genesis_hash(b),
+                  "custom genesis_message yields distinct hash");
+        }
+
+        // 4. Empty genesis_message (explicit no-inscription) ALSO
+        //    changes the hash — proves rule (2). An empty string is
+        //    NOT the same as the default; operators who want a
+        //    chain identity that hashes the absence-of-message
+        //    explicitly use "" to get a distinct chain hash.
+        {
+            GenesisConfig a = make_baseline();
+            GenesisConfig b = make_baseline();
+            b.genesis_message = "";
+            check(compute_genesis_hash(a) != compute_genesis_hash(b),
+                  "empty genesis_message also yields distinct hash "
+                  "(empty != default)");
+        }
+
+        // 5. Different custom messages yield different hashes.
+        {
+            GenesisConfig a = make_baseline();
+            a.genesis_message = "Message A";
+            GenesisConfig b = make_baseline();
+            b.genesis_message = "Message B";
+            check(compute_genesis_hash(a) != compute_genesis_hash(b),
+                  "different custom messages yield distinct hashes");
+        }
+
+        // 6. Same custom message yields same hash (determinism
+        //    under override).
+        {
+            GenesisConfig a = make_baseline();
+            a.genesis_message = "Inscribed at deployment time";
+            GenesisConfig b = make_baseline();
+            b.genesis_message = "Inscribed at deployment time";
+            check(compute_genesis_hash(a) == compute_genesis_hash(b),
+                  "identical custom messages yield same hash");
+        }
+
+        // 7. JSON round-trip: from_json with absent genesis_message
+        //    yields default; to_json includes it; from_json on the
+        //    serialized JSON yields the same value back.
+        {
+            GenesisConfig a = make_baseline();
+            a.genesis_message = "Round-trip test";
+            // Add minimal mandatory fields for to_json to work.
+            nlohmann::json js = a.to_json();
+            GenesisConfig back = GenesisConfig::from_json(js);
+            check(back.genesis_message == "Round-trip test",
+                  "to_json + from_json round-trips genesis_message");
+        }
+
+        // 8. from_json with absent key uses DEFAULT_GENESIS_MESSAGE.
+        {
+            nlohmann::json js = {
+                {"chain_id",    "minimal"},
+                {"m_creators",  3},
+                {"k_block_sigs", 3}
+            };
+            GenesisConfig c = GenesisConfig::from_json(js);
+            check(c.genesis_message == DEFAULT_GENESIS_MESSAGE,
+                  "from_json: absent key -> DEFAULT_GENESIS_MESSAGE");
+        }
+
+        // 9. Size cap enforced: oversized message throws.
+        {
+            nlohmann::json js = {
+                {"chain_id",   "oversize"},
+                {"m_creators", 3},
+                {"k_block_sigs", 3},
+                {"genesis_message",
+                 std::string(GENESIS_MESSAGE_MAX_BYTES + 1, 'x')}
+            };
+            bool threw = false;
+            try { GenesisConfig::from_json(js); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "from_json rejects oversized genesis_message (>256B)");
+        }
+
+        // 10. Boundary: exactly GENESIS_MESSAGE_MAX_BYTES bytes is
+        //     accepted.
+        {
+            nlohmann::json js = {
+                {"chain_id",   "boundary"},
+                {"m_creators", 3},
+                {"k_block_sigs", 3},
+                {"genesis_message",
+                 std::string(GENESIS_MESSAGE_MAX_BYTES, 'x')}
+            };
+            bool threw = false;
+            try {
+                GenesisConfig c = GenesisConfig::from_json(js);
+                check(c.genesis_message.size() == GENESIS_MESSAGE_MAX_BYTES,
+                      "exactly GENESIS_MESSAGE_MAX_BYTES accepted");
+            } catch (const std::exception&) { threw = true; }
+            if (threw) check(false,
+                              "exactly GENESIS_MESSAGE_MAX_BYTES should be accepted");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": genesis-message " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

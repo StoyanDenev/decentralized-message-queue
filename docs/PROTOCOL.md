@@ -687,6 +687,17 @@ Genesis is block 0 with `initial_state` carrying creator/account allocations. It
 {
   // Chain identity
   "chain_id":       "string",   // free-form, salts the genesis hash
+  "genesis_message": "string",  // optional UTF-8 inscription, ≤ 256 B.
+                                 // Default: DEFAULT_GENESIS_MESSAGE
+                                 // ("It is not valuable what you do but
+                                 // the ability to do it is the real
+                                 // value."). Hash-mixed into the
+                                 // genesis hash ONLY when non-default,
+                                 // so pre-message genesis files remain
+                                 // byte-identical. Custom values
+                                 // (including explicit "") produce
+                                 // distinct chain identities. Length-
+                                 // prefixed u64 BE in compute_genesis_hash.
   "shard_id":       0,          // 0 for SINGLE/BEACON; per-shard for SHARD
   "chain_role":     0,          // 0 = SINGLE, 1 = BEACON, 2 = SHARD
   "initial_shard_count": 1,     // S in the sharded deployment

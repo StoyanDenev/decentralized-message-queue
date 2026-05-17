@@ -67,8 +67,33 @@ struct GenesisAllocation {
     uint64_t    balance{0};
 };
 
+// Protocol-level philosophical anchor inscribed on every Determ deployment
+// unless the operator overrides at genesis-build time. Forms the default
+// value for GenesisConfig::genesis_message. Hash-mixing rule: when the
+// configured message equals this default, the genesis-hash builder skips
+// the mix (backward-compat invariant for pre-message genesis files); when
+// the operator overrides (to "" for explicit no-inscription, or to any
+// custom string), the hash incorporates it and produces a distinct chain
+// identity.
+inline constexpr const char* DEFAULT_GENESIS_MESSAGE =
+    "It is not valuable what you do but the ability to do it is the real value.";
+
+// Maximum byte length for genesis_message (validated at JSON load).
+inline constexpr size_t GENESIS_MESSAGE_MAX_BYTES = 256;
+
 struct GenesisConfig {
     std::string                     chain_id;
+    // Optional inscribed genesis message — per-deployment cultural anchor,
+    // mission statement, regulatory disclosure, or commemorative text.
+    // Maximum GENESIS_MESSAGE_MAX_BYTES bytes. Defaults to
+    // DEFAULT_GENESIS_MESSAGE (above). Operators may override with any
+    // UTF-8 string up to the cap — license disclosures, news-headline
+    // timestamp anchors, mission statements, etc. Inscribed at genesis-
+    // build time, included in compute_genesis_hash when non-default,
+    // immutable thereafter. Accessible via the GenesisConfig stored at
+    // chain start (RPC exposure via a future `genesis_info` endpoint is a
+    // small follow-on; the field itself is the substrate).
+    std::string                     genesis_message{DEFAULT_GENESIS_MESSAGE};
     uint32_t                        m_creators{3};
     // Rev. 3 dual-mode: K = M = strong BFT (full unanimity); K < M = weak
     // BFT (Phase 2 K-of-M threshold). Phase 1 unanimity unchanged across

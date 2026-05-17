@@ -11,7 +11,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **60 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **61 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
@@ -36,6 +36,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_sha256.sh` | SHA-256 wrapper + Big-Endian encoding unit test (S-035 Option 1 seed) — in-process `crypto::sha256` + `SHA256Builder`; 10 assertions covering NIST FIPS 180-4 test vectors (empty input, "abc", 56-byte input exercising the >55-byte padding path), incremental Builder ↔ one-shot equivalence, multi-piece append correctness, **and the Preliminaries §1.3 big-endian uint64_t / int64_t encoding** that every signing_bytes / compute_block_digest / merkle_leaf_hash path depends on for cross-platform protocol determinism. Foundation test under every hash claim in the entire codebase |
 | `test_anon_address.sh` | Anon-address helpers unit test (S-035 Option 1 seed) — in-process `is_anon_address` / `normalize_anon_address` / `parse_anon_pubkey` / `make_anon_address`; 12 assertions covering case-insensitive acceptance (S-028 closure), invalid-input rejection (missing 0x, wrong length, non-hex), case-normalization to canonical lowercase, round-trip via make_anon_address ↔ parse_anon_pubkey, registered-domain pass-through. Faster unit-level counterpart to test_anon_address_case.sh (which exercises the same surface end-to-end through 3-node RPC — 1+ minute vs ~1 second) |
 | `test_headers_gossip.sh` | v2.2 gossip-layer header-sync (HEADERS_REQUEST / HEADERS_RESPONSE wire messages — MsgType 17/18); asserts gossip-layer fetch via `determ headers --peer host:port` returns a valid envelope, content matches the RPC fetch byte-for-byte, gossip-fetched headers pass through verify-headers + verify-block-sigs cleanly, and pagination semantics match. Closes the last v2.2 outstanding ask — light clients can now peer directly with full nodes without RPC binding |
+| `test_genesis_message.sh` | `GenesisConfig::genesis_message` hash-mixing contract unit test (S-035 Option 1 seed); 10 assertions covering backward-compat default-skips-mix invariant, custom-yields-distinct-hash, empty-string-distinct-from-default, determinism under override, JSON round-trip, absent-key default-fallback, size cap enforcement (256B max), and boundary acceptance. Locks in the operator-facing inscribed-message feature against silent regressions that would either break existing chain identity or allow chain-identity collisions |
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |

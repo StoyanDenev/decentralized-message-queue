@@ -366,6 +366,24 @@ Properties:
 
 See `docs/proofs/EconomicSoundness.md` (FA11 T-13) for the supply-neutrality proof — the proof generalizes over any sum-preserving NEF rule, lottery + cap included. The shipped `chain.cpp:825` implementation still uses the historical geometric `pool/2` formula and is flagged for lottery + cap re-implementation under the E-track reconciliation item in `plan.md` §E1.
 
+### 8.6 Inscribed genesis message
+
+Every Determ genesis carries an optional inscribed string field, `genesis_message`, capped at 256 bytes. The default value — used when the operator omits the field — is the protocol-level philosophical anchor:
+
+> *"It is not valuable what you do but the ability to do it is the real value."*
+
+Operators may override with any UTF-8 string up to the cap: mission statements, regulatory disclosures (e.g., "Licensed by Malta Gaming Authority MGA/B2C/12345"), news-headline timestamp anchors (Bitcoin-style), or commemorative text. The message is inscribed at genesis-build time, included in `compute_genesis_hash` when non-default, and immutable thereafter. Two deployments differing only in `genesis_message` are distinct chains with distinct hashes.
+
+The mix-only-when-non-default rule preserves backward compatibility for pre-message genesis files: they load with the default value (via JSON-key-absent default), the hash builder skips the mix, and the resulting chain hash matches pre-message behavior. Operators who explicitly override (including overriding to the empty string to opt out of inscription entirely) get distinct chain identities.
+
+The inscribed message is accessible via the GenesisConfig stored at chain start; a small follow-on item adds a dedicated `genesis_info` RPC for ergonomic external access. Use cases:
+- **Cultural / philosophical anchor.** Default applies; no operator action required.
+- **Regulatory disclosure.** Operator sets to license authority + ID for licensed deployments (gambling, payment, financial services).
+- **Timestamp anchor.** Operator inscribes a current news headline to prove the chain wasn't pre-genesised (Bitcoin's strategy).
+- **Commemorative text.** Operator inscribes deployment context (date, occasion, founding-member roster).
+
+The inscription is *purely cultural* — it has no protocol behavior beyond hash mixing and read-only RPC exposure. No tx type references it; no validator logic depends on it; no economic mechanism uses it. The field exists to give each Determ deployment a small canvas for context, on the principle that the chain's identity is more than its consensus config.
+
 ---
 
 ## 9. Wallet recovery (A2)
@@ -579,6 +597,7 @@ Determ's design space — unconditional safety in steady state, conditional live
 ```
 GenesisConfig {
   chain_id: string                     // operator-chosen unique identifier
+  genesis_message: string              // inscribed cultural anchor (≤256B); see §8.6
   m_creators: u32                      // pool size per round
   k_block_sigs: u32                    // committee size (1 <= K <= M)
   block_subsidy: u64                   // page reward per block

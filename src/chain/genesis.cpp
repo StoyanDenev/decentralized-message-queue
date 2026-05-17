@@ -66,6 +66,7 @@ json GenesisConfig::to_json() const {
     for (auto& k : param_keyholders) keyholders.push_back(to_hex(k));
     return {
         {"chain_id",                 chain_id},
+        {"genesis_message",          genesis_message},
         {"m_creators",               m_creators},
         {"k_block_sigs",             k_block_sigs},
         {"block_subsidy",            block_subsidy},
@@ -99,6 +100,18 @@ json GenesisConfig::to_json() const {
 GenesisConfig GenesisConfig::from_json(const json& j) {
     GenesisConfig c;
     c.chain_id      = j.value("chain_id",      "");
+    // Optional genesis_message. Default (key absent) is DEFAULT_GENESIS_MESSAGE
+    // — the protocol-level philosophical anchor. Explicit empty string is
+    // allowed for operators who want no inscription. Validated against
+    // GENESIS_MESSAGE_MAX_BYTES.
+    c.genesis_message = j.value("genesis_message", std::string{DEFAULT_GENESIS_MESSAGE});
+    if (c.genesis_message.size() > GENESIS_MESSAGE_MAX_BYTES) {
+        throw std::runtime_error(
+            "genesis: genesis_message exceeds "
+            + std::to_string(GENESIS_MESSAGE_MAX_BYTES)
+            + " bytes (got "
+            + std::to_string(c.genesis_message.size()) + ")");
+    }
     c.m_creators    = j.value("m_creators",    uint32_t{3});
     c.k_block_sigs  = j.value("k_block_sigs",  c.m_creators);   // default to M (strong)
     c.block_subsidy = j.value("block_subsidy", uint64_t{0});
@@ -354,6 +367,20 @@ Block make_genesis_block(const GenesisConfig& cfg) {
     if (!cfg.committee_region.empty()) {
         rb.append(static_cast<uint8_t>(cfg.committee_region.size()));
         rb.append(cfg.committee_region);
+    }
+    // Inscribed genesis_message: mix only when it differs from the default.
+    // Pre-message genesis files (which load with the default via
+    // GenesisConfig::from_json) remain byte-identical to pre-message
+    // chain hashes — backward-compat invariant. Explicit empty override
+    // and any custom inscription both produce distinct chain hashes.
+    // Length-prefixed (u64 BE, matching Preliminaries §1.3's multi-byte
+    // integer encoding convention used throughout signing_bytes /
+    // compute_block_digest / compute_genesis_hash) so the encoding is
+    // unambiguous: a 0-byte message hashes to a different value than
+    // an absent message (the absent path skips the mix entirely).
+    if (cfg.genesis_message != DEFAULT_GENESIS_MESSAGE) {
+        rb.append(static_cast<uint64_t>(cfg.genesis_message.size()));
+        rb.append(cfg.genesis_message);
     }
     for (auto& c : cfg.initial_creators) rb.append(c.ed_pub.data(), c.ed_pub.size());
     // A5: governance fields. governance_mode == 0 (uncontrolled) and
