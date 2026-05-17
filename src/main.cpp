@@ -250,6 +250,11 @@ In-process tests (deterministic, no network):
                                               make_genesis_block — chain
                                               identity origin + S-039
                                               diagnostic-UX gap lock-in
+  determ test-envelope                        wallet/envelope.hpp AES-256-GCM
+                                              + PBKDF2 encrypt/decrypt + AAD
+                                              binding + serialize round-trip
+                                              (A2 Phase 2 wallet recovery
+                                              share wrapping)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -7242,6 +7247,179 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": genesis " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the A2 Phase 2
+    // AEAD envelope (wallet/envelope.hpp). This is the wrapping
+    // primitive for Shamir recovery shares + identity keys, used
+    // throughout the wallet recovery flow (S-004 option 2 keyfile
+    // encryption, A2 share envelopes).
+    //
+    // A regression here would silently weaken at-rest security for
+    // every encrypted wallet artifact — encrypted shares could become
+    // recoverable without the passphrase, or tampered ciphertexts
+    // could decode without an AEAD-tag failure.
+    if (cmd == "test-envelope") {
+        using namespace determ::wallet::envelope;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Use low PBKDF2 iters in tests to keep them <5s. The
+        // production default is 600k iters (~200ms each call); 1000
+        // is enough to exercise the path with no perceptible runtime.
+        const uint32_t TEST_ITERS = 1000;
+        const std::vector<uint8_t> PT = {'h','e','l','l','o',' ','s','h','a','r','e'};
+        const std::string PW = "correct horse battery staple";
+        const std::vector<uint8_t> AAD = {'g','u','a','r','d','i','a','n','-','1'};
+
+        // 1. Encrypt + decrypt round-trip with matching passphrase + AAD.
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            auto pt_back = decrypt(env, PW, AAD);
+            check(pt_back.has_value(),
+                  "encrypt → decrypt round-trip with matching pw + AAD");
+            check(pt_back && *pt_back == PT,
+                  "decrypted plaintext matches original");
+        }
+
+        // 2. Envelope shape: salt non-empty, nonce is 12 bytes (AES-GCM
+        //    standard), ciphertext is plaintext-length + 16-byte tag.
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            check(env.salt.size() >= 16,
+                  "envelope.salt is >= 16 bytes (DEFAULT_SALT_LEN)");
+            check(env.nonce.size() == 12,
+                  "envelope.nonce is exactly 12 bytes (AES-GCM standard)");
+            check(env.ciphertext.size() == PT.size() + 16,
+                  "envelope.ciphertext is plaintext_size + 16-byte GCM tag");
+            check(env.pbkdf2_iters == TEST_ITERS,
+                  "envelope.pbkdf2_iters round-trips configured value");
+            check(env.aad == AAD,
+                  "envelope.aad round-trips supplied AAD");
+        }
+
+        // 3. Wrong passphrase fails decryption (AEAD tag verification).
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            auto pt_back = decrypt(env, "wrong password", AAD);
+            check(!pt_back.has_value(),
+                  "decrypt rejects wrong passphrase (AEAD tag fail)");
+        }
+
+        // 4. Empty passphrase fails (against an envelope encrypted
+        //    with non-empty passphrase).
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            auto pt_back = decrypt(env, "", AAD);
+            check(!pt_back.has_value(),
+                  "decrypt rejects empty passphrase against non-empty-encrypted");
+        }
+
+        // 5. Mismatched AAD fails. Critical: this is the bind-context
+        //    property — guardian-1's encrypted share cannot be presented
+        //    as guardian-2's because the AAD won't match.
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            std::vector<uint8_t> AAD2 = {'g','u','a','r','d','i','a','n','-','2'};
+            auto pt_back = decrypt(env, PW, AAD2);
+            check(!pt_back.has_value(),
+                  "decrypt rejects mismatched AAD (per-guardian binding)");
+        }
+
+        // 6. Tampered ciphertext fails. Flip one byte in the
+        //    ciphertext, decrypt must fail.
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            env.ciphertext[0] ^= 0xFF;
+            auto pt_back = decrypt(env, PW, AAD);
+            check(!pt_back.has_value(),
+                  "decrypt rejects tampered ciphertext");
+        }
+
+        // 7. Tampered tag fails. The tag is the last 16 bytes of the
+        //    ciphertext; flip one byte there.
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            env.ciphertext[env.ciphertext.size() - 1] ^= 0xFF;
+            auto pt_back = decrypt(env, PW, AAD);
+            check(!pt_back.has_value(),
+                  "decrypt rejects tampered GCM tag");
+        }
+
+        // 8. Different encryptions with same inputs produce different
+        //    envelopes (fresh salt + nonce each time). Critical for
+        //    safety: re-using the same plaintext+passphrase must NOT
+        //    produce the same ciphertext (would leak that two stored
+        //    artifacts encrypted the same plaintext).
+        {
+            Envelope e1 = encrypt(PT, PW, AAD, TEST_ITERS);
+            Envelope e2 = encrypt(PT, PW, AAD, TEST_ITERS);
+            check(e1.salt != e2.salt,
+                  "encrypt: fresh salt per envelope (nondeterminism property)");
+            check(e1.nonce != e2.nonce,
+                  "encrypt: fresh nonce per envelope (nondeterminism property)");
+            check(e1.ciphertext != e2.ciphertext,
+                  "encrypt: same plaintext+pw yields different ciphertexts");
+        }
+
+        // 9. Serialize + deserialize round-trip.
+        {
+            Envelope env = encrypt(PT, PW, AAD, TEST_ITERS);
+            std::string blob = serialize(env);
+            auto back = deserialize(blob);
+            check(back.has_value(), "deserialize succeeds on valid blob");
+            if (back) {
+                check(back->salt        == env.salt, "deserialize: salt preserved");
+                check(back->pbkdf2_iters == env.pbkdf2_iters,
+                      "deserialize: pbkdf2_iters preserved");
+                check(back->nonce       == env.nonce,
+                      "deserialize: nonce preserved");
+                check(back->aad         == env.aad,
+                      "deserialize: aad preserved");
+                check(back->ciphertext  == env.ciphertext,
+                      "deserialize: ciphertext preserved");
+                // Full round-trip: deserialized envelope decrypts correctly.
+                auto pt_back = decrypt(*back, PW, AAD);
+                check(pt_back && *pt_back == PT,
+                      "deserialize → decrypt full round-trip");
+            }
+        }
+
+        // 10. deserialize rejects bad input.
+        {
+            auto bad = deserialize("not a valid envelope");
+            check(!bad.has_value(),
+                  "deserialize rejects garbage input");
+            auto truncated = deserialize("DWE1.aabb");
+            check(!truncated.has_value(),
+                  "deserialize rejects truncated envelope");
+        }
+
+        // 11. Empty plaintext can be encrypted (degenerate but valid).
+        {
+            std::vector<uint8_t> empty;
+            Envelope env = encrypt(empty, PW, AAD, TEST_ITERS);
+            check(env.ciphertext.size() == 16,
+                  "encrypt(empty plaintext) yields 16-byte ciphertext (just tag)");
+            auto pt_back = decrypt(env, PW, AAD);
+            check(pt_back.has_value() && pt_back->empty(),
+                  "decrypt of empty-plaintext envelope yields empty plaintext");
+        }
+
+        // 12. Empty AAD round-trips correctly.
+        {
+            Envelope env = encrypt(PT, PW, {}, TEST_ITERS);
+            auto pt_back = decrypt(env, PW, {});
+            check(pt_back && *pt_back == PT,
+                  "encrypt/decrypt with empty AAD round-trips");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": envelope " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

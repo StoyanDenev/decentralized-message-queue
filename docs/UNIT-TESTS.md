@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-19 subcommands; 335 assertions; runs in <14s with no flakes.
+20 subcommands; 362 assertions; runs in <14s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -112,6 +112,12 @@ during development. Each new test wrapper must be added to the
 | `determ test-rate-limiter` | `net::RateLimiter` token bucket (S-014 surface — the shared helper used identically by RpcServer and GossipNet) (16 assertions): default-disabled bypass, configure(0,0) explicit-disable, configure(>0,>0) enables + getter round-trip, first-touch FULL invariant (legitimate callers don't get hit cold), burst exhaustion (4th consume fails at burst=3 same-instant), per-key independence (exhausting key A doesn't throttle key B — the central security property), reconfigure semantics, refill timing (100ms sleep at rate=20/s yields ≥1 new token), burst-cap invariant (long sleep at high rate does NOT exceed burst — defeats slow-leak attacks), 100-distinct-keys-at-scale. Unit-level counterpart to wire-level `test_rpc_rate_limit.sh` + `test_gossip_rate_limit.sh`. | `tools/test_rate_limiter.sh` | S-014 |
 | `determ test-binary-codec` | Wire-format codec (A3 / S8 closure: JSON envelope v0 + binary envelope v1 + format-detecting dispatcher) + S-022 per-MsgType cap table (35 assertions): JSON envelope round-trip across HELLO + STATUS_REQUEST + TRANSACTION (with type + payload byte-for-byte preservation); binary envelope round-trip across STATUS_RESPONSE + CONTRIB via both `Message::serialize_binary` + `Message::deserialize` (format-detecting) and direct `encode_binary` / `decode_binary`; `is_binary_envelope` format-detection contract (returns true on binary magic byte, false on JSON `{`); malformed-input rejection (garbage bytes + truncated valid JSON); `max_message_bytes` golden vectors for all 19 enumerated MsgType variants (16 MB tier: SNAPSHOT_RESPONSE / CHAIN_RESPONSE; 4 MB tier: BLOCK / BEACON_HEADER / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE / HEADERS_RESPONSE; 1 MB tier: HELLO / CONTRIB / BLOCK_SIG / ABORT_CLAIM / ABORT_EVENT / EQUIVOCATION_EVIDENCE / TRANSACTION / STATUS_REQUEST / STATUS_RESPONSE / GET_CHAIN / SNAPSHOT_REQUEST / HEADERS_REQUEST + default-tight 1 MB fence for future MsgType additions — defeats new types slipping past the S-022 boundary). | `tools/test_binary_codec.sh` | A3 / S8 / S-022 |
 | `determ test-wire-types` | Block-internal wire types JSON round-trip + S-018 strict-rejection (39 assertions). Covers `CrossShardReceipt` (FA7 / V12 source-side receipt — 10 fields), `AbortEvent` (FA3 abort certificate — 4 fields + claims subtree), `EquivocationEvent` (FA6 slashing evidence — 8 fields), `GenesisAlloc` (chain-identity allocation — 5 fields including R1 empty-region backward-compat + zero-stake legacy). S-018 strict-rejection lock-in for all four: missing required field throws with field-name diagnostic; wrong-length hex throws via `json_require_hex` length check. `CrossShardReceipt::from_json` was hardened in the same commit that shipped this test (previously permissive via `j.value()` defaults — defense-in-depth gap closed; now uses `json_require` / `json_require_hex` to match the rest of the S-018 surface). | `tools/test_wire_types.sh` | FA7 / V12 / FA3 / FA6 / S-018 |
+
+### 2.6 Wallet / key surface
+
+| Subcommand | What it tests | Wrapper | FA-track |
+|---|---|---|---|
+| `determ test-envelope` | `wallet/envelope.hpp` AES-256-GCM + PBKDF2-HMAC-SHA-256 AEAD wrapping primitive (A2 Phase 2 wallet recovery share envelopes + S-004 option 2 passphrase-encrypted keyfiles; 27 assertions). Encrypt/decrypt round-trip + envelope shape (salt + nonce + tag sizes); AEAD safety properties (wrong-pw / empty-pw / mismatched-AAD / tampered-ct / tampered-tag all fail; fresh salt + nonce per encryption → distinct ciphertexts from same plaintext+passphrase — defeats artifact-correlation attacks); serialize/deserialize canonical hex round-trip with bad-input rejection; empty-plaintext + empty-AAD edge cases. A regression here would silently weaken at-rest security for every encrypted wallet artifact. | `tools/test_envelope.sh` | A2 / S-004 |
 
 ---
 

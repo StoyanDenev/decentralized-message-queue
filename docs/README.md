@@ -12,7 +12,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **74 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **75 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
@@ -50,6 +50,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 | `test_consensus_msgs.sh` | ContribMsg + BlockSigMsg + AbortClaimMsg + commitment-hash unit test (S-035 Option 1 seed); 28 assertions covering make_contrib_commitment determinism + per-input sensitivity + tx_hashes ORDER sensitivity (sorted-ascending contract), make_abort_claim_message determinism + per-input sensitivity (round defeats Phase-1 vs Phase-2 replay), domain separation between commitment hashes, full JSON round-trip for all three message types, real Ed25519 sign/verify integration |
 | `test_tx_root.sh` | compute_tx_root unit test (FA2 censorship-resistance primitive; S-035 Option 1 seed); 10 assertions: union semantics ({A,B} ∪ {B,C} == {A,B,C}, NOT intersection {B}), dedup across lists, list permutation invariance, empty inner list invariance, sensitivity to added tx. A regression to intersection semantics (S-025 deleted) would silently break union-rule censorship resistance |
 | `test_genesis.sh` | compute_genesis_hash + make_genesis_block unit test (chain-identity origin; S-035 Option 1 seed); 19 assertions over chain_id sensitivity + the **S-039 diagnostic-UX gap lock-in** (m_creators / k_block_sigs / block_subsidy / min_stake / initial_shard_count / bft_enabled are NOT bound into the hash — operator-UX gap, fix deferred as wire-compat break) + fields that ARE bound (shard_id / chain_role / suspension_slash + merge_threshold_blocks non-default / genesis_message / committee_region non-empty) + make_genesis_block invariants + JSON round-trip + oversize rejection. Discovered S-039 during test authoring |
+| `test_envelope.sh` | wallet/envelope.hpp AES-256-GCM + PBKDF2-HMAC-SHA-256 AEAD wrapping primitive unit test (A2 Phase 2 wallet recovery share envelopes + S-004 option 2 passphrase-encrypted keyfiles; S-035 Option 1 seed); 27 assertions covering encrypt/decrypt round-trip + envelope shape + AEAD safety properties (wrong-pw / empty-pw / mismatched-AAD / tampered-ct / tampered-tag all fail; fresh salt + nonce per encryption guarantee distinct ciphertexts — defeats artifact-correlation attacks) + serialize/deserialize canonical hex round-trip with bad-input rejection + edge cases (empty plaintext, empty AAD). A regression here would silently weaken at-rest security for every encrypted wallet artifact |
 | `test_atomic_scope.sh` | A9 Phase 2D nested-scope rollback primitive |
 | `test_composable_batch.sh` | COMPOSABLE_BATCH all-or-nothing semantics under partial-failure |
 | `test_dapp_register.sh` / `test_dapp_call.sh` / `test_dapp_e2e.sh` | v2.18/v2.19 DApp substrate end-to-end |
