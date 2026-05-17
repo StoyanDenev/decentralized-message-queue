@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-12 subcommands; 157 assertions; runs in <12s with no flakes.
+13 subcommands; 192 assertions; runs in <12s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -100,6 +100,7 @@ during development. Each new test wrapper must be added to the
 | Subcommand | What it tests | Wrapper | FA-track |
 |---|---|---|---|
 | `determ test-rate-limiter` | `net::RateLimiter` token bucket (S-014 surface — the shared helper used identically by RpcServer and GossipNet) (16 assertions): default-disabled bypass, configure(0,0) explicit-disable, configure(>0,>0) enables + getter round-trip, first-touch FULL invariant (legitimate callers don't get hit cold), burst exhaustion (4th consume fails at burst=3 same-instant), per-key independence (exhausting key A doesn't throttle key B — the central security property), reconfigure semantics, refill timing (100ms sleep at rate=20/s yields ≥1 new token), burst-cap invariant (long sleep at high rate does NOT exceed burst — defeats slow-leak attacks), 100-distinct-keys-at-scale. Unit-level counterpart to wire-level `test_rpc_rate_limit.sh` + `test_gossip_rate_limit.sh`. | `tools/test_rate_limiter.sh` | S-014 |
+| `determ test-binary-codec` | Wire-format codec (A3 / S8 closure: JSON envelope v0 + binary envelope v1 + format-detecting dispatcher) + S-022 per-MsgType cap table (35 assertions): JSON envelope round-trip across HELLO + STATUS_REQUEST + TRANSACTION (with type + payload byte-for-byte preservation); binary envelope round-trip across STATUS_RESPONSE + CONTRIB via both `Message::serialize_binary` + `Message::deserialize` (format-detecting) and direct `encode_binary` / `decode_binary`; `is_binary_envelope` format-detection contract (returns true on binary magic byte, false on JSON `{`); malformed-input rejection (garbage bytes + truncated valid JSON); `max_message_bytes` golden vectors for all 19 enumerated MsgType variants (16 MB tier: SNAPSHOT_RESPONSE / CHAIN_RESPONSE; 4 MB tier: BLOCK / BEACON_HEADER / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE / HEADERS_RESPONSE; 1 MB tier: HELLO / CONTRIB / BLOCK_SIG / ABORT_CLAIM / ABORT_EVENT / EQUIVOCATION_EVIDENCE / TRANSACTION / STATUS_REQUEST / STATUS_RESPONSE / GET_CHAIN / SNAPSHOT_REQUEST / HEADERS_REQUEST + default-tight 1 MB fence for future MsgType additions — defeats new types slipping past the S-022 boundary). | `tools/test_binary_codec.sh` | A3 / S8 / S-022 |
 
 ---
 
@@ -109,12 +110,12 @@ during development. Each new test wrapper must be added to the
 
 | Surface | Function(s) | Why high value | Effort |
 |---|---|---|---|
-| Equivocation event verification | `validator::check_equivocation_events` | FA6 closure surface | ~1d |
-| Block binary codec | `binary_codec::encode_block` / `decode_block` (A3/S8) | Wire-format integrity invariant; defeats malformed-input acceptance | ~1d |
-| Cross-shard receipt hashing | `compute_receipt_hash` (V12/V13) | FA7 destination-credit determinism | ~½d |
+| Equivocation event verification | `validator::check_equivocation_events` | FA6 closure surface | ~1d (requires partial NodeRegistry fixture) |
+| Cross-shard receipt round-trip | `CrossShardReceipt::to_json` / `from_json` (V12/V13) | FA7 destination-credit determinism | ~½d |
 | Bounded mempool | `Node::mempool_admit_check` / `mempool_make_room_for` (S-008) | Admission/eviction policy invariants | ~1d (needs partial Node fixture) |
 | AbortClaimMsg verification | `validator::verify_abort_claim` | FA3 surface | ~½d |
 | Genesis loader | `genesis_from_config` | Identity hash + initial-state contract | ~½d |
+| AbortEvent JSON round-trip | `AbortEvent::to_json` / `from_json` | wire-format integrity (claims_json subtree) | ~½d |
 
 ### 3.2 Mid-level invariants
 

@@ -209,6 +209,12 @@ In-process tests (deterministic, no network):
                                               including Phase-2-reveal fields +
                                               partner_subset_hash + state_root
                                               zero-skip backward-compat
+  determ test-binary-codec                    Wire-format codec (A3 / S8) — JSON
+                                              envelope v0 + binary envelope v1
+                                              round-trip + format-detecting
+                                              deserializer + malformed-input
+                                              rejection + S-022 per-MsgType cap
+                                              table golden vectors
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -5518,6 +5524,234 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-hash " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the wire-format
+    // codec (A3 / S8 closure). Exercises `Message::serialize` (legacy
+    // JSON envelope, default v0), `Message::serialize_binary` (v1
+    // binary envelope), the `Message::deserialize` format-detecting
+    // dispatcher, `encode_binary` / `decode_binary` directly, and
+    // `is_binary_envelope` detection. Plus locks in `max_message_bytes`
+    // per-MsgType caps (S-022 surface) so future MsgType additions
+    // don't slip through unbounded.
+    //
+    // Why this matters: the wire format is the trust boundary between
+    // peers. A regression here would either silently break cross-peer
+    // interoperability (encode/decode asymmetry across MsgType variants)
+    // OR widen an attack surface (a new MsgType slipping past the
+    // S-022 default-tight 1 MB cap to 16 MB).
+    if (cmd == "test-binary-codec") {
+        using namespace determ;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: serialize() / serialize_binary() prepend a 4-byte
+        // big-endian length prefix (the framing layer). deserialize()
+        // expects body-only — the peer's framing layer strips the
+        // prefix before dispatching. For unit-level round-trip, strip
+        // the prefix here too.
+        auto strip_frame = [](const std::vector<uint8_t>& framed) {
+            std::vector<uint8_t> body;
+            if (framed.size() > 4) {
+                body.assign(framed.begin() + 4, framed.end());
+            }
+            return body;
+        };
+
+        // === JSON envelope (v0) round-trip across multiple MsgTypes ===
+
+        // 1. HELLO round-trip via JSON envelope. HELLO is special: it
+        //    happens pre-negotiation, so it's ALWAYS JSON regardless of
+        //    the peer's wire-version. Test that explicitly.
+        {
+            Message m = make_hello("alice", 12345, ChainRole::SINGLE, 0, 1);
+            auto framed = m.serialize();
+            check(framed.size() > 4,
+                  "HELLO JSON serialize produces framed bytes");
+            auto body = strip_frame(framed);
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::HELLO,
+                  "HELLO round-trip: type preserved");
+            check(back.payload["domain"] == "alice",
+                  "HELLO round-trip: domain field preserved");
+            check(back.payload["port"] == 12345,
+                  "HELLO round-trip: port field preserved");
+        }
+
+        // 2. STATUS_REQUEST round-trip (consensus-chatter category).
+        {
+            Message m{MsgType::STATUS_REQUEST, json::object()};
+            auto framed = m.serialize();
+            auto body = strip_frame(framed);
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::STATUS_REQUEST,
+                  "STATUS_REQUEST round-trip: type preserved");
+        }
+
+        // 3. TRANSACTION round-trip with non-trivial payload.
+        {
+            json tx_payload = {
+                {"from", "alice"}, {"to", "bob"}, {"amount", 100},
+                {"fee", 1}, {"nonce", 5}, {"hash", "deadbeef"}
+            };
+            Message m{MsgType::TRANSACTION, tx_payload};
+            auto framed = m.serialize();
+            auto body = strip_frame(framed);
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::TRANSACTION,
+                  "TRANSACTION round-trip: type preserved");
+            check(back.payload == tx_payload,
+                  "TRANSACTION round-trip: payload preserved byte-for-byte");
+        }
+
+        // === Binary envelope (v1) round-trip ===
+
+        // 4. STATUS_RESPONSE binary round-trip. Use STATUS_RESPONSE
+        //    rather than HELLO because HELLO is rejected by the
+        //    binary path (it's always JSON pre-negotiation).
+        {
+            json status = {{"head_index", 100}, {"head_hash", "abcd1234"}};
+            Message m{MsgType::STATUS_RESPONSE, status};
+            auto framed = m.serialize_binary();
+            auto body = strip_frame(framed);
+            check(!body.empty(),
+                  "STATUS_RESPONSE binary serialize produces non-empty body");
+            check(is_binary_envelope(body.data(), body.size()),
+                  "is_binary_envelope detects binary-encoded bytes");
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::STATUS_RESPONSE,
+                  "STATUS_RESPONSE binary round-trip: type preserved");
+        }
+
+        // 5. Format detection — JSON-encoded bytes do NOT trigger
+        //    is_binary_envelope.
+        {
+            Message m{MsgType::STATUS_REQUEST, json::object()};
+            auto json_framed = m.serialize();
+            auto json_body = strip_frame(json_framed);
+            check(!is_binary_envelope(json_body.data(), json_body.size()),
+                  "is_binary_envelope returns false for JSON-encoded bytes");
+        }
+
+        // 6. encode_binary / decode_binary directly (free-function path).
+        //    These operate on body bytes (no framing).
+        {
+            Message m{MsgType::CONTRIB, {{"x", 1}}};
+            auto bytes = encode_binary(m);
+            check(!bytes.empty(),
+                  "encode_binary produces non-empty bytes");
+            Message back = decode_binary(bytes.data(), bytes.size());
+            check(back.type == MsgType::CONTRIB,
+                  "decode_binary round-trip: type preserved");
+        }
+
+        // === Malformed input rejection ===
+
+        // 7. Garbage bytes (not valid JSON, not valid binary envelope).
+        //    is_binary_envelope returns false (no 0xB1 magic byte), so
+        //    deserialize falls through to JSON parse which throws on
+        //    invalid JSON.
+        {
+            std::vector<uint8_t> garbage = {0xFF, 0xFE, 0xFD, 0xFC};
+            bool threw = false;
+            try {
+                Message::deserialize(garbage.data(), garbage.size());
+            } catch (const std::exception&) { threw = true; }
+            check(threw, "deserialize throws on garbage bytes");
+        }
+
+        // 8. Truncated valid JSON (envelope missing closing brace).
+        //    Catches partial-payload regressions in the framing layer.
+        {
+            std::string truncated = "{\"type\":0,\"payload\":{";
+            std::vector<uint8_t> bytes(truncated.begin(), truncated.end());
+            bool threw = false;
+            try {
+                Message::deserialize(bytes.data(), bytes.size());
+            } catch (const std::exception&) { threw = true; }
+            check(threw, "deserialize throws on truncated JSON");
+        }
+
+        // === S-022 per-message-type cap golden vectors ===
+
+        // 9. SNAPSHOT_RESPONSE + CHAIN_RESPONSE caps are 16 MB
+        //    (the only legitimate large-payload channels).
+        {
+            check(max_message_bytes(MsgType::SNAPSHOT_RESPONSE) ==
+                  16 * 1024 * 1024,
+                  "max_message_bytes(SNAPSHOT_RESPONSE) == 16 MB");
+            check(max_message_bytes(MsgType::CHAIN_RESPONSE) ==
+                  16 * 1024 * 1024,
+                  "max_message_bytes(CHAIN_RESPONSE) == 16 MB");
+        }
+
+        // 10. BLOCK + related block-shaped types are 4 MB.
+        {
+            check(max_message_bytes(MsgType::BLOCK) == 4 * 1024 * 1024,
+                  "max_message_bytes(BLOCK) == 4 MB");
+            check(max_message_bytes(MsgType::BEACON_HEADER) == 4 * 1024 * 1024,
+                  "max_message_bytes(BEACON_HEADER) == 4 MB");
+            check(max_message_bytes(MsgType::SHARD_TIP) == 4 * 1024 * 1024,
+                  "max_message_bytes(SHARD_TIP) == 4 MB");
+            check(max_message_bytes(MsgType::CROSS_SHARD_RECEIPT_BUNDLE) ==
+                  4 * 1024 * 1024,
+                  "max_message_bytes(CROSS_SHARD_RECEIPT_BUNDLE) == 4 MB");
+            check(max_message_bytes(MsgType::HEADERS_RESPONSE) ==
+                  4 * 1024 * 1024,
+                  "max_message_bytes(HEADERS_RESPONSE) == 4 MB");
+        }
+
+        // 11. Consensus-chatter + requests + status default to 1 MB.
+        {
+            check(max_message_bytes(MsgType::HELLO) == 1 * 1024 * 1024,
+                  "max_message_bytes(HELLO) == 1 MB");
+            check(max_message_bytes(MsgType::CONTRIB) == 1 * 1024 * 1024,
+                  "max_message_bytes(CONTRIB) == 1 MB");
+            check(max_message_bytes(MsgType::BLOCK_SIG) == 1 * 1024 * 1024,
+                  "max_message_bytes(BLOCK_SIG) == 1 MB");
+            check(max_message_bytes(MsgType::ABORT_CLAIM) == 1 * 1024 * 1024,
+                  "max_message_bytes(ABORT_CLAIM) == 1 MB");
+            check(max_message_bytes(MsgType::ABORT_EVENT) == 1 * 1024 * 1024,
+                  "max_message_bytes(ABORT_EVENT) == 1 MB");
+            check(max_message_bytes(MsgType::EQUIVOCATION_EVIDENCE) ==
+                  1 * 1024 * 1024,
+                  "max_message_bytes(EQUIVOCATION_EVIDENCE) == 1 MB");
+            check(max_message_bytes(MsgType::TRANSACTION) == 1 * 1024 * 1024,
+                  "max_message_bytes(TRANSACTION) == 1 MB");
+            check(max_message_bytes(MsgType::STATUS_REQUEST) == 1 * 1024 * 1024,
+                  "max_message_bytes(STATUS_REQUEST) == 1 MB");
+            check(max_message_bytes(MsgType::STATUS_RESPONSE) == 1 * 1024 * 1024,
+                  "max_message_bytes(STATUS_RESPONSE) == 1 MB");
+            check(max_message_bytes(MsgType::GET_CHAIN) == 1 * 1024 * 1024,
+                  "max_message_bytes(GET_CHAIN) == 1 MB");
+            check(max_message_bytes(MsgType::SNAPSHOT_REQUEST) ==
+                  1 * 1024 * 1024,
+                  "max_message_bytes(SNAPSHOT_REQUEST) == 1 MB");
+            check(max_message_bytes(MsgType::HEADERS_REQUEST) ==
+                  1 * 1024 * 1024,
+                  "max_message_bytes(HEADERS_REQUEST) == 1 MB");
+        }
+
+        // 12. Default-branch invariant: any future MsgType beyond
+        //     the enumerated set is capped at 1 MB. Use a value
+        //     definitely past the enum to exercise the default path.
+        {
+            // Cast a future-reserved value (e.g., 200) through MsgType
+            // to test the default branch. Safe — max_message_bytes is
+            // a pure switch with no UB on unmapped enum values.
+            check(max_message_bytes(static_cast<MsgType>(200)) ==
+                  1 * 1024 * 1024,
+                  "max_message_bytes default branch (future MsgType) == 1 MB");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": binary-codec " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
