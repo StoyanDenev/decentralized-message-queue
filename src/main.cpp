@@ -365,6 +365,10 @@ In-process tests (deterministic, no network):
                                               vectors for type byte / null
                                               terminators / BE u64 encoding /
                                               payload position
+  determ test-merge-event-bytes               MergeEvent::encode byte-layout
+                                              invariant — golden vectors for
+                                              event_type / LE u32+u64 fields /
+                                              region_len + utf-8 region
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -11889,6 +11893,235 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-signing-bytes " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the exact byte
+    // layout of `MergeEvent::encode` via golden vectors. The R4
+    // wire format is:
+    //
+    //   [event_type: 1 byte u8]               offset 0
+    //   [shard_id: 4 bytes little-endian]     offset 1
+    //   [partner_id: 4 bytes little-endian]   offset 5
+    //   [effective_height: 8 bytes LE]        offset 9
+    //   [evidence_window_start: 8 bytes LE]   offset 17
+    //   [region_len: 1 byte u8]               offset 25
+    //   [region: utf-8 bytes (region_len)]    offset 26+
+    //
+    // Note: MergeEvent uses LITTLE-ENDIAN per the rev.9 R4 spec —
+    // distinct from Transaction::signing_bytes which uses big-
+    // endian (Preliminaries §1.3). The choice is deliberate: tx
+    // signing is hash-input (BE for cross-platform protocol
+    // determinism convention); MergeEvent is a wire payload that
+    // decodes byte-for-byte (LE matches the host platform's
+    // memory representation on x86 + ARM little-endian targets).
+    //
+    // test-merge-event-codec covers round-trip + field sensitivity
+    // + rejection paths. This test locks the EXACT byte layout
+    // via concrete golden vectors — defends against any future
+    // regression that flips endianness or shifts offsets.
+    if (cmd == "test-merge-event-bytes") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Empty-region golden vector ===
+
+        // 1. All-zero MergeEvent with empty region encodes to
+        //    exactly 26 bytes, all zero.
+        {
+            MergeEvent ev;  // defaults: event_type=BEGIN (0), all 0,
+                            // region empty
+            auto bytes = ev.encode();
+            check(bytes.size() == 26,
+                  "empty-region MergeEvent encodes to 26 bytes");
+            bool all_zero = true;
+            for (auto b : bytes) {
+                if (b != 0) { all_zero = false; break; }
+            }
+            check(all_zero,
+                  "empty-region all-zero MergeEvent encodes as 26 zero bytes");
+        }
+
+        // === event_type at offset 0 ===
+
+        // 2. event_type byte is at offset 0.
+        {
+            MergeEvent ev;
+            ev.event_type = MergeEvent::BEGIN;
+            auto bytes = ev.encode();
+            check(bytes[0] == 0,
+                  "event_type=BEGIN at offset 0 == 0x00");
+
+            ev.event_type = MergeEvent::END;
+            bytes = ev.encode();
+            check(bytes[0] == 1,
+                  "event_type=END at offset 0 == 0x01");
+        }
+
+        // === shard_id at offset 1 (4 bytes LE) ===
+
+        // 3. shard_id = 0x42 (small value): LSB at offset 1.
+        {
+            MergeEvent ev;
+            ev.shard_id = 0x42;
+            auto bytes = ev.encode();
+            check(bytes[1] == 0x42,
+                  "shard_id=0x42 LE: byte 1 (LSB) == 0x42");
+            check(bytes[2] == 0x00, "shard_id=0x42 LE: byte 2 == 0x00");
+            check(bytes[3] == 0x00, "shard_id=0x42 LE: byte 3 == 0x00");
+            check(bytes[4] == 0x00, "shard_id=0x42 LE: byte 4 (MSB) == 0x00");
+        }
+
+        // 4. shard_id = 0x12345678: full LE pattern.
+        {
+            MergeEvent ev;
+            ev.shard_id = 0x12345678;
+            auto bytes = ev.encode();
+            check(bytes[1] == 0x78,
+                  "shard_id=0x12345678 LE: byte 1 (LSB) == 0x78");
+            check(bytes[2] == 0x56, "shard_id LE: byte 2 == 0x56");
+            check(bytes[3] == 0x34, "shard_id LE: byte 3 == 0x34");
+            check(bytes[4] == 0x12,
+                  "shard_id LE: byte 4 (MSB) == 0x12");
+        }
+
+        // === partner_id at offset 5 (4 bytes LE) ===
+
+        // 5. partner_id = 0xAB at offset 5 LSB position.
+        {
+            MergeEvent ev;
+            ev.partner_id = 0xAB;
+            auto bytes = ev.encode();
+            check(bytes[5] == 0xAB,
+                  "partner_id=0xAB LE: byte 5 (LSB) == 0xAB");
+            check(bytes[6] == 0x00, "partner_id LE: byte 6 == 0x00");
+            check(bytes[7] == 0x00, "partner_id LE: byte 7 == 0x00");
+            check(bytes[8] == 0x00, "partner_id LE: byte 8 (MSB) == 0x00");
+        }
+
+        // === effective_height at offset 9 (8 bytes LE) ===
+
+        // 6. effective_height = 0x42 (small): LSB at offset 9.
+        {
+            MergeEvent ev;
+            ev.effective_height = 0x42;
+            auto bytes = ev.encode();
+            check(bytes[9]  == 0x42,
+                  "effective_height=0x42 LE: byte 9 (LSB) == 0x42");
+            check(bytes[10] == 0x00, "effective_height LE: byte 10 == 0x00");
+            check(bytes[16] == 0x00,
+                  "effective_height LE: byte 16 (MSB) == 0x00");
+        }
+
+        // 7. effective_height = 0x0102030405060708: full LE pattern.
+        {
+            MergeEvent ev;
+            ev.effective_height = 0x0102030405060708ULL;
+            auto bytes = ev.encode();
+            check(bytes[9]  == 0x08,
+                  "effective_height=0x0102..0708 LE: byte 9 (LSB) == 0x08");
+            check(bytes[10] == 0x07, "effective_height LE: byte 10 == 0x07");
+            check(bytes[11] == 0x06, "effective_height LE: byte 11 == 0x06");
+            check(bytes[12] == 0x05, "effective_height LE: byte 12 == 0x05");
+            check(bytes[13] == 0x04, "effective_height LE: byte 13 == 0x04");
+            check(bytes[14] == 0x03, "effective_height LE: byte 14 == 0x03");
+            check(bytes[15] == 0x02, "effective_height LE: byte 15 == 0x02");
+            check(bytes[16] == 0x01,
+                  "effective_height LE: byte 16 (MSB) == 0x01");
+        }
+
+        // === evidence_window_start at offset 17 (8 bytes LE) ===
+
+        // 8. evidence_window_start = 0x42 at offset 17 LSB.
+        {
+            MergeEvent ev;
+            ev.evidence_window_start = 0x42;
+            auto bytes = ev.encode();
+            check(bytes[17] == 0x42,
+                  "evidence_window_start=0x42 LE: byte 17 (LSB) == 0x42");
+            check(bytes[18] == 0x00, "evidence_window_start LE: byte 18 == 0x00");
+            check(bytes[24] == 0x00,
+                  "evidence_window_start LE: byte 24 (MSB) == 0x00");
+        }
+
+        // === region_len at offset 25 (1 byte) ===
+
+        // 9. region_len byte at offset 25.
+        {
+            MergeEvent ev;
+            ev.merging_shard_region = "us-east";  // 7 bytes
+            auto bytes = ev.encode();
+            check(bytes[25] == 7,
+                  "region_len='us-east' (7 chars): byte 25 == 0x07");
+        }
+
+        // 10. Empty region → region_len byte at offset 25 == 0.
+        {
+            MergeEvent ev;
+            ev.merging_shard_region = "";
+            auto bytes = ev.encode();
+            check(bytes[25] == 0,
+                  "empty region: region_len byte at offset 25 == 0x00");
+        }
+
+        // === region utf-8 bytes at offset 26+ ===
+
+        // 11. region "us-east" content at offsets [26..32].
+        {
+            MergeEvent ev;
+            ev.merging_shard_region = "us-east";
+            auto bytes = ev.encode();
+            check(bytes.size() == 26 + 7,
+                  "region 'us-east' total size: 26 + 7 = 33 bytes");
+            check(bytes[26] == 'u', "region utf-8: byte 26 == 'u'");
+            check(bytes[27] == 's', "region utf-8: byte 27 == 's'");
+            check(bytes[28] == '-', "region utf-8: byte 28 == '-'");
+            check(bytes[29] == 'e', "region utf-8: byte 29 == 'e'");
+            check(bytes[30] == 'a', "region utf-8: byte 30 == 'a'");
+            check(bytes[31] == 's', "region utf-8: byte 31 == 's'");
+            check(bytes[32] == 't', "region utf-8: byte 32 == 't'");
+        }
+
+        // === Combined golden vector ===
+
+        // 12. Full populated MergeEvent: every field non-default.
+        //     Builds a comprehensive golden vector that exercises
+        //     every byte position together.
+        {
+            MergeEvent ev;
+            ev.event_type = MergeEvent::END;       // byte 0 = 0x01
+            ev.shard_id = 0x00000001;              // bytes 1..4 = 01 00 00 00
+            ev.partner_id = 0x00000002;            // bytes 5..8 = 02 00 00 00
+            ev.effective_height = 0x0000000000000100ULL;  // bytes 9..16 = 00 01 00 00 00 00 00 00
+            ev.evidence_window_start = 0x00000000000000F0ULL; // bytes 17..24 = F0 00 ...
+            ev.merging_shard_region = "X";         // byte 25 = 0x01, byte 26 = 'X'
+
+            auto bytes = ev.encode();
+            check(bytes.size() == 27,
+                  "full MergeEvent: encode size 26 + 1 region byte = 27");
+            check(bytes[0]  == 0x01,
+                  "full: event_type=END at byte 0");
+            check(bytes[1]  == 0x01 && bytes[2] == 0 && bytes[3] == 0 && bytes[4] == 0,
+                  "full: shard_id=1 LE at bytes [1..4]");
+            check(bytes[5]  == 0x02 && bytes[6] == 0 && bytes[7] == 0 && bytes[8] == 0,
+                  "full: partner_id=2 LE at bytes [5..8]");
+            check(bytes[9]  == 0x00 && bytes[10] == 0x01,
+                  "full: effective_height=0x100 LE: byte 9 = 0x00, byte 10 = 0x01");
+            check(bytes[17] == 0xF0,
+                  "full: evidence_window_start=0xF0 LE at byte 17");
+            check(bytes[25] == 0x01,
+                  "full: region_len=1 at byte 25");
+            check(bytes[26] == 'X',
+                  "full: region byte 'X' at byte 26");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merge-event-bytes " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
