@@ -68,10 +68,11 @@ Usage:
   determ show-account <address>              Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash>                      Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
-  determ snapshot inspect --in f [--state-root <hex64>]
+  determ snapshot inspect --in f [--state-root <hex64>] [--json]
                                               Validate + summarize a snapshot file (round-trip check);
                                               optional --state-root pins an externally-trusted root for
-                                              trustless-fast-sync verification
+                                              trustless-fast-sync verification; --json emits
+                                              machine-readable output for scripts
   determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
   determ peers                               List connected peers
   determ balance [<domain>]                  Show domain balance
@@ -1279,18 +1280,32 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
 static int cmd_snapshot_inspect(int argc, char** argv) {
     std::string in_path;
     std::string expected_state_root_hex;
+    bool json_out = false;
     for (int i = 0; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--in")          in_path = argv[i + 1];
         else if (std::string(argv[i]) == "--state-root") expected_state_root_hex = argv[i + 1];
     }
+    // `--json` is a flag, not a value-pair, so scan all args including
+    // the last position.
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") json_out = true;
+    }
     if (in_path.empty()) {
         std::cerr << "Usage: determ snapshot inspect --in <file> "
-                     "[--state-root <hex64>]\n";
+                     "[--state-root <hex64>] [--json]\n";
         return 1;
     }
     try {
         std::ifstream f(in_path);
-        if (!f) { std::cerr << "Cannot open " << in_path << "\n"; return 1; }
+        if (!f) {
+            if (json_out) {
+                json err = {{"error", "cannot_open"}, {"path", in_path}};
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "Cannot open " << in_path << "\n";
+            }
+            return 1;
+        }
         json snap = json::parse(f);
         chain::Chain c = chain::Chain::restore_from_snapshot(snap);
 
@@ -1301,47 +1316,92 @@ static int cmd_snapshot_inspect(int argc, char** argv) {
         // this is the read-out + the external-pin comparison.
         Hash restored_root = c.compute_state_root();
 
-        std::cout << "snapshot OK: " << in_path << "\n";
-        std::cout << "  block_index : "
-                  << (c.empty() ? 0 : c.head().index) << "\n";
-        std::cout << "  head_hash   : "
-                  << (c.empty() ? std::string{} : to_hex(c.head_hash()))
-                  << "\n";
-        std::cout << "  state_root  : " << to_hex(restored_root) << "\n";
-        std::cout << "  accounts    : " << c.accounts().size()    << "\n";
-        std::cout << "  stakes      : " << c.stakes().size()      << "\n";
-        std::cout << "  registrants : " << c.registrants().size() << "\n";
-        std::cout << "  block_subsidy: " << c.block_subsidy()     << "\n";
-        std::cout << "  min_stake   : " << c.min_stake()          << "\n";
-        std::cout << "  shard_count : " << c.shard_count()        << "\n";
-        std::cout << "  shard_id    : " << c.my_shard_id()        << "\n";
-        std::cout << "  tail headers: " << c.height()             << "\n";
+        // Build the inspection result. Same data in both formats; the
+        // `--json` mode is for scripts that want to consume the result
+        // (e.g., bootstrap-orchestrators that pipeline snapshot
+        // verification + state-root checks).
+        json result = {
+            {"status",        "ok"},
+            {"path",          in_path},
+            {"block_index",   c.empty() ? 0 : c.head().index},
+            {"head_hash",     c.empty() ? std::string{} : to_hex(c.head_hash())},
+            {"state_root",    to_hex(restored_root)},
+            {"accounts",      c.accounts().size()},
+            {"stakes",        c.stakes().size()},
+            {"registrants",   c.registrants().size()},
+            {"block_subsidy", c.block_subsidy()},
+            {"min_stake",     c.min_stake()},
+            {"shard_count",   c.shard_count()},
+            {"shard_id",      c.my_shard_id()},
+            {"tail_headers",  c.height()},
+        };
 
         // External-trusted-root pin (trustless-fast-sync gate).
         if (!expected_state_root_hex.empty()) {
             if (expected_state_root_hex.size() != 64) {
-                std::cerr << "Error: --state-root must be 64 hex chars "
-                             "(32 bytes), got "
-                          << expected_state_root_hex.size() << "\n";
+                if (json_out) {
+                    json err = {
+                        {"error", "invalid_state_root_length"},
+                        {"got",   expected_state_root_hex.size()}
+                    };
+                    std::cout << err.dump() << "\n";
+                } else {
+                    std::cerr << "Error: --state-root must be 64 hex chars "
+                                 "(32 bytes), got "
+                              << expected_state_root_hex.size() << "\n";
+                }
                 return 1;
             }
             Hash expected = from_hex_arr<32>(expected_state_root_hex);
             if (expected != restored_root) {
-                std::cerr << "FAIL: snapshot state_root does NOT match "
-                             "supplied --state-root\n";
-                std::cerr << "  snapshot's state_root: "
-                          << to_hex(restored_root) << "\n";
-                std::cerr << "  supplied state_root:   "
-                          << to_hex(expected) << "\n";
-                std::cerr << "  (snapshot may have been tampered with, "
-                             "or was produced against a different chain "
-                             "than the one you trust)\n";
+                if (json_out) {
+                    json err = {
+                        {"error",                  "state_root_mismatch"},
+                        {"snapshot_state_root",    to_hex(restored_root)},
+                        {"supplied_state_root",    to_hex(expected)}
+                    };
+                    std::cout << err.dump() << "\n";
+                } else {
+                    std::cerr << "FAIL: snapshot state_root does NOT match "
+                                 "supplied --state-root\n";
+                    std::cerr << "  snapshot's state_root: "
+                              << to_hex(restored_root) << "\n";
+                    std::cerr << "  supplied state_root:   "
+                              << to_hex(expected) << "\n";
+                    std::cerr << "  (snapshot may have been tampered with, "
+                                 "or was produced against a different chain "
+                                 "than the one you trust)\n";
+                }
                 return 1;
             }
-            std::cout << "  trusted root: ✓ matches --state-root\n";
+            result["trusted_root_match"] = true;
+        }
+
+        if (json_out) {
+            std::cout << result.dump() << "\n";
+        } else {
+            std::cout << "snapshot OK: " << in_path << "\n";
+            std::cout << "  block_index : " << result["block_index"].get<uint64_t>() << "\n";
+            std::cout << "  head_hash   : " << result["head_hash"].get<std::string>() << "\n";
+            std::cout << "  state_root  : " << result["state_root"].get<std::string>() << "\n";
+            std::cout << "  accounts    : " << result["accounts"].get<size_t>()    << "\n";
+            std::cout << "  stakes      : " << result["stakes"].get<size_t>()      << "\n";
+            std::cout << "  registrants : " << result["registrants"].get<size_t>() << "\n";
+            std::cout << "  block_subsidy: " << result["block_subsidy"].get<uint64_t>() << "\n";
+            std::cout << "  min_stake   : " << result["min_stake"].get<uint64_t>() << "\n";
+            std::cout << "  shard_count : " << result["shard_count"].get<uint32_t>() << "\n";
+            std::cout << "  shard_id    : " << result["shard_id"].get<uint32_t>() << "\n";
+            std::cout << "  tail headers: " << result["tail_headers"].get<size_t>() << "\n";
+            if (result.contains("trusted_root_match"))
+                std::cout << "  trusted root: ✓ matches --state-root\n";
         }
     } catch (std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        if (json_out) {
+            json err = {{"error", "exception"}, {"message", e.what()}};
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "Error: " << e.what() << "\n";
+        }
         return 1;
     }
     return 0;
