@@ -465,23 +465,30 @@ Block Block::from_json(const json& j) {
     for (auto& c : json_require_array(j, "creators"))
         b.creators.push_back(c.get<std::string>());
 
+    // S-018 defense-in-depth: optional fields gain the same wrong-
+    // type rejection that required fields get via json_require_array.
+    // Pattern: outer `j.contains(...)` makes the field optional;
+    // inner `json_require_array` ensures that IF present, the field
+    // is a JSON array (not a scalar). Without this, a peer sending
+    // `"creator_tx_lists": 42` would throw an opaque nlohmann error
+    // mid-iteration; now it throws a clean S-018 field-name diagnostic.
     if (j.contains("creator_tx_lists")) {
-        for (auto& one : j["creator_tx_lists"]) {
+        for (auto& one : json_require_array(j, "creator_tx_lists")) {
             std::vector<Hash> list;
             for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
             b.creator_tx_lists.push_back(std::move(list));
         }
     }
     if (j.contains("creator_ed_sigs")) {
-        for (auto& s : j["creator_ed_sigs"])
+        for (auto& s : json_require_array(j, "creator_ed_sigs"))
             b.creator_ed_sigs.push_back(from_hex_arr<64>(s.get<std::string>()));
     }
     if (j.contains("creator_dh_inputs")) {
-        for (auto& h : j["creator_dh_inputs"])
+        for (auto& h : json_require_array(j, "creator_dh_inputs"))
             b.creator_dh_inputs.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
     if (j.contains("creator_dh_secrets")) {
-        for (auto& h : j["creator_dh_secrets"])
+        for (auto& h : json_require_array(j, "creator_dh_secrets"))
             b.creator_dh_secrets.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
 
@@ -501,7 +508,7 @@ Block Block::from_json(const json& j) {
         b.bft_proposer = json_require<std::string>(j, "bft_proposer");
 
     if (j.contains("creator_block_sigs")) {
-        for (auto& s : j["creator_block_sigs"])
+        for (auto& s : json_require_array(j, "creator_block_sigs"))
             b.creator_block_sigs.push_back(from_hex_arr<64>(s.get<std::string>()));
     }
 
@@ -510,22 +517,22 @@ Block Block::from_json(const json& j) {
         b.abort_events.push_back(AbortEvent::from_json(ae));
 
     if (j.contains("equivocation_events")) {
-        for (auto& ej : j["equivocation_events"])
+        for (auto& ej : json_require_array(j, "equivocation_events"))
             b.equivocation_events.push_back(EquivocationEvent::from_json(ej));
     }
 
     if (j.contains("cross_shard_receipts")) {
-        for (auto& rj : j["cross_shard_receipts"])
+        for (auto& rj : json_require_array(j, "cross_shard_receipts"))
             b.cross_shard_receipts.push_back(CrossShardReceipt::from_json(rj));
     }
 
     if (j.contains("inbound_receipts")) {
-        for (auto& rj : j["inbound_receipts"])
+        for (auto& rj : json_require_array(j, "inbound_receipts"))
             b.inbound_receipts.push_back(CrossShardReceipt::from_json(rj));
     }
 
     if (j.contains("initial_state"))
-        for (auto& ia : j["initial_state"])
+        for (auto& ia : json_require_array(j, "initial_state"))
             b.initial_state.push_back(GenesisAlloc::from_json(ia));
 
     if (j.contains("partner_subset_hash"))
