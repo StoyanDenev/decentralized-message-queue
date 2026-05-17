@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include <determ/net/gossip.hpp>
+#include <determ/util/json_validate.hpp>
 #include <iostream>
 #include <algorithm>
 
@@ -201,8 +202,18 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
             break;
         case MsgType::ABORT_EVENT:
             if (on_abort_event) {
-                uint64_t bi = msg.payload.value("block_index", uint64_t{0});
-                Hash ph = from_hex_arr<32>(msg.payload.value("prev_hash", std::string{}));
+                // S-018 defense-in-depth: ABORT_EVENT envelope fields
+                // (block_index, prev_hash, event) are all required.
+                // A peer sending a malformed envelope previously
+                // either silently defaulted (block_index=0,
+                // prev_hash=zero) or threw an opaque nlohmann error
+                // on the j["event"] access. Now requires the fields
+                // explicitly with field-name diagnostics.
+                uint64_t bi = util::json_require<uint64_t>(msg.payload, "block_index");
+                Hash ph = from_hex_arr<32>(util::json_require_hex(msg.payload, "prev_hash", 64));
+                if (!msg.payload.contains("event"))
+                    throw std::runtime_error(
+                        "S-018: ABORT_EVENT envelope missing required 'event' field");
                 auto ev = chain::AbortEvent::from_json(msg.payload["event"]);
                 on_abort_event(bi, ph, ev);
             }
@@ -219,13 +230,30 @@ void GossipNet::handle_message(std::shared_ptr<Peer> peer, const Message& msg) {
             break;
         case MsgType::SHARD_TIP:
             if (on_shard_tip) {
-                ShardId sid = msg.payload.value("shard_id", ShardId{0});
+                // S-018 defense-in-depth: SHARD_TIP envelope must
+                // carry both shard_id AND a 'tip' Block; a peer
+                // sending neither previously silently defaulted
+                // to shard_id=0 or threw an opaque nlohmann error
+                // on the missing 'tip' access.
+                ShardId sid = util::json_require<ShardId>(msg.payload, "shard_id");
+                if (!msg.payload.contains("tip"))
+                    throw std::runtime_error(
+                        "S-018: SHARD_TIP envelope missing required 'tip' field");
                 on_shard_tip(sid, chain::Block::from_json(msg.payload["tip"]));
             }
             break;
         case MsgType::CROSS_SHARD_RECEIPT_BUNDLE:
             if (on_cross_shard_receipt_bundle) {
-                ShardId sid = msg.payload.value("src_shard", ShardId{0});
+                // S-018 defense-in-depth: CROSS_SHARD_RECEIPT_BUNDLE
+                // envelope must carry both src_shard AND a 'src_block'
+                // Block. Bundle relays through beacons before being
+                // applied, so a malformed bundle dropped at the gossip
+                // boundary saves downstream processing.
+                ShardId sid = util::json_require<ShardId>(msg.payload, "src_shard");
+                if (!msg.payload.contains("src_block"))
+                    throw std::runtime_error(
+                        "S-018: CROSS_SHARD_RECEIPT_BUNDLE envelope missing "
+                        "required 'src_block' field");
                 on_cross_shard_receipt_bundle(sid,
                     chain::Block::from_json(msg.payload["src_block"]),
                     msg);   // raw msg passed for relay re-broadcast
