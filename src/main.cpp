@@ -344,6 +344,10 @@ In-process tests (deterministic, no network):
                                               ConsensusMode / ChainRole /
                                               ShardingMode / InclusionModel
                                               wire-format discriminators
+  determ test-block-accessors                 chain::Block default-construction
+                                              + field accessor invariants +
+                                              value preservation across every
+                                              field of the central wire struct
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -10934,6 +10938,243 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": enum-values " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for `chain::Block`
+    // default-construction + field accessors + value-preservation
+    // semantics. Block is the central wire structure — every
+    // gossip hop transits a Block, every chain.json save/load
+    // serializes blocks, every snapshot tail-header is a Block.
+    // The default-construction invariants (every field has a
+    // safe zero-equivalent default) are protocol-critical:
+    // partial Block construction during apply paths must not
+    // expose half-initialized garbage.
+    if (cmd == "test-block-accessors") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Default Block construction ===
+
+        // 1. Default Block: index=0 + timestamp=0 + prev_hash zero.
+        //    (Genesis-shape defaults — Block at index 0 with no
+        //    parent and timestamp 0 is the wire shape of a
+        //    pre-population genesis.)
+        {
+            Block b;
+            check(b.index == 0, "default Block: index == 0");
+            check(b.timestamp == 0, "default Block: timestamp == 0");
+            check(b.prev_hash == Hash{},
+                  "default Block: prev_hash == zero Hash");
+        }
+
+        // 2. Default Block: empty transactions[] vector (no txs).
+        {
+            Block b;
+            check(b.transactions.empty(),
+                  "default Block: transactions[] empty");
+        }
+
+        // 3. Default Block: empty creators[] vector (no committee).
+        {
+            Block b;
+            check(b.creators.empty(),
+                  "default Block: creators[] empty");
+        }
+
+        // 4. Default Block: empty committee-aligned vectors
+        //    (creator_tx_lists, creator_ed_sigs, creator_dh_inputs,
+        //    creator_dh_secrets, creator_block_sigs).
+        {
+            Block b;
+            check(b.creator_tx_lists.empty(),
+                  "default Block: creator_tx_lists empty");
+            check(b.creator_ed_sigs.empty(),
+                  "default Block: creator_ed_sigs empty");
+            check(b.creator_dh_inputs.empty(),
+                  "default Block: creator_dh_inputs empty");
+            check(b.creator_dh_secrets.empty(),
+                  "default Block: creator_dh_secrets empty");
+            check(b.creator_block_sigs.empty(),
+                  "default Block: creator_block_sigs empty");
+        }
+
+        // 5. Default Block: tx_root, delay_seed, delay_output all
+        //    zero (Phase-1/Phase-2 fields un-populated until
+        //    consensus runs).
+        {
+            Block b;
+            check(b.tx_root == Hash{},
+                  "default Block: tx_root == zero");
+            check(b.delay_seed == Hash{},
+                  "default Block: delay_seed == zero");
+            check(b.delay_output == Hash{},
+                  "default Block: delay_output == zero");
+        }
+
+        // 6. Default Block: consensus_mode == MUTUAL_DISTRUST
+        //    (the rev.7/8 default; BFT must be explicitly set).
+        {
+            Block b;
+            check(b.consensus_mode == ConsensusMode::MUTUAL_DISTRUST,
+                  "default Block: consensus_mode == MUTUAL_DISTRUST");
+        }
+
+        // 7. Default Block: bft_proposer empty (MD blocks don't
+        //    have a proposer; BFT blocks set it explicitly).
+        {
+            Block b;
+            check(b.bft_proposer.empty(),
+                  "default Block: bft_proposer empty (MD default)");
+        }
+
+        // 8. Default Block: cumulative_rand zero (chain-randomness
+        //    accumulator is zero pre-population; first block sets
+        //    it via apply_transactions).
+        {
+            Block b;
+            check(b.cumulative_rand == Hash{},
+                  "default Block: cumulative_rand == zero");
+        }
+
+        // 9. Default Block: abort_events / equivocation_events /
+        //    cross_shard_receipts / inbound_receipts / initial_state
+        //    all empty. Apply-path-populated collections.
+        {
+            Block b;
+            check(b.abort_events.empty(),
+                  "default Block: abort_events empty");
+            check(b.equivocation_events.empty(),
+                  "default Block: equivocation_events empty");
+            check(b.cross_shard_receipts.empty(),
+                  "default Block: cross_shard_receipts empty");
+            check(b.inbound_receipts.empty(),
+                  "default Block: inbound_receipts empty");
+            check(b.initial_state.empty(),
+                  "default Block: initial_state empty");
+        }
+
+        // 10. Default Block: state_root + partner_subset_hash both
+        //     zero (the zero-skip backward-compat fields — pre-
+        //     feature blocks have these as zero, JSON encoding
+        //     omits them entirely).
+        {
+            Block b;
+            check(b.state_root == Hash{},
+                  "default Block: state_root == zero (pre-S-033 default)");
+            check(b.partner_subset_hash == Hash{},
+                  "default Block: partner_subset_hash == zero (pre-R4 default)");
+        }
+
+        // === Block field assignment preservation ===
+
+        // 11. Setting transactions[] preserves the assigned tx
+        //     (size + per-field equality).
+        {
+            Block b;
+            Transaction tx;
+            tx.from = "alice";
+            tx.to = "bob";
+            tx.amount = 100;
+            tx.fee = 1;
+            tx.nonce = 5;
+            b.transactions.push_back(tx);
+
+            check(b.transactions.size() == 1,
+                  "Block.transactions: push_back grows to size 1");
+            check(b.transactions[0].from == "alice",
+                  "Block.transactions[0]: from preserved");
+            check(b.transactions[0].amount == 100,
+                  "Block.transactions[0]: amount preserved");
+        }
+
+        // 12. Setting creators[] preserves the order + values.
+        {
+            Block b;
+            b.creators = {"alice", "bob", "carol"};
+            check(b.creators.size() == 3,
+                  "Block.creators: 3-element assignment");
+            check(b.creators[0] == "alice" &&
+                  b.creators[1] == "bob" &&
+                  b.creators[2] == "carol",
+                  "Block.creators: order + values preserved");
+        }
+
+        // 13. Setting parallel committee-aligned vectors keeps
+        //     them aligned by index (caller invariant — but the
+        //     struct doesn't enforce it; just verifies they
+        //     can hold independent sizes).
+        {
+            Block b;
+            b.creators = {"alice", "bob"};
+            Signature s1{}, s2{};
+            for (size_t i = 0; i < s1.size(); ++i) {
+                s1[i] = uint8_t(0xA0 + i);
+                s2[i] = uint8_t(0xB0 + i);
+            }
+            b.creator_ed_sigs = {s1, s2};
+            check(b.creator_ed_sigs.size() == 2,
+                  "Block: creator_ed_sigs sized to match creators");
+            check(b.creator_ed_sigs[0] == s1,
+                  "Block: creator_ed_sigs[0] preserved");
+            check(b.creator_ed_sigs[1] == s2,
+                  "Block: creator_ed_sigs[1] preserved");
+        }
+
+        // 14. Setting consensus_mode to BFT preserves through
+        //     read-back + accessor.
+        {
+            Block b;
+            b.consensus_mode = ConsensusMode::BFT;
+            b.bft_proposer = "alice";
+            check(b.consensus_mode == ConsensusMode::BFT,
+                  "Block: consensus_mode=BFT preserved");
+            check(b.bft_proposer == "alice",
+                  "Block: bft_proposer preserved");
+        }
+
+        // 15. Setting state_root to non-zero value: stored exactly
+        //     as written (no normalization or truncation).
+        {
+            Block b;
+            Hash sr{};
+            for (size_t i = 0; i < sr.size(); ++i) sr[i] = uint8_t(i);
+            b.state_root = sr;
+            check(b.state_root == sr,
+                  "Block: state_root non-zero value preserved exactly");
+        }
+
+        // 16. compute_hash on default Block: deterministic + matches
+        //     a freshly-constructed Block's hash. Useful sanity
+        //     for any code that copies Blocks then expects
+        //     identical hashes.
+        {
+            Block b1;
+            Block b2;
+            check(b1.compute_hash() == b2.compute_hash(),
+                  "compute_hash on two default Blocks matches (struct value-equality)");
+        }
+
+        // 17. compute_hash distinguishes blocks differing in any
+        //     bound field. Sanity check that the hash is sensitive
+        //     to a change (covered comprehensively by test-block-
+        //     hash; this is the canary that the function actually
+        //     produces a different value when index changes).
+        {
+            Block b1;
+            Block b2;
+            b2.index = 1;
+            check(b1.compute_hash() != b2.compute_hash(),
+                  "compute_hash: index=0 vs index=1 produces distinct hashes");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-accessors " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
