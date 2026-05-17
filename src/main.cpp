@@ -289,6 +289,11 @@ In-process tests (deterministic, no network):
                                               variants + shard routing
                                               + A1 supply counters +
                                               operator-tunable getters
+  determ test-json-validate                   S-018 json_validate helpers —
+                                              json_require<T> / _hex / _array
+                                              direct unit test (error-message
+                                              contract under every from_json
+                                              in the codebase)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -8610,6 +8615,211 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-helpers " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the S-018
+    // foundation helpers in `include/determ/util/json_validate.hpp`:
+    //
+    //   * json_require<T>(j, field)         — typed required-field
+    //   * json_require_hex(j, field, len)   — typed hex string with
+    //                                          length-check
+    //   * json_require_array(j, field)      — required-array (returns ref)
+    //
+    // These three helpers are under EVERY S-018-hardened from_json
+    // path in the codebase (Transaction / Block / AbortEvent /
+    // EquivocationEvent / GenesisAlloc / CrossShardReceipt /
+    // ContribMsg / BlockSigMsg / AbortClaimMsg + the gossip-envelope
+    // dispatchers). If json_require ever silently allowed a missing
+    // field through, every from_json that uses it would silently
+    // accept missing fields too. test-s018-json-validation already
+    // exercises a few representative through-paths; this test
+    // exercises the helpers DIRECTLY.
+    if (cmd == "test-json-validate") {
+        using namespace determ::util;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto expect_throws = [&](auto fn, const char* needle, const char* label) {
+            bool threw = false;
+            std::string what;
+            try { fn(); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find(needle) != std::string::npos, label);
+        };
+
+        // === json_require<T> ===
+
+        // 1. Happy path: present field of correct type extracts cleanly.
+        {
+            json j = {{"x", 42}, {"name", "alice"}};
+            check(json_require<int>(j, "x") == 42,
+                  "json_require<int> happy path");
+            check(json_require<std::string>(j, "name") == "alice",
+                  "json_require<std::string> happy path");
+        }
+
+        // 2. Missing field throws with field name + "S-018" prefix
+        //    + "missing" diagnostic.
+        {
+            json j = json::object();
+            expect_throws(
+                [&]() { (void)json_require<int>(j, "missing_field"); },
+                "missing_field",
+                "json_require missing-field error mentions field name");
+            expect_throws(
+                [&]() { (void)json_require<int>(j, "missing_field"); },
+                "S-018",
+                "json_require missing-field error has 'S-018' prefix");
+            expect_throws(
+                [&]() { (void)json_require<int>(j, "missing_field"); },
+                "missing",
+                "json_require missing-field error has 'missing' keyword");
+        }
+
+        // 3. Wrong type throws with field name + "wrong type" + nlohmann
+        //    inner detail.
+        {
+            json j = {{"x", "not_a_number"}};
+            expect_throws(
+                [&]() { (void)json_require<int>(j, "x"); },
+                "x",
+                "json_require wrong-type error mentions field name");
+            expect_throws(
+                [&]() { (void)json_require<int>(j, "x"); },
+                "wrong type",
+                "json_require wrong-type error has 'wrong type' keyword");
+        }
+
+        // === json_require_hex ===
+
+        // 4. Happy path: present hex field of correct length returns
+        //    the raw string.
+        {
+            std::string h = std::string(64, '0');
+            json j = {{"hash", h}};
+            check(json_require_hex(j, "hash", 64) == h,
+                  "json_require_hex happy path");
+        }
+
+        // 5. Missing field error.
+        {
+            json j = json::object();
+            expect_throws(
+                [&]() { (void)json_require_hex(j, "hash", 64); },
+                "hash",
+                "json_require_hex missing-field error mentions field name");
+        }
+
+        // 6. Wrong-length error explicitly states expected + got.
+        {
+            json j = {{"hash", "deadbeef"}};  // 8 chars, want 64
+            expect_throws(
+                [&]() { (void)json_require_hex(j, "hash", 64); },
+                "wrong hex length",
+                "json_require_hex wrong-length error has 'wrong hex length'");
+            expect_throws(
+                [&]() { (void)json_require_hex(j, "hash", 64); },
+                "expected 64",
+                "json_require_hex wrong-length error states expected count");
+            expect_throws(
+                [&]() { (void)json_require_hex(j, "hash", 64); },
+                "got 8",
+                "json_require_hex wrong-length error states got count");
+        }
+
+        // 7. Wrong type (number instead of string) throws via
+        //    underlying json_require<std::string> path.
+        {
+            json j = {{"hash", 42}};
+            expect_throws(
+                [&]() { (void)json_require_hex(j, "hash", 64); },
+                "hash",
+                "json_require_hex with non-string value throws with field name");
+        }
+
+        // === json_require_array ===
+
+        // 8. Happy path: present array field returns const-ref usable
+        //    for iteration.
+        {
+            json j = {{"items", json::array({1, 2, 3})}};
+            const auto& a = json_require_array(j, "items");
+            check(a.size() == 3, "json_require_array happy path size==3");
+            check(a[0].get<int>() == 1,
+                  "json_require_array happy path first element");
+        }
+
+        // 9. Missing field throws.
+        {
+            json j = json::object();
+            expect_throws(
+                [&]() { (void)json_require_array(j, "items"); },
+                "items",
+                "json_require_array missing-field error mentions field name");
+            expect_throws(
+                [&]() { (void)json_require_array(j, "items"); },
+                "expected array",
+                "json_require_array missing-field error mentions 'expected array'");
+        }
+
+        // 10. Wrong type (scalar instead of array).
+        {
+            json j = {{"items", "scalar"}};
+            expect_throws(
+                [&]() { (void)json_require_array(j, "items"); },
+                "items",
+                "json_require_array wrong-type error mentions field name");
+            expect_throws(
+                [&]() { (void)json_require_array(j, "items"); },
+                "got string",
+                "json_require_array wrong-type error states observed type");
+        }
+
+        // 11. Wrong type (object instead of array).
+        {
+            json j = {{"items", json::object()}};
+            expect_throws(
+                [&]() { (void)json_require_array(j, "items"); },
+                "got object",
+                "json_require_array wrong-type error states 'got object'");
+        }
+
+        // 12. Empty array is OK (size=0 is a valid array shape).
+        {
+            json j = {{"items", json::array()}};
+            const auto& a = json_require_array(j, "items");
+            check(a.empty(),
+                  "json_require_array accepts empty array (size=0 valid)");
+        }
+
+        // === Field-name uniqueness across helper variants ===
+
+        // 13. All three helpers consistently include the field name
+        //     in their diagnostic — important for operator triage.
+        //     Verify with a deliberately unusual name.
+        {
+            json j = json::object();
+            expect_throws(
+                [&]() { (void)json_require<int>(j, "weird_!@#_name"); },
+                "weird_!@#_name",
+                "json_require preserves unusual field name in diagnostic");
+            expect_throws(
+                [&]() { (void)json_require_hex(j, "weird_!@#_name", 4); },
+                "weird_!@#_name",
+                "json_require_hex preserves unusual field name in diagnostic");
+            expect_throws(
+                [&]() { (void)json_require_array(j, "weird_!@#_name"); },
+                "weird_!@#_name",
+                "json_require_array preserves unusual field name in diagnostic");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": json-validate " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
