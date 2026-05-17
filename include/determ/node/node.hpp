@@ -189,6 +189,11 @@ public:
     // insertion order. Empty = no pending. Operator-facing readback
     // for `determ pending-params` CLI + monitoring of governance drift.
     nlohmann::json rpc_pending_params()                             const;
+    // S-032 cache visibility: list of abort_records as JSON array
+    // sorted by count descending (most-aborted first). Each entry is
+    // {domain, count, last_block}. Operator-facing readback for
+    // `determ abort-records` CLI + diagnosing committee instability.
+    nlohmann::json rpc_abort_records()                              const;
     // rev.9: block explorer primitive. Returns the full block at the
     // given index (block 0 = genesis). Returns null if out of range.
     nlohmann::json rpc_block(uint64_t index)                        const;

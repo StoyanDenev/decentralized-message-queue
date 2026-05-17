@@ -578,6 +578,7 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | `validators` | `{}` | array of pool entries |
 | `committee` | `{}` | current epoch's K-of-K committee |
 | `pending_params` | `{}` | array of `{effective_height, name, value_hex, value_bytes}` — A5 Phase 2 staged PARAM_CHANGE entries not yet activated. Sorted ascending by `effective_height`; within a bucket, in apply-order (insertion order). Empty for `governance_mode=0` deployments. The `status` RPC also exposes the total count as `pending_param_changes`. |
+| `abort_records` | `{}` | array of `{domain, count, last_block}` — S-032 cache of Phase-1 abort accumulators, sorted by `count` descending (most-aborted first, with deterministic domain-asc tie-break). Each entry is the per-domain aggregate updated at apply time when a `round=1` `AbortEvent` is baked into a finalized block. Phase-2 (timing-skew) aborts are NOT tracked here. Operator-facing diagnostic for committee instability + BFT-escalation patterns. |
 | **Account queries (S-028 case-normalised at input)** | | |
 | `account` | `{address}` | balance + nonce + registry + stake |
 | `balance` | `{domain}` | balance only (lock-free path) |

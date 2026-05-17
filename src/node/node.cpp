@@ -2492,6 +2492,47 @@ json Node::rpc_pending_params() const {
     return arr;
 }
 
+// S-032 cache visibility. Returns the chain's abort_records as a JSON
+// array sorted by `count` descending — i.e., the most-aborted domains
+// first. Useful for operators diagnosing committee instability, BFT
+// escalations, or suspension patterns. Each entry includes (domain,
+// count, last_block). Empty array = no recorded aborts.
+//
+// abort_records is the S-032 cache that build_from_chain reads instead
+// of walking history; it's incremented at apply time for every
+// Phase-1 AbortEvent baked into a finalized block. Phase-2 aborts
+// (timing-skew on healthy creators) are NOT tracked here.
+json Node::rpc_abort_records() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    auto& records = chain_.abort_records();
+    // Materialize (domain, count, last_block) tuples for stable
+    // descending-by-count sort. We use a plain struct instead of
+    // copying AbortRecord (the underlying type may live in a
+    // different namespace; safer to extract fields).
+    struct Row { std::string domain; uint64_t count; uint64_t last_block; };
+    std::vector<Row> sorted;
+    sorted.reserve(records.size());
+    for (auto& [domain, rec] : records) {
+        sorted.push_back({domain, rec.count, rec.last_block});
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Row& a, const Row& b) {
+                  // Primary: count descending. Tie-break: domain
+                  // ascending (deterministic across nodes).
+                  if (a.count != b.count) return a.count > b.count;
+                  return a.domain < b.domain;
+              });
+    json arr = json::array();
+    for (auto& r : sorted) {
+        json entry;
+        entry["domain"]     = r.domain;
+        entry["count"]      = r.count;
+        entry["last_block"] = r.last_block;
+        arr.push_back(entry);
+    }
+    return arr;
+}
+
 json Node::rpc_block(uint64_t index) const {
     std::shared_lock<std::shared_mutex> lk(state_mutex_);
     if (index >= chain_.height()) return nullptr;

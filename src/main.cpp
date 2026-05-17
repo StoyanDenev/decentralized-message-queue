@@ -72,6 +72,10 @@ Usage:
                                               not yet activated. --at-height N
                                               filters to entries activating by
                                               block N (i.e., effective_height<=N)
+  determ abort-records [--top N] [--json]    S-032 abort_records cache —
+                                              Phase-1 aborts per domain (count,
+                                              last_block) sorted descending.
+                                              --top N truncates to first N entries
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -411,6 +415,14 @@ Additional in-process tests:
                                               light-client) — proof+verify,
                                               tampering rejection, non-
                                               membership nullopt, determinism
+  determ test-abort-event-apply               AbortEvent apply — Phase-1
+                                              SUSPENSION_SLASH stake
+                                              deduction, S-032 abort_records
+                                              cache, A1 accumulated_slashed
+  determ test-equivocation-apply              EquivocationEvent apply — FA6
+                                              full stake forfeit +
+                                              deregistration (inactive_from)
+                                              + A1 invariant
 )" << "\n";
 }
 
@@ -1481,6 +1493,66 @@ static int cmd_pending_params(int argc, char** argv) {
                       << std::setw(8)  << e.value("value_bytes", uint64_t{0})
                       << hex.substr(0, std::min<size_t>(hex.size(), 32))
                       << (hex.size() > 32 ? "..." : "")
+                      << "\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// determ abort-records [--top N] [--json] [--rpc-port P]
+//   List abort_records (the S-032 cache) — domains that have aborted
+//   in Phase-1 along with their count + most recent block. Sorted by
+//   count descending so the most-aborted (most-suspended) domains
+//   come first. Useful for diagnosing committee instability, BFT-
+//   escalation patterns, and which validators may need remediation.
+//
+//   --top N truncates output to the first N entries (default: all).
+//   --json passes the RPC array through verbatim for scripts.
+static int cmd_abort_records(int argc, char** argv) {
+    bool json_out = false;
+    bool have_top = false;
+    size_t top_n = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--top" && i + 1 < argc) {
+            have_top = true;
+            top_n = static_cast<size_t>(std::stoul(argv[i + 1]));
+        }
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        auto result = rpc::rpc_call("127.0.0.1", port, "abort_records");
+        if (!result.is_array()) result = json::array();
+
+        // --top N client-side truncation. RPC always returns the full
+        // (sorted) list — cheap because abort_records is bounded by
+        // the registered-validator pool size (<= a few hundred typical).
+        if (have_top && result.size() > top_n) {
+            json truncated = json::array();
+            for (size_t i = 0; i < top_n; ++i) truncated.push_back(result[i]);
+            result = std::move(truncated);
+        }
+
+        if (json_out) {
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
+        if (result.empty()) {
+            std::cout << "(no abort records — no Phase-1 aborts on this chain)\n";
+            return 0;
+        }
+        std::cout << std::left
+                  << std::setw(28) << "domain"
+                  << std::setw(10) << "count"
+                  << "last_block\n";
+        for (auto& e : result) {
+            std::cout << std::setw(28) << e.value("domain", std::string{})
+                      << std::setw(10) << e.value("count", uint64_t{0})
+                      << e.value("last_block", uint64_t{0})
                       << "\n";
         }
     } catch (std::exception& e) {
@@ -3132,6 +3204,7 @@ int main(int argc, char** argv) {
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
     if (cmd == "pending-params") return cmd_pending_params(sub_argc, sub_argv);
+    if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
@@ -13561,6 +13634,363 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-proof " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: apply-side handling of AbortEvent (Phase-1
+    // suspension slashing). Each `round=1` AbortEvent baked into a
+    // finalized block deducts SUSPENSION_SLASH from the aborted
+    // domain's staked balance (bounded by available stake — no negative
+    // balances) and increments abort_records[domain] (the S-032 cache).
+    // Phase-2 (round=2) timing-skew aborts on healthy creators are
+    // economically free — they don't punish honest absence.
+    if (cmd == "test-abort-event-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Shared GenesisConfig: alice has stake=500. We deduct
+        // SUSPENSION_SLASH (default 10) when an AbortEvent with
+        // aborting_node="alice" lands.
+        GenesisConfig cfg;
+        cfg.chain_id = "abort-event-apply-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // === Phase-1 abort: stake deducted ===
+
+        // 1. Phase-1 AbortEvent with stake-bearing target: stake reduced.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.stake("alice") == 500,
+                  "baseline: alice stake == 500");
+
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "alice";
+            ae.timestamp = 0;
+            ae.event_hash = Hash{};
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.abort_events.push_back(ae);
+            c.append(b1);
+
+            check(c.stake("alice") == 490,
+                  "Phase-1 abort: alice stake 500 - SUSPENSION_SLASH(10) = 490");
+        }
+
+        // 2. abort_records cache populated for aborted domain.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "alice";
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.abort_events.push_back(ae);
+            c.append(b1);
+
+            auto& records = c.abort_records();
+            auto it = records.find("alice");
+            check(it != records.end() && it->second.count == 1,
+                  "abort_records: alice count incremented to 1");
+            check(it != records.end() && it->second.last_block == 1,
+                  "abort_records: alice last_block == 1");
+        }
+
+        // === Phase-2 abort: NO slashing ===
+
+        // 3. Phase-2 AbortEvent (round=2): stake unchanged, no records.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            AbortEvent ae;
+            ae.round = 2;
+            ae.aborting_node = "alice";
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.abort_events.push_back(ae);
+            c.append(b1);
+
+            check(c.stake("alice") == 500,
+                  "Phase-2 abort: stake unchanged (timing-skew not slashed)");
+            check(c.abort_records().find("alice") == c.abort_records().end(),
+                  "Phase-2 abort: abort_records NOT incremented");
+        }
+
+        // === Aborted-without-stake: domain not in stakes_ ===
+
+        // 4. AbortEvent with non-stake-bearing target: no crash, no
+        //    deduction, abort_records still incremented (DOMAIN_INCLUSION
+        //    mode tracks aborts even without stake).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "bogus_no_stake";
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.abort_events.push_back(ae);
+            c.append(b1);
+
+            check(c.stake("bogus_no_stake") == 0,
+                  "no-stake abort: no stake change (sender has none)");
+            check(c.abort_records().find("bogus_no_stake") != c.abort_records().end(),
+                  "no-stake abort: records incremented (S-032 cache contract)");
+        }
+
+        // === Stake exhaustion: deduct bounded by available stake ===
+
+        // 5. Multiple Phase-1 aborts: SUSPENSION_SLASH stops at 0
+        //    (no negative balance). 51 aborts on stake=500 + slash=10
+        //    fully drains stake but doesn't go negative.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            for (uint64_t h = 1; h <= 51; ++h) {
+                AbortEvent ae;
+                ae.round = 1;
+                ae.aborting_node = "alice";
+                ae.event_hash = Hash{};
+                ae.event_hash[0] = uint8_t(h);  // distinct per block
+
+                Block b;
+                b.index = h;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.abort_events.push_back(ae);
+                c.append(b);
+            }
+            // After 51 aborts × 10 slash = 510 > 500: stake floors at 0.
+            check(c.stake("alice") == 0,
+                  "exhausted stake: 51 aborts drains stake to 0 (no negative)");
+            check(c.abort_records().at("alice").count == 51,
+                  "exhausted stake: abort_records.count == 51 (cache still tracks)");
+        }
+
+        // === A1 invariant holds across slashing ===
+
+        // 6. accumulated_slashed counter tracks deductions; A1 holds.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t baseline = c.live_total_supply();
+
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "alice";
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.abort_events.push_back(ae);
+            c.append(b1);
+
+            check(c.accumulated_slashed() == 10,
+                  "A1: accumulated_slashed bumped by SUSPENSION_SLASH=10");
+            check(c.live_total_supply() == baseline - 10,
+                  "A1: live supply decreased by exactly the slash");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after slash");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": abort-event-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: apply-side handling of EquivocationEvent (FA6
+    // full equivocation slashing + deregistration). Each event baked
+    // into a finalized block (validator already verified the two-sig
+    // proof) (a) forfeits the equivocator's ENTIRE staked balance and
+    // (b) marks their registry entry inactive_from = b.index + 1.
+    //
+    // The dual mechanism unifies STAKE_INCLUSION and DOMAIN_INCLUSION:
+    //   - STAKE_INCLUSION: stake → 0 makes them ineligible.
+    //   - DOMAIN_INCLUSION: stake is already 0, so the deregistration
+    //                       is what actually removes them.
+    if (cmd == "test-equivocation-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "equivocation-apply-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Helper: build a minimal valid EquivocationEvent for `target`.
+        auto make_ev = [](const std::string& target) {
+            EquivocationEvent ev;
+            ev.equivocator = target;
+            ev.block_index = 1;
+            for (size_t i = 0; i < ev.digest_a.size(); ++i)
+                ev.digest_a[i] = uint8_t(0xAA);
+            for (size_t i = 0; i < ev.digest_b.size(); ++i)
+                ev.digest_b[i] = uint8_t(0xBB);
+            // sig_a + sig_b default-constructed; apply doesn't re-verify
+            // (validator's job — we test apply semantics only).
+            return ev;
+        };
+
+        // === Full stake forfeiture ===
+
+        // 1. Apply EquivocationEvent → equivocator's entire stake → 0.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.stake("alice") == 500,
+                  "baseline: alice stake == 500");
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.equivocation_events.push_back(make_ev("alice"));
+            c.append(b1);
+
+            check(c.stake("alice") == 0,
+                  "equivocation: alice stake → 0 (full forfeit)");
+        }
+
+        // === Registry deactivation ===
+
+        // 2. Apply EquivocationEvent → registry inactive_from = b.index+1.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            auto reg_before = c.registrant("alice");
+            check(reg_before.has_value()
+                  && reg_before->inactive_from == UINT64_MAX,
+                  "baseline: alice registry active (inactive_from sentinel)");
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.equivocation_events.push_back(make_ev("alice"));
+            c.append(b1);
+
+            auto reg_after = c.registrant("alice");
+            check(reg_after.has_value()
+                  && reg_after->inactive_from == 2,  // b.index+1 == 1+1
+                  "equivocation: registry inactive_from == b.index+1 (== 2)");
+        }
+
+        // === Non-existent equivocator: no crash ===
+
+        // 3. EquivocationEvent for a domain with no stake/registry: apply
+        //    is silent (no entries to mutate). Defense-in-depth: validator
+        //    rejects such events before reaching apply, but the apply path
+        //    must be robust to replay of pre-validated chains.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.equivocation_events.push_back(make_ev("ghost_no_state"));
+            c.append(b1);
+
+            check(c.height() == 2,
+                  "ghost equivocator: apply succeeds, height advances");
+            check(c.stake("alice") == 500,
+                  "ghost equivocator: alice (different domain) unaffected");
+        }
+
+        // === A1 invariant holds across full forfeit ===
+
+        // 4. accumulated_slashed counter += full stake; A1 invariant.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t baseline = c.live_total_supply();  // 1500 = 1000 bal + 500 stake
+
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.equivocation_events.push_back(make_ev("alice"));
+            c.append(b1);
+
+            check(c.accumulated_slashed() == 500,
+                  "A1: accumulated_slashed bumped by full alice stake (500)");
+            check(c.live_total_supply() == baseline - 500,
+                  "A1: live supply decreased by exactly the forfeit");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after equivocation forfeit");
+        }
+
+        // === Idempotency: re-applying same equivocation on a fresh chain
+        //     produces the same outcome (apply is deterministic) ===
+
+        // 5. Two chains see same equivocation → same state.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c1.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.equivocation_events.push_back(make_ev("alice"));
+
+            c1.append(b1);
+            // c2: rebuild same Block (prev_hash matches because both
+            // chains have byte-identical genesis).
+            Block b2 = b1;
+            c2.append(b2);
+
+            check(c1.stake("alice") == c2.stake("alice")
+                  && c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: two chains apply same equivocation → same state");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": equivocation-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
