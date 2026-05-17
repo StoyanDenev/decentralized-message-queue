@@ -314,6 +314,11 @@ In-process tests (deterministic, no network):
                                               — prev_hash continuity (central
                                               chain-integrity invariant);
                                               empty-chain rejection paths
+  determ test-state-types                     AccountState / StakeEntry /
+                                              RegistryEntry / DAppEntry default
+                                              values + UINT64_MAX sentinel
+                                              semantics (protocol-critical
+                                              "active until concrete event")
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -9884,6 +9889,190 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-append " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the four chain
+    // state structs (AccountState / StakeEntry / RegistryEntry /
+    // DAppEntry) — their default values and sentinel semantics. The
+    // UINT64_MAX sentinel for unlock_height and inactive_from is a
+    // protocol-critical invariant: "active until set to a concrete
+    // height by an apply-path event." A regression to a zero default
+    // would cause every fresh stake to look immediately unlockable
+    // (and every fresh registrant to look immediately deregistered),
+    // breaking suspension policy + UNSTAKE semantics.
+    if (cmd == "test-state-types") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === AccountState ===
+
+        // 1. Default AccountState: balance=0, next_nonce=0.
+        {
+            AccountState a;
+            check(a.balance == 0,    "AccountState default: balance == 0");
+            check(a.next_nonce == 0, "AccountState default: next_nonce == 0");
+        }
+
+        // 2. AccountState assignability + value preservation.
+        {
+            AccountState a;
+            a.balance = 1000;
+            a.next_nonce = 7;
+            check(a.balance == 1000 && a.next_nonce == 7,
+                  "AccountState: field assignment preserved");
+        }
+
+        // === StakeEntry ===
+
+        // 3. Default StakeEntry: locked=0, unlock_height=UINT64_MAX.
+        //    The UINT64_MAX sentinel is THE protocol-critical default —
+        //    means "stake is locked indefinitely (the validator is
+        //    active)". A regression to zero would mean every fresh
+        //    stake looks immediately unlockable.
+        {
+            StakeEntry s;
+            check(s.locked == 0,
+                  "StakeEntry default: locked == 0");
+            check(s.unlock_height == UINT64_MAX,
+                  "StakeEntry default: unlock_height == UINT64_MAX (active-stake sentinel)");
+        }
+
+        // 4. StakeEntry: setting unlock_height to a concrete value
+        //    (the DEREGISTER apply path) preserves through assignment.
+        {
+            StakeEntry s;
+            s.locked = 5000;
+            s.unlock_height = 1234;  // post-DEREGISTER concrete height
+            check(s.locked == 5000,
+                  "StakeEntry: locked assignment");
+            check(s.unlock_height == 1234,
+                  "StakeEntry: unlock_height assignment (post-DEREGISTER concrete)");
+            check(s.unlock_height != UINT64_MAX,
+                  "StakeEntry: distinguishes concrete unlock vs sentinel");
+        }
+
+        // === RegistryEntry ===
+
+        // 5. Default RegistryEntry: ed_pub=zero, registered_at=0,
+        //    active_from=0, inactive_from=UINT64_MAX (the active
+        //    sentinel — registrant is active until DEREGISTER sets
+        //    it to a concrete height), region empty.
+        {
+            RegistryEntry r;
+            check(r.ed_pub == PubKey{},
+                  "RegistryEntry default: ed_pub == zero PubKey");
+            check(r.registered_at == 0,
+                  "RegistryEntry default: registered_at == 0");
+            check(r.active_from == 0,
+                  "RegistryEntry default: active_from == 0");
+            check(r.inactive_from == UINT64_MAX,
+                  "RegistryEntry default: inactive_from == UINT64_MAX (active sentinel)");
+            check(r.region.empty(),
+                  "RegistryEntry default: region == \"\" (global pool member)");
+        }
+
+        // 6. RegistryEntry: DEREGISTER sets inactive_from to a concrete
+        //    height; sentinel distinguishable from any real height.
+        {
+            RegistryEntry r;
+            r.ed_pub = PubKey{};
+            r.registered_at = 100;
+            r.active_from = 110;
+            r.inactive_from = 500;  // post-DEREGISTER concrete
+            r.region = "us-east";
+            check(r.inactive_from != UINT64_MAX,
+                  "RegistryEntry: concrete inactive_from distinguishable from sentinel");
+            check(r.region == "us-east",
+                  "RegistryEntry: region tag preserved");
+        }
+
+        // === DAppEntry (v2.18) ===
+
+        // 7. Default DAppEntry: service_pubkey=zero, endpoint_url="",
+        //    topics empty, retention=0 (full retention),
+        //    metadata empty, registered_at=0, active_from=0,
+        //    inactive_from=UINT64_MAX (active sentinel — same pattern
+        //    as RegistryEntry).
+        {
+            DAppEntry d;
+            check(d.service_pubkey == PubKey{},
+                  "DAppEntry default: service_pubkey == zero PubKey");
+            check(d.endpoint_url.empty(),
+                  "DAppEntry default: endpoint_url == \"\"");
+            check(d.topics.empty(),
+                  "DAppEntry default: topics empty");
+            check(d.retention == 0,
+                  "DAppEntry default: retention == 0 (full retention)");
+            check(d.metadata.empty(),
+                  "DAppEntry default: metadata empty");
+            check(d.registered_at == 0,
+                  "DAppEntry default: registered_at == 0");
+            check(d.active_from == 0,
+                  "DAppEntry default: active_from == 0");
+            check(d.inactive_from == UINT64_MAX,
+                  "DAppEntry default: inactive_from == UINT64_MAX (active sentinel)");
+        }
+
+        // 8. DAppEntry assignment preserves all fields.
+        {
+            DAppEntry d;
+            for (size_t i = 0; i < d.service_pubkey.size(); ++i)
+                d.service_pubkey[i] = uint8_t(i);
+            d.endpoint_url = "https://dapp.example";
+            d.topics = {"chat", "files"};
+            d.retention = 1;
+            d.metadata = {0xDE, 0xAD, 0xBE, 0xEF};
+            d.registered_at = 200;
+            d.active_from = 210;
+            d.inactive_from = 1000;
+
+            check(d.endpoint_url == "https://dapp.example",
+                  "DAppEntry: endpoint_url assignment");
+            check(d.topics.size() == 2 && d.topics[0] == "chat",
+                  "DAppEntry: topics assignment");
+            check(d.retention == 1,
+                  "DAppEntry: retention=1 (prunable) preserved");
+            check(d.metadata.size() == 4 && d.metadata[0] == 0xDE,
+                  "DAppEntry: metadata bytes preserved");
+            check(d.inactive_from == 1000,
+                  "DAppEntry: post-deactivation inactive_from preserved");
+        }
+
+        // === Sentinel cross-struct consistency ===
+
+        // 9. RegistryEntry and DAppEntry both use UINT64_MAX as the
+        //    "active" sentinel for inactive_from. This consistency
+        //    matters because apply paths compare `inactive_from`
+        //    against block.index in the same way for both.
+        {
+            RegistryEntry r;
+            DAppEntry d;
+            check(r.inactive_from == d.inactive_from,
+                  "RegistryEntry and DAppEntry use same active sentinel");
+            check(r.inactive_from == UINT64_MAX,
+                  "Active sentinel is UINT64_MAX (consistent across types)");
+        }
+
+        // 10. StakeEntry uses the same UINT64_MAX sentinel for its
+        //     unlock_height field. While registered, unlock_height is
+        //     held at UINT64_MAX (DEREGISTER drops it to a concrete
+        //     height = inactive_from + UNSTAKE_DELAY). This pairs
+        //     with RegistryEntry.inactive_from semantics.
+        {
+            StakeEntry s;
+            RegistryEntry r;
+            check(s.unlock_height == r.inactive_from,
+                  "StakeEntry.unlock_height + RegistryEntry.inactive_from share UINT64_MAX sentinel");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-types " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
