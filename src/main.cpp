@@ -299,6 +299,11 @@ In-process tests (deterministic, no network):
                                               sub-object arrays + zero-skip
                                               fields + compute_hash invariance
                                               through JSON transit
+  determ test-config-roundtrip                Config::to_json / from_json —
+                                              operator-config save+reload
+                                              round-trip across all 32
+                                              tunable fields (ports / peers /
+                                              rate-limits / region / enums)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -9252,6 +9257,198 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-roundtrip " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Config::to_json /
+    // Config::from_json round-trip. Config is the operator-facing
+    // config.json — every field operators tune (ports, peers,
+    // rate-limits, regions, sharding mode, governance flags). A
+    // regression in round-trip would mean operators can't reload
+    // their saved configs cleanly: missing fields silently reset to
+    // defaults, breaking the operator's intent.
+    if (cmd == "test-config-roundtrip") {
+        using namespace determ;
+        using namespace determ::node;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. Default Config → to_json → from_json preserves defaults
+        //    (all the documented defaults survive a save+reload cycle).
+        {
+            Config c1;
+            json j = c1.to_json();
+            Config c2 = Config::from_json(j);
+
+            check(c2.listen_port == c1.listen_port,
+                  "default Config: listen_port (7777) round-trips");
+            check(c2.rpc_port == c1.rpc_port,
+                  "default Config: rpc_port (7778) round-trips");
+            check(c2.rpc_localhost_only == c1.rpc_localhost_only,
+                  "default Config: rpc_localhost_only (true) round-trips");
+            check(c2.rpc_rate_per_sec == c1.rpc_rate_per_sec,
+                  "default Config: rpc_rate_per_sec (0) round-trips");
+            check(c2.bft_enabled == c1.bft_enabled,
+                  "default Config: bft_enabled (true) round-trips");
+            check(c2.bft_escalation_threshold == c1.bft_escalation_threshold,
+                  "default Config: bft_escalation_threshold (5) round-trips");
+            check(c2.m_creators == c1.m_creators,
+                  "default Config: m_creators (3) round-trips");
+            check(c2.chain_role == c1.chain_role,
+                  "default Config: chain_role (SINGLE) round-trips");
+            check(c2.sharding_mode == c1.sharding_mode,
+                  "default Config: sharding_mode (CURRENT) round-trips");
+        }
+
+        // 2. Custom Config with every field set → round-trips.
+        //    Each setter exercises a specific path through from_json's
+        //    j.value() defaults.
+        {
+            Config c1;
+            c1.domain = "alice";
+            c1.data_dir = "/tmp/data";
+            c1.listen_port = 18888;
+            c1.rpc_port = 18999;
+            c1.rpc_localhost_only = false;
+            c1.rpc_auth_secret = "deadbeef" + std::string(56, 'a');
+            c1.rpc_rate_per_sec = 100.0;
+            c1.rpc_rate_burst = 200.0;
+            c1.gossip_rate_per_sec = 500.0;
+            c1.gossip_rate_burst = 1000.0;
+            c1.bootstrap_peers = {"node1:7777", "node2:7777"};
+            c1.beacon_peers = {"beacon1:8000"};
+            c1.shard_peers = {"shard1:9000", "shard2:9001"};
+            c1.key_path = "/tmp/key.json";
+            c1.chain_path = "/tmp/chain.json";
+            c1.snapshot_path = "/tmp/snap.json";
+            c1.shard_manifest_path = "/tmp/manifest.json";
+            c1.genesis_path = "/tmp/genesis.json";
+            c1.genesis_hash = std::string(64, 'a');
+            c1.m_creators = 5;
+            c1.k_block_sigs = 4;
+            c1.bft_enabled = false;
+            c1.bft_escalation_threshold = 10;
+            c1.chain_role = ChainRole::BEACON;
+            c1.sharding_mode = ShardingMode::EXTENDED;
+            c1.shard_id = 7;
+            c1.initial_shard_count = 8;
+            c1.epoch_blocks = 2000;
+            c1.tx_commit_ms = 500;
+            c1.block_sig_ms = 500;
+            c1.abort_claim_ms = 500;
+            c1.region = "us-east";
+            c1.committee_region = "us-east";
+            c1.log_quiet = true;
+
+            json j = c1.to_json();
+            Config c2 = Config::from_json(j);
+
+            check(c2.domain == c1.domain,
+                  "custom Config: domain round-trips");
+            check(c2.data_dir == c1.data_dir,
+                  "custom Config: data_dir round-trips");
+            check(c2.listen_port == c1.listen_port,
+                  "custom Config: listen_port round-trips");
+            check(c2.rpc_port == c1.rpc_port,
+                  "custom Config: rpc_port round-trips");
+            check(c2.rpc_localhost_only == c1.rpc_localhost_only,
+                  "custom Config: rpc_localhost_only=false round-trips");
+            check(c2.rpc_auth_secret == c1.rpc_auth_secret,
+                  "custom Config: rpc_auth_secret round-trips");
+            check(c2.rpc_rate_per_sec == c1.rpc_rate_per_sec,
+                  "custom Config: rpc_rate_per_sec (double) round-trips");
+            check(c2.rpc_rate_burst == c1.rpc_rate_burst,
+                  "custom Config: rpc_rate_burst (double) round-trips");
+            check(c2.gossip_rate_per_sec == c1.gossip_rate_per_sec,
+                  "custom Config: gossip_rate_per_sec round-trips");
+            check(c2.gossip_rate_burst == c1.gossip_rate_burst,
+                  "custom Config: gossip_rate_burst round-trips");
+            check(c2.bootstrap_peers == c1.bootstrap_peers,
+                  "custom Config: bootstrap_peers (vector) round-trips");
+            check(c2.beacon_peers == c1.beacon_peers,
+                  "custom Config: beacon_peers (vector) round-trips");
+            check(c2.shard_peers == c1.shard_peers,
+                  "custom Config: shard_peers (vector) round-trips");
+            check(c2.key_path == c1.key_path,
+                  "custom Config: key_path round-trips");
+            check(c2.chain_path == c1.chain_path,
+                  "custom Config: chain_path round-trips");
+            check(c2.snapshot_path == c1.snapshot_path,
+                  "custom Config: snapshot_path round-trips");
+            check(c2.genesis_path == c1.genesis_path,
+                  "custom Config: genesis_path round-trips");
+            check(c2.genesis_hash == c1.genesis_hash,
+                  "custom Config: genesis_hash round-trips");
+            check(c2.m_creators == c1.m_creators,
+                  "custom Config: m_creators round-trips");
+            check(c2.k_block_sigs == c1.k_block_sigs,
+                  "custom Config: k_block_sigs round-trips");
+            check(c2.bft_enabled == c1.bft_enabled,
+                  "custom Config: bft_enabled=false round-trips");
+            check(c2.bft_escalation_threshold == c1.bft_escalation_threshold,
+                  "custom Config: bft_escalation_threshold round-trips");
+            check(c2.chain_role == ChainRole::BEACON,
+                  "custom Config: chain_role=BEACON round-trips");
+            check(c2.sharding_mode == ShardingMode::EXTENDED,
+                  "custom Config: sharding_mode=EXTENDED round-trips");
+            check(c2.shard_id == c1.shard_id,
+                  "custom Config: shard_id round-trips");
+            check(c2.initial_shard_count == c1.initial_shard_count,
+                  "custom Config: initial_shard_count round-trips");
+            check(c2.epoch_blocks == c1.epoch_blocks,
+                  "custom Config: epoch_blocks round-trips");
+            check(c2.tx_commit_ms == c1.tx_commit_ms,
+                  "custom Config: tx_commit_ms round-trips");
+            check(c2.block_sig_ms == c1.block_sig_ms,
+                  "custom Config: block_sig_ms round-trips");
+            check(c2.abort_claim_ms == c1.abort_claim_ms,
+                  "custom Config: abort_claim_ms round-trips");
+            check(c2.region == c1.region,
+                  "custom Config: region round-trips");
+            check(c2.committee_region == c1.committee_region,
+                  "custom Config: committee_region round-trips");
+            check(c2.log_quiet == c1.log_quiet,
+                  "custom Config: log_quiet=true round-trips");
+        }
+
+        // 3. Empty JSON → default Config (all defaults applied; the
+        //    intentionally-permissive contract on Config::from_json).
+        {
+            json j = json::object();
+            Config c = Config::from_json(j);
+            check(c.listen_port == 7777,
+                  "empty JSON: listen_port defaults to 7777");
+            check(c.rpc_port == 7778,
+                  "empty JSON: rpc_port defaults to 7778");
+            check(c.rpc_localhost_only == true,
+                  "empty JSON: rpc_localhost_only defaults to true (S-001 secure default)");
+            check(c.m_creators == 3,
+                  "empty JSON: m_creators defaults to 3");
+            check(c.bft_enabled == true,
+                  "empty JSON: bft_enabled defaults to true");
+        }
+
+        // 4. Default chain_role + sharding_mode enum values from
+        //    integers in JSON (defends against operators editing the
+        //    integer codes by hand).
+        {
+            Config c1;
+            c1.chain_role = ChainRole::SHARD;
+            c1.sharding_mode = ShardingMode::NONE;
+            json j = c1.to_json();
+            Config c2 = Config::from_json(j);
+            check(c2.chain_role == ChainRole::SHARD,
+                  "chain_role=SHARD (uint8_t=2) round-trips correctly");
+            check(c2.sharding_mode == ShardingMode::NONE,
+                  "sharding_mode=NONE (uint8_t=0) round-trips correctly");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": config-roundtrip " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
