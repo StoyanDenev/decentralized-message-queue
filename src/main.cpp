@@ -294,6 +294,11 @@ In-process tests (deterministic, no network):
                                               direct unit test (error-message
                                               contract under every from_json
                                               in the codebase)
+  determ test-block-roundtrip                 Block::to_json / from_json full
+                                              field-set round-trip across all
+                                              sub-object arrays + zero-skip
+                                              fields + compute_hash invariance
+                                              through JSON transit
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -8833,6 +8838,420 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": json-validate " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Block::to_json /
+    // Block::from_json full round-trip across the field set. Block
+    // round-trips through JSON at every gossip hop (BLOCK MsgType),
+    // every chain.json save/load (Chain::save / load), and every
+    // snapshot tail-header save/restore. A field-loss regression
+    // would silently corrupt the wire format. test-block-hash + the
+    // existing test-wire-types lock specific sub-aspects; this is
+    // the full-block round-trip.
+    if (cmd == "test-block-roundtrip") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto pattern_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+        auto pattern_sig = [](uint8_t base) {
+            Signature s{};
+            for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(base + i);
+            return s;
+        };
+        auto pattern_pub = [](uint8_t base) {
+            PubKey p{};
+            for (size_t i = 0; i < p.size(); ++i) p[i] = uint8_t(base + i);
+            return p;
+        };
+
+        // === Minimal block: only required fields set ===
+
+        // 1. Minimal block round-trips: index + prev_hash + timestamp
+        //    + cumulative_rand + abort_events array (the json_require_*
+        //    required fields).
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 1000;
+            b.cumulative_rand = pattern_hash(0x10);
+            // abort_events MUST be set to an empty array (required by
+            // json_require_array) — leaving the field absent would
+            // trigger S-018 rejection on read-back.
+            // (Empty vector default-constructed in Block; we just need
+            //  to not strip the to_json output.)
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+
+            check(back.index == 0, "minimal block: index round-trip");
+            check(back.timestamp == 1000,
+                  "minimal block: timestamp round-trip");
+            check(back.prev_hash == b.prev_hash,
+                  "minimal block: prev_hash round-trip");
+            check(back.cumulative_rand == b.cumulative_rand,
+                  "minimal block: cumulative_rand round-trip");
+        }
+
+        // === Block with transactions ===
+
+        // 2. Transactions[] round-trips. Each Transaction has its own
+        //    test (test-transaction) for field-level coverage; here
+        //    we just verify Block's outer container preserves the list.
+        {
+            Block b;
+            b.index = 7;
+            b.prev_hash = pattern_hash(0x20);
+            b.timestamp = 2000;
+            b.cumulative_rand = pattern_hash(0x21);
+
+            for (int i = 0; i < 3; ++i) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice" + std::to_string(i);
+                tx.to = "bob" + std::to_string(i);
+                tx.amount = 100 + i;
+                tx.fee = 1;
+                tx.nonce = i;
+                tx.hash = tx.compute_hash();
+                b.transactions.push_back(tx);
+            }
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+            check(back.transactions.size() == 3,
+                  "block with transactions: count preserved");
+            check(back.transactions[1].from == "alice1",
+                  "block with transactions: per-tx fields preserved");
+            check(back.transactions[2].amount == 102,
+                  "block with transactions: amount preserved");
+        }
+
+        // === Block with K-of-K committee structure ===
+
+        // 3. creators / creator_tx_lists / creator_ed_sigs /
+        //    creator_dh_inputs / creator_dh_secrets / creator_block_sigs
+        //    all round-trip preserving length + content.
+        {
+            Block b;
+            b.index = 42;
+            b.prev_hash = pattern_hash(0x30);
+            b.timestamp = 3000;
+            b.cumulative_rand = pattern_hash(0x31);
+
+            b.creators = {"alice", "bob", "carol"};
+            b.creator_tx_lists = {
+                {pattern_hash(0x40), pattern_hash(0x41)},
+                {pattern_hash(0x42)},
+                {}};
+            b.creator_ed_sigs = {
+                pattern_sig(0x50), pattern_sig(0x51), pattern_sig(0x52)};
+            b.creator_dh_inputs = {
+                pattern_hash(0x60), pattern_hash(0x61), pattern_hash(0x62)};
+            b.creator_dh_secrets = {
+                pattern_hash(0x70), pattern_hash(0x71), pattern_hash(0x72)};
+            b.creator_block_sigs = {
+                pattern_sig(0x80), pattern_sig(0x81), pattern_sig(0x82)};
+
+            b.tx_root = pattern_hash(0x90);
+            b.delay_seed = pattern_hash(0x91);
+            b.delay_output = pattern_hash(0x92);
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+
+            check(back.creators == b.creators,
+                  "committee block: creators round-trip");
+            check(back.creator_tx_lists.size() == 3,
+                  "committee block: creator_tx_lists count");
+            check(back.creator_tx_lists[0][1] == pattern_hash(0x41),
+                  "committee block: creator_tx_lists value preserved");
+            check(back.creator_tx_lists[2].empty(),
+                  "committee block: empty inner list preserved");
+            check(back.creator_ed_sigs[1] == pattern_sig(0x51),
+                  "committee block: creator_ed_sigs preserved");
+            check(back.creator_dh_inputs[0] == pattern_hash(0x60),
+                  "committee block: creator_dh_inputs preserved");
+            check(back.creator_dh_secrets[2] == pattern_hash(0x72),
+                  "committee block: creator_dh_secrets preserved");
+            check(back.creator_block_sigs[1] == pattern_sig(0x81),
+                  "committee block: creator_block_sigs preserved");
+            check(back.tx_root == b.tx_root,
+                  "committee block: tx_root preserved");
+            check(back.delay_seed == b.delay_seed,
+                  "committee block: delay_seed preserved");
+            check(back.delay_output == b.delay_output,
+                  "committee block: delay_output preserved");
+        }
+
+        // === BFT-mode block ===
+
+        // 4. consensus_mode + bft_proposer round-trip. BFT mode is the
+        //    fallback when K-of-K stalls; the per-block consensus_mode
+        //    discriminator must survive JSON transit.
+        {
+            Block b;
+            b.index = 100;
+            b.prev_hash = pattern_hash(0x10);
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+            b.consensus_mode = ConsensusMode::BFT;
+            b.bft_proposer = "alice";
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+            check(back.consensus_mode == ConsensusMode::BFT,
+                  "BFT block: consensus_mode round-trip");
+            check(back.bft_proposer == "alice",
+                  "BFT block: bft_proposer round-trip");
+        }
+
+        // === Block with abort_events ===
+
+        // 5. abort_events array of AbortEvent JSON sub-objects.
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+
+            AbortEvent ae1;
+            ae1.round = 1;
+            ae1.aborting_node = "carol";
+            ae1.timestamp = 5000;
+            ae1.event_hash = pattern_hash(0xA0);
+            ae1.claims_json = json::array();
+            b.abort_events.push_back(ae1);
+
+            AbortEvent ae2;
+            ae2.round = 2;
+            ae2.aborting_node = "dan";
+            ae2.timestamp = 5001;
+            ae2.event_hash = pattern_hash(0xA1);
+            ae2.claims_json = json::array();
+            b.abort_events.push_back(ae2);
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+
+            check(back.abort_events.size() == 2,
+                  "block with aborts: count preserved");
+            check(back.abort_events[0].aborting_node == "carol",
+                  "block with aborts: aborting_node preserved");
+            check(back.abort_events[1].round == 2,
+                  "block with aborts: round preserved");
+        }
+
+        // === Block with equivocation_events ===
+
+        // 6. equivocation_events array of EquivocationEvent JSON
+        //    sub-objects.
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+
+            EquivocationEvent ev;
+            ev.equivocator = "mallory";
+            ev.block_index = 50;
+            ev.digest_a = pattern_hash(0xB0);
+            ev.sig_a = pattern_sig(0xB1);
+            ev.digest_b = pattern_hash(0xB2);
+            ev.sig_b = pattern_sig(0xB3);
+            ev.shard_id = 1;
+            ev.beacon_anchor_height = 100;
+            b.equivocation_events.push_back(ev);
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+
+            check(back.equivocation_events.size() == 1,
+                  "block with equivocation: count preserved");
+            check(back.equivocation_events[0].equivocator == "mallory",
+                  "block with equivocation: equivocator preserved");
+            check(back.equivocation_events[0].shard_id == 1,
+                  "block with equivocation: shard_id preserved");
+        }
+
+        // === Block with cross-shard receipts (V12 + V13 surface) ===
+
+        // 7. cross_shard_receipts + inbound_receipts arrays.
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+
+            CrossShardReceipt csr;
+            csr.src_shard = 1;
+            csr.dst_shard = 2;
+            csr.src_block_index = 100;
+            csr.src_block_hash = pattern_hash(0xC0);
+            csr.tx_hash = pattern_hash(0xC1);
+            csr.from = "alice";
+            csr.to = "bob";
+            csr.amount = 500;
+            csr.fee = 5;
+            csr.nonce = 7;
+            b.cross_shard_receipts.push_back(csr);
+
+            CrossShardReceipt ibr;
+            ibr.src_shard = 3;
+            ibr.dst_shard = 2;
+            ibr.src_block_index = 200;
+            ibr.src_block_hash = pattern_hash(0xD0);
+            ibr.tx_hash = pattern_hash(0xD1);
+            ibr.from = "carol";
+            ibr.to = "bob";
+            ibr.amount = 750;
+            ibr.fee = 5;
+            ibr.nonce = 3;
+            b.inbound_receipts.push_back(ibr);
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+
+            check(back.cross_shard_receipts.size() == 1,
+                  "block with receipts: cross_shard_receipts count");
+            check(back.cross_shard_receipts[0].amount == 500,
+                  "block with receipts: cross_shard amount preserved");
+            check(back.inbound_receipts.size() == 1,
+                  "block with receipts: inbound_receipts count");
+            check(back.inbound_receipts[0].amount == 750,
+                  "block with receipts: inbound amount preserved");
+        }
+
+        // === Genesis block (initial_state array) ===
+
+        // 8. initial_state array of GenesisAlloc sub-objects.
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 0;
+            b.cumulative_rand = Hash{};
+
+            GenesisAlloc a1;
+            a1.domain = "alice";
+            a1.ed_pub = pattern_pub(0xE0);
+            a1.balance = 10000;
+            a1.stake = 1000;
+            a1.region = "us-east";
+            b.initial_state.push_back(a1);
+
+            GenesisAlloc a2;
+            a2.domain = "bob";
+            a2.ed_pub = pattern_pub(0xE5);
+            a2.balance = 5000;
+            a2.stake = 0;
+            a2.region = "";  // legacy / no-region
+            b.initial_state.push_back(a2);
+
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+
+            check(back.initial_state.size() == 2,
+                  "genesis block: initial_state count");
+            check(back.initial_state[0].region == "us-east",
+                  "genesis block: region tag preserved");
+            check(back.initial_state[1].region.empty(),
+                  "genesis block: empty region preserved (R1 backward-compat)");
+            check(back.initial_state[0].balance == 10000,
+                  "genesis block: balance preserved");
+        }
+
+        // === Zero-skip fields (state_root + partner_subset_hash) ===
+
+        // 9. state_root: omitted in JSON when zero (backward-compat
+        //    with pre-S-033 blocks); present when non-zero.
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+            b.state_root = Hash{};  // explicit zero
+
+            json j = b.to_json();
+            check(!j.contains("state_root"),
+                  "state_root: omitted from JSON when zero (zero-skip)");
+
+            b.state_root = pattern_hash(0xF0);
+            j = b.to_json();
+            check(j.contains("state_root"),
+                  "state_root: present in JSON when non-zero");
+            Block back = Block::from_json(j);
+            check(back.state_root == b.state_root,
+                  "state_root: round-trips when non-zero");
+        }
+
+        // 10. partner_subset_hash: same zero-skip pattern (R4 Phase 3).
+        {
+            Block b;
+            b.index = 0;
+            b.prev_hash = Hash{};
+            b.timestamp = 1;
+            b.cumulative_rand = Hash{};
+
+            json j = b.to_json();
+            check(!j.contains("partner_subset_hash"),
+                  "partner_subset_hash: omitted from JSON when zero (R4 backward-compat)");
+
+            b.partner_subset_hash = pattern_hash(0xF5);
+            j = b.to_json();
+            check(j.contains("partner_subset_hash"),
+                  "partner_subset_hash: present in JSON when non-zero");
+            Block back = Block::from_json(j);
+            check(back.partner_subset_hash == b.partner_subset_hash,
+                  "partner_subset_hash: round-trips when non-zero");
+        }
+
+        // === compute_hash invariance across round-trip ===
+
+        // 11. A block's compute_hash is identical before and after a
+        //     JSON round-trip. This is the CRITICAL invariant: a
+        //     block gossiped between peers MUST produce the same
+        //     block_hash on the receiver. Any field-loss in to_json /
+        //     from_json that affects signing_bytes would break this.
+        {
+            Block b;
+            b.index = 42;
+            b.prev_hash = pattern_hash(0x10);
+            b.timestamp = 1000;
+            b.cumulative_rand = pattern_hash(0x20);
+            b.creators = {"alice", "bob"};
+            b.creator_block_sigs = {pattern_sig(0xE0), pattern_sig(0xE1)};
+            b.tx_root = pattern_hash(0x30);
+            b.delay_seed = pattern_hash(0x40);
+            b.delay_output = pattern_hash(0x50);
+            b.state_root = pattern_hash(0x60);
+
+            Hash before = b.compute_hash();
+            json j = b.to_json();
+            Block back = Block::from_json(j);
+            Hash after = back.compute_hash();
+
+            check(before == after,
+                  "compute_hash invariant: block_hash unchanged by JSON round-trip");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-roundtrip " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
