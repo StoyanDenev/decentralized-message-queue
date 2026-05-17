@@ -393,6 +393,11 @@ Additional in-process tests:
   determ test-merge-state                     Chain merge_state read API +
                                               R4 threshold setters
                                               (merge/revert/grace) round-trip
+  determ test-chain-apply-block               Chain::append / apply_transactions
+                                              central state-transition surface
+                                              — genesis bootstrap, TRANSFER /
+                                              STAKE / REGISTER apply, prev_hash
+                                              continuity, A1 invariant sequence
 )" << "\n";
 }
 
@@ -12688,6 +12693,357 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": merge-state " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain::append + apply_transactions — the central
+    // state-transition function under every block-application path.
+    // Bisect-debug: adding assertions ONE AT A TIME to isolate the
+    // STATUS_STACK_BUFFER_OVERRUN crash mode from the prior attempt.
+    if (cmd == "test-chain-apply-block") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a single GenesisConfig used across all sub-cases.
+        // alice = creator with stake + registry; bob = balance-only via
+        // initial_balances merge path.
+        GenesisConfig cfg;
+        cfg.chain_id = "test-chain-apply-block";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        GenesisAllocation bob_bal;
+        bob_bal.domain = "bob"; bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // === Step 1: genesis bootstrap ===
+
+        // 1. height advances to 1 after genesis.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.height() == 1,
+                  "append(genesis): chain.height() == 1");
+        }
+
+        // 2. accounts installed from initial_state.balance.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.balance("alice") == 1000 && c.balance("bob") == 200,
+                  "genesis: balance(alice) == 1000, balance(bob) == 200");
+        }
+
+        // 3. stakes installed for alice (non-zero stake).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.stake("alice") == 500,
+                  "genesis: stake(alice) == 500");
+        }
+
+        // 4. bob: no stake entry (stake=0 → not added).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.stake("bob") == 0,
+                  "genesis: stake(bob) == 0 (no entry created at stake=0)");
+        }
+
+        // 5. alice registry entry (non-zero ed_pub).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            auto reg = c.registrant("alice");
+            check(reg.has_value() && reg->active_from == 0
+                  && reg->inactive_from == UINT64_MAX,
+                  "genesis: registrant(alice) active from height 0");
+        }
+
+        // 6. bob: no registry entry (zero ed_pub from initial_balances merge).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            auto reg = c.registrant("bob");
+            check(!reg.has_value(),
+                  "genesis: registrant(bob) absent (zero ed_pub)");
+        }
+
+        // 7. genesis_total = sum(balances + stakes) = 1000 + 500 + 200 = 1700.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.genesis_total() == 1700,
+                  "genesis: genesis_total == 1700");
+            check(c.expected_total() == c.live_total_supply(),
+                  "genesis: A1 invariant (expected == live)");
+        }
+
+        // === Step 3: regular-block apply ===
+        //
+        // CRITICAL: apply_transactions distributes fees + subsidy to
+        // `b.creators` at end-of-block. If creators[] is empty AND a tx
+        // charges fees, the fees vanish (sender debited but no creator
+        // credited) — breaking the A1 unitary-supply invariant, which
+        // triggers a throw inside apply, which (uncaught at top level)
+        // produces STATUS_STACK_BUFFER_OVERRUN via std::terminate. Every
+        // sub-case below sets creators=["alice"] so fees route back to
+        // alice and A1 stays balanced. block_subsidy_ defaults to 0 in
+        // a fresh Chain, so subsidy doesn't enter the math.
+
+        // 8. Empty block at index 1: state preserved, height advances.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.timestamp = 1;
+            b1.creators = {"alice"};
+            c.append(b1);
+            check(c.height() == 2 && c.balance("alice") == 1000
+                  && c.balance("bob") == 200,
+                  "empty block at index 1: state preserved, height=2");
+        }
+
+        // === Step 4: TRANSFER apply ===
+
+        // 9. Local TRANSFER alice→bob: balances update, nonce++.
+        //    apply_transactions checks nonce match but not Ed25519 sig
+        //    (the validator's job); we send an unsigned tx. Fee of 1
+        //    goes back to alice (sole creator), so net alice balance =
+        //    1000 - 100 - 1 + 1 = 900.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+            check(c.balance("alice") == 900,
+                  "TRANSFER: alice 1000 - 100 - 1 + 1(fee back) = 900");
+            check(c.balance("bob") == 300,
+                  "TRANSFER: bob 200 + 100 = 300");
+            check(c.next_nonce("alice") == 1,
+                  "TRANSFER: alice next_nonce 0 → 1");
+        }
+
+        // 10. Bad nonce: tx silently skipped (apply trusts validator,
+        //     this is defense-in-depth). No fees charged, no creator
+        //     credit needed.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 5;  // wrong
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+            check(c.balance("alice") == 1000 && c.balance("bob") == 200,
+                  "TRANSFER w/ wrong nonce: silently skipped");
+            check(c.next_nonce("alice") == 0,
+                  "TRANSFER w/ wrong nonce: nonce not incremented");
+        }
+
+        // 11. Insufficient balance: tx silently skipped — apply must
+        //     not produce negative balances even on validator-dropped
+        //     inputs. No fees charged because the cost check fires
+        //     before sender.balance is touched.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 10000; tx.fee = 1; tx.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+            check(c.balance("alice") == 1000 && c.balance("bob") == 200,
+                  "TRANSFER w/ insufficient balance: silently skipped");
+        }
+
+        // === Step 5: STAKE apply ===
+
+        // 12. STAKE: locks amount via 8-byte LE payload, debits balance + fee.
+        //     fee=1 back to alice (sole creator). Net: alice balance
+        //     1000 - 300 (stake) - 1 (fee) + 1 (fee back) = 700.
+        //     Stake: 500 (genesis) + 300 = 800.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload.resize(8);
+            uint64_t stake_amt = 300;
+            for (int i = 0; i < 8; ++i)
+                tx.payload[i] = uint8_t((stake_amt >> (8 * i)) & 0xff);
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+            check(c.stake("alice") == 800,
+                  "STAKE: stakes_[alice] 500 + 300 = 800");
+            check(c.balance("alice") == 700,
+                  "STAKE: balance(alice) 1000 - 300 - 1 + 1(fee back) = 700");
+        }
+
+        // === Step 6: REGISTER apply (with derive_delay-randomized active_from) ===
+
+        // 13. First seed carol with a TRANSFER, then carol REGISTERs.
+        //     active_from = block.index + derive_delay(cumulative_rand, tx.hash),
+        //     so it must be > 2 (block.index = 2). derive_delay returns
+        //     1..REGISTRATION_DELAY_WINDOW so active_from is at least 3.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            // Block 1: TRANSFER alice → carol so carol has funds for fee.
+            Transaction seed;
+            seed.type = TxType::TRANSFER;
+            seed.from = "alice"; seed.to = "carol";
+            seed.amount = 100; seed.fee = 1; seed.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(seed);
+            c.append(b1);
+            check(c.balance("carol") == 100,
+                  "REGISTER setup: carol balance == 100 after seed TRANSFER");
+
+            // Block 2: carol REGISTERs with a 32-byte pubkey payload.
+            Transaction reg;
+            reg.type = TxType::REGISTER;
+            reg.from = "carol"; reg.fee = 1; reg.nonce = 0;
+            reg.payload.resize(32);
+            for (int i = 0; i < 32; ++i) reg.payload[i] = uint8_t(0xC0 + i);
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            // Non-zero cumulative_rand so derive_delay produces a
+            // deterministic active_from > 2.
+            for (size_t i = 0; i < b2.cumulative_rand.size(); ++i)
+                b2.cumulative_rand[i] = uint8_t(0x42);
+            b2.transactions.push_back(reg);
+            c.append(b2);
+
+            auto entry = c.registrant("carol");
+            check(entry.has_value(),
+                  "REGISTER: registrant(carol) created");
+            check(entry.has_value() && entry->active_from > 2,
+                  "REGISTER: active_from > block.index (derive_delay > 0)");
+            check(entry.has_value() && entry->inactive_from == UINT64_MAX,
+                  "REGISTER: inactive_from sentinel == UINT64_MAX");
+            check(c.next_nonce("carol") == 1,
+                  "REGISTER: carol next_nonce 0 → 1");
+        }
+
+        // === Step 7: prev_hash continuity (chain-integrity invariant) ===
+
+        // 14. append with wrong prev_hash throws — central chain-integrity
+        //     invariant. Without it a peer could insert a block at the
+        //     wrong height and silently corrupt state.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block bad;
+            bad.index = 1;
+            for (size_t i = 0; i < bad.prev_hash.size(); ++i)
+                bad.prev_hash[i] = 0xFF;  // wrong
+            bad.creators = {"alice"};
+            bool threw = false;
+            try { c.append(bad); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "append w/ wrong prev_hash throws (chain integrity)");
+            check(c.height() == 1 && c.balance("alice") == 1000,
+                  "throwing append: no state mutation visible");
+        }
+
+        // === Step 8: A1 unitary supply invariant across a sequence ===
+
+        // 15. A1 invariant holds across genesis + empty + TRANSFER + STAKE
+        //     sequence. expected_total == live_total_supply after every
+        //     successful apply commit. (Apply-side asserts the same
+        //     invariant internally; this is the read-side confirmation.)
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant after genesis (baseline)");
+
+            // Empty block.
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            c.append(b1);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant after empty block");
+
+            // TRANSFER.
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.transactions.push_back(tx);
+            c.append(b2);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant after TRANSFER");
+
+            // STAKE.
+            Transaction st;
+            st.type = TxType::STAKE;
+            st.from = "alice"; st.fee = 1; st.nonce = 1;
+            st.payload.resize(8);
+            uint64_t amt = 100;
+            for (int i = 0; i < 8; ++i)
+                st.payload[i] = uint8_t((amt >> (8 * i)) & 0xff);
+            Block b3;
+            b3.index = 3;
+            b3.prev_hash = c.head().compute_hash();
+            b3.creators = {"alice"};
+            b3.transactions.push_back(st);
+            c.append(b3);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant after STAKE");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-apply-block " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
