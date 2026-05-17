@@ -356,6 +356,10 @@ In-process tests (deterministic, no network):
   determ test-make-block-sig                  make_block_sig Phase-2 BlockSigMsg
                                               producer — sign/verify integration +
                                               key binding + RFC 8032 determinism
+  determ test-domain-separation               Cross-cutting non-collision test
+                                              across every protocol commitment
+                                              hash + S-033/S-038 state_root
+                                              exclusion-fence proofs
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -11469,6 +11473,203 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": make-block-sig " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process cross-cutting test verifying
+    // domain separation across every commitment hash in the
+    // protocol. The protocol uses many SHA-256-based commitments
+    // for distinct semantic purposes:
+    //
+    //   * compute_block_digest    (Phase-2 K-of-K sig target)
+    //   * make_contrib_commitment (Phase-1 sig target)
+    //   * make_abort_claim_message (abort certificate sig target)
+    //   * compute_delay_seed      (Phase-1 inputs commitment)
+    //   * compute_block_rand      (Phase-2 randomness output)
+    //   * compute_tx_root         (tx union commitment)
+    //   * compute_genesis_hash    (chain identity)
+    //   * Transaction::compute_hash (tx identity)
+    //   * Block::compute_hash     (block identity / chain-anchor)
+    //
+    // Every pair of these MUST produce distinct outputs even when
+    // fed similar inputs. A cross-domain collision (e.g., a
+    // make_contrib_commitment output that equals some
+    // compute_block_digest output) could enable cross-protocol
+    // replay attacks where an attacker uses a sig made for one
+    // commitment in another context.
+    //
+    // Individual sensitivity tests are already covered for each
+    // function in dedicated subcommands. This test exercises the
+    // CROSS-domain non-collision invariant on a single common
+    // input — the explicit defense-in-depth assertion that
+    // domain separation works as designed.
+    if (cmd == "test-domain-separation") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Common anchor inputs — same prev_hash + block_index across
+        // all commitment hashes that accept them.
+        const uint64_t IDX = 42;
+        Hash prev{};
+        for (size_t i = 0; i < prev.size(); ++i) prev[i] = uint8_t(0x10 + i);
+        Hash tx_root{};
+        for (size_t i = 0; i < tx_root.size(); ++i) tx_root[i] = uint8_t(0x20 + i);
+        std::vector<Hash> dh_inputs = {tx_root, prev};  // arbitrary
+
+        // === Collect commitment outputs ===
+
+        Hash contrib_commit = make_contrib_commitment(IDX, prev, {}, Hash{});
+        Hash abort_msg_r1   = make_abort_claim_message(IDX, 1, prev, "dan");
+        Hash abort_msg_r2   = make_abort_claim_message(IDX, 2, prev, "dan");
+        Hash delay_seed     = compute_delay_seed(IDX, prev, tx_root, dh_inputs);
+        Hash block_rand     = compute_block_rand(delay_seed, {});
+
+        // Block-level: minimal Block at this index.
+        Block b;
+        b.index = IDX;
+        b.prev_hash = prev;
+        b.timestamp = 1;
+        b.cumulative_rand = Hash{};
+        b.tx_root = tx_root;
+        b.delay_seed = delay_seed;
+        Hash block_digest = compute_block_digest(b);
+        Hash block_hash   = b.compute_hash();
+
+        // Transaction-level commit.
+        Transaction tx;
+        tx.type = TxType::TRANSFER;
+        tx.from = "alice";
+        tx.to = "bob";
+        tx.amount = 100;
+        tx.fee = 1;
+        tx.nonce = 5;
+        Hash tx_hash = tx.compute_hash();
+
+        // tx_root union helper.
+        std::vector<std::vector<Hash>> creator_tx_lists = {{tx_hash}};
+        Hash tx_root_of_one = compute_tx_root(creator_tx_lists);
+
+        // Genesis identity commit.
+        GenesisConfig gcfg;
+        gcfg.chain_id = "test";
+        Hash genesis_hash = compute_genesis_hash(gcfg);
+
+        // === Pairwise non-collision assertions ===
+
+        // 1. make_contrib_commitment vs make_abort_claim_message.
+        //    Different sig-target domains; must produce distinct
+        //    hashes on similar inputs.
+        check(contrib_commit != abort_msg_r1,
+              "domain-sep: make_contrib_commitment != make_abort_claim_message (different sig targets)");
+
+        // 2. make_abort_claim round-1 vs round-2: distinct (round-
+        //    binding within the abort-claim domain).
+        check(abort_msg_r1 != abort_msg_r2,
+              "domain-sep: make_abort_claim_message round 1 != round 2");
+
+        // 3. compute_delay_seed vs compute_block_rand. Phase-1
+        //    inputs commit vs Phase-2 output: distinct domains.
+        check(delay_seed != block_rand,
+              "domain-sep: compute_delay_seed != compute_block_rand (Phase-1 vs Phase-2)");
+
+        // 4. compute_block_digest vs Block::compute_hash. The K-of-K
+        //    sig target (Phase-2) vs the chain-anchor identity.
+        //    compute_block_digest deliberately excludes Phase-2-reveal
+        //    fields + state_root + abort_events + ..., while
+        //    compute_hash includes them all via signing_bytes.
+        check(block_digest != block_hash,
+              "domain-sep: compute_block_digest != Block::compute_hash (S-030 D2 exclusion fence)");
+
+        // 5. Transaction::compute_hash vs Block::compute_hash. Even
+        //    on a synthetic Block holding this tx, distinct domain
+        //    inputs → distinct hashes.
+        check(tx_hash != block_hash,
+              "domain-sep: Transaction::compute_hash != Block::compute_hash");
+
+        // 6. compute_tx_root (containing tx_hash) vs tx_hash itself.
+        //    The union commit is structurally distinct from a single
+        //    member's hash.
+        check(tx_root_of_one != tx_hash,
+              "domain-sep: compute_tx_root({tx_hash}) != tx_hash (structural distinct)");
+
+        // 7. compute_genesis_hash vs all others (chain identity is
+        //    its own domain). Probabilistic: a collision here would
+        //    be a SHA-256 birthday-paradox impossibility.
+        check(genesis_hash != contrib_commit,
+              "domain-sep: compute_genesis_hash != make_contrib_commitment");
+        check(genesis_hash != abort_msg_r1,
+              "domain-sep: compute_genesis_hash != make_abort_claim_message");
+        check(genesis_hash != delay_seed,
+              "domain-sep: compute_genesis_hash != compute_delay_seed");
+        check(genesis_hash != block_rand,
+              "domain-sep: compute_genesis_hash != compute_block_rand");
+        check(genesis_hash != block_digest,
+              "domain-sep: compute_genesis_hash != compute_block_digest");
+        check(genesis_hash != block_hash,
+              "domain-sep: compute_genesis_hash != Block::compute_hash");
+        check(genesis_hash != tx_hash,
+              "domain-sep: compute_genesis_hash != Transaction::compute_hash");
+
+        // 8. compute_block_digest vs compute_delay_seed. Both are
+        //    block-level commits but at different protocol phases.
+        check(block_digest != delay_seed,
+              "domain-sep: compute_block_digest != compute_delay_seed");
+
+        // 9. compute_block_digest vs make_contrib_commitment. Both
+        //    are committee-sig targets but at different protocol
+        //    phases (Phase-1 vs Phase-2).
+        check(block_digest != contrib_commit,
+              "domain-sep: compute_block_digest != make_contrib_commitment");
+
+        // 10. compute_block_rand vs delay_seed (Phase-2 random vs
+        //     Phase-1 seed) — already checked above as #3, but
+        //     also verify it differs from compute_block_digest.
+        check(block_rand != block_digest,
+              "domain-sep: compute_block_rand != compute_block_digest");
+
+        // 11. Block::compute_hash vs compute_block_digest with
+        //     state_root mutation (S-033 + S-038 closure): a Block
+        //     with non-zero state_root has compute_hash that
+        //     incorporates it, but compute_block_digest doesn't —
+        //     a state_root-only mutation produces:
+        //       block_digest(b2) == block_digest(b)    [excluded]
+        //       compute_hash(b2) != compute_hash(b)    [included]
+        {
+            Block b2 = b;
+            Hash sr{};
+            for (size_t i = 0; i < sr.size(); ++i) sr[i] = uint8_t(0xF0 + i);
+            b2.state_root = sr;
+            Hash b2_digest = compute_block_digest(b2);
+            Hash b2_hash   = b2.compute_hash();
+            check(b2_digest == block_digest,
+                  "S-033/S-038: state_root change leaves block_digest unchanged");
+            check(b2_hash != block_hash,
+                  "S-033/S-038: state_root change DOES affect compute_hash");
+            // And the two outputs (digest + hash) must still differ.
+            check(b2_digest != b2_hash,
+                  "domain-sep: digest != hash even with state_root populated");
+        }
+
+        // 12. Sanity: hashing the SAME inputs through the SAME
+        //     function twice produces the same output (determinism).
+        //     Cross-checks that the domain-separation comes from
+        //     distinct hash inputs, not from any internal state.
+        {
+            Hash a = make_contrib_commitment(IDX, prev, {}, Hash{});
+            Hash b_ = make_contrib_commitment(IDX, prev, {}, Hash{});
+            check(a == b_,
+                  "sanity: same input → same output (determinism, not non-collision)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": domain-separation " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
