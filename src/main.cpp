@@ -66,9 +66,12 @@ Usage:
   determ chain-summary [--last N]            Compact summary of last N blocks
   determ validators                          List the current validator pool
   determ committee                           List the current epoch's K-of-K committee
-  determ pending-params [--json]             A5 staged PARAM_CHANGE entries
+  determ pending-params [--at-height N] [--json]
+                                              A5 staged PARAM_CHANGE entries
                                               (effective_height, name, value_hex)
-                                              not yet activated
+                                              not yet activated. --at-height N
+                                              filters to entries activating by
+                                              block N (i.e., effective_height<=N)
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -398,6 +401,16 @@ Additional in-process tests:
                                               — genesis bootstrap, TRANSFER /
                                               STAKE / REGISTER apply, prev_hash
                                               continuity, A1 invariant sequence
+  determ test-snapshot-roundtrip              Chain::serialize_state +
+                                              restore_from_snapshot round-trip
+                                              — account/stake/registry state,
+                                              A1 counters, state_root preserved
+                                              (S-033/S-037/S-038 contract)
+  determ test-state-proof                     Chain::state_proof Merkle
+                                              inclusion proof primitive (v2.2
+                                              light-client) — proof+verify,
+                                              tampering rejection, non-
+                                              membership nullopt, determinism
 )" << "\n";
 }
 
@@ -1403,20 +1416,57 @@ static int cmd_committee(int argc, char** argv) {
 //   in `governance_mode=1` deployments to confirm that PARAM_CHANGE
 //   txs have been accepted, see what's about to land, and audit drift
 //   between observed chain state and expected post-activation state.
+// determ pending-params [--at-height N] [--json] [--rpc-port P]
+//   List A5 PARAM_CHANGE entries staged but not yet activated.
+//   --at-height N filters to entries with effective_height <= N
+//                (i.e., what WILL have activated by block N). Useful
+//                for operators verifying that a planned upgrade
+//                window covers the expected param changes. Empty
+//                result if no entries qualify (or no entries at all).
+//   Default output: tabular; --json passes the filtered RPC array
+//                   through verbatim.
 static int cmd_pending_params(int argc, char** argv) {
     bool json_out = false;
+    bool have_at_height = false;
+    uint64_t at_height = 0;
     for (int i = 0; i < argc; ++i) {
-        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--at-height" && i + 1 < argc) {
+            have_at_height = true;
+            at_height = std::stoull(argv[i + 1]);
+        }
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "pending_params");
+        if (!result.is_array()) result = json::array();
+
+        // --at-height filtering: client-side post-filter on the RPC
+        // result. Server returns the full list (ordered by
+        // effective_height ascending); we just drop entries with
+        // effective_height > at_height. Cheaper than a new RPC method
+        // and keeps the server-side handler simple.
+        if (have_at_height) {
+            json filtered = json::array();
+            for (auto& e : result) {
+                uint64_t eff = e.value("effective_height", uint64_t{0});
+                if (eff <= at_height) filtered.push_back(e);
+            }
+            result = std::move(filtered);
+        }
+
         if (json_out) {
             std::cout << result.dump(2) << "\n";
             return 0;
         }
-        if (!result.is_array() || result.empty()) {
-            std::cout << "(no pending PARAM_CHANGE entries)\n";
+        if (result.empty()) {
+            if (have_at_height) {
+                std::cout << "(no PARAM_CHANGE entries with effective_height <= "
+                          << at_height << ")\n";
+            } else {
+                std::cout << "(no pending PARAM_CHANGE entries)\n";
+            }
             return 0;
         }
         std::cout << std::left
@@ -13044,6 +13094,473 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": chain-apply-block " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain::serialize_state + Chain::restore_from_snapshot
+    // round-trip. The snapshot wire format is used by:
+    //   - `determ snapshot create / inspect / fetch` operator commands
+    //   - SNAPSHOT_RESPONSE gossip (peer-to-peer fast-bootstrap)
+    //   - the S-037 / S-038 closure path (dapp_registry + state_root
+    //     verification gate)
+    //
+    // A regression that drops a field on serialize or fails to restore
+    // one would silently break either fast-sync bootstrap (account /
+    // stake / registry differences) or the S-033 state-root
+    // verification gate. tools/test_dapp_snapshot.sh exercises this
+    // end-to-end via 3-node gossip; this in-process test pins the
+    // core round-trip semantics in <1s.
+    //
+    // Implementation note: like test-chain-apply-block, every Block
+    // here sets `b.creators = {"alice"}` so the A1 invariant holds
+    // across applies (see test-chain-apply-block gotcha comment).
+    if (cmd == "test-snapshot-roundtrip") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a populated chain (genesis + 1 TRANSFER block) for the
+        // round-trip tests. Same fixture style as test-chain-apply-block.
+        auto populate = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "snapshot-roundtrip-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            alice_c.region = "us-east";
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            GenesisAllocation bob_bal;
+            bob_bal.domain = "bob"; bob_bal.balance = 200;
+            cfg.initial_balances = {alice_bal, bob_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            // Block 1: TRANSFER alice → bob with fee routed back to alice.
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.timestamp = 1;
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+            return c;
+        };
+
+        // === Basic round-trip semantics ===
+
+        // 1. serialize_state returns a JSON object with version=1 + top keys.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            check(snap.is_object() && snap.value("version", 0) == 1,
+                  "serialize_state: returns version=1 JSON object");
+        }
+
+        // 2. block_index + head_hash reflect the chain's tip.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            check(snap.value("block_index", uint64_t{99}) == 1
+                  && snap.value("head_hash", std::string{})
+                     == to_hex(c.head_hash()),
+                  "serialize_state: block_index + head_hash match chain tip");
+        }
+
+        // === Round-trip preserves account / stake / registry state ===
+
+        // 3. accounts round-trip preserves balance.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.balance("alice") == c.balance("alice")
+                  && r.balance("bob") == c.balance("bob"),
+                  "restore: balance(alice + bob) preserved");
+        }
+
+        // 4. accounts round-trip preserves next_nonce.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.next_nonce("alice") == c.next_nonce("alice"),
+                  "restore: next_nonce(alice) preserved (== 1 after TRANSFER)");
+        }
+
+        // 5. stakes round-trip preserves locked.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.stake("alice") == c.stake("alice"),
+                  "restore: stake(alice) preserved");
+        }
+
+        // 6. registrants round-trip preserves ed_pub + region (R1).
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            auto cr = c.registrant("alice");
+            auto rr = r.registrant("alice");
+            check(cr.has_value() && rr.has_value()
+                  && cr->ed_pub == rr->ed_pub
+                  && cr->region == rr->region,
+                  "restore: registrant(alice).ed_pub + region preserved");
+        }
+
+        // === A1 supply counters round-trip ===
+
+        // 7. All 5 A1 counters preserved.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.genesis_total() == c.genesis_total()
+                  && r.accumulated_subsidy() == c.accumulated_subsidy()
+                  && r.accumulated_slashed() == c.accumulated_slashed()
+                  && r.accumulated_inbound() == c.accumulated_inbound()
+                  && r.accumulated_outbound() == c.accumulated_outbound(),
+                  "restore: 5 A1 supply counters preserved");
+        }
+
+        // 8. A1 invariant holds post-restore.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.expected_total() == r.live_total_supply(),
+                  "restore: A1 invariant (expected == live) holds");
+        }
+
+        // === Genesis-pinned constants round-trip ===
+
+        // 9. 4 setters round-trip.
+        {
+            Chain c = populate();
+            c.set_block_subsidy(123);
+            c.set_min_stake(7777);
+            c.set_suspension_slash(42);
+            c.set_unstake_delay(2500);
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.block_subsidy() == 123 && r.min_stake() == 7777
+                  && r.suspension_slash() == 42 && r.unstake_delay() == 2500,
+                  "restore: 4 genesis-pinned constants preserved");
+        }
+
+        // === The S-033 / S-037 / S-038 central contract ===
+
+        // 10. compute_state_root preserved across round-trip. This is the
+        //     central S-033 contract — without it, the state_root
+        //     verification gate in the validator would reject the first
+        //     post-restore block (the S-038 closure scenario).
+        {
+            Chain c = populate();
+            Hash root_before = c.compute_state_root();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            Hash root_after = r.compute_state_root();
+            check(root_before == root_after,
+                  "restore: compute_state_root preserved (S-033/S-038 contract)");
+        }
+
+        // === Rejection + back-compat ===
+
+        // 11. Wrong version rejected with clear diagnostic.
+        {
+            json bad;
+            bad["version"] = 99;
+            bool threw = false;
+            std::string what;
+            try { (void)Chain::restore_from_snapshot(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("version") != std::string::npos,
+                  "restore: unsupported version rejected with diagnostic");
+        }
+
+        // 12. Non-object input rejected.
+        {
+            json bad = json::array();
+            bool threw = false;
+            try { (void)Chain::restore_from_snapshot(bad); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "restore: non-object input rejected");
+        }
+
+        // 13. Minimal valid snapshot (version only) loads cleanly with
+        //     defaults — exercises the legacy back-compat path (pre-S-037
+        //     snapshots without dapp_registry; pre-A5 snapshots without
+        //     suspension_slash; pre-A1 snapshots without supply counters).
+        {
+            json minimal;
+            minimal["version"] = 1;
+            bool threw = false;
+            try {
+                Chain r = Chain::restore_from_snapshot(minimal);
+                check(r.balance("anyone") == 0 && r.height() == 0
+                      && r.empty(),
+                      "minimal snapshot (version only): defaults applied");
+            } catch (const std::exception&) { threw = true; }
+            check(!threw, "minimal snapshot: loads cleanly");
+        }
+
+        // === Determinism ===
+
+        // 14. Same snapshot input → same restored state_root. Critical
+        //     for cross-node bootstrap agreement.
+        {
+            Chain c = populate();
+            json snap = c.serialize_state(16);
+            Chain r1 = Chain::restore_from_snapshot(snap);
+            Chain r2 = Chain::restore_from_snapshot(snap);
+            check(r1.compute_state_root() == r2.compute_state_root(),
+                  "deterministic: 2 restores → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": snapshot-roundtrip " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain::state_proof — the v2.2 light-client
+    // inclusion-proof primitive. Returns a Merkle proof anchoring a
+    // (key, value_hash) pair to the chain's compute_state_root. A
+    // light client that holds a trusted block header runs
+    // crypto::merkle_verify to confirm the proof without trusting
+    // the full node beyond protocol correctness.
+    //
+    // The network-level tools/test_state_proof.sh exercises the RPC
+    // path end-to-end via a 3-node cluster; this in-process test pins
+    // the primitive in <1s.
+    if (cmd == "test-state-proof") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build chain with two accounts (alice + bob) so multiple a:
+        // and s: namespace leaves exist (not just the always-emitted
+        // k: constants).
+        auto build_chain = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "state-proof-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            GenesisAllocation bob_bal;
+            bob_bal.domain = "bob"; bob_bal.balance = 200;
+            cfg.initial_balances = {alice_bal, bob_bal};
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+
+        // Helper: build "a:" + domain key per PROTOCOL.md §4.1.1.
+        auto account_key = [](const std::string& domain) {
+            std::vector<uint8_t> key;
+            key.push_back('a'); key.push_back(':');
+            key.insert(key.end(), domain.begin(), domain.end());
+            return key;
+        };
+
+        // === Inclusion + verify ===
+
+        // 1. state_proof for an existing account returns a proof.
+        {
+            Chain c = build_chain();
+            auto p = c.state_proof(account_key("alice"));
+            check(p.has_value(),
+                  "state_proof('a:alice'): returns proof");
+        }
+
+        // 2. Returned proof's key matches the query key exactly.
+        {
+            Chain c = build_chain();
+            auto key = account_key("alice");
+            auto p = c.state_proof(key);
+            check(p.has_value() && p->key == key,
+                  "state_proof: returned key == query key");
+        }
+
+        // 3. The proof verifies via crypto::merkle_verify against
+        //    compute_state_root. This is the entire light-client
+        //    security argument.
+        {
+            Chain c = build_chain();
+            auto p = c.state_proof(account_key("alice"));
+            Hash root = c.compute_state_root();
+            bool ok = p.has_value()
+                && crypto::merkle_verify(
+                      root, p->key, p->value_hash, p->target_index,
+                      p->leaf_count, p->proof);
+            check(ok,
+                  "merkle_verify('a:alice', proof): accepts under root");
+        }
+
+        // 4. Tampered value_hash fails verification. Defends against
+        //    a malicious full node lying about an account's balance.
+        {
+            Chain c = build_chain();
+            auto p = c.state_proof(account_key("alice"));
+            Hash root = c.compute_state_root();
+            Hash bad_value = p->value_hash;
+            bad_value[0] ^= 0xFF;
+            bool ok = p.has_value()
+                && crypto::merkle_verify(
+                      root, p->key, bad_value, p->target_index,
+                      p->leaf_count, p->proof);
+            check(!ok,
+                  "merkle_verify: rejects tampered value_hash");
+        }
+
+        // 5. Tampered sibling-hash in the proof path fails.
+        {
+            Chain c = build_chain();
+            auto p = c.state_proof(account_key("alice"));
+            Hash root = c.compute_state_root();
+            auto bad_proof = p->proof;
+            if (!bad_proof.empty()) bad_proof[0][0] ^= 0xFF;
+            bool ok = p.has_value()
+                && crypto::merkle_verify(
+                      root, p->key, p->value_hash, p->target_index,
+                      p->leaf_count, bad_proof);
+            check(!ok,
+                  "merkle_verify: rejects tampered sibling-hash");
+        }
+
+        // 6. Wrong target_index fails (sibling-shuffle attack
+        //    defense — a malicious full node returning proofs for a
+        //    different leaf position).
+        {
+            Chain c = build_chain();
+            auto p = c.state_proof(account_key("alice"));
+            Hash root = c.compute_state_root();
+            size_t bad_idx = (p->target_index + 1) % p->leaf_count;
+            bool ok = p.has_value()
+                && crypto::merkle_verify(
+                      root, p->key, p->value_hash, bad_idx,
+                      p->leaf_count, p->proof);
+            check(!ok,
+                  "merkle_verify: rejects wrong target_index");
+        }
+
+        // 7. Distinct keys → distinct (key, value_hash, target_index).
+        {
+            Chain c = build_chain();
+            auto pa = c.state_proof(account_key("alice"));
+            auto pb = c.state_proof(account_key("bob"));
+            check(pa.has_value() && pb.has_value()
+                  && pa->value_hash != pb->value_hash,
+                  "state_proof: distinct keys → distinct value_hashes");
+        }
+
+        // 8. Cross-proof-swap fails — alice's proof can't certify
+        //    bob's value.
+        {
+            Chain c = build_chain();
+            auto pa = c.state_proof(account_key("alice"));
+            auto pb = c.state_proof(account_key("bob"));
+            Hash root = c.compute_state_root();
+            // Use alice's proof + index but try to certify bob's value.
+            bool ok = pa.has_value() && pb.has_value()
+                && crypto::merkle_verify(
+                      root, account_key("alice"), pb->value_hash,
+                      pa->target_index, pa->leaf_count, pa->proof);
+            check(!ok,
+                  "merkle_verify: rejects cross-key value swap");
+        }
+
+        // === Non-membership: absent key ===
+
+        // 9. state_proof for a non-existent account returns nullopt.
+        //    Non-membership proofs are NOT supported by the sorted-
+        //    leaves design (see chain.hpp::StateProof comment); nullopt
+        //    is the documented contract.
+        {
+            Chain c = build_chain();
+            auto p = c.state_proof(account_key("nonexistent"));
+            check(!p.has_value(),
+                  "state_proof('a:nonexistent'): returns nullopt");
+        }
+
+        // === Determinism ===
+
+        // 10. Two proofs for same key over unchanged chain → byte-
+        //     identical. Light clients must get the same answer from
+        //     any full node.
+        {
+            Chain c = build_chain();
+            auto key = account_key("alice");
+            auto p1 = c.state_proof(key);
+            auto p2 = c.state_proof(key);
+            check(p1.has_value() && p2.has_value()
+                  && p1->value_hash == p2->value_hash
+                  && p1->target_index == p2->target_index
+                  && p1->leaf_count == p2->leaf_count
+                  && p1->proof == p2->proof,
+                  "state_proof: deterministic across calls (same chain)");
+        }
+
+        // 11. After mutation (TRANSFER), alice's value_hash changes
+        //     AND the new proof verifies under the new state_root.
+        {
+            Chain c = build_chain();
+            auto pre = c.state_proof(account_key("alice"));
+
+            // Apply a TRANSFER. b.creators=alice ensures fee routes
+            // back so A1 stays balanced.
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.transactions.push_back(tx);
+            c.append(b1);
+
+            auto post = c.state_proof(account_key("alice"));
+            check(pre.has_value() && post.has_value()
+                  && pre->value_hash != post->value_hash,
+                  "state_proof: alice's value_hash changes after TRANSFER");
+
+            // post proof verifies under post state_root.
+            Hash post_root = c.compute_state_root();
+            bool ok = post.has_value()
+                && crypto::merkle_verify(
+                      post_root, account_key("alice"), post->value_hash,
+                      post->target_index, post->leaf_count, post->proof);
+            check(ok,
+                  "state_proof: new proof verifies under new state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-proof " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
