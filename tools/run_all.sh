@@ -48,9 +48,10 @@
 #                         dapp_call, s018_json_validation, merkle,
 #                         committee_selection, shard_routing, ed25519,
 #                         sha256, anon_address, genesis_message,
-#                         state_root_unit, block_rand, rate_limiter.
-#                         Each runs in <5s with no flakes. Useful for
-#                         quick iteration during development.
+#                         state_root_unit, block_rand, rate_limiter,
+#                         block_digest, block_hash. Each runs in <5s
+#                         with no flakes. Useful for quick iteration
+#                         during development.
 
 set -u
 cd "$(dirname "$0")/.."
@@ -75,7 +76,7 @@ ONLY_PATTERN="${ONLY_PATTERN:-}"
 # These are wrappers around `determ test-*` subcommands — no network,
 # no clusters, <5s each, no flakes. Useful for dev iteration.
 if [ "${FAST:-0}" = "1" ]; then
-    ONLY_PATTERN='test_(atomic_scope|composable_batch|dapp_register|dapp_call|s018_json_validation|merkle|committee_selection|shard_routing|ed25519|sha256|anon_address|genesis_message|state_root_unit|block_rand|rate_limiter)\.sh$'
+    ONLY_PATTERN='test_(atomic_scope|composable_batch|dapp_register|dapp_call|s018_json_validation|merkle|committee_selection|shard_routing|ed25519|sha256|anon_address|genesis_message|state_root_unit|block_rand|rate_limiter|block_digest|block_hash)\.sh$'
     echo "FAST=1 mode: ONLY_PATTERN set to in-process tests only"
     echo
 fi

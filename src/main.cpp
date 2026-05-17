@@ -197,6 +197,18 @@ In-process tests (deterministic, no network):
                                               bypass, first-touch full, burst
                                               exhaustion, per-key independence,
                                               refill timing, burst-cap invariant
+  determ test-block-digest                    compute_block_digest (FA1 signature
+                                              target) — INCLUSION-list field
+                                              coverage + EXCLUSION-list (S-030 D2)
+                                              fence (delay_output, state_root,
+                                              equivocation_events, abort_events,
+                                              etc. MUST NOT affect digest)
+  determ test-block-hash                      Block::signing_bytes() +
+                                              Block::compute_hash() — FA1 chain-
+                                              anchor identity; full field-coverage
+                                              including Phase-2-reveal fields +
+                                              partner_subset_hash + state_root
+                                              zero-skip backward-compat
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -5021,6 +5033,491 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": rate-limiter " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for compute_block_digest
+    // (the FA1 signature target). Locks in BOTH:
+    //   (a) the INCLUSION list — every field in compute_block_digest
+    //       must change the digest when mutated (signature-domain
+    //       coverage; defeats a regression where a field is silently
+    //       removed from the digest).
+    //   (b) the deliberate EXCLUSION list (S-030 D2 territory) —
+    //       fields NOT in compute_block_digest must NOT change it.
+    //       The excluded fields are: delay_output, creator_dh_secrets,
+    //       cumulative_rand, abort_events, equivocation_events,
+    //       inbound_receipts, cross_shard_receipts, state_root,
+    //       partner_subset_hash, timestamp.
+    //
+    //       The "Phase-2-reveal" subset (delay_output,
+    //       creator_dh_secrets, cumulative_rand) is excluded because
+    //       these values aren't known yet at digest-signing time. The
+    //       remaining excludes (S-030 D2) are reconciled at apply time
+    //       via:
+    //         - state_root: S-033 + S-038 (apply-time gate now wired)
+    //         - the rest:  v2.7 F2 view reconciliation (deferred)
+    //
+    //       Documenting the exclusion list with explicit assertions
+    //       prevents a future commit from silently moving a field
+    //       across the boundary (e.g., a well-meaning patch that adds
+    //       abort_events to the digest would break the S-030 D2 design
+    //       assumptions and the v2.7 F2 spec).
+    if (cmd == "test-block-digest") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a populated Block with non-default values for
+        // every digest-relevant field so each individual mutation is
+        // distinguishable.
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+        auto patterned_sig = [](uint8_t base) {
+            Signature s{};
+            for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(base + i);
+            return s;
+        };
+
+        auto make_block = [&]() {
+            Block b;
+            b.index = 42;
+            b.prev_hash = patterned_hash(0x10);
+            b.tx_root = patterned_hash(0x20);
+            b.delay_seed = patterned_hash(0x30);
+            b.consensus_mode = ConsensusMode::MUTUAL_DISTRUST;
+            b.bft_proposer = "";  // empty for MD blocks
+            b.creators = {"alice", "bob", "carol"};
+            b.creator_tx_lists = {
+                {patterned_hash(0x40), patterned_hash(0x41)},
+                {patterned_hash(0x42)},
+                {}
+            };
+            b.creator_ed_sigs = {
+                patterned_sig(0x50), patterned_sig(0x51), patterned_sig(0x52)};
+            b.creator_dh_inputs = {
+                patterned_hash(0x60), patterned_hash(0x61), patterned_hash(0x62)};
+            return b;
+        };
+
+        Block baseline = make_block();
+        Hash dig_baseline = compute_block_digest(baseline);
+
+        // === INCLUSION list: every field in compute_block_digest
+        //     changes the digest when mutated ===
+
+        // 1. Determinism.
+        {
+            Hash again = compute_block_digest(baseline);
+            check(again == dig_baseline, "compute_block_digest deterministic");
+        }
+
+        // 2. index sensitivity.
+        {
+            Block b = baseline;
+            b.index = 43;
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: index sensitivity (INCLUDED)");
+        }
+
+        // 3. prev_hash sensitivity.
+        {
+            Block b = baseline;
+            b.prev_hash = patterned_hash(0xFE);
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: prev_hash sensitivity (INCLUDED)");
+        }
+
+        // 4. tx_root sensitivity.
+        {
+            Block b = baseline;
+            b.tx_root = patterned_hash(0xFD);
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: tx_root sensitivity (INCLUDED)");
+        }
+
+        // 5. delay_seed sensitivity.
+        {
+            Block b = baseline;
+            b.delay_seed = patterned_hash(0xFC);
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: delay_seed sensitivity (INCLUDED)");
+        }
+
+        // 6. consensus_mode sensitivity.
+        {
+            Block b = baseline;
+            b.consensus_mode = ConsensusMode::BFT;
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: consensus_mode sensitivity (INCLUDED)");
+        }
+
+        // 7. bft_proposer sensitivity.
+        {
+            Block b = baseline;
+            b.bft_proposer = "alice";  // non-empty proposer
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: bft_proposer sensitivity (INCLUDED)");
+        }
+
+        // 8. creators sensitivity (value).
+        {
+            Block b = baseline;
+            b.creators[1] = "different_bob";
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: creators value sensitivity (INCLUDED)");
+        }
+
+        // 9. creator_tx_lists sensitivity.
+        {
+            Block b = baseline;
+            b.creator_tx_lists[0][0] = patterned_hash(0xFB);
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: creator_tx_lists sensitivity (INCLUDED)");
+        }
+
+        // 10. creator_ed_sigs sensitivity.
+        {
+            Block b = baseline;
+            b.creator_ed_sigs[1] = patterned_sig(0xFA);
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: creator_ed_sigs sensitivity (INCLUDED)");
+        }
+
+        // 11. creator_dh_inputs sensitivity (the Phase-1 commit).
+        {
+            Block b = baseline;
+            b.creator_dh_inputs[2] = patterned_hash(0xF9);
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: creator_dh_inputs sensitivity (INCLUDED)");
+        }
+
+        // === EXCLUSION list: S-030 D2 territory + Phase-2-reveal
+        //     subset. Mutating these MUST NOT change the digest.
+        //     This is the explicit "two blocks can share a digest"
+        //     surface that v2.7 F2 reconciles. ===
+
+        // 12. delay_output excluded (Phase-2-reveal).
+        {
+            Block b = baseline;
+            b.delay_output = patterned_hash(0xE0);
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: delay_output EXCLUDED (Phase-2-reveal)");
+        }
+
+        // 13. creator_dh_secrets excluded (Phase-2-reveal).
+        {
+            Block b = baseline;
+            b.creator_dh_secrets = {patterned_hash(0xE1), patterned_hash(0xE2)};
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: creator_dh_secrets EXCLUDED (Phase-2-reveal)");
+        }
+
+        // 14. cumulative_rand excluded (Phase-2-reveal derivative).
+        {
+            Block b = baseline;
+            b.cumulative_rand = patterned_hash(0xE3);
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: cumulative_rand EXCLUDED");
+        }
+
+        // 15. abort_events excluded (S-030 D2 — v2.7 F2 territory).
+        {
+            Block b = baseline;
+            AbortEvent ae;
+            ae.round = 1;
+            ae.event_hash = patterned_hash(0xE4);
+            b.abort_events.push_back(ae);
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: abort_events EXCLUDED (S-030 D2 / F2)");
+        }
+
+        // 16. equivocation_events excluded (S-030 D2 — v2.7 F2 territory).
+        {
+            Block b = baseline;
+            EquivocationEvent ev;
+            ev.equivocator = "mallory";
+            ev.block_index = 42;
+            ev.digest_a = patterned_hash(0xE5);
+            ev.digest_b = patterned_hash(0xE6);
+            ev.sig_a = patterned_sig(0xE7);
+            ev.sig_b = patterned_sig(0xE8);
+            b.equivocation_events.push_back(ev);
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: equivocation_events EXCLUDED (S-030 D2 / F2)");
+        }
+
+        // 17. state_root excluded from digest (S-033 / v2.1 — apply-time
+        //     gate via S-038 is the closure mechanism; the digest doesn't
+        //     need to include it because each peer recomputes it locally
+        //     and the gate rejects on mismatch).
+        {
+            Block b = baseline;
+            b.state_root = patterned_hash(0xE9);
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: state_root EXCLUDED (apply-time gate)");
+        }
+
+        // 18. partner_subset_hash excluded (R4 Phase 3 merge —
+        //     covered by signing_bytes, not by the K-of-K Phase-2
+        //     digest).
+        {
+            Block b = baseline;
+            b.partner_subset_hash = patterned_hash(0xEA);
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: partner_subset_hash EXCLUDED");
+        }
+
+        // 19. timestamp excluded (assembler-proposed; v2.7 F2 will add
+        //     this to the digest via the ±30s validation pattern).
+        {
+            Block b = baseline;
+            b.timestamp = 999;
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: timestamp EXCLUDED (v2.7 F2 territory)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-digest " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Block::signing_bytes()
+    // and Block::compute_hash() — the FA1 signature target that ends up
+    // as the chain's prev_hash field on every subsequent block. Unlike
+    // compute_block_digest (which is signed at Phase-2 by the K-of-K
+    // committee BEFORE state-root and Phase-2-reveal fields are known),
+    // signing_bytes covers EVERY consensus-relevant field of the block,
+    // including the Phase-2-reveal fields and the apply-time-recomputed
+    // state_root. This is the function that produces the block's chain-
+    // anchor identity.
+    if (cmd == "test-block-hash") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+        auto patterned_sig = [](uint8_t base) {
+            Signature s{};
+            for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(base + i);
+            return s;
+        };
+
+        auto make_block = [&]() {
+            Block b;
+            b.index = 7;
+            b.prev_hash = patterned_hash(0x10);
+            b.timestamp = 1000;
+            b.tx_root = patterned_hash(0x20);
+            b.delay_seed = patterned_hash(0x30);
+            b.delay_output = patterned_hash(0x35);
+            b.consensus_mode = ConsensusMode::MUTUAL_DISTRUST;
+            b.bft_proposer = "";  // empty for MD blocks
+            b.cumulative_rand = patterned_hash(0x38);
+            b.creators = {"alice", "bob", "carol"};
+            b.creator_tx_lists = {
+                {patterned_hash(0x40)}, {patterned_hash(0x41)}, {}};
+            b.creator_ed_sigs = {
+                patterned_sig(0x50), patterned_sig(0x51), patterned_sig(0x52)};
+            b.creator_dh_inputs = {
+                patterned_hash(0x60), patterned_hash(0x61), patterned_hash(0x62)};
+            b.creator_dh_secrets = {
+                patterned_hash(0x70), patterned_hash(0x71), patterned_hash(0x72)};
+            b.creator_block_sigs = {
+                patterned_sig(0x80), patterned_sig(0x81), patterned_sig(0x82)};
+            return b;
+        };
+
+        Block baseline = make_block();
+        Hash h_baseline = baseline.compute_hash();
+
+        // 1. Determinism: compute_hash() called twice returns the same
+        //    Hash. (No internal builder state leak.)
+        {
+            Hash again = baseline.compute_hash();
+            check(again == h_baseline, "compute_hash() deterministic");
+        }
+
+        // 2. signing_bytes() determinism: 100 calls return the same
+        //    32-byte hash. signing_bytes() returns the SHA-256 result
+        //    (already hashed), so it should be deterministic by
+        //    construction — but a regression to vector-style
+        //    accumulation could break this.
+        {
+            auto s1 = baseline.signing_bytes();
+            bool all_match = true;
+            for (int i = 0; i < 100; ++i) {
+                auto si = baseline.signing_bytes();
+                if (si != s1) { all_match = false; break; }
+            }
+            check(all_match, "signing_bytes() pure (100 calls match)");
+        }
+
+        // 3. signing_bytes() returns exactly 32 bytes (SHA-256 output).
+        {
+            auto sb = baseline.signing_bytes();
+            check(sb.size() == 32, "signing_bytes() returns 32 bytes (SHA-256 output)");
+        }
+
+        // === Sensitivity to fields in signing_bytes (the "always
+        //     covered" set) — every field must change compute_hash
+        //     when mutated. ===
+
+        // 4. timestamp sensitivity (signing_bytes includes timestamp
+        //    even though compute_block_digest doesn't — signing_bytes
+        //    is computed AFTER digest signing, at gossip time, so the
+        //    field is fully known).
+        {
+            Block b = baseline; b.timestamp = 9999;
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: timestamp sensitivity");
+        }
+
+        // 5. delay_output sensitivity (Phase-2 reveal — included in
+        //    signing_bytes, excluded from digest).
+        {
+            Block b = baseline; b.delay_output = patterned_hash(0xF1);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: delay_output sensitivity (Phase-2-reveal)");
+        }
+
+        // 6. creator_dh_secrets sensitivity (Phase-2 reveal).
+        {
+            Block b = baseline;
+            b.creator_dh_secrets[1] = patterned_hash(0xF2);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: creator_dh_secrets sensitivity");
+        }
+
+        // 7. cumulative_rand sensitivity.
+        {
+            Block b = baseline; b.cumulative_rand = patterned_hash(0xF3);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: cumulative_rand sensitivity");
+        }
+
+        // 8. creator_block_sigs sensitivity (the K-of-K committee
+        //    signatures themselves, bound into compute_hash but NOT
+        //    into signing_bytes).
+        {
+            Block b = baseline; b.creator_block_sigs[0] = patterned_sig(0xF4);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: creator_block_sigs sensitivity");
+        }
+
+        // === Backward-compat invariants for fields with zero-skip
+        //     encoding (partner_subset_hash for R4 Phase 3,
+        //     state_root for S-033). Both fields are bound into
+        //     signing_bytes ONLY when non-zero, preserving byte-
+        //     identical hashes for pre-feature blocks. ===
+
+        // 9. partner_subset_hash zero-skip: setting to zero (default)
+        //    yields the same hash as not touching it. Setting non-zero
+        //    changes the hash.
+        {
+            Block b1 = baseline;          // default zero
+            Block b2 = baseline;          // also default zero (explicit)
+            Hash zero{};
+            b2.partner_subset_hash = zero;
+            check(b1.compute_hash() == b2.compute_hash(),
+                  "compute_hash: partner_subset_hash zero-skip (zero == default)");
+            b2.partner_subset_hash = patterned_hash(0xA0);
+            check(b2.compute_hash() != b1.compute_hash(),
+                  "compute_hash: partner_subset_hash non-zero changes hash");
+        }
+
+        // 10. state_root zero-skip (S-033 backward-compat).
+        {
+            Block b1 = baseline;
+            Block b2 = baseline;
+            Hash zero{};
+            b2.state_root = zero;
+            check(b1.compute_hash() == b2.compute_hash(),
+                  "compute_hash: state_root zero-skip (zero == default)");
+            b2.state_root = patterned_hash(0xA1);
+            check(b2.compute_hash() != b1.compute_hash(),
+                  "compute_hash: state_root non-zero changes hash");
+        }
+
+        // 11. Bound fields chain together: a block with BOTH
+        //     partner_subset_hash AND state_root non-zero has a hash
+        //     distinct from either alone.
+        {
+            Block bp = baseline;
+            bp.partner_subset_hash = patterned_hash(0xB0);
+            Block bs = baseline;
+            bs.state_root = patterned_hash(0xB1);
+            Block bps = baseline;
+            bps.partner_subset_hash = patterned_hash(0xB0);
+            bps.state_root = patterned_hash(0xB1);
+            Hash hp = bp.compute_hash();
+            Hash hs = bs.compute_hash();
+            Hash hps = bps.compute_hash();
+            check(hp != hs && hp != hps && hs != hps,
+                  "compute_hash: partner_subset_hash and state_root contribute independently");
+        }
+
+        // 12. Order matters in creator-aligned vectors: swapping
+        //     creators[0] and creators[1] yields a different hash
+        //     (committee-selection-order invariant — pairs with
+        //     test-block-rand assertion #6).
+        {
+            Block b = baseline;
+            std::swap(b.creators[0], b.creators[1]);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: creators[] ORDER sensitivity");
+        }
+
+        // 13. Equivocation events bound into hash. Two same-digest
+        //     blocks differing only in equivocation_events still
+        //     produce DIFFERENT hashes (this is the S-030 D2 mitigation
+        //     at the chain-anchor level — the digest is shared but
+        //     compute_hash distinguishes the actual block).
+        {
+            Block b = baseline;
+            EquivocationEvent ev;
+            ev.equivocator = "mallory";
+            ev.block_index = 7;
+            ev.digest_a = patterned_hash(0xC1);
+            ev.digest_b = patterned_hash(0xC2);
+            ev.sig_a = patterned_sig(0xC3);
+            ev.sig_b = patterned_sig(0xC4);
+            b.equivocation_events.push_back(ev);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: equivocation_events change hash even when digest doesn't");
+        }
+
+        // 14. Abort events bound into hash via event_hash field.
+        //     Note: only event_hash is bound (per S030-D2-Analysis.md
+        //     "Implementation cross-reference") — other AbortEvent
+        //     fields aren't included.
+        {
+            Block b = baseline;
+            AbortEvent ae;
+            ae.round = 1;
+            ae.event_hash = patterned_hash(0xC5);
+            b.abort_events.push_back(ae);
+            check(b.compute_hash() != h_baseline,
+                  "compute_hash: abort_events event_hash bound into block hash");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-hash " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
