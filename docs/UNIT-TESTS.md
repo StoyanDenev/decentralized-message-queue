@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-23 subcommands; 417 assertions; runs in <14s with no flakes.
+24 subcommands; 428 assertions; runs in <14s with no flakes.
 
 ### 2.1 Cryptographic primitives
 

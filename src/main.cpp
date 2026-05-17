@@ -273,6 +273,12 @@ In-process tests (deterministic, no network):
                                               chain_abort_hash +
                                               genesis_random_state (V8
                                               foundation + S5 anti-cartel)
+  determ test-snapshot-defense                S-018 defense-in-depth lock-in
+                                              for Chain::restore_from_snapshot
+                                              wrong-type collection rejection
+                                              (every collection throws clean
+                                              field-name diagnostic, not
+                                              opaque nlohmann error)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -8094,6 +8100,158 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": random-state " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the S-018
+    // defense-in-depth hardening applied to Chain::restore_from_snapshot
+    // (commits 77f32c6 / 5841199 / f30ecc0). Verifies that snapshots
+    // with wrong-type collection fields throw clean diagnostics
+    // naming the field, not opaque nlohmann internal errors.
+    //
+    // Snapshots are the attack-relevant channel: they arrive via
+    // SNAPSHOT_RESPONSE gossip (16 MB cap, an unbounded-tier channel)
+    // and via operator-pinned files on disk. A malicious peer could
+    // craft a snapshot with `"accounts": "scalar"` to either crash
+    // the parser or produce confusing error messages; the hardening
+    // makes diagnostics clear at the parse boundary.
+    if (cmd == "test-snapshot-defense") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto try_restore = [&](const json& snap) -> std::string {
+            try {
+                (void)Chain::restore_from_snapshot(snap);
+                return "";  // no throw
+            } catch (const std::exception& e) {
+                return e.what();
+            }
+        };
+
+        // A minimal valid snapshot skeleton — version + (no blocks).
+        // We mutate specific collection fields to scalar/wrong-type
+        // and verify each is caught.
+        auto base_snap = []() {
+            json s;
+            s["version"] = 1;
+            s["block_subsidy"] = 0;
+            s["shard_count"] = 1;
+            s["shard_id"] = 0;
+            s["shard_salt"] = std::string(64, '0');
+            s["headers"] = json::array();
+            return s;
+        };
+
+        // 1. Baseline: a valid empty snapshot loads without error.
+        {
+            json s = base_snap();
+            std::string err = try_restore(s);
+            check(err.empty(),
+                  "baseline: minimal valid snapshot restores without error");
+        }
+
+        // 2. accounts = scalar → rejected with field-name diagnostic.
+        {
+            json s = base_snap();
+            s["accounts"] = "scalar";
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("accounts") != std::string::npos,
+                  "snapshot defense: 'accounts' as scalar throws with field name");
+        }
+
+        // 3. stakes = number → rejected.
+        {
+            json s = base_snap();
+            s["stakes"] = 42;
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("stakes") != std::string::npos,
+                  "snapshot defense: 'stakes' as number throws with field name");
+        }
+
+        // 4. registrants = object → rejected.
+        {
+            json s = base_snap();
+            s["registrants"] = json::object();
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("registrants") != std::string::npos,
+                  "snapshot defense: 'registrants' as object throws with field name");
+        }
+
+        // 5. applied_inbound_receipts = string → rejected.
+        {
+            json s = base_snap();
+            s["applied_inbound_receipts"] = "bad";
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("applied_inbound_receipts") != std::string::npos,
+                  "snapshot defense: 'applied_inbound_receipts' as string throws with field name");
+        }
+
+        // 6. merge_state = number → rejected.
+        {
+            json s = base_snap();
+            s["merge_state"] = 1;
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("merge_state") != std::string::npos,
+                  "snapshot defense: 'merge_state' as number throws with field name");
+        }
+
+        // 7. abort_records = scalar → rejected.
+        {
+            json s = base_snap();
+            s["abort_records"] = "bad";
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("abort_records") != std::string::npos,
+                  "snapshot defense: 'abort_records' as scalar throws with field name");
+        }
+
+        // 8. dapp_registry = scalar → rejected (S-037 surface).
+        {
+            json s = base_snap();
+            s["dapp_registry"] = "bad";
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("dapp_registry") != std::string::npos,
+                  "snapshot defense: 'dapp_registry' as scalar throws with field name");
+        }
+
+        // 9. pending_param_changes = scalar → rejected.
+        {
+            json s = base_snap();
+            s["pending_param_changes"] = "bad";
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("pending_param_changes") != std::string::npos,
+                  "snapshot defense: 'pending_param_changes' as scalar throws with field name");
+        }
+
+        // 10. Wrong snapshot version still rejected by the earlier
+        //     version check (preserves the pre-defense check).
+        {
+            json s = base_snap();
+            s["version"] = 99;
+            std::string err = try_restore(s);
+            check(!err.empty(),
+                  "snapshot defense: wrong version still rejected");
+        }
+
+        // 11. Empty optional fields (missing key) still load — the
+        //     defense doesn't break backward-compat with legacy
+        //     snapshots that omit optional fields.
+        {
+            json s = base_snap();
+            // No optional fields set; restore must succeed (this is
+            // the "fresh genesis snapshot" shape).
+            std::string err = try_restore(s);
+            check(err.empty(),
+                  "snapshot defense: empty optional fields still load (backward-compat)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": snapshot-defense " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
