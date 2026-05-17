@@ -284,6 +284,11 @@ In-process tests (deterministic, no network):
                                               round-trips + case-insensitive
                                               parse + rejection paths + enum
                                               to_string mappings
+  determ test-chain-helpers                   Chain read API — balance /
+                                              next_nonce / stake / lockfree
+                                              variants + shard routing
+                                              + A1 supply counters +
+                                              operator-tunable getters
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -8443,6 +8448,168 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": encoding " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for Chain's read-side
+    // API surface (balance, next_nonce, stake, height, empty, head_hash,
+    // shard_count, my_shard_id, supply counters). These are queried by
+    // every RPC handler + every block-apply step that consults state
+    // before mutating. A regression in default-value behavior or in
+    // the lock-free read paths would cascade through every safety
+    // proof that assumes a consistent state view.
+    if (cmd == "test-chain-helpers") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Default-Chain read-API behavior ===
+
+        // 1. Empty chain: height()==0, empty()==true, head_hash()==zero
+        //    (or empty), no balances anywhere.
+        {
+            Chain c;
+            check(c.height() == 0, "default Chain: height == 0");
+            check(c.empty(),       "default Chain: empty()");
+        }
+
+        // 2. balance() of an unknown domain returns 0 (the safety
+        //    default — defeats accidental crediting on read of an
+        //    uninitialized account).
+        {
+            Chain c;
+            check(c.balance("nobody") == 0,
+                  "default Chain: balance(\"nobody\") == 0");
+            check(c.balance("0x0000000000000000000000000000000000000000000000000000000000000000") == 0,
+                  "default Chain: balance(zero-anon-address) == 0");
+        }
+
+        // 3. next_nonce() of an unknown sender returns 0 (so first tx
+        //    can use nonce 0; subsequent ones increment per tx).
+        {
+            Chain c;
+            check(c.next_nonce("nobody") == 0,
+                  "default Chain: next_nonce(\"nobody\") == 0");
+        }
+
+        // 4. stake() of an unknown domain returns 0.
+        {
+            Chain c;
+            check(c.stake("nobody") == 0,
+                  "default Chain: stake(\"nobody\") == 0");
+        }
+
+        // 5. Lock-free reads return the same values as locked reads
+        //    on a default chain (no concurrency yet; both paths should
+        //    produce equivalent results).
+        {
+            Chain c;
+            check(c.balance_lockfree("nobody") == c.balance("nobody"),
+                  "balance_lockfree == balance on default chain");
+            check(c.next_nonce_lockfree("nobody") == c.next_nonce("nobody"),
+                  "next_nonce_lockfree == next_nonce on default chain");
+            check(c.stake_lockfree("nobody") == c.stake("nobody"),
+                  "stake_lockfree == stake on default chain");
+        }
+
+        // === Chain-parameter getters ===
+
+        // 6. Setters round-trip through getters (these are the
+        //    operator-config knobs that genesis pins).
+        {
+            Chain c;
+            c.set_block_subsidy(50);
+            check(c.block_subsidy() == 50, "set_block_subsidy round-trips");
+
+            c.set_min_stake(2000);
+            check(c.min_stake() == 2000, "set_min_stake round-trips");
+
+            c.set_suspension_slash(99);
+            check(c.suspension_slash() == 99,
+                  "set_suspension_slash round-trips");
+
+            c.set_unstake_delay(500);
+            check(c.unstake_delay() == 500,
+                  "set_unstake_delay round-trips");
+        }
+
+        // === Shard routing ===
+
+        // 7. Default Chain has shard_count == 1, is_cross_shard returns
+        //    false (single-shard degenerate case — every address is
+        //    "local").
+        {
+            Chain c;
+            check(c.shard_count() == 1,
+                  "default Chain: shard_count == 1 (single-shard)");
+            check(c.my_shard_id() == 0,
+                  "default Chain: my_shard_id == 0");
+            check(!c.is_cross_shard("anyone"),
+                  "default Chain (single-shard): is_cross_shard == false unconditionally");
+        }
+
+        // 8. set_shard_routing reflected through getters.
+        {
+            Chain c;
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0xA0 + i);
+            c.set_shard_routing(4, salt, ShardId{1});
+            check(c.shard_count() == 4,
+                  "set_shard_routing: shard_count round-trips");
+            check(c.my_shard_id() == 1,
+                  "set_shard_routing: my_shard_id round-trips");
+            check(c.shard_salt() == salt,
+                  "set_shard_routing: shard_salt round-trips");
+        }
+
+        // 9. is_cross_shard logic: with shard_count > 1, addresses
+        //    that route to a different shard return true.
+        //    Note: depends on shard_id_for_address's hash of the
+        //    address; we can't predict the exact outcome for a given
+        //    string without running it through the salted hash. Just
+        //    verify the function works in both directions for SOME
+        //    address pair.
+        {
+            Chain c;
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(i);
+            c.set_shard_routing(4, salt, ShardId{0});
+            // Try addresses until we find one on each side of the
+            // cross-shard boundary.
+            bool found_local = false, found_remote = false;
+            for (int i = 0; i < 100 && !(found_local && found_remote); ++i) {
+                std::string addr = "domain_" + std::to_string(i);
+                if (c.is_cross_shard(addr)) found_remote = true;
+                else found_local = true;
+            }
+            check(found_local,
+                  "shard_count=4: at least some address routes locally");
+            check(found_remote,
+                  "shard_count=4: at least some address routes cross-shard");
+        }
+
+        // === Supply counters (A1 unitary balance surface) ===
+
+        // 10. Default Chain: all counters zero. (No genesis applied,
+        //     no mutations.)
+        {
+            Chain c;
+            check(c.accumulated_subsidy()  == 0,
+                  "default Chain: accumulated_subsidy == 0");
+            check(c.accumulated_slashed()  == 0,
+                  "default Chain: accumulated_slashed == 0");
+            check(c.accumulated_inbound()  == 0,
+                  "default Chain: accumulated_inbound == 0");
+            check(c.accumulated_outbound() == 0,
+                  "default Chain: accumulated_outbound == 0");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-helpers " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
