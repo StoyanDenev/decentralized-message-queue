@@ -323,6 +323,12 @@ In-process tests (deterministic, no network):
                                               (K / M / BFT / region / mode /
                                               governance) + validate() genesis
                                               short-circuit invariant
+  determ test-timing-profiles                 TimingProfile constants —
+                                              cluster / web / regional / global /
+                                              tactical + their _test siblings
+                                              + single_test (operator-facing
+                                              M/K + chain_role + sharding_mode +
+                                              round timing lock-in)
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -10308,6 +10314,160 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": validator-config " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the
+    // TimingProfile constants in `include/determ/chain/params.hpp`.
+    // Each named profile (cluster / web / regional / global /
+    // tactical + their `_test` siblings + single_test) has
+    // documented M/K + chain_role + sharding_mode values that
+    // operators rely on for their deployments. A regression that
+    // changes any of these silently would shift the consensus
+    // posture of every chain that pins the profile name in its
+    // config.
+    //
+    // Locks in:
+    //   * M/K committee values per profile (the rev.7 published
+    //     defaults — "3/3 strong" for cluster, "3/2 weak" for web,
+    //     "5/4" for regional, "7/5" for global, "3/3 strong" for
+    //     tactical).
+    //   * chain_role + sharding_mode pairs (cluster=BEACON/CURRENT,
+    //     web=SHARD/EXTENDED, regional=SHARD/CURRENT,
+    //     global=BEACON/EXTENDED, tactical=SHARD/EXTENDED).
+    //   * Each test profile mirrors its prod sibling's M/K +
+    //     chain_role + sharding_mode (the documented test-vs-prod
+    //     parity invariant).
+    //   * single_test = SINGLE / NONE / M=K=3 — the unsharded
+    //     single-chain test path.
+    if (cmd == "test-timing-profiles") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto check_profile = [&](const TimingProfile& p, const char* name,
+                                  uint32_t exp_m, uint32_t exp_k,
+                                  ChainRole exp_role, ShardingMode exp_mode) {
+            check(p.m_creators == exp_m,
+                  (std::string("PROFILE_") + name + ": M == "
+                   + std::to_string(exp_m)).c_str());
+            check(p.k_block_sigs == exp_k,
+                  (std::string("PROFILE_") + name + ": K == "
+                   + std::to_string(exp_k)).c_str());
+            check(p.chain_role == exp_role,
+                  (std::string("PROFILE_") + name + ": chain_role matches").c_str());
+            check(p.sharding_mode == exp_mode,
+                  (std::string("PROFILE_") + name + ": sharding_mode matches").c_str());
+        };
+
+        // === Production profiles ===
+
+        // 1. cluster: BEACON + CURRENT + M=K=3 (strong MD).
+        check_profile(PROFILE_CLUSTER, "CLUSTER",
+                       3, 3, ChainRole::BEACON, ShardingMode::CURRENT);
+        // 2. web: SHARD + EXTENDED + M=3, K=2 (weak BFT).
+        check_profile(PROFILE_WEB, "WEB",
+                       3, 2, ChainRole::SHARD, ShardingMode::EXTENDED);
+        // 3. regional: SHARD + CURRENT + M=5, K=4.
+        check_profile(PROFILE_REGIONAL, "REGIONAL",
+                       5, 4, ChainRole::SHARD, ShardingMode::CURRENT);
+        // 4. global: BEACON + EXTENDED + M=7, K=5.
+        check_profile(PROFILE_GLOBAL, "GLOBAL",
+                       7, 5, ChainRole::BEACON, ShardingMode::EXTENDED);
+        // 5. tactical: SHARD + EXTENDED + M=K=3 (strong MD).
+        check_profile(PROFILE_TACTICAL, "TACTICAL",
+                       3, 3, ChainRole::SHARD, ShardingMode::EXTENDED);
+
+        // === Production timing (round-timer triples) ===
+
+        // 6. Round-timer values per profile.
+        check(PROFILE_CLUSTER.tx_commit_ms == 50,
+              "cluster: tx_commit_ms == 50");
+        check(PROFILE_CLUSTER.block_sig_ms == 50,
+              "cluster: block_sig_ms == 50");
+        check(PROFILE_CLUSTER.abort_claim_ms == 25,
+              "cluster: abort_claim_ms == 25");
+        check(PROFILE_WEB.tx_commit_ms == 200,
+              "web: tx_commit_ms == 200");
+        check(PROFILE_REGIONAL.tx_commit_ms == 300,
+              "regional: tx_commit_ms == 300");
+        check(PROFILE_GLOBAL.tx_commit_ms == 600,
+              "global: tx_commit_ms == 600");
+        check(PROFILE_TACTICAL.tx_commit_ms == 20,
+              "tactical: tx_commit_ms == 20 (drone swarm)");
+
+        // === Test profiles mirror their prod siblings ===
+
+        // 7. single_test: SINGLE + NONE + M=K=3 (the unsharded
+        //    single-chain test path).
+        check_profile(PROFILE_SINGLE_TEST, "SINGLE_TEST",
+                       3, 3, ChainRole::SINGLE, ShardingMode::NONE);
+
+        // 8. cluster_test mirrors cluster (BEACON + CURRENT, M=K=3).
+        check_profile(PROFILE_CLUSTER_TEST, "CLUSTER_TEST",
+                       PROFILE_CLUSTER.m_creators,
+                       PROFILE_CLUSTER.k_block_sigs,
+                       PROFILE_CLUSTER.chain_role,
+                       PROFILE_CLUSTER.sharding_mode);
+
+        // 9. web_test mirrors web (SHARD + EXTENDED, M=3, K=2).
+        check_profile(PROFILE_WEB_TEST, "WEB_TEST",
+                       PROFILE_WEB.m_creators,
+                       PROFILE_WEB.k_block_sigs,
+                       PROFILE_WEB.chain_role,
+                       PROFILE_WEB.sharding_mode);
+
+        // 10. regional_test mirrors regional (SHARD + CURRENT, M=5, K=4).
+        check_profile(PROFILE_REGIONAL_TEST, "REGIONAL_TEST",
+                       PROFILE_REGIONAL.m_creators,
+                       PROFILE_REGIONAL.k_block_sigs,
+                       PROFILE_REGIONAL.chain_role,
+                       PROFILE_REGIONAL.sharding_mode);
+
+        // 11. global_test mirrors global (BEACON + EXTENDED, M=7, K=5).
+        check_profile(PROFILE_GLOBAL_TEST, "GLOBAL_TEST",
+                       PROFILE_GLOBAL.m_creators,
+                       PROFILE_GLOBAL.k_block_sigs,
+                       PROFILE_GLOBAL.chain_role,
+                       PROFILE_GLOBAL.sharding_mode);
+
+        // 12. tactical_test mirrors tactical.
+        check_profile(PROFILE_TACTICAL_TEST, "TACTICAL_TEST",
+                       PROFILE_TACTICAL.m_creators,
+                       PROFILE_TACTICAL.k_block_sigs,
+                       PROFILE_TACTICAL.chain_role,
+                       PROFILE_TACTICAL.sharding_mode);
+
+        // 13. All `_test` profiles use the documented sub-30ms test
+        //     timing triples (5/5/3). The test sentinel.
+        bool test_timings_ok =
+            PROFILE_SINGLE_TEST.tx_commit_ms == TEST_TX_COMMIT_MS &&
+            PROFILE_SINGLE_TEST.block_sig_ms == TEST_BLOCK_SIG_MS &&
+            PROFILE_SINGLE_TEST.abort_claim_ms == TEST_ABORT_CLAIM_MS &&
+            PROFILE_CLUSTER_TEST.tx_commit_ms == TEST_TX_COMMIT_MS &&
+            PROFILE_WEB_TEST.tx_commit_ms == TEST_TX_COMMIT_MS &&
+            PROFILE_REGIONAL_TEST.tx_commit_ms == TEST_TX_COMMIT_MS &&
+            PROFILE_GLOBAL_TEST.tx_commit_ms == TEST_TX_COMMIT_MS &&
+            PROFILE_TACTICAL_TEST.tx_commit_ms == TEST_TX_COMMIT_MS;
+        check(test_timings_ok,
+              "all _test profiles use TEST_TX_COMMIT_MS / TEST_BLOCK_SIG_MS / TEST_ABORT_CLAIM_MS");
+
+        // 14. TEST_TX_COMMIT_MS is sub-30ms (sanity: test profiles
+        //     should be much faster than prod profiles).
+        check(TEST_TX_COMMIT_MS < 30,
+              "TEST_TX_COMMIT_MS < 30 (sub-30ms test timer sentinel)");
+
+        // 15. Production profiles are NOT sub-30ms (they're network-
+        //     scaled). Cluster is the fastest prod profile at 50ms.
+        check(PROFILE_CLUSTER.tx_commit_ms >= 50,
+              "PROFILE_CLUSTER.tx_commit_ms >= 50 (prod-tier timing)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": timing-profiles " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
