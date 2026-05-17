@@ -66,8 +66,8 @@ Usage:
   determ chain-summary [--last N]            Compact summary of last N blocks
   determ validators                          List the current validator pool
   determ committee                           List the current epoch's K-of-K committee
-  determ show-account <address>              Inspect any address (balance, nonce, registry, stake)
-  determ show-tx <hash>                      Look up a tx by hash (block_index + payload)
+  determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
+  determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
   determ snapshot inspect --in f [--state-root <hex64>] [--json]
                                               Validate + summarize a snapshot file (round-trip check);
@@ -1275,16 +1275,31 @@ static int cmd_committee(int argc, char** argv) {
 //   info + stake when the address is a registered validator.
 static int cmd_show_account(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: determ show-account <address> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-account <address> [--rpc-port N] [--json]\n";
         return 1;
     }
     std::string addr = argv[0];
     uint16_t port = get_rpc_port(argc, argv);
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") json_out = true;
+    }
     try {
         json params = {{"address", addr}};
         auto result = rpc::rpc_call("127.0.0.1", port, "account", params);
         if (result.is_null()) {
-            std::cout << "(no on-chain state for " << addr << ")\n";
+            if (json_out) {
+                std::cout << json::object().dump() << "\n";
+            } else {
+                std::cout << "(no on-chain state for " << addr << ")\n";
+            }
+            return 0;
+        }
+        if (json_out) {
+            // Pass-through the RPC's JSON — scripts get the same shape
+            // they'd get from a direct RPC call without the human-
+            // readable formatting overhead.
+            std::cout << result.dump() << "\n";
             return 0;
         }
         std::cout << "address      : " << result.value("address", std::string{}) << "\n";
@@ -1303,7 +1318,12 @@ static int cmd_show_account(int argc, char** argv) {
             std::cout << "registry     : (not registered)\n";
         }
     } catch (std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        if (json_out) {
+            json err = {{"error", e.what()}};
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "Error: " << e.what() << "\n";
+        }
         return 1;
     }
     return 0;
@@ -1609,21 +1629,34 @@ static int cmd_snapshot(int argc, char** argv) {
     return 1;
 }
 
-// determ show-tx <hash> [--rpc-port N]
+// determ show-tx <hash> [--rpc-port N] [--json]
 //   Look up a transaction by its hex-encoded hash. Reports the tx
 //   payload, the block it landed in, and the block's timestamp.
+//   --json emits the raw RPC envelope for script consumption.
 static int cmd_show_tx(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: determ show-tx <hash> [--rpc-port N]\n";
+        std::cerr << "Usage: determ show-tx <hash> [--rpc-port N] [--json]\n";
         return 1;
     }
     std::string hash_hex = argv[0];
     uint16_t port = get_rpc_port(argc, argv);
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") json_out = true;
+    }
     try {
         json params = {{"hash", hash_hex}};
         auto result = rpc::rpc_call("127.0.0.1", port, "tx", params);
         if (result.is_null()) {
-            std::cout << "(tx " << hash_hex.substr(0, 16) << "... not found in any finalized block)\n";
+            if (json_out) {
+                std::cout << json::object().dump() << "\n";
+            } else {
+                std::cout << "(tx " << hash_hex.substr(0, 16) << "... not found in any finalized block)\n";
+            }
+            return 0;
+        }
+        if (json_out) {
+            std::cout << result.dump() << "\n";
             return 0;
         }
         std::cout << "block_index : " << result.value("block_index", uint64_t{0}) << "\n";
@@ -1632,7 +1665,12 @@ static int cmd_show_tx(int argc, char** argv) {
         std::cout << "transaction :\n";
         std::cout << result["tx"].dump(2) << "\n";
     } catch (std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        if (json_out) {
+            json err = {{"error", e.what()}};
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "Error: " << e.what() << "\n";
+        }
         return 1;
     }
     return 0;

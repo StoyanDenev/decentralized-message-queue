@@ -25,8 +25,8 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 | `determ chain-summary [--last N] [--json] [--rpc-port N]` | Compact view of last `N` blocks (default 10). `--json` emits the raw RPC response (`{blocks: [...], height, total_supply, genesis_total, accumulated_subsidy, accumulated_inbound, accumulated_slashed, accumulated_outbound}` — the A1 unitary-supply counters). |
 | `determ validators [--json] [--rpc-port N]` | Registered validator pool (domain, ed_pub, stake, active_from). Default: human-readable table. `--json` emits the raw RPC array verbatim — feeds directly into `verify-block-sigs --committee` for light-client K-of-K verification. |
 | `determ committee [--json] [--rpc-port N]` | Current epoch's K-of-K committee (deterministic from chain state). `--json` flag same as for `validators` — emits the raw RPC array shape `verify-block-sigs --committee` consumes. |
-| `determ show-account <addr> [--rpc-port N]` | Balance + nonce + registry record + stake for any address |
-| `determ show-tx <hash> [--rpc-port N]` | Locate a tx in a finalized block (block_index + payload) |
+| `determ show-account <addr> [--rpc-port N] [--json]` | Balance + nonce + registry record + stake for any address. Default human-readable; `--json` pass-throughs the raw RPC envelope for script consumption. Empty result → `{}` (JSON) or `(no on-chain state for X)` (human). |
+| `determ show-tx <hash> [--rpc-port N] [--json]` | Locate a tx in a finalized block (block_index + payload). Default human-readable; `--json` pass-throughs the raw RPC envelope. Empty result → `{}` (JSON) or `(tx ... not found ...)` (human). |
 | `determ balance <domain> [--rpc-port N]` | Balance only |
 | `determ nonce <domain> [--rpc-port N]` | Next expected nonce |
 | `determ stake_info <domain> [--rpc-port N]` | Locked stake + unlock_height |

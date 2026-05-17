@@ -777,6 +777,30 @@ Strictly sequential after Phase A. v2.26 ships first as a v2.25 prerequisite (ke
 
 **Phase-C exit criterion:** Determ becomes a usable federated-identity anchor for off-chain services without trust in any single Determ node.
 
+### Phase D — Beaconless v2 architecture (~3-4 months, after Phase A/B/C ship)
+
+The largest single architectural effort in Determ's roadmap. Removes the beacon as a special role; distributes its functions across shards via light-client mesh + replicated deployment manifest + per-shard committee log + Merkle-proof cross-shard receipts. Completes Determ's mutual-distrust posture at every architectural layer and raises horizontal-scale ceiling from ~50 to ~200-500 shards.
+
+**Status: spec resolved per Option A** in `docs/proofs/Beaconless-v2-SPEC.md`. All 6 interlinked foundational sub-questions formally resolved (cross-shard validation architecture, trust anchor, committee continuity, cross-shard receipts, decentralized merge detection, randomness mixing). Implementation pending pre-implementation review (8-point checklist in spec §8).
+
+**Prerequisites:**
+- v2 + Theme 9 substantially shipped (Beaconless v2 builds on v2.1 state Merkle root, v2.2 light-client proofs, v2.10 FROST-BLS threshold infrastructure)
+- Deterministic-simulation framework (S-035 Option 2, ~3-4 weeks) — needed to catch Byzantine bugs in the much-larger beaconless surface that integration tests can't drive
+
+| Order | Item | Effort | Why this order |
+|---|---|---|---|
+| D.0 | DSF (S-035 Option 2) | 3-4 weeks | **Beaconless v2 prerequisite.** Virtual clock + virtual network + scriptable Byzantine actors. Without DSF, Beaconless v2 bug-discovery rate is integration-test-bounded. |
+| D.1 | Light-client mesh infrastructure | 3-4 weeks | Foundational substrate; every other Beaconless v2 item builds on this. Lazy validation logic + per-source eviction. |
+| D.2 | Deployment manifest infrastructure | 2-3 weeks | Replaces beacon's trust-anchor role. K-of-K co-signing for mutations; cooldown-based default-accept prevents single-shard veto. |
+| D.3 | Committee-rotation log (per shard) | 1-2 weeks | Append-only on-chain log; light-client traversal; snapshot compaction every 100 epochs. |
+| D.4 | Cross-shard receipts with Merkle proofs | 2-3 weeks | Receipt format extension; source-side proof generation; receiver-side validation via light-client header. |
+| D.5 | Decentralized merge-detection | 1-2 weeks | Per-shard SHARD_TIP observation + Merritt-witness affidavits. Tolerates k Byzantine shards given num_shards > k(k+1). |
+| D.6 | Cross-shard randomness aggregation | 1-2 weeks | Per-epoch accumulator over threshold signatures (reuses v2.10 FROST-BLS). |
+| D.7 | `AUTONOMOUS_SHARD` chain_role + migration | 1-2 weeks | New chain_role; per-deployment flag-day migration tooling. |
+| D.8 | Tests + docs | 2 weeks | DSF-driven scenarios; integration test for 3-5 autonomous shard deployment; documentation refresh. |
+
+**Phase-D exit criterion:** Determ deployments operate without a beacon. Mutual-distrust posture extends to every architectural layer including cross-shard coordination. Horizontal-scale ceiling raised from ~50 to ~200-500 shards via lazy validation.
+
 ### Total combined
 
 | Phase | Window | Cumulative wall-clock |
@@ -784,14 +808,15 @@ Strictly sequential after Phase A. v2.26 ships first as a v2.25 prerequisite (ke
 | Phase A (v2 Themes 1-7) | ~8-9 weeks | ~8-9 weeks |
 | Phase B (Theme 8) | 3-5 months | ~5-7 months |
 | Phase C (Theme 9) | 4-6 weeks (DKG infrastructure shared with Phase A — Theme 9 effort reduced), partially parallel with later Phase B | ~6-9 months total (unchanged at the outer envelope; v2.10 work absorbed into Phase A) |
+| Phase D (Beaconless v2) | ~3-4 months (incl. DSF prereq), after Phase A/B/C | **~10-13 months total** for "Beaconless v2 complete" |
 
-NH-track items run in parallel without gating any phase. NH1 (C99 rewrite, A10 Stage 1 entry) is a multi-month engineering bet; NH4 (military certification) is a calendar/operator-policy track; NH5 (dynamic BFT threshold) lands at C6 in Phase A; NH6 (regulatory mapping) lands incrementally with v2.24 in Phase B.
+Phase D is the natural "what's after v2 + Theme 9" effort. NH-track items run in parallel without gating any phase. NH1 (C99 rewrite, A10 Stage 1 entry) is a multi-month engineering bet; NH4 (military certification) is a calendar/operator-policy track; NH5 (dynamic BFT threshold) lands at C6 in Phase A; NH6 (regulatory mapping) lands incrementally with v2.24 in Phase B.
 
 ### What is explicitly NOT in this sequencing
 
 - **v2.13 fair ordering** — see "v2.13 fair ordering scope" below for the explicit deferral rationale.
 - **v2.21+ DApp ecosystem items** — community/ecosystem track, not core protocol.
-- **Beaconless v2 architecture** — separate v2.x direction with 6 substantial open design questions; not on this sequencing.
+- **Cross-deployment Beaconless beyond Determ-to-Determ** — Phase D is intra-deployment beaconless. Inter-deployment (multi-Determ federation) is a v3-class concern building on Phase D's light-client mesh infrastructure.
 
 ### v2.13 fair ordering — scope clarification
 
