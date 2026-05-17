@@ -8243,6 +8243,19 @@ int main(int argc, char** argv) {
                   "snapshot defense: 'pending_param_changes' as scalar throws with field name");
         }
 
+        // 9b. headers = scalar → rejected. (The tail-header block list
+        //     was hardened in the same series — light clients consume
+        //     this field during fast-bootstrap, and a wrong-type
+        //     headers would throw an opaque nlohmann error mid-
+        //     iteration if not gated.)
+        {
+            json s = base_snap();
+            s["headers"] = "bad";
+            std::string err = try_restore(s);
+            check(!err.empty() && err.find("headers") != std::string::npos,
+                  "snapshot defense: 'headers' as scalar throws with field name");
+        }
+
         // 10. Wrong snapshot version still rejected by the earlier
         //     version check (preserves the pre-defense check).
         {

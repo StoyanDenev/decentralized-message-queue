@@ -1845,7 +1845,7 @@ Chain Chain::restore_from_snapshot(const json& snap) {
         }
     }
     if (snap.contains("headers")) {
-        for (auto& bj : snap["headers"]) {
+        for (auto& bj : json_require_array(snap, "headers")) {
             c.blocks_.push_back(Block::from_json(bj));
         }
     }
