@@ -86,7 +86,9 @@ Usage:
                                               --region T tags the entry for R1
                                               EXTENDED-mode region-pinned shards
                                               for inclusion in a genesis config.
-  determ genesis-tool build <config.json>    Build a genesis from peer-info entries
+  determ genesis-tool build <config.json> [--json]
+                                              Build a genesis from peer-info entries
+                                              (writes <cfg>.hash; --json for scripts)
   determ genesis-tool build-sharded <cfg>    Stage B2: produce 1 beacon + S shard genesis files
                                               and print the genesis hash.
   determ account create [--out <file>]       Generate a fresh anonymous account
@@ -1883,44 +1885,86 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
 //   <config>.hash next to the file for convenient distribution.
 static int cmd_genesis_tool_build(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: determ genesis-tool build <genesis_config.json>\n";
+        std::cerr << "Usage: determ genesis-tool build <genesis_config.json> [--json]\n";
         return 1;
     }
     std::string path = argv[0];
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
+    auto emit_error = [&](const std::string& msg) {
+        if (json_out) {
+            json err = {{"status", "error"}, {"message", msg}};
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "Error: " << msg << "\n";
+        }
+    };
     try {
         auto cfg  = chain::GenesisConfig::load(path);
         if (cfg.k_block_sigs == 0 || cfg.k_block_sigs > cfg.m_creators) {
-            std::cerr << "Genesis invalid: k_block_sigs=" << cfg.k_block_sigs
-                      << " must satisfy 1 <= K <= M=" << cfg.m_creators << "\n";
+            emit_error("k_block_sigs=" + std::to_string(cfg.k_block_sigs)
+                       + " must satisfy 1 <= K <= M="
+                       + std::to_string(cfg.m_creators));
             return 1;
         }
         auto hash = chain::compute_genesis_hash(cfg);
         std::string hex = to_hex(hash);
         const char* mode = (cfg.k_block_sigs == cfg.m_creators) ? "strong" : "weak";
-        std::cout << "Genesis chain_id:   " << cfg.chain_id           << "\n";
-        std::cout << "Chain role:         " << to_string(cfg.chain_role)
-                  << " (shard_id=" << cfg.shard_id
-                  << ", S=" << cfg.initial_shard_count
-                  << ", E=" << cfg.epoch_blocks << ")\n";
-        std::cout << "M_creators:         " << cfg.m_creators         << "\n";
-        std::cout << "K_block_sigs:       " << cfg.k_block_sigs       << "\n";
-        std::cout << "Mode:               " << mode << " (default: mutual-distrust K-of-K)\n";
-        std::cout << "Inclusion:          " << chain::to_string(cfg.inclusion_model)
-                  << " (min_stake=" << cfg.min_stake << ")\n";
-        std::cout << "BFT escalation:     "
-                  << (cfg.bft_enabled
-                      ? ("enabled, threshold=" + std::to_string(cfg.bft_escalation_threshold) + " round-1 aborts")
-                      : "disabled (chain halts on persistent silent committee member)")
-                  << "\n";
-        std::cout << "Initial creators:   " << cfg.initial_creators.size() << "\n";
-        std::cout << "Initial balances:   " << cfg.initial_balances.size() << "\n";
-        std::cout << "Genesis hash:       " << hex << "\n";
 
+        // Build the result struct once; both output modes draw from it.
+        json result = {
+            {"status",                  "ok"},
+            {"path",                    path},
+            {"chain_id",                cfg.chain_id},
+            {"chain_role",              to_string(cfg.chain_role)},
+            {"shard_id",                cfg.shard_id},
+            {"initial_shard_count",    cfg.initial_shard_count},
+            {"epoch_blocks",            cfg.epoch_blocks},
+            {"m_creators",              cfg.m_creators},
+            {"k_block_sigs",            cfg.k_block_sigs},
+            {"mode",                    mode},
+            {"inclusion_model",         chain::to_string(cfg.inclusion_model)},
+            {"min_stake",               cfg.min_stake},
+            {"bft_enabled",             cfg.bft_enabled},
+            {"bft_escalation_threshold", cfg.bft_escalation_threshold},
+            {"initial_creators",        cfg.initial_creators.size()},
+            {"initial_balances",        cfg.initial_balances.size()},
+            {"genesis_hash",            hex},
+            {"hash_file",               path + ".hash"}
+        };
+
+        // Always write the .hash file — operators rely on this for
+        // distribution. JSON mode preserves the writeback.
         std::ofstream f(path + ".hash");
         f << hex << "\n";
-        std::cout << "Wrote " << path << ".hash\n";
+
+        if (json_out) {
+            std::cout << result.dump() << "\n";
+        } else {
+            std::cout << "Genesis chain_id:   " << cfg.chain_id           << "\n";
+            std::cout << "Chain role:         " << to_string(cfg.chain_role)
+                      << " (shard_id=" << cfg.shard_id
+                      << ", S=" << cfg.initial_shard_count
+                      << ", E=" << cfg.epoch_blocks << ")\n";
+            std::cout << "M_creators:         " << cfg.m_creators         << "\n";
+            std::cout << "K_block_sigs:       " << cfg.k_block_sigs       << "\n";
+            std::cout << "Mode:               " << mode << " (default: mutual-distrust K-of-K)\n";
+            std::cout << "Inclusion:          " << chain::to_string(cfg.inclusion_model)
+                      << " (min_stake=" << cfg.min_stake << ")\n";
+            std::cout << "BFT escalation:     "
+                      << (cfg.bft_enabled
+                          ? ("enabled, threshold=" + std::to_string(cfg.bft_escalation_threshold) + " round-1 aborts")
+                          : "disabled (chain halts on persistent silent committee member)")
+                      << "\n";
+            std::cout << "Initial creators:   " << cfg.initial_creators.size() << "\n";
+            std::cout << "Initial balances:   " << cfg.initial_balances.size() << "\n";
+            std::cout << "Genesis hash:       " << hex << "\n";
+            std::cout << "Wrote " << path << ".hash\n";
+        }
     } catch (std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        emit_error(e.what());
         return 1;
     }
     return 0;

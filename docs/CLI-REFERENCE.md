@@ -55,7 +55,7 @@ All inspection commands hit the running node's RPC. Default RPC port is in the n
 | Command | Purpose |
 |---|---|
 | `determ genesis-tool peer-info <domain> [--data-dir D] [--stake N] [--region T]` | Emit JSON snippet for `initial_creators`. Optional `--region T` tags the entry with the operator's R1 region (only emitted when non-empty — preserves byte-identical output for existing CURRENT-mode + legacy callers). Required for EXTENDED-mode region-pinned shards: operator runs `peer-info myvalidator --stake 1000 --region us-east` instead of hand-editing the JSON before passing it to `genesis-tool build`. |
-| `determ genesis-tool build <config.json>` | Compute genesis block + write `.hash` sidecar |
+| `determ genesis-tool build <config.json> [--json]` | Compute genesis block + write `.hash` sidecar. Default human-readable summary listing chain_id, role, M/K, mode, inclusion model, BFT settings, creator + balance counts, and computed genesis hash. `--json` emits a single-line JSON object with the same fields plus `status:"ok"` / `error` envelope for CI consumption (e.g., a build pipeline that pins the genesis hash into deployment manifests). |
 | `determ genesis-tool build-sharded <config.json>` | Produce 1 beacon + S shard genesis files (with shared `shard_address_salt`) |
 
 ## Snapshots (B6.basic — fast-bootstrap)
