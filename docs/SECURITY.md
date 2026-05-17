@@ -11,7 +11,7 @@
 | | Critical | High | Medium | Low/Op | Total |
 |---|---|---|---|---|---|
 | Open (untouched) | **0** | **0** | **0** | **0** | **0** |
-| Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped + v2.7 F2 closes Option 1) | **2** (S-035 Option 3 path-portability shipped; Options 1+2 outstanding. S-036 EXTENDED-mode-only; v2.11 closes) | **4** |
+| Partially mitigated | **1** (S-030) | — | **1** (S-016 Option 2 shipped + v2.7 F2 closes Option 1) | **2** (S-035 Option 3 path-portability shipped + Option 1 seeded with 9 in-process unit tests; Options 1 continuing / 2 outstanding. S-036 EXTENDED-mode-only; v2.11 closes) | **4** |
 | Mitigated in-session | **5** (S-001, S-002, S-003, S-004, S-031) | **13** (S-006, S-007, S-008, S-010, S-011, S-012, S-013, S-014, S-017, S-020, S-032, S-033, S-038) | **1** (S-018) | **8** (S-021, S-022, S-024, S-026, S-027, S-028, S-029, S-037) | **27** |
 | Closed by M-F (delay-hash removal) | — | — | — | — | **5** (S-005, S-009, S-015, S-019, S-034) |
 | Informational (`EXTENDED` posture) | — | — | — | — | **4** (T-001..T-004) |
@@ -102,7 +102,7 @@ Sortable matrix of all open findings. Detailed entries below in §3-§6.
 | S-032 | ✅ Mitigated | Incremental registry cache on Chain + snapshot persistence; build_from_chain reads cache, no log walk | `node/registry.cpp::build_from_chain` | done |
 | S-033 | ✅ Mitigated | Merkle tree state commitment + Block.state_root + signing_bytes binding + apply/restore verification | `chain/chain.cpp::compute_state_root` | done |
 | S-034 | ✅ Closed | VDF `EVP_MD_CTX` allocation — moot, delay-hash module deleted (commit `1b9b086`) | n/a | done |
-| S-035 | 🟠 Partially mitigated | No unit tests, no CI, no deterministic simulation framework — Option 3 path-portability shipped (all 49 tests source `tools/common.sh` + use `$PROJECT_ROOT` / `$DETERM`; portable to Linux/Mac builds); Options 1 (gtest/Catch2 unit tests) + 2 (deterministic-simulation framework) remain | `tools/common.sh` + `tools/test_*.sh` (path layer); CI workflow file is operator policy | Option 1: 1-2w; Option 2: 3-4w |
+| S-035 | 🟠 Partially mitigated | No unit tests, no CI, no deterministic simulation framework — Option 3 path-portability shipped (all 63 tests source `tools/common.sh` + use `$PROJECT_ROOT` / `$DETERM`; portable to Linux/Mac builds); Option 1 (gtest/Catch2 unit tests) seeded with 9 in-process `determ test-*` subcommands covering Merkle, committee selection, shard routing, Ed25519, SHA-256, anon-address, genesis-message, state-root, block-rand surfaces; Option 2 (deterministic-simulation framework) outstanding | `tools/common.sh` + `tools/test_*.sh` (path layer); `determ test-*` subcommands in `src/main.cpp` (Option 1 seeds); CI workflow file is operator policy | Option 1 continuing per-feature; Option 2: 3-4w |
 | S-036 | 🟠 Partially mitigated | Beacon-fabricated MERGE_BEGIN evidence window — `EXTENDED`-mode-specific. Phase-6 internal-consistency bounds shipped (`effective_height ≥ block + grace`; BEGIN window must lie entirely in past — leading `evidence_window_start ≤ b.index` check added to prevent integer overflow bypassing the threshold-arithmetic check); full closure requires on-chain SHARD_TIP records, tracked as v2.11. See `docs/proofs/UnderQuorumMerge.md` + `docs/V2-DESIGN.md` v2.11 row. | `node/validator.cpp::check_transactions` MERGE_EVENT branch | v2.11 |
 | S-037 | ✅ Mitigated | `dapp_registry` field now emitted by `Chain::serialize_state` (after merge_state block) and read back by `restore_from_snapshot` with `if (snap.contains("dapp_registry"))` guard for pre-v2.18 backward compat. Every field that contributes to the `d:` value-hash in `build_state_leaves` is round-tripped: `service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`, plus the map key. Regression: `tools/test_dapp_snapshot.sh` register → snapshot → restore → `dapp-info` verification end-to-end (12/12 PASS). | `chain/chain.cpp::serialize_state` + `::restore_from_snapshot` | done |
 | S-038 | ✅ Mitigated | S-033 verification gate was dormant on production blocks because `Node::try_finalize_round` did not populate `body.state_root` before broadcast; the gate skipped on `state_root = 0` per the backward-compat shim. `try_finalize_round` now sets `body.state_root` via a tentative-chain dry-run between `build_body` and `apply_block_locked` (mirrors the digest-dry-run pattern in `start_block_sig_phase`). The gate now fires on every block — peer nodes reject any block whose stored `state_root` doesn't match the locally-recomputed value over their own apply of the same transactions. `compute_block_digest` already excludes `state_root` (§4.3) so K-of-K signatures are unaffected. Discovered while writing the S-037 test (snapshot tail head's `state_root` field was empty in JSON, exposing this latent gap). | `node/node.cpp::try_finalize_round` | done |
@@ -959,9 +959,25 @@ Compounds with S-031 because this 4M-iteration loop runs under `state_mutex_` on
 
 ### S-035 — No unit tests, no CI, no deterministic simulation framework — 🟠 Partially mitigated
 
-**Severity:** Operational • **Status:** 🟠 Partially mitigated (Option 3 path portability shipped in-session — all 49 tests now portable; Option 1 + Option 2 outstanding) • **Sources:** Architectural Analysis §4.1, §4.2
+**Severity:** Operational • **Status:** 🟠 Partially mitigated (Option 3 path portability shipped in-session; Option 1 seeded with 9 in-process `determ test-*` subcommands covering every cryptographic foundation; Option 2 outstanding) • **Sources:** Architectural Analysis §4.1, §4.2
 
 **Path portability shipped in-session (Option 3, ~1d).** Every test under `tools/test_*.sh` now sources `tools/common.sh` which detects the determ + determ-wallet binaries across platforms (Windows MSVC multi-config `build/Release/determ.exe`, Linux/Mac single-config `build/determ`, etc.) and resolves `PROJECT_ROOT` to a Windows-style absolute path on Git Bash via `pwd -W` (with `cygpath -m` fallback for Cygwin). Hard-coded `C:/sauromatae/...` references in test scripts are replaced with `$PROJECT_ROOT/...`; hard-coded `build/Release/determ.exe` is replaced with `$DETERM`. Override hooks: set `DETERM_BIN=/path/to/determ` or `DETERM_WALLET_BIN=/path/to/determ-wallet` to use a custom build layout (CI runners can point at any installed binary without editing tests).
+
+**Option 1 seeded in-session (per-feature unit tests).** Nine in-process `determ test-*` subcommands added to `src/main.cpp` cover the cryptographic foundations under every FA-track safety proof:
+
+| Subcommand | Surface | FA-track | Assertions |
+|---|---|---|---|
+| `determ test-merkle` | `crypto::merkle_root` + `merkle_proof` + `merkle_verify` + `merkle_leaf_hash` + `merkle_inner_hash` (S-033 commitment) | FA1 (safety) | 10 |
+| `determ test-committee-selection` | `crypto::select_m_creators` (S-020 hybrid — both branches), `select_after_abort_m`, `epoch_committee_seed` | FA1 / FA2 / FA5 / FA8 | 13 |
+| `determ test-shard-routing` | `crypto::shard_id_for_address` (FA7 destination routing) | FA7 | 7 |
+| `determ test-ed25519` | `crypto::sign` / `crypto::verify` / `generate_node_key` (every signature claim) | FA1 / FA2 / FA5 / FA6 / FA7 / FA10 | 10 |
+| `determ test-sha256` | `crypto::sha256` + `SHA256Builder` (NIST FIPS 180-4 vectors + Preliminaries §1.3 BE encoding) | all hash claims | 10 |
+| `determ test-anon-address` | `is_anon_address` / `normalize_anon_address` / `parse_anon_pubkey` / `make_anon_address` (S-028 case-insensitive parsing) | wallet | 12 |
+| `determ test-genesis-message` | `GenesisConfig::genesis_message` hash-mixing contract (backward-compat default-skips-mix + custom-yields-distinct-hash + size cap) | chain identity | 10 |
+| `determ test-state-root` | `Chain::compute_state_root()` commitment algebra (S-033 / v2.1 / S-037 / S-038) — determinism, purity, per-namespace sensitivity, order independence, invertibility | FA1 (state commitment) | 13 |
+| `determ test-block-rand` | V8 randomness primitives — `compute_delay_seed`, `compute_block_rand`, `proposer_idx`, `required_block_sigs`, `count_round1_aborts` (commit-reveal contract + BFT quorum arithmetic) | FA1 / FA5 / FA8 | 21 |
+
+Each runs in <5s with no network, no flakes. Wrappers in `tools/test_*.sh`. `FAST=1 bash tools/run_all.sh` runs only this subset (14/14 PASS in ~7s) for fast iteration. The next mechanical extension is to add unit tests for the remaining cryptographic surface — equivocation detection (FA6), bounded mempool (S-008), rate limiter (S-014), block-binary-codec (A3/S8), cross-shard-receipt hashing (FA7 / V12 / V13). Then mid-level invariants (chain.append validation paths, abort-tally semantics, fork resolution).
 
 Verified end-to-end with the converted tests:
 
@@ -980,7 +996,7 @@ The change is mechanical (49 file `sed` + a 25-line `common.sh` helper) and zero
 
 | # | Option | Cost | Status |
 |---|---|---|---|
-| 1 | **Add gtest/Catch2** for crypto, serialization, state transitions, validator rules. CMake + Linux CI. | 1-2w to seed + ongoing per-feature. | ⏳ outstanding |
+| 1 | **Add gtest/Catch2** for crypto, serialization, state transitions, validator rules. CMake + Linux CI. | 1-2w to seed + ongoing per-feature. | 🟡 seeded in-session — 9 in-process `determ test-*` subcommands ship under `src/main.cpp` (covering Merkle, committee selection, shard routing, Ed25519, SHA-256, anon-address, genesis-message, state-root, block-rand surfaces; 106 total assertions; FAST=1 suite 14/14 PASS in <10s). Pattern is extensible; each new feature pairs with a `determ test-FEATURE` subcommand. Backbone is the existing `tools/test_*.sh` infrastructure rather than a separate gtest CMake target — pragmatic for an MVP without a CI runner. |
 | 2 | **Deterministic simulation framework** — virtual clock + virtual network + scriptable Byzantine actors. | 3-4w. Substantial but the right tool for testing consensus. | ⏳ outstanding |
 | 3 | **Path portability** — replace Windows-specific test paths with platform-agnostic ones; add Linux/Mac CI. | 1d. | ✅ shipped (path layer; CI workflow file remains operator-policy) |
 
@@ -1285,7 +1301,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 - Critical findings: 0 fully-open (1 partially mitigated — S-030 D2 via S-033 indirect closure; v2.7 F2 spec'd for full consensus-layer closure)
 - High findings: 0 open (S-006 / S-010 / S-011 all closed in-session)
 - Medium findings: 0 fully open; 1 mitigated in-session (S-018 — every attack-relevant wire-format consumer hardened via `json_require<T>` / `json_require_hex` helpers); 1 partially mitigated (S-016 via Option 2 time-ordered admission; v2.7 F2 closes S-016 fully via Option 1 intersection commitment)
-- Low/Op findings: 0 fully open; 1 partially mitigated (S-035 — Option 3 path-portability shipped in-session via `tools/common.sh`; Options 1 [gtest seed] + 2 [deterministic-simulation framework] outstanding as v1.x quality work, not blocking); 8 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
+- Low/Op findings: 0 fully open; 1 partially mitigated (S-035 — Option 3 path-portability shipped in-session via `tools/common.sh`; Option 1 [gtest seed] seeded in-session with 9 in-process `determ test-*` subcommands [106 assertions over Merkle / committee selection / shard routing / Ed25519 / SHA-256 / anon-address / genesis-message / state-root / block-rand]; Option 2 [deterministic-simulation framework] outstanding as v1.x quality work, not blocking); 8 closed in-session; T-001..T-004 are informational `EXTENDED`-mode trade-offs, not bugs
 - EXTENDED-mode-specific: 1 partially mitigated (S-036 — bounds-check shipped; full closure via on-chain SHARD_TIP records is v2.11)
 - 27 findings mitigated in-session total (5 Critical + 13 High + 1 Medium + 8 Low/Op)
 - Track A remaining: **none — Track A complete**
