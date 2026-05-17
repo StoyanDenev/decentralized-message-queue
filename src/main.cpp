@@ -179,6 +179,10 @@ In-process tests (deterministic, no network):
                                               contract (backward-compat default-skips-mix
                                               invariant + custom-yields-distinct-hash
                                               + size cap enforcement)
+  determ test-state-root                      Chain::compute_state_root() commitment
+                                              algebra (S-033 / v2.1) — determinism,
+                                              purity, per-namespace sensitivity, order
+                                              independence, invertibility
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -4344,6 +4348,240 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": genesis-message " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the state-Merkle
+    // commitment surface (S-033 + S-037 + S-038). Exercises
+    // Chain::compute_state_root() over a Chain object directly — no
+    // network, no consensus, no apply-time validation. Verifies:
+    //   - Determinism: same state → same root, regardless of compute order.
+    //   - Purity: repeated computes on an unmodified Chain match.
+    //   - Sensitivity: every public set_*() that maps into a k:-namespace
+    //     leaf (and shard routing via "k:my_shard_id" + "k:shard_salt")
+    //     produces a distinct state_root when changed.
+    //   - Invertibility: changing a value then reverting produces the
+    //     same root as never-having-changed (no hidden internal state).
+    //   - Namespace separation: two different mutations produce two
+    //     different alternate roots (defeating accidental collisions
+    //     where unrelated fields collapse to the same leaf hash).
+    // The state-root is the apex of FA1 (safety) — light clients,
+    // snapshot restore, and the apply-time S-033 gate all rest on this
+    // function being byte-deterministic over identical state. A unit
+    // test here catches accidental encoding drift before the network-
+    // level test_state_root.sh / test_dapp_snapshot.sh tests would.
+    if (cmd == "test-state-root") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: a fresh Chain seeded with non-default values so every
+        // k: leaf is distinguishable. Using zero/default everywhere
+        // could hide a "missing leaf == leaf with hash-of-zero" bug.
+        auto fresh_chain = []() {
+            Chain c;
+            c.set_block_subsidy(50);
+            c.set_subsidy_pool_initial(10000);
+            c.set_subsidy_mode(2);
+            c.set_lottery_jackpot_multiplier(7);
+            c.set_min_stake(1000);
+            c.set_suspension_slash(10);
+            c.set_unstake_delay(500);
+            c.set_merge_threshold_blocks(20);
+            c.set_revert_threshold_blocks(40);
+            c.set_merge_grace_blocks(5);
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0xA0 + i);
+            c.set_shard_routing(4, salt, ShardId{1});
+            return c;
+        };
+
+        // 1. Determinism: two Chains built from identical inputs produce
+        //    identical state_roots. This is the central invariant —
+        //    without it, K-of-K nodes would compute different state
+        //    commitments for the same block and fail signature gathering.
+        {
+            Chain a = fresh_chain();
+            Chain b = fresh_chain();
+            check(a.compute_state_root() == b.compute_state_root(),
+                  "identical Chains produce identical state_roots");
+        }
+
+        // 2. Purity: calling compute_state_root() N times on an
+        //    unmodified Chain returns the same hash every time. Defeats
+        //    bugs where internal caches accumulate or hash builders
+        //    aren't reset between calls.
+        {
+            Chain c = fresh_chain();
+            Hash first = c.compute_state_root();
+            bool all_match = true;
+            for (int i = 0; i < 10; ++i) {
+                if (c.compute_state_root() != first) {
+                    all_match = false;
+                    break;
+                }
+            }
+            check(all_match, "compute_state_root() is pure (10 sequential calls match)");
+        }
+
+        // 3. Non-zero baseline: a default Chain with no accounts has a
+        //    non-zero state_root because the k: namespace constants
+        //    (block_subsidy, min_stake, shard_count, etc.) always emit
+        //    leaves. An all-zero result would mean build_state_leaves()
+        //    returned an empty vector — a regression.
+        {
+            Chain c;  // pure default, no setters
+            Hash root = c.compute_state_root();
+            check(root != Hash{},
+                  "default Chain has non-zero state_root (k: leaves always present)");
+        }
+
+        // 4. block_subsidy sensitivity: mutating this value must change
+        //    state_root (the "k:block_subsidy" leaf).
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            c.set_block_subsidy(99);
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_block_subsidy() changes state_root");
+        }
+
+        // 5. min_stake sensitivity.
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            c.set_min_stake(2000);
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_min_stake() changes state_root");
+        }
+
+        // 6. subsidy_pool_initial sensitivity.
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            c.set_subsidy_pool_initial(20000);
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_subsidy_pool_initial() changes state_root");
+        }
+
+        // 7. shard_count + my_shard_id sensitivity (via set_shard_routing).
+        //    Both contribute their own k: leaves.
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            Hash salt = c.shard_salt();
+            c.set_shard_routing(8, salt, ShardId{2});  // 4 → 8 shards
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_shard_routing() (different shard_count) changes state_root");
+        }
+
+        // 8. shard_salt sensitivity: same shard_count/id but different
+        //    salt yields a different state_root (the "k:shard_salt"
+        //    leaf is its own 32-byte value-hash input).
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            Hash new_salt{};
+            for (size_t i = 0; i < new_salt.size(); ++i)
+                new_salt[i] = uint8_t(0x10 + i);
+            c.set_shard_routing(c.shard_count(), new_salt, c.my_shard_id());
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_shard_routing() with different salt changes state_root");
+        }
+
+        // 9. Invertibility: change-then-revert produces the original
+        //    state_root. Catches bugs where a setter dirty-marks
+        //    persistent shadow state that isn't actually visible
+        //    through build_state_leaves.
+        {
+            Chain c = fresh_chain();
+            Hash original = c.compute_state_root();
+            c.set_block_subsidy(99);
+            c.set_block_subsidy(50);  // back to fresh_chain() value
+            Hash reverted = c.compute_state_root();
+            check(original == reverted,
+                  "change-then-revert returns to the original state_root");
+        }
+
+        // 10. Cross-namespace distinction: two different mutations
+        //     should produce two different state_roots — neither equal
+        //     to baseline AND not equal to each other. Defeats hidden
+        //     namespace-collision bugs where, e.g., block_subsidy and
+        //     min_stake accidentally hash the same way.
+        {
+            Chain baseline = fresh_chain();
+            Hash hb = baseline.compute_state_root();
+
+            Chain mod_a = fresh_chain();
+            mod_a.set_block_subsidy(77);
+            Hash ha = mod_a.compute_state_root();
+
+            Chain mod_b = fresh_chain();
+            mod_b.set_min_stake(77);  // same numeric value, different field
+            Hash hbb = mod_b.compute_state_root();
+
+            check(ha != hb && hbb != hb && ha != hbb,
+                  "different namespace mutations produce distinct roots (no collision)");
+        }
+
+        // 11. Order independence (within a namespace): the build_state_
+        //     leaves() function sorts leaves by key before hashing, so
+        //     the order setters were called in should never affect the
+        //     final root. This catches any future regression where a
+        //     setter accidentally writes into an order-preserving
+        //     container that build_state_leaves enumerates in
+        //     insertion order.
+        {
+            Chain c1;
+            c1.set_block_subsidy(50);
+            c1.set_min_stake(1000);
+            c1.set_unstake_delay(500);
+            Hash h1 = c1.compute_state_root();
+
+            Chain c2;
+            c2.set_unstake_delay(500);
+            c2.set_min_stake(1000);
+            c2.set_block_subsidy(50);
+            Hash h2 = c2.compute_state_root();
+
+            check(h1 == h2,
+                  "setter call order doesn't affect state_root (leaves sorted internally)");
+        }
+
+        // 12. lottery_jackpot_multiplier sensitivity (a u32 field —
+        //     covers a different-typed leaf input than the u64 fields
+        //     above).
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            c.set_lottery_jackpot_multiplier(11);
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_lottery_jackpot_multiplier() (u32) changes state_root");
+        }
+
+        // 13. subsidy_mode sensitivity (a u8 field — narrowest type that
+        //     gets promoted to u64 for hashing per Preliminaries §1.3).
+        {
+            Chain c = fresh_chain();
+            Hash before = c.compute_state_root();
+            c.set_subsidy_mode(5);
+            Hash after = c.compute_state_root();
+            check(before != after,
+                  "set_subsidy_mode() (u8) changes state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-root " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
