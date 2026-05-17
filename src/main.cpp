@@ -304,6 +304,11 @@ In-process tests (deterministic, no network):
                                               round-trip across all 32
                                               tunable fields (ports / peers /
                                               rate-limits / region / enums)
+  determ test-tx-binary-codec                 Transaction binary codec
+                                              (encode_tx_frame / decode_tx_frame
+                                              via encode_binary / decode_binary)
+                                              — S-002 fixed-slot amount/fee/
+                                              nonce path + trailer overflow
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -9449,6 +9454,205 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": config-roundtrip " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the binary
+    // Transaction codec — `encode_tx_frame` / `decode_tx_frame` in
+    // `src/net/binary_codec.cpp`. This is the v1 (binary) wire-
+    // format path for TRANSACTION MsgType: a 4×32-byte fixed-slot
+    // area + a variable-length trailer.
+    //
+    // S-002 dependency: admission-side sig verification reads
+    // amount/fee/nonce from the FIXED slots (not the trailer). A
+    // regression that dropped these values during binary transit
+    // — as happened pre-S-002 closure — would silently zero these
+    // fields and let corrupted txs into the mempool until the
+    // validator filtered them later. This test locks the values
+    // through the round-trip explicitly.
+    if (cmd == "test-tx-binary-codec") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a Transaction → wrap in TRANSACTION Message →
+        // encode_binary → decode_binary → extract the tx back.
+        auto tx_roundtrip = [](const Transaction& tx) -> Transaction {
+            Message m{MsgType::TRANSACTION, tx.to_json()};
+            auto bytes = encode_binary(m);
+            Message back = decode_binary(bytes.data(), bytes.size());
+            return Transaction::from_json(back.payload);
+        };
+
+        // 1. TRANSFER round-trip preserves all fixed-slot fields
+        //    (amount / fee / nonce — the S-002 critical path).
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice";
+            tx.to = "bob";
+            tx.amount = 100;
+            tx.fee = 5;
+            tx.nonce = 7;
+            tx.payload = {0xDE, 0xAD};
+            tx.hash = tx.compute_hash();
+
+            Transaction back = tx_roundtrip(tx);
+            check(back.amount == tx.amount,
+                  "binary TRANSFER: amount preserved (S-002 fixed-slot)");
+            check(back.fee == tx.fee,
+                  "binary TRANSFER: fee preserved (S-002 fixed-slot)");
+            check(back.nonce == tx.nonce,
+                  "binary TRANSFER: nonce preserved (S-002 fixed-slot)");
+            check(back.from == tx.from,
+                  "binary TRANSFER: from preserved (trailer)");
+            check(back.to == tx.to,
+                  "binary TRANSFER: to preserved (trailer)");
+            check(back.payload == tx.payload,
+                  "binary TRANSFER: payload preserved");
+            check(back.type == tx.type,
+                  "binary TRANSFER: type preserved");
+        }
+
+        // 2. compute_hash invariance across binary round-trip. This
+        //    is the critical invariant — admission-side sig verify
+        //    (S-002) recomputes the hash from received bytes, so
+        //    any field loss breaks signature validation.
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "carol";
+            tx.to = "dan";
+            tx.amount = 42;
+            tx.fee = 1;
+            tx.nonce = 11;
+            tx.payload = {0xCA, 0xFE, 0xBA, 0xBE};
+            tx.hash = tx.compute_hash();
+
+            Hash before = tx.compute_hash();
+            Transaction back = tx_roundtrip(tx);
+            Hash after = back.compute_hash();
+            check(before == after,
+                  "binary tx round-trip: compute_hash invariant (S-002 sig verify precondition)");
+        }
+
+        // 3. Two-tx round-trip: distinct transactions produce distinct
+        //    encoded bytes (no cross-tx state leak in the codec).
+        {
+            Transaction tx1, tx2;
+            tx1.type = TxType::TRANSFER;
+            tx1.from = "alice"; tx1.to = "bob";
+            tx1.amount = 100; tx1.fee = 1; tx1.nonce = 1;
+            tx1.hash = tx1.compute_hash();
+
+            tx2 = tx1;
+            tx2.amount = 200;
+            tx2.hash = tx2.compute_hash();
+
+            Message m1{MsgType::TRANSACTION, tx1.to_json()};
+            Message m2{MsgType::TRANSACTION, tx2.to_json()};
+            auto b1 = encode_binary(m1);
+            auto b2 = encode_binary(m2);
+            check(b1 != b2,
+                  "binary tx: distinct amounts produce distinct frames");
+        }
+
+        // Below assertions are renumbered after dropping direct-frame
+        // poke tests (encode_tx_frame / decode_tx_frame aren't in the
+        // public binary_codec API). The Message-level round-trip
+        // covers the same end-to-end path.
+        //
+        // Large payload (> 32 bytes) round-trips via the trailer-
+        //    overflow path. The first 32 bytes live in the fixed
+        //    slot at offset 96; the overflow lives in the trailer
+        //    after type + payload_len.
+        {
+            Transaction tx;
+            tx.type = TxType::DAPP_CALL;
+            tx.from = "alice";
+            tx.to = "dapp.example";
+            tx.amount = 0;
+            tx.fee = 1;
+            tx.nonce = 5;
+            tx.payload.resize(64);
+            for (size_t i = 0; i < tx.payload.size(); ++i)
+                tx.payload[i] = uint8_t(0x40 + i);
+            tx.hash = tx.compute_hash();
+
+            Transaction back = tx_roundtrip(tx);
+            check(back.payload == tx.payload,
+                  "binary tx: 64-byte payload round-trips via trailer overflow");
+            check(back.payload.size() == 64,
+                  "binary tx: payload size preserved through overflow");
+        }
+
+        // 6. Each TxType discriminator round-trips.
+        {
+            for (TxType t : {TxType::TRANSFER, TxType::REGISTER,
+                              TxType::DEREGISTER, TxType::STAKE,
+                              TxType::UNSTAKE, TxType::PARAM_CHANGE,
+                              TxType::COMPOSABLE_BATCH,
+                              TxType::DAPP_REGISTER, TxType::DAPP_CALL}) {
+                Transaction tx;
+                tx.type = t;
+                tx.from = "x"; tx.to = "y";
+                tx.amount = 0; tx.fee = 1; tx.nonce = 1;
+                tx.payload = {0x01};
+                tx.hash = tx.compute_hash();
+                Transaction back = tx_roundtrip(tx);
+                check(back.type == t,
+                      ("binary tx: TxType=" + std::to_string(int(t))
+                       + " round-trips").c_str());
+            }
+        }
+
+        // 7. Zero-amount + zero-fee + zero-nonce round-trip (edge case
+        //    at the LE u64 encoding boundary).
+        {
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = "validator1";
+            tx.to = "";
+            tx.amount = 0;
+            tx.fee = 0;
+            tx.nonce = 0;
+            tx.payload.assign(32, 0xAA);  // pretend pubkey
+            tx.hash = tx.compute_hash();
+
+            Transaction back = tx_roundtrip(tx);
+            check(back.amount == 0 && back.fee == 0 && back.nonce == 0,
+                  "binary tx: all-zeros numeric fields round-trip cleanly");
+        }
+
+        // 8. Max u64 amount round-trip (boundary check for LE u64
+        //    encoding).
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "rich";
+            tx.to = "rich2";
+            tx.amount = UINT64_MAX;
+            tx.fee = UINT64_MAX;
+            tx.nonce = UINT64_MAX;
+            tx.hash = tx.compute_hash();
+
+            Transaction back = tx_roundtrip(tx);
+            check(back.amount == UINT64_MAX,
+                  "binary tx: UINT64_MAX amount round-trips");
+            check(back.fee == UINT64_MAX,
+                  "binary tx: UINT64_MAX fee round-trips");
+            check(back.nonce == UINT64_MAX,
+                  "binary tx: UINT64_MAX nonce round-trips");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": tx-binary-codec " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
