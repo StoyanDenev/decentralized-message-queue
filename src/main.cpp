@@ -87,6 +87,9 @@ Usage:
                                               (canonical chain identity) — for
                                               monitoring scripts cross-checking
                                               chain identity across nodes.
+  determ block-hash <index>                  Print just compute_hash of block at
+                                              <index> (64-hex). Useful for
+                                              cross-node fork detection scripts.
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -462,6 +465,15 @@ Additional in-process tests:
   determ test-dapp-state-transition           DApp registry lifecycle —
                                               register (op=0) → update → deactivate
                                               (op=1 deferred via grace window)
+  determ test-overflow-paths                  S-007 overflow protection —
+                                              TRANSFER + inbound receipt
+                                              overflow → throw + Phase-1
+                                              rollback; boundary at UINT64_MAX
+  determ test-state-root-namespaces           Exhaustive 10-namespace
+                                              state_root coverage (S-033) —
+                                              a/s/r/d/i/b/m/p/k/k:c each
+                                              mutation changes root + cross-
+                                              namespace independence
 )" << "\n";
 }
 
@@ -1574,6 +1586,44 @@ static int cmd_pending_params(int argc, char** argv) {
                       << (hex.size() > 32 ? "..." : "")
                       << "\n";
         }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// determ block-hash <index> [--rpc-port P]
+//   Print just the compute_hash of the block at the given index. The
+//   `block` RPC returns full block JSON which already includes the
+//   computed `hash` field. This CLI extracts and prints only that
+//   value (no JSON envelope) for scripts that need to compare block
+//   identity at a specific height across nodes:
+//     a_hash=$(determ block-hash 100 --rpc-port 7778)
+//     b_hash=$(determ block-hash 100 --rpc-port 7779)
+//     [ "$a_hash" == "$b_hash" ] && echo "agree" || echo "FORKED"
+//   Exit 1 if index out of range; exit 0 + 64-hex on success.
+static int cmd_block_hash(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: determ block-hash <index> [--rpc-port N]\n";
+        return 1;
+    }
+    uint64_t index = std::stoull(argv[0]);
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"index", index}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "block", params);
+        if (result.is_null()) {
+            std::cerr << "Error: block " << index
+                      << " out of range (chain.height too low)\n";
+            return 1;
+        }
+        std::string hash = result.value("hash", std::string{});
+        if (hash.empty()) {
+            std::cerr << "Error: block JSON missing 'hash' field\n";
+            return 1;
+        }
+        std::cout << hash << "\n";
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -3389,6 +3439,7 @@ int main(int argc, char** argv) {
     if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
     if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
+    if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
@@ -15905,6 +15956,495 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": dapp-state-transition " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: S-007 overflow-protection paths. apply_transactions
+    // uses `checked_add_u64` on every credit path that could otherwise
+    // wrap u64 (TRANSFER receiver, inbound receipt, per-creator
+    // subsidy/fee, dust to creator[0]). When the addition would
+    // overflow, the apply throws `S-007: ...` and Phase-1 rolls back —
+    // protecting balance integrity against runaway long-lived
+    // deployments aggregating payouts to near UINT64_MAX. Without
+    // these checks an attacker could wrap a victim's balance to 0
+    // by crediting an overflowing amount.
+    if (cmd == "test-overflow-paths") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build genesis with a recipient near UINT64_MAX.
+        auto build_genesis_overflow = [](uint64_t alice_bal, uint64_t bob_bal) {
+            GenesisConfig cfg;
+            cfg.chain_id = "overflow-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 0;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_alloc, bob_alloc;
+            alice_alloc.domain = "alice"; alice_alloc.balance = alice_bal;
+            bob_alloc.domain = "bob";     bob_alloc.balance   = bob_bal;
+            cfg.initial_balances = {alice_alloc, bob_alloc};
+            return make_genesis_block(cfg);
+        };
+
+        // === TRANSFER receiver overflow ===
+
+        // 1. TRANSFER credit that would overflow `bob` (already near
+        //    UINT64_MAX): apply throws "S-007: TRANSFER credit would
+        //    overflow recipient balance".
+        {
+            Chain c;
+            c.append(build_genesis_overflow(1000, UINT64_MAX - 50));
+            check(c.balance("bob") == UINT64_MAX - 50,
+                  "setup: bob at UINT64_MAX - 50");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100;  // would push bob past UINT64_MAX
+            tx.fee = 1;
+            tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+
+            bool threw = false;
+            std::string what;
+            try { c.append(b); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("S-007") != std::string::npos
+                  && what.find("TRANSFER") != std::string::npos,
+                  "TRANSFER receiver overflow: throws S-007 with diagnostic");
+        }
+
+        // === Rollback contract: state unchanged after throw ===
+
+        // 2. On S-007 throw, Phase-1 rollback leaves the chain
+        //    byte-identical to entry.
+        {
+            Chain c;
+            c.append(build_genesis_overflow(1000, UINT64_MAX - 50));
+            Hash root_before = c.compute_state_root();
+            uint64_t alice_before = c.balance("alice");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+
+            try { c.append(b); } catch (const std::exception&) {}
+            check(c.height() == 1,
+                  "rollback: height stays at 1 (genesis only; failed apply rolled back)");
+            check(c.balance("alice") == alice_before,
+                  "rollback: alice balance unchanged after S-007 throw");
+            check(c.compute_state_root() == root_before,
+                  "rollback: state_root byte-identical after S-007 throw");
+        }
+
+        // === Inbound receipt overflow ===
+
+        // 3. Inbound CrossShardReceipt that would overflow `bob`: apply
+        //    throws "S-007: inbound receipt credit would overflow".
+        {
+            Chain c;
+            c.append(build_genesis_overflow(1000, UINT64_MAX - 30));
+
+            CrossShardReceipt r;
+            r.src_shard = 1; r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = 0xAA;
+            r.from = "remote";
+            r.to = "bob";
+            r.amount = 100;  // would push bob past UINT64_MAX
+            r.fee = 0; r.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(r);
+
+            bool threw = false;
+            std::string what;
+            try { c.append(b); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw && what.find("S-007") != std::string::npos
+                  && what.find("inbound") != std::string::npos,
+                  "inbound receipt overflow: throws S-007 with 'inbound' diagnostic");
+        }
+
+        // === No-overflow boundary: exact UINT64_MAX is OK ===
+
+        // 4. Credit that brings receiver to EXACTLY UINT64_MAX is OK
+        //    (no overflow — the check is strict greater-than).
+        {
+            Chain c;
+            c.append(build_genesis_overflow(100, UINT64_MAX - 50));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50;  // bob: UINT64_MAX - 50 + 50 = UINT64_MAX exactly
+            tx.fee = 0;
+            tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+
+            bool threw = false;
+            try { c.append(b); }
+            catch (const std::exception&) { threw = true; }
+            check(!threw,
+                  "boundary: credit to exactly UINT64_MAX is OK (no overflow)");
+            check(c.balance("bob") == UINT64_MAX,
+                  "boundary: bob balance == UINT64_MAX");
+        }
+
+        // === Successful TRANSFER unaffected ===
+
+        // 5. Sanity: normal TRANSFER (no near-overflow recipients)
+        //    works unchanged. This confirms the overflow check doesn't
+        //    spuriously fire on normal txs.
+        {
+            Chain c;
+            c.append(build_genesis_overflow(1000, 200));
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+            check(c.balance("bob") == 300
+                  && c.balance("alice") == 900,
+                  "sanity: normal TRANSFER unaffected by overflow check");
+        }
+
+        // === A1 invariant preserved on overflow path ===
+
+        // 6. After a thrown S-007, A1 invariant still holds (state
+        //    rolled back to pre-throw → invariant holds by induction).
+        {
+            Chain c;
+            c.append(build_genesis_overflow(1000, UINT64_MAX - 30));
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds at genesis baseline");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+
+            try { c.append(b); } catch (const std::exception&) {}
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds after S-007 rollback");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": overflow-paths " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: exhaustive coverage of every state_root namespace.
+    // compute_state_root emits leaves across 10 keyed namespaces (per
+    // PROTOCOL.md §4.1.1):
+    //   a:/s:/r:/d:/i:/b:/m:/p:  (per-domain or composite keys)
+    //   k:                       (constants — all genesis-pinned setters)
+    //   k:c:                     (A1 counters)
+    // test-state-root unit covers the k:-namespace via setter sensitivity.
+    // This test extends to the OTHER namespaces by mutating their
+    // backing state via apply and verifying compute_state_root changes.
+    if (cmd == "test-state-root-namespaces") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a populated chain and capture state_root.
+        auto base_chain = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "state-root-namespaces-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain = "bob"; bob_bal.balance = 200;
+            cfg.initial_balances = {alice_bal, bob_bal};
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+
+        // Helper: append a populated block to mutate state.
+        auto append_block = [](Chain& c,
+                                const std::vector<Transaction>& txs,
+                                const std::vector<AbortEvent>& aborts = {}) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions = txs;
+            b.abort_events = aborts;
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(0x42);
+            c.append(b);
+        };
+
+        // === a:-namespace (accounts) ===
+
+        // 1. Mutating an account balance changes state_root.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            append_block(c, {tx});
+
+            check(c.compute_state_root() != root_before,
+                  "a:-namespace (accounts): TRANSFER mutates balance → root changes");
+        }
+
+        // === s:-namespace (stakes) ===
+
+        // 2. Mutating a stake entry changes state_root.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload.resize(8);
+            uint64_t amt = 100;
+            for (int i = 0; i < 8; ++i)
+                tx.payload[i] = uint8_t((amt >> (8 * i)) & 0xff);
+            append_block(c, {tx});
+
+            check(c.compute_state_root() != root_before,
+                  "s:-namespace (stakes): STAKE mutates locked → root changes");
+        }
+
+        // === r:-namespace (registrants) ===
+
+        // 3. Mutating a registrant entry (DEREGISTER → inactive_from)
+        //    changes state_root.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            Transaction tx;
+            tx.type = TxType::DEREGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            append_block(c, {tx});
+
+            check(c.compute_state_root() != root_before,
+                  "r:-namespace (registrants): DEREGISTER sets inactive_from → root changes");
+        }
+
+        // === b:-namespace (abort_records) ===
+
+        // 4. Phase-1 AbortEvent updates abort_records[domain] → root changes.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "alice";
+            append_block(c, {}, {ae});
+
+            check(c.compute_state_root() != root_before,
+                  "b:-namespace (abort_records): Phase-1 abort updates count → root changes");
+        }
+
+        // === d:-namespace (dapp_registry) ===
+
+        // 5. DAPP_REGISTER mutates dapp_registry → state_root changes.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            // Pack a minimal valid DAPP_REGISTER op=0 payload.
+            std::vector<uint8_t> payload;
+            payload.push_back(0);  // op=0 create
+            PubKey svc{};
+            for (size_t i = 0; i < svc.size(); ++i) svc[i] = uint8_t(0xA0 + i);
+            payload.insert(payload.end(), svc.begin(), svc.end());
+            payload.push_back(0);  // url_len = 0
+            payload.push_back(0);  // topic_count = 0
+            payload.push_back(1);  // retention
+            payload.push_back(0); payload.push_back(0);  // metalen = 0
+
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = payload;
+            append_block(c, {tx});
+
+            check(c.compute_state_root() != root_before,
+                  "d:-namespace (dapp_registry): DAPP_REGISTER mutates → root changes");
+        }
+
+        // === m:-namespace (merge_state) ===
+
+        // 6. MERGE_EVENT mutates merge_state → root changes.
+        {
+            Chain c = base_chain();
+            // Enable cross-shard mode so MERGE_EVENT can apply.
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+
+            Hash root_before = c.compute_state_root();
+
+            MergeEvent ev;
+            ev.event_type = MergeEvent::BEGIN;
+            ev.shard_id = ShardId{1};
+            ev.partner_id = ShardId{2};  // (1+1) % 4 = 2 → valid partner
+            ev.effective_height = 100;
+            ev.evidence_window_start = 0;
+            ev.merging_shard_region = "us";
+            Transaction tx;
+            tx.type = TxType::MERGE_EVENT;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = ev.encode();
+            append_block(c, {tx});
+
+            check(c.compute_state_root() != root_before,
+                  "m:-namespace (merge_state): MERGE_BEGIN inserts → root changes");
+        }
+
+        // === p:-namespace (pending_param_changes) ===
+
+        // 7. stage_param_change mutates pending_param_changes → root changes.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            c.stage_param_change(100, "MIN_STAKE",
+                                 std::vector<uint8_t>(8, 0x42));
+
+            check(c.compute_state_root() != root_before,
+                  "p:-namespace (pending_param_changes): stage mutates → root changes");
+        }
+
+        // === k:-namespace (constants) ===
+
+        // 8. Setter mutates a constant → root changes. (Already covered
+        //    in test-state-root unit; included here for completeness.)
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+            c.set_min_stake(9999);
+            check(c.compute_state_root() != root_before,
+                  "k:-namespace (constants): set_min_stake → root changes");
+        }
+
+        // === k:c: counters (A1 supply counters) ===
+
+        // 9. Subsidy mint bumps accumulated_subsidy → root changes.
+        {
+            Chain c = base_chain();
+            c.set_block_subsidy(50);
+            Hash root_before = c.compute_state_root();
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            c.append(b);
+
+            check(c.compute_state_root() != root_before,
+                  "k:c: counters (accumulated_subsidy): mint changes root");
+        }
+
+        // === i:-namespace (applied_inbound_receipts) ===
+
+        // 10. Apply inbound receipt → applied_inbound_receipts grows → root changes.
+        {
+            Chain c = base_chain();
+            Hash root_before = c.compute_state_root();
+
+            CrossShardReceipt r;
+            r.src_shard = 1; r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = 0xDE;
+            r.from = "remote"; r.to = "bob";
+            r.amount = 10; r.fee = 0; r.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(r);
+            c.append(b);
+
+            check(c.compute_state_root() != root_before,
+                  "i:-namespace (applied_inbound_receipts): receipt adds entry → root changes");
+        }
+
+        // === Cross-namespace independence: different mutations → different roots ===
+
+        // 11. Two distinct mutations produce two distinct roots (no
+        //     accidental collision across namespaces).
+        {
+            Chain c1 = base_chain();
+            Chain c2 = base_chain();
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "baseline: identical fresh chains have identical roots");
+
+            // c1: mutate balance (a:-namespace).
+            Transaction tx_a;
+            tx_a.type = TxType::TRANSFER;
+            tx_a.from = "alice"; tx_a.to = "bob";
+            tx_a.amount = 100; tx_a.fee = 1; tx_a.nonce = 0;
+            append_block(c1, {tx_a});
+
+            // c2: mutate stake (s:-namespace).
+            Transaction tx_s;
+            tx_s.type = TxType::STAKE;
+            tx_s.from = "alice"; tx_s.fee = 1; tx_s.nonce = 0;
+            tx_s.payload.resize(8);
+            uint64_t amt = 100;
+            for (int i = 0; i < 8; ++i)
+                tx_s.payload[i] = uint8_t((amt >> (8 * i)) & 0xff);
+            append_block(c2, {tx_s});
+
+            check(c1.compute_state_root() != c2.compute_state_root(),
+                  "cross-namespace: different mutations → distinct roots (no collision)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-root-namespaces " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
