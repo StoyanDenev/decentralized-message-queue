@@ -215,6 +215,11 @@ In-process tests (deterministic, no network):
                                               deserializer + malformed-input
                                               rejection + S-022 per-MsgType cap
                                               table golden vectors
+  determ test-wire-types                      Block-internal wire types JSON
+                                              round-trip — CrossShardReceipt +
+                                              AbortEvent + EquivocationEvent +
+                                              GenesisAlloc; field-preservation +
+                                              S-018 strict-rejection lock-in
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -5752,6 +5757,293 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": binary-codec " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the four block-
+    // internal wire types' JSON round-trips:
+    //
+    //   * CrossShardReceipt (FA7 / V12 — source-side receipt emission)
+    //   * AbortEvent (FA3 — consensus abort certificate)
+    //   * EquivocationEvent (FA6 — slashing evidence)
+    //   * GenesisAlloc (chain-identity genesis allocation)
+    //
+    // Each of these structs is `to_json` / `from_json` round-trip
+    // critical: blocks gossip these as JSON via the chain's encoding,
+    // and any field-loss across the round-trip would silently corrupt
+    // wire data without a parse error. The S-018 helpers fence against
+    // missing required fields, but they don't catch "field present but
+    // serialized then dropped on read." That's what this test catches.
+    if (cmd == "test-wire-types") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+        auto patterned_sig = [](uint8_t base) {
+            Signature s{};
+            for (size_t i = 0; i < s.size(); ++i) s[i] = uint8_t(base + i);
+            return s;
+        };
+        auto patterned_pub = [](uint8_t base) {
+            PubKey p{};
+            for (size_t i = 0; i < p.size(); ++i) p[i] = uint8_t(base + i);
+            return p;
+        };
+
+        // === CrossShardReceipt round-trip ===
+        {
+            CrossShardReceipt r;
+            r.src_shard       = 1;
+            r.dst_shard       = 2;
+            r.src_block_index = 100;
+            r.src_block_hash  = patterned_hash(0xA0);
+            r.tx_hash         = patterned_hash(0xB0);
+            r.from            = "alice";
+            r.to              = "bob";
+            r.amount          = 500;
+            r.fee             = 5;
+            r.nonce           = 7;
+
+            json j = r.to_json();
+            CrossShardReceipt back = CrossShardReceipt::from_json(j);
+
+            check(back.src_shard == r.src_shard,
+                  "CrossShardReceipt round-trip: src_shard preserved");
+            check(back.dst_shard == r.dst_shard,
+                  "CrossShardReceipt round-trip: dst_shard preserved");
+            check(back.src_block_index == r.src_block_index,
+                  "CrossShardReceipt round-trip: src_block_index preserved");
+            check(back.src_block_hash == r.src_block_hash,
+                  "CrossShardReceipt round-trip: src_block_hash preserved");
+            check(back.tx_hash == r.tx_hash,
+                  "CrossShardReceipt round-trip: tx_hash preserved");
+            check(back.from == r.from,
+                  "CrossShardReceipt round-trip: from preserved");
+            check(back.to == r.to,
+                  "CrossShardReceipt round-trip: to preserved");
+            check(back.amount == r.amount,
+                  "CrossShardReceipt round-trip: amount preserved");
+            check(back.fee == r.fee,
+                  "CrossShardReceipt round-trip: fee preserved");
+            check(back.nonce == r.nonce,
+                  "CrossShardReceipt round-trip: nonce preserved");
+        }
+
+        // CrossShardReceipt: S-018 strict rejection. Every field is
+        // required — missing any one throws with a clear field-name
+        // diagnostic. This is the in-session hardening pass for the
+        // wire type — previously from_json used permissive j.value()
+        // defaults; now it uses json_require / json_require_hex to
+        // match the rest of the S-018 surface.
+        {
+            json bad = {
+                {"src_shard", 1}, {"dst_shard", 2}, {"src_block_index", 100},
+                {"src_block_hash", to_hex(patterned_hash(0xA0))},
+                {"tx_hash", to_hex(patterned_hash(0xB0))},
+                {"from", "alice"}, {"to", "bob"},
+                {"amount", 500}, {"fee", 5}
+                // nonce intentionally missing
+            };
+            bool threw = false;
+            std::string what;
+            try { (void)CrossShardReceipt::from_json(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "CrossShardReceipt::from_json throws on missing 'nonce' (S-018)");
+            check(what.find("nonce") != std::string::npos,
+                  "CrossShardReceipt S-018 error message mentions 'nonce' field name");
+        }
+
+        // === AbortEvent round-trip ===
+        {
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "carol";
+            ae.timestamp = 1234567890;
+            ae.event_hash = patterned_hash(0xC0);
+            ae.claims_json = json::array();  // empty inline claims OK
+
+            json j = ae.to_json();
+            AbortEvent back = AbortEvent::from_json(j);
+
+            check(back.round == ae.round,
+                  "AbortEvent round-trip: round preserved");
+            check(back.aborting_node == ae.aborting_node,
+                  "AbortEvent round-trip: aborting_node preserved");
+            check(back.timestamp == ae.timestamp,
+                  "AbortEvent round-trip: timestamp preserved");
+            check(back.event_hash == ae.event_hash,
+                  "AbortEvent round-trip: event_hash preserved");
+        }
+
+        // === EquivocationEvent round-trip ===
+        {
+            EquivocationEvent ev;
+            ev.equivocator = "mallory";
+            ev.block_index = 42;
+            ev.digest_a = patterned_hash(0xD0);
+            ev.sig_a    = patterned_sig(0xD1);
+            ev.digest_b = patterned_hash(0xD2);
+            ev.sig_b    = patterned_sig(0xD3);
+            ev.shard_id = 3;
+            ev.beacon_anchor_height = 100;
+
+            json j = ev.to_json();
+            EquivocationEvent back = EquivocationEvent::from_json(j);
+
+            check(back.equivocator == ev.equivocator,
+                  "EquivocationEvent round-trip: equivocator preserved");
+            check(back.block_index == ev.block_index,
+                  "EquivocationEvent round-trip: block_index preserved");
+            check(back.digest_a == ev.digest_a,
+                  "EquivocationEvent round-trip: digest_a preserved");
+            check(back.sig_a == ev.sig_a,
+                  "EquivocationEvent round-trip: sig_a preserved");
+            check(back.digest_b == ev.digest_b,
+                  "EquivocationEvent round-trip: digest_b preserved");
+            check(back.sig_b == ev.sig_b,
+                  "EquivocationEvent round-trip: sig_b preserved");
+            check(back.shard_id == ev.shard_id,
+                  "EquivocationEvent round-trip: shard_id preserved");
+            check(back.beacon_anchor_height == ev.beacon_anchor_height,
+                  "EquivocationEvent round-trip: beacon_anchor_height preserved");
+        }
+
+        // === GenesisAlloc round-trip ===
+        {
+            GenesisAlloc g;
+            g.domain  = "alice";
+            g.ed_pub  = patterned_pub(0xE0);
+            g.balance = 10000;
+            g.stake   = 1000;
+            g.region  = "us-east";
+
+            json j = g.to_json();
+            GenesisAlloc back = GenesisAlloc::from_json(j);
+
+            check(back.domain == g.domain,
+                  "GenesisAlloc round-trip: domain preserved");
+            check(back.ed_pub == g.ed_pub,
+                  "GenesisAlloc round-trip: ed_pub preserved");
+            check(back.balance == g.balance,
+                  "GenesisAlloc round-trip: balance preserved");
+            check(back.stake == g.stake,
+                  "GenesisAlloc round-trip: stake preserved");
+            check(back.region == g.region,
+                  "GenesisAlloc round-trip: region preserved");
+        }
+
+        // GenesisAlloc: empty region (the rev.9 R1 "legacy/global pool"
+        // default) round-trips correctly. This is the backward-compat
+        // path for pre-R1 genesis files.
+        {
+            GenesisAlloc g;
+            g.domain  = "bob";
+            g.ed_pub  = patterned_pub(0xE5);
+            g.balance = 500;
+            g.stake   = 0;
+            g.region  = "";  // empty
+
+            json j = g.to_json();
+            GenesisAlloc back = GenesisAlloc::from_json(j);
+
+            check(back.region.empty(),
+                  "GenesisAlloc empty-region round-trips as empty (R1 legacy compat)");
+            check(back.stake == 0,
+                  "GenesisAlloc zero-stake round-trips correctly");
+        }
+
+        // === S-018 strict-rejection lock-in for the three S-018-
+        //     enforced types ===
+
+        // AbortEvent: round + aborting_node + timestamp + event_hash
+        // are all S-018 required. Missing any one throws with a clear
+        // field-name diagnostic. Test "round" as the canary.
+        {
+            json bad = {
+                {"aborting_node", "carol"}, {"timestamp", 1},
+                {"event_hash", to_hex(patterned_hash(0xC0))}
+                // round missing
+            };
+            bool threw = false;
+            std::string what;
+            try { (void)AbortEvent::from_json(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "AbortEvent::from_json throws on missing 'round' (S-018)");
+            check(what.find("round") != std::string::npos,
+                  "AbortEvent S-018 error message mentions 'round' field name");
+        }
+
+        // EquivocationEvent: equivocator + block_index + digest_a/b +
+        // sig_a/b are all S-018 required. Test "digest_a" as the canary
+        // for the json_require_hex path (with size-check at 64 hex chars).
+        {
+            json bad = {
+                {"equivocator", "mallory"},
+                {"block_index", 42},
+                // digest_a missing
+                {"sig_a", to_hex(patterned_sig(0xD1))},
+                {"digest_b", to_hex(patterned_hash(0xD2))},
+                {"sig_b", to_hex(patterned_sig(0xD3))}
+            };
+            bool threw = false;
+            std::string what;
+            try { (void)EquivocationEvent::from_json(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "EquivocationEvent::from_json throws on missing 'digest_a' (S-018)");
+            check(what.find("digest_a") != std::string::npos,
+                  "EquivocationEvent S-018 error message mentions 'digest_a' field name");
+        }
+
+        // EquivocationEvent: wrong-length hex for digest_a (S-018 hex
+        // length check — should be 64 hex chars for a 32-byte hash).
+        {
+            json bad = {
+                {"equivocator", "mallory"},
+                {"block_index", 42},
+                {"digest_a", "deadbeef"},  // only 4 bytes, not 32
+                {"sig_a", to_hex(patterned_sig(0xD1))},
+                {"digest_b", to_hex(patterned_hash(0xD2))},
+                {"sig_b", to_hex(patterned_sig(0xD3))}
+            };
+            bool threw = false;
+            try { (void)EquivocationEvent::from_json(bad); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "EquivocationEvent::from_json throws on wrong-length 'digest_a' hex (S-018)");
+        }
+
+        // GenesisAlloc: domain is the only S-018 required field; balance
+        // / stake / region all default. Test missing domain throws.
+        {
+            json bad = {
+                {"balance", 100}, {"stake", 10}
+                // domain missing
+            };
+            bool threw = false;
+            std::string what;
+            try { (void)GenesisAlloc::from_json(bad); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "GenesisAlloc::from_json throws on missing 'domain' (S-018)");
+            check(what.find("domain") != std::string::npos,
+                  "GenesisAlloc S-018 error message mentions 'domain' field name");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": wire-types " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

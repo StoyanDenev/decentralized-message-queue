@@ -210,19 +210,23 @@ json CrossShardReceipt::to_json() const {
 }
 
 CrossShardReceipt CrossShardReceipt::from_json(const json& j) {
+    // S-018 follow-on: every consensus-critical field is required. A
+    // receipt is bound into the parent block's signing_bytes, so a
+    // tampered receipt fails K-of-K — but defense-in-depth at the
+    // parse layer means a malformed receipt is rejected immediately
+    // with a clear field-name diagnostic rather than silently zeroing
+    // the missing field and propagating to deeper validation.
     CrossShardReceipt r;
-    r.src_shard       = j.value("src_shard",       uint32_t{0});
-    r.dst_shard       = j.value("dst_shard",       uint32_t{0});
-    r.src_block_index = j.value("src_block_index", uint64_t{0});
-    r.src_block_hash  = from_hex_arr<32>(j.value("src_block_hash",
-                                                    std::string(64, '0')));
-    r.tx_hash         = from_hex_arr<32>(j.value("tx_hash",
-                                                    std::string(64, '0')));
-    r.from            = j.value("from",   std::string{});
-    r.to              = j.value("to",     std::string{});
-    r.amount          = j.value("amount", uint64_t{0});
-    r.fee             = j.value("fee",    uint64_t{0});
-    r.nonce           = j.value("nonce",  uint64_t{0});
+    r.src_shard       = json_require<uint32_t>(j, "src_shard");
+    r.dst_shard       = json_require<uint32_t>(j, "dst_shard");
+    r.src_block_index = json_require<uint64_t>(j, "src_block_index");
+    r.src_block_hash  = from_hex_arr<32>(json_require_hex(j, "src_block_hash", 64));
+    r.tx_hash         = from_hex_arr<32>(json_require_hex(j, "tx_hash",        64));
+    r.from            = json_require<std::string>(j, "from");
+    r.to              = json_require<std::string>(j, "to");
+    r.amount          = json_require<uint64_t>(j, "amount");
+    r.fee             = json_require<uint64_t>(j, "fee");
+    r.nonce           = json_require<uint64_t>(j, "nonce");
     return r;
 }
 
