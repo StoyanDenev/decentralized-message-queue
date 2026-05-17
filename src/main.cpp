@@ -79,6 +79,10 @@ Usage:
                                               Phase-1 aborts per domain (count,
                                               last_block) sorted descending.
                                               --top N truncates to first N entries
+  determ supply [--json]                     Compact A1 unitary-balance summary
+                                              (genesis_total + 4 counters +
+                                              expected vs live + invariant status).
+                                              Exit 2 if invariant violated.
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -433,6 +437,13 @@ Additional in-process tests:
   determ test-cross-shard-receipt-apply       Inbound receipt apply (rev.9
                                               B3.4) — credit + dedup-set
                                               + A1 accumulated_inbound
+  determ test-param-change-apply              A5 PARAM_CHANGE apply — stage at
+                                              one block, activate at
+                                              effective_height; chain field
+                                              mutation + hook invocation
+  determ test-subsidy-distribution            Subsidy distribution apply —
+                                              FLAT, E3 LOTTERY (jackpot seed),
+                                              E4 finite pool drain, A1 mint
 )" << "\n";
 }
 
@@ -1550,6 +1561,85 @@ static int cmd_pending_params(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// determ supply [--json] [--rpc-port P]
+//   Compact A1 unitary-balance summary — genesis_total + the four
+//   running counters (subsidy minted, inbound credited, slashed,
+//   outbound) — and the expected vs live totals. Useful for monitoring
+//   scripts that just want supply numbers without the chain-summary
+//   block-by-block detail.
+//
+//   Output format:
+//     genesis_total:        N
+//     +accumulated_subsidy: N    (E1/E3/E4 mint history)
+//     +accumulated_inbound: N    (cross-shard credits received)
+//     -accumulated_slashed: N    (suspension + equivocation forfeits)
+//     -accumulated_outbound: N   (cross-shard credits sent)
+//     expected_total:       N    (= genesis + subsidy + inbound
+//                                   - slashed - outbound)
+//     live_total_supply:    N    (= Σ accounts.balance + Σ stakes.locked)
+//     A1 invariant: OK | VIOLATED  (expected == live ?)
+//
+//   --json emits the same fields as a JSON object for scripts.
+//   Pulls from chain_summary RPC (which already includes all
+//   A1 counters) — no new RPC method needed.
+static int cmd_supply(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        // chain_summary already exposes all 5 counters + total_supply
+        // (= live_total_supply). last_n=1 keeps the response light;
+        // we only need the counters from the envelope, not blocks.
+        json params = {{"last_n", uint32_t{1}}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "chain_summary", params);
+        if (!result.is_object()) {
+            std::cerr << "Error: chain_summary returned non-object\n";
+            return 1;
+        }
+        uint64_t genesis_total   = result.value("genesis_total",       uint64_t{0});
+        uint64_t accum_subsidy   = result.value("accumulated_subsidy", uint64_t{0});
+        uint64_t accum_inbound   = result.value("accumulated_inbound", uint64_t{0});
+        uint64_t accum_slashed   = result.value("accumulated_slashed", uint64_t{0});
+        uint64_t accum_outbound  = result.value("accumulated_outbound",uint64_t{0});
+        uint64_t live_supply     = result.value("total_supply",        uint64_t{0});
+        uint64_t expected =
+            genesis_total + accum_subsidy + accum_inbound
+            - accum_slashed - accum_outbound;
+        bool invariant_ok = (expected == live_supply);
+
+        if (json_out) {
+            json out = {
+                {"genesis_total",        genesis_total},
+                {"accumulated_subsidy",  accum_subsidy},
+                {"accumulated_inbound",  accum_inbound},
+                {"accumulated_slashed",  accum_slashed},
+                {"accumulated_outbound", accum_outbound},
+                {"expected_total",       expected},
+                {"live_total_supply",    live_supply},
+                {"a1_invariant_ok",      invariant_ok}
+            };
+            std::cout << out.dump(2) << "\n";
+            return invariant_ok ? 0 : 2;  // exit 2 on invariant violation
+        }
+        std::cout << "genesis_total:        " << genesis_total  << "\n"
+                  << "+accumulated_subsidy: " << accum_subsidy  << "\n"
+                  << "+accumulated_inbound: " << accum_inbound  << "\n"
+                  << "-accumulated_slashed: " << accum_slashed  << "\n"
+                  << "-accumulated_outbound: " << accum_outbound << "\n"
+                  << "expected_total:       " << expected       << "\n"
+                  << "live_total_supply:    " << live_supply    << "\n"
+                  << "A1 invariant:         "
+                  << (invariant_ok ? "OK" : "VIOLATED")
+                  << "\n";
+        return invariant_ok ? 0 : 2;  // exit 2 on invariant violation
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // determ abort-records [--top N] [--json] [--rpc-port P]
@@ -3255,6 +3345,7 @@ int main(int argc, char** argv) {
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
     if (cmd == "pending-params") return cmd_pending_params(sub_argc, sub_argv);
     if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
+    if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
@@ -14529,6 +14620,417 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": cross-shard-receipt-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: A5 PARAM_CHANGE apply path — stage at one block,
+    // activate at the (effective_height)-th apply. activate_pending_params
+    // mutates the chain field at apply entry, then the block's txs
+    // replay under the new value. Names that don't have chain-instance
+    // storage are forwarded to the optional param_changed_hook_ (Node's
+    // way to mirror validator-side fields like bft_escalation_threshold).
+    if (cmd == "test-param-change-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "param-change-apply-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Helper: encode u64 as 8-byte LE (the apply-side format
+        // documented in activate_pending_params).
+        auto le8 = [](uint64_t v) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i) p[i] = uint8_t((v >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        // Helper: append an empty Block at the given index that
+        // triggers activate_pending_params() at apply entry.
+        auto advance_to = [&](Chain& c, uint64_t target_h) {
+            while (c.height() < target_h + 1) {  // height = block count
+                Block b;
+                b.index = c.height();
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+        };
+
+        // === Staging contract ===
+
+        // 1. Stage MIN_STAKE = 7777 at height 5: no immediate mutation
+        //    (apply at block 5 hasn't run yet — chain only has genesis).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.min_stake() == 1000,
+                  "baseline: min_stake == 1000 (genesis default)");
+
+            c.stage_param_change(5, "MIN_STAKE", le8(7777));
+            check(c.min_stake() == 1000,
+                  "stage only: min_stake unchanged before activation height");
+            check(c.pending_param_changes().size() == 1,
+                  "stage: pending_param_changes has 1 height bucket");
+        }
+
+        // === Activation at apply entry ===
+
+        // 2. Stage at height H, then apply blocks 1..H. At H's apply
+        //    entry, activate_pending_params mutates min_stake_.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.stage_param_change(3, "MIN_STAKE", le8(7777));
+            advance_to(c, 3);
+            check(c.min_stake() == 7777,
+                  "activation: min_stake == 7777 after block 3 applies");
+            check(c.pending_param_changes().empty(),
+                  "activation: pending map drained after activation");
+        }
+
+        // 3. Effective_height == 0 activates at the FIRST non-genesis
+        //    block's apply (apply iterates pending entries with
+        //    effective_height <= current_height).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.stage_param_change(0, "SUSPENSION_SLASH", le8(99));
+            advance_to(c, 1);
+            check(c.suspension_slash() == 99,
+                  "effective_height=0: activates at first non-genesis apply");
+        }
+
+        // === Activation of multiple params at same height ===
+
+        // 4. Three params staged at the same height all activate in
+        //    insertion order. (The apply iterates the bucket vector.)
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.stage_param_change(2, "MIN_STAKE", le8(1111));
+            c.stage_param_change(2, "SUSPENSION_SLASH", le8(22));
+            c.stage_param_change(2, "UNSTAKE_DELAY", le8(333));
+            advance_to(c, 2);
+            check(c.min_stake() == 1111
+                  && c.suspension_slash() == 22
+                  && c.unstake_delay() == 333,
+                  "3 params at same height: all activated at apply");
+        }
+
+        // === Activation of params at DIFFERENT heights ===
+
+        // 5. Two staged at heights 2 and 4. Apply blocks 1..3 → only
+        //    height-2 entry activated. Apply block 4 → height-4 too.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.stage_param_change(2, "MIN_STAKE", le8(2222));
+            c.stage_param_change(4, "MIN_STAKE", le8(4444));
+
+            advance_to(c, 2);
+            check(c.min_stake() == 2222,
+                  "height 2 reached: first stage activated");
+            check(c.pending_param_changes().size() == 1,
+                  "height 2 reached: height-4 entry still pending");
+
+            advance_to(c, 4);
+            check(c.min_stake() == 4444,
+                  "height 4 reached: second stage activated (overrides first)");
+            check(c.pending_param_changes().empty(),
+                  "all heights reached: pending map empty");
+        }
+
+        // === Unknown name: silent no-op + hook still fires ===
+
+        // 6. Unknown param name: chain-storage fields unchanged. The
+        //    hook (if installed) is still invoked.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            int hook_calls = 0;
+            std::string last_name;
+            c.set_param_changed_hook(
+                [&](const std::string& name,
+                    const std::vector<uint8_t>&) {
+                    hook_calls++;
+                    last_name = name;
+                });
+            c.stage_param_change(1, "FUTURE_UNKNOWN_PARAM", le8(123));
+            advance_to(c, 1);
+
+            check(c.min_stake() == 1000,
+                  "unknown param: min_stake unchanged");
+            check(hook_calls == 1 && last_name == "FUTURE_UNKNOWN_PARAM",
+                  "unknown param: hook fired (Node can forward to validator)");
+        }
+
+        // === Hook fires for KNOWN params too ===
+
+        // 7. Hook is invoked even for chain-storage params (Node uses
+        //    this to mirror validator-side fields).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            int hook_calls = 0;
+            c.set_param_changed_hook(
+                [&](const std::string&,
+                    const std::vector<uint8_t>&) { hook_calls++; });
+            c.stage_param_change(1, "MIN_STAKE", le8(5555));
+            advance_to(c, 1);
+            check(hook_calls == 1,
+                  "known param: hook fires (MIN_STAKE also via hook)");
+            check(c.min_stake() == 5555,
+                  "known param: chain field still updated");
+        }
+
+        // === Determinism ===
+
+        // 8. Two chains see same staging + apply → same chain state.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            c1.stage_param_change(2, "MIN_STAKE", le8(8888));
+            c2.stage_param_change(2, "MIN_STAKE", le8(8888));
+            advance_to(c1, 2);
+            advance_to(c2, 2);
+            check(c1.min_stake() == c2.min_stake()
+                  && c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same staging → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": param-change-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: subsidy distribution apply — fee + per-block
+    // block_subsidy distributed equally among `b.creators`, with the
+    // dust (modulo remainder) going to creator[0]. E3 lottery mode
+    // (subsidy_mode_=1 + lottery_jackpot_multiplier_) replaces the
+    // FLAT per-block subsidy with a two-point draw seeded by
+    // cumulative_rand. E4 finite subsidy pool caps cumulative
+    // accumulated_subsidy at subsidy_pool_initial — once drained,
+    // subsidy_this_block falls to 0 and the chain runs on fees alone.
+    if (cmd == "test-subsidy-distribution") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "subsidy-distribution-test";
+        GenesisCreator alice_c, bob_c;
+        alice_c.domain = "alice"; bob_c.domain = "bob";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        for (size_t i = 0; i < bob_c.ed_pub.size(); ++i)   bob_c.ed_pub[i]   = uint8_t(0x20 + i);
+        alice_c.initial_stake = 500;
+        bob_c.initial_stake   = 0;
+        cfg.initial_creators = {alice_c, bob_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // === FLAT mode (subsidy_mode_=0, default) ===
+
+        // 1. FLAT subsidy 100, single creator: full amount credited.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            uint64_t bal_before = c.balance("alice");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            c.append(b);
+
+            check(c.balance("alice") == bal_before + 100,
+                  "FLAT subsidy / 1 creator: full 100 credited");
+            check(c.accumulated_subsidy() == 100,
+                  "FLAT: accumulated_subsidy += block_subsidy");
+        }
+
+        // 2. FLAT subsidy 100, TWO creators: 50/50 split.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob"};
+            c.append(b);
+
+            check(c.balance("alice") == 1050,
+                  "FLAT subsidy / 2 creators: alice 1000 + 50 = 1050");
+            check(c.balance("bob") == 1050,
+                  "FLAT subsidy / 2 creators: bob 1000 + 50 = 1050");
+        }
+
+        // 3. FLAT subsidy 101, TWO creators: 50/50 + dust(1) to creator[0].
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(101);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob"};
+            c.append(b);
+
+            check(c.balance("alice") == 1051,
+                  "FLAT dust: alice 1000 + 50 + 1(dust) = 1051");
+            check(c.balance("bob") == 1050,
+                  "FLAT dust: bob 1000 + 50 = 1050 (no dust)");
+        }
+
+        // === LOTTERY mode (subsidy_mode_=1) ===
+
+        // 4. LOTTERY jackpot: when cumulative_rand[0..7] % M == 0, pays
+        //    block_subsidy * M. Pick a seed that hits the jackpot.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(50);
+            c.set_subsidy_mode(1);
+            c.set_lottery_jackpot_multiplier(4);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            // Construct cumulative_rand such that the first 8 BE bytes
+            // form an integer divisible by 4. All-zero → 0 % 4 == 0 (jackpot).
+            b.cumulative_rand = Hash{};
+            c.append(b);
+
+            check(c.accumulated_subsidy() == 200,
+                  "LOTTERY jackpot: pays subsidy * multiplier = 50*4 = 200");
+            check(c.balance("alice") == 1200,
+                  "LOTTERY jackpot: alice 1000 + 200 = 1200");
+        }
+
+        // 5. LOTTERY miss: lottery value NOT divisible by M → 0 subsidy.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(50);
+            c.set_subsidy_mode(1);
+            c.set_lottery_jackpot_multiplier(4);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            // Construct cumulative_rand so the BE u64 isn't divisible by 4.
+            b.cumulative_rand = Hash{};
+            b.cumulative_rand[7] = 1;  // last byte = 1 → u64 == 1, 1 % 4 != 0
+            c.append(b);
+
+            check(c.accumulated_subsidy() == 0,
+                  "LOTTERY miss: subsidy = 0 (lottery % M != 0)");
+            check(c.balance("alice") == 1000,
+                  "LOTTERY miss: alice balance unchanged");
+        }
+
+        // === E4 finite-pool subsidy ===
+
+        // 6. E4: subsidy_pool_initial caps cumulative subsidy. Once
+        //    accumulated_subsidy_ reaches the cap, subsidy_this_block
+        //    falls to 0 (chain runs on fees alone).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            c.set_subsidy_pool_initial(150);  // can pay full 100, then partial 50
+
+            // Block 1: full 100 (cumulative 100 < cap 150).
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            c.append(b1);
+            check(c.accumulated_subsidy() == 100,
+                  "E4 finite pool: block 1 pays full subsidy = 100");
+
+            // Block 2: only 50 left in pool.
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            c.append(b2);
+            check(c.accumulated_subsidy() == 150,
+                  "E4 finite pool: block 2 pays remaining 50 (cap reached)");
+
+            // Block 3: pool drained, subsidy = 0.
+            Block b3;
+            b3.index = 3; b3.prev_hash = c.head().compute_hash();
+            b3.creators = {"alice"};
+            c.append(b3);
+            check(c.accumulated_subsidy() == 150,
+                  "E4 finite pool drained: block 3 pays 0 (no overflow past cap)");
+        }
+
+        // === A1 invariant under subsidy mint ===
+
+        // 7. Subsidy is a MINT — increases live supply. A1 holds because
+        //    accumulated_subsidy_ accounts for the mint exactly.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(50);
+            uint64_t baseline = c.live_total_supply();
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            c.append(b);
+
+            check(c.live_total_supply() == baseline + 50,
+                  "A1: subsidy mints exactly block_subsidy");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after mint");
+        }
+
+        // === Empty creators: NO subsidy paid (A1-safe no-op) ===
+
+        // 8. b.creators.empty() with subsidy + 0 fees: distribution
+        //    branch skipped, accumulated_subsidy NOT bumped (apply-side
+        //    contract: subsidy only counts if actually paid out).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            uint64_t baseline = c.live_total_supply();
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            // creators intentionally empty + no fee-bearing txs to keep
+            // A1 balanced (the chain-apply-block gotcha contract).
+            c.append(b);
+
+            check(c.accumulated_subsidy() == 0,
+                  "empty creators: NO subsidy paid (A1-safe)");
+            check(c.live_total_supply() == baseline,
+                  "empty creators: supply unchanged");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": subsidy-distribution " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
