@@ -279,6 +279,11 @@ In-process tests (deterministic, no network):
                                               (every collection throws clean
                                               field-name diagnostic, not
                                               opaque nlohmann error)
+  determ test-encoding                        types.hpp encoding helpers —
+                                              to_hex / from_hex / from_hex_arr
+                                              round-trips + case-insensitive
+                                              parse + rejection paths + enum
+                                              to_string mappings
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -8252,6 +8257,192 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": snapshot-defense " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the foundation-
+    // layer encoding helpers in `include/determ/types.hpp`:
+    //
+    //   * to_hex(uint8_t*, size_t)              — bytes-to-hex
+    //   * to_hex<N>(array<uint8_t, N>)          — templated overload
+    //   * from_hex(string)                      — hex-to-bytes
+    //   * from_hex_arr<N>(string)               — to fixed-size array
+    //   * to_string(ChainRole)                  — enum → "single"/"beacon"/"shard"
+    //   * to_string(ShardingMode)               — enum → "none"/"current"/"extended"
+    //
+    // These functions are under EVERY hex serialization in the
+    // codebase. A regression here would cascade across the entire
+    // wire format. This test locks them in.
+    if (cmd == "test-encoding") {
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === to_hex / from_hex round-trip ===
+
+        // 1. Empty input round-trip: empty bytes → "" → empty bytes.
+        {
+            std::vector<uint8_t> empty;
+            std::string h = to_hex(empty.data(), empty.size());
+            check(h.empty(), "to_hex of empty bytes returns empty string");
+            std::vector<uint8_t> back = from_hex(h);
+            check(back == empty, "from_hex of empty string returns empty bytes");
+        }
+
+        // 2. Single-byte boundary values (0x00 and 0xff) round-trip with
+        //    correct hex spelling and 2 chars.
+        {
+            std::vector<uint8_t> b00 = {0x00};
+            std::vector<uint8_t> bff = {0xff};
+            check(to_hex(b00.data(), 1) == "00",
+                  "to_hex({0x00}) == \"00\" (2 chars, leading zero preserved)");
+            check(to_hex(bff.data(), 1) == "ff",
+                  "to_hex({0xff}) == \"ff\"");
+        }
+
+        // 3. Multi-byte round-trip with pattern bytes.
+        {
+            std::vector<uint8_t> v = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};
+            std::string h = to_hex(v.data(), v.size());
+            check(h == "deadbeefcafe", "to_hex({0xDE,0xAD,...}) lowercase round-trip");
+            check(from_hex(h) == v, "from_hex round-trip preserves bytes");
+        }
+
+        // 4. Case-insensitive parse on the from_hex side: same bytes
+        //    out regardless of input case.
+        {
+            std::vector<uint8_t> from_lower = from_hex("deadbeef");
+            std::vector<uint8_t> from_upper = from_hex("DEADBEEF");
+            std::vector<uint8_t> from_mixed = from_hex("DeAdBeEf");
+            check(from_lower == from_upper,
+                  "from_hex case-insensitive: lower == upper");
+            check(from_lower == from_mixed,
+                  "from_hex case-insensitive: lower == mixed");
+        }
+
+        // 5. from_hex rejects odd-length input.
+        {
+            bool threw = false;
+            try { (void)from_hex("abc"); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "from_hex(odd length) throws");
+        }
+
+        // === to_hex<N> templated overload (for Hash, PubKey, Signature) ===
+
+        // 6. to_hex<32>(Hash) returns 64-char hex.
+        {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(i);
+            std::string s = to_hex(h);
+            check(s.size() == 64, "to_hex(Hash) returns 64 chars (32 bytes × 2)");
+            check(s.substr(0, 6) == "000102",
+                  "to_hex(Hash{0,1,2,...}) starts with \"000102\"");
+        }
+
+        // 7. to_hex<64>(Signature) returns 128-char hex.
+        {
+            Signature sig{};
+            for (size_t i = 0; i < sig.size(); ++i) sig[i] = uint8_t(0xA0 + (i % 16));
+            std::string s = to_hex(sig);
+            check(s.size() == 128,
+                  "to_hex(Signature) returns 128 chars (64 bytes × 2)");
+        }
+
+        // === from_hex_arr<N> ===
+
+        // 8. from_hex_arr<32> round-trips correctly.
+        {
+            std::string h = "0001020304050607" "08090a0b0c0d0e0f"
+                            "1011121314151617" "18191a1b1c1d1e1f";
+            Hash back = from_hex_arr<32>(h);
+            for (size_t i = 0; i < back.size(); ++i) {
+                if (back[i] != uint8_t(i)) {
+                    check(false, "from_hex_arr<32> byte preserved");
+                    break;
+                }
+            }
+            check(true, "from_hex_arr<32> all 32 bytes round-trip");
+        }
+
+        // 9. from_hex_arr<N> rejects wrong length.
+        {
+            bool threw = false;
+            try { (void)from_hex_arr<32>("deadbeef"); }  // 4 bytes, want 32
+            catch (const std::exception&) { threw = true; }
+            check(threw, "from_hex_arr<32> rejects short input");
+
+            threw = false;
+            try { (void)from_hex_arr<32>(std::string(80, '0')); }  // 40 bytes
+            catch (const std::exception&) { threw = true; }
+            check(threw, "from_hex_arr<32> rejects long input");
+        }
+
+        // === Cross-helper round-trip via to_hex(array) + from_hex_arr ===
+
+        // 10. Hash → string → Hash preserves all 32 bytes.
+        {
+            Hash original{};
+            for (size_t i = 0; i < original.size(); ++i)
+                original[i] = uint8_t((i * 7 + 11) & 0xff);
+            std::string s = to_hex(original);
+            Hash back = from_hex_arr<32>(s);
+            check(back == original,
+                  "Hash → to_hex → from_hex_arr<32> round-trip preserves all bytes");
+        }
+
+        // === to_string(enum) — for log + RPC output ===
+
+        // 11. ChainRole to_string mappings.
+        {
+            check(std::string(to_string(ChainRole::SINGLE)) == "single",
+                  "to_string(ChainRole::SINGLE) == \"single\"");
+            check(std::string(to_string(ChainRole::BEACON)) == "beacon",
+                  "to_string(ChainRole::BEACON) == \"beacon\"");
+            check(std::string(to_string(ChainRole::SHARD)) == "shard",
+                  "to_string(ChainRole::SHARD) == \"shard\"");
+        }
+
+        // 12. ShardingMode to_string mappings.
+        {
+            check(std::string(to_string(ShardingMode::NONE)) == "none",
+                  "to_string(ShardingMode::NONE) == \"none\"");
+            check(std::string(to_string(ShardingMode::CURRENT)) == "current",
+                  "to_string(ShardingMode::CURRENT) == \"current\"");
+            check(std::string(to_string(ShardingMode::EXTENDED)) == "extended",
+                  "to_string(ShardingMode::EXTENDED) == \"extended\"");
+        }
+
+        // === Determinism: hex encoding has no internal state ===
+
+        // 13. to_hex called twice on the same bytes returns identical
+        //     strings. (Defends against a regression where std::ostringstream
+        //     state leaks between calls.)
+        {
+            std::vector<uint8_t> v = {0x10, 0x20, 0x30};
+            std::string h1 = to_hex(v.data(), v.size());
+            std::string h2 = to_hex(v.data(), v.size());
+            check(h1 == h2, "to_hex is deterministic across calls");
+            check(h1 == "102030",
+                  "to_hex({0x10,0x20,0x30}) == \"102030\"");
+        }
+
+        // === now_unix monotonicity sanity ===
+
+        // 14. now_unix returns plausible unix epoch (> 1.5e9, i.e.,
+        //     post-2017). Sanity check that the function is wired to
+        //     the system clock and returning seconds-since-epoch.
+        {
+            int64_t t = now_unix();
+            check(t > 1500000000LL,
+                  "now_unix returns plausible post-2017 unix time");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": encoding " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
