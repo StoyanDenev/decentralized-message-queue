@@ -369,6 +369,11 @@ In-process tests (deterministic, no network):
                                               invariant — golden vectors for
                                               event_type / LE u32+u64 fields /
                                               region_len + utf-8 region
+  determ test-make-genesis-block              make_genesis_block invariants —
+                                              structural (index=0, zero prev,
+                                              timestamp=0), creators sorted,
+                                              initial_state population +
+                                              initial_balances merge semantics
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -12122,6 +12127,272 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": merge-event-bytes " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for `make_genesis_block`
+    // structural invariants — the creator sort + initial_balances
+    // merge behavior. test-genesis covers identity-hash invariants
+    // + the make_genesis_block top-level shape; this test exercises
+    // the structural details:
+    //
+    //   * creators[] sorted alphabetically (deterministic selection input)
+    //   * Each initial_creator → one initial_state entry with
+    //     domain + ed_pub + stake + region populated
+    //   * initial_balances merge into existing initial_state entry
+    //     when domain matches; else create a new entry
+    //   * Genesis block invariants: index=0, prev_hash=zero,
+    //     empty transactions[] / creator_tx_lists / ... / etc.
+    if (cmd == "test-make-genesis-block") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_pub = [](uint8_t base) {
+            PubKey p{};
+            for (size_t i = 0; i < p.size(); ++i) p[i] = uint8_t(base + i);
+            return p;
+        };
+
+        // === Structural invariants on a minimal genesis ===
+
+        // 1. make_genesis_block: index == 0.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            Block g = make_genesis_block(cfg);
+            check(g.index == 0, "make_genesis_block: index == 0");
+        }
+
+        // 2. make_genesis_block: prev_hash == zero (genesis has no parent).
+        {
+            GenesisConfig cfg;
+            Block g = make_genesis_block(cfg);
+            check(g.prev_hash == Hash{},
+                  "make_genesis_block: prev_hash == zero (no parent)");
+        }
+
+        // 3. make_genesis_block: timestamp == 0 (genesis is timestamp-
+        //    less; per-chain anchor not wall-clock).
+        {
+            GenesisConfig cfg;
+            Block g = make_genesis_block(cfg);
+            check(g.timestamp == 0,
+                  "make_genesis_block: timestamp == 0");
+        }
+
+        // 4. make_genesis_block: transactions[] empty (no txs in
+        //    genesis; initial_state encodes the seed).
+        {
+            GenesisConfig cfg;
+            Block g = make_genesis_block(cfg);
+            check(g.transactions.empty(),
+                  "make_genesis_block: transactions[] empty");
+        }
+
+        // 5. make_genesis_block: committee-aligned vectors all empty
+        //    (no Phase-1/Phase-2 work for genesis).
+        {
+            GenesisConfig cfg;
+            Block g = make_genesis_block(cfg);
+            check(g.creator_tx_lists.empty(),
+                  "make_genesis_block: creator_tx_lists empty");
+            check(g.creator_ed_sigs.empty(),
+                  "make_genesis_block: creator_ed_sigs empty");
+            check(g.creator_dh_inputs.empty(),
+                  "make_genesis_block: creator_dh_inputs empty");
+            check(g.creator_block_sigs.empty(),
+                  "make_genesis_block: creator_block_sigs empty");
+            check(g.tx_root == Hash{},
+                  "make_genesis_block: tx_root == zero");
+        }
+
+        // === Creator-list sort invariant ===
+
+        // 6. creators[] sorted alphabetically regardless of insertion
+        //    order. This is the deterministic-committee-selection
+        //    contract — committee selection must produce the same
+        //    output on every node regardless of how the operator
+        //    typed the creator list.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            // Intentionally NOT alphabetical insertion order.
+            GenesisCreator c1, c2, c3;
+            c1.domain = "carol"; c1.ed_pub = patterned_pub(0x30); c1.initial_stake = 1000;
+            c2.domain = "alice"; c2.ed_pub = patterned_pub(0x10); c2.initial_stake = 1000;
+            c3.domain = "bob";   c3.ed_pub = patterned_pub(0x20); c3.initial_stake = 1000;
+            cfg.initial_creators = {c1, c2, c3};
+
+            Block g = make_genesis_block(cfg);
+            check(g.creators.size() == 3,
+                  "make_genesis_block: creators[] size matches input");
+            check(g.creators[0] == "alice",
+                  "make_genesis_block: creators sorted — alice first");
+            check(g.creators[1] == "bob",
+                  "make_genesis_block: creators sorted — bob second");
+            check(g.creators[2] == "carol",
+                  "make_genesis_block: creators sorted — carol third");
+        }
+
+        // === initial_state population from initial_creators ===
+
+        // 7. Each initial_creator gets one initial_state entry
+        //    carrying domain + ed_pub + stake + region.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            GenesisCreator c1;
+            c1.domain = "alice";
+            c1.ed_pub = patterned_pub(0x10);
+            c1.initial_stake = 5000;
+            c1.region = "us-east";
+            cfg.initial_creators = {c1};
+
+            Block g = make_genesis_block(cfg);
+            check(g.initial_state.size() == 1,
+                  "make_genesis_block: 1 creator → 1 initial_state entry");
+            check(g.initial_state[0].domain == "alice",
+                  "initial_state[0]: domain preserved");
+            check(g.initial_state[0].ed_pub == patterned_pub(0x10),
+                  "initial_state[0]: ed_pub preserved");
+            check(g.initial_state[0].stake == 5000,
+                  "initial_state[0]: stake preserved");
+            check(g.initial_state[0].region == "us-east",
+                  "initial_state[0]: region preserved");
+            check(g.initial_state[0].balance == 0,
+                  "initial_state[0]: balance defaults to 0 (no initial_balance match)");
+        }
+
+        // === initial_balances merge behavior ===
+
+        // 8. initial_balance for a domain that already exists in
+        //    initial_creators MERGES into the existing entry.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            GenesisCreator c1;
+            c1.domain = "alice";
+            c1.ed_pub = patterned_pub(0x10);
+            c1.initial_stake = 1000;
+            cfg.initial_creators = {c1};
+            GenesisAllocation balance;
+            balance.domain = "alice";
+            balance.balance = 50000;
+            cfg.initial_balances = {balance};
+
+            Block g = make_genesis_block(cfg);
+            check(g.initial_state.size() == 1,
+                  "make_genesis_block: matching-domain balance merges → still 1 entry");
+            check(g.initial_state[0].domain == "alice",
+                  "merged: domain preserved");
+            check(g.initial_state[0].stake == 1000,
+                  "merged: stake preserved");
+            check(g.initial_state[0].balance == 50000,
+                  "merged: balance from initial_balances added to creator entry");
+        }
+
+        // 9. initial_balance for a NEW domain (not in initial_creators)
+        //    creates a fresh initial_state entry with stake=0.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            GenesisCreator c1;
+            c1.domain = "alice";
+            c1.ed_pub = patterned_pub(0x10);
+            c1.initial_stake = 1000;
+            cfg.initial_creators = {c1};
+            GenesisAllocation a;
+            a.domain = "newuser";  // NOT in initial_creators
+            a.balance = 99999;
+            cfg.initial_balances = {a};
+
+            Block g = make_genesis_block(cfg);
+            check(g.initial_state.size() == 2,
+                  "make_genesis_block: non-matching balance creates 2nd entry");
+            // Find the "newuser" entry.
+            bool found_newuser = false;
+            for (auto& e : g.initial_state) {
+                if (e.domain == "newuser") {
+                    check(e.balance == 99999,
+                          "new entry: balance from initial_balances");
+                    check(e.stake == 0,
+                          "new entry: stake == 0 (not in initial_creators)");
+                    check(e.ed_pub == PubKey{},
+                          "new entry: ed_pub default (zero — pure-balance domain)");
+                    found_newuser = true;
+                    break;
+                }
+            }
+            check(found_newuser,
+                  "make_genesis_block: non-matching domain creates new initial_state entry");
+        }
+
+        // 10. Multiple initial_balances + multiple creators: each
+        //     balance either merges or creates, never both.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            GenesisCreator c1, c2;
+            c1.domain = "alice";
+            c1.ed_pub = patterned_pub(0x10);
+            c1.initial_stake = 1000;
+            c2.domain = "bob";
+            c2.ed_pub = patterned_pub(0x20);
+            c2.initial_stake = 2000;
+            cfg.initial_creators = {c1, c2};
+
+            GenesisAllocation b1, b2, b3;
+            b1.domain = "alice";   b1.balance = 100;   // merges into alice
+            b2.domain = "bob";     b2.balance = 200;   // merges into bob
+            b3.domain = "newuser"; b3.balance = 300;   // creates new entry
+            cfg.initial_balances = {b1, b2, b3};
+
+            Block g = make_genesis_block(cfg);
+            check(g.initial_state.size() == 3,
+                  "make_genesis_block: 2 creators + 3 balances (2 merge + 1 new) → 3 entries");
+
+            // Verify alice merged (stake + balance).
+            for (auto& e : g.initial_state) {
+                if (e.domain == "alice") {
+                    check(e.stake == 1000 && e.balance == 100,
+                          "alice merged: stake=1000 + balance=100");
+                }
+                if (e.domain == "bob") {
+                    check(e.stake == 2000 && e.balance == 200,
+                          "bob merged: stake=2000 + balance=200");
+                }
+                if (e.domain == "newuser") {
+                    check(e.stake == 0 && e.balance == 300,
+                          "newuser new: stake=0 + balance=300");
+                }
+            }
+        }
+
+        // === Determinism ===
+
+        // 11. make_genesis_block: same input → same block (the
+        //     genesis-identity precondition).
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "test";
+            GenesisCreator c1;
+            c1.domain = "alice";
+            c1.ed_pub = patterned_pub(0x10);
+            cfg.initial_creators = {c1};
+
+            Block g1 = make_genesis_block(cfg);
+            Block g2 = make_genesis_block(cfg);
+            check(g1.compute_hash() == g2.compute_hash(),
+                  "make_genesis_block: deterministic across calls");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": make-genesis-block " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
