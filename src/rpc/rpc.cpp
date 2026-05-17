@@ -264,6 +264,8 @@ json RpcServer::dispatch(const json& req) {
         return node_.rpc_account(params.value("address", std::string{}));
     if (method == "tx")
         return node_.rpc_tx(params.value("hash", std::string{}));
+    if (method == "pending_params")
+        return node_.rpc_pending_params();
     throw std::runtime_error("Unknown method: " + method);
 }
 

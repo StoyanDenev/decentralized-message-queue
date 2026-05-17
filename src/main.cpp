@@ -66,6 +66,9 @@ Usage:
   determ chain-summary [--last N]            Compact summary of last N blocks
   determ validators                          List the current validator pool
   determ committee                           List the current epoch's K-of-K committee
+  determ pending-params [--json]             A5 staged PARAM_CHANGE entries
+                                              (effective_height, name, value_hex)
+                                              not yet activated
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -376,6 +379,20 @@ In-process tests (deterministic, no network):
                                               initial_balances merge semantics
 
 For details + flags see docs/CLI-REFERENCE.md.
+)";
+    // Second concatenated literal — MSVC has a 16384-char limit per
+    // raw-string token. Split into multiple writes to stay within the
+    // limit as the help text grows with new test surfaces.
+    std::cout << R"(
+Additional in-process tests:
+  determ test-pending-param-changes           Chain::stage_param_change +
+                                              pending_param_changes() — A5
+                                              governance staging (height-keyed
+                                              map, value round-trip,
+                                              same-height insertion order)
+  determ test-merge-state                     Chain merge_state read API +
+                                              R4 threshold setters
+                                              (merge/revert/grace) round-trip
 )" << "\n";
 }
 
@@ -1362,6 +1379,54 @@ static int cmd_committee(int argc, char** argv) {
                       << std::setw(10) << v.value("stake", uint64_t{0})
                       << std::setw(15) << v.value("active_from", uint64_t{0})
                       << v.value("ed_pub", std::string{}).substr(0, 24) << "...\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// determ pending-params [--json] [--rpc-port N]
+//   List PARAM_CHANGE entries that have been validated and staged but
+//   not yet activated. Each entry shows (effective_height, name,
+//   value_hex, value_bytes). Sorted ascending by effective_height; at
+//   each block apply, entries with effective_height <= block.index
+//   activate (the named field mutates) in insertion order.
+//
+//   A5 Phase 2 governance visibility primitive — useful for operators
+//   in `governance_mode=1` deployments to confirm that PARAM_CHANGE
+//   txs have been accepted, see what's about to land, and audit drift
+//   between observed chain state and expected post-activation state.
+static int cmd_pending_params(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        auto result = rpc::rpc_call("127.0.0.1", port, "pending_params");
+        if (json_out) {
+            std::cout << result.dump(2) << "\n";
+            return 0;
+        }
+        if (!result.is_array() || result.empty()) {
+            std::cout << "(no pending PARAM_CHANGE entries)\n";
+            return 0;
+        }
+        std::cout << std::left
+                  << std::setw(20) << "effective_height"
+                  << std::setw(28) << "name"
+                  << std::setw(8)  << "bytes"
+                  << "value_hex (first 32 chars)\n";
+        for (auto& e : result) {
+            std::string hex = e.value("value_hex", std::string{});
+            std::cout << std::setw(20) << e.value("effective_height", uint64_t{0})
+                      << std::setw(28) << e.value("name", std::string{})
+                      << std::setw(8)  << e.value("value_bytes", uint64_t{0})
+                      << hex.substr(0, std::min<size_t>(hex.size(), 32))
+                      << (hex.size() > 32 ? "..." : "")
+                      << "\n";
         }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -3011,6 +3076,7 @@ int main(int argc, char** argv) {
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
+    if (cmd == "pending-params") return cmd_pending_params(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
@@ -12393,6 +12459,235 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": make-genesis-block " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain::stage_param_change + pending_param_changes()
+    // — the A5 Phase 2 governance staging primitive. A validated
+    // PARAM_CHANGE tx stages a (name, value) pair to activate at a
+    // future block; at apply, pending entries with effective_height <=
+    // b.index are activated. This test pins the read-write surface
+    // semantics in <1s without exercising the apply path.
+    if (cmd == "test-pending-param-changes") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. Default Chain: pending_param_changes is empty.
+        {
+            Chain c;
+            check(c.pending_param_changes().empty(),
+                  "default Chain: pending_param_changes empty");
+        }
+
+        // 2. Stage one entry at height 100 → map has one entry, height
+        //    key matches.
+        {
+            Chain c;
+            std::vector<uint8_t> v = {1, 2, 3};
+            c.stage_param_change(100, "min_stake", v);
+            check(c.pending_param_changes().size() == 1,
+                  "stage one entry: pending size == 1");
+            check(c.pending_param_changes().count(100) == 1,
+                  "stage at height 100: map key 100 present");
+        }
+
+        // 3. Value is preserved byte-for-byte in the inner vector.
+        {
+            Chain c;
+            std::vector<uint8_t> v = {0xAA, 0xBB, 0xCC};
+            c.stage_param_change(50, "param", v);
+            auto& bucket = c.pending_param_changes().at(50);
+            check(bucket.size() == 1,
+                  "single stage: inner bucket size == 1");
+            check(bucket[0].first == "param",
+                  "stage: name preserved");
+            check(bucket[0].second == v,
+                  "stage: value preserved byte-for-byte");
+        }
+
+        // 4. Stage two entries at the SAME height → both kept; vector
+        //    push_back preserves apply order (A5 Phase 2 contract).
+        {
+            Chain c;
+            c.stage_param_change(200, "first",  {1});
+            c.stage_param_change(200, "second", {2});
+            auto& bucket = c.pending_param_changes().at(200);
+            check(bucket.size() == 2,
+                  "two entries at same height: bucket size == 2");
+            check(bucket[0].first == "first" && bucket[1].first == "second",
+                  "same-height stage: insertion order preserved");
+        }
+
+        // 5. Stage at DIFFERENT heights → separate map entries (ordered
+        //    map sorts by height — activation order at apply is
+        //    deterministic across replays).
+        {
+            Chain c;
+            c.stage_param_change(300, "a", {1});
+            c.stage_param_change(100, "b", {2});
+            c.stage_param_change(200, "c", {3});
+            check(c.pending_param_changes().size() == 3,
+                  "stage at 3 heights: 3 map entries");
+            // std::map iteration is sorted by key — verify ascending.
+            std::vector<uint64_t> heights;
+            for (auto& [h, _] : c.pending_param_changes()) heights.push_back(h);
+            check(heights == std::vector<uint64_t>{100, 200, 300},
+                  "pending_param_changes: heights sorted ascending");
+        }
+
+        // 6. Empty value vector is valid (delete-param sentinel form).
+        {
+            Chain c;
+            c.stage_param_change(1, "name", {});
+            auto& bucket = c.pending_param_changes().at(1);
+            check(bucket[0].second.empty(),
+                  "stage with empty value: empty vector preserved");
+        }
+
+        // 7. Large value vector (256 bytes — A5 typical param-payload
+        //    size) round-trips.
+        {
+            Chain c;
+            std::vector<uint8_t> big(256);
+            for (size_t i = 0; i < big.size(); ++i) big[i] = uint8_t(i);
+            c.stage_param_change(10, "big", big);
+            auto& bucket = c.pending_param_changes().at(10);
+            check(bucket[0].second == big,
+                  "stage 256-byte value: round-trips intact");
+        }
+
+        // 8. Multiple chains are independent (no shared static state).
+        {
+            Chain c1;
+            Chain c2;
+            c1.stage_param_change(5, "x", {0xFF});
+            check(c1.pending_param_changes().size() == 1
+                  && c2.pending_param_changes().empty(),
+                  "independent chains: stage on c1 doesn't leak to c2");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": pending-param-changes " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain merge-state read API + governance threshold
+    // setters. The R4 under-quorum-merge primitive — merge_state() /
+    // is_shard_merged() / shards_absorbed_by() — is the read surface
+    // exercised by the EXTENDED-mode validator + producer paths to
+    // discover absorbed-shard status. The threshold setters are A5
+    // governance entry points for the three merge-policy knobs.
+    if (cmd == "test-merge-state") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Default-empty merge state (the common case) ===
+
+        // 1. Default Chain: merge_state empty.
+        {
+            Chain c;
+            check(c.merge_state().empty(),
+                  "default Chain: merge_state empty (no merges)");
+        }
+
+        // 2. is_shard_merged returns false for any shard on empty chain.
+        {
+            Chain c;
+            ShardId out_partner = 99;
+            bool merged = c.is_shard_merged(ShardId{0}, &out_partner);
+            check(!merged,
+                  "is_shard_merged on empty map: returns false");
+            check(out_partner == 99,
+                  "is_shard_merged on empty map: out_partner unmodified");
+        }
+
+        // 3. is_shard_merged null out_partner pointer is safe.
+        {
+            Chain c;
+            bool merged = c.is_shard_merged(ShardId{0}, nullptr);
+            check(!merged,
+                  "is_shard_merged(0, nullptr) safe on empty");
+        }
+
+        // 4. shards_absorbed_by returns empty for any partner on empty.
+        {
+            Chain c;
+            auto out = c.shards_absorbed_by(ShardId{0});
+            check(out.empty(),
+                  "shards_absorbed_by on empty: returns empty vector");
+        }
+
+        // === R4 threshold setters round-trip ===
+
+        // 5. merge_threshold_blocks default + setter round-trip.
+        {
+            Chain c;
+            uint32_t def = c.merge_threshold_blocks();
+            check(def == 100,
+                  "default merge_threshold_blocks == 100 (GenesisConfig default)");
+            c.set_merge_threshold_blocks(42);
+            check(c.merge_threshold_blocks() == 42,
+                  "set_merge_threshold_blocks(42): round-trips");
+        }
+
+        // 6. revert_threshold_blocks default + setter (2:1 hysteresis
+        //    against merge_threshold).
+        {
+            Chain c;
+            uint32_t def = c.revert_threshold_blocks();
+            check(def == 200,
+                  "default revert_threshold_blocks == 200 (2x merge threshold)");
+            c.set_revert_threshold_blocks(500);
+            check(c.revert_threshold_blocks() == 500,
+                  "set_revert_threshold_blocks: round-trips");
+        }
+
+        // 7. merge_grace_blocks default + setter (R4 evidence-window
+        //    minimum lead).
+        {
+            Chain c;
+            uint32_t def = c.merge_grace_blocks();
+            check(def == 10,
+                  "default merge_grace_blocks == 10");
+            c.set_merge_grace_blocks(20);
+            check(c.merge_grace_blocks() == 20,
+                  "set_merge_grace_blocks: round-trips");
+        }
+
+        // 8. Threshold setters are independent — setting one doesn't
+        //    perturb the others.
+        {
+            Chain c;
+            c.set_merge_threshold_blocks(50);
+            check(c.revert_threshold_blocks() == 200
+                  && c.merge_grace_blocks() == 10,
+                  "set_merge_threshold: revert + grace unchanged");
+        }
+
+        // === MergePartnerInfo struct defaults ===
+
+        // 9. Default-constructed MergePartnerInfo has zero partner_id +
+        //    empty refugee_region.
+        {
+            Chain::MergePartnerInfo info{};
+            check(info.partner_id == 0,
+                  "MergePartnerInfo default: partner_id == 0");
+            check(info.refugee_region.empty(),
+                  "MergePartnerInfo default: refugee_region empty");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merge-state " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

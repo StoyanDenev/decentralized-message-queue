@@ -2404,6 +2404,20 @@ json Node::rpc_status() const {
     j["beacon_headers"]    = beacon_headers_.size();    // shard-only; 0 elsewhere
     j["tracked_shard_tips"] = latest_shard_tips_.size(); // beacon-only; 0 elsewhere
     j["pending_inbound_receipts"] = pending_inbound_receipts_.size(); // shard-only
+    // A5 Phase 2 governance visibility: count of PARAM_CHANGE entries
+    // staged but not yet activated. Each entry waits until its
+    // effective_height is reached and then mutates a named chain
+    // parameter at the start of that block's apply. A non-zero value
+    // means governance has staged changes that will land in future
+    // blocks — operators tracking parameter drift can alert on this.
+    // The detailed (height, name, value) list is exposed via the
+    // `pending_params` RPC + `determ pending-params` CLI.
+    {
+        size_t n = 0;
+        for (auto& [_, bucket] : chain_.pending_param_changes())
+            n += bucket.size();
+        j["pending_param_changes"] = n;
+    }
 
     // Block-mode + tx counters across the full chain. Useful for ops
     // dashboards and test assertions ("did the chain actually escalate?").
@@ -2452,6 +2466,30 @@ json Node::rpc_status() const {
 json Node::rpc_peers() const {
     auto addrs = gossip_.peer_addresses();
     return json(addrs);
+}
+
+// A5 Phase 2 governance visibility. Returns the chain's staged
+// PARAM_CHANGE entries as a JSON array — one element per staged change
+// — so operators can see exactly which parameters will mutate, when,
+// and to what value. The list is sorted ascending by effective_height
+// (apply order); within the same height bucket, entries are in
+// insertion order (also apply order). Empty array = no pending
+// changes. Values are hex-encoded (matches PROTOCOL.md §A5 wire format
+// for PARAM_CHANGE payloads).
+json Node::rpc_pending_params() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json arr = json::array();
+    for (auto& [eff, bucket] : chain_.pending_param_changes()) {
+        for (auto& [name, value] : bucket) {
+            json entry;
+            entry["effective_height"] = eff;
+            entry["name"]             = name;
+            entry["value_hex"]        = to_hex(value.data(), value.size());
+            entry["value_bytes"]      = value.size();
+            arr.push_back(entry);
+        }
+    }
+    return arr;
 }
 
 json Node::rpc_block(uint64_t index) const {

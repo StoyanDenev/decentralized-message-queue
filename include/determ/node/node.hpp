@@ -183,6 +183,12 @@ public:
     // RPC handlers
     nlohmann::json rpc_status()                                     const;
     nlohmann::json rpc_peers()                                      const;
+    // A5 Phase 2 governance visibility: list of staged PARAM_CHANGE
+    // entries (effective_height, name, value_hex, value_bytes).
+    // Sorted ascending by effective_height; within a bucket, in
+    // insertion order. Empty = no pending. Operator-facing readback
+    // for `determ pending-params` CLI + monitoring of governance drift.
+    nlohmann::json rpc_pending_params()                             const;
     // rev.9: block explorer primitive. Returns the full block at the
     // given index (block 0 = genesis). Returns null if out of range.
     nlohmann::json rpc_block(uint64_t index)                        const;

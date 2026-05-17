@@ -570,13 +570,14 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | Method | Params | Returns |
 |---|---|---|
 | **Chain / consensus queries** | | |
-| `status` | `{}` | head + head_hash + role + shard_id + epoch_index + peer_count + mempool + MD/BFT counters + `next_creators` preview + **`protections`** block (every operator-tunable security flag — see CLI-REFERENCE.md) |
+| `status` | `{}` | head + head_hash + role + shard_id + epoch_index + peer_count + mempool + `pending_param_changes` count (total staged A5 entries; detailed list via `pending_params`) + MD/BFT counters + `next_creators` preview + **`protections`** block (every operator-tunable security flag — see CLI-REFERENCE.md) |
 | `peers` | `{}` | `[address, ...]` |
 | `block` | `{index}` | full block JSON or null |
 | `headers` | `{from, count}` | `{headers: [<header>], from, count, height}` — v2.2 light-client header slice. Each header is the Block JSON minus `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` (the heavy fields a light client doesn't need for committee-sig verification or state_root extraction), plus an explicit `block_hash` field (server-computed: signing_bytes-based `compute_hash` uses the heavy fields the client doesn't have, so the server includes the hash so the client can verify the prev_hash chain links between consecutive headers). Server caps `count` at 256; out-of-range `from` returns empty `headers` array. Also available as gossip-layer `HEADERS_REQUEST` (MsgType 17) / `HEADERS_RESPONSE` (MsgType 18) wire messages — the gossip envelope is byte-identical so any downstream verifier (verify-headers, verify-block-sigs) works against gossip-fetched headers identically. |
 | `chain_summary` | `{last_n}` | array of compact block summaries |
 | `validators` | `{}` | array of pool entries |
 | `committee` | `{}` | current epoch's K-of-K committee |
+| `pending_params` | `{}` | array of `{effective_height, name, value_hex, value_bytes}` — A5 Phase 2 staged PARAM_CHANGE entries not yet activated. Sorted ascending by `effective_height`; within a bucket, in apply-order (insertion order). Empty for `governance_mode=0` deployments. The `status` RPC also exposes the total count as `pending_param_changes`. |
 | **Account queries (S-028 case-normalised at input)** | | |
 | `account` | `{address}` | balance + nonce + registry + stake |
 | `balance` | `{domain}` | balance only (lock-free path) |
