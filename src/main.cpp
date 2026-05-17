@@ -13,6 +13,7 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
+#include <determ/net/rate_limiter.hpp>
 // v2.17: envelope crypto for passphrase-encrypted keyfiles.
 // Lives in wallet/envelope.cpp, also linked into determ binary.
 #include "envelope.hpp"
@@ -26,6 +27,8 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
+#include <chrono>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -189,6 +192,11 @@ In-process tests (deterministic, no network):
                                               + count_round1_aborts (FA1 + FA5
                                               foundation; commit-reveal contract +
                                               BFT quorum arithmetic)
+  determ test-rate-limiter                    S-014 token-bucket rate limiter
+                                              (net::RateLimiter) — disabled-mode
+                                              bypass, first-touch full, burst
+                                              exhaustion, per-key independence,
+                                              refill timing, burst-cap invariant
 
 For details + flags see docs/CLI-REFERENCE.md.
 )" << "\n";
@@ -4859,6 +4867,160 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-rand " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the S-014
+    // per-peer-IP token bucket rate limiter (net::RateLimiter). Used
+    // identically by RpcServer and GossipNet, so a unit test at the
+    // shared-library level locks in the policy for both transports
+    // in one place. The behavioral test (test_gossip_rate_limit.sh)
+    // covers the wire end-to-end; this complements it by exercising
+    // the algebra directly without setting up a network.
+    if (cmd == "test-rate-limiter") {
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. Default state is disabled (rate=0, burst=0): every
+        //    consume() returns true with no bucket allocation.
+        {
+            RateLimiter rl;
+            check(!rl.enabled(),
+                  "default-constructed RateLimiter is disabled");
+            bool all_ok = true;
+            for (int i = 0; i < 1000; ++i) {
+                if (!rl.consume("1.2.3.4")) { all_ok = false; break; }
+            }
+            check(all_ok, "disabled RateLimiter never throttles (1000/1000 pass)");
+        }
+
+        // 2. Explicit configure(0, 0) leaves the limiter disabled.
+        {
+            RateLimiter rl;
+            rl.configure(0.0, 0.0);
+            check(!rl.enabled(), "configure(0, 0) leaves limiter disabled");
+        }
+
+        // 3. Configure with positive rate and burst enables the
+        //    limiter and exposes the values via getters.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            check(rl.enabled(), "configure(10, 5) enables limiter");
+            check(rl.rate_per_sec() == 10.0,
+                  "rate_per_sec() round-trips configured value");
+            check(rl.burst() == 5.0,
+                  "burst() round-trips configured value");
+        }
+
+        // 4. First-touch starts the bucket FULL (legitimate callers
+        //    don't get hit cold). With burst=3, three consecutive
+        //    consume() calls at the same instant all succeed.
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 3.0);  // refill rate small so it doesn't add tokens during the test
+            bool a = rl.consume("ip1");
+            bool b = rl.consume("ip1");
+            bool c = rl.consume("ip1");
+            check(a && b && c,
+                  "first-touch bucket is full (3 consecutive consumes succeed at burst=3)");
+        }
+
+        // 5. Burst exhaustion: the 4th consume at the same instant
+        //    fails (1.0 rate × ~µs elapsed ≪ 1 token).
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 3.0);
+            rl.consume("ip2"); rl.consume("ip2"); rl.consume("ip2");
+            bool fourth = rl.consume("ip2");
+            check(!fourth,
+                  "4th consume at burst=3 same-instant fails (bucket exhausted)");
+        }
+
+        // 6. Per-key independence: exhausting one key doesn't affect
+        //    another (the central security property — one abusive
+        //    peer can't deny service for others).
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 3.0);
+            // Exhaust ipA's bucket.
+            for (int i = 0; i < 3; ++i) rl.consume("ipA");
+            bool ipA_fourth = rl.consume("ipA");
+            // Fresh ipB bucket should still allow 3 consumes.
+            bool ipB_a = rl.consume("ipB");
+            bool ipB_b = rl.consume("ipB");
+            bool ipB_c = rl.consume("ipB");
+            check(!ipA_fourth && ipB_a && ipB_b && ipB_c,
+                  "per-key independence (ipA exhausted does NOT throttle ipB)");
+        }
+
+        // 7. Reconfigure after creation: setting new rate/burst takes
+        //    effect on next consume.
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 1.0);
+            check(rl.consume("ipC"), "burst=1 first consume succeeds");
+            check(!rl.consume("ipC"), "burst=1 second consume fails");
+            // Reconfigure to disabled.
+            rl.configure(0.0, 0.0);
+            check(rl.consume("ipC"),
+                  "reconfigure(0, 0) re-enables passes (disabled bypasses bucket)");
+        }
+
+        // 8. Refill after a brief sleep: with rate=20/sec, sleeping
+        //    100ms should add ~2 tokens (cap at burst). We sleep then
+        //    verify at least one new consume succeeds.
+        {
+            RateLimiter rl;
+            rl.configure(20.0, 2.0);
+            rl.consume("ipD"); rl.consume("ipD");  // drain
+            check(!rl.consume("ipD"), "burst=2 third immediate consume fails");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            check(rl.consume("ipD"),
+                  "after 100ms sleep at rate=20/s, at least one new token (refill works)");
+        }
+
+        // 9. Refill cap: long sleep does NOT exceed burst. With
+        //    burst=3 and a 500ms sleep at rate=100/sec, the bucket
+        //    would otherwise overflow to 50 tokens; the cap holds at
+        //    3, so only 3 consecutive consumes can succeed before a
+        //    fail.
+        {
+            RateLimiter rl;
+            rl.configure(100.0, 3.0);
+            rl.consume("ipE"); rl.consume("ipE"); rl.consume("ipE");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Should now have ~3 tokens (capped), not 50.
+            bool a = rl.consume("ipE");
+            bool b = rl.consume("ipE");
+            bool c = rl.consume("ipE");
+            // The 4th here MUST fail — otherwise the cap is broken.
+            bool d = rl.consume("ipE");
+            check(a && b && c && !d,
+                  "burst cap holds: long sleep at high rate does not exceed burst");
+        }
+
+        // 10. Many distinct keys: 100 keys each consume their entire
+        //     burst, all succeed (per-key independence at scale).
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 2.0);
+            bool all_ok = true;
+            for (int k = 0; k < 100; ++k) {
+                std::string key = "10.0.0." + std::to_string(k);
+                if (!rl.consume(key) || !rl.consume(key)) {
+                    all_ok = false; break;
+                }
+            }
+            check(all_ok, "100 distinct keys each consume 2 tokens — all 200 succeed");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": rate-limiter " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
