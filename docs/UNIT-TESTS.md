@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-22 subcommands; 390 assertions; runs in <14s with no flakes.
+23 subcommands; 417 assertions; runs in <14s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -96,6 +96,7 @@ during development. Each new test wrapper must be added to the
 |---|---|---|---|
 | `determ test-block-rand` | V8 randomness primitives (21 assertions): `compute_delay_seed` (Phase-1 inputs commitment), `compute_block_rand` (Phase-2 output), `proposer_idx` (BFT-mode designated proposer), `required_block_sigs` (MD vs BFT quorum), `count_round1_aborts` (suspension + escalation tally). Determinism + every-input-field sensitivity + creator_dh_inputs / ordered_secrets ORDER sensitivity (the committee-selection-order contract pairing Phase-1 commits with Phase-2 reveals — without this, a malicious gather could reorder reveals to bias future randomness), domain separation between the two hash functions, proposer_idx in-range invariant + abort-rotation mechanism + empty-committee short-circuit, required_block_sigs golden vectors for MD = K and BFT = ceil(2K/3) (K = 1..12), count_round1_aborts round-2 filter. | `tools/test_block_rand.sh` | FA1 / FA5 / FA8 |
 | `determ test-tx-root` | `compute_tx_root` — K-committee union-of-tx-hashes commitment (10 assertions). Union semantics ({A,B} ∪ {B,C} == {A,B,C}, NOT intersection {B}), dedup, list permutation invariance, within-list order invariance, empty inner list invariance, sensitivity to added tx. **The FA2 censorship-resistance primitive** — regression to intersection (note S-025 deletion: intersection variant was removed) would silently let one member exclude txs. | `tools/test_tx_root.sh` | FA2 (censorship) |
+| `determ test-random-state` | Random-state primitives in `crypto/random.cpp` — `compute_dh_output` (2-share fold) + `compute_dh_output_m` (M-share fold, current path) + `update_random_state` (per-block chain) + `compute_abort_hash` + `chain_abort_hash` (S5 anti-cartel — abort-dependent re-selection so attackers can't pre-plan abort sequences) + `genesis_random_state` (block-0 seed). 27 assertions: determinism + argument-order sensitivity + per-input sensitivity for each function. **Foundation layer below** test-block-rand's compute_delay_seed / compute_block_rand. The committee-selection-order contract for compute_dh_output_m + the aborting_node sensitivity in compute_abort_hash are the key invariants — without them, attackers could either reorder reveals or plan abort sequences to bias future selection. | `tools/test_random_state.sh` | V8 / S5 anti-cartel |
 
 ### 2.4 Consensus message surface
 
