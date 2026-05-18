@@ -110,7 +110,10 @@ Usage:
                                               trustless-fast-sync verification; --json emits
                                               machine-readable output for scripts
   determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
-  determ peers                               List connected peers
+  determ peers [--json] [--count]            List connected peers (one per line).
+                                              --count prints a bare integer
+                                              (or `{"count":N}` with --json) —
+                                              one-shot for monitoring scripts.
   determ balance [<domain>]                  Show domain balance
   determ stake <amount> [--fee <n>]          Lock <amount> as registration stake
   determ unstake <amount> [--fee <n>]        Release stake (after deregister + delay)
@@ -519,6 +522,16 @@ Additional in-process tests:
                                               A1 at every boundary, subsidy
                                               linear accrual, state_root
                                               mutation, determinism
+  determ test-tx-edge-cases                   TRANSFER corner cases —
+                                              self-transfer, zero amount,
+                                              missing sender, insufficient
+                                              balance (incl. boundary), A1
+                                              invariant + determinism
+  determ test-snapshot-then-apply             Snapshot+restore equivalence —
+                                              restored chain remains
+                                              operational, post-restore
+                                              apply matches full replay at
+                                              every subsequent height
 )" << "\n";
 }
 
@@ -2368,12 +2381,26 @@ static int cmd_show_tx(int argc, char** argv) {
 //   emits the raw RPC array verbatim (one JSON array of strings).
 static int cmd_peers(int argc, char** argv) {
     bool json_out = false;
+    bool count_only = false;
     for (int i = 0; i < argc; ++i) {
-        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+        std::string a = argv[i];
+        if (a == "--json")       json_out   = true;
+        else if (a == "--count") count_only = true;
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "peers");
+        // --count: bare integer (count of connected peers) for shell
+        // scripts. Result MUST be an array; degenerate non-array values
+        // print 0 (so a malformed RPC response can't crash monitoring
+        // dashboards). --count and --json compose: --count + --json
+        // emits `{"count": N}` (single-line, machine-readable).
+        if (count_only) {
+            size_t n = result.is_array() ? result.size() : 0;
+            if (json_out) std::cout << json({{"count", n}}).dump() << "\n";
+            else          std::cout << n << "\n";
+            return 0;
+        }
         if (json_out) {
             std::cout << result.dump(2) << "\n";
             return 0;
@@ -18308,6 +18335,490 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": multi-block-chain " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: TRANSFER corner cases beyond test-chain-apply-block /
+    // test-multi-tx-block. The big in-the-happy-path cases are covered;
+    // this test fills the edges where wrong/malformed/degenerate inputs
+    // either silently skip (apply-side safety net) or get clamped:
+    //   - Self-transfer (alice → alice)
+    //   - Zero-amount + zero-fee no-op
+    //   - Zero-amount + non-zero fee (pay creator nothing else)
+    //   - Missing sender (operator[] creates 0-balance entry → skip)
+    //   - Insufficient balance: amount > balance, fee = 0
+    //   - Insufficient balance: balance covers fee but not amount + fee
+    //   - All edge cases preserve A1 invariant and are deterministic
+    if (cmd == "test-tx-edge-cases") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a minimal genesis fixture (no stake — simpler A1 math).
+        GenesisConfig cfg;
+        cfg.chain_id = "tx-edge-cases-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 100;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 50;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // === Self-transfer: alice → alice ===
+
+        // 1. TRANSFER alice → alice (amount=20, fee=1). Apply order:
+        //    sender.balance -= cost (=21); accounts_[tx.to=alice].balance += amount.
+        //    Same map entry, so net effect on alice.balance is -fee = -1.
+        //    Then fee returns via creator (alice is sole creator) so net 0.
+        //    Nonce bumps. A1 holds (intra-shard, value-conserving).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t alice_before = c.balance("alice");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "alice";
+            tx.amount = 20; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == alice_before,
+                  "self-transfer: alice.balance NET unchanged (fee returns via creator)");
+            check(c.next_nonce("alice") == 1,
+                  "self-transfer: nonce 0 → 1");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds under self-transfer");
+        }
+
+        // === Zero-amount + zero-fee no-op ===
+
+        // 2. TRANSFER alice → bob (amount=0, fee=0). cost=0, balance unchanged,
+        //    receiver += 0, nonce++. Pure no-op except nonce.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t alice_before = c.balance("alice");
+            uint64_t bob_before   = c.balance("bob");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 0; tx.fee = 0; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == alice_before,
+                  "zero/zero TRANSFER: alice unchanged");
+            check(c.balance("bob") == bob_before,
+                  "zero/zero TRANSFER: bob unchanged");
+            check(c.next_nonce("alice") == 1,
+                  "zero/zero TRANSFER: nonce 0 → 1");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds under zero/zero TRANSFER");
+        }
+
+        // === Zero-amount + non-zero fee ===
+
+        // 3. TRANSFER alice → bob (amount=0, fee=1). alice pays the fee
+        //    (then receives it back via creator distribution = no net change).
+        //    bob unchanged. Nonce++.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t alice_before = c.balance("alice");
+            uint64_t bob_before   = c.balance("bob");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 0; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == alice_before,
+                  "zero-amount + fee: alice NET unchanged (fee returns)");
+            check(c.balance("bob") == bob_before,
+                  "zero-amount + fee: bob unchanged");
+            check(c.next_nonce("alice") == 1,
+                  "zero-amount + fee: nonce 0 → 1");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds under zero-amount + fee");
+        }
+
+        // === Sender doesn't exist in accounts ===
+
+        // 4. TRANSFER from "ghost" (no genesis entry, no prior tx).
+        //    accounts_[tx.from] operator[] creates entry with balance=0,
+        //    next_nonce=0. tx.nonce=0 matches. cost=amount+fee=11; balance
+        //    (0) < cost → silent skip (continue in apply loop). No nonce
+        //    bump, no state change, no fee charged.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t bob_before = c.balance("bob");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "ghost"; tx.to = "bob";
+            tx.amount = 10; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("ghost") == 0,
+                  "missing-sender TRANSFER: ghost balance stays 0");
+            check(c.balance("bob") == bob_before,
+                  "missing-sender TRANSFER: bob unchanged (skip)");
+            check(c.next_nonce("ghost") == 0,
+                  "missing-sender TRANSFER: nonce NOT bumped on skip");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds under missing-sender skip");
+        }
+
+        // === Insufficient balance: amount > balance ===
+
+        // 5. alice has balance=100. TRANSFER amount=200, fee=0. cost=200 > 100
+        //    → silent skip. No nonce bump.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t alice_before = c.balance("alice");
+            uint64_t bob_before   = c.balance("bob");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 200; tx.fee = 0; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == alice_before,
+                  "insufficient-balance (amount>balance): alice unchanged");
+            check(c.balance("bob") == bob_before,
+                  "insufficient-balance (amount>balance): bob unchanged");
+            check(c.next_nonce("alice") == 0,
+                  "insufficient-balance (amount>balance): nonce NOT bumped");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds under skip");
+        }
+
+        // === Insufficient balance: balance covers fee, not amount + fee ===
+
+        // 6. alice balance=100. TRANSFER amount=100, fee=1. cost=101 > 100
+        //    → silent skip. Defends against partial-debit attacks where an
+        //    attacker might hope to "land the fee but not the amount".
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t alice_before = c.balance("alice");
+            uint64_t bob_before   = c.balance("bob");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == alice_before,
+                  "edge: balance == amount alone, fee tips over: alice unchanged");
+            check(c.balance("bob") == bob_before,
+                  "edge: balance == amount alone, fee tips over: bob unchanged");
+            check(c.next_nonce("alice") == 0,
+                  "edge: balance == amount alone, fee tips over: nonce stays");
+        }
+
+        // === Boundary: balance == amount + fee exactly ===
+
+        // 7. alice balance=100. TRANSFER amount=99, fee=1. cost=100 == balance
+        //    → SUCCEEDS (strict `<` check). alice -= 100, bob += 99,
+        //    fee 1 returns via creator → alice net = -99, bob = +99.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t bob_before = c.balance("bob");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 99; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == 100 - 99,
+                  "boundary: balance == amount+fee exact: alice = 1 (net -99)");
+            check(c.balance("bob") == bob_before + 99,
+                  "boundary: balance == amount+fee exact: bob credited 99");
+            check(c.next_nonce("alice") == 1,
+                  "boundary: nonce 0 → 1");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds at exact-balance boundary");
+        }
+
+        // === Determinism across edges ===
+
+        // 8. Two chains apply identical edge-case mix → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+
+            std::vector<Transaction> mix;
+            // Self-transfer
+            { Transaction t; t.type = TxType::TRANSFER;
+              t.from = "alice"; t.to = "alice"; t.amount = 5; t.fee = 1; t.nonce = 0;
+              mix.push_back(t); }
+            // Zero / fee
+            { Transaction t; t.type = TxType::TRANSFER;
+              t.from = "alice"; t.to = "bob"; t.amount = 0; t.fee = 1; t.nonce = 1;
+              mix.push_back(t); }
+            // Missing sender (skipped)
+            { Transaction t; t.type = TxType::TRANSFER;
+              t.from = "ghost"; t.to = "bob"; t.amount = 1; t.fee = 0; t.nonce = 0;
+              mix.push_back(t); }
+
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions = mix;
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same edge-case mix → same state_root");
+            check(c1.balance("alice") == c2.balance("alice")
+                  && c1.next_nonce("alice") == c2.next_nonce("alice"),
+                  "determinism: same edge-case mix → same balance + nonce");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": tx-edge-cases " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: snapshot+restore chain remains OPERATIONAL —
+    // post-restore appends produce identical state to a fresh full
+    // replay from genesis. This is the property that snapshots are
+    // "equivalent to replay" beyond the round-trip semantics
+    // covered by test-snapshot-roundtrip (which only checks read-side
+    // invariants post-restore, not whether further apply works).
+    //
+    // Strategy:
+    //   - Chain A (control): fresh genesis → 5 blocks with mixed txs
+    //   - Chain B (target):  fresh genesis → 3 blocks (same as A's 1..3)
+    //                      → serialize_state → restore_from_snapshot
+    //                      → apply A's blocks 4 + 5
+    //   - Assert A.state_root == B.state_root at every height post-restore
+    //   - Assert A.balance == B.balance for every account
+    //   - Assert A.next_nonce == B.next_nonce for every sender
+    //   - Assert A1 invariant on B throughout
+    if (cmd == "test-snapshot-then-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "snapshot-then-apply-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // Identical 5-block sequence builder. Each invocation returns a
+        // fresh Chain that has been mutated through the exact same 5
+        // block applies — the "ground truth" against which restored
+        // chains are compared.
+        auto build_chain = [&](uint64_t up_to_height) {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(10);
+            c.set_unstake_delay(2);
+
+            // Block 1: TRANSFER alice → bob 50
+            if (up_to_height >= 1) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = "bob";
+                tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+                Block b;
+                b.index = 1; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                c.append(b);
+            }
+            // Block 2: empty (subsidy only)
+            if (up_to_height >= 2) {
+                Block b;
+                b.index = 2; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+            // Block 3: TRANSFER alice → bob 30
+            if (up_to_height >= 3) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = "bob";
+                tx.amount = 30; tx.fee = 1; tx.nonce = 1;
+                Block b;
+                b.index = 3; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                c.append(b);
+            }
+            // Block 4: TRANSFER alice → bob 20  (post-restore region)
+            if (up_to_height >= 4) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = "bob";
+                tx.amount = 20; tx.fee = 1; tx.nonce = 2;
+                Block b;
+                b.index = 4; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                c.append(b);
+            }
+            // Block 5: empty (subsidy only)
+            if (up_to_height >= 5) {
+                Block b;
+                b.index = 5; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+            return c;
+        };
+
+        // === Build control chain A: full replay 0..5 ===
+        Chain A = build_chain(5);
+        check(A.height() == 6,
+              "control: chain A reaches height 6 (genesis + 5 blocks)");
+        check(A.expected_total() == A.live_total_supply(),
+              "control: A1 invariant on chain A");
+
+        // === Build target chain B: replay 0..3, snapshot, restore, apply 4..5 ===
+        Chain B_pre = build_chain(3);
+        check(B_pre.height() == 4,
+              "target setup: B_pre reaches height 4 (genesis + 3 blocks)");
+
+        // Snapshot the partial chain.
+        json snap = B_pre.serialize_state(16);
+        Chain B = Chain::restore_from_snapshot(snap);
+
+        // === Post-restore state matches the control chain at same height ===
+
+        check(B.height() == B_pre.height(),
+              "restore: B.height matches snapshot-time height");
+        check(B.compute_state_root() == B_pre.compute_state_root(),
+              "restore: B.state_root matches snapshot-time root (S-033/S-038)");
+
+        // Build a separate control at exactly height 3 to compare against.
+        Chain A_at_3 = build_chain(3);
+        check(B.compute_state_root() == A_at_3.compute_state_root(),
+              "restore vs. fresh-replay: same state_root at restore point");
+        check(B.balance("alice") == A_at_3.balance("alice")
+              && B.balance("bob") == A_at_3.balance("bob"),
+              "restore vs. fresh-replay: same account balances");
+        check(B.next_nonce("alice") == A_at_3.next_nonce("alice"),
+              "restore vs. fresh-replay: same next_nonce(alice)");
+
+        // === Apply A's blocks 4 and 5 to B and verify match per height ===
+
+        // After restore, B's setters need to be re-applied — block_subsidy
+        // and unstake_delay live in the snapshot as constants, so they're
+        // preserved. Verify that before proceeding.
+        check(B.block_subsidy() == 10,
+              "restore: block_subsidy preserved across snapshot");
+
+        // Block 4: TRANSFER alice → bob 20
+        {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 20; tx.fee = 1; tx.nonce = 2;
+            Block b;
+            b.index = 4; b.prev_hash = B.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            B.append(b);
+        }
+        Chain A_at_4 = build_chain(4);
+        check(B.compute_state_root() == A_at_4.compute_state_root(),
+              "post-restore apply: state_root after block 4 matches replay");
+        check(B.balance("alice") == A_at_4.balance("alice")
+              && B.balance("bob") == A_at_4.balance("bob"),
+              "post-restore apply: balances after block 4 match replay");
+        check(B.next_nonce("alice") == A_at_4.next_nonce("alice"),
+              "post-restore apply: next_nonce(alice) after block 4 matches");
+        check(B.expected_total() == B.live_total_supply(),
+              "A1: invariant holds on B after post-restore block 4");
+
+        // Block 5: empty (subsidy only)
+        {
+            Block b;
+            b.index = 5; b.prev_hash = B.head().compute_hash();
+            b.creators = {"alice"};
+            B.append(b);
+        }
+        check(B.compute_state_root() == A.compute_state_root(),
+              "post-restore apply: final state_root matches full-replay A");
+        check(B.height() == A.height(),
+              "post-restore apply: final height matches A");
+        check(B.head().compute_hash() == A.head().compute_hash(),
+              "post-restore apply: final head_hash matches A");
+        check(B.balance("alice") == A.balance("alice")
+              && B.balance("bob") == A.balance("bob"),
+              "post-restore apply: final balances match A");
+        check(B.next_nonce("alice") == A.next_nonce("alice"),
+              "post-restore apply: final next_nonce(alice) matches A");
+        check(B.accumulated_subsidy() == A.accumulated_subsidy(),
+              "post-restore apply: accumulated_subsidy matches A");
+        check(B.expected_total() == B.live_total_supply(),
+              "A1: invariant holds on B at final height");
+
+        // === Sanity: A1 holds on both ===
+        check(A.expected_total() == A.live_total_supply(),
+              "control: A1 holds on full-replay A at final height");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": snapshot-then-apply " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
