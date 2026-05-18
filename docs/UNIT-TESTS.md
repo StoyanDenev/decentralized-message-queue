@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-62 subcommands; 1287 assertions; runs in <32s with no flakes.
+64 subcommands; 1309 assertions; runs in <33s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -128,6 +128,8 @@ during development. Each new test wrapper must be added to the
 | `determ test-state-root-namespaces` | Exhaustive 10-namespace `compute_state_root` coverage — S-033 invariant. 12 assertions covering each of the 10 namespaces (a:/s:/r:/d:/i:/b:/m:/p:/k:/k:c:) — mutating each via the appropriate apply or setter path verifies state_root changes; baseline equality on identical chains; cross-namespace independence (different namespace mutations → distinct roots, no accidental collision). Catches the "forgotten-leaf-emission" and "wrong-key-encoding" regression classes that would silently fork at the state_root verification gate. | `tools/test_state_root_namespaces.sh` | S-033 / state_root |
 | `determ test-multi-tx-block` | Multi-tx block apply semantics (18 assertions across 6 blocks). Two TRANSFERs from same sender with ascending nonces; same sender + wrong nonce on second (defensive skip); two different senders in same block (independent nonce counters); interleaved alice→bob→alice; insufficient balance mid-block (silent skip without nonce++ — subsequent tx still applies); A1 invariant after multi-tx. Covers the in-block tx-ordering contract enabling sender-batched operations in a single block. | `tools/test_multi_tx_block.sh` | apply ordering / multi-tx |
 | `determ test-state-proof-namespaces` | `Chain::state_proof` verify path across all major state namespaces — a/s/r/b/d (9 assertions). Per-namespace inclusion + `crypto::merkle_verify` under root for accounts, stakes, registrants, abort_records, DApp registry; cross-namespace independence (5 distinct value_hashes → no accidental collision); cross-namespace proof-swap rejection (a:-key with s: value_hash fails); non-existent stake key → nullopt; determinism (2 proofs byte-identical). Complements `test-state-proof` (a:-namespace in-depth coverage). | `tools/test_state_proof_namespaces.sh` | v2.2 light-client / namespaces |
+| `determ test-applied-receipt-restore` | applied_inbound_receipts dedup-set survives snapshot serialize/restore (10 assertions). Baseline (3 distinct receipts credit; dedup-set predicate matches); snapshot → restore preserves balance + dedup-set + predicate; **critical** — duplicate `(src_shard, tx_hash)` on restored chain silently skipped (exactly-once-credit preserved across bootstrap, defeating double-credit attacks); fresh receipt post-restore credits normally; S-033 state_root preserved through restore (i:-namespace included); A1 accumulated_inbound + invariant preserved. | `tools/test_applied_receipt_restore.sh` | rev.9 B3.4 / S-033 / fast-sync |
+| `determ test-stake-accounting` | Comprehensive stake-state-machine invariants (12 assertions). Genesis (locked = initial_stake, unlock_height = UINT64_MAX sentinel); STAKE (locked += amount, unlock_height unchanged); slash (locked -= SUSPENSION_SLASH, unlock_height unchanged); DEREGISTER (unlock_height = inactive_from + unstake_delay); UNSTAKE pre-unlock (silent fail + fee refund); UNSTAKE post-unlock (locked → balance); A1 conservation (STAKE moves value, full STAKE→UNSTAKE round-trip conserves supply). Complements `test-unstake-deregister-apply` (per-tx) with full-lifecycle composition. | `tools/test_stake_accounting.sh` | stake lifecycle / composition |
 
 ### 2.3 Randomness + consensus arithmetic + tx-root
 

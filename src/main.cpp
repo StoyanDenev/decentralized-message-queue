@@ -90,10 +90,11 @@ Usage:
   determ block-hash <index>                  Print just compute_hash of block at
                                               <index> (64-hex). Useful for
                                               cross-node fork detection scripts.
-  determ head [--json]                       Print just <height> <head_hash>
-                                              (space-separated; --json for
-                                              structured output). For monitoring
-                                              scripts tracking chain advancement.
+  determ head [--field height|hash] [--json]
+                                              Print just <height> <head_hash>
+                                              (space-separated; --field <one>
+                                              prints just height or hash;
+                                              --json emits structured object).
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -486,6 +487,14 @@ Additional in-process tests:
                                               major namespaces (a/s/r/b/d) +
                                               cross-namespace independence +
                                               swap-rejection defense
+  determ test-applied-receipt-restore         applied_inbound_receipts dedup
+                                              survives snapshot restore —
+                                              exactly-once-credit preserved
+                                              across fast-sync bootstrap
+  determ test-stake-accounting                Full stake-state-machine
+                                              invariants — STAKE / UNSTAKE /
+                                              DEREGISTER / slash interaction
+                                              + A1 conservation across lifecycle
 )" << "\n";
 }
 
@@ -1605,17 +1614,27 @@ static int cmd_pending_params(int argc, char** argv) {
     return 0;
 }
 
-// determ head [--json] [--rpc-port P]
+// determ head [--field height|hash] [--json] [--rpc-port P]
 //   Print just the chain's current head — height + head_hash on a
 //   single line (space-separated by default). For monitoring scripts
 //   tracking chain advancement:
 //     while true; do read h hash <<< "$(determ head)"; echo "$h $hash"; sleep 1; done
+//   --field height  prints just the height (no hash) — for `expr`-style scripts.
+//   --field hash    prints just the hash (no height).
 //   --json emits {height, head_hash} for scripts that want structured output.
-//   Pulls from status RPC. Exit 1 if no chain loaded.
+//   Pulls from status RPC. Exit 1 if no chain loaded or --field value unknown.
 static int cmd_head(int argc, char** argv) {
     bool json_out = false;
+    std::string field;
     for (int i = 0; i < argc; ++i) {
-        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--field" && i + 1 < argc) field = argv[i + 1];
+    }
+    if (!field.empty() && field != "height" && field != "hash") {
+        std::cerr << "Error: --field must be 'height' or 'hash', got '"
+                  << field << "'\n";
+        return 1;
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
@@ -1629,9 +1648,11 @@ static int cmd_head(int argc, char** argv) {
         if (json_out) {
             json out = {{"height", height}, {"head_hash", head_hash}};
             std::cout << out.dump() << "\n";
-        } else {
-            std::cout << height << " " << head_hash << "\n";
+            return 0;
         }
+        if (field == "height")     std::cout << height    << "\n";
+        else if (field == "hash")  std::cout << head_hash << "\n";
+        else                       std::cout << height << " " << head_hash << "\n";
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -16887,6 +16908,391 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-proof-namespaces " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: applied_inbound_receipts dedup-set survives
+    // snapshot serialize / restore. The exactly-once-credit guarantee
+    // for cross-shard receipts depends on this set being preserved
+    // across fast-sync bootstrap. Without persistence, a node that
+    // bootstraps from a snapshot would lose the dedup state and
+    // could re-credit any receipt that arrives via post-bootstrap
+    // gossip (forge double-credit attack on cross-shard transfers).
+    if (cmd == "test-applied-receipt-restore") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a chain, apply some inbound receipts, then snapshot
+        // + restore + verify dedup-set survives.
+        GenesisConfig cfg;
+        cfg.chain_id = "applied-receipt-restore-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain = "bob"; bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        auto make_receipt = [](ShardId src_shard, uint8_t tx_seed,
+                                const std::string& to_domain, uint64_t amount) {
+            CrossShardReceipt r;
+            r.src_shard = src_shard; r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = tx_seed;
+            r.from = "remote";
+            r.to = to_domain;
+            r.amount = amount;
+            r.fee = 0; r.nonce = 0;
+            return r;
+        };
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+
+        // Apply 3 distinct inbound receipts.
+        {
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(make_receipt(ShardId{1}, 0x01, "bob", 10));
+            b.inbound_receipts.push_back(make_receipt(ShardId{1}, 0x02, "bob", 20));
+            b.inbound_receipts.push_back(make_receipt(ShardId{2}, 0x03, "bob", 30));
+            c.append(b);
+        }
+
+        // === Pre-restore baseline ===
+
+        // 1. All 3 receipts applied → bob credited 60.
+        check(c.balance("bob") == 200 + 60,
+              "baseline: bob credited 10+20+30 = 60");
+
+        // 2. inbound_receipt_applied predicate matches the 3 entries.
+        {
+            Hash h1{}; h1[0] = 0x01;
+            Hash h2{}; h2[0] = 0x02;
+            Hash h3{}; h3[0] = 0x03;
+            check(c.inbound_receipt_applied(ShardId{1}, h1)
+                  && c.inbound_receipt_applied(ShardId{1}, h2)
+                  && c.inbound_receipt_applied(ShardId{2}, h3),
+                  "baseline: all 3 (src_shard, tx_hash) pairs in dedup set");
+        }
+
+        // === Snapshot + restore ===
+
+        // 3. Serialize → restore → bob's balance preserved.
+        json snap = c.serialize_state(16);
+        Chain r = Chain::restore_from_snapshot(snap);
+        check(r.balance("bob") == c.balance("bob"),
+              "restore: bob's balance preserved (260)");
+
+        // 4. Snapshot JSON has applied_inbound_receipts field with 3 entries.
+        check(snap.contains("applied_inbound_receipts")
+              && snap["applied_inbound_receipts"].is_array()
+              && snap["applied_inbound_receipts"].size() == 3,
+              "snapshot: applied_inbound_receipts has all 3 entries");
+
+        // 5. inbound_receipt_applied predicate returns true post-restore.
+        {
+            Hash h1{}; h1[0] = 0x01;
+            Hash h2{}; h2[0] = 0x02;
+            Hash h3{}; h3[0] = 0x03;
+            check(r.inbound_receipt_applied(ShardId{1}, h1)
+                  && r.inbound_receipt_applied(ShardId{1}, h2)
+                  && r.inbound_receipt_applied(ShardId{2}, h3),
+                  "restore: dedup-set entries present (exactly-once preserved)");
+        }
+
+        // === Critical: re-applying a duplicate on restored chain is NO-OP ===
+
+        // 6. After restore, applying a receipt with same (src_shard,
+        //    tx_hash) as one of the originals is silently skipped
+        //    (the dedup set survived). Without this, an attacker
+        //    could double-credit by gossipping the same receipt
+        //    post-bootstrap.
+        {
+            uint64_t bob_before = r.balance("bob");
+            Block dup;
+            dup.index = 2; dup.prev_hash = r.head().compute_hash();
+            dup.creators = {"alice"};
+            dup.inbound_receipts.push_back(make_receipt(ShardId{1}, 0x01, "bob", 999));
+            r.append(dup);
+            check(r.balance("bob") == bob_before,
+                  "dedup survives restore: duplicate receipt NOT re-credited");
+        }
+
+        // === New receipt with distinct (src_shard, tx_hash) is OK ===
+
+        // 7. A truly new receipt (new tx_hash) applies normally on
+        //    the restored chain.
+        {
+            uint64_t bob_before = r.balance("bob");
+            Block fresh;
+            fresh.index = r.height();
+            fresh.prev_hash = r.head().compute_hash();
+            fresh.creators = {"alice"};
+            fresh.inbound_receipts.push_back(make_receipt(ShardId{1}, 0xAA, "bob", 5));
+            r.append(fresh);
+            check(r.balance("bob") == bob_before + 5,
+                  "fresh receipt post-restore: credited normally");
+        }
+
+        // === state_root preserved across restore ===
+
+        // 8. The S-033 contract: compute_state_root must match
+        //    pre-snapshot, otherwise the post-restore block-validation
+        //    gate would reject the first new block.
+        check(c.compute_state_root() == Chain::restore_from_snapshot(snap)
+                                            .compute_state_root(),
+              "S-033: state_root preserved through restore (applied_inbound included in i:-namespace)");
+
+        // === A1 invariant holds post-restore ===
+
+        // 9. accumulated_inbound counter survives → A1 invariant holds.
+        Chain r2 = Chain::restore_from_snapshot(snap);
+        check(r2.accumulated_inbound() == 60,
+              "A1: accumulated_inbound counter preserved (60)");
+        check(r2.expected_total() == r2.live_total_supply(),
+              "A1 invariant: expected == live after restore");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": applied-receipt-restore " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: comprehensive stake-state-machine invariants.
+    // STAKE / UNSTAKE / DEREGISTER / slash interact non-trivially
+    // around the unlock_height sentinel + locked balance. This test
+    // exercises the full state machine in a structured way that the
+    // per-tx-apply tests don't compose.
+    if (cmd == "test-stake-accounting") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "stake-accounting-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        auto encode = [](uint64_t v) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i)
+                p[i] = uint8_t((v >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        auto apply_one = [&](Chain& c, const Transaction& tx) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(0x42);
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // === Genesis stake state ===
+
+        // 1. Genesis stake matches initial_stake; unlock_height is
+        //    the sentinel UINT64_MAX (never unlockable).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            check(c.stake("alice") == 500,
+                  "genesis: alice stake == initial_stake = 500");
+            check(c.stake_unlock_height("alice") == UINT64_MAX,
+                  "genesis: alice unlock_height == UINT64_MAX (sentinel)");
+        }
+
+        // === STAKE adds to locked, preserves unlock_height ===
+
+        // 2. STAKE doesn't change unlock_height (only DEREGISTER does).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = encode(200);
+            apply_one(c, tx);
+
+            check(c.stake("alice") == 700,
+                  "STAKE: locked 500 + 200 = 700");
+            check(c.stake_unlock_height("alice") == UINT64_MAX,
+                  "STAKE: unlock_height unchanged (sentinel)");
+        }
+
+        // === Slash reduces locked, preserves unlock_height ===
+
+        // 3. AbortEvent slash deducts SUSPENSION_SLASH from locked.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            AbortEvent ae;
+            ae.round = 1; ae.aborting_node = "alice";
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.abort_events.push_back(ae);
+            c.append(b);
+
+            check(c.stake("alice") == 500 - 10,  // SUSPENSION_SLASH = 10
+                  "slash: locked 500 - SUSPENSION_SLASH(10) = 490");
+            check(c.stake_unlock_height("alice") == UINT64_MAX,
+                  "slash: unlock_height unchanged");
+        }
+
+        // === DEREGISTER sets unlock_height ===
+
+        // 4. DEREGISTER sets unlock_height = inactive_from + unstake_delay.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(5);
+
+            Transaction tx;
+            tx.type = TxType::DEREGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            apply_one(c, tx);
+
+            uint64_t unlock = c.stake_unlock_height("alice");
+            check(unlock != UINT64_MAX && unlock > 0,
+                  "DEREGISTER: unlock_height set to finite value (no longer sentinel)");
+
+            // unlock = registrant.inactive_from + unstake_delay_
+            auto reg = c.registrant("alice");
+            check(reg.has_value()
+                  && unlock == reg->inactive_from + c.unstake_delay(),
+                  "DEREGISTER: unlock_height = inactive_from + unstake_delay");
+        }
+
+        // === UNSTAKE gated by unlock_height ===
+
+        // 5. UNSTAKE before unlock_height fails (silent + fee refund).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = encode(100);
+            apply_one(c, tx);
+
+            check(c.stake("alice") == 500,
+                  "UNSTAKE before unlock: stake unchanged");
+            check(c.balance("alice") == 1000,
+                  "UNSTAKE before unlock: balance unchanged (fee refunded)");
+        }
+
+        // === UNSTAKE after unlock_height succeeds ===
+
+        // 6. After DEREGISTER + unlock delay, UNSTAKE moves locked → balance.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1);
+
+            // Block 1: DEREGISTER alice.
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            apply_one(c, dereg);
+
+            uint64_t unlock = c.stake_unlock_height("alice");
+
+            // Advance to unlock height with empty blocks.
+            while (c.height() <= unlock) {
+                Block b;
+                b.index = c.height(); b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+
+            // UNSTAKE 200.
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;
+            tx.payload = encode(200);
+            uint64_t bal_before = c.balance("alice");
+            apply_one(c, tx);
+
+            check(c.stake("alice") == 300,
+                  "UNSTAKE post-unlock: locked 500 - 200 = 300");
+            check(c.balance("alice") == bal_before + 200,
+                  "UNSTAKE post-unlock: balance += 200 (fee net-zero with creator)");
+        }
+
+        // === Value conservation across the stake state machine ===
+
+        // 7. A1 invariant: locked + balance is conserved through
+        //    STAKE → UNSTAKE round-trip (modulo slash + subsidy).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1);
+            uint64_t baseline = c.live_total_supply();
+
+            // STAKE 100.
+            Transaction stake;
+            stake.type = TxType::STAKE;
+            stake.from = "alice"; stake.fee = 1; stake.nonce = 0;
+            stake.payload = encode(100);
+            apply_one(c, stake);
+            check(c.live_total_supply() == baseline,
+                  "A1: STAKE moves value (balance → locked), no supply change");
+
+            // DEREGISTER + advance + UNSTAKE 100.
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 1;
+            apply_one(c, dereg);
+
+            uint64_t unlock = c.stake_unlock_height("alice");
+            while (c.height() <= unlock) {
+                Block b;
+                b.index = c.height(); b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+
+            Transaction unstake;
+            unstake.type = TxType::UNSTAKE;
+            unstake.from = "alice"; unstake.fee = 1; unstake.nonce = 2;
+            unstake.payload = encode(100);
+            apply_one(c, unstake);
+            check(c.live_total_supply() == baseline,
+                  "A1: full STAKE → UNSTAKE round-trip → supply conserved");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": stake-accounting " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
