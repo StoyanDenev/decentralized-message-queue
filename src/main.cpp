@@ -66,10 +66,13 @@ Usage:
                                               field's value (one-shot extraction)
   determ show-block <index>                  Print block at index (full JSON)
   determ chain-summary [--last N]            Compact summary of last N blocks
-  determ validators [--filter-region R] [--json]
+  determ validators [--filter-region R] [--json] [--count]
                                               List the current validator pool;
                                               --filter-region R filters to
-                                              validators in region R (rev.9 R1)
+                                              validators in region R (rev.9 R1).
+                                              --count prints just an integer
+                                              (composes with --filter-region
+                                              and --json).
   determ committee                           List the current epoch's K-of-K committee
   determ pending-params [--at-height N] [--json]
                                               A5 staged PARAM_CHANGE entries
@@ -532,6 +535,17 @@ Additional in-process tests:
                                               operational, post-restore
                                               apply matches full replay at
                                               every subsequent height
+  determ test-genesis-with-region             R1 regional creator coverage —
+                                              region propagation through
+                                              registry; genesis-hash
+                                              sensitivity to creator.region
+                                              + committee_region; snapshot
+                                              + state_root preservation
+  determ test-anon-routing                    Anon-address routing
+                                              integration — make/parse round-
+                                              trip, case-variant routes to
+                                              same shard (S-028), local vs
+                                              cross-shard TRANSFER, A1
 )" << "\n";
 }
 
@@ -1442,11 +1456,13 @@ static int cmd_headers(int argc, char** argv) {
 //   shape `verify-block-sigs --committee` consumes.
 static int cmd_validators(int argc, char** argv) {
     bool json_out = false;
+    bool count_only = false;
     std::string filter_region;
     bool have_filter = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--json") json_out = true;
+        if (a == "--json")        json_out   = true;
+        else if (a == "--count")  count_only = true;
         else if (a == "--filter-region" && i + 1 < argc) {
             have_filter = true;
             filter_region = argv[i + 1];
@@ -1466,6 +1482,17 @@ static int cmd_validators(int argc, char** argv) {
                 }
             }
             result = std::move(filtered);
+        }
+
+        // --count: bare integer (count of validators after region filter)
+        // for shell scripts. Composes with --filter-region (count just
+        // the regional subset) and --json (emit `{"count": N}`). Defends
+        // against non-array responses by reporting 0.
+        if (count_only) {
+            size_t n = result.is_array() ? result.size() : 0;
+            if (json_out) std::cout << json({{"count", n}}).dump() << "\n";
+            else          std::cout << n << "\n";
+            return 0;
         }
 
         if (json_out) {
@@ -18819,6 +18846,413 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": snapshot-then-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: R1 regional creator coverage. test-genesis +
+    // test-make-genesis-block already cover compute_genesis_hash and
+    // make_genesis_block invariants; this test fills the R1 region-
+    // specific surface: region propagates through GenesisCreator →
+    // GenesisAlloc → registry, and genesis-hash is sensitive to both
+    // GenesisConfig.committee_region and GenesisCreator.region.
+    //
+    // Why this matters: rev.9 R1 region pinning is the basis of R2
+    // (region-aware committee selection) and R4 (partner_subset_hash
+    // bound into block.signing_bytes). Silent drift in region storage
+    // would manifest as wrong committee composition + wrong block hashes.
+    if (cmd == "test-genesis-with-region") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto make_cfg = [](const std::string& alice_region,
+                            const std::string& bob_region,
+                            const std::string& committee_region) {
+            GenesisConfig cfg;
+            cfg.chain_id = "genesis-with-region-test";
+            cfg.committee_region = committee_region;
+            GenesisCreator a_c, b_c;
+            a_c.domain = "alice"; b_c.domain = "bob";
+            for (size_t i = 0; i < a_c.ed_pub.size(); ++i) {
+                a_c.ed_pub[i] = uint8_t(0x10 + i);
+                b_c.ed_pub[i] = uint8_t(0x20 + i);
+            }
+            a_c.initial_stake = 500;
+            b_c.initial_stake = 300;
+            a_c.region = alice_region;
+            b_c.region = bob_region;
+            cfg.initial_creators = {a_c, b_c};
+            GenesisAllocation ab, bb;
+            ab.domain = "alice"; ab.balance = 1000;
+            bb.domain = "bob";   bb.balance = 200;
+            cfg.initial_balances = {ab, bb};
+            return cfg;
+        };
+
+        // === Region propagates to registry ===
+
+        // 1. After genesis, registrants_["alice"].region matches the
+        //    GenesisCreator.region set at config time.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg("us-east", "eu-west", "")));
+            auto ra = c.registrant("alice");
+            auto rb = c.registrant("bob");
+            check(ra.has_value() && ra->region == "us-east",
+                  "region propagates: alice.region == us-east in registry");
+            check(rb.has_value() && rb->region == "eu-west",
+                  "region propagates: bob.region == eu-west in registry");
+        }
+
+        // === Empty region (pre-R1 backward compat) ===
+
+        // 2. Empty region (the default) stays empty in registry.
+        //    Existing genesis files (no region field) must hash identically.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg("", "", "")));
+            auto ra = c.registrant("alice");
+            check(ra.has_value() && ra->region == "",
+                  "empty region: stays empty (backward compat)");
+        }
+
+        // === Genesis-hash sensitivity to creator.region ===
+
+        // 3. Changing alice's region MUST change the genesis hash.
+        //    Otherwise an adversary could swap regions silently.
+        {
+            Hash h_us  = compute_genesis_hash(make_cfg("us-east", "eu-west", ""));
+            Hash h_apa = compute_genesis_hash(make_cfg("apac",    "eu-west", ""));
+            check(h_us != h_apa,
+                  "genesis hash sensitive to GenesisCreator.region");
+        }
+
+        // === Genesis-hash sensitivity to committee_region ===
+
+        // 4. Two genesis configs differing only in committee_region MUST
+        //    produce different genesis hashes (so two regional shards
+        //    can't collide on chain identity).
+        {
+            Hash h_global   = compute_genesis_hash(make_cfg("us-east", "eu-west", ""));
+            Hash h_us_pin   = compute_genesis_hash(make_cfg("us-east", "eu-west", "us-east"));
+            check(h_global != h_us_pin,
+                  "genesis hash sensitive to GenesisConfig.committee_region");
+        }
+
+        // === Empty committee_region == default (backward compat) ===
+
+        // 5. Default-empty committee_region preserves pre-R1 hash stability.
+        //    Two identical configs (both committee_region="") must hash equal.
+        {
+            Hash h1 = compute_genesis_hash(make_cfg("us-east", "eu-west", ""));
+            Hash h2 = compute_genesis_hash(make_cfg("us-east", "eu-west", ""));
+            check(h1 == h2,
+                  "default-empty committee_region: deterministic");
+        }
+
+        // === Region preserved through snapshot round-trip ===
+
+        // 6. Snapshot serialize → restore_from_snapshot preserves
+        //    RegistryEntry.region. Otherwise restored validators would
+        //    lose their region claim (becoming global-pool members) which
+        //    would silently break region-pinned committee selection.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg("us-east", "eu-west", "us-east")));
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+
+            auto ra = r.registrant("alice");
+            auto rb = r.registrant("bob");
+            check(ra.has_value() && ra->region == "us-east",
+                  "snapshot round-trip: alice.region preserved");
+            check(rb.has_value() && rb->region == "eu-west",
+                  "snapshot round-trip: bob.region preserved");
+        }
+
+        // === Region survives state_root computation (r:-namespace) ===
+
+        // 7. Two chains differing only in registrant.region MUST have
+        //    different state_root values (region is in r: namespace).
+        {
+            Chain c1; c1.append(make_genesis_block(make_cfg("us-east", "eu-west", "")));
+            Chain c2; c2.append(make_genesis_block(make_cfg("apac",    "eu-west", "")));
+            check(c1.compute_state_root() != c2.compute_state_root(),
+                  "state_root sensitive to registrant.region");
+        }
+
+        // === Genesis JSON round-trip preserves regions ===
+
+        // 8. GenesisConfig.to_json() → from_json round-trip preserves
+        //    creator.region + committee_region fields.
+        {
+            GenesisConfig cfg = make_cfg("apac", "eu-west", "apac");
+            json j = cfg.to_json();
+            GenesisConfig cfg2 = GenesisConfig::from_json(j);
+            check(cfg2.committee_region == "apac",
+                  "GenesisConfig JSON round-trip: committee_region preserved");
+            // Verify creators
+            bool found_alice = false;
+            for (auto& c : cfg2.initial_creators) {
+                if (c.domain == "alice" && c.region == "apac") {
+                    found_alice = true; break;
+                }
+            }
+            check(found_alice,
+                  "GenesisConfig JSON round-trip: creator.region preserved");
+        }
+
+        // === Mixed-region creator set ===
+
+        // 9. Creators can have different regions; each retains its own
+        //    in registry (not coalesced or overwritten).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg("us-east", "apac", "")));
+            const auto& regs = c.registrants();
+            // Find by iteration; insertion-order/map-order independent.
+            std::string alice_region, bob_region;
+            for (auto& [domain, entry] : regs) {
+                if (domain == "alice") alice_region = entry.region;
+                if (domain == "bob")   bob_region   = entry.region;
+            }
+            check(alice_region == "us-east" && bob_region == "apac",
+                  "mixed-region: each creator retains its own region");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": genesis-with-region " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: anon-address routing integration. The primitives
+    // are covered (test-anon-address: parse + normalize + canonical
+    // hex; test-shard-routing: shard_id_for_address) but the integration
+    // path (anon address parsed → routed → applied as TRANSFER) is
+    // not pinned. This test verifies the three layers compose correctly:
+    //
+    //   1. make_anon_address(pubkey) produces a canonical hex string
+    //   2. shard_id_for_address(addr) routes deterministically
+    //   3. Case-variant inputs route to the same shard (S-028 closure)
+    //   4. TRANSFER to anon-address routes correctly through is_cross_shard
+    //
+    // Defends against silent drift between the parsing layer and the
+    // routing layer (e.g., parse_anon_pubkey normalizes case but
+    // shard_id_for_address doesn't, or vice versa).
+    if (cmd == "test-anon-routing") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a Hash from a base byte (deterministic test input).
+        auto patterned_pubkey = [](uint8_t base) {
+            std::array<uint8_t, 32> pk{};
+            for (size_t i = 0; i < pk.size(); ++i) pk[i] = uint8_t(base + i);
+            return pk;
+        };
+
+        // === make_anon_address → parse_anon_pubkey round-trip ===
+
+        // 1. make_anon_address(pubkey) produces a 0x + 64-hex address.
+        //    parse_anon_pubkey on that address returns the same pubkey.
+        {
+            auto pk = patterned_pubkey(0xAA);
+            std::string addr = make_anon_address(pk);
+            check(is_anon_address(addr),
+                  "make_anon_address: produces an anon-address form");
+            check(addr.size() == 66 && addr.substr(0, 2) == "0x",
+                  "make_anon_address: 0x prefix + 64 hex chars (66 total)");
+            auto parsed = parse_anon_pubkey(addr);
+            check(parsed == pk,
+                  "make/parse round-trip: pubkey preserved");
+        }
+
+        // === Case-variant addresses route to same shard ===
+
+        // 2. S-028 closure: 0xAABB... and 0xaabb... must route to the
+        //    same shard. If normalization layer drifts from routing
+        //    layer, the same logical address would land on different
+        //    shards depending on case.
+        {
+            auto pk = patterned_pubkey(0xBB);
+            std::string canonical = make_anon_address(pk);  // already lowercase
+            // Build uppercase variant
+            std::string upper = canonical;
+            for (auto& ch : upper) ch = uint8_t(std::toupper((unsigned char)ch));
+            // 0x prefix should stay lowercase per convention; restore that.
+            upper[0] = '0'; upper[1] = 'x';
+            // Both must parse to same pubkey
+            auto p1 = parse_anon_pubkey(canonical);
+            auto p2 = parse_anon_pubkey(upper);
+            check(p1 == p2,
+                  "case-variant parse: 0xABC... == 0xabc... pubkey");
+
+            // After normalize_anon_address, both must route to same shard.
+            std::string norm1 = normalize_anon_address(canonical);
+            std::string norm2 = normalize_anon_address(upper);
+            check(norm1 == norm2,
+                  "case-variant normalize: produces identical canonical form");
+
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0x55 + i);
+            auto s1 = shard_id_for_address(norm1, 4, salt);
+            auto s2 = shard_id_for_address(norm2, 4, salt);
+            check(s1 == s2,
+                  "case-variant route: 0xABC... and 0xabc... same shard");
+        }
+
+        // === Distinct pubkeys produce distinct addresses ===
+
+        // 3. Two different pubkeys MUST produce different anon-addresses
+        //    (otherwise different keys could spend each other's balance).
+        {
+            auto pk1 = patterned_pubkey(0xC0);
+            auto pk2 = patterned_pubkey(0xC1);
+            check(make_anon_address(pk1) != make_anon_address(pk2),
+                  "distinct pubkeys: produce distinct anon-addresses");
+        }
+
+        // === TRANSFER to anon-address that routes locally credits locally ===
+
+        // 4. In single-shard mode (shard_count=1), every address is "local"
+        //    — TRANSFER to anon-address credits anon-address locally.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "anon-routing-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 0;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // shard_count=1 → is_cross_shard always false.
+            check(!c.is_cross_shard("0x" + std::string(64, 'a')),
+                  "single-shard: anon-address NOT cross-shard");
+
+            std::string anon_dst = make_anon_address(patterned_pubkey(0xD0));
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = anon_dst;
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance(anon_dst) == 50,
+                  "local route: anon-address credited 50 in single-shard");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds on local anon-address TRANSFER");
+        }
+
+        // === TRANSFER to anon-address that routes cross-shard ===
+
+        // 5. Multi-shard mode: find an anon-address that routes to a
+        //    DIFFERENT shard. is_cross_shard returns true → outbound debit
+        //    only; recipient NOT credited locally (it would receive a
+        //    receipt on the destination shard).
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "anon-routing-test-multi";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 0;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0x77 + i);
+            c.set_shard_routing(4, salt, ShardId{0});
+
+            // Probe pubkeys until we find an anon-address that routes to
+            // a non-zero shard.
+            std::string cross_addr;
+            for (uint8_t base = 0x40; base < 0xFF; ++base) {
+                std::string addr = make_anon_address(patterned_pubkey(base));
+                if (c.is_cross_shard(addr)) { cross_addr = addr; break; }
+            }
+            check(!cross_addr.empty(),
+                  "multi-shard probe: found a cross-shard anon-address");
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = cross_addr;
+            tx.amount = 60; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance(cross_addr) == 0,
+                  "cross-shard route: anon-address NOT credited locally");
+            check(c.accumulated_outbound() == 60,
+                  "cross-shard route: accumulated_outbound += amount");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds on cross-shard anon-address TRANSFER");
+        }
+
+        // === Determinism ===
+
+        // 6. Two chains apply same anon-TRANSFER → same state_root.
+        {
+            GenesisConfig cfg;
+            cfg.chain_id = "anon-routing-det";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 0;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal};
+
+            std::string anon_dst = make_anon_address(patterned_pubkey(0xE0));
+
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = anon_dst;
+            tx.amount = 25; tx.fee = 1; tx.nonce = 0;
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same anon-TRANSFER → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": anon-routing " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
