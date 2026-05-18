@@ -81,10 +81,14 @@ Usage:
                                               Phase-1 aborts per domain (count,
                                               last_block) sorted descending.
                                               --top N truncates to first N entries
-  determ supply [--json]                     Compact A1 unitary-balance summary
+  determ supply [--json] [--field NAME]      Compact A1 unitary-balance summary
                                               (genesis_total + 4 counters +
                                               expected vs live + invariant status).
                                               Exit 2 if invariant violated.
+                                              --field NAME prints one bare value
+                                              (live_total_supply | expected_total
+                                               | genesis_total | accumulated_*
+                                               | a1_invariant_ok).
   determ chain-id                            Print the chain's genesis-block hash
                                               (canonical chain identity) — for
                                               monitoring scripts cross-checking
@@ -506,6 +510,15 @@ Additional in-process tests:
                                               equivocator twice, no-stake
                                               (DOMAIN_INCLUSION), override
                                               pre-deactivated
+  determ test-cross-shard-multi-receipt       Mixed inbound + outbound in same
+                                              block + multi-receipt + dedup
+                                              across blocks + A1 dual-counter
+                                              integrity
+  determ test-multi-block-chain               N-block append — prev_hash
+                                              linkage, height monotonicity,
+                                              A1 at every boundary, subsidy
+                                              linear accrual, state_root
+                                              mutation, determinism
 )" << "\n";
 }
 
@@ -1785,8 +1798,36 @@ static int cmd_chain_id(int argc, char** argv) {
 //   A1 counters) — no new RPC method needed.
 static int cmd_supply(int argc, char** argv) {
     bool json_out = false;
+    std::string field;
     for (int i = 0; i < argc; ++i) {
-        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--field" && i + 1 < argc) field = argv[i + 1];
+    }
+    // --field is one-shot scalar extraction for shell scripts:
+    //   live_total_supply | expected_total | genesis_total
+    //   accumulated_subsidy | accumulated_inbound | accumulated_slashed
+    //   accumulated_outbound | a1_invariant_ok
+    // Bare value on stdout; exit 0 if field resolves, exit 1 if unknown
+    // field name. --field mode does NOT exit-2 on A1 violation — the
+    // a1_invariant_ok field already exposes that bit.
+    static const std::vector<std::string> kAllowedFields = {
+        "genesis_total", "accumulated_subsidy", "accumulated_inbound",
+        "accumulated_slashed", "accumulated_outbound",
+        "expected_total", "live_total_supply", "a1_invariant_ok"
+    };
+    if (!field.empty()) {
+        bool ok = false;
+        for (const auto& f : kAllowedFields) if (f == field) { ok = true; break; }
+        if (!ok) {
+            std::cerr << "Error: unknown --field '" << field << "' — allowed: ";
+            for (size_t i = 0; i < kAllowedFields.size(); ++i) {
+                if (i) std::cerr << ", ";
+                std::cerr << kAllowedFields[i];
+            }
+            std::cerr << "\n";
+            return 1;
+        }
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
@@ -1809,6 +1850,20 @@ static int cmd_supply(int argc, char** argv) {
             genesis_total + accum_subsidy + accum_inbound
             - accum_slashed - accum_outbound;
         bool invariant_ok = (expected == live_supply);
+
+        if (!field.empty()) {
+            // One-shot scalar print for shell scripts.
+            if      (field == "genesis_total")        std::cout << genesis_total  << "\n";
+            else if (field == "accumulated_subsidy")  std::cout << accum_subsidy  << "\n";
+            else if (field == "accumulated_inbound")  std::cout << accum_inbound  << "\n";
+            else if (field == "accumulated_slashed")  std::cout << accum_slashed  << "\n";
+            else if (field == "accumulated_outbound") std::cout << accum_outbound << "\n";
+            else if (field == "expected_total")       std::cout << expected       << "\n";
+            else if (field == "live_total_supply")    std::cout << live_supply    << "\n";
+            else if (field == "a1_invariant_ok")
+                std::cout << (invariant_ok ? "true" : "false") << "\n";
+            return 0;
+        }
 
         if (json_out) {
             json out = {
@@ -17709,6 +17764,550 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": equivocation-multi " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: cross-shard mixed-receipt apply — exercises the
+    // interaction between inbound credits and outbound debits in the
+    // SAME block, multi-receipt in same block (different destinations,
+    // same destination), dedup across BLOCKS, and A1 counter integrity
+    // when both directions move. The single-direction paths are already
+    // covered by test-cross-shard-receipt-apply (inbound only) and
+    // test-cross-shard-outbound-apply (outbound only); this test fills
+    // the gap where both happen simultaneously.
+    if (cmd == "test-cross-shard-multi-receipt") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "cross-shard-multi-receipt-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;  // no stake — simpler A1 math
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain = "bob";     bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // Helper: inbound receipt builder (mirrors
+        // test-cross-shard-receipt-apply convention).
+        auto make_receipt = [](const std::string& to_domain,
+                                uint64_t amount,
+                                uint8_t tx_hash_seed) {
+            CrossShardReceipt r;
+            r.src_shard = 1;
+            r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = tx_hash_seed;
+            r.from = "src_sender";
+            r.to = to_domain;
+            r.amount = amount;
+            r.fee = 0;
+            r.nonce = 0;
+            return r;
+        };
+
+        // Helper: find a cross-shard address (same pattern as
+        // test-cross-shard-outbound-apply).
+        auto find_cross_shard_address = [](uint32_t shard_count,
+                                            const Hash& salt,
+                                            ShardId my_shard_id) {
+            for (int i = 0; i < 256; ++i) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "addr%02x", i);
+                std::string addr = buf;
+                auto routed = crypto::shard_id_for_address(addr, shard_count, salt);
+                if (routed != my_shard_id) return addr;
+            }
+            return std::string{};
+        };
+
+        // === Mixed inbound + outbound in SAME block ===
+
+        // 1. A block containing both an inbound receipt (credit bob)
+        //    AND a cross-shard outbound TRANSFER (debit alice → remote).
+        //    Both A1 counters advance independently; final A1 invariant
+        //    holds.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+            check(!remote.empty(),
+                  "fixture: found cross-shard outbound address");
+
+            Transaction tx_out;
+            tx_out.type = TxType::TRANSFER;
+            tx_out.from = "alice"; tx_out.to = remote;
+            tx_out.amount = 80; tx_out.fee = 1; tx_out.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(make_receipt("bob", 40, 0x10));
+            b.transactions.push_back(tx_out);
+            c.append(b);
+
+            // bob credited 40 (200 + 40 = 240)
+            check(c.balance("bob") == 240,
+                  "mixed-same-block: bob credited via inbound (200+40=240)");
+            // alice debited 80 + 1, fee returned via creator = -80
+            check(c.balance("alice") == 920,
+                  "mixed-same-block: alice debited 80 (fee returns)");
+            check(c.accumulated_inbound() == 40,
+                  "mixed-same-block: accumulated_inbound = 40");
+            check(c.accumulated_outbound() == 80,
+                  "mixed-same-block: accumulated_outbound = 80");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds with both counters advancing");
+        }
+
+        // === Multiple inbound receipts to same destination ===
+
+        // 2. Two receipts to bob in the same block, different tx_hashes
+        //    → both credited; accumulated_inbound = sum; balance = sum.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(make_receipt("bob", 30, 0x20));
+            b.inbound_receipts.push_back(make_receipt("bob", 70, 0x21));
+            c.append(b);
+
+            check(c.balance("bob") == 300,  // 200 + 30 + 70
+                  "two-to-same-dst: bob credited cumulatively (200+30+70=300)");
+            check(c.accumulated_inbound() == 100,
+                  "two-to-same-dst: accumulated_inbound += 30+70 = 100");
+        }
+
+        // === Multiple inbound receipts to distinct destinations ===
+
+        // 3. Two receipts to different destinations in one block —
+        //    each credited independently.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(make_receipt("bob",          25, 0x30));
+            b.inbound_receipts.push_back(make_receipt("brand_new_X", 100, 0x31));
+            c.append(b);
+
+            check(c.balance("bob") == 225,
+                  "two-distinct-dst: bob credited (200+25=225)");
+            check(c.balance("brand_new_X") == 100,
+                  "two-distinct-dst: new account created with credit 100");
+            check(c.accumulated_inbound() == 125,
+                  "two-distinct-dst: accumulated_inbound = 125");
+        }
+
+        // === Dedup across BLOCKS with mixed inbound + outbound ===
+
+        // 4. Block 1: inbound (tx_hash=0x40) + outbound. Block 2: same
+        //    inbound (tx_hash=0x40 — duplicate; dedup-skip) + another
+        //    outbound. The dedup must hold even when blocks contain
+        //    additional mixed traffic.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+
+            // Block 1: inbound + outbound
+            Transaction tx1;
+            tx1.type = TxType::TRANSFER;
+            tx1.from = "alice"; tx1.to = remote;
+            tx1.amount = 30; tx1.fee = 1; tx1.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.inbound_receipts.push_back(make_receipt("bob", 50, 0x40));
+            b1.transactions.push_back(tx1);
+            c.append(b1);
+
+            uint64_t bob_after_b1 = c.balance("bob");
+            check(bob_after_b1 == 250,
+                  "dedup-x-block setup: bob credited from b1 (200+50=250)");
+
+            // Block 2: SAME inbound (dedup) + another outbound
+            Transaction tx2;
+            tx2.type = TxType::TRANSFER;
+            tx2.from = "alice"; tx2.to = remote;
+            tx2.amount = 20; tx2.fee = 1; tx2.nonce = 1;
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.inbound_receipts.push_back(make_receipt("bob", 50, 0x40));  // dup
+            b2.transactions.push_back(tx2);
+            c.append(b2);
+
+            check(c.balance("bob") == bob_after_b1,
+                  "dedup-x-block: duplicate receipt NOT re-credited");
+            check(c.accumulated_inbound() == 50,
+                  "dedup-x-block: accumulated_inbound stays = 50 (one-shot)");
+            check(c.accumulated_outbound() == 50,  // 30 + 20
+                  "dedup-x-block: accumulated_outbound = 30+20 = 50 (both txs apply)");
+        }
+
+        // === A1 across multi-receipt boundary ===
+
+        // 5. After 3 blocks with various receipt + outbound combinations,
+        //    A1 invariant holds throughout (snapshot the counters at
+        //    each height).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+
+            // Block 1: inbound only
+            {
+                Block b;
+                b.index = 1; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.inbound_receipts.push_back(make_receipt("bob", 100, 0x50));
+                c.append(b);
+                check(c.expected_total() == c.live_total_supply(),
+                      "A1 at H=1 (inbound-only): expected == live");
+            }
+            // Block 2: outbound only
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = remote;
+                tx.amount = 60; tx.fee = 1; tx.nonce = 0;
+                Block b;
+                b.index = 2; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                c.append(b);
+                check(c.expected_total() == c.live_total_supply(),
+                      "A1 at H=2 (outbound-only): expected == live");
+            }
+            // Block 3: both inbound + outbound, AND multi-receipt
+            {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = remote;
+                tx.amount = 40; tx.fee = 1; tx.nonce = 1;
+                Block b;
+                b.index = 3; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.inbound_receipts.push_back(make_receipt("bob", 15, 0x51));
+                b.inbound_receipts.push_back(make_receipt("bob", 25, 0x52));
+                b.transactions.push_back(tx);
+                c.append(b);
+                check(c.expected_total() == c.live_total_supply(),
+                      "A1 at H=3 (mixed multi-receipt + outbound): expected == live");
+            }
+            // Final tally: accumulated_inbound = 100+15+25 = 140
+            check(c.accumulated_inbound() == 140,
+                  "final A1: accumulated_inbound across 3 blocks = 140");
+            // accumulated_outbound = 60+40 = 100
+            check(c.accumulated_outbound() == 100,
+                  "final A1: accumulated_outbound across 3 blocks = 100");
+        }
+
+        // === Determinism: replay produces same state ===
+
+        // 6. Two chains apply identical mixed sequence → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Hash salt{};
+            c1.set_shard_routing(4, salt, ShardId{0});
+            c2.set_shard_routing(4, salt, ShardId{0});
+            std::string remote = find_cross_shard_address(4, salt, ShardId{0});
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = 35; tx.fee = 1; tx.nonce = 0;
+
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"alice"};
+                b.inbound_receipts.push_back(make_receipt("bob", 22, 0x60));
+                b.inbound_receipts.push_back(make_receipt("bob", 33, 0x61));
+                b.transactions.push_back(tx);
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same mixed inbound+outbound → same state_root");
+            check(c1.balance("bob") == c2.balance("bob")
+                  && c1.balance("alice") == c2.balance("alice"),
+                  "determinism: balances identical");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": cross-shard-multi-receipt " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: multi-block-chain — exercises the append path
+    // over N sequential blocks, verifying prev_hash linkage, height
+    // monotonicity, A1 invariant maintained at every boundary,
+    // accumulated_subsidy accrues linearly, and state_root mutates
+    // each block. The single-block-apply tests cover apply semantics
+    // for individual ops; this test fills the gap of CHAIN-LEVEL
+    // continuity invariants across many heights — the property that
+    // makes replay/snapshot/light-client all reliable.
+    if (cmd == "test-multi-block-chain") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "multi-block-chain-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain = "bob";     bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        constexpr uint64_t N_BLOCKS = 10;
+
+        // === prev_hash linkage across N blocks ===
+
+        // 1. Each block's prev_hash exactly matches the previous block's
+        //    compute_hash(); break in chain ⇒ append throws.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            std::vector<Hash> hashes;
+            hashes.push_back(c.head().compute_hash());
+
+            for (uint64_t i = 1; i <= N_BLOCKS; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+                hashes.push_back(c.head().compute_hash());
+            }
+
+            check(c.height() == N_BLOCKS + 1,
+                  "prev_hash linkage: chain height = N+1 (genesis + N blocks)");
+            // Verify EVERY block's prev_hash matches the prior hash.
+            bool all_linked = true;
+            for (uint64_t i = 1; i <= N_BLOCKS; ++i) {
+                if (c.at(i).prev_hash != hashes[i - 1]) {
+                    all_linked = false;
+                    break;
+                }
+            }
+            check(all_linked,
+                  "prev_hash linkage: every block.prev_hash == prior.compute_hash()");
+        }
+
+        // === Height monotonicity ===
+
+        // 2. Block.index increases by exactly 1 per append.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            for (uint64_t i = 1; i <= N_BLOCKS; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+            bool monotonic = true;
+            for (uint64_t i = 0; i <= N_BLOCKS; ++i) {
+                if (c.at(i).index != i) {
+                    monotonic = false;
+                    break;
+                }
+            }
+            check(monotonic, "height monotonicity: block[i].index == i for all i");
+        }
+
+        // === A1 invariant maintained across all boundaries ===
+
+        // 3. After EVERY block append (including empty + mixed-tx),
+        //    expected_total() == live_total_supply().
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(10);  // small subsidy per block
+            c.set_unstake_delay(2);
+
+            bool a1_held = true;
+            uint64_t a1_violation_height = 0;
+            // Initial check at genesis.
+            if (c.expected_total() != c.live_total_supply()) {
+                a1_held = false;
+                a1_violation_height = 0;
+            }
+
+            for (uint64_t i = 1; i <= N_BLOCKS; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                // Inject varied content per block to exercise multiple paths.
+                if (i % 3 == 1) {
+                    // TRANSFER intra-shard
+                    Transaction tx;
+                    tx.type = TxType::TRANSFER;
+                    tx.from = "alice"; tx.to = "bob";
+                    tx.amount = 5; tx.fee = 1; tx.nonce = (i - 1) / 3;
+                    b.transactions.push_back(tx);
+                }
+                // even blocks (i % 3 != 1) — empty body (only subsidy)
+                c.append(b);
+                if (c.expected_total() != c.live_total_supply()) {
+                    a1_held = false;
+                    a1_violation_height = i;
+                    break;
+                }
+            }
+            check(a1_held,
+                  "A1 invariant: expected == live at EVERY block append");
+            if (!a1_held)
+                std::cout << "     (violated at height " << a1_violation_height << ")\n";
+        }
+
+        // === accumulated_subsidy accrues linearly ===
+
+        // 4. After N empty blocks with block_subsidy=K, the running total
+        //    is exactly N*K.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            constexpr uint64_t SUBSIDY = 25;
+            c.set_block_subsidy(SUBSIDY);
+
+            for (uint64_t i = 1; i <= N_BLOCKS; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+            check(c.accumulated_subsidy() == N_BLOCKS * SUBSIDY,
+                  "subsidy linear: accumulated_subsidy = N * block_subsidy");
+            check(c.live_total_supply() == 1700 + N_BLOCKS * SUBSIDY,
+                  "subsidy linear: live supply grew by exactly N*K");
+        }
+
+        // === state_root changes when state changes; stable otherwise ===
+
+        // 5. After a state-mutating block (TRANSFER credits an account)
+        //    the state_root MUST differ from the prior root.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash root_before = c.compute_state_root();
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            Hash root_after = c.compute_state_root();
+            check(root_before != root_after,
+                  "state_root mutation: TRANSFER changes the root");
+        }
+
+        // === Determinism: parallel chains apply same sequence ===
+
+        // 6. Two chains apply IDENTICAL N-block sequence → identical
+        //    state_root at every height. This is the snapshot/replay
+        //    determinism property.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            c1.set_block_subsidy(7); c2.set_block_subsidy(7);
+
+            bool all_match = true;
+            uint64_t mismatch_height = 0;
+            for (uint64_t i = 1; i <= N_BLOCKS; ++i) {
+                Block tmpl;
+                tmpl.index = i;
+                tmpl.creators = {"alice"};
+                // tx every other block
+                if (i % 2 == 1) {
+                    Transaction tx;
+                    tx.type = TxType::TRANSFER;
+                    tx.from = "alice"; tx.to = "bob";
+                    tx.amount = 3; tx.fee = 1; tx.nonce = (i - 1) / 2;
+                    tmpl.transactions.push_back(tx);
+                }
+                // Apply to both — prev_hash filled from each chain's own head
+                Block b1 = tmpl; b1.prev_hash = c1.head().compute_hash();
+                Block b2 = tmpl; b2.prev_hash = c2.head().compute_hash();
+                c1.append(b1);
+                c2.append(b2);
+
+                if (c1.compute_state_root() != c2.compute_state_root()) {
+                    all_match = false;
+                    mismatch_height = i;
+                    break;
+                }
+            }
+            check(all_match,
+                  "determinism: state_root identical at every height");
+            if (!all_match)
+                std::cout << "     (diverged at height " << mismatch_height << ")\n";
+            check(c1.height() == c2.height(),
+                  "determinism: heights match");
+        }
+
+        // === Compute hash idempotency ===
+
+        // 7. compute_hash() is deterministic: computing the same block's
+        //    hash twice returns the same value.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            c.append(b);
+
+            Hash h1 = c.head().compute_hash();
+            Hash h2 = c.head().compute_hash();
+            check(h1 == h2, "compute_hash: idempotent");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": multi-block-chain " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
