@@ -67,7 +67,7 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-60 subcommands; 1260 assertions; runs in <31s with no flakes.
+62 subcommands; 1287 assertions; runs in <32s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
@@ -126,6 +126,8 @@ during development. Each new test wrapper must be added to the
 | `determ test-dapp-state-transition` | Full DApp registry lifecycle — DAPP_REGISTER op=0 create / op=0 update / op=1 deactivate (22 assertions across 5 blocks). Initial registration preserves all fields + `inactive_from = UINT64_MAX` sentinel; update on same domain REPLACES service_pubkey/url/topics/retention/metadata but PRESERVES `registered_at` (creation-time invariant); deactivate sets `inactive_from = current_height + DAPP_GRACE_BLOCKS` (deferred via grace window — entry stays in registry); independent domain registration; `dapp_registry()` size; replayed lifecycle → same state_root. Complements network-level `test_dapp_register.sh` + `test_dapp_call.sh`. | `tools/test_dapp_state_transition.sh` | v2.18 DApp lifecycle |
 | `determ test-overflow-paths` | S-007 overflow-protection apply paths (10 assertions across 6 blocks). TRANSFER receiver overflow → S-007 throw with diagnostic; Phase-1 rollback contract (height, balance, state_root all byte-identical after throw); inbound CrossShardReceipt overflow → S-007 throw with 'inbound' diagnostic; boundary at exactly UINT64_MAX is OK (strict `>` check); sanity (normal TRANSFER unaffected); A1 invariant preserved across throw rollback. Defends against wrap-to-zero attacks on long-lived balances. | `tools/test_overflow_paths.sh` | S-007 / overflow protection |
 | `determ test-state-root-namespaces` | Exhaustive 10-namespace `compute_state_root` coverage — S-033 invariant. 12 assertions covering each of the 10 namespaces (a:/s:/r:/d:/i:/b:/m:/p:/k:/k:c:) — mutating each via the appropriate apply or setter path verifies state_root changes; baseline equality on identical chains; cross-namespace independence (different namespace mutations → distinct roots, no accidental collision). Catches the "forgotten-leaf-emission" and "wrong-key-encoding" regression classes that would silently fork at the state_root verification gate. | `tools/test_state_root_namespaces.sh` | S-033 / state_root |
+| `determ test-multi-tx-block` | Multi-tx block apply semantics (18 assertions across 6 blocks). Two TRANSFERs from same sender with ascending nonces; same sender + wrong nonce on second (defensive skip); two different senders in same block (independent nonce counters); interleaved alice→bob→alice; insufficient balance mid-block (silent skip without nonce++ — subsequent tx still applies); A1 invariant after multi-tx. Covers the in-block tx-ordering contract enabling sender-batched operations in a single block. | `tools/test_multi_tx_block.sh` | apply ordering / multi-tx |
+| `determ test-state-proof-namespaces` | `Chain::state_proof` verify path across all major state namespaces — a/s/r/b/d (9 assertions). Per-namespace inclusion + `crypto::merkle_verify` under root for accounts, stakes, registrants, abort_records, DApp registry; cross-namespace independence (5 distinct value_hashes → no accidental collision); cross-namespace proof-swap rejection (a:-key with s: value_hash fails); non-existent stake key → nullopt; determinism (2 proofs byte-identical). Complements `test-state-proof` (a:-namespace in-depth coverage). | `tools/test_state_proof_namespaces.sh` | v2.2 light-client / namespaces |
 
 ### 2.3 Randomness + consensus arithmetic + tx-root
 

@@ -90,6 +90,10 @@ Usage:
   determ block-hash <index>                  Print just compute_hash of block at
                                               <index> (64-hex). Useful for
                                               cross-node fork detection scripts.
+  determ head [--json]                       Print just <height> <head_hash>
+                                              (space-separated; --json for
+                                              structured output). For monitoring
+                                              scripts tracking chain advancement.
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
   determ snapshot create [--out f]           Dump current chain state for fast bootstrap (B6.basic)
@@ -474,6 +478,14 @@ Additional in-process tests:
                                               a/s/r/d/i/b/m/p/k/k:c each
                                               mutation changes root + cross-
                                               namespace independence
+  determ test-multi-tx-block                  Multi-tx block apply — in-block
+                                              ordering, multi-sender nonce
+                                              independence, mid-block skip
+                                              (insufficient balance, bad nonce)
+  determ test-state-proof-namespaces          state_proof verify across all
+                                              major namespaces (a/s/r/b/d) +
+                                              cross-namespace independence +
+                                              swap-rejection defense
 )" << "\n";
 }
 
@@ -1585,6 +1597,40 @@ static int cmd_pending_params(int argc, char** argv) {
                       << hex.substr(0, std::min<size_t>(hex.size(), 32))
                       << (hex.size() > 32 ? "..." : "")
                       << "\n";
+        }
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+// determ head [--json] [--rpc-port P]
+//   Print just the chain's current head — height + head_hash on a
+//   single line (space-separated by default). For monitoring scripts
+//   tracking chain advancement:
+//     while true; do read h hash <<< "$(determ head)"; echo "$h $hash"; sleep 1; done
+//   --json emits {height, head_hash} for scripts that want structured output.
+//   Pulls from status RPC. Exit 1 if no chain loaded.
+static int cmd_head(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        auto result = rpc::rpc_call("127.0.0.1", port, "status");
+        uint64_t height = result.value("height", uint64_t{0});
+        std::string head_hash = result.value("head_hash", std::string{});
+        if (head_hash.empty() && height == 0) {
+            std::cerr << "Error: chain not loaded or empty\n";
+            return 1;
+        }
+        if (json_out) {
+            json out = {{"height", height}, {"head_hash", head_hash}};
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << height << " " << head_hash << "\n";
         }
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -3440,6 +3486,7 @@ int main(int argc, char** argv) {
     if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
+    if (cmd == "head")          return cmd_head(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
     if (cmd == "snapshot")      return cmd_snapshot(sub_argc, sub_argv);
@@ -16445,6 +16492,401 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-root-namespaces " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: multi-tx block apply semantics. Tests the
+    // in-block apply ordering — txs in `b.transactions` apply in
+    // vector order (left to right). Sender's `next_nonce` increments
+    // after each successful tx, so subsequent txs from the same sender
+    // in the same block require their nonce to match the value AFTER
+    // the previous tx's increment. This is the in-block tx-ordering
+    // contract that lets a sender batch operations in one block.
+    if (cmd == "test-multi-tx-block") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "multi-tx-block-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal, carol_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 500;
+        carol_bal.domain = "carol"; carol_bal.balance = 0;
+        cfg.initial_balances = {alice_bal, bob_bal, carol_bal};
+
+        auto make_transfer = [](const std::string& from, const std::string& to,
+                                  uint64_t amount, uint64_t fee, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = from; tx.to = to;
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+            return tx;
+        };
+
+        // === Two txs from same sender, ascending nonce ===
+
+        // 1. Alice sends two TRANSFERs in one block, nonces 0 and 1.
+        //    Both apply. Bob credited 100 + 50 = 150. Alice debited
+        //    150 + 2 (fees, both back via creator) = net 148.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(make_transfer("alice", "bob", 100, 1, 0));
+            b.transactions.push_back(make_transfer("alice", "bob", 50,  1, 1));
+            c.append(b);
+
+            check(c.balance("alice") == 1000 - 100 - 50 - 2 + 2,  // = 850
+                  "two TRANSFERs from alice in same block: alice net 850 (fees return)");
+            check(c.balance("bob") == 500 + 100 + 50,
+                  "two TRANSFERs: bob 500 + 100 + 50 = 650");
+            check(c.next_nonce("alice") == 2,
+                  "two TRANSFERs from alice: alice next_nonce = 2");
+        }
+
+        // === Same sender, wrong nonce on second tx ===
+
+        // 2. Second tx with nonce 99 (wrong): first applies, second
+        //    silently skipped (apply's defense-in-depth nonce check).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(make_transfer("alice", "bob", 100, 1, 0));
+            b.transactions.push_back(make_transfer("alice", "bob", 50,  1, 99));  // wrong
+            c.append(b);
+
+            check(c.balance("alice") == 1000 - 100 - 1 + 1,  // = 900 (only first applied)
+                  "wrong-nonce second: only first applies (alice 900)");
+            check(c.balance("bob") == 500 + 100,
+                  "wrong-nonce second: bob credited from first only (600)");
+            check(c.next_nonce("alice") == 1,
+                  "wrong-nonce second: next_nonce after first apply only");
+        }
+
+        // === Different senders in same block ===
+
+        // 3. Alice and bob each send a TRANSFER in the same block.
+        //    Both apply independently. Each sender's nonce starts at 0.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(make_transfer("alice", "carol", 100, 1, 0));
+            b.transactions.push_back(make_transfer("bob",   "carol", 50,  1, 0));
+            c.append(b);
+
+            check(c.balance("carol") == 100 + 50,
+                  "two senders: carol 0 + 100 + 50 = 150");
+            check(c.next_nonce("alice") == 1 && c.next_nonce("bob") == 1,
+                  "two senders: both nonces independently incremented to 1");
+            check(c.balance("alice") == 1000 - 100 - 1 + 2,  // 901: 2 fees go to alice (creator)
+                  "two senders: alice debited 100+1, +2 fees (sole creator)");
+        }
+
+        // === Interleaved: alice → bob → alice in same block ===
+
+        // 4. Three txs: alice→bob nonce 0; bob→carol nonce 0; alice→bob nonce 1.
+        //    All apply.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(make_transfer("alice", "bob",   30, 1, 0));
+            b.transactions.push_back(make_transfer("bob",   "carol", 20, 1, 0));
+            b.transactions.push_back(make_transfer("alice", "bob",   10, 1, 1));
+            c.append(b);
+
+            // alice: 1000 - 30 - 1 - 10 - 1 + 3 (fees back) = 961
+            check(c.balance("alice") == 961,
+                  "interleaved 3 txs: alice 1000 - 30 - 10 - 2(fees) + 3(fee return) = 961");
+            // bob: 500 + 30 - 20 - 1 + 10 = 519
+            check(c.balance("bob") == 519,
+                  "interleaved 3 txs: bob 500 + 30 - 20 - 1 + 10 = 519");
+            check(c.balance("carol") == 20,
+                  "interleaved 3 txs: carol 0 + 20 = 20");
+            check(c.next_nonce("alice") == 2 && c.next_nonce("bob") == 1,
+                  "interleaved 3 txs: alice nonce 2, bob nonce 1");
+        }
+
+        // === Insufficient balance mid-block: skip and continue ===
+
+        // 5. Bob has 500, tries to send 600 → silently skipped; alice's
+        //    tx still applies. Bob's nonce NOT incremented (the skip
+        //    happens before nonce++).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(make_transfer("bob",   "carol", 600, 1, 0));  // skip
+            b.transactions.push_back(make_transfer("alice", "carol", 100, 1, 0));  // ok
+            c.append(b);
+
+            check(c.balance("bob") == 500,
+                  "insufficient bob: bob balance unchanged after skip");
+            check(c.balance("carol") == 100,
+                  "insufficient bob, alice succeeds: carol 0 + 100 = 100");
+            check(c.next_nonce("bob") == 0,
+                  "insufficient bob: bob nonce stays at 0 (skip pre-nonce++)");
+            check(c.next_nonce("alice") == 1,
+                  "alice succeeded: alice nonce 0 → 1");
+        }
+
+        // === All-or-nothing semantics: A1 always holds across multi-tx ===
+
+        // 6. After every successful multi-tx block apply, the A1
+        //    invariant holds. Apply-side asserts internally + we
+        //    re-check the read-side identity.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(make_transfer("alice", "bob",   100, 1, 0));
+            b.transactions.push_back(make_transfer("bob",   "carol",  50, 1, 0));
+            b.transactions.push_back(make_transfer("alice", "carol",  25, 1, 1));
+            c.append(b);
+
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant holds after multi-tx (3 TRANSFERs intra-shard)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": multi-tx-block " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: state_proof primitive across non-account
+    // namespaces. test-state-proof unit covers proof correctness for
+    // the a:-namespace; this test extends to s:/r:/d:/b: keys to
+    // verify the underlying merkle proof + verify path works for
+    // every namespace (not just accounts).
+    if (cmd == "test-state-proof-namespaces") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a chain with state in multiple namespaces.
+        GenesisConfig cfg;
+        cfg.chain_id = "state-proof-ns-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+
+        // Apply an AbortEvent so b:-namespace has alice's record.
+        {
+            AbortEvent ae;
+            ae.round = 1;
+            ae.aborting_node = "alice";
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.abort_events.push_back(ae);
+            c.append(b);
+        }
+
+        // Apply a DAPP_REGISTER so d:-namespace has alice's record.
+        {
+            std::vector<uint8_t> payload;
+            payload.push_back(0);  // op=0
+            PubKey svc{};
+            for (size_t i = 0; i < svc.size(); ++i) svc[i] = uint8_t(0xA0 + i);
+            payload.insert(payload.end(), svc.begin(), svc.end());
+            payload.push_back(0); payload.push_back(0); payload.push_back(1);
+            payload.push_back(0); payload.push_back(0);
+
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = payload;
+
+            Block b;
+            b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        }
+
+        Hash root = c.compute_state_root();
+
+        // Helper: build "<ns>:" + domain key.
+        auto ns_domain_key = [](char ns, const std::string& domain) {
+            std::vector<uint8_t> key;
+            key.push_back(uint8_t(ns)); key.push_back(':');
+            key.insert(key.end(), domain.begin(), domain.end());
+            return key;
+        };
+
+        // === a:-namespace (accounts) ===
+
+        // 1. state_proof for alice's account verifies under state_root.
+        {
+            auto key = ns_domain_key('a', "alice");
+            auto p = c.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && ok,
+                  "a:-namespace: state_proof('a:alice') verifies under state_root");
+        }
+
+        // === s:-namespace (stakes) ===
+
+        // 2. state_proof for alice's stake verifies.
+        {
+            auto key = ns_domain_key('s', "alice");
+            auto p = c.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && ok,
+                  "s:-namespace: state_proof('s:alice') verifies under state_root");
+        }
+
+        // === r:-namespace (registrants) ===
+
+        // 3. state_proof for alice's registrant verifies.
+        {
+            auto key = ns_domain_key('r', "alice");
+            auto p = c.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && ok,
+                  "r:-namespace: state_proof('r:alice') verifies under state_root");
+        }
+
+        // === b:-namespace (abort_records) ===
+
+        // 4. state_proof for alice's abort record verifies.
+        {
+            auto key = ns_domain_key('b', "alice");
+            auto p = c.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && ok,
+                  "b:-namespace: state_proof('b:alice') verifies under state_root");
+        }
+
+        // === d:-namespace (dapp_registry) ===
+
+        // 5. state_proof for alice's DApp entry verifies.
+        {
+            auto key = ns_domain_key('d', "alice");
+            auto p = c.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && ok,
+                  "d:-namespace: state_proof('d:alice') verifies under state_root");
+        }
+
+        // === Distinct namespace value_hashes ===
+
+        // 6. The 5 namespace-keyed proofs above have distinct
+        //    value_hashes (no accidental collision).
+        {
+            std::vector<Hash> value_hashes;
+            for (char ns : {'a', 's', 'r', 'b', 'd'}) {
+                auto p = c.state_proof(ns_domain_key(ns, "alice"));
+                if (p.has_value()) value_hashes.push_back(p->value_hash);
+            }
+            // All 5 hashes should be distinct.
+            std::sort(value_hashes.begin(), value_hashes.end());
+            value_hashes.erase(
+                std::unique(value_hashes.begin(), value_hashes.end()),
+                value_hashes.end());
+            check(value_hashes.size() == 5,
+                  "cross-namespace: 5 distinct value_hashes (no namespace collision)");
+        }
+
+        // === Cross-namespace proof swap fails ===
+
+        // 7. Using a:-key with s:-proof's value_hash should fail
+        //    merkle_verify (different namespace, different leaf).
+        {
+            auto pa = c.state_proof(ns_domain_key('a', "alice"));
+            auto ps = c.state_proof(ns_domain_key('s', "alice"));
+            // Try to verify 'a:alice' (alice's account) with s: value.
+            bool ok = pa.has_value() && ps.has_value()
+                && crypto::merkle_verify(
+                      root, ns_domain_key('a', "alice"),
+                      ps->value_hash,  // wrong value
+                      pa->target_index, pa->leaf_count, pa->proof);
+            check(!ok,
+                  "cross-namespace swap: a:-key with s: value_hash rejected");
+        }
+
+        // === Non-existent namespace key returns nullopt ===
+
+        // 8. state_proof for non-existent ('s:ghost') returns nullopt.
+        {
+            auto p = c.state_proof(ns_domain_key('s', "ghost_nonexistent"));
+            check(!p.has_value(),
+                  "non-existent stake key: state_proof returns nullopt");
+        }
+
+        // === Proof determinism across namespaces ===
+
+        // 9. Two proofs for the same key over the same chain are
+        //    byte-identical (already covered for a:, extended check
+        //    for s:).
+        {
+            auto key = ns_domain_key('s', "alice");
+            auto p1 = c.state_proof(key);
+            auto p2 = c.state_proof(key);
+            check(p1.has_value() && p2.has_value()
+                  && p1->value_hash == p2->value_hash
+                  && p1->target_index == p2->target_index
+                  && p1->leaf_count == p2->leaf_count
+                  && p1->proof == p2->proof,
+                  "determinism: 2 proofs for s:-key are byte-identical");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-proof-namespaces " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
