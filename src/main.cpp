@@ -61,7 +61,9 @@ Usage:
   determ register <domain> [--rpc-port <p>]  Submit RegisterTx to running node
   determ start [--config <path>]             Start node (sync + participate in consensus)
   determ send <to_domain> <amount>           Submit TRANSFER transaction
-  determ status                              Chain head, node count, next creators
+  determ status [--field <name>]             Chain head, node count, next creators.
+                                              --field <name> prints just that
+                                              field's value (one-shot extraction)
   determ show-block <index>                  Print block at index (full JSON)
   determ chain-summary [--last N]            Compact summary of last N blocks
   determ validators [--filter-region R] [--json]
@@ -495,6 +497,15 @@ Additional in-process tests:
                                               invariants — STAKE / UNSTAKE /
                                               DEREGISTER / slash interaction
                                               + A1 conservation across lifecycle
+  determ test-fee-distribution-edge           Fee + subsidy distribution edge
+                                              cases — dust to creator[0],
+                                              zero-fee + non-zero subsidy,
+                                              exact-divide, subsidy < creator count
+  determ test-equivocation-multi              Multi-equivocation edge cases —
+                                              two distinct equivocators, same
+                                              equivocator twice, no-stake
+                                              (DOMAIN_INCLUSION), override
+                                              pre-deactivated
 )" << "\n";
 }
 
@@ -694,10 +705,39 @@ static int cmd_send(int argc, char** argv) {
         {{"to", to}, {"amount", amount}, {"fee", fee}});
 }
 
+// determ status [--field <name>] [--rpc-port N]
+//   Print the status RPC JSON (default behavior, full dump). With
+//   --field <name>, prints just the value of that top-level field
+//   (one-shot extraction for shell scripts). Empty string is printed
+//   for absent/null fields; non-scalar values are dumped compactly.
+//   Examples:
+//     determ status                             # full JSON
+//     determ status --field height              # just an integer
+//     determ status --field committee_region    # just a string
+//     determ status --field protections         # compact object dump
 static int cmd_status(int argc, char** argv) {
+    std::string field;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--field" && i + 1 < argc) field = argv[i + 1];
+    }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "status");
+        if (!field.empty()) {
+            // Field-extraction mode: print one value (no JSON envelope).
+            if (!result.contains(field) || result[field].is_null()) {
+                // Empty line for absent / null — operators can check exit 0.
+                std::cout << "\n";
+                return 0;
+            }
+            auto& v = result[field];
+            if (v.is_string())       std::cout << v.get<std::string>() << "\n";
+            else if (v.is_number())  std::cout << v.dump()              << "\n";
+            else if (v.is_boolean()) std::cout << (v.get<bool>() ? "true" : "false") << "\n";
+            else                     std::cout << v.dump()              << "\n";
+            return 0;
+        }
         std::cout << result.dump(2) << "\n";
     } catch (std::exception& e) {
         std::cerr << "Error (is the node running?): " << e.what() << "\n";
@@ -17293,6 +17333,382 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": stake-accounting " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: fee + subsidy distribution edge cases. Tests
+    // boundary conditions beyond test-subsidy-distribution: many
+    // creators with prime dust, large fees, fee + subsidy combined,
+    // zero-fee tx in a block (no distribution).
+    if (cmd == "test-fee-distribution-edge") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "fee-distribution-edge-test";
+        GenesisCreator a_c, b_c, c_c;
+        a_c.domain = "alice"; b_c.domain = "bob"; c_c.domain = "carol";
+        for (size_t i = 0; i < a_c.ed_pub.size(); ++i) {
+            a_c.ed_pub[i] = uint8_t(0x10 + i);
+            b_c.ed_pub[i] = uint8_t(0x20 + i);
+            c_c.ed_pub[i] = uint8_t(0x30 + i);
+        }
+        cfg.initial_creators = {a_c, b_c, c_c};
+        GenesisAllocation ab, bb, cb;
+        ab.domain = "alice"; ab.balance = 1000;
+        bb.domain = "bob";   bb.balance = 1000;
+        cb.domain = "carol"; cb.balance = 1000;
+        cfg.initial_balances = {ab, bb, cb};
+
+        // === 3 creators + 100 total distributed → 33/33/34 split (dust to first) ===
+
+        // 1. 100 / 3 = 33 each, remainder 1 dust to alice. Note: creators
+        //    are sorted alphabetically; alice < bob < carol so alice
+        //    is creators[0] and gets the dust.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);  // 100 / 3 creators
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            c.append(b);
+
+            // alice = 1000 + 33 (share) + 1 (dust) = 1034
+            check(c.balance("alice") == 1034,
+                  "3 creators + subsidy 100: alice 1000 + 33 + 1 (dust) = 1034");
+            // bob, carol = 1000 + 33 = 1033
+            check(c.balance("bob") == 1033 && c.balance("carol") == 1033,
+                  "3 creators + subsidy 100: bob/carol 1000 + 33 = 1033");
+        }
+
+        // === Large fee + subsidy combine into single distribution pool ===
+
+        // 2. Fee 30 + subsidy 10 = 40 total → 13 + 13 + 13 + dust 1.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(10);
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 0; tx.fee = 30; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            // alice = 1000 - 0 - 30 (fee) + 13 (share) + 1 (dust) = 984
+            check(c.balance("alice") == 984,
+                  "fee 30 + subsidy 10 → 3 creators: alice 1000 - 30 + 13 + 1 = 984");
+            // bob = 1000 + 13 (creator share) = 1013 (TRANSFER amount=0)
+            check(c.balance("bob") == 1013,
+                  "fee 30 + subsidy 10: bob 1000 + 13 = 1013");
+            check(c.balance("carol") == 1013,
+                  "fee 30 + subsidy 10: carol 1000 + 13 = 1013");
+        }
+
+        // === Zero fee + zero subsidy: no distribution (no-op) ===
+
+        // 3. Empty block, zero subsidy: nothing distributed.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // block_subsidy defaults to 0
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            c.append(b);
+
+            check(c.balance("alice") == 1000
+                  && c.balance("bob") == 1000
+                  && c.balance("carol") == 1000,
+                  "0 fees + 0 subsidy: no distribution, no creator credit");
+            check(c.accumulated_subsidy() == 0,
+                  "0 subsidy: accumulated_subsidy stays 0 (no mint)");
+        }
+
+        // === Tx with zero fee + non-zero subsidy: subsidy still mints ===
+
+        // 4. Subsidy 30 / 3 creators = 10 each (no dust). Tx with fee=0
+        //    adds nothing to total_distributed.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(30);
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 5; tx.fee = 0;  // zero fee
+            tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("alice") == 1000 - 5 + 10,  // 1005
+                  "zero-fee tx + subsidy 30: alice 1000 - 5 + 10 = 1005");
+            check(c.balance("bob") == 1000 + 5 + 10,  // 1015
+                  "zero-fee tx + subsidy 30: bob 1000 + 5 + 10 = 1015");
+            check(c.accumulated_subsidy() == 30,
+                  "zero-fee tx: subsidy still minted (accumulated 30)");
+        }
+
+        // === Many creators: subsidy / N with remainder = 0 (exact divide) ===
+
+        // 5. Subsidy 30 / 3 creators = 10 each, no dust (exact divide).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(30);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            c.append(b);
+
+            check(c.balance("alice") == 1010
+                  && c.balance("bob") == 1010
+                  && c.balance("carol") == 1010,
+                  "exact-divide subsidy 30 / 3: each creator +10 (no dust)");
+        }
+
+        // === Subsidy < creator count: each gets 0, dust to creator[0] ===
+
+        // 6. Subsidy 2 / 3 creators = 0 each + dust 2 to alice (creator[0]).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(2);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            c.append(b);
+
+            check(c.balance("alice") == 1002,
+                  "subsidy 2 < creators 3: alice gets 0 + dust 2 = 1002");
+            check(c.balance("bob") == 1000 && c.balance("carol") == 1000,
+                  "subsidy 2 < creators 3: bob/carol get 0");
+        }
+
+        // === A1 holds across all these distribution scenarios ===
+
+        // 7. After each distribution, A1 invariant holds.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            uint64_t baseline = c.live_total_supply();
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 7; tx.nonce = 0;
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.live_total_supply() == baseline + 100,
+                  "A1: subsidy 100 minted, TRANSFER internal → +100 net");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: expected == live after fee+subsidy distribution");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fee-distribution-edge " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: multi-equivocation edge cases beyond
+    // test-equivocation-apply. Covers: multiple events in same block,
+    // same equivocator twice, equivocator with no stake (DOMAIN_INCLUSION
+    // mode), and equivocator who was already deregistered.
+    if (cmd == "test-equivocation-multi") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "equivocation-multi-test";
+        GenesisCreator a_c, b_c;
+        a_c.domain = "alice"; b_c.domain = "bob";
+        for (size_t i = 0; i < a_c.ed_pub.size(); ++i) {
+            a_c.ed_pub[i] = uint8_t(0x10 + i);
+            b_c.ed_pub[i] = uint8_t(0x20 + i);
+        }
+        a_c.initial_stake = 500;
+        b_c.initial_stake = 300;
+        cfg.initial_creators = {a_c, b_c};
+        GenesisAllocation ab, bb;
+        ab.domain = "alice"; ab.balance = 1000;
+        bb.domain = "bob";   bb.balance = 200;
+        cfg.initial_balances = {ab, bb};
+
+        auto make_ev = [](const std::string& target, uint64_t block_index) {
+            EquivocationEvent ev;
+            ev.equivocator = target;
+            ev.block_index = block_index;
+            for (size_t i = 0; i < ev.digest_a.size(); ++i)
+                ev.digest_a[i] = uint8_t(0xAA + i);
+            for (size_t i = 0; i < ev.digest_b.size(); ++i)
+                ev.digest_b[i] = uint8_t(0xBB + i);
+            return ev;
+        };
+
+        // === Two distinct equivocators in same block ===
+
+        // 1. Alice + bob both equivocate in the same block. Both have
+        //    their full stake forfeited; both registry entries deactivated.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.equivocation_events.push_back(make_ev("alice", 0));
+            b.equivocation_events.push_back(make_ev("bob",   0));
+            c.append(b);
+
+            check(c.stake("alice") == 0,
+                  "multi-equivocate: alice stake → 0");
+            check(c.stake("bob") == 0,
+                  "multi-equivocate: bob stake → 0");
+            auto ra = c.registrant("alice");
+            auto rb = c.registrant("bob");
+            check(ra.has_value() && ra->inactive_from == 2,
+                  "multi-equivocate: alice inactive_from = b.index+1 = 2");
+            check(rb.has_value() && rb->inactive_from == 2,
+                  "multi-equivocate: bob inactive_from = b.index+1 = 2");
+        }
+
+        // === Same equivocator twice in same block ===
+
+        // 2. Same domain equivocates twice in the same block — only
+        //    forfeits stake once (already zeroed; second event no-op
+        //    on stake). Registry entry remains deactivated.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.equivocation_events.push_back(make_ev("alice", 0));
+            b.equivocation_events.push_back(make_ev("alice", 5));  // diff block_index
+            c.append(b);
+
+            check(c.stake("alice") == 0,
+                  "double-equivocate: alice stake → 0 (first event drains; second no-op)");
+            check(c.accumulated_slashed() == 500,
+                  "double-equivocate: accumulated_slashed = 500 (only first counts)");
+        }
+
+        // === Equivocator with no stake (DOMAIN_INCLUSION mode) ===
+
+        // 3. Equivocator who has registry but stake = 0 (DOMAIN_INCLUSION
+        //    mode or post-UNSTAKE). The deregistration is what matters;
+        //    no stake to forfeit but inactive_from is set.
+        {
+            // Set up: zero-stake creator-like fixture.
+            GenesisConfig zcfg = cfg;
+            zcfg.initial_creators[0].initial_stake = 0;  // alice no stake
+            Chain c;
+            c.append(make_genesis_block(zcfg));
+            check(c.stake("alice") == 0,
+                  "DOMAIN_INCLUSION baseline: alice has 0 stake");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.equivocation_events.push_back(make_ev("alice", 0));
+            c.append(b);
+
+            check(c.stake("alice") == 0,
+                  "no-stake equivocate: alice stake stays 0 (nothing to forfeit)");
+            auto ra = c.registrant("alice");
+            check(ra.has_value() && ra->inactive_from == 2,
+                  "no-stake equivocate: alice STILL deregistered (inactive_from set)");
+            check(c.accumulated_slashed() == 0,
+                  "no-stake equivocate: accumulated_slashed stays 0 (no value forfeited)");
+        }
+
+        // === Equivocator with registry but registrant was already deactivated ===
+
+        // 4. Pre-deactivated equivocator: inactive_from update OVERRIDES
+        //    the existing future value with the new b.index+1.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1);
+
+            // Block 1: DEREGISTER alice (sets inactive_from to future).
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions.push_back(dereg);
+            c.append(b1);
+
+            auto reg_before = c.registrant("alice");
+            uint64_t inactive_before = reg_before->inactive_from;
+            check(inactive_before > 1,
+                  "pre-deactivate setup: inactive_from set to future value");
+
+            // Block 2: equivocate alice — should override inactive_from.
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.equivocation_events.push_back(make_ev("alice", 1));
+            c.append(b2);
+
+            auto reg_after = c.registrant("alice");
+            check(reg_after.has_value() && reg_after->inactive_from == 3,
+                  "pre-deactivate equivocate: inactive_from OVERRIDDEN to b.index+1 = 3");
+        }
+
+        // === Determinism: replay produces same state ===
+
+        // 5. Two chains apply same multi-equivocation → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            Block b;
+            b.index = 1; b.prev_hash = c1.head().compute_hash();
+            b.creators = {"alice"};
+            b.equivocation_events.push_back(make_ev("alice", 0));
+            b.equivocation_events.push_back(make_ev("bob",   0));
+            c1.append(b);
+            Block b2 = b;
+            c2.append(b2);
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same multi-equivocation → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": equivocation-multi " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
