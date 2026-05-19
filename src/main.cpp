@@ -158,7 +158,7 @@ Usage:
                                               trustless-fast-sync verification; --json emits
                                               machine-readable output for scripts
   determ snapshot fetch --peer h:p --out f   Fetch a snapshot from a running node over the gossip wire
-  determ snapshot diff <fa> <fb> [--json]    Compare two snapshot files. Prints
+)" << R"(  determ snapshot diff <fa> <fb> [--json]    Compare two snapshot files. Prints
                                               divergence lines (FIELD: A != B)
                                               over block_index / head_hash /
                                               state_root, account + stake +
@@ -167,6 +167,12 @@ Usage:
                                               equal. Operator incident-analysis
                                               tool — localize divergence between
                                               two snapshots without manual diff.
+  determ snapshot stats <file> [--json]      Lightweight metadata-only inspection
+                                              — reads top-level JSON without
+                                              the heavy Chain::restore_from_
+                                              snapshot pipeline. Fast triage on
+                                              large snapshot files before
+                                              committing to `snapshot inspect`.
   determ peers [--json] [--count]            List connected peers (one per line).
                                               --count prints a bare integer
                                               (or `{"count":N}` with --json) —
@@ -700,6 +706,18 @@ Additional in-process tests:
                                               required_block_sigs(BFT, k) =
                                               ceil(2k/3). Pins the formula at
                                               the heart of safety/liveness.
+  determ test-config-load-save                Config::load + Config::save file
+                                              IO round-trip — save writes
+                                              well-formed JSON, load reads
+                                              losslessly, missing-file +
+                                              malformed-JSON error contracts,
+                                              save creates parent dirs.
+  determ test-block-from-json-minimal         Block::from_json minimum-valid
+                                              input — 5 required fields
+                                              (index/prev_hash/timestamp/
+                                              transactions/creators); each
+                                              missing throws diagnostic naming
+                                              field; wrong-type rejection.
 )" << "\n";
 }
 
@@ -3484,9 +3502,141 @@ static int cmd_snapshot_diff(int argc, char** argv) {
     return 0;
 }
 
+// determ snapshot stats <file> [--json]
+//   Lightweight metadata-only snapshot inspection — reads top-level
+//   JSON fields without running the full Chain::restore_from_snapshot
+//   pipeline. Useful for fast triage on large snapshot files before
+//   committing to the heavy restore + state_root verify path.
+//
+//   Reports: file size on disk, version, block_index + head_hash from
+//   the snapshot header, account/stake/registrant count, and the 5
+//   A1 unitary-supply counters.
+//
+//   Default output: human-readable column. --json emits a structured
+//   envelope:
+//     {file, size_bytes, version, block_index, head_hash,
+//      accounts, stakes, registrants,
+//      genesis_total, accumulated_subsidy, accumulated_inbound,
+//      accumulated_slashed, accumulated_outbound}
+//
+//   Differences from `snapshot inspect`:
+//     - stats: O(parse + top-level field read) — fast even on 100 MB+
+//     - inspect: O(parse + full restore + state_root compute) — slower
+//                but verifies S-033/S-038 internal consistency
+//
+//   Exit 0 on success; exit 1 on file open / JSON parse / missing
+//   field error.
+static int cmd_snapshot_stats(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: determ snapshot stats <file> [--json]\n";
+        return 1;
+    }
+    std::string path = argv[0];
+    bool json_out = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") json_out = true;
+    }
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    uint64_t size_bytes = uint64_t(fs::file_size(path, ec));
+    if (ec) {
+        if (json_out) {
+            std::cout << json({{"error", "cannot_open"}, {"path", path}}).dump() << "\n";
+        } else {
+            std::cerr << "Error: cannot open " << path << ": " << ec.message() << "\n";
+        }
+        return 1;
+    }
+
+    json snap;
+    try {
+        std::ifstream f(path);
+        snap = json::parse(f);
+    } catch (const std::exception& e) {
+        if (json_out) {
+            std::cout << json({{"error", "json_parse"}, {"message", e.what()}}).dump() << "\n";
+        } else {
+            std::cerr << "Error: JSON parse failed: " << e.what() << "\n";
+        }
+        return 1;
+    }
+    if (!snap.is_object()) {
+        if (json_out) {
+            std::cout << json({{"error", "not_object"}}).dump() << "\n";
+        } else {
+            std::cerr << "Error: snapshot is not a JSON object\n";
+        }
+        return 1;
+    }
+
+    // Top-level field reads. Use defensive .value() defaults — stats
+    // is meant to work even on partial / older snapshot formats
+    // (whereas `snapshot inspect` enforces strict version=1).
+    int version              = snap.value("version", 0);
+    uint64_t block_index     = snap.value("block_index", uint64_t{0});
+    std::string head_hash    = snap.value("head_hash", std::string{});
+    size_t accounts          = snap.contains("accounts")
+                                  ? (snap["accounts"].is_array()
+                                         ? snap["accounts"].size() : 0)
+                                  : 0;
+    size_t stakes            = snap.contains("stakes")
+                                  ? (snap["stakes"].is_array()
+                                         ? snap["stakes"].size() : 0)
+                                  : 0;
+    size_t registrants       = snap.contains("registrants")
+                                  ? (snap["registrants"].is_array()
+                                         ? snap["registrants"].size() : 0)
+                                  : 0;
+    uint64_t genesis_total   = snap.value("genesis_total",       uint64_t{0});
+    uint64_t accum_subsidy   = snap.value("accumulated_subsidy", uint64_t{0});
+    uint64_t accum_inbound   = snap.value("accumulated_inbound", uint64_t{0});
+    uint64_t accum_slashed   = snap.value("accumulated_slashed", uint64_t{0});
+    uint64_t accum_outbound  = snap.value("accumulated_outbound",uint64_t{0});
+
+    if (json_out) {
+        json env = {
+            {"file",                path},
+            {"size_bytes",          size_bytes},
+            {"version",             version},
+            {"block_index",         block_index},
+            {"head_hash",           head_hash},
+            {"accounts",            accounts},
+            {"stakes",              stakes},
+            {"registrants",         registrants},
+            {"genesis_total",       genesis_total},
+            {"accumulated_subsidy", accum_subsidy},
+            {"accumulated_inbound", accum_inbound},
+            {"accumulated_slashed", accum_slashed},
+            {"accumulated_outbound",accum_outbound}
+        };
+        std::cout << env.dump() << "\n";
+        return 0;
+    }
+
+    auto truncate = [](const std::string& s) {
+        return s.size() > 24 ? s.substr(0, 24) + "..." : s;
+    };
+    std::cout << "file         : " << path        << "\n"
+              << "size_bytes   : " << size_bytes  << "\n"
+              << "version      : " << version     << "\n"
+              << "block_index  : " << block_index << "\n"
+              << "head_hash    : " << truncate(head_hash) << "\n"
+              << "accounts     : " << accounts    << "\n"
+              << "stakes       : " << stakes      << "\n"
+              << "registrants  : " << registrants << "\n"
+              << "A1 counters:\n"
+              << "  genesis_total       : " << genesis_total  << "\n"
+              << "  accumulated_subsidy : " << accum_subsidy  << "\n"
+              << "  accumulated_inbound : " << accum_inbound  << "\n"
+              << "  accumulated_slashed : " << accum_slashed  << "\n"
+              << "  accumulated_outbound: " << accum_outbound << "\n";
+    return 0;
+}
+
 static int cmd_snapshot(int argc, char** argv) {
     if (argc < 1) {
-        std::cerr << "Usage: determ snapshot {create|inspect|fetch|diff} ...\n";
+        std::cerr << "Usage: determ snapshot {create|inspect|fetch|diff|stats} ...\n";
         return 1;
     }
     std::string sub = argv[0];
@@ -3494,6 +3644,7 @@ static int cmd_snapshot(int argc, char** argv) {
     if (sub == "inspect") return cmd_snapshot_inspect(argc - 1, argv + 1);
     if (sub == "fetch")   return cmd_snapshot_fetch  (argc - 1, argv + 1);
     if (sub == "diff")    return cmd_snapshot_diff   (argc - 1, argv + 1);
+    if (sub == "stats")   return cmd_snapshot_stats  (argc - 1, argv + 1);
     std::cerr << "Unknown snapshot subcommand: " << sub << "\n";
     return 1;
 }
@@ -24037,6 +24188,367 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": required-block-sigs "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Config::load(path) + Config::save(path) file IO
+    // round-trip. complement to test-config-roundtrip (in-memory JSON
+    // round-trip) and test-config-defaults (default values pin) —
+    // those test the JSON layer; this test pins the FILE IO layer.
+    //
+    // Pins:
+    //   - save writes well-formed JSON (parseable)
+    //   - load reads the saved file back losslessly (round-trip)
+    //   - save→load idempotent across cycles
+    //   - missing file → diagnostic naming the path
+    //   - malformed JSON file → clean exception
+    //   - save creates parent directories (mkdirp behavior)
+    if (cmd == "test-config-load-save") {
+        using namespace determ;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        namespace fs = std::filesystem;
+
+        // Setup: temp directory + scratch paths.
+        auto tmp_dir = fs::temp_directory_path() / "determ-test-config-load-save";
+        std::error_code ec;
+        fs::remove_all(tmp_dir, ec);  // clean start
+        fs::create_directories(tmp_dir, ec);
+        auto path = (tmp_dir / "config.json").string();
+
+        // === save → load round-trip ===
+
+        // 1. Build a customized Config, save to disk, load back.
+        //    All non-default fields must round-trip.
+        {
+            Config orig;
+            orig.domain        = "alice";
+            orig.listen_port   = 18888;
+            orig.rpc_port      = 18999;
+            orig.rpc_localhost_only = false;
+            orig.rpc_auth_secret = "deadbeef" + std::string(56, 'a');
+            orig.m_creators    = 5;
+            orig.k_block_sigs  = 4;
+            orig.bft_enabled   = false;
+            orig.chain_role    = ChainRole::BEACON;
+            orig.sharding_mode = ShardingMode::EXTENDED;
+            orig.region        = "us-east";
+            orig.committee_region = "us-east";
+            orig.log_quiet     = true;
+
+            orig.save(path);
+            Config loaded = Config::load(path);
+
+            check(loaded.domain == orig.domain,
+                  "save→load: domain preserved");
+            check(loaded.listen_port == orig.listen_port,
+                  "save→load: listen_port preserved");
+            check(loaded.rpc_localhost_only == orig.rpc_localhost_only,
+                  "save→load: rpc_localhost_only preserved (S-001 critical)");
+            check(loaded.rpc_auth_secret == orig.rpc_auth_secret,
+                  "save→load: rpc_auth_secret preserved");
+            check(loaded.m_creators == orig.m_creators
+                  && loaded.k_block_sigs == orig.k_block_sigs,
+                  "save→load: committee params preserved");
+            check(loaded.bft_enabled == orig.bft_enabled,
+                  "save→load: bft_enabled preserved");
+            check(loaded.chain_role == orig.chain_role,
+                  "save→load: chain_role preserved");
+            check(loaded.sharding_mode == orig.sharding_mode,
+                  "save→load: sharding_mode preserved");
+            check(loaded.region == orig.region
+                  && loaded.committee_region == orig.committee_region,
+                  "save→load: R1 region tags preserved");
+            check(loaded.log_quiet == orig.log_quiet,
+                  "save→load: log_quiet preserved");
+        }
+
+        // === save writes parseable JSON ===
+
+        // 2. Saved file is well-formed JSON (verify by re-parsing).
+        {
+            std::ifstream f(path);
+            check(f.good(),
+                  "save: file exists + readable");
+            nlohmann::json j;
+            bool parsed = true;
+            try { f >> j; }
+            catch (const std::exception&) { parsed = false; }
+            check(parsed && j.is_object(),
+                  "save: file contains valid JSON object");
+        }
+
+        // === save→load idempotent across cycles ===
+
+        // 3. Two consecutive save→load cycles produce identical state.
+        {
+            Config c1 = Config::load(path);
+            auto path2 = (tmp_dir / "config2.json").string();
+            c1.save(path2);
+            Config c2 = Config::load(path2);
+
+            check(c1.domain == c2.domain
+                  && c1.listen_port == c2.listen_port
+                  && c1.chain_role == c2.chain_role
+                  && c1.committee_region == c2.committee_region,
+                  "idempotent: save→load→save→load preserves all fields");
+        }
+
+        // === Missing file → diagnostic naming path ===
+
+        // 4. Load from non-existent path throws with the path in
+        //    the diagnostic.
+        {
+            auto missing = (tmp_dir / "does-not-exist.json").string();
+            bool threw = false; std::string what;
+            try { (void)Config::load(missing); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "load missing file: throws");
+            check(what.find("does-not-exist") != std::string::npos
+                  || what.find("Cannot open") != std::string::npos,
+                  "load missing file: diagnostic names path or 'Cannot open'");
+        }
+
+        // === Malformed JSON file → clean exception ===
+
+        // 5. Write garbage to a file, load → exception. The path layer
+        //    delegates JSON parsing to nlohmann which throws json::parse_error.
+        {
+            auto bad_path = (tmp_dir / "malformed.json").string();
+            {
+                std::ofstream f(bad_path);
+                f << "{not_valid_json_at_all";
+            }
+            bool threw = false;
+            try { (void)Config::load(bad_path); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "load malformed JSON: throws");
+        }
+
+        // === save creates parent directories (mkdirp) ===
+
+        // 6. save() to a nested path creates the parent dir tree.
+        {
+            auto nested = (tmp_dir / "a" / "b" / "c" / "config.json").string();
+            Config c;
+            c.domain = "nested-test";
+            c.save(nested);  // should mkdir -p
+
+            check(fs::exists(nested, ec),
+                  "save mkdirp: nested config.json created");
+        }
+
+        // Cleanup
+        fs::remove_all(tmp_dir, ec);
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": config-load-save "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Block::from_json minimum-valid input + S-018
+    // required-field rejection. Block::from_json at chain/block.cpp:451
+    // uses json_require<T> / json_require_hex / json_require_array for
+    // 5 required fields: index, prev_hash, timestamp, transactions,
+    // creators. Anything else is optional. This test pins:
+    //   - Minimal valid Block JSON parses cleanly
+    //   - Missing each required field throws with diagnostic naming
+    //     the field
+    //   - Round-trip via compute_hash (sanity)
+    //   - S-018 wrong-type rejection on required fields
+    if (cmd == "test-block-from-json-minimal") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        // check() uses fputs to stdout (not std::cout) because this
+        // specific test exposed a stdout-stream state issue under MSVC
+        // Release where std::cout writes after certain json operations
+        // would silently fail — fputs bypasses the issue.
+        auto check = [&](bool cond, const char* msg) {
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
+        };
+
+        // Helper: build minimal-valid Block JSON. Block::from_json
+        // requires 7 fields outside any j.contains() guard:
+        // index, prev_hash, timestamp, transactions, creators,
+        // cumulative_rand, abort_events. All other arrays + hex
+        // fields are optional (gated by j.contains(...) followed by
+        // json_require_array / json_require_hex which fires on
+        // wrong-type IF present).
+        auto minimal_json = []() {
+            json j = json::object();
+            j["index"]           = uint64_t{0};
+            j["prev_hash"]       = std::string(64, '0');
+            j["timestamp"]       = int64_t{0};
+            j["transactions"]    = json::array();
+            j["creators"]        = json::array();
+            j["cumulative_rand"] = std::string(64, '0');
+            j["abort_events"]    = json::array();
+            return j;
+        };
+
+        // Helper: expect Block::from_json(j) to throw with `needle`
+        // in the message.
+        auto expect_throw_with = [&](json j, const std::string& needle,
+                                       const char* test_msg) {
+            bool threw = false; std::string what;
+            try { (void)Block::from_json(j); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            bool found = !needle.empty() && what.find(needle) != std::string::npos;
+            check(threw && (needle.empty() || found), test_msg);
+        };
+
+        // === Minimal valid Block parses cleanly ===
+
+        // 1. The 7 required fields suffice; from_json succeeds.
+        {
+            json j = minimal_json();
+            bool ok = true;
+            Block b;
+            try { b = Block::from_json(j); }
+            catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "minimal Block: 7 required fields parse cleanly");
+            check(b.index == 0,
+                  "minimal Block: index = 0");
+            check(b.transactions.empty(),
+                  "minimal Block: transactions = []");
+            check(b.creators.empty(),
+                  "minimal Block: creators = []");
+        }
+
+        // === Missing each required field → diagnostic naming field ===
+
+        // 2. Missing `index` → throws with "index" in message.
+        {
+            json j = minimal_json();
+            j.erase("index");
+            expect_throw_with(j, "index",
+                  "missing 'index': diagnostic names field");
+        }
+
+        // 3. Missing `prev_hash` → throws naming "prev_hash".
+        {
+            json j = minimal_json();
+            j.erase("prev_hash");
+            expect_throw_with(j, "prev_hash",
+                  "missing 'prev_hash': diagnostic names field");
+        }
+
+        // 4. Missing `timestamp` → throws naming "timestamp".
+        {
+            json j = minimal_json();
+            j.erase("timestamp");
+            expect_throw_with(j, "timestamp",
+                  "missing 'timestamp': diagnostic names field");
+        }
+
+        // 5. Missing `transactions` → throws naming "transactions".
+        {
+            json j = minimal_json();
+            j.erase("transactions");
+            expect_throw_with(j, "transactions",
+                  "missing 'transactions': diagnostic names field");
+        }
+
+        // 6. Missing `creators` → throws naming "creators".
+        {
+            json j = minimal_json();
+            j.erase("creators");
+            expect_throw_with(j, "creators",
+                  "missing 'creators': diagnostic names field");
+        }
+
+        // 6b. Missing `cumulative_rand` → throws naming the field.
+        //     (Required at chain/block.cpp:515.)
+        {
+            json j = minimal_json();
+            j.erase("cumulative_rand");
+            expect_throw_with(j, "cumulative_rand",
+                  "missing 'cumulative_rand': diagnostic names field");
+        }
+
+        // 6c. Missing `abort_events` → throws naming the field.
+        //     (Required at chain/block.cpp:516 — json_require_array,
+        //     outside any j.contains guard. 7th required field.)
+        {
+            json j = minimal_json();
+            j.erase("abort_events");
+            expect_throw_with(j, "abort_events",
+                  "missing 'abort_events': diagnostic names field");
+        }
+
+        // === Wrong-type rejection on required fields ===
+
+        // 7. transactions: <number> (not array) → S-018 rejection.
+        {
+            json j = minimal_json();
+            j["transactions"] = 42;
+            expect_throw_with(j, "transactions",
+                  "wrong-type transactions (number): diagnostic names field");
+        }
+
+        // 8. creators: <object> (not array) → S-018 rejection.
+        {
+            json j = minimal_json();
+            j["creators"] = json::object();
+            expect_throw_with(j, "creators",
+                  "wrong-type creators (object): diagnostic names field");
+        }
+
+        // 9. prev_hash: short hex (not 64 chars) → S-018 rejection.
+        {
+            json j = minimal_json();
+            j["prev_hash"] = "abc";  // way too short
+            expect_throw_with(j, "prev_hash",
+                  "wrong-length prev_hash (short hex): diagnostic names field");
+        }
+
+        // === Compute_hash post-parse (sanity) ===
+
+        // 10. After successful Block::from_json, compute_hash works.
+        {
+            json j = minimal_json();
+            Block b = Block::from_json(j);
+            Hash h = b.compute_hash();
+            (void)h;  // just confirm it doesn't throw
+            check(true,
+                  "post-parse compute_hash: doesn't throw on minimal block");
+        }
+
+        // === Round-trip via to_json ===
+
+        // 11. minimal block → to_json → from_json → minimal block
+        //     (identity up to optional-field defaults).
+        {
+            json j = minimal_json();
+            Block b = Block::from_json(j);
+            json j2 = b.to_json();
+            Block b2 = Block::from_json(j2);
+            check(b.index == b2.index
+                  && b.prev_hash == b2.prev_hash
+                  && b.timestamp == b2.timestamp
+                  && b.transactions.size() == b2.transactions.size()
+                  && b.creators.size() == b2.creators.size(),
+                  "minimal block to_json→from_json: 5 required fields identity");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-from-json-minimal "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
