@@ -302,15 +302,105 @@ S-036 witness-window historical validation closes here: the beacon's emitted `ev
 
 ### v2.12 — Cross-shard atomic primitives
 
-**Motivation.** Today's cross-shard transfer is two-phase: source debits, beacon relays, destination credits. Source-debit and destination-credit are temporally decoupled (FA7 covers safety). For some use cases (cross-shard atomic swaps, DEX matching across shards) operators want all-or-nothing semantics.
+**Problem statement.** Today's cross-shard transfer is fire-and-forget: source-shard apply debits the sender, beacon relays the receipt to the destination, destination-shard apply credits the recipient. Apply at source and apply at destination are independent atomic operations separated by the `CROSS_SHARD_RECEIPT_LATENCY = 3` block latency window. FA7 covers safety (no double-spend, no lost credit) and the temporal decoupling is benign for one-shot transfers: at worst the sender debits and the recipient credits some blocks later — both legs eventually land.
 
-**Mechanism.** New tx type `CROSS_SHARD_SWAP`: carries a `(src_action, dst_action, timeout_height)` tuple. Source-shard apply locks the input; destination-shard apply commits the output. Beacon coordinates the two-phase commit. If the destination fails to commit by `timeout_height`, source unlocks.
+The decoupling breaks down for use cases that need **conditional, joint settlement** of two paired actions:
 
-This is a 2PC layered on the existing receipt mechanism. Doesn't change FA7's existing atomicity properties; adds an explicit-rollback primitive for use cases that need it.
+- **Cross-shard atomic swaps.** Alice on shard 0 owes Bob 100 DCH; Bob on shard 1 owes Alice an off-chain asset. Either both settle or neither — a half-settled swap leaves one party out-of-pocket.
+- **Cross-shard DEX matching.** Order book on shard 0 matches a sell against a buy on shard 1. The match is only legitimate if both legs apply; one leg landing alone leaves the order book inconsistent.
+- **Cross-shard escrow with deadline.** Funds locked on shard 0 should release to shard 1 iff the destination accepts within a deadline, else refund to source.
 
-**Cost.** 1 week. New tx types, two-shard coordination, timeout-refund path, integration tests.
+v1.x has no primitive for these patterns. Users would have to build them as a two-step protocol (debit at source → if-credit-lands-then-do-X) with off-chain compensating-action logic for the failure modes — fragile, and incompatible with the chain's mutual-distrust posture (the off-chain compensator becomes a trust singleton).
 
-**Closes:** A class of DApp deployment models that need atomic cross-shard transactions.
+**Mechanism (sketch).** Layer a two-phase commit (2PC) on top of the existing receipt machinery. The primitive is a new `TxType::CROSS_SHARD_SWAP` carrying `(src_action, dst_action, timeout_height, swap_id)` where:
+
+- `src_action` describes the source-shard leg: subject account, debit amount, optional payload.
+- `dst_action` describes the destination-shard leg: subject account, credit amount, optional payload.
+- `timeout_height` is the destination-shard height by which the swap must commit; after this, the source-side lock unwinds.
+- `swap_id = SHA-256(src_action ‖ dst_action ‖ timeout_height ‖ submitter_nonce)` — collision-resistant unique identifier, used by both sides to correlate the two halves.
+
+The flow:
+
+1. **PREPARE at source.** Submitter posts the `CROSS_SHARD_SWAP` to the source shard. Source-shard apply moves `src_action.amount` from the submitter's account into a per-swap `locked_pool_` entry keyed by `swap_id`. The submitter's nonce advances. The fee is charged now. Source-shard apply emits a `SwapPrepareReceipt` to the destination (analogous to today's `CrossShardReceipt` but carrying the swap_id + dst_action + timeout instead of a plain credit instruction).
+2. **PREPARE relay.** Beacon (in v1.x sharding topology) or destination's light-client mesh (post-Phase-D Beaconless v2) relays the receipt to the destination shard. Receipt admission rules are identical to today's `inbound_receipts_eligible_for_inclusion` — 3-block latency + intersection-of-K-views in F2 mode.
+3. **COMMIT at destination.** When the destination shard's apply path sees the `SwapPrepareReceipt`, it admits it into a per-destination `pending_swaps_` table keyed by `swap_id`. The destination's recipient (named in `dst_action.subject`) can then submit a follow-up `CROSS_SHARD_SWAP_COMMIT` tx referencing `swap_id` within `[receipt_admit_height, timeout_height]`. Destination-shard apply emits the credit and a `SwapCommitReceipt` back to source.
+4. **FINALIZE at source.** Source-shard apply consumes the `SwapCommitReceipt`, removes the `locked_pool_[swap_id]` entry, marks the swap finalized.
+5. **TIMEOUT path.** If destination-shard height passes `timeout_height` with no `CROSS_SHARD_SWAP_COMMIT` against the swap, destination apply emits a `SwapTimeoutReceipt`. Source apply, on receiving it, refunds the locked amount back to the submitter's account and removes `locked_pool_[swap_id]`. The fee already paid is not refunded — same model as a failed `COMPOSABLE_BATCH` inner tx (submitter paid for block space).
+
+The destination-side recipient can also actively decline via `CROSS_SHARD_SWAP_ABORT` (carries swap_id + the recipient's signature over an abort intent). Destination apply emits an immediate `SwapTimeoutReceipt` without waiting for the block-height deadline — same source-side handling.
+
+**Wire-format changes.**
+
+| Slot | Use | Notes |
+|---|---|---|
+| `TxType::CROSS_SHARD_SWAP = 11` | Source-side PREPARE | Carries `(src_action, dst_action, timeout_height, swap_id)`. Submitter signs. |
+| `TxType::CROSS_SHARD_SWAP_COMMIT = 12` | Destination-side COMMIT | Carries `swap_id`. Destination recipient signs. Apply path enforces the recipient's identity matches `dst_action.subject` from the pending swap entry. |
+| `TxType::CROSS_SHARD_SWAP_ABORT = 13` | Destination-side ABORT | Carries `swap_id`. Destination recipient signs. Optional fast-path for cancellation. |
+| `struct SwapPrepareReceipt` | Wire receipt, src → dst | Sibling of `CrossShardReceipt`; carries swap_id + dst_action + timeout_height. |
+| `struct SwapCommitReceipt` | Wire receipt, dst → src | Carries swap_id + final-state attestation. |
+| `struct SwapTimeoutReceipt` | Wire receipt, dst → src | Carries swap_id + timeout or abort reason. |
+
+The three new TxType slots reuse the existing tx envelope (sig, nonce, fee, payload). The three new receipt structs reuse the existing receipt envelope plumbing (binary codec + JSON, beacon relay path, F2 reconciliation).
+
+State additions on Chain: `std::map<SwapId, LockedSwap> locked_pool_` (source-side) and `std::map<SwapId, PendingSwap> pending_swaps_` (destination-side). Both contribute new state_root namespace leaves — proposed `l:` (locked) and `g:` (pending, since `p:` is already taken by payloads). Both are pruned on swap finalization or timeout.
+
+**Apply-path changes.** Functions extended (no rewrites):
+
+- `BlockValidator::validate_tx` — three new branches for the new tx types; shape/sig/timeout-range checks; reject `CROSS_SHARD_SWAP_COMMIT` and `CROSS_SHARD_SWAP_ABORT` if `swap_id` not in `pending_swaps_`.
+- `Chain::apply_transactions` — three new branches; source-side debit-into-lock for PREPARE; destination-side credit-out-of-pending for COMMIT; timeout sweep at start of each block (any swap whose `timeout_height` is now in the past gets a `SwapTimeoutReceipt` queued for outbound).
+- `Chain::serialize_state` / `restore_from_snapshot` — `locked_pool_` and `pending_swaps_` added to the snapshot tail and the state_root leaf set.
+- `Chain::atomic_scope` (v2.4 A9 substrate) — the source-side debit-into-lock and the destination-side credit-out-of-pending each run inside `atomic_scope` so the per-block-half is atomic. The two halves remain temporally decoupled (3-block latency, by design); the swap as a whole is atomic via the explicit lock + timeout + refund machinery, not via a global cross-shard transaction lock.
+
+**Backward-compat story.** Pure addition; no existing tx behavior changes. v1.x nodes can coexist on the same chain only at heights below the activation flag — they reject the new tx types with "unknown TxType" (existing behavior for any TxType > 10). Activation is a coordinated flag-day height + genesis-pinned constant `cross_shard_swap_active_from_height`. Nodes running v1.x continue to validate blocks up to that height; from the height onward, they must upgrade. Operators who never use `CROSS_SHARD_SWAP` see no change beyond the version bump.
+
+Snapshot interop: snapshots from a v2.12-active node include the new state namespaces; v1.x nodes reject such snapshots (state_root won't validate with their narrower leaf set — already enforced by S-033's state_root gate). No silent corruption path.
+
+**Threat model.** What the primitive defeats:
+
+- **Half-settled swap.** Single-leg apply (source debits, destination never credits, or vice versa) is structurally impossible. Source can't apply credit without destination's COMMIT; destination can't apply credit without a `SwapPrepareReceipt` matching a real source-side lock.
+- **Off-chain compensator trust.** The chain itself handles the rollback path via `timeout_height` + `SwapTimeoutReceipt`. No third-party trustee needed.
+- **Race-condition double-spend.** The submitter's funds are debited at PREPARE time; the submitter cannot also spend those funds elsewhere because they're physically removed from `account_state_` and held in `locked_pool_`. Re-submission of the same swap_id is rejected (the swap_id is in `locked_pool_` until finalized or timed-out).
+
+New attack surface introduced:
+
+- **Griefing via dangling locks.** A submitter who picks a long `timeout_height` ties up their own funds — only their funds, no shared resource. Cap: enforce `timeout_height - current_height ≤ MAX_SWAP_TIMEOUT_BLOCKS` (proposed 10,000 blocks ≈ several hours at web profile). Self-griefing only, but the cap prevents misconfigured wallets from creating effectively permanent locks.
+- **Destination-shard censorship of COMMIT.** If the destination shard's K-committee censors a particular `CROSS_SHARD_SWAP_COMMIT`, the swap times out and refunds — the source-side submitter loses the fee + the opportunity cost of the lock, but not the principal. FA2 (collaborative inclusion) bounds the censorship to (Q-1)-of-K conjunction, same as any other tx; not new attack surface.
+- **swap_id collision attack.** `swap_id` includes the submitter's nonce in its preimage, so a single submitter cannot create a collision against their own prior swaps. A cross-submitter collision would require finding a SHA-256 collision (V-3 assumption); not new attack surface.
+- **Timeout-window manipulation.** Destination-shard clock divergence from source-shard clock could affect the timeout judgment. Resolved by anchoring `timeout_height` to the **destination shard's** block index (not the source's, not wall-clock time), and by reusing the existing ±30s timestamp window for any timestamp-based assertions inside `dst_action`. This is the same anchor the existing receipt mechanism uses.
+- **Cascading swap deadlock.** Two swaps that mutually depend (swap A's COMMIT requires funds locked in swap B) are not deadlocked because both swaps' source-side debits already happened — COMMIT only needs the swap_id to be in `pending_swaps_`, not any external balance check. The destination recipient can COMMIT or ABORT independently per swap.
+
+**Effort estimate.** ~1.5 weeks focused work (revised from prior ~1 week estimate after spelling out the wire format):
+
+| Sub-component | Effort |
+|---|---|
+| Three new TxType slots + binary codec + JSON | 2 days |
+| Three new receipt structs + receipt-relay plumbing | 2 days |
+| Source-side PREPARE apply path + `locked_pool_` | 1 day |
+| Destination-side COMMIT/ABORT apply paths + `pending_swaps_` | 1 day |
+| Timeout-sweep apply hook + outbound receipt emission | 1 day |
+| State-root namespace integration + snapshot serialize/restore | 1 day |
+| Validator gates + activation-height flag | 0.5 day |
+| Regression tests (happy-path, timeout, abort, snapshot round-trip) | 2 days |
+| Documentation refresh (PROTOCOL.md tx-type table + receipt table) | 1 day |
+
+**Dependencies.**
+
+- **v2.4 (A9 overlay/atomic_scope)** — ✅ shipped. The per-half atomicity rides on `Chain::atomic_scope`.
+- **v2.1 (state Merkle root)** — ✅ shipped. The new `locked_pool_` and `pending_swaps_` namespaces contribute to state_root via the existing leaf-builder pattern; without v2.1 there's no integrity check on the per-swap state.
+- **v2.7 (F2 view reconciliation)** — recommended but not strictly required. The new receipts inherit the same intersection-rule treatment v1.x receipts already get (credit-bearing → intersection-of-K-views). F2 tightens the rule; v2.12 works under either the v1.x latency-based admission or F2 intersection.
+- **No dependency on v2.10 (threshold randomness)** — the swap primitive is deterministic in the receipt-admission rules; no randomness consumed.
+- **No dependency on v2.22 (confidential tx)** — orthogonal. Future composition: a `CROSS_SHARD_SWAP` could carry Pedersen-committed amounts under v2.22's view-key infrastructure, but that's a v2.22-era extension, not a v2.12 dependency.
+
+**Cross-references.**
+
+- FA7 cross-shard receipt atomicity proof: `docs/proofs/CrossShardReceipts.md`. v2.12 extends FA7's scope from "one-shot credit" to "joint debit + conditional credit + timeout refund." The proof structure is unchanged — same source-side debit-then-emit-receipt invariant, same destination-side admit-then-credit invariant — just applied to three new receipt types instead of one.
+- A9 atomic_scope: `include/determ/chain/chain.hpp::atomic_scope` (and v2.4 above). Per-half atomicity ride-along.
+- Existing cross-shard receipt struct: `include/determ/chain/block.hpp::CrossShardReceipt` (line 339). v2.12's three new receipt structs follow the same shape.
+- COMPOSABLE_BATCH precedent: `TxType::COMPOSABLE_BATCH = 8` (line 108). Same "fee charged regardless of inner success" semantics; same `atomic_scope` host.
+- Receipt-admission latency constant: `CROSS_SHARD_RECEIPT_LATENCY = 3` (referenced in S-016 closure narrative in MEMORY.md; v2.12 reuses unchanged).
+- Sharding topology: works under both v1.x BEACON-mediated sharding and post-Phase-D Beaconless v2 light-client mesh. The wire surface is the same; only the relay-layer changes.
+
+**Closes.** A class of DApp deployment models that need atomic cross-shard transactions (atomic swaps, cross-shard DEX matching, cross-shard escrow with deadline). Strictly additive — no v1.x finding closure depends on v2.12. Enables the application layer to build conditional-settlement protocols without a trusted off-chain compensator.
 
 ### v2.13 — Fair-ordering primitive
 
