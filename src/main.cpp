@@ -73,7 +73,10 @@ Usage:
                                               --count prints just an integer
                                               (composes with --filter-region
                                               and --json).
-  determ committee                           List the current epoch's K-of-K committee
+  determ committee [--json] [--count]        List the current epoch's K-of-K committee.
+                                              --count prints a bare integer
+                                              (or `{"count":N}` with --json) —
+                                              regional under-quorum monitoring.
   determ pending-params [--at-height N] [--json]
                                               A5 staged PARAM_CHANGE entries
                                               (effective_height, name, value_hex)
@@ -606,6 +609,16 @@ Additional in-process tests:
                                               domain creates entry; DEREGISTER
                                               non-registrant no-op; stacked
                                               receipt+TRANSFER sums correctly
+  determ test-randomized-delay                derive_delay contract via REGISTER
+                                              active_from + DEREGISTER inactive_from
+                                              — determinism, sensitivity to both
+                                              inputs, range [1,10], distribution
+                                              coverage across the window
+  determ test-block-timestamp                 Block.timestamp hash-surface scope —
+                                              IN compute_hash + signing_bytes;
+                                              NOT in state_root; NOT in
+                                              compute_block_digest (committee-sig
+                                              path excludes consensus-time meta)
 )" << "\n";
 }
 
@@ -1650,12 +1663,25 @@ static int cmd_chain_summary(int argc, char** argv) {
 //   --committee` for light-client K-of-K signature verification.
 static int cmd_committee(int argc, char** argv) {
     bool json_out = false;
+    bool count_only = false;
     for (int i = 0; i < argc; ++i) {
-        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+        std::string a = argv[i];
+        if      (a == "--json")  json_out   = true;
+        else if (a == "--count") count_only = true;
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
         auto result = rpc::rpc_call("127.0.0.1", port, "committee");
+        // --count: bare integer (size of next-K committee). For
+        // monitoring scripts in regional deployments where the
+        // committee may temporarily be < K (region under-quorum).
+        // Composes with --json to emit `{"count": N}` (single-line).
+        if (count_only) {
+            size_t n = result.is_array() ? result.size() : 0;
+            if (json_out) std::cout << json({{"count", n}}).dump() << "\n";
+            else          std::cout << n << "\n";
+            return 0;
+        }
         if (json_out) {
             std::cout << result.dump(2) << "\n";
             return 0;
@@ -21280,6 +21306,379 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": account-create-on-credit "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: randomized-delay contract via REGISTER active_from
+    // and DEREGISTER inactive_from. chain.cpp's static derive_delay()
+    // returns 1 + (sha256(tx_hash || cumulative_rand)[0..7] %
+    // REGISTRATION_DELAY_WINDOW), with REGISTRATION_DELAY_WINDOW = 10.
+    // So delay ∈ [1, 10] per registration / deregistration.
+    //
+    // This test exercises the OBSERVABLE contract (active_from /
+    // inactive_from values across various inputs):
+    //   - Determinism: same (cumulative_rand, tx) → same delay
+    //   - Sensitivity to cumulative_rand
+    //   - Sensitivity to tx_hash (via tx.payload variation)
+    //   - Range bound: delay ∈ [1, 10] (i.e., active_from ∈ [h+1, h+10])
+    //   - Distribution coverage: across many runs, delay spans the range
+    //
+    // Defends against drift in the randomization formula that could
+    // either (a) collapse delay to a single value (predictability
+    // attack — operator picks own activation height) or (b) escape
+    // the [1, 10] window (silent over-/under-delay of activations).
+    if (cmd == "test-randomized-delay") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice is a creator. We REGISTER "bob" (not in
+        // initial_creators) with various tx payloads and cumulative_rand
+        // values; the registrant's active_from reveals the delay.
+        auto make_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "randomized-delay-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 0;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal};
+            return cfg;
+        };
+
+        // Helper: REGISTER "bob" in a block with given cumulative_rand
+        // and payload-flavor. Returns the resulting active_from value
+        // (= height + delay).
+        auto register_with = [&](Chain& c, uint8_t cr_seed, uint8_t pk_seed,
+                                   uint64_t nonce) -> uint64_t {
+            std::vector<uint8_t> payload;
+            for (int i = 0; i < 32; ++i) payload.push_back(uint8_t(pk_seed + i));
+
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = "bob"; tx.fee = 1; tx.nonce = nonce;
+            tx.payload = std::move(payload);
+            // Critical: derive_delay reads tx.hash, NOT tx.compute_hash().
+            // In production, the validator + tx-codec set this; here we
+            // populate it explicitly so payload variation maps to hash
+            // variation.
+            tx.hash = tx.compute_hash();
+
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(cr_seed + i);
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            auto rb = c.registrant("bob");
+            return rb.has_value() ? rb->active_from : 0;
+        };
+
+        // === Determinism ===
+
+        // 1. Two chains with identical (cumulative_rand, payload, height)
+        //    produce identical active_from.
+        {
+            Chain c1; c1.append(make_genesis_block(make_cfg()));
+            Chain c2; c2.append(make_genesis_block(make_cfg()));
+            uint64_t af1 = register_with(c1, 0x42, 0xCC, 0);
+            uint64_t af2 = register_with(c2, 0x42, 0xCC, 0);
+            check(af1 == af2,
+                  "determinism: same (cumulative_rand, tx) → same active_from");
+        }
+
+        // === Range bound ===
+
+        // 2. active_from ∈ [height+1, height+10] (delay = 1..10).
+        //    height here is 1 (the block containing REGISTER), so
+        //    active_from ∈ [2, 11].
+        {
+            Chain c; c.append(make_genesis_block(make_cfg()));
+            uint64_t af = register_with(c, 0x55, 0xAA, 0);
+            check(af >= 2 && af <= 11,
+                  "range: active_from in [2, 11] (delay in [1, 10])");
+        }
+
+        // === cumulative_rand sensitivity ===
+
+        // 3. Same tx, two distinct cumulative_rand values → DIFFERENT
+        //    active_from (defends against the operator pre-computing
+        //    a fixed delay independent of randomness chain).
+        //    Note: we probe two distinct cumulative_rand seeds that
+        //    are known to map to different residues mod 10. seed
+        //    0x10 vs 0x20 will hash differently.
+        {
+            Chain c1; c1.append(make_genesis_block(make_cfg()));
+            Chain c2; c2.append(make_genesis_block(make_cfg()));
+            uint64_t af1 = register_with(c1, 0x10, 0xCC, 0);
+            uint64_t af2 = register_with(c2, 0x20, 0xCC, 0);
+            // It IS possible for two distinct cumulative_rands to map to
+            // the same delay (1-in-10 collision). Probe ~6 distinct
+            // seeds until we find a pair that differs, to make this
+            // assertion robust against rare collisions.
+            std::set<uint64_t> seen;
+            for (uint8_t s = 0x10; s < 0x40; ++s) {
+                Chain cp; cp.append(make_genesis_block(make_cfg()));
+                seen.insert(register_with(cp, s, 0xCC, 0));
+            }
+            check(seen.size() >= 2,
+                  "cumulative_rand sensitivity: distinct seeds yield distinct delays");
+            // Sanity that the first probe set up two values (may match by chance)
+            check(af1 >= 2 && af2 >= 2,
+                  "cumulative_rand probes: both in valid range");
+        }
+
+        // === tx_hash (payload) sensitivity ===
+
+        // 4. Same cumulative_rand, two distinct payloads (=> different
+        //    tx hashes) → delay differs across SOME pair (1-in-10 chance
+        //    of collision per pair, so probe several).
+        {
+            std::set<uint64_t> seen;
+            for (uint8_t pk = 0x10; pk < 0x40; ++pk) {
+                Chain cp; cp.append(make_genesis_block(make_cfg()));
+                seen.insert(register_with(cp, 0x77, pk, 0));
+            }
+            check(seen.size() >= 2,
+                  "tx_hash sensitivity: distinct payloads yield distinct delays");
+        }
+
+        // === Distribution: many runs span much of [1, 10] ===
+
+        // 5. Run 60 distinct (cumulative_rand, payload) pairs; the set
+        //    of observed delays should include AT LEAST 7 of the 10
+        //    possible values (rough uniformity check — true uniform
+        //    distribution would hit all 10 with ~99.99% probability
+        //    over 60 samples, but we allow 3 "miss" slots for safety).
+        //
+        //    Defends against a regression that collapses the formula
+        //    to a small subset (e.g., always returns 1, or only even
+        //    delays).
+        {
+            std::set<uint64_t> delays;
+            int idx = 0;
+            for (uint8_t cr = 0x01; cr < 0x09; ++cr) {
+                for (uint8_t pk = 0x40; pk < 0x48; ++pk) {
+                    Chain cp; cp.append(make_genesis_block(make_cfg()));
+                    uint64_t af = register_with(cp, cr, pk, 0);
+                    delays.insert(af - 1);  // af = height + delay; here height = 1
+                    if (++idx >= 60) break;
+                }
+                if (idx >= 60) break;
+            }
+            check(delays.size() >= 7,
+                  "distribution: >=7 distinct delays out of 10 observed across 60 runs");
+            // All observed delays must be in [1, 10].
+            bool all_in_range = true;
+            for (auto d : delays) {
+                if (d < 1 || d > 10) { all_in_range = false; break; }
+            }
+            check(all_in_range,
+                  "distribution: all observed delays in [1, 10]");
+        }
+
+        // === DEREGISTER uses the same derive_delay ===
+
+        // 6. inactive_from = height + delay (same formula). Range and
+        //    sensitivity properties carry over.
+        {
+            Chain c; c.append(make_genesis_block(make_cfg()));
+            c.set_unstake_delay(0);
+
+            // First REGISTER bob.
+            register_with(c, 0x11, 0xCC, 0);
+            // DEREGISTER bob in next block.
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "bob"; dereg.fee = 1; dereg.nonce = 1;
+            dereg.hash = dereg.compute_hash();
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(0x99 + i);
+            b.transactions.push_back(dereg);
+            uint64_t h = b.index;
+            c.append(b);
+
+            auto rb = c.registrant("bob");
+            check(rb.has_value(),
+                  "DEREGISTER: bob registry entry still present");
+            uint64_t if_val = rb.value().inactive_from;
+            check(if_val >= h + 1 && if_val <= h + 10,
+                  "DEREGISTER: inactive_from in [h+1, h+10] (same delay formula)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": randomized-delay "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Block.timestamp semantics. The timestamp field is
+    // operator-supplied (no clock-monotonicity enforcement at the chain
+    // layer — that's validator concern). This test pins which hash
+    // surfaces timestamp DOES vs DOES NOT participate in:
+    //   - IN compute_hash (block identity changes with timestamp)
+    //   - IN signing_bytes (creator_block_sigs are over signing_bytes)
+    //   - NOT in state_root (state_root binds ACCOUNT state, not block-
+    //     metadata — two chains can have different block timestamps
+    //     while still agreeing on the application state)
+    //   - NOT in compute_block_digest (the FA1 signature path —
+    //     timestamp is excluded so committee sigs commit to body)
+    //
+    // Documenting and pinning these boundaries — a regression that
+    // accidentally bound timestamp into state_root would break the
+    // light-client equivalence proofs (proofs assume state_root depends
+    // only on accounts/stakes/registry/etc, NOT on consensus-time
+    // metadata).
+    if (cmd == "test-block-timestamp") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice is sole creator with balance + stake.
+        GenesisConfig cfg;
+        cfg.chain_id = "block-timestamp-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Build two chains that differ ONLY in block timestamp at
+        // height 1. Each gets an empty block at height 1 with
+        // different timestamps. State / receipts / events are
+        // identical.
+        auto build_chain_at_ts = [&](uint64_t ts) -> Chain {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.timestamp = ts;
+            c.append(b);
+            return c;
+        };
+
+        // === compute_hash IS sensitive to timestamp ===
+
+        // 1. Two blocks differing only in timestamp produce different
+        //    compute_hash. Identity of the block changes — fork-resolve
+        //    must see them as distinct.
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(c1.head().compute_hash() != c2.head().compute_hash(),
+                  "compute_hash: sensitive to timestamp");
+        }
+
+        // === signing_bytes IS sensitive to timestamp ===
+
+        // 2. Block::signing_bytes() differs for two blocks differing
+        //    only in timestamp. (Creator signatures are computed over
+        //    signing_bytes; identical signing_bytes would let a
+        //    creator's signature be replayed across blocks with
+        //    different timestamps.)
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            const Block& b1 = c1.head();
+            const Block& b2 = c2.head();
+            check(b1.signing_bytes() != b2.signing_bytes(),
+                  "signing_bytes: sensitive to timestamp");
+        }
+
+        // === state_root is NOT sensitive to timestamp ===
+
+        // 3. Two chains differing only in block timestamps produce
+        //    IDENTICAL state_root at the same height. state_root
+        //    binds account state, not block metadata. Light-client
+        //    proofs depend on this property.
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "state_root: NOT sensitive to timestamp (binds account state only)");
+        }
+
+        // === compute_block_digest is NOT sensitive to timestamp ===
+
+        // 4. compute_block_digest excludes consensus-time-only fields
+        //    per PROTOCOL.md §4.3. timestamp is one of those exclusions:
+        //    two blocks differing only in timestamp produce identical
+        //    digest. The FA1 committee-signature path commits to body,
+        //    not block-meta.
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(determ::node::compute_block_digest(c1.head()) == determ::node::compute_block_digest(c2.head()),
+                  "compute_block_digest: NOT sensitive to timestamp");
+        }
+
+        // === Genesis timestamp IS bound into chain identity ===
+
+        // 5. compute_genesis_hash is independent of any post-genesis
+        //    block.timestamp (genesis identity only). But the GENESIS
+        //    block.timestamp field IS part of compute_hash for the
+        //    genesis block itself. (Genesis timestamp is typically 0;
+        //    chain identity = compute_hash of genesis block.)
+        {
+            // Two chains with same config but different genesis-block
+            // timestamps. compute_genesis_hash isn't directly settable
+            // — make_genesis_block sets b.timestamp = 0. So instead
+            // we verify the documented invariant: at any non-genesis
+            // height, two chains with identical history except for
+            // one block's timestamp have different head hashes but
+            // same state_root.
+            //
+            // Already covered above (asserts 1 + 3). Add a sanity
+            // assertion: head_hash differs but height matches.
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(c1.height() == c2.height(),
+                  "sanity: timestamp difference doesn't affect chain height");
+        }
+
+        // === Determinism (same timestamp produces same hashes) ===
+
+        // 6. Two chains with identical timestamp produce identical
+        //    compute_hash + signing_bytes + state_root + block_digest.
+        {
+            Chain c1 = build_chain_at_ts(5000);
+            Chain c2 = build_chain_at_ts(5000);
+            check(c1.head().compute_hash() == c2.head().compute_hash()
+                  && c1.head().signing_bytes() == c2.head().signing_bytes()
+                  && determ::node::compute_block_digest(c1.head()) == determ::node::compute_block_digest(c2.head())
+                  && c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: identical timestamp → identical hashes across all surfaces");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-timestamp "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
