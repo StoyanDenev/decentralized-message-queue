@@ -99,6 +99,13 @@ Usage:
   determ block-hash <index>                  Print just compute_hash of block at
                                               <index> (64-hex). Useful for
                                               cross-node fork detection scripts.
+  determ block-range <from> <to>             Bulk fetch via headers RPC (paged
+                  [--field NAME] [--json]    256/page). Default: index + block_hash
+                                              per height. --field NAME prints
+                                              bare values (one per line) for
+                                              fork-detection diff scripts.
+                                              Allowed: index | prev_hash |
+                                              state_root | block_hash | timestamp.
   determ head [--field height|hash] [--json]
                                               Print just <height> <head_hash>
                                               (space-separated; --field <one>
@@ -567,6 +574,19 @@ Additional in-process tests:
                                               in one block; disjoint-actor
                                               independence; same-actor
                                               abort+equiv stacking
+  determ test-nef-pool-drain                  E1 Negative Entry Fee mechanism —
+                                              ZEROTH_ADDRESS pool halves on
+                                              first-time REGISTER; re-REGISTER
+                                              (key rotation / region update)
+                                              does NOT drain; geometric
+                                              exhaustion; A1 conservation;
+                                              state_root sensitive to pool
+  determ test-tx-payload-bounds               Per-tx-type payload-size gates —
+                                              REGISTER (< 32 skip, 32 accept,
+                                              mismatched region_len skip);
+                                              STAKE / UNSTAKE (!= 8 bytes skip);
+                                              TRANSFER empty payload accept;
+                                              A1 invariance under skip paths
 )" << "\n";
 }
 
@@ -1808,6 +1828,127 @@ static int cmd_block_hash(int argc, char** argv) {
     } catch (std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
+    }
+    return 0;
+}
+
+// determ block-range <from> <to> [--field NAME] [--json] [--rpc-port P]
+//   Bulk-fetch a range of block fields via the headers RPC. Inclusive
+//   on both ends ([from, to]). Builds on the existing `block-hash`
+//   CLI (which fetches a single block at a time) — operators doing
+//   fork detection across multiple heights pay one RPC + pagination
+//   round trip per up-to-256 headers instead of one per height.
+//
+//   --field NAME selects which header field to emit per height.
+//                Default: block_hash. Allowed: index, prev_hash,
+//                state_root, block_hash, timestamp.
+//   --json       emits the full headers-array JSON (machine-readable
+//                envelope; same shape `determ headers` produces).
+//
+//   Default output: one line per height — `<index> <value>`. With
+//   --field NAME, the format is one bare value per line (no index
+//   prefix) — ready for diff(1) or comparison scripts:
+//
+//     $ determ block-range 100 105 --field block_hash --rpc-port 7778
+//     <hash100>
+//     <hash101>
+//     ...
+//
+//   Each height that's out-of-range (server-side height < requested)
+//   is omitted (the headers RPC truncates). Exit 1 only on RPC error
+//   or invalid args; partial responses are an honest reflection of
+//   chain state.
+static int cmd_block_range(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "Usage: determ block-range <from> <to> "
+                     "[--field NAME] [--json] [--rpc-port N]\n";
+        return 1;
+    }
+    uint64_t from_idx = 0, to_idx = 0;
+    try {
+        from_idx = std::stoull(argv[0]);
+        to_idx   = std::stoull(argv[1]);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: <from> and <to> must be unsigned integers\n";
+        return 1;
+    }
+    if (to_idx < from_idx) {
+        std::cerr << "Error: <to> (" << to_idx << ") must be >= <from> ("
+                  << from_idx << ")\n";
+        return 1;
+    }
+
+    bool json_out = false;
+    std::string field = "block_hash";
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--field" && i + 1 < argc) field = argv[i + 1];
+    }
+    static const std::vector<std::string> kAllowedFields = {
+        "index", "prev_hash", "state_root", "block_hash", "timestamp"
+    };
+    bool field_ok = false;
+    for (const auto& f : kAllowedFields) if (f == field) { field_ok = true; break; }
+    if (!field_ok) {
+        std::cerr << "Error: unknown --field '" << field << "' — allowed: ";
+        for (size_t i = 0; i < kAllowedFields.size(); ++i) {
+            if (i) std::cerr << ", ";
+            std::cerr << kAllowedFields[i];
+        }
+        std::cerr << "\n";
+        return 1;
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+
+    constexpr uint32_t PAGE = 256;  // Mirrors HEADERS_PAGE_MAX server-side.
+    json all = json::array();
+    try {
+        uint64_t cur = from_idx;
+        while (cur <= to_idx) {
+            uint64_t remaining = to_idx - cur + 1;
+            uint32_t want = uint32_t(std::min<uint64_t>(remaining, PAGE));
+            json params = {{"from", cur}, {"count", want}};
+            auto result = rpc::rpc_call("127.0.0.1", port, "headers", params);
+            if (!result.is_object() || !result.contains("headers")
+                || !result["headers"].is_array()) {
+                std::cerr << "Error: headers RPC returned unexpected shape\n";
+                return 1;
+            }
+            const auto& hs = result["headers"];
+            for (auto& h : hs) all.push_back(h);
+            if (hs.empty() || hs.size() < want) break;  // server-side truncation
+            cur += hs.size();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+
+    if (json_out) {
+        std::cout << json({{"headers", all},
+                              {"from", from_idx},
+                              {"to", to_idx},
+                              {"received", all.size()}}).dump() << "\n";
+        return 0;
+    }
+
+    // Default: one line per header. If --field omitted (default
+    // block_hash), prefix with index for readability; if --field set
+    // explicitly, emit bare values for shell-script consumption.
+    bool default_field = (field == "block_hash");
+    for (auto& h : all) {
+        if (!h.contains(field) || h[field].is_null()) {
+            std::cout << "\n";  // honest missing-value marker
+            continue;
+        }
+        const auto& v = h[field];
+        if (default_field) {
+            uint64_t idx = h.value("index", uint64_t{0});
+            std::cout << idx << " " << v.get<std::string>() << "\n";
+        } else if (v.is_string())   std::cout << v.get<std::string>() << "\n";
+        else if (v.is_number())     std::cout << v.dump() << "\n";
+        else                         std::cout << v.dump() << "\n";
     }
     return 0;
 }
@@ -3809,6 +3950,7 @@ int main(int argc, char** argv) {
     if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
+    if (cmd == "block-range")   return cmd_block_range(sub_argc, sub_argv);
     if (cmd == "head")          return cmd_head(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
@@ -19929,6 +20071,603 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-event-composition " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: E1 Negative Entry Fee mechanism. ZEROTH_ADDRESS is
+    // a canonical pseudo-account (all-zero pubkey, no usable private key)
+    // seeded at genesis via GenesisConfig.zeroth_pool_initial. On every
+    // FIRST-TIME REGISTER, the apply layer transfers half the current
+    // pool balance to the new registrant — re-registrations (key rotation
+    // / region update) DO NOT touch the pool. Pool exhausts geometrically.
+    //
+    // This is a documented economic primitive with NO existing unit-test
+    // coverage. Silent drift here would either drain the pool too fast
+    // (overspending), under-credit new domains (NEF not landing), or
+    // touch the pool on re-REGISTER (incentivizing key churn).
+    if (cmd == "test-nef-pool-drain") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a Block that REGISTERs `domain` with the given
+        // payload (32-byte pubkey + optional region).
+        auto make_register_tx = [](const std::string& domain,
+                                     uint8_t pubkey_base,
+                                     const std::string& region,
+                                     uint64_t nonce) {
+            std::vector<uint8_t> payload;
+            for (int i = 0; i < 32; ++i)
+                payload.push_back(uint8_t(pubkey_base + i));
+            if (!region.empty()) {
+                payload.push_back(uint8_t(region.size()));
+                for (char ch : region) payload.push_back(uint8_t(ch));
+            }
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = domain; tx.fee = 1; tx.nonce = nonce;
+            tx.payload = std::move(payload);
+            return tx;
+        };
+
+        auto make_cfg = [](uint64_t pool_initial) {
+            GenesisConfig cfg;
+            cfg.chain_id = "nef-pool-drain-test";
+            cfg.zeroth_pool_initial = pool_initial;
+            // Need a creator to apply blocks.
+            GenesisCreator gc;
+            gc.domain = "validator";
+            for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                gc.ed_pub[i] = uint8_t(0x10 + i);
+            gc.initial_stake = 0;
+            cfg.initial_creators = {gc};
+            // Alice + bob get some balance so they can pay fees.
+            GenesisAllocation alice_bal, bob_bal, validator_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 100;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 100;
+            validator_bal.domain = "validator"; validator_bal.balance = 100;
+            cfg.initial_balances = {alice_bal, bob_bal, validator_bal};
+            return cfg;
+        };
+
+        // === Pool is seeded at genesis ===
+
+        // 1. zeroth_pool_initial = 1000 → ZEROTH_ADDRESS has balance 1000.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000)));
+            check(c.balance(ZEROTH_ADDRESS) == 1000,
+                  "pool seeded: ZEROTH_ADDRESS balance = zeroth_pool_initial");
+            // A1 invariant must hold (pool is part of accounted supply).
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds with seeded pool");
+        }
+
+        // === Empty pool: NEF no-op ===
+
+        // 2. zeroth_pool_initial = 0 → REGISTER drains nothing.
+        //    alice is NOT a creator (validator is), so the fee goes to
+        //    validator and does NOT return to alice. alice ends -1.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(0)));
+            uint64_t alice_before = c.balance("alice");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"validator"};
+            b.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+            c.append(b);
+
+            // Pool was empty → NEF contributes 0. alice paid fee 1
+            // (claimed by validator-the-creator); no NEF credit.
+            check(c.balance("alice") == alice_before - 1,
+                  "empty pool: NEF = 0, alice = -1 fee (no NEF credit)");
+            check(c.balance(ZEROTH_ADDRESS) == 0,
+                  "empty pool: balance still 0");
+        }
+
+        // === First-time REGISTER drains half the pool ===
+
+        // 3. Pool = 1000, alice first-time REGISTER → alice gets +500,
+        //    pool drops to 500.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000)));
+            uint64_t alice_before = c.balance("alice");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"validator"};
+            b.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+            c.append(b);
+
+            // Net: alice paid fee 1, fee fully returns via creator
+            // (validator is sole creator and gets fee, but alice
+            // is registrant and pays fee). Net fee effect on alice
+            // depends on whether alice is in creators set — she's
+            // NOT, so alice ends -1 fee + 500 NEF = +499.
+            check(c.balance("alice") == alice_before + 500 - 1,
+                  "first-time REGISTER: alice +500 NEF, -1 fee → net +499");
+            check(c.balance(ZEROTH_ADDRESS) == 500,
+                  "first-time REGISTER: pool halved 1000 → 500");
+            // A1 invariant: NEF is a balance TRANSFER (pool → registrant),
+            // not a mint or burn. expected_total unchanged.
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: NEF is value-conserving (transfer not mint)");
+        }
+
+        // === Re-REGISTER (key rotation / region update): NO pool drain ===
+
+        // 4. After first REGISTER, alice re-registers with a different
+        //    region. Pool MUST stay unchanged — this defends against
+        //    key-rotation churn attacks where an attacker spams REGISTER
+        //    to drain the pool.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000)));
+
+            // Block 1: first REGISTER (drain).
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"validator"};
+            b1.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+            c.append(b1);
+            uint64_t pool_after_first = c.balance(ZEROTH_ADDRESS);  // 500
+            check(pool_after_first == 500,
+                  "re-REGISTER setup: pool at 500 after first");
+
+            // Block 2: re-REGISTER alice with region update. Pool stays.
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"validator"};
+            b2.transactions.push_back(make_register_tx("alice", 0xA0, "us-east", 1));
+            c.append(b2);
+
+            check(c.balance(ZEROTH_ADDRESS) == pool_after_first,
+                  "re-REGISTER: pool UNCHANGED (key rotation / region update)");
+            // Verify region updated.
+            auto ra = c.registrant("alice");
+            check(ra.has_value() && ra->region == "us-east",
+                  "re-REGISTER: region update succeeded");
+        }
+
+        // === Geometric exhaustion: multiple distinct first-time REGISTERs ===
+
+        // 5. Pool = 1000. alice (first-time) → pool 500. bob (first-time)
+        //    → pool 250. carol (first-time) → pool 125. Pool halves on
+        //    each first-time REGISTER.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000)));
+            // Need genesis allocation for carol too so the fee can be paid.
+            // Workaround: directly append register blocks; chain
+            // accounts_ auto-creates account on first reference.
+
+            // alice
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"validator"};
+            b1.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+            c.append(b1);
+            check(c.balance(ZEROTH_ADDRESS) == 500,
+                  "geometric: pool 1000 → 500 after alice");
+
+            // bob
+            Block b2;
+            b2.index = 2; b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"validator"};
+            b2.transactions.push_back(make_register_tx("bob", 0xB0, "", 0));
+            c.append(b2);
+            check(c.balance(ZEROTH_ADDRESS) == 250,
+                  "geometric: pool 500 → 250 after bob");
+
+            // carol — note: carol has no genesis balance. The fee
+            // charge will fail and the REGISTER will silently skip,
+            // so NEF should also NOT fire.
+            Block b3;
+            b3.index = 3; b3.prev_hash = c.head().compute_hash();
+            b3.creators = {"validator"};
+            b3.transactions.push_back(make_register_tx("carol", 0xC0, "", 0));
+            c.append(b3);
+            // Carol's REGISTER may fail at fee-charge (carol has 0 balance).
+            // The skip happens BEFORE the NEF block in chain.cpp (charge_fee
+            // is checked first), so pool stays at 250.
+            check(c.balance(ZEROTH_ADDRESS) == 250,
+                  "geometric: carol's REGISTER fails (0 balance), pool stays 250");
+        }
+
+        // === A1 invariant under multiple drains ===
+
+        // 6. A1 holds across 3 consecutive first-time REGISTERs.
+        //    Total supply moves only by failed-tx state (which here is none
+        //    for the successful alice/bob path).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(2000)));
+            uint64_t total_before = c.live_total_supply();
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"validator"};
+            b1.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+            b1.transactions.push_back(make_register_tx("bob",   0xB0, "", 0));
+            c.append(b1);
+
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds under 2-REGISTER block");
+            check(c.live_total_supply() == total_before,
+                  "A1: total supply unchanged (NEF is intra-shard transfer)");
+        }
+
+        // === state_root sensitive to pool drain ===
+
+        // 7. Two chains: c1 does a first-REGISTER (drains pool); c2
+        //    skips it. state_root must differ (pool balance is in
+        //    a:-namespace of S-033).
+        {
+            Chain c1; c1.append(make_genesis_block(make_cfg(1000)));
+            Chain c2; c2.append(make_genesis_block(make_cfg(1000)));
+
+            Block b1;
+            b1.index = 1; b1.prev_hash = c1.head().compute_hash();
+            b1.creators = {"validator"};
+            b1.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+            c1.append(b1);
+
+            // c2: empty block (same height; different content)
+            Block b2;
+            b2.index = 1; b2.prev_hash = c2.head().compute_hash();
+            b2.creators = {"validator"};
+            c2.append(b2);
+
+            check(c1.compute_state_root() != c2.compute_state_root(),
+                  "state_root sensitive to NEF pool drain (a:-namespace)");
+        }
+
+        // === Determinism: same drain sequence → same state_root ===
+
+        // 8. Two chains apply same NEF sequence → same root.
+        {
+            Chain c1; c1.append(make_genesis_block(make_cfg(1000)));
+            Chain c2; c2.append(make_genesis_block(make_cfg(1000)));
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"validator"};
+                b.transactions.push_back(make_register_tx("alice", 0xA0, "", 0));
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same NEF drain → same state_root");
+            check(c1.balance(ZEROTH_ADDRESS) == c2.balance(ZEROTH_ADDRESS),
+                  "determinism: same pool balance");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": nef-pool-drain " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: tx-payload-bounds — exhaustive coverage of
+    // apply-side payload-size gates that silently skip on malformed
+    // input. Each tx type has its own payload-shape contract; this
+    // test pins the boundary behavior on each:
+    //   - REGISTER: payload.size() < 32 → skip; == 32 → empty region;
+    //               > 32 → must have valid region_len header
+    //   - STAKE/UNSTAKE: payload.size() != 8 → skip
+    //   - Boundary cases at the precise size limit
+    //   - A1 invariant holds under skip (no state mutation)
+    //
+    // Defends against payload-format regressions that could either
+    // crash the apply path or silently corrupt state.
+    if (cmd == "test-tx-payload-bounds") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice is the creator (genesis registrant entry, gets fees);
+        // bob is the TEST SUBJECT for REGISTER — not in initial_creators
+        // so c.registrant("bob") starts as nullopt. STAKE/UNSTAKE tests still
+        // use alice (creator) since stake operations don't create registrants.
+        GenesisConfig cfg;
+        cfg.chain_id = "tx-payload-bounds-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        auto encode_u64 = [](uint64_t v) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i)
+                p[i] = uint8_t((v >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        auto apply_with_tx = [&](Chain& c, const Transaction& tx) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // === REGISTER: payload < 32 → skip ===
+
+        // 1. payload.size() = 31 (one byte short of pubkey): skip, no
+        //    nonce bump, no registrant entry created. Uses "bob" (not in
+        //    initial_creators) so registrant("bob") starts as nullopt.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t nonce_before = c.next_nonce("bob");
+
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = "bob"; tx.fee = 1; tx.nonce = nonce_before;
+            tx.payload.resize(31, 0xAB);  // 31 bytes — too small
+            apply_with_tx(c, tx);
+
+            check(!c.registrant("bob").has_value(),
+                  "REGISTER < 32 bytes: NO registrant entry created");
+            check(c.next_nonce("bob") == nonce_before,
+                  "REGISTER < 32 bytes: nonce NOT bumped (silent skip)");
+        }
+
+        // === REGISTER: payload == 32 (legacy/no-region) → accepted ===
+
+        // 2. Exactly 32 bytes = pubkey only, no region. Accepted; entry
+        //    has empty region.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = "bob"; tx.fee = 1; tx.nonce = 0;
+            tx.payload.resize(32, 0xAB);  // exactly 32 bytes
+            apply_with_tx(c, tx);
+
+            auto rb = c.registrant("bob");
+            check(rb.has_value() && rb->region == "",
+                  "REGISTER == 32 bytes: registrant created with empty region");
+        }
+
+        // === REGISTER: payload > 32 with mismatched region_len → skip ===
+
+        // 3. payload.size() = 35 with payload[32] = 5 (claimed region_len),
+        //    but only 2 region bytes follow (total = 32 + 1 + 2 = 35,
+        //    expected = 32 + 1 + 5 = 38). Mismatch → skip.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = "bob"; tx.fee = 1; tx.nonce = 0;
+            tx.payload.resize(32, 0xAB);  // pubkey
+            tx.payload.push_back(5);      // claimed region_len = 5
+            tx.payload.push_back('u');    // only 2 region bytes
+            tx.payload.push_back('s');
+            apply_with_tx(c, tx);
+
+            check(!c.registrant("bob").has_value(),
+                  "REGISTER w/ mismatched region_len: NO entry created (skip)");
+        }
+
+        // === REGISTER: payload > 32 with matched region_len → accepted ===
+
+        // 4. payload.size() = 32 + 1 + 7 = 40 with payload[32] = 7 (matches
+        //    "us-east" length). Accepted; entry has region = "us-east".
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::REGISTER;
+            tx.from = "bob"; tx.fee = 1; tx.nonce = 0;
+            tx.payload.resize(32, 0xAB);
+            tx.payload.push_back(7);
+            std::string region = "us-east";
+            for (char ch : region) tx.payload.push_back(uint8_t(ch));
+            apply_with_tx(c, tx);
+
+            auto rb = c.registrant("bob");
+            check(rb.has_value() && rb->region == "us-east",
+                  "REGISTER w/ matched region_len: region preserved");
+        }
+
+        // === STAKE: payload != 8 bytes → skip ===
+
+        // 5. STAKE payload size != 8 → silent skip (no stake added, no
+        //    nonce bump, no fee charged).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t stake_before = c.stake("alice");
+            uint64_t balance_before = c.balance("alice");
+            uint64_t nonce_before = c.next_nonce("alice");
+
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = nonce_before;
+            tx.payload.resize(7, 0x01);  // 7 bytes — wrong size
+            apply_with_tx(c, tx);
+
+            check(c.stake("alice") == stake_before,
+                  "STAKE != 8 bytes: stake unchanged");
+            check(c.balance("alice") == balance_before,
+                  "STAKE != 8 bytes: balance unchanged (fee not charged)");
+            check(c.next_nonce("alice") == nonce_before,
+                  "STAKE != 8 bytes: nonce NOT bumped (silent skip)");
+        }
+
+        // === STAKE: payload = 8 bytes (correct) → accepted ===
+
+        // 6. Exactly 8 bytes encoding amount=100 → accepted, stake +100.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t balance_before = c.balance("alice");
+
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = encode_u64(100);  // exactly 8 bytes
+            apply_with_tx(c, tx);
+
+            check(c.stake("alice") == 100,
+                  "STAKE == 8 bytes: amount staked correctly");
+            // alice paid 100 + 1 fee, fee returns via creator (alice = creator).
+            check(c.balance("alice") == balance_before - 100,
+                  "STAKE == 8 bytes: balance -= amount (fee returned)");
+        }
+
+        // === STAKE: payload = 9 bytes (too long) → skip ===
+
+        // 7. 9 bytes payload (one too many) → silent skip.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = encode_u64(50);
+            tx.payload.push_back(0xFF);  // 1 extra byte → 9 total
+            apply_with_tx(c, tx);
+
+            check(c.stake("alice") == 0,
+                  "STAKE > 8 bytes: silent skip (no stake added)");
+        }
+
+        // === UNSTAKE: payload != 8 bytes → skip ===
+
+        // 8. UNSTAKE with wrong payload size: silent skip with NO fee charge.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // Set up: stake some first.
+            {
+                Transaction stk;
+                stk.type = TxType::STAKE;
+                stk.from = "alice"; stk.fee = 1; stk.nonce = 0;
+                stk.payload = encode_u64(50);
+                apply_with_tx(c, stk);
+            }
+            uint64_t stake_before = c.stake("alice");
+
+            Transaction tx;
+            tx.type = TxType::UNSTAKE;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 1;
+            tx.payload.resize(0);  // empty payload — wrong size
+            apply_with_tx(c, tx);
+
+            check(c.stake("alice") == stake_before,
+                  "UNSTAKE != 8 bytes: stake unchanged");
+        }
+
+        // === Empty TRANSFER payload accepted (optional payload) ===
+
+        // 9. TRANSFER with empty payload: accepted (payload is optional for
+        //    TRANSFER, per A4 memo design). Use a fresh recipient domain
+        //    "freshie" that has no genesis allocation so balance starts at 0.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "freshie";
+            tx.amount = 10; tx.fee = 1; tx.nonce = 0;
+            tx.payload.clear();  // empty
+            apply_with_tx(c, tx);
+
+            check(c.balance("freshie") == 10,
+                  "TRANSFER empty payload: accepted (payload is optional)");
+        }
+
+        // === A1 invariant under all skipped paths ===
+
+        // 10. Block with several malformed txs that all skip — A1 invariant
+        //     holds (no spurious mints / burns).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            uint64_t supply_before = c.live_total_supply();
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+
+            // All malformed:
+            {
+                Transaction t;
+                t.type = TxType::REGISTER;
+                t.from = "alice"; t.fee = 1; t.nonce = 0;
+                t.payload.resize(10, 0xCC);  // < 32, skip
+                b.transactions.push_back(t);
+            }
+            {
+                Transaction t;
+                t.type = TxType::STAKE;
+                t.from = "alice"; t.fee = 1; t.nonce = 0;
+                t.payload.resize(4, 0xDD);  // != 8, skip
+                b.transactions.push_back(t);
+            }
+            {
+                Transaction t;
+                t.type = TxType::UNSTAKE;
+                t.from = "alice"; t.fee = 1; t.nonce = 0;
+                t.payload.resize(99, 0xEE);  // != 8, skip
+                b.transactions.push_back(t);
+            }
+            c.append(b);
+
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1 invariant: holds across all skip paths");
+            check(c.live_total_supply() == supply_before,
+                  "all-skip block: live supply unchanged");
+        }
+
+        // === Determinism ===
+
+        // 11. Two chains see same malformed-payload sequence → same root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"alice"};
+                Transaction t;
+                t.type = TxType::REGISTER;
+                t.from = "alice"; t.fee = 1; t.nonce = 0;
+                t.payload.resize(15, 0xFF);  // wrong size
+                b.transactions.push_back(t);
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same malformed payload → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": tx-payload-bounds " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
