@@ -20,7 +20,7 @@ Validator V12 (`check_cross_shard_receipts`) requires: source-side, each cross-s
 
 Validator V13 (`check_inbound_receipts`) requires: destination-side, each entry in `b.inbound_receipts` has `dst_shard == my_shard_id`, `src_shard ≠ my_shard_id`, is unique within the block, and is not yet in `applied_inbound_receipts_`.
 
-Chain apply (`apply_transactions`, Preliminaries §9) does:
+Chain apply (`apply_transactions`, anchored by V15 in Preliminaries §5; cross-shard mechanics in Preliminaries §8) does:
 
 - Source-side: `sender.balance -= (amount + fee)`; if cross-shard, `block_outbound += amount` (no destination credit on this shard).
 - Destination-side: for each `r ∈ b.inbound_receipts` not yet applied, `accounts_[r.to].balance += r.amount`; insert `(src_shard, tx_hash)` into `applied_inbound_receipts_`; `block_inbound += r.amount`.
@@ -108,7 +108,7 @@ Therefore the destination credit corresponds to a real source-side debit with ov
 Liveness sketch (full treatment defers to FA4):
 
 1. After source block `B_s` finalizes at `h_s`, gossip propagates `B_s` (and via the bundle path, its receipt set) to all connected nodes within `Δ_g`.
-2. Destination producers at the next selected height observe the pending receipt in `pending_inbound_receipts_` and, by `producer.cpp::assemble_block`, bake it into `b_d.inbound_receipts` unless already applied.
+2. Destination producers at the next selected height observe the pending receipt in `pending_inbound_receipts_` and, by `producer.cpp::build_body`, bake it into `b_d.inbound_receipts` unless already applied.
 3. By FA4, the next destination committee selection succeeds (round 1) with probability `≥ 1 - p_abort` and within bounded rounds w.h.p.
 
 Hence `E[h_d - h_s] ≤ Δ_g / Δ_block + 1 / (1 - p_abort)`. ∎
@@ -117,7 +117,7 @@ Hence `E[h_d - h_s] ≤ Δ_g / Δ_block + 1 / (1 - p_abort)`. ∎
 
 ## 5. Proof of Corollary T-7.1
 
-Per-shard A1 (Preliminaries §9, `Chain::expected_total`):
+Per-shard A1 (V15 apply in Preliminaries §5; implementation in `Chain::expected_total`):
 
 ```
 LiveLocal(s) = genesis_s + accumulated_subsidy_s + accumulated_inbound_s
