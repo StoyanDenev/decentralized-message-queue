@@ -147,6 +147,15 @@ Usage:
                                               --json emits structured object).
   determ show-account <address> [--json]     Inspect any address (balance, nonce, registry, stake)
   determ show-tx <hash> [--json]             Look up a tx by hash (block_index + payload)
+  determ tx-hash --in <tx.json> [--json]     Compute Transaction hash from a JSON
+                                              file without submitting. Reads
+                                              {type,from,to,...,signature}
+                                              shape, runs Transaction::from_json
+                                              + compute_hash, prints 64-hex. Use
+                                              to predict + cross-check a hash
+                                              before submit_tx, or to verify a
+                                              sender-computed hash matches. Pure
+                                              local computation — no RPC.
   determ where-is <addr|domain>              Local-only shard-routing diagnostic.
                   --shard-count N             Computes which shard the address
                   [--salt-hex HEX] [--json]   routes to via shard_id_for_address.
@@ -718,6 +727,20 @@ Additional in-process tests:
                                               transactions/creators); each
                                               missing throws diagnostic naming
                                               field; wrong-type rejection.
+  determ test-config-permissive               Config::from_json silently
+                                              accepts unknown/extra fields
+                                              (legacy-config-friendly
+                                              contract) — typos + future
+                                              fields + arbitrary nested
+                                              objects don't throw; known
+                                              fields still bind correctly.
+  determ test-chain-shard-routing-config      Chain::set_shard_routing +
+                                              is_cross_shard contract at
+                                              Chain level — shard_count<=1
+                                              short-circuits to false;
+                                              shard_count>1 routes via salt
+                                              + my_shard_id; salt-sensitivity;
+                                              accessor round-trip.
 )" << "\n";
 }
 
@@ -2668,6 +2691,72 @@ static int cmd_check_fork(int argc, char** argv) {
 //       STAKE:           N2
 //       ...
 //   (zero-count types omitted from human output; --json includes them)
+
+// determ tx-hash --in <tx.json> [--json]
+//   Compute Transaction hash from a JSON file without submitting.
+//
+//   Reads a single Transaction-shaped JSON object (the same shape produced
+//   by Transaction::to_json) from --in, runs Transaction::from_json +
+//   compute_hash, and prints the 64-hex hash. Pure local computation —
+//   no RPC, no daemon, no signing.
+//
+//   Use cases:
+//     - Predict a tx's hash before calling submit_tx (e.g., to pre-stage
+//       a status-tracker entry against the future hash).
+//     - Verify that a sender-computed hash matches the canonical signing-
+//       bytes-driven hash on the receiver side (interop sanity check).
+//     - Debug signature failures by comparing the hash the wallet signed
+//       against what Determ would compute from the same JSON shape.
+//
+//   --in   FILE   Read JSON from FILE (required).
+//   --json        Emit {"hash": "<64hex>"} instead of bare hex.
+//
+//   Exit codes:
+//     0 — success, hash printed
+//     1 — missing/unreadable --in, malformed JSON, or from_json error
+static int cmd_tx_hash(int argc, char** argv) {
+    std::string in_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--in" && i + 1 < argc) in_path = argv[i + 1];
+        else if (a == "--json") json_out = true;
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ tx-hash --in <tx.json> [--json]\n";
+        return 1;
+    }
+    std::ifstream f(in_path);
+    if (!f) {
+        std::cerr << "Error: cannot open --in file: " << in_path << "\n";
+        return 1;
+    }
+    json j;
+    try {
+        f >> j;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: failed to parse JSON from " << in_path
+                  << ": " << e.what() << "\n";
+        return 1;
+    }
+    determ::chain::Transaction tx;
+    try {
+        tx = determ::chain::Transaction::from_json(j);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: Transaction::from_json failed: " << e.what() << "\n";
+        return 1;
+    }
+    auto hash = tx.compute_hash();
+    std::string hash_hex = determ::to_hex(hash);
+    if (json_out) {
+        json env = {{"hash", hash_hex}};
+        std::cout << env.dump() << "\n";
+    } else {
+        std::cout << hash_hex << "\n";
+    }
+    return 0;
+}
+
 static int cmd_tx_summary(int argc, char** argv) {
     uint32_t last_n = 10;
     bool json_out = false;
@@ -4950,6 +5039,7 @@ int main(int argc, char** argv) {
     if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
     if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
     if (cmd == "tx-summary")    return cmd_tx_summary(sub_argc, sub_argv);
+    if (cmd == "tx-hash")       return cmd_tx_hash(sub_argc, sub_argv);
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
     if (cmd == "block-info")    return cmd_block_info(sub_argc, sub_argv);
@@ -24549,6 +24639,362 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-from-json-minimal "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Config::from_json is intentionally permissive (uses j.value(key, default)
+    // for every field). Unknown / future / typo'd keys must be silently
+    // ignored so that:
+    //   1. Legacy configs survive forward upgrades (we add new fields without
+    //      breaking older deployments that don't have them yet).
+    //   2. Newer configs survive rollbacks (an older binary doesn't choke on
+    //      fields it doesn't recognize yet).
+    //   3. Operator typos on optional knobs don't kill node startup with an
+    //      opaque "unknown field" error — known fields still bind correctly.
+    // This contract is the dual of S-018 (which enforces strict validation on
+    // CONSENSUS wire surfaces). Operator-config tolerance is by design.
+    if (cmd == "test-config-permissive") {
+        using namespace determ;
+        using namespace determ::node;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === Unknown / future / typo'd keys are silently ignored ===
+
+        // 1. A wholly unknown key doesn't throw.
+        {
+            json j = json::object();
+            j["some_unknown_future_field"] = "value";
+            bool ok = true;
+            try { (void)Config::from_json(j); }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "unknown field 'some_unknown_future_field': accepted silently");
+        }
+
+        // 2. A common typo of a known field is silently ignored (the typo'd
+        //    key has no effect; the real default still binds).
+        {
+            json j = json::object();
+            j["rpc_prot"] = 9999;  // typo of "rpc_port"
+            Config c;
+            bool ok = true;
+            try { c = Config::from_json(j); }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "typo'd field 'rpc_prot': accepted silently");
+            check(c.rpc_port == 7778,
+                  "typo'd 'rpc_prot' does NOT affect rpc_port default (7778)");
+        }
+
+        // 3. Arbitrary nested object value at unknown key — also accepted.
+        {
+            json j = json::object();
+            j["future_nested"] = json::object({{"k", json::array({1,2,3})}});
+            bool ok = true;
+            try { (void)Config::from_json(j); }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "unknown nested-object field: accepted silently");
+        }
+
+        // 4. Many unknown fields at once — still accepted.
+        {
+            json j = json::object();
+            for (int i = 0; i < 16; ++i) {
+                j[std::string("noise_") + std::to_string(i)] = i;
+            }
+            bool ok = true;
+            try { (void)Config::from_json(j); }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "16 unknown noise fields: accepted silently");
+        }
+
+        // === Known fields STILL bind correctly when accompanied by unknown ===
+
+        // 5. Known + unknown side-by-side: known wins; unknown is dropped.
+        {
+            json j = json::object();
+            j["listen_port"] = uint16_t{12345};
+            j["unknown_xyz"] = "ignored";
+            j["rpc_port"]    = uint16_t{23456};
+            Config c = Config::from_json(j);
+            check(c.listen_port == 12345,
+                  "listen_port binds correctly alongside unknown field");
+            check(c.rpc_port == 23456,
+                  "rpc_port binds correctly alongside unknown field");
+        }
+
+        // 6. Known field with VALID type wins; sibling typo'd version is
+        //    silently ignored (typo branch never bound).
+        {
+            json j = json::object();
+            j["bft_enabled"] = false;      // real field
+            j["bft_enable"]  = true;       // typo — must be ignored
+            Config c = Config::from_json(j);
+            check(c.bft_enabled == false,
+                  "bft_enabled binds real field, typo'd 'bft_enable' ignored");
+        }
+
+        // === The empty-object case (full defaults) is unaffected ===
+
+        // 7. Empty JSON object → full defaults populated (sanity vs
+        //    test-config-defaults).
+        {
+            Config c = Config::from_json(json::object());
+            check(c.rpc_localhost_only == true,
+                  "empty config: S-001 rpc_localhost_only=true (default)");
+            check(c.bft_enabled == true,
+                  "empty config: bft_enabled=true (default)");
+            check(c.m_creators == 3,
+                  "empty config: m_creators=3 (default)");
+        }
+
+        // === Legacy-config forward-compat scenario (closer to real life) ===
+
+        // 8. A "pre-v2 config" missing several v2+ fields (e.g.,
+        //    rpc_rate_per_sec / log_quiet / sharding_mode) still loads
+        //    cleanly and gets safe defaults.
+        {
+            json legacy = json::object();
+            legacy["domain"]       = "alice.tld";
+            legacy["data_dir"]     = "/var/determ";
+            legacy["listen_port"]  = uint16_t{7777};
+            legacy["rpc_port"]     = uint16_t{7778};
+            legacy["m_creators"]   = uint32_t{3};
+            legacy["k_block_sigs"] = uint32_t{3};
+            // intentionally OMIT: rpc_rate_per_sec, gossip_rate_per_sec,
+            //                     rpc_localhost_only, log_quiet, region,
+            //                     committee_region, sharding_mode,
+            //                     bft_escalation_threshold, ...
+            Config cl;
+            bool ok = true;
+            try { cl = Config::from_json(legacy); }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "legacy config (missing v2+ fields): loads cleanly");
+            check(cl.domain == "alice.tld",
+                  "legacy config: known field 'domain' bound correctly");
+            check(cl.rpc_localhost_only == true,
+                  "legacy config: missing rpc_localhost_only defaults to true (S-001)");
+            check(cl.rpc_rate_per_sec == 0.0,
+                  "legacy config: missing rpc_rate_per_sec defaults to 0.0 (S-014 off)");
+            check(cl.log_quiet == false,
+                  "legacy config: missing log_quiet defaults to false");
+        }
+
+        // === Future-config rollback-compat scenario (newer config, older binary) ===
+
+        // 9. A config that contains FUTURE fields the current binary doesn't
+        //    know about (e.g., a v2.30 binary's "threshold_dkg_round" field)
+        //    must still load on the current binary — the unknown field is
+        //    just ignored.
+        {
+            json future_cfg = json::object();
+            future_cfg["domain"]   = "future.tld";
+            future_cfg["m_creators"] = uint32_t{5};
+            // Speculative v2.x fields that don't exist in the current binary:
+            future_cfg["threshold_dkg_round"]   = uint64_t{42};
+            future_cfg["regional_partner_set"] = json::array({"r0","r1"});
+            future_cfg["enable_zkvm_dapps"]    = true;
+            Config cf;
+            bool ok = true;
+            try { cf = Config::from_json(future_cfg); }
+            catch (const std::exception&) { ok = false; }
+            check(ok, "future config (with unknown v2.x fields): loads cleanly");
+            check(cf.m_creators == 5,
+                  "future config: known field 'm_creators=5' bound correctly");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": config-permissive "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Chain::set_shard_routing pins shard_count + shard_salt + my_shard_id
+    // at chain construction (genesis-driven). The companion is_cross_shard
+    // helper uses these three to short-circuit single-chain mode and route
+    // multi-shard addresses via the canonical SHA-256-salted hash. This is
+    // the Chain-layer contract — different angle than test-shard-routing
+    // (which tests the crypto-layer shard_id_for_address primitive).
+    if (cmd == "test-chain-shard-routing-config") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: build a canonical "salt" (any 32 bytes).
+        auto make_salt = [](uint8_t b) {
+            Hash s{}; for (auto& x : s) x = b; return s;
+        };
+
+        // === Default state (no set_shard_routing call) ===
+
+        // 1. Default Chain construction starts in single-shard mode
+        //    (shard_count_ = 1, the chain.hpp default). is_cross_shard
+        //    must return false unconditionally per the short-circuit rule.
+        {
+            Chain c;
+            check(c.shard_count() == 1,
+                  "default Chain: shard_count() == 1 (single-shard default)");
+            check(c.is_cross_shard("alice.tld") == false,
+                  "default Chain: is_cross_shard returns false unconditionally");
+            check(c.is_cross_shard("bob.example") == false,
+                  "default Chain: is_cross_shard returns false for any address");
+        }
+
+        // === shard_count <= 1 short-circuits to false ===
+
+        // 2. After set_shard_routing(1, ...), still single-shard mode —
+        //    is_cross_shard must return false unconditionally per the
+        //    documented contract ("SINGLE chains (shard_count_ <= 1)
+        //    return false unconditionally").
+        {
+            Chain c;
+            Hash salt = make_salt(0x77);
+            c.set_shard_routing(/*shard_count=*/1, salt, /*my_shard_id=*/0);
+            check(c.shard_count() == 1,
+                  "shard_count=1: accessor round-trip");
+            check(c.shard_salt() == salt,
+                  "shard_count=1: shard_salt() accessor round-trip");
+            check(c.my_shard_id() == 0,
+                  "shard_count=1: my_shard_id() accessor round-trip");
+            check(c.is_cross_shard("alice.tld") == false,
+                  "shard_count=1: is_cross_shard returns false (short-circuit)");
+            check(c.is_cross_shard("bob.example") == false,
+                  "shard_count=1: is_cross_shard returns false for ANY address");
+        }
+
+        // 3. shard_count=0 is also "single-shard mode" — must short-circuit.
+        {
+            Chain c;
+            Hash salt = make_salt(0xAB);
+            c.set_shard_routing(/*shard_count=*/0, salt, /*my_shard_id=*/0);
+            check(c.shard_count() == 0,
+                  "shard_count=0: accessor round-trip");
+            check(c.is_cross_shard("alice.tld") == false,
+                  "shard_count=0: is_cross_shard returns false (short-circuit)");
+        }
+
+        // === shard_count > 1 delegates to crypto-layer shard_id_for_address ===
+
+        // 4. shard_count=4 routes via salted SHA-256. For any given address,
+        //    Chain::is_cross_shard(addr) must equal
+        //    (shard_id_for_address(addr,4,salt) != my_shard_id).
+        {
+            Chain c;
+            Hash salt = make_salt(0x11);
+            uint32_t sc = 4;
+            ShardId my = 0;
+            c.set_shard_routing(sc, salt, my);
+
+            // Verify the routing matches the crypto-layer for several addresses.
+            for (const char* addr : {"alice.tld",
+                                       "bob.example",
+                                       "carol.org",
+                                       "dave.net",
+                                       "eve.test"}) {
+                ShardId got = crypto::shard_id_for_address(addr, sc, salt);
+                bool expected_cross = (got != my);
+                bool actual_cross   = c.is_cross_shard(addr);
+                std::string msg = std::string("shard_count=4 my=0: ") + addr
+                                  + " routes consistently with shard_id_for_address";
+                check(expected_cross == actual_cross, msg.c_str());
+            }
+        }
+
+        // === my_shard_id parameter: same-shard returns false, others true ===
+
+        // 5. For any address, exactly one my_shard_id makes is_cross_shard
+        //    return false (the address's home shard). All others return true.
+        {
+            Hash salt = make_salt(0x22);
+            uint32_t sc = 4;
+            const std::string addr = "alice.tld";
+            ShardId home = crypto::shard_id_for_address(addr, sc, salt);
+            uint32_t false_count = 0;
+            for (uint32_t s = 0; s < sc; ++s) {
+                Chain c;
+                c.set_shard_routing(sc, salt, ShardId(s));
+                if (!c.is_cross_shard(addr)) false_count++;
+            }
+            check(false_count == 1,
+                  "shard_count=4: address routes to exactly 1 of 4 shards (false_count=1)");
+            // Sanity: that one is `home`.
+            Chain c;
+            c.set_shard_routing(sc, salt, home);
+            check(c.is_cross_shard(addr) == false,
+                  "shard_count=4: is_cross_shard=false when my_shard_id=home");
+        }
+
+        // === Salt sensitivity: changing salt can change routing ===
+
+        // 6. Two chains with same shard_count + my_shard_id but DIFFERENT
+        //    salts will (likely) disagree on at least one address's routing.
+        //    We probe several addresses and assert at least one differs —
+        //    a guard against the salt being silently ignored.
+        {
+            uint32_t sc = 4;
+            Chain c1; c1.set_shard_routing(sc, make_salt(0x33), ShardId{0});
+            Chain c2; c2.set_shard_routing(sc, make_salt(0x44), ShardId{0});
+            bool any_diff = false;
+            for (const char* addr : {"alice.tld","bob.tld","carol.tld",
+                                       "dave.tld","eve.tld","frank.tld",
+                                       "grace.tld","henry.tld"}) {
+                if (c1.is_cross_shard(addr) != c2.is_cross_shard(addr)) {
+                    any_diff = true; break;
+                }
+            }
+            check(any_diff,
+                  "shard_count=4: changing salt changes routing for at least one of 8 addresses");
+        }
+
+        // === Re-set is idempotent: calling set_shard_routing twice with
+        //     the same args yields the same routing ===
+
+        // 7. Calling set_shard_routing twice (same args) is a no-op.
+        {
+            Chain c;
+            Hash salt = make_salt(0x55);
+            uint32_t sc = 4;
+            c.set_shard_routing(sc, salt, ShardId{1});
+            bool first  = c.is_cross_shard("alice.tld");
+            c.set_shard_routing(sc, salt, ShardId{1});  // re-set
+            bool second = c.is_cross_shard("alice.tld");
+            check(first == second,
+                  "set_shard_routing(same args)^2: is_cross_shard result unchanged");
+            check(c.shard_count() == sc,
+                  "set_shard_routing(same args)^2: shard_count unchanged");
+            check(c.my_shard_id() == 1,
+                  "set_shard_routing(same args)^2: my_shard_id unchanged");
+        }
+
+        // 8. Calling set_shard_routing with DIFFERENT my_shard_id flips
+        //    is_cross_shard for the appropriate address (idempotent reset).
+        {
+            Chain c;
+            Hash salt = make_salt(0x66);
+            uint32_t sc = 4;
+            const std::string addr = "alice.tld";
+            ShardId home = crypto::shard_id_for_address(addr, sc, salt);
+            ShardId other = ShardId((home + 1) % sc);
+            c.set_shard_routing(sc, salt, home);
+            bool at_home  = c.is_cross_shard(addr);  // expect false
+            c.set_shard_routing(sc, salt, other);    // reset to a different shard
+            bool at_other = c.is_cross_shard(addr);  // expect true
+            check(at_home == false,
+                  "reset my_shard_id=home: is_cross_shard(addr)=false");
+            check(at_other == true,
+                  "reset my_shard_id=other: is_cross_shard(addr)=true");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-shard-routing-config "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
