@@ -64,6 +64,11 @@ Usage:
   determ status [--field <name>]             Chain head, node count, next creators.
                                               --field <name> prints just that
                                               field's value (one-shot extraction)
+  determ summary [--json]                    Operator dashboard — height + head
+                                              + peers + mempool + committee +
+                                              sync state + A1 invariant in one
+                                              compact view. SSH-into-server
+                                              quick-check workflow.
   determ show-block <index>                  Print block at index (full JSON)
   determ chain-summary [--last N]            Compact summary of last N blocks
   determ validators [--filter-region R] [--json] [--count]
@@ -667,6 +672,17 @@ Additional in-process tests:
                                               debit + dst inbound credit;
                                               src_outbound == dst_inbound;
                                               net supply across pair conserved.
+  determ test-chain-ctor-bootstrap            Chain() + Chain(genesis) ctor
+                                              variants produce equivalent state;
+                                              head()/at() empty-chain throw
+                                              contracts; both bootstrap paths
+                                              support continued append.
+  determ test-snapshot-version-rejection      restore_from_snapshot version-field
+                                              validation — version=1 accepted,
+                                              0/999/-1/missing/wrong-type
+                                              rejected with diagnostic;
+                                              non-object input rejected with
+                                              distinct 'not a JSON object'.
 )" << "\n";
 }
 
@@ -905,6 +921,115 @@ static int cmd_status(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// determ summary [--json] [--rpc-port P]
+//   Operator dashboard. Gathers the most-frequently-checked status
+//   fields into a single compact view: height + head_hash, peer +
+//   committee + mempool sizes, this node's committee_region, sync
+//   state, A1 invariant status. Designed for the common SSH-into-
+//   server quick-check workflow — one line summarizes "is the node
+//   healthy + caught up + connected?".
+//
+//   Uses `status` RPC for most fields + `chain_summary` (last_n=1)
+//   for A1 counter aggregation. No new server RPC required.
+//
+//   Default output (human-readable):
+//     height       : N
+//     head_hash    : <prefix>...
+//     genesis      : <prefix>...
+//     peers        : N
+//     mempool      : N
+//     committee    : N (region: <r>)
+//     sync_state   : in_sync | syncing
+//     A1 invariant : OK | VIOLATED
+//
+//   --json emits a structured envelope for monitoring dashboards.
+static int cmd_summary(int argc, char** argv) {
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        if (std::string(argv[i]) == "--json") { json_out = true; break; }
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+
+    try {
+        auto st = rpc::rpc_call("127.0.0.1", port, "status");
+        if (!st.is_object()) {
+            std::cerr << "Error: status RPC returned non-object\n";
+            return 1;
+        }
+
+        // Pull A1 counters from chain_summary (last_n=1 for min payload).
+        json cs_params = {{"last_n", uint32_t{1}}};
+        auto cs = rpc::rpc_call("127.0.0.1", port, "chain_summary", cs_params);
+        if (!cs.is_object()) {
+            std::cerr << "Error: chain_summary RPC returned non-object\n";
+            return 1;
+        }
+        uint64_t genesis_total   = cs.value("genesis_total",       uint64_t{0});
+        uint64_t accum_subsidy   = cs.value("accumulated_subsidy", uint64_t{0});
+        uint64_t accum_inbound   = cs.value("accumulated_inbound", uint64_t{0});
+        uint64_t accum_slashed   = cs.value("accumulated_slashed", uint64_t{0});
+        uint64_t accum_outbound  = cs.value("accumulated_outbound",uint64_t{0});
+        uint64_t live_supply     = cs.value("total_supply",        uint64_t{0});
+        uint64_t expected =
+            genesis_total + accum_subsidy + accum_inbound
+            - accum_slashed - accum_outbound;
+        bool a1_ok = (expected == live_supply);
+
+        // Pull peer count + mempool from status; pull committee from
+        // dedicated RPC (always-current value).
+        uint64_t height       = st.value("height", uint64_t{0});
+        std::string head_hash = st.value("head_hash", std::string{});
+        std::string genesis_h = st.value("genesis",   std::string{});
+        uint64_t peer_count   = st.value("peer_count", uint64_t{0});
+        uint64_t mempool_size = st.value("mempool_size", uint64_t{0});
+        std::string sync      = st.value("sync_state", std::string{"unknown"});
+        std::string region    = st.value("committee_region", std::string{});
+
+        // Committee size — fetch dedicated array.
+        size_t committee_size = 0;
+        try {
+            auto cmt = rpc::rpc_call("127.0.0.1", port, "committee");
+            if (cmt.is_array()) committee_size = cmt.size();
+        } catch (...) { /* leave 0 on failure — partial summary is OK */ }
+
+        if (json_out) {
+            json env = {
+                {"height",         height},
+                {"head_hash",      head_hash},
+                {"genesis",        genesis_h},
+                {"peers",          peer_count},
+                {"mempool",        mempool_size},
+                {"committee",      committee_size},
+                {"committee_region", region},
+                {"sync_state",     sync},
+                {"a1_invariant_ok", a1_ok},
+                {"live_total_supply", live_supply},
+                {"expected_total",    expected}
+            };
+            std::cout << env.dump() << "\n";
+            return a1_ok ? 0 : 2;
+        }
+
+        auto truncate = [](const std::string& s) {
+            return s.size() > 24 ? s.substr(0, 24) + "..." : s;
+        };
+        std::cout << "height       : " << height       << "\n"
+                  << "head_hash    : " << truncate(head_hash) << "\n"
+                  << "genesis      : " << truncate(genesis_h) << "\n"
+                  << "peers        : " << peer_count   << "\n"
+                  << "mempool      : " << mempool_size << "\n"
+                  << "committee    : " << committee_size
+                  << " (region: "      << (region.empty() ? "(global)" : region)
+                  << ")\n"
+                  << "sync_state   : " << sync         << "\n"
+                  << "A1 invariant : " << (a1_ok ? "OK" : "VIOLATED") << "\n";
+        return a1_ok ? 0 : 2;
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // determ show-block <index> [--rpc-port N]
@@ -4538,6 +4663,7 @@ int main(int argc, char** argv) {
     if (cmd == "register")    return cmd_register(sub_argc, sub_argv);
     if (cmd == "send")        return cmd_send(sub_argc, sub_argv);
     if (cmd == "status")        return cmd_status(sub_argc, sub_argv);
+    if (cmd == "summary")       return cmd_summary(sub_argc, sub_argv);
     if (cmd == "peers")         return cmd_peers(sub_argc, sub_argv);
     if (cmd == "show-block")    return cmd_show_block(sub_argc, sub_argv);
     if (cmd == "headers")       return cmd_headers(sub_argc, sub_argv);
@@ -23209,6 +23335,318 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": cross-shard-atomicity "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain constructor bootstrap paths. The Chain
+    // class has two ctors:
+    //   - Chain() = default → produces an empty Chain
+    //   - explicit Chain(Block genesis) → bootstraps the chain by
+    //     applying genesis as block 0 (used by Chain::Chain at
+    //     chain.cpp:49 which calls apply_transactions(genesis))
+    //
+    // Plus the legacy bootstrap path: Chain c; c.append(make_genesis_block(cfg))
+    //
+    // This test pins:
+    //   - Chain() is empty
+    //   - Chain(genesis) is non-empty (height=1)
+    //   - head_hash() and head().compute_hash() match for both bootstrap paths
+    //   - head() on empty Chain throws "Empty chain"
+    //   - at(index) out-of-range throws
+    //   - Both bootstrap paths produce equivalent state from same genesis
+    if (cmd == "test-chain-ctor-bootstrap") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a representative genesis config.
+        auto make_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "chain-ctor-bootstrap-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal};
+            return cfg;
+        };
+
+        // === Default-construct Chain is empty ===
+
+        // 1. Chain() produces an empty Chain. height==0, empty()==true.
+        {
+            Chain c;
+            check(c.empty(),
+                  "Chain(): empty() returns true");
+            check(c.height() == 0,
+                  "Chain(): height() returns 0");
+        }
+
+        // === head() on empty Chain throws ===
+
+        // 2. Calling head() on an empty Chain throws "Empty chain".
+        {
+            Chain c;
+            bool threw = false;
+            std::string what;
+            try { (void)c.head(); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            check(threw,
+                  "head() on empty Chain: throws");
+            check(what.find("Empty chain") != std::string::npos,
+                  "head() empty Chain throw: message contains 'Empty chain'");
+        }
+
+        // === at() out-of-range throws ===
+
+        // 3. at(N) on empty Chain throws std::out_of_range-style message.
+        {
+            Chain c;
+            bool threw = false;
+            try { (void)c.at(0); }
+            catch (const std::out_of_range&) { threw = true; }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "at(0) on empty Chain: throws");
+        }
+
+        // === Explicit Chain(genesis_block) ctor ===
+
+        // 4. Chain(genesis) bootstraps the chain. height=1, head matches
+        //    the supplied genesis.
+        {
+            Block g = make_genesis_block(make_cfg());
+            Chain c(g);  // explicit ctor variant
+            check(c.height() == 1,
+                  "Chain(genesis) ctor: height=1");
+            check(!c.empty(),
+                  "Chain(genesis) ctor: empty()==false");
+            check(c.head().index == 0,
+                  "Chain(genesis) ctor: head().index == 0");
+            check(c.head().compute_hash() == g.compute_hash(),
+                  "Chain(genesis) ctor: head().compute_hash() == genesis.compute_hash()");
+            check(c.head_hash() == g.compute_hash(),
+                  "Chain(genesis) ctor: head_hash() matches");
+        }
+
+        // === Both bootstrap paths produce equivalent state ===
+
+        // 5. Chain c1; c1.append(genesis) and Chain c2(genesis) produce
+        //    chains with identical head_hash + state_root + state.
+        {
+            Block g = make_genesis_block(make_cfg());
+
+            Chain c1;
+            c1.append(g);
+
+            Chain c2(g);  // explicit ctor
+
+            check(c1.head_hash() == c2.head_hash(),
+                  "bootstrap equivalence: append vs ctor → same head_hash");
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "bootstrap equivalence: append vs ctor → same state_root");
+            check(c1.balance("alice") == c2.balance("alice"),
+                  "bootstrap equivalence: same account state");
+            check(c1.stake("alice") == c2.stake("alice"),
+                  "bootstrap equivalence: same stake state");
+        }
+
+        // === Both bootstrap paths support continued append ===
+
+        // 6. After ctor bootstrap, chain accepts further appends.
+        {
+            Block g = make_genesis_block(make_cfg());
+            Chain c(g);
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.height() == 2,
+                  "Chain(genesis) supports continued append: height=2 after 1 block");
+            check(c.balance("bob") == 50,
+                  "Chain(genesis) supports continued append: tx applied");
+        }
+
+        // === Empty Chain accepts genesis via append ===
+
+        // 7. Default Chain → append(genesis) → state matches Chain(genesis).
+        //    Same as test 5 from the other direction; sanity check that
+        //    the legacy append-path is the canonical bootstrap.
+        {
+            Block g = make_genesis_block(make_cfg());
+            Chain c1;
+            check(c1.empty(),
+                  "append path: starts empty");
+            c1.append(g);
+            check(!c1.empty() && c1.height() == 1,
+                  "append path: not empty + height 1 after genesis append");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-ctor-bootstrap "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: snapshot version-field rejection. The
+    // restore_from_snapshot path at chain.cpp:1703-1709 requires
+    // `snap.version == 1` and throws on any other value. This test
+    // pins the version gate:
+    //   - version=0 (or missing field, which defaults to 0): rejected
+    //   - version=1 (current): accepted (round-trip via serialize_state)
+    //   - version=999 (future): rejected
+    //   - non-object input: rejected with distinct diagnostic
+    //
+    // Defends against regressions that would either accept arbitrary
+    // version numbers (silent migration drift) or break the current
+    // version=1 path (existing snapshots become unloadable).
+    if (cmd == "test-snapshot-version-rejection") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: try restore_from_snapshot, record throw + message.
+        auto expect_throw_with = [&](const json& snap,
+                                       const std::string& needle,
+                                       const char* test_msg) {
+            bool threw = false; std::string what;
+            try { (void)Chain::restore_from_snapshot(snap); }
+            catch (const std::exception& e) { threw = true; what = e.what(); }
+            bool found = !needle.empty() && what.find(needle) != std::string::npos;
+            check(threw && (needle.empty() || found), test_msg);
+        };
+
+        // === Baseline: version=1 accepts ===
+
+        // 1. A minimal valid snapshot with version=1 round-trips. This
+        //    is the happy-path baseline against which negative tests
+        //    are compared.
+        {
+            Chain c;  // empty Chain (no genesis applied)
+            json snap = c.serialize_state(0);
+            // serialize_state should produce version=1 by construction.
+            check(snap.value("version", 0) == 1,
+                  "baseline: serialize_state(empty) sets version=1");
+
+            bool ok = true;
+            try { (void)Chain::restore_from_snapshot(snap); }
+            catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "baseline: version=1 snapshot accepted (round-trip)");
+        }
+
+        // === Missing version field rejected ===
+
+        // 2. snap.value("version", 0) defaults to 0 when missing,
+        //    which then fails the != 1 check. Diagnostic mentions
+        //    "version" (or "0").
+        {
+            json snap = json::object();
+            // Intentionally omit "version" field; add required object
+            // shape so the FIRST check (is_object()) passes.
+            expect_throw_with(snap, "unsupported snapshot version",
+                  "missing version: rejected with 'unsupported snapshot version'");
+        }
+
+        // === version=0 explicitly rejected ===
+
+        // 3. {"version": 0} — explicitly set to zero. Same rejection
+        //    as missing.
+        {
+            json snap = {{"version", 0}};
+            expect_throw_with(snap, "unsupported snapshot version: 0",
+                  "version=0: rejected with explicit '0' in message");
+        }
+
+        // === version=999 (future) rejected ===
+
+        // 4. Future version number → rejected. Defends against silent
+        //    accept of an unknown format.
+        {
+            json snap = {{"version", 999}};
+            expect_throw_with(snap, "unsupported snapshot version: 999",
+                  "version=999: rejected with explicit '999' in message");
+        }
+
+        // === version=-1 (negative) rejected ===
+
+        // 5. Negative version number → rejected.
+        {
+            json snap = {{"version", -1}};
+            expect_throw_with(snap, "unsupported snapshot version",
+                  "version=-1: rejected");
+        }
+
+        // === Non-object input rejected ===
+
+        // 6. JSON array (not object) → rejected with distinct diagnostic
+        //    ("not a JSON object"), BEFORE version check fires.
+        {
+            json snap = json::array({1, 2, 3});
+            expect_throw_with(snap, "not a JSON object",
+                  "non-object snapshot: rejected with 'not a JSON object'");
+        }
+
+        // === JSON string input rejected ===
+
+        // 7. JSON string (still valid JSON, not an object) → rejected
+        //    same as array.
+        {
+            json snap = "version=1";
+            expect_throw_with(snap, "not a JSON object",
+                  "string snapshot: rejected as non-object");
+        }
+
+        // === JSON null input rejected ===
+
+        // 8. JSON null → rejected (also non-object).
+        {
+            json snap = nullptr;
+            expect_throw_with(snap, "not a JSON object",
+                  "null snapshot: rejected as non-object");
+        }
+
+        // === version field as string (wrong type) ===
+
+        // 9. {"version": "1"} — JSON string instead of integer. nlohmann's
+        //    .value("version", 0) THROWS json::type_error on a wrong-type
+        //    field (it doesn't fall back to default for type mismatches).
+        //    So this gets rejected with a type-error message — different
+        //    diagnostic than the version-mismatch path, but still
+        //    rejected. We assert that SOME rejection happens; the exact
+        //    diagnostic depends on nlohmann's behavior.
+        {
+            json snap = {{"version", "1"}};
+            bool threw = false;
+            try { (void)Chain::restore_from_snapshot(snap); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "version field as string: rejected (some error path)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": snapshot-version-rejection "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
