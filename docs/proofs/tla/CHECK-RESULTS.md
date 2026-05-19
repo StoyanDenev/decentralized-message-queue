@@ -61,11 +61,12 @@ The Byzantine action `ContribByzantine` lets a Byzantine member commit to multip
 
 | Invariant | Maps to |
 |---|---|
-| `Inv_NoDoubleCredit` | FA7 T-7 part 1: each `(src, tx_hash)` credited at most once on dst |
+| `Inv_NoDoubleCredit` | FA7 T-7 part 1: each `(src, tx_hash)` credited at most once on dst (set semantics) |
+| `Inv_V13_DedupContract` | V13 dst-side dedup: every applied `(src, id)` pair has exactly one emitted-receipt provenance on `src` whose destination is this `dst` (non-degenerate strengthening — couples src-side V12 emission with dst-side V13 admission) |
 | `Inv_AppliedHasOrigin` | FA7 T-7 part 2: every applied receipt traces to an emitted one |
 | `Inv_SupplyInvariant` | FA7 T-7.1 corollary: `LiveGlobal + Pending = Genesis` |
 
-The adversary action `ReplayReceipt` re-injects an already-emitted receipt into a destination's pending queue. The dedup guard in `ApplyReceipt` ensures it is never credited twice.
+The adversary action `ReplayReceipt` re-injects an already-emitted receipt into a destination's pending queue. The dedup guard in `ApplyReceipt` ensures it is never credited twice. `Inv_V13_DedupContract` is the machine-checkable counterpart to V13 in `proofs/Preliminaries.md` (post V12+V13 split) and corresponds to the `chain::Chain::applied_inbound_receipts_` membership check at `src/chain/chain.cpp:1365`.
 
 ### Receipts.tla → FA7 L-7.2 (focused)
 

@@ -130,6 +130,19 @@ Inv_NoDoubleCredit ==
        \A pair1, pair2 \in applied[dst] :
           pair1 = pair2 => TRUE   \* set semantics already enforces uniqueness
 
+\* V13 dst-side dedup contract (non-degenerate strengthening of
+\* Inv_NoDoubleCredit): for any destination shard `dst` and any
+\* (src, id) pair in applied[dst], there is exactly one emitted receipt
+\* on `src` matching that pair AND its destination is `dst`. This
+\* couples src-side V12 emission with dst-side V13 admission: no credit
+\* can exist on dst without a unique provenance on src.
+Inv_V13_DedupContract ==
+    \A dst \in Shards :
+       \A pair \in applied[dst] :
+          LET src == pair[1] IN LET id == pair[2] IN
+          Cardinality({ r \in emitted_receipts[src] :
+                          r[1] = src /\ r[6] = id /\ r[2] = dst }) = 1
+
 \* Stronger form: an applied (src, id) pair on dst corresponds to exactly
 \* one emitted receipt on src.
 Inv_AppliedHasOrigin ==
