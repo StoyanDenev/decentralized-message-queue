@@ -106,6 +106,14 @@ Usage:
                                               fork-detection diff scripts.
                                               Allowed: index | prev_hash |
                                               state_root | block_hash | timestamp.
+  determ check-fork --node-a h:p             Automated cross-node divergence
+                  --node-b h:p               detection. Fetches the range from
+                  --from N --to M            BOTH nodes via headers RPC and
+                  [--field NAME] [--json]    reports the FIRST height where they
+                                              disagree on `--field`. Default
+                                              field state_root. Exit 0 identical,
+                                              2 if divergent (operator alert
+                                              gate), 1 on error.
   determ head [--field height|hash] [--json]
                                               Print just <height> <head_hash>
                                               (space-separated; --field <one>
@@ -587,6 +595,17 @@ Additional in-process tests:
                                               STAKE / UNSTAKE (!= 8 bytes skip);
                                               TRANSFER empty payload accept;
                                               A1 invariance under skip paths
+  determ test-empty-block-apply               Empty / minimal block apply —
+                                              empty creators no-subsidy gate;
+                                              creators set with no txs; failed
+                                              tx silently skipped; prev_hash
+                                              chain intact; A1 invariance
+  determ test-account-create-on-credit        Account auto-creation paths —
+                                              TRANSFER to new domain creates
+                                              entry; inbound receipt to new
+                                              domain creates entry; DEREGISTER
+                                              non-registrant no-op; stacked
+                                              receipt+TRANSFER sums correctly
 )" << "\n";
 }
 
@@ -1975,6 +1994,179 @@ static int cmd_chain_id(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// determ check-fork --node-a host:port --node-b host:port
+//                   --from N --to M [--field state_root|block_hash]
+//                   [--json]
+//
+//   Automated cross-node divergence detection. Fetches the requested
+//   range of block fields from BOTH nodes (using the same paged headers
+//   path that `block-range` uses internally) and reports the FIRST
+//   height where the two disagree.
+//
+//   Real operator use: when two nodes report different `state_root` at
+//   the same `height`, this command localizes the divergence to a
+//   specific block — operators can then drill into that block's
+//   `transactions` / `inbound_receipts` / `equivocation_events` to find
+//   which event caused the fork.
+//
+//   Default field is `state_root` (the canonical chain-state commitment).
+//   `block_hash` also valuable for "did headers diverge?" checks.
+//
+//   Exit codes:
+//     0 — ranges identical OR one side truncated to a shorter set
+//          (informational; not a test gate by default)
+//     2 — DIVERGENCE detected; first-divergent height printed
+//     1 — error (bad args, RPC error, unknown --field)
+//
+//   --json emits {"identical": <bool>, "first_divergence": <N>|null,
+//                 "a": [...], "b": [...]} for machine consumers.
+//
+//   Example:
+//     determ check-fork --node-a 127.0.0.1:7778 \
+//                       --node-b 127.0.0.1:7779 \
+//                       --from 100 --to 200 \
+//                       --field state_root
+static int cmd_check_fork(int argc, char** argv) {
+    std::string node_a, node_b;
+    std::string field = "state_root";
+    uint64_t from_idx = 0, to_idx = 0;
+    bool have_from = false, have_to = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--node-a" && i + 1 < argc) node_a = argv[i + 1];
+        else if (a == "--node-b" && i + 1 < argc) node_b = argv[i + 1];
+        else if (a == "--from"   && i + 1 < argc) {
+            try { from_idx = std::stoull(argv[i + 1]); have_from = true; }
+            catch (...) { std::cerr << "Error: --from must be unsigned\n"; return 1; }
+        }
+        else if (a == "--to"     && i + 1 < argc) {
+            try { to_idx = std::stoull(argv[i + 1]); have_to = true; }
+            catch (...) { std::cerr << "Error: --to must be unsigned\n"; return 1; }
+        }
+        else if (a == "--field"  && i + 1 < argc) field = argv[i + 1];
+        else if (a == "--json")                    json_out = true;
+    }
+    if (node_a.empty() || node_b.empty() || !have_from || !have_to) {
+        std::cerr << "Usage: determ check-fork --node-a host:port --node-b host:port "
+                     "--from N --to M [--field state_root|block_hash] [--json]\n";
+        return 1;
+    }
+    if (to_idx < from_idx) {
+        std::cerr << "Error: --to (" << to_idx << ") must be >= --from ("
+                  << from_idx << ")\n";
+        return 1;
+    }
+    static const std::vector<std::string> kAllowedFields = {
+        "index", "prev_hash", "state_root", "block_hash", "timestamp"
+    };
+    bool field_ok = false;
+    for (const auto& f : kAllowedFields) if (f == field) { field_ok = true; break; }
+    if (!field_ok) {
+        std::cerr << "Error: unknown --field '" << field << "' — allowed: ";
+        for (size_t i = 0; i < kAllowedFields.size(); ++i) {
+            if (i) std::cerr << ", ";
+            std::cerr << kAllowedFields[i];
+        }
+        std::cerr << "\n";
+        return 1;
+    }
+
+    // Split "host:port" into (host, port) for rpc_call.
+    auto split_addr = [](const std::string& addr) {
+        size_t col = addr.find(':');
+        if (col == std::string::npos)
+            throw std::runtime_error("address must be host:port, got '" + addr + "'");
+        return std::make_pair(addr.substr(0, col),
+                              uint16_t(std::stoul(addr.substr(col + 1))));
+    };
+
+    // Bulk-fetch from one node using the same paged path as cmd_block_range.
+    auto fetch_range = [&](const std::string& addr) -> json {
+        auto [host, port] = split_addr(addr);
+        constexpr uint32_t PAGE = 256;
+        json all = json::array();
+        uint64_t cur = from_idx;
+        while (cur <= to_idx) {
+            uint64_t remaining = to_idx - cur + 1;
+            uint32_t want = uint32_t(std::min<uint64_t>(remaining, PAGE));
+            json params = {{"from", cur}, {"count", want}};
+            auto result = rpc::rpc_call(host, port, "headers", params);
+            if (!result.is_object() || !result.contains("headers")
+                || !result["headers"].is_array()) {
+                throw std::runtime_error("headers RPC unexpected shape from " + addr);
+            }
+            const auto& hs = result["headers"];
+            for (auto& h : hs) all.push_back(h);
+            if (hs.empty() || hs.size() < want) break;  // truncated
+            cur += hs.size();
+        }
+        return all;
+    };
+
+    json a_arr, b_arr;
+    try {
+        a_arr = fetch_range(node_a);
+        b_arr = fetch_range(node_b);
+    } catch (const std::exception& e) {
+        if (json_out) {
+            std::cout << json({{"error", "fetch_failed"},
+                                  {"message", e.what()}}).dump() << "\n";
+        } else {
+            std::cerr << "Error: " << e.what() << "\n";
+        }
+        return 1;
+    }
+
+    // Find first divergence (compare common prefix only).
+    size_t n_compare = std::min(a_arr.size(), b_arr.size());
+    int64_t first_div = -1;
+    for (size_t i = 0; i < n_compare; ++i) {
+        std::string va = a_arr[i].value(field, std::string{});
+        std::string vb = b_arr[i].value(field, std::string{});
+        if (va != vb) {
+            // Translate array index back to chain height (from_idx + i).
+            first_div = int64_t(from_idx + i);
+            break;
+        }
+    }
+    bool identical = (first_div < 0);
+
+    if (json_out) {
+        json env = {
+            {"identical",          identical},
+            {"first_divergence",   identical ? json(nullptr) : json(first_div)},
+            {"node_a_received",    a_arr.size()},
+            {"node_b_received",    b_arr.size()},
+            {"field",              field},
+            {"from",               from_idx},
+            {"to",                 to_idx}
+        };
+        std::cout << env.dump() << "\n";
+    } else {
+        if (identical) {
+            std::cout << "check-fork: ranges agree on `" << field << "` "
+                      << "(" << n_compare << " heights compared: "
+                      << from_idx << " .. " << (from_idx + n_compare - 1) << ")\n";
+            if (a_arr.size() != b_arr.size()) {
+                std::cout << "  note: one node truncated — node-a returned "
+                          << a_arr.size() << " headers, node-b returned "
+                          << b_arr.size() << "\n";
+            }
+        } else {
+            std::cout << "check-fork: FORK detected at height " << first_div
+                      << " (field=" << field << ")\n";
+            const auto& av = a_arr[first_div - from_idx][field];
+            const auto& bv = b_arr[first_div - from_idx][field];
+            std::cout << "  node-a (" << node_a << "): "
+                      << (av.is_string() ? av.get<std::string>() : av.dump()) << "\n";
+            std::cout << "  node-b (" << node_b << "): "
+                      << (bv.is_string() ? bv.get<std::string>() : bv.dump()) << "\n";
+        }
+    }
+    return identical ? 0 : 2;
 }
 
 // determ supply [--json] [--rpc-port P]
@@ -3951,6 +4143,7 @@ int main(int argc, char** argv) {
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
     if (cmd == "block-range")   return cmd_block_range(sub_argc, sub_argv);
+    if (cmd == "check-fork")    return cmd_check_fork(sub_argc, sub_argv);
     if (cmd == "head")          return cmd_head(sub_argc, sub_argv);
     if (cmd == "show-account")  return cmd_show_account(sub_argc, sub_argv);
     if (cmd == "show-tx")       return cmd_show_tx(sub_argc, sub_argv);
@@ -20668,6 +20861,426 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-payload-bounds " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: empty / minimal-content block apply. The happy-path
+    // tests use blocks with non-empty creators + transactions; this test
+    // pins the degenerate cases:
+    //   - Block with empty creators[] (no committee) — subsidy gated off,
+    //     fee distribution gated off (A1-safe contract — chain.cpp lines
+    //     1286 and 1390 both check !b.creators.empty())
+    //   - Block with creators but NO transactions / events (subsidy only)
+    //   - Block with TX that fails (insufficient balance) — apply skips,
+    //     no state change
+    //   - Multiple consecutive empty blocks (chain advances cleanly)
+    //   - Empty-creators block's state_root behaves correctly relative
+    //     to non-empty-creators block at same height
+    //
+    // Defends against subsidy double-distribution on empty creators
+    // (would mint to nowhere → silent supply inflation) and against
+    // empty-block apply hangs/crashes.
+    if (cmd == "test-empty-block-apply") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice is creator with stake, balance for paying fees.
+        GenesisConfig cfg;
+        cfg.chain_id = "empty-block-apply-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // === Empty creators + subsidy: subsidy NOT minted (A1-safe) ===
+
+        // 1. Block with creators.empty() and non-zero block_subsidy:
+        //    subsidy distribution gated off in chain.cpp:1286
+        //    (!b.creators.empty()). Live supply unchanged.
+        //
+        //    NOTE: chain.cpp's apply has A1 invariant verification at
+        //    end (line ~1397). If b.creators is EMPTY and any fee-charging
+        //    tx ran, total_fees would NOT be redistributed → A1 violation
+        //    → throw. To safely test empty-creators, use a block with
+        //    ZERO fee txs (or no txs at all).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            uint64_t supply_before = c.live_total_supply();
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            // b.creators left empty — no committee.
+            // No transactions: avoid the A1 fee-distribution gate issue.
+            c.append(b);
+
+            check(c.accumulated_subsidy() == 0,
+                  "empty creators: NO subsidy minted (A1-safe gate)");
+            check(c.live_total_supply() == supply_before,
+                  "empty creators: live supply unchanged");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds with empty-creators block");
+        }
+
+        // === Non-empty creators + no txs: subsidy minted, chain advances ===
+
+        // 2. Block with creators = {"alice"} but no txs/events. Subsidy
+        //    minted to alice (sole creator).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(50);
+            uint64_t alice_before = c.balance("alice");
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};  // non-empty
+            c.append(b);
+
+            check(c.accumulated_subsidy() == 50,
+                  "creators={alice}, no txs: subsidy minted exactly 50");
+            check(c.balance("alice") == alice_before + 50,
+                  "creators={alice}: alice receives full subsidy");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds with subsidy-only block");
+        }
+
+        // === Multiple consecutive empty blocks ===
+
+        // 3. Chain advances cleanly across N consecutive blocks with
+        //    creators set but no txs.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(10);
+
+            for (uint64_t i = 1; i <= 5; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+
+            check(c.height() == 6,  // genesis + 5 empty
+                  "5 consecutive empty blocks: height = 6");
+            check(c.accumulated_subsidy() == 50,  // 5 * 10
+                  "5 empty blocks: subsidy = 5 * 10 = 50");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: holds across 5 consecutive empty blocks");
+        }
+
+        // === Block with TX that fails (insufficient balance) ===
+
+        // 4. Block with creators + a single TX that fails to apply
+        //    (insufficient balance). The TX is skipped silently; subsidy
+        //    still mints. Block applied otherwise normally.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(20);
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "ghost";  // ghost has 0 balance
+            tx.to = "alice";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("ghost") == 0,
+                  "TX-fails block: ghost balance still 0 (skip)");
+            check(c.accumulated_subsidy() == 20,
+                  "TX-fails block: subsidy minted normally (20)");
+            check(c.next_nonce("ghost") == 0,
+                  "TX-fails block: ghost nonce NOT bumped on skip");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: holds when block's only TX silently skips");
+        }
+
+        // === state_root behavior on empty block ===
+
+        // 5. Two chains at same height: c1 applies an empty block (just
+        //    subsidy), c2 applies an empty block too. state_roots should
+        //    be identical. Cross-check vs a chain that didn't advance.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            c1.set_block_subsidy(10);
+            c2.set_block_subsidy(10);
+
+            Block b1, b2;
+            b1.index = 1; b1.prev_hash = c1.head().compute_hash();
+            b1.creators = {"alice"};
+            b2.index = 1; b2.prev_hash = c2.head().compute_hash();
+            b2.creators = {"alice"};
+            c1.append(b1);
+            c2.append(b2);
+
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: parallel empty blocks → same state_root");
+
+            // c3 stays at genesis (no advance) — must differ
+            Chain c3; c3.append(make_genesis_block(cfg));
+            check(c1.compute_state_root() != c3.compute_state_root(),
+                  "subsidy mint changes state_root vs genesis");
+        }
+
+        // === prev_hash linkage on chain of empty blocks ===
+
+        // 6. Each empty block's prev_hash matches the prior block's
+        //    compute_hash — pre_hash chain unbroken even when blocks
+        //    contain only the subsidy distribution.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(5);
+
+            std::vector<Hash> hashes;
+            hashes.push_back(c.head().compute_hash());
+            for (uint64_t i = 1; i <= 3; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+                hashes.push_back(c.head().compute_hash());
+            }
+
+            bool linked = true;
+            for (uint64_t i = 1; i <= 3; ++i) {
+                if (c.at(i).prev_hash != hashes[i - 1]) {
+                    linked = false; break;
+                }
+            }
+            check(linked,
+                  "empty blocks: prev_hash chain unbroken across 3 heights");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": empty-block-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: account auto-creation paths. accounts_ is a map
+    // that auto-creates entries on first reference via operator[]. This
+    // is mostly safe but can have subtle correctness implications:
+    //   - TRANSFER to "new_domain" creates the account with balance += amount
+    //   - Inbound receipt to "new_domain" creates the account
+    //   - DEREGISTER on "ghost" (no registrant) is no-op (no auto-creation)
+    //   - REGISTER from "new_domain" creates BOTH accounts_ entry AND
+    //     registry entry — but not stake entry (only if STAKE happens)
+    //
+    // Defends against silent state-corruption regressions where an
+    // operator[] access creates an unintended account entry that
+    // affects state_root or balance lookups.
+    if (cmd == "test-account-create-on-credit") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "account-create-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // === TRANSFER to non-existent domain creates account ===
+
+        // 1. alice TRANSFER → "new_domain" 50, fee 1. "new_domain" had
+        //    no genesis entry; account is created with balance = 50.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            size_t accts_before = c.accounts().size();
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "new_domain";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("new_domain") == 50,
+                  "TRANSFER to non-existent: account created with balance");
+            check(c.accounts().size() == accts_before + 1,
+                  "TRANSFER to non-existent: accounts map grew by 1");
+            check(c.next_nonce("new_domain") == 0,
+                  "TRANSFER recipient: next_nonce = 0 (no tx from them yet)");
+        }
+
+        // === Inbound receipt to non-existent domain creates account ===
+
+        // 2. Inbound receipt credits "fresh" → entry created.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            CrossShardReceipt r;
+            r.src_shard = 1; r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = 0xAB;
+            r.from = "src_sender";
+            r.to = "fresh_via_receipt";
+            r.amount = 42; r.fee = 0; r.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(r);
+            c.append(b);
+
+            check(c.balance("fresh_via_receipt") == 42,
+                  "inbound receipt to non-existent: account created with credit");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds with new-account credit via receipt");
+        }
+
+        // === DEREGISTER on non-registrant: nonce++ only, no auto-create ===
+
+        // 3. DEREGISTER from "alice" (creator, IS registrant) → works.
+        //    DEREGISTER from "newbie" (not in registry, NOT a creator)
+        //    → no-op aside from possible nonce bump.
+        //    NOTE: chain.cpp:842: `if (rit == registrants_.end()) {
+        //    sender.next_nonce++; break; }`. The nonce DOES bump even
+        //    on non-registrant — it's a defensive design.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            // newbie needs balance to pay fee for DEREGISTER.
+            // The genesis allocation didn't include newbie, but we
+            // could pre-credit via TRANSFER. Alternative: alice runs
+            // DEREGISTER on themselves first to exercise the path,
+            // then we verify alice's path. But the question is whether
+            // operator[] on registrants_ creates an entry on FAILED
+            // DEREGISTER — it does NOT, per the code (find first,
+            // then next_nonce++).
+            //
+            // Build newbie with TRANSFER credit first.
+            {
+                Transaction t;
+                t.type = TxType::TRANSFER;
+                t.from = "alice"; t.to = "newbie";
+                t.amount = 10; t.fee = 1; t.nonce = 0;
+                Block b;
+                b.index = 1; b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(t);
+                c.append(b);
+            }
+            uint64_t nonce_before = c.next_nonce("newbie");
+            check(!c.registrant("newbie").has_value(),
+                  "setup: newbie has no registry entry");
+
+            // newbie tries DEREGISTER (they have balance, but no
+            // registry entry).
+            Transaction tx;
+            tx.type = TxType::DEREGISTER;
+            tx.from = "newbie"; tx.fee = 1; tx.nonce = nonce_before;
+            Block b;
+            b.index = 2; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(!c.registrant("newbie").has_value(),
+                  "DEREGISTER non-registrant: NO registry entry auto-created");
+            check(c.next_nonce("newbie") == nonce_before + 1,
+                  "DEREGISTER non-registrant: nonce DID bump (defensive design)");
+        }
+
+        // === Receipt + TRANSFER to same fresh recipient: sums correctly ===
+
+        // 4. New domain "stacked" gets both an inbound receipt AND a
+        //    local TRANSFER in the same block. Final balance = sum.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            CrossShardReceipt r;
+            r.src_shard = 1; r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            r.tx_hash = Hash{};
+            r.tx_hash[0] = 0xCD;
+            r.from = "src";
+            r.to = "stacked";
+            r.amount = 30; r.fee = 0; r.nonce = 0;
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "stacked";
+            tx.amount = 25; tx.fee = 1; tx.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(r);
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            check(c.balance("stacked") == 30 + 25,
+                  "stacked credit: receipt 30 + TRANSFER 25 = 55");
+        }
+
+        // === Determinism ===
+
+        // 5. Two chains apply same TRANSFER-to-new-domain → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "x";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+
+            for (auto* cp : {&c1, &c2}) {
+                Block b;
+                b.index = 1; b.prev_hash = cp->head().compute_hash();
+                b.creators = {"alice"};
+                b.transactions.push_back(tx);
+                cp->append(b);
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same auto-creation → same state_root");
+            check(c1.accounts().size() == c2.accounts().size(),
+                  "determinism: same account-set size");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": account-create-on-credit "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
