@@ -55,7 +55,7 @@ If `signing_bytes(B) = signing_bytes(B')`, then `B` and `B'` differ at most in `
 
 ### Lemma L-1.3 — Pigeonhole on K-of-K signatures
 
-Suppose `B ≠ B'` are valid at height `h` and have the same committee `K_h` (Lemma 1.1). Suppose further `compute_block_digest(B) ≠ compute_block_digest(B')` (the "B and B' represent semantically different blocks" case — see §3 for the alternative). Then for every `v_i ∈ K_h`, there exist signatures `σ_a, σ_b ∈ {0,1}⁵¹²` with:
+Suppose `B ≠ B'` are valid at height `h` and have the same committee `K_h` (Lemma L-1.1). Suppose further `compute_block_digest(B) ≠ compute_block_digest(B')` (the "B and B' represent semantically different blocks" case — see §3 for the alternative). Then for every `v_i ∈ K_h`, there exist signatures `σ_a, σ_b ∈ {0,1}⁵¹²` with:
 
 - `Verify(pk_i, compute_block_digest(B), σ_a) = 1`
 - `Verify(pk_i, compute_block_digest(B'), σ_b) = 1`
@@ -63,11 +63,11 @@ Suppose `B ≠ B'` are valid at height `h` and have the same committee `K_h` (Le
 
 i.e., `v_i` has signed two distinct digests at the same height `h`.
 
-**Proof.** V8 (Preliminaries §5) for `B`: at least `k := |B.creators|` (MD) or `Q := ⌈2|B.creators|/3⌉` (BFT) members have signed `compute_block_digest(B)`. V8 for `B'`: same, with `compute_block_digest(B')`.
+**Proof.** V8 (Preliminaries §5) for `B`: at least `K` (MD-mode, `|B.creators| = K`) or `Q = ⌈2·k_bft/3⌉` (BFT-mode, where `|B.creators| = k_bft = ⌈2K/3⌉ = |K_h|`) members have signed `compute_block_digest(B)`. V8 for `B'`: same, with `compute_block_digest(B')`.
 
-For MD-mode blocks, `k = K` and **all** K members have signed each. So every `v_i ∈ K_h` signed both digests. The two signatures `(σ_a, σ_b)` witnessing this are extracted from `B.creator_block_sigs[i]` and `B'.creator_block_sigs[i]` respectively, both of which verify under V8.
+For MD-mode blocks, the quorum is `K` and **all** K members have signed each. So every `v_i ∈ K_h` signed both digests. The two signatures `(σ_a, σ_b)` witnessing this are extracted from `B.creator_block_sigs[i]` and `B'.creator_block_sigs[i]` respectively, both of which verify under V8.
 
-For BFT-mode blocks the committee size shrinks to `|K_h| = ⌈2K/3⌉` and the quorum within that smaller committee is `Q = ⌈2|K_h|/3⌉`. By inclusion-exclusion: `|S(B) ∩ S(B')| ≥ 2Q − |K_h|` (≥ 2 in the worked cases K = 3, 6, 9, and growing thereafter). At least the intersection-many members signed both digests. See `BFTSafety.md` (FA5) for the conditional-safety argument that builds on this overlap.
+For BFT-mode blocks the committee size shrinks to `|K_h| = k_bft = ⌈2K/3⌉` and the quorum within that smaller committee is `Q = ⌈2·k_bft/3⌉ = ⌈2|K_h|/3⌉`, leaving `|K_h| − Q` sentinel slots. By inclusion-exclusion: `|S(B) ∩ S(B')| ≥ 2Q − |K_h|` (≥ 2 in the worked cases K = 3, 6, 9, and growing thereafter). At least the intersection-many members signed both digests. See `BFTSafety.md` (FA5) for the conditional-safety argument that builds on this overlap.
 
 Therefore at least one — and in MD-mode, every — member of `K_h` has produced two valid signatures over distinct digests at `h`.   ∎
 
@@ -182,7 +182,7 @@ The safety predicate proved here corresponds to the implementation chain:
 | Committee determinism L-1.1 | `BlockValidator::check_creator_selection` + `src/node/node.cpp::check_if_selected` |
 | `signing_bytes` injectivity L-1.2 | `src/chain/block.cpp::Block::signing_bytes` |
 | Block digest L-1.2 | `src/node/producer.cpp::compute_block_digest` |
-| Equivocation detection (clause 2) | `src/node/node.cpp::apply_block_locked` (cross-block check) + FA6 |
+| Equivocation detection (clause 2) | Two paths feed the same `EquivocationEvent` channel: (i) rev.8 BlockSigMsg-level cross-block check in `src/node/node.cpp::apply_block_locked` (matches stored block-at-height vs incoming block-at-height by `bft_proposer`); (ii) S-006 ContribMsg same-generation check in `src/node/node.cpp::on_contrib` (matches the same signer producing two different commits in the same round). Both detections gossip an `EquivocationEvent` that gets baked into the next block; downstream slashing is FA6. |
 | State commitment + apply-time gate (S-033 + S-038, S-030 D1/D2 apply-layer closure) | `src/chain/chain.cpp::compute_state_root` (Merkle root) + `apply_transactions` (`if (b.state_root != zero) verify` gate) + `src/node/node.cpp::try_finalize_round` (producer populates `body.state_root` via tentative-chain dry-run before broadcast — S-038 closure) |
 
 A future reviewer can re-validate the proof by reading the source-level objects in the right column against the predicates in the left.

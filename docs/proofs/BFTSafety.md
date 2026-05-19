@@ -165,7 +165,7 @@ When B1 is violated, the recovery path (T-5.1) loses an additional `2⁻¹²⁸`
 | BFT-mode `consensus_mode = BFT` block | `include/determ/chain/block.hpp::ConsensusMode::BFT` |
 | `Q = ⌈2|K_h|/3⌉` quorum check (with `|K_h| = ⌈2K/3⌉` BFT committee size) | `src/node/validator.cpp::check_block_sigs` BFT branch via `producer.cpp::required_block_sigs` |
 | BFT escalation trigger | `src/node/node.cpp::check_if_selected` (four gates: `bft_enabled`, `total_aborts ≥ bft_escalation_threshold`, available pool < K, available pool ≥ ceil(2K/3)) |
-| `bft_proposer` deterministic election | `proposer_idx` in `src/node/producer.cpp` (called from `node.cpp::current_bft_proposer` for the producer side and `validator.cpp::check_block_structure` for the validator side; full algorithm in PROTOCOL.md §5.3.1) |
+| `bft_proposer` deterministic election | `proposer_idx` in `src/node/producer.cpp` (called from `node.cpp::Node::current_proposer_domain` for the producer side and `validator.cpp::BlockValidator::check_block_sigs` (BFT branch, around line 416) for the validator side; full algorithm in PROTOCOL.md §5.3.1; straight-modulo bias `≤ 2⁻⁵⁶` because `committee_size ≤ 256`) |
 | BFT mode opt-out | `Config.bft_enabled` (default true, false disables escalation) |
 | Slashing recovery (T-5.1) | `EquivocationSlashing.md` (FA6) + `src/chain/chain.cpp::apply_transactions` |
 
