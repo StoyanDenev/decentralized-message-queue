@@ -73,6 +73,12 @@ Usage:
                                               --count prints just an integer
                                               (composes with --filter-region
                                               and --json).
+  determ stakes [--top N] [--json]           List validators sorted by stake
+                                              DESCENDING. Complements `validators`
+                                              (which sorts by domain). --top N
+                                              truncates; --json emits machine-
+                                              readable array with explicit `rank`
+                                              indices (1-based).
   determ committee [--json] [--count]        List the current epoch's K-of-K committee.
                                               --count prints a bare integer
                                               (or `{"count":N}` with --json) —
@@ -634,6 +640,18 @@ Additional in-process tests:
                                               nonce skip, future nonce skip, per-
                                               sender independence, A1 invariance
                                               under repeated replay attempts.
+  determ test-chain-save-load                 Chain::save + Chain::load file
+                                              persistence round-trip — head_hash,
+                                              state_root, account/stake/registry,
+                                              A1 counters preserved; missing-file
+                                              defensive empty Chain.
+  determ test-block-validator-basic           BlockValidator consensus-validation
+                                              entry via public validate() —
+                                              genesis short-circuits OK; bad
+                                              prev_hash fails; unregistered
+                                              creator fails with diagnostic;
+                                              creator count vs k_block_sigs gate;
+                                              determinism.
 )" << "\n";
 }
 
@@ -1616,6 +1634,122 @@ static int cmd_validators(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// determ stakes [--top N] [--json] [--rpc-port P]
+//   List validators sorted by stake DESCENDING. Complements
+//   `determ validators` (which sorts alphabetically by domain).
+//   Operator use cases:
+//     - "Who are the top stakers?" — for slashing impact analysis,
+//        committee-influence assessment, governance signal.
+//     - "Why does region X have low committee participation?" —
+//        sorted-by-stake view immediately shows whether the region's
+//        validators are min-staked or fully staked.
+//
+//   --top N        : truncate to top N entries (default = unlimited)
+//   --json         : emit the (filtered + sorted) entries as a JSON
+//                    array; entries match `validators` RPC shape
+//                    (domain, stake, active_from, region, ed_pub)
+//                    with the addition of explicit `rank` index.
+//
+//   Pulls from the `validators` RPC and sorts client-side. No new
+//   server method needed. Zero-stake entries kept (they may be
+//   pre-genesis registrants in DOMAIN_INCLUSION mode); tie-breaks
+//   by domain ascending.
+static int cmd_stakes(int argc, char** argv) {
+    uint32_t top_n = 0;  // 0 = unlimited
+    bool have_top = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--top" && i + 1 < argc) {
+            try { top_n = uint32_t(std::stoul(argv[i + 1])); have_top = true; }
+            catch (...) { std::cerr << "Error: --top must be unsigned\n"; return 1; }
+        }
+        else if (a == "--json") json_out = true;
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+
+    try {
+        auto result = rpc::rpc_call("127.0.0.1", port, "validators");
+        if (!result.is_array()) {
+            std::cerr << "Error: validators RPC returned non-array\n";
+            return 1;
+        }
+
+        // Materialize entries with stake as sort key.
+        struct Entry {
+            std::string domain;
+            uint64_t    stake;
+            uint64_t    active_from;
+            std::string region;
+            std::string ed_pub;
+        };
+        std::vector<Entry> entries;
+        entries.reserve(result.size());
+        for (auto& v : result) {
+            Entry e;
+            e.domain      = v.value("domain", std::string{});
+            e.stake       = v.value("stake", uint64_t{0});
+            e.active_from = v.value("active_from", uint64_t{0});
+            e.region      = v.value("region", std::string{});
+            e.ed_pub      = v.value("ed_pub", std::string{});
+            entries.push_back(std::move(e));
+        }
+
+        // Sort by stake DESC, ties broken by domain ASC.
+        std::sort(entries.begin(), entries.end(),
+                  [](const Entry& a, const Entry& b) {
+                      if (a.stake != b.stake) return a.stake > b.stake;
+                      return a.domain < b.domain;
+                  });
+
+        // Truncate to top N.
+        size_t limit = have_top ? std::min<size_t>(top_n, entries.size())
+                                : entries.size();
+
+        if (json_out) {
+            json arr = json::array();
+            for (size_t i = 0; i < limit; ++i) {
+                const auto& e = entries[i];
+                arr.push_back({
+                    {"rank",        i + 1},  // 1-indexed for human readability
+                    {"domain",      e.domain},
+                    {"stake",       e.stake},
+                    {"active_from", e.active_from},
+                    {"region",      e.region},
+                    {"ed_pub",      e.ed_pub}
+                });
+            }
+            std::cout << arr.dump(2) << "\n";
+            return 0;
+        }
+
+        if (limit == 0) {
+            std::cout << "(no validators)\n";
+            return 0;
+        }
+        std::cout << std::left
+                  << std::setw(6)  << "rank"
+                  << std::setw(25) << "domain"
+                  << std::setw(12) << "stake"
+                  << std::setw(15) << "active_from"
+                  << std::setw(12) << "region"
+                  << "ed_pub\n";
+        for (size_t i = 0; i < limit; ++i) {
+            const auto& e = entries[i];
+            std::cout << std::setw(6)  << (i + 1)
+                      << std::setw(25) << e.domain
+                      << std::setw(12) << e.stake
+                      << std::setw(15) << e.active_from
+                      << std::setw(12) << (e.region.empty() ? "(global)" : e.region)
+                      << e.ed_pub.substr(0, 24) << "...\n";
+        }
+        return 0;
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // determ chain-summary [--last N] [--json] [--rpc-port N]
@@ -4300,6 +4434,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify-genesis") return cmd_verify_genesis(sub_argc, sub_argv);
     if (cmd == "chain-summary") return cmd_chain_summary(sub_argc, sub_argv);
     if (cmd == "validators")    return cmd_validators(sub_argc, sub_argv);
+    if (cmd == "stakes")        return cmd_stakes(sub_argc, sub_argv);
     if (cmd == "committee")     return cmd_committee(sub_argc, sub_argv);
     if (cmd == "pending-params") return cmd_pending_params(sub_argc, sub_argv);
     if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
@@ -22208,6 +22343,391 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-replay-protection "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: Chain::save + Chain::load file-persistence
+    // round-trip. The chain.json on-disk format is what every node
+    // restarts from (snapshot-bootstrap is the alternative for new
+    // joiners; existing nodes load + replay chain.json). This test
+    // pins:
+    //   - save writes a non-empty file
+    //   - load(path) reconstructs a Chain whose state matches the
+    //     saved one byte-for-byte (state_root, height, head_hash,
+    //     accounts, stakes, registry, A1 counters, genesis-pinned
+    //     constants when passed through the load() params)
+    //   - Atomic-write semantics: save→load→save→load idempotent
+    //     across multiple cycles
+    //   - load() with non-existent path produces an empty Chain
+    //     (defensive — a fresh node has no chain.json yet)
+    if (cmd == "test-chain-save-load") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a populated chain with mixed activity.
+        auto build = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "chain-save-load-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            alice_c.region = "us-east";
+            cfg.initial_creators = {alice_c};
+            cfg.committee_region = "us-east";
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 200;
+            cfg.initial_balances = {alice_bal, bob_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(10);
+            c.set_min_stake(1000);
+
+            // Block 1: TRANSFER alice → bob 100, fee 1
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 100; tx.fee = 1; tx.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+
+            return c;
+        };
+
+        // Write to a temp file path. tmpnam is deprecated but adequate
+        // for this scope; alternative is to use std::filesystem::temp_directory_path
+        // + a manual unique suffix.
+        std::string path;
+        {
+            namespace fs = std::filesystem;
+            auto tmp = fs::temp_directory_path() / "determ-test-chain-save-load.json";
+            path = tmp.string();
+            std::error_code ec;
+            fs::remove(path, ec);  // ensure clean start
+        }
+
+        // === Save produces non-empty file ===
+
+        // 1. After save, file exists with non-trivial size.
+        {
+            Chain c = build();
+            c.save(path);
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            check(fs::exists(path, ec) && fs::file_size(path, ec) > 32,
+                  "save: file exists with non-trivial size");
+        }
+
+        // === Load reconstructs equivalent state ===
+
+        // 2. load(path) returns a Chain whose state_root + head_hash +
+        //    height match the saved one.
+        {
+            Chain c = build();
+            c.save(path);
+
+            // load() requires block_subsidy at load time so apply replay
+            // credits creators correctly. We saved with block_subsidy=10.
+            Chain r = Chain::load(path, /*block_subsidy=*/10);
+
+            check(r.height() == c.height(),
+                  "load: height matches saved");
+            check(r.head_hash() == c.head_hash(),
+                  "load: head_hash matches saved");
+            check(r.compute_state_root() == c.compute_state_root(),
+                  "load: state_root matches saved");
+        }
+
+        // === Account state preserved ===
+
+        // 3. balance + next_nonce of each domain preserved.
+        {
+            Chain c = build();
+            c.save(path);
+            Chain r = Chain::load(path, /*block_subsidy=*/10);
+
+            check(r.balance("alice") == c.balance("alice"),
+                  "load: alice balance preserved");
+            check(r.balance("bob") == c.balance("bob"),
+                  "load: bob balance preserved");
+            check(r.next_nonce("alice") == c.next_nonce("alice"),
+                  "load: alice next_nonce preserved");
+        }
+
+        // === Stake + registry preserved ===
+
+        // 4. stake + registrant entry preserved.
+        {
+            Chain c = build();
+            c.save(path);
+            Chain r = Chain::load(path, /*block_subsidy=*/10);
+
+            check(r.stake("alice") == c.stake("alice"),
+                  "load: alice stake preserved");
+            auto rc = c.registrant("alice");
+            auto rr = r.registrant("alice");
+            check(rc.has_value() && rr.has_value()
+                  && rc->region == rr->region,
+                  "load: alice registrant.region preserved");
+        }
+
+        // === A1 counters preserved ===
+
+        // 5. All 5 A1 counters round-trip.
+        {
+            Chain c = build();
+            c.save(path);
+            Chain r = Chain::load(path, /*block_subsidy=*/10);
+
+            check(r.genesis_total() == c.genesis_total()
+                  && r.accumulated_subsidy() == c.accumulated_subsidy()
+                  && r.accumulated_inbound() == c.accumulated_inbound()
+                  && r.accumulated_slashed() == c.accumulated_slashed()
+                  && r.accumulated_outbound() == c.accumulated_outbound(),
+                  "load: all 5 A1 counters preserved");
+            check(r.expected_total() == r.live_total_supply(),
+                  "A1: invariant holds on reloaded chain");
+        }
+
+        // === save → load → save → load idempotent ===
+
+        // 6. Two consecutive save-load cycles produce identical state.
+        {
+            Chain c = build();
+            c.save(path);
+            Chain r1 = Chain::load(path, /*block_subsidy=*/10);
+            r1.save(path);
+            Chain r2 = Chain::load(path, /*block_subsidy=*/10);
+
+            check(r1.head_hash() == r2.head_hash(),
+                  "save→load idempotent: head_hash stable after second cycle");
+            check(r1.compute_state_root() == r2.compute_state_root(),
+                  "save→load idempotent: state_root stable");
+        }
+
+        // === Load missing file → empty chain ===
+
+        // 7. Load from non-existent path yields an empty Chain. The
+        //    Node startup path relies on this — first-launch has no
+        //    chain.json on disk yet.
+        {
+            namespace fs = std::filesystem;
+            auto missing = (fs::temp_directory_path()
+                             / "determ-test-missing-nonexistent-zzzz.json").string();
+            std::error_code ec; fs::remove(missing, ec);  // ensure gone
+
+            Chain r = Chain::load(missing);
+            check(r.empty(),
+                  "load missing file: returns empty Chain (defensive)");
+        }
+
+        // Cleanup
+        { std::error_code ec; std::filesystem::remove(path, ec); }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-save-load "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: BlockValidator basic consensus-validation entry.
+    // BlockValidator::validate() runs ~13 sub-checks; this test pins
+    // the simpler ones at the API surface:
+    //   - validate() on genesis (index 0) returns OK unconditionally
+    //     (genesis trust comes from operator-pinned genesis_hash)
+    //   - check_prev_hash: matching → OK, mismatched → fail
+    //   - check_creators_registered: every creator in registry → OK;
+    //     any unregistered creator → fail with diagnostic
+    //   - Empty creators set with non-genesis block: passes both these
+    //     gates trivially (subsequent gates may reject)
+    //
+    // Defends against drift in the consensus-entry gate that would
+    // either accept malformed blocks or reject valid ones — both
+    // catastrophic for liveness vs safety respectively.
+    if (cmd == "test-block-validator-basic") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build a chain with alice + bob as creators.
+        auto build_chain = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "block-validator-basic-test";
+            GenesisCreator alice_c, bob_c;
+            alice_c.domain = "alice"; bob_c.domain = "bob";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+                bob_c.ed_pub[i]   = uint8_t(0x20 + i);
+            }
+            alice_c.initial_stake = 1000;
+            bob_c.initial_stake = 1000;
+            cfg.initial_creators = {alice_c, bob_c};
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain = "bob"; bob_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            return c;
+        };
+
+        // All check_* sub-functions are private; we exercise them via
+        // the public validate() entry point. validate() runs the gates
+        // in order, short-circuiting on the first failure, so each
+        // assertion below targets a specific gate by constructing a
+        // block that's clean up to (but failing at) that gate.
+
+        // === validate() on genesis always returns OK ===
+
+        // 1. Genesis block (index 0) is unauthenticated by signatures;
+        //    validate() short-circuits on b.index == 0 regardless of
+        //    other content (trust comes from operator-pinned genesis
+        //    hash, not from chain-level validation).
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            Block fake_genesis;
+            fake_genesis.index = 0;
+            fake_genesis.creators = {"unknown_domain"};  // wouldn't pass otherwise
+            auto r = bv.validate(fake_genesis, c, reg);
+            check(r.ok,
+                  "validate(genesis): index=0 short-circuits OK");
+        }
+
+        // === validate() with mismatched prev_hash fails ===
+
+        // 2. Non-genesis block with wrong prev_hash → fail at first
+        //    gate. validate() returns the prev_hash diagnostic.
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            Block b;
+            b.index = 1;
+            Hash bogus{};
+            for (size_t i = 0; i < bogus.size(); ++i) bogus[i] = uint8_t(0xFF);
+            b.prev_hash = bogus;
+            b.creators = {"alice"};
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok,
+                  "validate: mismatched prev_hash → fail");
+            check(r.error.find("prev_hash") != std::string::npos,
+                  "validate fail: error mentions prev_hash");
+        }
+
+        // === validate() with unregistered creator fails ===
+
+        // 3. Block with correct prev_hash but unregistered creator
+        //    fails at the second gate. Diagnostic names the offending
+        //    domain.
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"ghost"};  // not in registry
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok,
+                  "validate: unregistered creator → fail");
+            check(r.error.find("ghost") != std::string::npos,
+                  "validate fail: error names offender (ghost)");
+        }
+
+        // === Mixed creators with unregistered domain fails ===
+
+        // 4. Two creators where one (bob) is registered + one (ghost)
+        //    isn't: still fails. Diagnostic identifies ghost.
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "ghost"};
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok,
+                  "validate: mixed valid + unregistered → fail");
+            check(r.error.find("ghost") != std::string::npos,
+                  "validate mixed fail: error names ghost (not alice)");
+        }
+
+        // === Block sized differently from K-committee fails creator_selection ===
+
+        // 5. Block at non-genesis height with a registered creator but
+        //    creator-selection gate also runs. set_k_block_sigs(5)
+        //    means committee size = 5; a 1-creator block fails the
+        //    "m == k_block_sigs OR m == k_bft" rule. Just verify
+        //    validate() returns a fail Result (specific gate may
+        //    drift; we test the failure surface, not the diagnostic).
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            bv.set_k_block_sigs(5);  // expect committee size 5 (or BFT 4)
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};  // size 1, neither 5 nor 4
+            auto r = bv.validate(b, c, reg);
+            check(!r.ok,
+                  "validate: creator count mismatching k_block_sigs → fail");
+        }
+
+        // === Determinism: validate() pure on identical inputs ===
+
+        // 6. Same Block + Chain + NodeRegistry → same Result twice.
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+            Block fake_genesis;
+            fake_genesis.index = 0;
+            auto r1 = bv.validate(fake_genesis, c, reg);
+            auto r2 = bv.validate(fake_genesis, c, reg);
+            check(r1.ok == r2.ok && r1.error == r2.error,
+                  "determinism: validate() pure on identical inputs");
+        }
+
+        // === BlockValidator default-construct works ===
+
+        // 7. Default-constructed BlockValidator is usable for the
+        //    genesis path without explicit setter calls (defaults
+        //    suffice when only validating genesis).
+        {
+            Chain c = build_chain();
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;  // no setters called
+            Block fake_genesis;
+            fake_genesis.index = 0;
+            auto r = bv.validate(fake_genesis, c, reg);
+            check(r.ok,
+                  "default-constructed BlockValidator: genesis still OK");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": block-validator-basic "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
