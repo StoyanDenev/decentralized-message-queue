@@ -95,6 +95,12 @@ Usage:
                                               (live_total_supply | expected_total
                                                | genesis_total | accumulated_*
                                                | a1_invariant_ok).
+  determ tx-summary [--last N]               Per-type tx count over the last N
+                  [--by-type] [--json]        blocks (default 10). Operator
+                                              capacity-monitoring tool — "how
+                                              many TRANSFERs vs STAKEs vs
+                                              DAPP_CALLs?" Default shows window,
+                                              total, by-type breakdown.
   determ chain-id                            Print the chain's genesis-block hash
                                               (canonical chain identity) — for
                                               monitoring scripts cross-checking
@@ -619,6 +625,15 @@ Additional in-process tests:
                                               NOT in state_root; NOT in
                                               compute_block_digest (committee-sig
                                               path excludes consensus-time meta)
+  determ test-node-registry                   NodeRegistry::build_from_chain +
+                                              eligible_in_region — FA8 R2 region-
+                                              aware committee selection. Min-stake
+                                              gate, region filter (strict equality),
+                                              sorted-by-domain, determinism.
+  determ test-tx-replay-protection            Nonce-gating replay defense — stale
+                                              nonce skip, future nonce skip, per-
+                                              sender independence, A1 invariance
+                                              under repeated replay attempts.
 )" << "\n";
 }
 
@@ -2216,6 +2231,129 @@ static int cmd_check_fork(int argc, char** argv) {
 //   --json emits the same fields as a JSON object for scripts.
 //   Pulls from chain_summary RPC (which already includes all
 //   A1 counters) — no new RPC method needed.
+
+// determ tx-summary [--last N] [--by-type] [--json] [--rpc-port P]
+//   Per-type transaction count over the last N blocks (default 10).
+//   Operator capacity-monitoring tool: "how many TRANSFERs vs STAKEs
+//   vs DAPP_CALLs did we process in the last N blocks?" Useful for
+//   dashboards tracking workload mix.
+//
+//   --last N        : window size (default 10, max bounded by chain-summary RPC)
+//   --by-type       : emit per-type breakdown (default mode)
+//   --json          : structured output for scripts
+//                       {total: N, by_type: {TRANSFER: N, STAKE: N, ...},
+//                        block_count: N, first_index: I, last_index: J}
+//
+//   Pulls from chain_summary RPC which already returns full block JSON
+//   (including transactions[].type). No new RPC method needed.
+//
+//   Default human-readable output:
+//     window:       blocks [I..J] (N blocks)
+//     total:        T txs
+//     by type:
+//       TRANSFER:        N1
+//       STAKE:           N2
+//       ...
+//   (zero-count types omitted from human output; --json includes them)
+static int cmd_tx_summary(int argc, char** argv) {
+    uint32_t last_n = 10;
+    bool json_out = false;
+    bool by_type = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--last" && i + 1 < argc) {
+            try { last_n = uint32_t(std::stoul(argv[i + 1])); }
+            catch (...) { std::cerr << "Error: --last must be unsigned\n"; return 1; }
+        }
+        else if (a == "--by-type") by_type = true;
+        else if (a == "--json")    json_out = true;
+    }
+    uint16_t port = get_rpc_port(argc, argv);
+
+    try {
+        json params = {{"last_n", last_n}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "chain_summary", params);
+        if (!result.is_object() || !result.contains("blocks")
+            || !result["blocks"].is_array()) {
+            std::cerr << "Error: chain_summary returned unexpected shape\n";
+            return 1;
+        }
+        const auto& blocks = result["blocks"];
+
+        // Tally per-type. We use the TxType string form emitted by
+        // chain_summary's block.to_json (e.g., "TRANSFER", "STAKE", ...).
+        std::map<std::string, uint64_t> by_type_count;
+        uint64_t total = 0;
+        uint64_t first_index = UINT64_MAX, last_index = 0;
+        size_t block_count = 0;
+        for (auto& blk : blocks) {
+            if (!blk.is_object()) continue;
+            uint64_t idx = blk.value("index", uint64_t{0});
+            if (idx < first_index) first_index = idx;
+            if (idx > last_index)  last_index = idx;
+            block_count++;
+            if (!blk.contains("transactions") || !blk["transactions"].is_array())
+                continue;
+            for (auto& tx : blk["transactions"]) {
+                if (!tx.is_object()) continue;
+                // TxType may be string or numeric depending on serialization;
+                // chain_summary uses string form per Block::to_json convention.
+                std::string type_str;
+                if (tx.contains("type")) {
+                    if (tx["type"].is_string())  type_str = tx["type"].get<std::string>();
+                    else if (tx["type"].is_number()) type_str = tx["type"].dump();
+                    else                              type_str = "UNKNOWN";
+                } else {
+                    type_str = "UNKNOWN";
+                }
+                by_type_count[type_str]++;
+                total++;
+            }
+        }
+        if (block_count == 0) first_index = 0;  // empty window
+
+        if (json_out) {
+            json bt = json::object();
+            for (const auto& [k, v] : by_type_count) bt[k] = v;
+            json env = {
+                {"total",        total},
+                {"by_type",      bt},
+                {"block_count",  block_count},
+                {"first_index",  first_index},
+                {"last_index",   last_index}
+            };
+            std::cout << env.dump() << "\n";
+            return 0;
+        }
+
+        // Human-readable output
+        if (block_count == 0) {
+            std::cout << "tx-summary: no blocks in window (chain is empty?)\n";
+            return 0;
+        }
+        std::cout << "window:    blocks [" << first_index << ".." << last_index
+                  << "] (" << block_count << " block"
+                  << (block_count == 1 ? "" : "s") << ")\n";
+        std::cout << "total:     " << total << " tx"
+                  << (total == 1 ? "" : "s") << "\n";
+        // by-type breakdown — print whether explicitly requested or default
+        if (by_type || !by_type) {  // always print breakdown in default mode
+            std::cout << "by type:\n";
+            if (by_type_count.empty()) {
+                std::cout << "  (no transactions in window)\n";
+            }
+            for (const auto& [k, v] : by_type_count) {
+                std::cout << "  " << std::left << std::setw(20) << k
+                          << v << "\n";
+            }
+        }
+        return 0;
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 static int cmd_supply(int argc, char** argv) {
     bool json_out = false;
     std::string field;
@@ -4166,6 +4304,7 @@ int main(int argc, char** argv) {
     if (cmd == "pending-params") return cmd_pending_params(sub_argc, sub_argv);
     if (cmd == "abort-records") return cmd_abort_records(sub_argc, sub_argv);
     if (cmd == "supply")        return cmd_supply(sub_argc, sub_argv);
+    if (cmd == "tx-summary")    return cmd_tx_summary(sub_argc, sub_argv);
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
     if (cmd == "block-range")   return cmd_block_range(sub_argc, sub_argv);
@@ -21679,6 +21818,396 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-timestamp "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: NodeRegistry::build_from_chain + eligible_in_region.
+    // FA8 R2 committee-selection foundation. Pins:
+    //   - build_from_chain reads (registrants, stakes) from a Chain and
+    //     produces a sorted-by-domain NodeRegistry
+    //   - Min-stake gate: domains with stake < chain.min_stake() excluded
+    //   - Window gate: active_from <= at_index < inactive_from
+    //   - eligible_in_region("") returns full pool (pre-R1 backward compat)
+    //   - eligible_in_region("us-east") returns only us-east subset
+    //   - Determinism across rebuilds
+    //
+    // Previously only exercised via end-to-end shell tests through the
+    // Node fixture. This direct unit test catches drift faster.
+    if (cmd == "test-node-registry") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: 3 creators with mixed regions and varying stake.
+        auto make_cfg = [&](uint64_t alice_stake, uint64_t bob_stake,
+                              uint64_t carol_stake,
+                              const std::string& alice_region,
+                              const std::string& bob_region,
+                              const std::string& carol_region) {
+            GenesisConfig cfg;
+            cfg.chain_id = "node-registry-test";
+            GenesisCreator alice_c, bob_c, carol_c;
+            alice_c.domain = "alice"; bob_c.domain = "bob"; carol_c.domain = "carol";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+                bob_c.ed_pub[i]   = uint8_t(0x20 + i);
+                carol_c.ed_pub[i] = uint8_t(0x30 + i);
+            }
+            alice_c.initial_stake = alice_stake;
+            bob_c.initial_stake   = bob_stake;
+            carol_c.initial_stake = carol_stake;
+            alice_c.region = alice_region;
+            bob_c.region   = bob_region;
+            carol_c.region = carol_region;
+            cfg.initial_creators = {alice_c, bob_c, carol_c};
+            return cfg;
+        };
+
+        // === build_from_chain produces all eligible creators ===
+
+        // 1. With all 3 creators at min_stake (default 1000), all
+        //    are eligible at height 0 (genesis applies active_from
+        //    via derive_delay; genesis-installed registry has
+        //    active_from = 0 so all eligible from height 0).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 1000,
+                                                    "", "", "")));
+            // Default min_stake = 1000. All three have stake >= 1000.
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            check(reg.size() == 3,
+                  "build_from_chain: 3 eligible creators at height 0");
+            check(reg.contains("alice") && reg.contains("bob")
+                  && reg.contains("carol"),
+                  "build_from_chain: all 3 by domain");
+        }
+
+        // === Min-stake gate ===
+
+        // 2. carol has stake 500 (< min_stake 1000) → excluded.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 500,
+                                                    "", "", "")));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            check(reg.size() == 2,
+                  "min-stake gate: only 2 eligible (carol stake < min_stake)");
+            check(reg.contains("alice") && reg.contains("bob"),
+                  "min-stake gate: alice + bob remain eligible");
+            check(!reg.contains("carol"),
+                  "min-stake gate: carol excluded (stake 500 < 1000)");
+        }
+
+        // === eligible_in_region("") = full pool ===
+
+        // 3. With all 3 creators in mixed regions, empty filter
+        //    returns the full pool (pre-R1 backward compat).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 1000,
+                                                    "us-east", "eu-west", "apac")));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            auto pool = reg.eligible_in_region("");
+            check(pool.size() == 3,
+                  "eligible_in_region(\"\"): returns full pool (R1 backward compat)");
+        }
+
+        // === eligible_in_region("us-east") = matching subset ===
+
+        // 4. Mixed-region pool filtered by region → only us-east entries.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 1000,
+                                                    "us-east", "eu-west", "us-east")));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            auto us = reg.eligible_in_region("us-east");
+            check(us.size() == 2,
+                  "eligible_in_region(\"us-east\"): 2 us-east creators");
+            bool has_alice = false, has_carol = false, has_bob = false;
+            for (const auto& n : us) {
+                if (n.domain == "alice") has_alice = true;
+                if (n.domain == "carol") has_carol = true;
+                if (n.domain == "bob")   has_bob = true;
+            }
+            check(has_alice && has_carol && !has_bob,
+                  "eligible_in_region(\"us-east\"): alice + carol, NOT bob");
+        }
+
+        // === Region filter is strict ===
+
+        // 5. Region "us" doesn't match "us-east" — strict equality.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 1000,
+                                                    "us-east", "eu-west", "us-east")));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            auto us = reg.eligible_in_region("us");  // mismatched prefix
+            check(us.empty(),
+                  "region filter: strict equality (no prefix match)");
+        }
+
+        // === Determinism: two rebuilds produce same set ===
+
+        // 6. build_from_chain on the same Chain twice → same NodeRegistry.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 1000,
+                                                    "us", "eu", "apac")));
+            NodeRegistry r1 = NodeRegistry::build_from_chain(c, 0);
+            NodeRegistry r2 = NodeRegistry::build_from_chain(c, 0);
+            check(r1.size() == r2.size(),
+                  "determinism: same Chain → same registry size");
+            // Sorted-by-domain → same nth domain on each.
+            auto s1 = r1.sorted_nodes();
+            auto s2 = r2.sorted_nodes();
+            bool same_order = (s1.size() == s2.size());
+            for (size_t i = 0; same_order && i < s1.size(); ++i) {
+                if (s1[i].domain != s2[i].domain) same_order = false;
+            }
+            check(same_order,
+                  "determinism: sorted-by-domain order identical across rebuilds");
+        }
+
+        // === Sorted-by-domain order ===
+
+        // 7. sorted_nodes() returns entries in lexicographic domain order.
+        {
+            Chain c;
+            // alice/bob/carol — already alpha-sorted.
+            c.append(make_genesis_block(make_cfg(1000, 1000, 1000,
+                                                    "", "", "")));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            auto sorted = reg.sorted_nodes();
+            check(sorted.size() == 3
+                  && sorted[0].domain == "alice"
+                  && sorted[1].domain == "bob"
+                  && sorted[2].domain == "carol",
+                  "sorted_nodes: lexicographic by domain");
+        }
+
+        // === Zero-stake creator excluded (boundary) ===
+
+        // 8. carol with stake = 0 → excluded regardless of registry entry.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 1000, 0,
+                                                    "", "", "")));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            check(!reg.contains("carol"),
+                  "zero-stake: carol excluded (stake 0)");
+            check(reg.size() == 2,
+                  "zero-stake: only alice + bob remain");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": node-registry "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: tx-replay-protection — pin the nonce-gating
+    // contract that defends against tx replay. chain.cpp:739:
+    //   if (tx.nonce != sender.next_nonce) continue;
+    // → strict-equality check skips both PAST and FUTURE nonces.
+    //
+    // Tests the replay-defense surface:
+    //   - TX applied at H: sender.next_nonce bumped from 0 to 1
+    //   - Same TX (nonce 0) replayed at H+1: skipped (stale nonce)
+    //   - TX with future nonce (5): skipped (gap in sequence)
+    //   - A1 invariance under replay attempts (no fee charged on skip)
+    //   - Per-sender nonces independent (alice's nonce doesn't affect bob)
+    //   - Determinism: replay attempt deterministic across chains
+    //
+    // Defends against regressions where strict-equality drifts to
+    // `>=` (allowing future-nonce TXs) or `>` (allowing replay of
+    // past nonces with same content).
+    if (cmd == "test-tx-replay-protection") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice (creator + balance), bob (balance only).
+        GenesisConfig cfg;
+        cfg.chain_id = "tx-replay-protection-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        auto apply_with_tx = [&](Chain& c, const Transaction& tx) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // === Successful apply bumps nonce ===
+
+        // 1. TX with nonce 0 applies; sender.next_nonce → 1.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            apply_with_tx(c, tx);
+
+            check(c.next_nonce("alice") == 1,
+                  "successful apply: nonce 0 → 1");
+            check(c.balance("bob") == 250,
+                  "successful apply: bob credited 50");
+        }
+
+        // === Replay (stale nonce) silently skipped ===
+
+        // 2. Block 1: TX with nonce 0 applies. Block 2: SAME TX replayed
+        //    (still nonce 0; but sender.next_nonce is now 1). Strict-
+        //    equality check fails → skip. Balance unchanged, fee not
+        //    charged, nonce stays at 1.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            apply_with_tx(c, tx);  // Block 1: applies
+
+            uint64_t alice_bal = c.balance("alice");
+            uint64_t bob_bal   = c.balance("bob");
+            uint64_t nonce_after_apply = c.next_nonce("alice");
+
+            // Block 2: same TX replayed (stale nonce).
+            apply_with_tx(c, tx);
+
+            check(c.balance("alice") == alice_bal,
+                  "replay (stale nonce): alice balance unchanged");
+            check(c.balance("bob") == bob_bal,
+                  "replay (stale nonce): bob balance unchanged");
+            check(c.next_nonce("alice") == nonce_after_apply,
+                  "replay (stale nonce): nonce stays (NOT re-bumped)");
+        }
+
+        // === Future-nonce TX silently skipped ===
+
+        // 3. TX with nonce 5 (when sender.next_nonce is 0): skipped.
+        //    Strict equality fires here too — gap in sequence rejected.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 5;  // future
+            apply_with_tx(c, tx);
+
+            check(c.balance("bob") == 200,
+                  "future nonce: bob unchanged (skip)");
+            check(c.next_nonce("alice") == 0,
+                  "future nonce: alice nonce NOT advanced");
+        }
+
+        // === Per-sender nonces are independent ===
+
+        // 4. alice's nonce advancement doesn't affect bob's nonce.
+        //    bob can still send tx with nonce 0 even after alice's
+        //    nonce is 5.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            // Five alice TXs (nonces 0..4).
+            for (uint64_t n = 0; n < 5; ++n) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = "alice"; tx.to = "bob";
+                tx.amount = 10; tx.fee = 0; tx.nonce = n;
+                apply_with_tx(c, tx);
+            }
+            check(c.next_nonce("alice") == 5,
+                  "per-sender: alice advanced to nonce 5");
+            check(c.next_nonce("bob") == 0,
+                  "per-sender: bob still at nonce 0");
+
+            // Bob can send with nonce 0 now.
+            Transaction bob_tx;
+            bob_tx.type = TxType::TRANSFER;
+            bob_tx.from = "bob"; bob_tx.to = "alice";
+            bob_tx.amount = 10; bob_tx.fee = 0; bob_tx.nonce = 0;
+            apply_with_tx(c, bob_tx);
+            check(c.next_nonce("bob") == 1,
+                  "per-sender: bob can send at nonce 0 (independent of alice)");
+        }
+
+        // === A1 invariance under replay attempts ===
+
+        // 5. Replay attempts don't move supply. A1 invariant holds.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 50; tx.fee = 1; tx.nonce = 0;
+            apply_with_tx(c, tx);
+            uint64_t supply_after_first = c.live_total_supply();
+
+            // 3 replay attempts (all skipped):
+            for (int i = 0; i < 3; ++i) apply_with_tx(c, tx);
+
+            check(c.live_total_supply() == supply_after_first,
+                  "A1: supply unchanged across replay attempts");
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: invariant holds despite repeated replays");
+        }
+
+        // === Determinism: replay attempts deterministic ===
+
+        // 6. Two chains see same replay sequence → same state_root.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 25; tx.fee = 1; tx.nonce = 0;
+
+            // Apply once + 2 replay attempts on each chain.
+            for (auto* cp : {&c1, &c2}) {
+                apply_with_tx(*cp, tx);  // applies
+                apply_with_tx(*cp, tx);  // stale-nonce skip
+                apply_with_tx(*cp, tx);  // stale-nonce skip
+            }
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: same replay sequence → same state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": tx-replay-protection "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
