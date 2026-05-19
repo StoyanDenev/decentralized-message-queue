@@ -119,6 +119,12 @@ Usage:
   determ block-hash <index>                  Print just compute_hash of block at
                                               <index> (64-hex). Useful for
                                               cross-node fork detection scripts.
+  determ block-info <index>                  Print one or more fields of a single
+                  [--field NAME] [--json]    block. --field NAME extracts a
+                                              bare value (index | prev_hash |
+                                              timestamp | tx_root | state_root |
+                                              block_hash | consensus_mode);
+                                              without it the full block prints.
   determ block-range <from> <to>             Bulk fetch via headers RPC (paged
                   [--field NAME] [--json]    256/page). Default: index + block_hash
                                               per height. --field NAME prints
@@ -573,7 +579,7 @@ Additional in-process tests:
                                               A1 at every boundary, subsidy
                                               linear accrual, state_root
                                               mutation, determinism
-  determ test-tx-edge-cases                   TRANSFER corner cases —
+)" << R"(  determ test-tx-edge-cases                   TRANSFER corner cases —
                                               self-transfer, zero amount,
                                               missing sender, insufficient
                                               balance (incl. boundary), A1
@@ -683,6 +689,17 @@ Additional in-process tests:
                                               rejected with diagnostic;
                                               non-object input rejected with
                                               distinct 'not a JSON object'.
+  determ test-config-defaults                 Operator-facing security defaults
+                                              from Config::from_json({}) —
+                                              S-001 rpc_localhost_only=true,
+                                              rate-limit disabled, BFT enabled,
+                                              K-of-K strong default, secure
+                                              port/region/log defaults.
+  determ test-required-block-sigs             BFT/MD quorum arithmetic —
+                                              required_block_sigs(MD, k) = k;
+                                              required_block_sigs(BFT, k) =
+                                              ceil(2k/3). Pins the formula at
+                                              the heart of safety/liveness.
 )" << "\n";
 }
 
@@ -2164,6 +2181,110 @@ static int cmd_block_hash(int argc, char** argv) {
         return 1;
     }
     return 0;
+}
+
+// determ block-info <index> [--field NAME] [--json] [--rpc-port P]
+//   Print one or more fields of a single block. Extension of
+//   `block-hash` (which only emits compute_hash) to any block field:
+//   index, prev_hash, timestamp, tx_root, state_root, block_hash,
+//   consensus_mode.
+//
+//   --field NAME       Select which field to emit (default: full block
+//                      JSON). Bare-value output for shell-script
+//                      consumption.
+//   --json             Emit the raw block JSON envelope (same as
+//                      `block-hash`'s underlying `block` RPC response).
+//
+//   Without --field, defaults to printing the full block. With --field,
+//   prints just the field value. Operator examples:
+//
+//     determ block-info 100 --field state_root --rpc-port 7778
+//     # → 64-char hex state_root
+//
+//     determ block-info 100 --field timestamp
+//     # → block timestamp as unsigned integer
+//
+//   Operator use cases: "what was state_root at block 100?" (audit
+//   trail); "what was timestamp delta between blocks N and M?"
+//   (chain progress velocity).
+static int cmd_block_info(int argc, char** argv) {
+    if (argc < 1) {
+        std::cerr << "Usage: determ block-info <index> [--field NAME] "
+                     "[--json] [--rpc-port N]\n";
+        return 1;
+    }
+    uint64_t index = 0;
+    try { index = std::stoull(argv[0]); }
+    catch (...) {
+        std::cerr << "Error: <index> must be an unsigned integer\n";
+        return 1;
+    }
+
+    std::string field;
+    bool json_out = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--json") json_out = true;
+        else if (a == "--field" && i + 1 < argc) field = argv[i + 1];
+    }
+
+    static const std::vector<std::string> kAllowedFields = {
+        "index", "prev_hash", "timestamp", "tx_root",
+        "state_root", "block_hash", "consensus_mode"
+    };
+    if (!field.empty()) {
+        bool ok = false;
+        for (const auto& f : kAllowedFields) if (f == field) { ok = true; break; }
+        if (!ok) {
+            std::cerr << "Error: unknown --field '" << field << "' — allowed: ";
+            for (size_t i = 0; i < kAllowedFields.size(); ++i) {
+                if (i) std::cerr << ", ";
+                std::cerr << kAllowedFields[i];
+            }
+            std::cerr << "\n";
+            return 1;
+        }
+    }
+
+    uint16_t port = get_rpc_port(argc, argv);
+    try {
+        json params = {{"index", index}};
+        auto result = rpc::rpc_call("127.0.0.1", port, "block", params);
+        if (result.is_null()) {
+            std::cerr << "Error: block " << index
+                      << " out of range (chain.height too low)\n";
+            return 1;
+        }
+
+        // block RPC returns full Block JSON. The block_hash field is
+        // computed server-side and added (matches the `hash` field
+        // emitted by Block::to_json post-compute_hash).
+        // Aliases: block_hash and hash refer to the same value.
+        if (!field.empty()) {
+            // Map "block_hash" → "hash" for the block RPC's emitted field.
+            std::string lookup = (field == "block_hash") ? "hash" : field;
+            if (!result.contains(lookup) || result[lookup].is_null()) {
+                std::cout << "\n";  // empty line for missing
+                return 0;
+            }
+            const auto& v = result[lookup];
+            if      (v.is_string())  std::cout << v.get<std::string>() << "\n";
+            else if (v.is_number())  std::cout << v.dump()              << "\n";
+            else if (v.is_boolean()) std::cout << (v.get<bool>() ? "true" : "false") << "\n";
+            else                      std::cout << v.dump()              << "\n";
+            return 0;
+        }
+
+        if (json_out) {
+            std::cout << result.dump() << "\n";
+        } else {
+            std::cout << result.dump(2) << "\n";
+        }
+        return 0;
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 }
 
 // determ block-range <from> <to> [--field NAME] [--json] [--rpc-port P]
@@ -4680,6 +4801,7 @@ int main(int argc, char** argv) {
     if (cmd == "tx-summary")    return cmd_tx_summary(sub_argc, sub_argv);
     if (cmd == "chain-id")      return cmd_chain_id(sub_argc, sub_argv);
     if (cmd == "block-hash")    return cmd_block_hash(sub_argc, sub_argv);
+    if (cmd == "block-info")    return cmd_block_info(sub_argc, sub_argv);
     if (cmd == "block-range")   return cmd_block_range(sub_argc, sub_argv);
     if (cmd == "check-fork")    return cmd_check_fork(sub_argc, sub_argv);
     if (cmd == "head")          return cmd_head(sub_argc, sub_argv);
@@ -23647,6 +23769,274 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": snapshot-version-rejection "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: operator-facing security defaults at Config::
+    // from_json({}). The most important pin is S-001's
+    // rpc_localhost_only=true default — a pre-S-001 config or a
+    // bare-minimum new operator's config.json must NOT expose RPC
+    // on all interfaces. Other defaults pin the "out-of-the-box
+    // safe" posture: rate-limit disabled (operators opt-in), BFT
+    // enabled, K-of-K strong mode (k_block_sigs == m_creators).
+    //
+    // Defends against any default-drift that would weaken the
+    // out-of-the-box security posture or change committee semantics
+    // for existing pre-feature configs.
+    if (cmd == "test-config-defaults") {
+        using namespace determ;
+        using namespace determ::node;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Load Config from EMPTY JSON object — every field uses its
+        // .value(<key>, <default>) fallback. This is what a brand-new
+        // operator sees if config.json has only essential fields.
+        Config c = Config::from_json(json::object());
+
+        // === S-001: rpc_localhost_only secure default ===
+
+        // 1. rpc_localhost_only must default to TRUE. Operators must
+        //    opt-IN to listen on all interfaces (the S-001 closure).
+        //    Pre-S-001 configs lacking the field get the secure value.
+        check(c.rpc_localhost_only == true,
+              "S-001 secure default: rpc_localhost_only = true");
+
+        // === Rate limits disabled by default ===
+
+        // 2. Both RPC + gossip rate limits default to 0 (disabled).
+        //    Operators opt-IN to throttling (S-014 surface).
+        check(c.rpc_rate_per_sec == 0.0
+              && c.rpc_rate_burst == 0.0,
+              "S-014 default: RPC rate limit disabled");
+        check(c.gossip_rate_per_sec == 0.0
+              && c.gossip_rate_burst == 0.0,
+              "S-014 default: gossip rate limit disabled");
+
+        // === BFT mode enabled by default ===
+
+        // 3. bft_enabled defaults to true. Aborts that cross the
+        //    escalation threshold trigger BFT-mode fallback automatically.
+        check(c.bft_enabled == true,
+              "bft_enabled default: true (auto-escalation)");
+        check(c.bft_escalation_threshold == 5,
+              "bft_escalation_threshold default: 5");
+
+        // === Committee defaults ===
+
+        // 4. K-of-K strong mode by default: k_block_sigs == m_creators.
+        //    Hybrid mode requires explicit operator config.
+        check(c.m_creators == 3,
+              "m_creators default: 3 (small-cluster sane default)");
+        check(c.k_block_sigs == c.m_creators,
+              "k_block_sigs default: == m_creators (strong K-of-K mode)");
+
+        // === Chain role + sharding defaults ===
+
+        // 5. chain_role defaults to SINGLE (unsharded; the rev.8
+        //    behavior preserved for backward-compat).
+        check(c.chain_role == ChainRole::SINGLE,
+              "chain_role default: SINGLE (unsharded)");
+
+        // 6. sharding_mode defaults to CURRENT (rev.9 B0-B6 sharding
+        //    without R1+R2 plumbing). EXTENDED requires explicit opt-in
+        //    via timing profile selection at `determ init`.
+        check(c.sharding_mode == ShardingMode::CURRENT,
+              "sharding_mode default: CURRENT (pre-R1 baseline)");
+
+        // 7. shard_id + initial_shard_count default to single-chain.
+        check(c.shard_id == ShardId{0},
+              "shard_id default: 0");
+        check(c.initial_shard_count == 1,
+              "initial_shard_count default: 1 (unsharded)");
+
+        // === Network ports ===
+
+        // 8. Listen + RPC ports default to 7777 / 7778. Useful
+        //    operator-facing pin (pre-rev-9 docs reference these).
+        check(c.listen_port == 7777,
+              "listen_port default: 7777");
+        check(c.rpc_port == 7778,
+              "rpc_port default: 7778");
+
+        // === Timing defaults ===
+
+        // 9. epoch_blocks + the 3 consensus-phase delays defaults.
+        check(c.epoch_blocks == 1000,
+              "epoch_blocks default: 1000");
+        check(c.tx_commit_ms == 200,
+              "tx_commit_ms default: 200ms");
+        check(c.block_sig_ms == 200,
+              "block_sig_ms default: 200ms");
+        check(c.abort_claim_ms == 200,
+              "abort_claim_ms default: 200ms");
+
+        // === Region defaults (R1) ===
+
+        // 10. R1 region tags default empty — pre-R1 configs are
+        //     byte-identical (no field, empty value, no behavior change).
+        check(c.region.empty(),
+              "R1 default: region = \"\" (pre-R1 byte-identical)");
+        check(c.committee_region.empty(),
+              "R1 default: committee_region = \"\" (global pool)");
+
+        // === Log + auth defaults ===
+
+        // 11. log_quiet defaults to false (operators see all logs).
+        //     rpc_auth_secret empty (HMAC auth disabled — opt-in).
+        check(c.log_quiet == false,
+              "log_quiet default: false (verbose logs)");
+        check(c.rpc_auth_secret.empty(),
+              "rpc_auth_secret default: empty (HMAC auth disabled)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": config-defaults "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: required_block_sigs(mode, committee_size) is the
+    // BFT/MD quorum arithmetic at the heart of safety/liveness proofs
+    // — particularly BFTSafety.md's |K_h|/Q analysis and the
+    // PROTOCOL.md §5.3 BFT escalation gate documentation.
+    //
+    // Formula:
+    //   MD mode:   required = committee_size (full K-of-K)
+    //   BFT mode:  required = ceil(2 * committee_size / 3)
+    //
+    // The BFT formula has the "two shrinkages" structure documented
+    // in MEMORY.md: committee shrinks from K to k_bft = ceil(2K/3),
+    // then within k_bft the required sigs are Q = ceil(2*k_bft/3).
+    // At the producer layer, required_block_sigs takes the COMMITTEE
+    // size directly and applies ceil(2/3) ONCE.
+    if (cmd == "test-required-block-sigs") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === MD mode: required == committee_size (full K-of-K) ===
+
+        // 1. MD mode requires every committee member to sign. No
+        //    sentinel slots; one missing signature breaks finalization
+        //    (escalation to BFT only happens via the abort threshold).
+        {
+            check(required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 3) == 3,
+                  "MD(3): requires 3 sigs (full K-of-K)");
+            check(required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 5) == 5,
+                  "MD(5): requires 5 sigs (full K-of-K)");
+            check(required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 9) == 9,
+                  "MD(9): requires 9 sigs (full K-of-K)");
+        }
+
+        // === BFT mode: required == ceil(2k/3) ===
+
+        // 2. BFT mode at K=3: ceil(2*3/3) = 2 sigs.
+        //    Note: this is degenerate — 2 == ceil(2*3/3) but for
+        //    safety analysis, BFT-mode requires f < N/3 honest where
+        //    f is the abortable nodes; at K=3 the BFT-mode reduces to
+        //    a trivial 2-of-3 quorum (still K-of-K-like).
+        {
+            check(required_block_sigs(ConsensusMode::BFT, 3) == 2,
+                  "BFT(3): requires 2 sigs (ceil(2*3/3) = 2)");
+        }
+
+        // 3. BFT mode at K=6: ceil(2*6/3) = 4 sigs.
+        //    Two sentinel slots permitted (6 - 4 = 2).
+        {
+            check(required_block_sigs(ConsensusMode::BFT, 6) == 4,
+                  "BFT(6): requires 4 sigs (ceil(2*6/3) = 4)");
+        }
+
+        // 4. BFT mode at K=4: ceil(2*4/3) = ceil(8/3) = 3 sigs.
+        //    One sentinel slot permitted.
+        {
+            check(required_block_sigs(ConsensusMode::BFT, 4) == 3,
+                  "BFT(4): requires 3 sigs (ceil(2*4/3) = 3)");
+        }
+
+        // 5. BFT mode at K=9: ceil(2*9/3) = 6 sigs.
+        //    Three sentinel slots permitted.
+        {
+            check(required_block_sigs(ConsensusMode::BFT, 9) == 6,
+                  "BFT(9): requires 6 sigs (ceil(2*9/3) = 6)");
+        }
+
+        // 6. BFT mode at K=5: ceil(2*5/3) = ceil(10/3) = 4 sigs.
+        //    One sentinel slot permitted (5 - 4 = 1).
+        {
+            check(required_block_sigs(ConsensusMode::BFT, 5) == 4,
+                  "BFT(5): requires 4 sigs (ceil(2*5/3) = 4)");
+        }
+
+        // 7. BFT mode at K=7: ceil(2*7/3) = ceil(14/3) = 5 sigs.
+        //    Two sentinel slots permitted.
+        {
+            check(required_block_sigs(ConsensusMode::BFT, 7) == 5,
+                  "BFT(7): requires 5 sigs (ceil(2*7/3) = 5)");
+        }
+
+        // === Edge cases ===
+
+        // 8. K=1 (degenerate): MD requires 1, BFT requires
+        //    ceil(2/3) = 1 (rounds up).
+        {
+            check(required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 1) == 1,
+                  "MD(1): requires 1 sig (degenerate, full K-of-K)");
+            check(required_block_sigs(ConsensusMode::BFT, 1) == 1,
+                  "BFT(1): requires 1 sig (degenerate, ceil(2/3)=1)");
+        }
+
+        // 9. K=2 (smallest non-degenerate BFT):
+        //    MD requires 2, BFT requires ceil(4/3) = 2 (no sentinel).
+        {
+            check(required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, 2) == 2,
+                  "MD(2): requires 2 sigs (full)");
+            check(required_block_sigs(ConsensusMode::BFT, 2) == 2,
+                  "BFT(2): requires 2 sigs (ceil(4/3)=2, no sentinels)");
+        }
+
+        // === BFT < MD invariant (always) ===
+
+        // 10. For all K, BFT requirement <= MD requirement.
+        //     BFT-mode is the LIVENESS escape hatch — it CAN'T require
+        //     more signatures than MD mode (that would defeat the
+        //     escalation's purpose).
+        {
+            bool invariant_holds = true;
+            for (size_t k = 1; k <= 16; ++k) {
+                size_t md  = required_block_sigs(ConsensusMode::MUTUAL_DISTRUST, k);
+                size_t bft = required_block_sigs(ConsensusMode::BFT, k);
+                if (bft > md) { invariant_holds = false; break; }
+            }
+            check(invariant_holds,
+                  "invariant: BFT(k) <= MD(k) for all 1<=k<=16");
+        }
+
+        // === Determinism (sanity) ===
+
+        // 11. Two calls with same inputs yield same output.
+        {
+            for (size_t k : {3, 5, 7, 9}) {
+                size_t a = required_block_sigs(ConsensusMode::BFT, k);
+                size_t b = required_block_sigs(ConsensusMode::BFT, k);
+                check(a == b,
+                      "determinism: BFT(k) pure (same inputs → same output)");
+                if (a != b) break;
+            }
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": required-block-sigs "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
