@@ -286,15 +286,171 @@ Full task brief: `plan.md` §A11. Full DKG specification: `docs/proofs/v2.10-DKG
 
 ### v2.11 — Auto-detection beacon-side trigger (R4 v1.1)
 
-**Motivation.** R4 ships in v1.x with operator-driven `MERGE_EVENT` submission via `determ submit-merge-event`. Production deployments want auto-detection: beacon observes `eligible_in_region(s) < 2K` over `merge_threshold_blocks` and no `SHARD_TIP_s` arrival → emits `MERGE_BEGIN` autonomously.
+**Problem statement.** R4 v1.0 ships the under-quorum-merge mechanism (`MergeEvent`, `Chain::merge_state_`, `refugee_region` cascade) but leaves the *triggering decision* to a human operator. Today an operator who notices that shard `s`'s eligible-region pool has dropped below `2K` runs `determ submit-merge-event --begin --shard s --partner p --region R --effective-height H --evidence-window-start W`, the beacon's K-committee co-signs the resulting `MERGE_EVENT` tx, and the merge cascade applies. This is fine for testbeds and supervised deployments but unworkable in production for three reasons:
 
-**Mechanism.** Beacon maintains a per-shard observation window. State machine: NORMAL → STRESS_CANDIDATE (after first observation) → STRESS_TRIGGER (after threshold) → emits MERGE_BEGIN. Symmetric for revert with hysteresis.
+1. **Reaction latency.** A shard with `eligible_in_region(s) = 1.6K` and a missed `SHARD_TIP_s` lives in degraded-quorum state continuously. The longer the operator takes to notice (minutes at best for a paged-in human, hours for an unmanned regional deployment), the longer that shard runs with a quorum gap. Under FA1 the shard still satisfies its safety conditions (committee selection just picks from the smaller pool); under FA5 the liveness slack thins until a single additional drop tips into `< K` and the shard stalls until merge.
+2. **Operator-trust singleton.** Whoever runs `submit-merge-event` becomes the de-facto authority for "is this shard merged or not?" The committee co-signs the resulting block, but the *origination* of the decision is a human acting outside the chain's mutual-distrust posture. A misconfigured wallet, a stale dashboard, or a compromised operator key (subject to S-001 / S-004 mitigations) can issue merges that aren't substantively justified.
+3. **No witness-window provenance.** The `evidence_window_start` field on the `MergeEvent` is a hint about which historical blocks justify the merge — but in v1.0 there's no chain-side check that `evidence_window_start` is consistent with the historical record. An operator who submits `evidence_window_start = H - merge_threshold_blocks` for an actually-healthy shard merges that shard anyway because the committee signs the block, not the historical claim. S-036 (partial Low/Op) captures this gap.
 
-S-036 witness-window historical validation closes here: the beacon's emitted `evidence_window_start` is verifiable by any other node re-deriving the observation history from previously-finalized blocks. Combined with the existing committee-signature ratification of MERGE_EVENT, a captured-beacon attack cannot manufacture an unwarranted merge without lying about historical content that's independently verifiable.
+v2.11 replaces the human-as-trigger with a deterministic beacon-side state machine that observes the chain's already-public state (`registrants_`, `SHARD_TIP_*` arrivals, per-shard tx-flow) and emits `MERGE_BEGIN` autonomously when its derivable triggering predicate fires.
 
-**Cost.** 2-3 days. Beacon-side state machine, integration with the existing R4 apply path, integration test.
+**Mechanism — beacon-side observation FSM.** Each shard `s` tracked by the beacon has a `MergeMonitor[s]` per-shard observation block:
 
-**Closes:** R4's v1.1 follow-on, partial S-036 closure (full closure needs on-chain SHARD_TIP records, separate item).
+```cpp
+struct MergeMonitor {
+    enum class State : uint8_t {
+        NORMAL,
+        STRESS_CANDIDATE,
+        STRESS_CONFIRMED,
+        MERGE_PENDING,
+        MERGED,
+        RECOVERY_CANDIDATE,
+        RECOVERY_CONFIRMED,
+    };
+    State        state{State::NORMAL};
+    uint64_t     state_entered_height{0};   // beacon block index of last state change
+    uint64_t     observation_window_start{0}; // running count anchor
+    uint32_t     consecutive_stress_blocks{0};
+    uint32_t     consecutive_recovery_blocks{0};
+    uint32_t     last_eligible_count{0};
+    uint64_t     last_shard_tip_height{0};
+    PartnerHint  pending_partner{};         // resolved at MERGE_PENDING entry
+};
+```
+
+State machine, evaluated once per beacon block as part of the beacon-side tick (between `BlockValidator::validate_block` and `Chain::apply_block_locked`):
+
+| From | To | Trigger | Action |
+|---|---|---|---|
+| `NORMAL` | `STRESS_CANDIDATE` | First block with `eligible_in_region(s) < 2K` OR `head_height - last_shard_tip_height > shard_tip_grace_blocks` | Record `observation_window_start = head_height`; `consecutive_stress_blocks = 1` |
+| `STRESS_CANDIDATE` | `STRESS_CONFIRMED` | `consecutive_stress_blocks >= stress_confirm_blocks` (default 25) | Lock the candidate; begin partner resolution |
+| `STRESS_CONFIRMED` | `MERGE_PENDING` | `consecutive_stress_blocks >= merge_threshold_blocks` (default 100; genesis-pinned) AND partner-resolution returned a valid `(partner_id, region)` pair | Emit `MERGE_BEGIN` candidate; queue `MERGE_EVENT` tx for next beacon block |
+| `MERGE_PENDING` | `MERGED` | The beacon's next block applies and contains the `MERGE_EVENT` tx (validator path runs S-036 historical check + K-committee co-signs) | `state_entered_height = H_merge` |
+| `STRESS_CANDIDATE`, `STRESS_CONFIRMED` | `NORMAL` | `eligible_in_region(s) >= 2K` for `stress_reset_blocks` (default 10) consecutive blocks | Clear monitor; reset counts |
+| `MERGED` | `RECOVERY_CANDIDATE` | First block with `eligible_in_region(s) >= 2K + recovery_hysteresis` (default `2K + K/2`) | `consecutive_recovery_blocks = 1` |
+| `RECOVERY_CANDIDATE` | `RECOVERY_CONFIRMED` | `consecutive_recovery_blocks >= recovery_confirm_blocks` (default 200; deliberately longer than `merge_threshold_blocks`) | Emit `MERGE_END` candidate |
+| `RECOVERY_CANDIDATE` | `MERGED` | `eligible_in_region(s) < 2K + recovery_hysteresis` at any block | Reset; stay merged |
+| `RECOVERY_CONFIRMED` | `NORMAL` | The beacon's next block applies and contains the matching `MERGE_END` tx | Clear monitor |
+
+The `stress_confirm_blocks` intermediate state acts as cheap noise rejection (block-rate fluctuation, transient peer churn, a single dropped `SHARD_TIP_s`) before committing to the heavier full-threshold count. Hysteresis on the recovery side (`recovery_hysteresis = K/2` extra eligible nodes; `recovery_confirm_blocks > merge_threshold_blocks` so revert requires more confidence than merge) is asymmetric on purpose: under-quorum merges should be cheap to enter (closing a real liveness gap) but harder to leave (avoid flapping back into the same trouble that triggered the original merge).
+
+**Partner-resolution algorithm.** When `STRESS_CONFIRMED` enters with a verified count gap, the beacon resolves `partner_id` deterministically from the chain's public state:
+
+1. **Candidate pool.** All currently-NORMAL shards with `eligible_in_region(p) >= 3K` (≥1K headroom over the bare-minimum committee size).
+2. **Region affinity.** Prefer a partner sharing the refugee's region if any candidate qualifies. Falls back to a different region as the merge cascade is region-agnostic at apply time (`refugee_region` carries the original region forward through `merge_state_`).
+3. **Tie-breaker.** Among qualifying candidates, pick the partner with smallest `(headroom_to_cap, partner_id)` lex tuple where `headroom_to_cap = max_eligible_per_shard - eligible_in_region(p)`. This load-balances merges across the partner pool over time.
+4. **No-candidate fallback.** If no shard meets the headroom requirement, the monitor stays in `STRESS_CONFIRMED` and the beacon emits an operational alert (`MergeMonitor::no_partner_available` counter). Operator falls back to manual `submit-merge-event` with policy override. This is the only path that retains the operator-as-trigger gate, and only for the worst-case "everyone's stressed" scenario.
+
+The candidate evaluation runs entirely against `Chain::registrants_` + `Chain::merge_state_` + the beacon's local `MergeMonitor[*]` table — all deterministic from already-public chain state. Any honest node re-deriving the partner pick from the chain's history at the merge height arrives at the same `(partner_id, region)` pair; this is what makes the historical-witness check (below) cryptographically meaningful instead of just informational.
+
+**S-036 historical-witness check.** The validator gate currently inferred by `BlockValidator::validate_block` checks that the `MergeEvent` payload is internally well-formed (region length cap, event_type discriminant, partner != shard, etc.). v2.11 extends this with a *historical* check: given the `evidence_window_start` field on the event, the validator re-derives the beacon's monitor state from blocks in `[evidence_window_start, effective_height)` and confirms the trigger predicate would have fired. Specifically:
+
+```cpp
+bool BlockValidator::validate_merge_event_historical(
+    const MergeEvent& ev,
+    const ChainHistoryReadHandle& hist) const
+{
+    if (ev.event_type == MergeEvent::BEGIN) {
+        // Replay the monitor FSM over [evidence_window_start, effective_height).
+        // For each beacon block H in the window:
+        //   - reconstruct eligible_in_region(ev.shard_id) at H from chain state at H
+        //   - reconstruct last SHARD_TIP_{ev.shard_id} height observed at H
+        //   - step the MergeMonitor FSM
+        // Accept iff the FSM reaches STRESS_CONFIRMED at or before effective_height
+        // AND consecutive_stress_blocks >= merge_threshold_blocks at effective_height.
+        // The partner-resolution algorithm is re-run; ev.partner_id must match.
+        return replay_monitor_reaches_pending(ev, hist);
+    } else {
+        // Symmetric replay for MERGE_END: monitor must be RECOVERY_CONFIRMED
+        // at or before effective_height.
+        return replay_monitor_reaches_recovery(ev, hist);
+    }
+}
+```
+
+This closes S-036 *fully* for `MERGE_EVENT` issuance (the original S-036 partial was about the witness window for evidence inclusion; here the witness window is what the FSM observed, and the chain re-derives the FSM transitions from finalized chain state alone). A captured-beacon adversary that submits a `MERGE_BEGIN` against an actually-healthy shard fails this check at validator time on every honest node; the K-committee will not co-sign a block whose `MERGE_EVENT` tx fails validate. The historical replay is `O(merge_threshold_blocks)` per `MERGE_EVENT` — at default 100 blocks this is negligible compared to per-block apply cost.
+
+**Wire-format additions.** None to existing structs. `MergeEvent` keeps its current shape (`event_type`, `shard_id`, `partner_id`, `effective_height`, `evidence_window_start`, `merging_shard_region` — already includes the field S-036 historical replay reads). v2.11 adds:
+
+| New surface | Location | Purpose |
+|---|---|---|
+| `MergeMonitorState` (per-shard runtime struct) | `include/determ/node/beacon.hpp` (new file, ~200 LOC) | Beacon-side FSM state; NOT chain state; not serialized into snapshot |
+| `mergemonitor_status` RPC | `src/node/node.cpp` | Operator visibility: returns current state, consecutive counts, observation window |
+| Config knobs: `stress_confirm_blocks`, `recovery_hysteresis`, `recovery_confirm_blocks`, `stress_reset_blocks`, `shard_tip_grace_blocks` | `include/determ/chain/genesis.hpp::GenesisConfig` + `Chain` mirrors | Genesis-pinned; reuse pattern from `merge_threshold_blocks` (already shipped) |
+| `BlockValidator::validate_merge_event_historical` | `include/determ/chain/validator.hpp` + impl | The S-036 replay check |
+| `ChainHistoryReadHandle` | `include/determ/chain/chain.hpp` | Read-only handle exposing block-N state-snapshot reconstruction for the historical replay; reuses existing block index + accounts_at_height accessors |
+
+The new config knobs default to the values listed in the FSM table above. Genesis-pinned so all nodes agree on triggering thresholds — required for the historical replay to be deterministic across observers.
+
+**Apply-path integration.** Functions extended (no rewrites):
+
+- `Node::on_beacon_tick` — new hook fired once per beacon block, before `enqueue_save`. Iterates all tracked shards, calls `MergeMonitor::step()`, queues `MERGE_EVENT` txs for next block on `MERGE_PENDING` / `RECOVERY_CONFIRMED` transitions.
+- `MergeMonitor::step` — pure function over (current state, per-block chain observation, FSM constants). Deterministic; reproducible by replay tooling.
+- `BlockValidator::validate_block` — extended with a single new call into `validate_merge_event_historical` for every `MERGE_EVENT` tx in the block.
+- `Chain::apply_transactions` — unchanged. The `MergeEvent` apply path was already shipped in R4 v1.0; v2.11 changes only the *origination* path and the *validation* gate, not the *application* path. The merge cascade itself (refugee assignment, partner committee expansion via `partner_subset_hash`) is unchanged.
+- `Chain::serialize_state` / `restore_from_snapshot` — unchanged. `MergeMonitor` is per-node runtime state (like the mempool, like subscriber lists from v2.20). Nodes restarting reconstruct their monitor state by replaying the last `2 × merge_threshold_blocks` of chain history; an interim short window in `NORMAL` is harmless because the merge state itself lives in `merge_state_` (already in snapshot).
+
+**Threat model.** What the primitive defeats and what it introduces:
+
+| Attack | v2.11 defense | New surface introduced |
+|---|---|---|
+| **Slow human-operator reaction** (degraded-quorum shard runs for minutes/hours while operator notices) | Deterministic FSM fires at exactly `merge_threshold_blocks` after stress entry; no human in the loop | None |
+| **Operator-as-trigger compromise** (a misconfigured wallet or captured operator key issues a merge against a healthy shard) | Validator-side historical replay rejects any `MERGE_EVENT` whose FSM trajectory doesn't reach `MERGE_PENDING` over `[evidence_window_start, effective_height)`. Committee cannot co-sign an invalid `MERGE_EVENT` because validate fails. | None — strictly removes the operator from the originating path |
+| **False-positive merge** (transient peer churn / network partition triggers stress; merge fires; merge survives the recovery delay; system suffers a non-justified consolidation) | `stress_confirm_blocks` noise-rejection layer + `merge_threshold_blocks` confirmation requirement + `recovery_hysteresis` asymmetric revert (easier to enter, harder to leave); FSM is conservative on entry, conservative on exit. Operator monitoring via `mergemonitor_status` RPC sees the candidate state and can intervene with manual override (a `MergeEvent` with an `operator_override` flag bypasses the historical replay — gated behind explicit config + per-event audit log). | Operator-override path is a controlled escape valve; documented as a break-glass; logs every override into a chain-event journal |
+| **False-negative miss** (real liveness failure goes undetected because the beacon's own observation history was corrupted by a captured-beacon attack) | The FSM observes already-public chain state (`registrants_`, last-applied-block tx-flow). A captured beacon that lies about its observation history will produce a `MergeEvent` whose historical replay fails on every honest node — the captured beacon cannot single-handedly issue merges. For an UNDETECTED-and-real failure (the beacon is captured AND the captured beacon refuses to issue merge), the K-committee can still issue `MERGE_EVENT` collectively via the existing operator path; v2.11 is additive, not replacing | The captured-beacon "refuse to act" path is fundamentally a liveness concern; mitigated by the operator-override path remaining available |
+| **Captured-beacon issues bogus partner pick** (beacon issues `MERGE_BEGIN` with a `partner_id` that doesn't match the deterministic resolution algorithm; perhaps to load a specific partner with extra refugee traffic) | Validator-side historical replay re-runs the partner-resolution algorithm and confirms the emitted `partner_id` matches the deterministic pick. Any partner-pick deviation fails validate | None |
+| **Flapping attack** (adversary creates oscillating eligible-count just above/below `2K` boundary to force repeated merge / revert cascades) | Asymmetric hysteresis (`recovery_confirm_blocks = 200` vs `merge_threshold_blocks = 100`; `recovery_hysteresis = K/2` extra eligible required for revert); any flap completes at most one cycle per `~300 blocks` even in worst case. Per-shard merge cap (proposed `MAX_MERGE_EVENTS_PER_SHARD_PER_EPOCH = 4`) caps total flap rate per epoch | One new config knob (the per-epoch cap); easy operator tuning |
+| **Cross-shard cascading merge** (one stress event creates a real refugee load on partner, partner becomes stressed, beacon merges partner too, cascade propagates) | The partner-resolution algorithm filters candidates to `eligible_in_region(p) >= 3K` (1K headroom). A partner whose own eligible count is borderline is never selected. If the eligible pool is so thin that no candidate qualifies, monitor stalls in `STRESS_CONFIRMED` and operator alert fires — better to surface the systemic failure than to propagate the cascade | The "no partner available" stall is a deliberate fail-safe; operator escalation path preserved |
+| **MERGE_EVENT timing manipulation** (adversary aligns `effective_height` with a block whose evidence window happens to cover a misleading slice of history) | `evidence_window_start` is constrained to `effective_height - merge_threshold_blocks - stress_confirm_blocks` (i.e., the actual window required to reach `MERGE_PENDING` from `NORMAL`); any narrower window fails replay, any wider window is rejected as out-of-spec. Validator-side gate enforced via `validate_merge_event_historical`. | None |
+
+**Effort estimate.** ~5-7 engineering days (revised from the prior ~2-3 day estimate after spelling out the historical-replay check):
+
+| Sub-component | Effort |
+|---|---|
+| `MergeMonitor` struct + FSM transitions (pure function) | 1 day |
+| `Node::on_beacon_tick` hook + per-block step integration | 0.5 day |
+| Partner-resolution algorithm | 0.5 day |
+| `BlockValidator::validate_merge_event_historical` (the S-036 closure) | 1 day |
+| `ChainHistoryReadHandle` for read-only historical state reconstruction | 1 day |
+| `mergemonitor_status` RPC + CLI verb (`determ mergemonitor`) | 0.5 day |
+| Genesis config knobs (5 new fields) + propagation through `GenesisConfig`/`Chain` | 0.5 day |
+| Regression tests: stress-fires, hysteresis revert, partner resolution, historical-replay rejection of bogus event, flap suppression, no-partner stall, operator-override audit | 1-1.5 days |
+| Documentation refresh (PROTOCOL.md §6.4 R4 substrate, SECURITY.md §S-036 closure, README.md §10.8) | 0.5-1 day |
+
+The expansion vs. the prior ~2-3 day estimate is the cost of doing the S-036 closure properly (deterministic historical replay rather than informational-only `evidence_window_start`). The cheaper version that ships only the FSM without the validator-side replay closes the latency problem but leaves the operator-trust-singleton problem open — not a v2.11-complete posture.
+
+**Dependencies.**
+
+- **R4 v1.0 substrate** — ✅ shipped. `MergeEvent` struct, `Chain::merge_state_`, `refugee_region` cascade, `partner_subset_hash` committee expansion all in tree.
+- **v2.1 state Merkle root** — ✅ shipped. `merge_state_` already contributes to state_root via the `m:` namespace. v2.11 reads `merge_state_` but doesn't extend its serialization.
+- **v2.4 A9 atomic_scope** — ✅ shipped. `MERGE_EVENT` apply already runs inside `atomic_scope`; v2.11 doesn't change this.
+- **No dependency on v2.7 F2 (view reconciliation).** `MERGE_EVENT` originates from the beacon, not from cross-shard receipts; the F2 per-field rules don't apply to MERGE_EVENT-bearing blocks.
+- **No dependency on v2.10 (threshold randomness).** The FSM is deterministic from public chain state; no randomness consumed.
+- **No dependency on Phase D Beaconless v2.** v2.11 is explicitly a *beacon-side* auto-detect; under Beaconless v2 (Phase D) the equivalent function is the per-shard SHARD_TIP observation + Merritt-witness affidavits design (`docs/proofs/Beaconless-v2-SPEC.md` D.5). v2.11 ships first because it lands within Phase A and gives the beacon-mediated topology a complete merge-detection story years before Phase D ships.
+
+**Cross-references.**
+
+- R4 v1.0 substrate: `include/determ/chain/block.hpp::MergeEvent` (line 321); `Chain::merge_state_` (`include/determ/chain/chain.hpp::merge_state_`, line 598); `Chain::merge_threshold_blocks_` (line 592, default 100, genesis-pinned).
+- S-036 (witness-window partial): `SECURITY.md` §S-036. v2.11 promotes this from Low/Op-partial to Low/Op-closed for the EXTENDED-mode merge path. The original S-036 broad scope (evidence inclusion windows for evidence/abort txs) is closed separately via the `evidence_window_start <= b.index` past-bound shipped in-session.
+- FA8 regional sharding proof: `docs/proofs/RegionalSharding.md`. v2.11's deterministic-FSM trigger preserves all FA8 invariants — the merge cascade itself is unchanged; only the *trigger* is rewired.
+- FA9 under-quorum-merge proof: `docs/proofs/UnderQuorumMerge.md`. v2.11 extends FA9's coverage from "operator-issued merges" to "beacon-FSM-issued merges with operator-override fallback"; the safety argument is unchanged.
+- `MergeEvent` apply path (R4 v1.0): `src/chain/chain.cpp::apply_merge_event` (via `apply_transactions` dispatch). v2.11 does not modify this function.
+- `tools/test_under_quorum_merge.sh` (R4 v1.0 regression): v2.11 adds a sibling `tools/test_merge_autodetect.sh` covering the FSM scenarios.
+- Phase D Beaconless v2 spec: `docs/proofs/Beaconless-v2-SPEC.md` §D.5 — the post-beacon equivalent of v2.11; same FSM shape, different witness distribution (per-shard SHARD_TIP observation instead of beacon-side observation).
+- `CLI-REFERENCE.md` `determ submit-merge-event`: the operator-override CLI verb remains shipped as the break-glass path.
+
+**Open design questions.**
+
+1. **Operator-override audit channel.** The break-glass `submit-merge-event --operator-override` path bypasses `validate_merge_event_historical`. Should it require a separate `OperatorOverride` event tx (with its own audit semantics) instead of riding on the existing `MergeEvent` envelope with a flag? Default position: in-band flag for v2.11.0 (simpler validator code path); separate tx for v2.11.1 if real deployments demand explicit audit-trail separation.
+2. **FSM constants: per-shard or chain-wide?** Today `merge_threshold_blocks` is chain-wide (single `GenesisConfig` field). Some deployments may want different thresholds per shard (e.g., a tactical-profile regional shard tolerates shorter windows than a global-profile shard). Default position: chain-wide in v2.11.0; per-shard override in v2.11.1 if deployment feedback demands it. Adding per-shard config later is backward-compatible (default to chain-wide value).
+3. **Should the FSM observe across `MERGE_EVENT` boundaries?** When shard `s` was previously merged into `p` and recovered via `MERGE_END`, the next stress event starts from `NORMAL` with no memory of the prior cycle. An attacker who knows this could trigger an artificial revert (e.g., a brief eligible-count bump past `2K + recovery_hysteresis`) just to reset the counter. Default position: yes, the per-shard FSM is memoryless across cycles by design; the per-shard merge-event cap (`MAX_MERGE_EVENTS_PER_SHARD_PER_EPOCH = 4`) bounds the worst case. Revisit if real deployments exhibit the pattern.
+4. **Cross-region partner preference: hard rule or soft preference?** The partner-resolution algorithm currently *prefers* a same-region partner but *falls back* to a different region if none qualifies. A stricter alternative would refuse merges that cross region boundaries — operationally cleaner but creates more "no partner available" stalls. Default position: soft preference; document the cross-region merge as a known operational signal that the region's deployment is under-provisioned and should be expanded.
+5. **Should `MergeMonitor` state surface via state_root?** Today the proposal is "no" — `MergeMonitor` is per-node runtime state, like the mempool. An adversary node could lie about its own monitor state without consequence because what counts at validate time is the historical replay against finalized chain blocks, not the live monitor. If a future requirement (e.g., interactive light-client merge-monitoring) needs cryptographic commitment to the monitor state, a v2.11.1 extension can lift it into the `m:` namespace alongside `merge_state_`. Defer until needed.
+6. **Composition with v2.7 F2.** F2 ships reconciled lists for `evidence_window_start` and friends, but the `MergeEvent`'s `evidence_window_start` is producer-set (whoever assembled the block emitted the field), not member-set. F2 doesn't touch the path. Confirmed via the field's lifecycle: producer queries `MergeMonitor[s].observation_window_start` at block-assembly time; this value rides in the block; validators re-derive against the historical record. No F2 reconciliation needed.
+
+**Cost.** ~5-7 days. See effort table above. Net new RPC surface is one verb; net new node state is one per-shard FSM map; net new validator gate is one historical-replay function; net new threat surface is the operator-override break-glass which carries its own audit constraints.
+
+**Closes:** R4 v1.1 follow-on (auto-detect was R4's deferred half); S-036 fully for the `MERGE_EVENT` issuance path (deterministic-replay validation closes the original "informational `evidence_window_start`" gap). Removes the operator-as-trigger trust singleton from the under-quorum-merge mechanism. Composes with the existing K-committee co-sign requirement: the FSM proposes, the committee ratifies, no single party originates.
 
 ---
 
@@ -1108,7 +1264,12 @@ Phase D is the natural "what's after v2 + Theme 9" effort. NH-track items run in
 
 - **v2.13 fair ordering** — see "v2.13 fair ordering scope" below for the explicit deferral rationale.
 - **v2.21+ DApp ecosystem items** — community/ecosystem track, not core protocol.
-- **Cross-deployment Beaconless beyond Determ-to-Determ** — Phase D is intra-deployment beaconless. Inter-deployment (multi-Determ federation) is a v3-class concern building on Phase D's light-client mesh infrastructure.
+- **v3 protocol features: none planned.** After Phase D ships, the *protocol* scope is bounded — no new wire format, no new tx types, no new consensus mechanism.
+- **v3 ecosystem deliverables (deferred to ecosystem timing):**
+  - **Cross-deployment Federation DApp** — documented as a canonical pattern in `V2-DAPP-DESIGN.md` §14. Delivers shared identity, federated DSSO, cross-deployment audit aggregation, federation governance via the existing v2.18 / v2.19 / v2.23 / v2.25 substrate. Not on the Determ team roadmap; built by operator consortiums when a specific commercial partnership creates the need (regulated-vertical multi-jurisdiction deployments, CBDC federations, industry consortium payment rails). Estimated effort per federation: ~1.5-2 months operator-side. Multiple federation DApps can coexist with different governance / audit / identity-linking policies — the protocol doesn't pick winners.
+- **v4+ candidates (out of scope; would be considered only if real deployment pressure surfaces):**
+  - **Hierarchical sharding (sharding-of-sharding)** — Phase D Beaconless v2 raises the horizontal-scale ceiling to ~200-500 shards via lazy validation, exceeding every documented commercial use case. If internet-scale public deployment ever pushes past that ceiling, hierarchical sharding becomes a v4 candidate driven by real scale data. Not on the roadmap; would not be promoted speculatively.
+  - **Validator portability across deployments** — would require protocol-level cross-deployment slashing economics, which break per-deployment mutual-distrust isolation. No commercial use case demands it. Would be a v4+ open question if specific deployment partnerships ever request it.
 
 ### v2.13 fair ordering — scope clarification
 
