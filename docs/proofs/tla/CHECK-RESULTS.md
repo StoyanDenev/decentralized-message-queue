@@ -26,6 +26,9 @@ java -jar tla2tools.jar -config Sharding.cfg Sharding.tla
 
 # FB3 — Receipt dedup
 java -jar tla2tools.jar -config Receipts.cfg Receipts.tla
+
+# FB5 — Account-state apply layer
+java -jar tla2tools.jar -config AccountState.cfg AccountState.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -39,6 +42,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | Consensus.tla (K=3, F=1) | ~10⁴–10⁵ | < 30s |
 | Sharding.tla (2 shards, 2 accts) | ~10³ | < 10s |
 | Receipts.tla (3 IDs, 6 blocks) | ~10² | < 1s |
+| AccountState.tla (3 domains, B=4, N=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -77,6 +81,23 @@ The adversary action `ReplayReceipt` re-injects an already-emitted receipt into 
 
 This is the smallest, fastest model — a regression-quality check on the dedup state machine specifically.
 
+### AccountState.tla → apply-layer (AccountState struct invariants)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `accounts` (balance, nonce) and `stakes` (locked, unlock_height) maps |
+| `Inv_NoNegativeBalance` | per-domain balance ≥ 0 (Nat-typed; documents the constraint) |
+| `Inv_NoNegativeStake` | per-domain stake.locked ≥ 0 |
+| `Inv_NonceBounded` | per-domain nonce within `MaxNonce` bound |
+| `Inv_NonceMonotonic` | action-level: no nonce ever decreases across a `[Next]_vars` step |
+| `Inv_SupplyConservation` | `sum(balances) + sum(stakes.locked) + slashed = INITIAL_TOTAL` — every Transfer / Stake / UnstakeStart / UnstakeComplete is an internal redistribution; only Slash decreases the live total (and the destruction is captured in `slashed`) |
+| `Inv_BalanceStakeIndependence` | action-level: Transfer never modifies stakes, Slash never modifies balances; only Stake and UnstakeComplete move value between the two maps |
+| `Inv_SlashedMonotonic` | `slashed` is monotone non-decreasing across any step |
+
+**Spec status:** written; TLC verification pending (consistent with the other three specs above — no TLC in the build container yet). The configuration in `AccountState.cfg` (3 domains, MaxBalance=4, MaxNonce=3, MaxHeight=4) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `accounts` (Domains → [balance, nonce]), `stakes` (Domains → [locked, unlock_height]), `height` (Nat), `slashed` (Nat). Actions modeled: `Transfer`, `Stake`, `UnstakeStart`, `UnstakeComplete`, `Slash`, `Tick`. The `ed_pub` field of the real `AccountState` struct is omitted intentionally — it is fixed at register time and is not invariant-relevant for any of these properties.
+
+Companion prose proof: `docs/proofs/AccountStateInvariants.md` (separately written — that document may not exist in this worktree at the time this spec was committed; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -93,6 +114,12 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `Sharding.pending_inbound` | `node::Node::pending_inbound_receipts_` |
 | `Sharding.applied` | `chain::Chain::applied_inbound_receipts_` |
 | `Receipts.applied` | same as above; isolated for focused check |
+| `AccountState.accounts` | `src/chain/chain.cpp::accounts_` (map<string, AccountState> keyed by domain) |
+| `AccountState.stakes` | `src/chain/chain.cpp::stakes_` (map<string, StakeState> with locked + unlock_height) |
+| `AccountState.height` | `src/chain/chain.cpp::current_height_` (advanced once per applied block) |
+| `AccountState.slashed` | `src/chain/chain.cpp` slash apply path (FA6 equivocation slashing) |
+| `AccountState.Transfer` | `src/chain/chain.cpp::apply_transactions` TRANSFER branch (balance debit/credit + nonce increment) |
+| `AccountState.Stake` / `UnstakeStart` / `UnstakeComplete` | STAKE / UNSTAKE branches in `apply_transactions` and the `unlock_height` cascade in `Chain::on_block_applied` |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -137,7 +164,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts; do
+    for cfg in Consensus Sharding Receipts AccountState; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
