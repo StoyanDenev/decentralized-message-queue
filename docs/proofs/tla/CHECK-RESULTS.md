@@ -1,4 +1,4 @@
-# FB8 — TLA+ model-check transcripts (template)
+# FB9 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -38,6 +38,9 @@ java -jar tla2tools.jar -config Nonce.cfg Nonce.tla
 
 # FB8 — Stake lifecycle (STAKE / DEREGISTER / UNSTAKE)
 java -jar tla2tools.jar -config StakeLifecycle.cfg StakeLifecycle.tla
+
+# FB9 — DApp registry lifecycle (DAPP_REGISTER create / update / deactivate)
+java -jar tla2tools.jar -config DAppRegistry.cfg DAppRegistry.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -55,6 +58,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | Snapshot.tla (3 domains, H=4, B=5) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 | Nonce.tla (3 domains, N=4, A=2, B=5) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | StakeLifecycle.tla (3 domains, H=6, B=5, D=3) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
+| DAppRegistry.tla (3 domains, 2 topics, H=6, G=3, P=100) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -166,6 +170,24 @@ Companion prose proof: `docs/proofs/NonceMonotonicity.md` (separately tracked; t
 
 Companion prose proof: `docs/proofs/StakeLifecycle.md` (separately tracked; the prose track is being assembled in parallel).
 
+### DAppRegistry.tla → v2.18 DAPP_REGISTER state machine (create / update / deactivate)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `dapp_registry` (Domains → DAppEntry record with owner, registered_at, inactive_from, prefix, topics), `registered_domains` (SUBSET Domains), `first_registered` (SUBSET registered_domains — provenance), `nef_pool` (0..InitialNefPool), `height` (0..MaxHeight) |
+| `Inv_RegisterIdempotent` | T-D2 idempotency: every domain in `first_registered` is also in `registered_domains` AND has `registered_at <= height` — the canonical first-registration provenance is preserved, and re-Register attempts are blocked structurally by the `d \notin registered_domains` guard |
+| `Inv_NefPoolNonNegative` | `nef_pool >= 0` at every reachable state — the floor-half drain (`nef_pool \div 2`) is closed on Nat; once the pool reaches zero, the terminal `0 \div 2 = 0` keeps it there |
+| `Inv_OwnerImmutable` | action-level: for any domain registered both pre- and post-step, `dapp_registry'[d].owner = dapp_registry[d].owner` — the headline "owner field is permanent" claim; Update only refreshes (prefix, topics), Deactivate only changes inactive_from, Reject* are stutters |
+| `Inv_RegisteredAtImmutable` | action-level: for any domain registered both pre- and post-step, `dapp_registry'[d].registered_at = dapp_registry[d].registered_at` — the structural defense against "DApp backdating attacks"; matches the explicit `e.registered_at = existing->second.registered_at;` line at `src/chain/chain.cpp:1109` |
+| `Inv_DeactivationForward` | action-level: once `dapp_registry[d].inactive_from` has been set away from Sentinel by Deactivate, it never changes again — the "no re-arming" property that makes Deactivate one-shot per domain (guarded by `dapp_registry[d].inactive_from = Sentinel` in the Deactivate action) |
+| `Inv_NefDrainsOnlyOnce` | action-level: across every `[Next]_vars` step, the NEF pool drains by floor-half iff `first_registered'` gains exactly one domain (i.e., a first-time Register fired) — captures the "re-REGISTER (key rotation): pool UNCHANGED" defense against the registration-churn drain attack documented in `tools/test_nef_pool_drain.sh` |
+| `Prop_EventualDeactivation` (temporal) | under fairness on `AdvanceHeight` + `Deactivate(d, owner)`, an active DApp's owner can eventually deactivate it (inactive_from /= Sentinel) OR the model bound was reached (height >= MaxHeight) — the existence-of-a-step claim, not the unconditional eventually claim, because Deactivate is opt-in |
+| `Prop_PostDeactivationInactive` (temporal) | under fairness on `AdvanceHeight`, a deactivated DApp's `DappActive(d)` eventually flips from TRUE to FALSE — height advances past the inactive_from horizon set by Deactivate; the grace-period delay is exercised at every choice of Deactivate height |
+
+**Spec status:** written; TLC verification pending (consistent with the other seven specs above). The configuration in `DAppRegistry.cfg` (3 domains, 2 topics, MaxHeight=6, DappGrace=3, Sentinel=1000, InitialNefPool=100) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `dapp_registry` (Domains → DAppEntry — total function with the registered_domains set acting as the partiality predicate, matching the C++ `std::map<string, DAppEntry>` pattern where `map.find(d) == map.end()` is the "not registered" signal), `registered_domains` (SUBSET Domains — authoritative membership), `first_registered` (SUBSET registered_domains — provenance set used by Inv_NefDrainsOnlyOnce), `nef_pool` (Nat, drains by floor-half on first-time Register), `height` (Nat). Actions modeled: `Register` (first-time apply — drains NEF, adds to first_registered), `Update` (mutable-field refresh — preserves owner + registered_at, NO NEF drain), `RejectUpdateByNonOwner` (adversarial action — silent no-op witnessing Inv_OwnerImmutable), `Deactivate` (owner-initiated wind-down — sets inactive_from = height + DappGrace), `RejectDeactivateByNonOwner` (adversarial action — silent no-op), `AdvanceHeight` (temporal driver). DappGrace=3 + MaxHeight=6 means the Deactivate-at-h=0..3 branch reaches the post-deactivation-inactive window within MaxHeight; the Deactivate-at-h>=4 branch exercises the "inactive_from > MaxHeight" escape in `Prop_PostDeactivationInactive`. InitialNefPool=100 lets the floor-half drain fire 7 times before reaching zero (100→50→25→12→6→3→1→0), witnessing the terminal `0 \div 2 = 0` case.
+
+Companion prose proof: `docs/proofs/DAppRegistryLifecycle.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -208,6 +230,17 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `StakeLifecycle.Unstake` | `src/chain/chain.cpp::apply_transactions` UNSTAKE success branch at lines 889–893 (`sit->second.locked -= amount; sender.balance += amount;`) |
 | `StakeLifecycle.UnstakeFailEarly` | the fee-refund pre-unlock branch at `src/chain/chain.cpp:881-888` (`height < sit->second.unlock_height` → refund fee, do not move value) |
 | `StakeLifecycle.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (one tick per applied block) |
+| `DAppRegistry.dapp_registry` | `src/chain/chain.cpp::dapp_registry_` (map<string, DAppEntry> keyed by domain — the v2.18 substrate) |
+| `DAppRegistry.registered_domains` | implicit: `dapp_registry_.find(d) != dapp_registry_.end()` — the C++ map's membership predicate; the TLA model lifts this into an explicit set to make set-membership reasoning cleaner |
+| `DAppRegistry.first_registered` | implicit: the chain has no explicit "first-registered" set, but the same predicate is witnessed at apply time via the `existing == dapp_registry_.end()` check at `src/chain/chain.cpp:1107-1112` (the branch that sets `registered_at = height`). The TLA model lifts this into an explicit provenance set so that Inv_NefDrainsOnlyOnce can be expressed as an action-level invariant |
+| `DAppRegistry.nef_pool` | `accounts_[ZEROTH_ADDRESS].balance` — the ZEROTH pool balance documented in `tools/test_nef_pool_drain.sh`; the TLA model abstracts the validator-REGISTER drain semantics into the DAppRegistry first-time-Register branch (the apply-path lifecycle is identical: half-drain on first-time registration, untouched on re-registration) |
+| `DAppRegistry.height` | `src/chain/chain.cpp::current_height_` (advanced once per applied block) |
+| `DAppRegistry.Register` (first-time branch) | `src/chain/chain.cpp::apply_transactions` DAPP_REGISTER op=0 branch at lines 1064-1116, specifically the `existing == dapp_registry_.end()` branch at line 1110-1112 (sets `e.registered_at = height` and `e.active_from = height; e.inactive_from = UINT64_MAX;`) |
+| `DAppRegistry.Update` | same DAPP_REGISTER op=0 branch, the `existing != dapp_registry_.end()` branch at lines 1107-1109 (preserves `e.registered_at = existing->second.registered_at;`) |
+| `DAppRegistry.RejectUpdateByNonOwner` / `RejectDeactivateByNonOwner` | validator-layer ed_pub authentication rejects the tx before apply; if the tx slips through validation, the apply layer's `tx.from` ownership check (implicit in the dispatch — the C++ key into `dapp_registry_` is `tx.from`, so a non-owner cannot mutate another's entry) silently no-ops with fee + nonce advance |
+| `DAppRegistry.Deactivate` | DAPP_REGISTER op=1 branch at `src/chain/chain.cpp:1055-1062` (sets `dapp_registry_[tx.from].inactive_from = height + DAPP_GRACE_BLOCKS`) |
+| `DAppRegistry.DappActive` | apply-side DAPP_CALL gate at `src/chain/chain.cpp:1142` (`if (dapp.inactive_from <= height) ... skip credit`) — the TLA helper lifts this into a state predicate |
+| `DAppRegistry.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs) |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -252,7 +285,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -263,7 +296,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The seven TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, and stake-lifecycle properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The eight TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, and DApp-registry-lifecycle properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
