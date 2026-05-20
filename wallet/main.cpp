@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <map>
 #include <set>
 #include <cstring>
 #include <cstdlib>
@@ -2366,6 +2367,463 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
     return 0;
 }
 
+// ── keyfile-recover — high-level T-of-N backup recovery CLI ────────────────
+//
+// `keyfile-recover` is the operator inverse of `backup-create`. It composes
+// `envelope::decrypt` + `shamir::combine` into a single call: given the
+// canonical pair of backup artifacts (shares + envelopes file produced
+// by `backup-create`) and a JSON file listing a T-of-N subset of
+// keyholder passphrases, recover the original secret and print it as hex.
+//
+// Inputs:
+//   --backup-shares    <file>: shares file emitted by backup-create's
+//                              --shares-out (shape: {"shares":[{"x":int,
+//                              "y_hex":"..."}, ...]}). Read for cross-
+//                              verification — we confirm each decrypted
+//                              y-bytes matches the shares-file entry.
+//   --backup-envelopes <file>: envelopes file emitted by backup-create's
+//                              --envelopes-out (shape: {"envelopes":
+//                              [{"share_index":int,"envelope_blob":"..."},
+//                              ...]}).
+//   --keyholders       <file>: SAME shape as backup-create's --keyholders
+//                              input but with ONLY a T-of-N subset of
+//                              passphrases supplied:
+//                              {"keyholders":[{"share_index":int,
+//                              "passphrase":"..."}, ...]}
+//   [--out  <file>]          : if supplied, write {"secret_hex":"..."} JSON
+//                              to <file> instead of emitting the hex to
+//                              stdout
+//   [--force]                : permit overwriting an existing --out file
+//   [--json]                 : print the JSON {"secret_hex":"..."} doc to
+//                              stdout (ignored if --out is supplied; --out
+//                              always writes JSON)
+//
+// Process:
+//   1. Parse the three input files.
+//   2. For each keyholder entry: look up the corresponding envelope by
+//      share_index, deserialize the envelope blob, decrypt with the
+//      keyholder's passphrase (NO AAD — backup-create produces AAD-free
+//      envelopes; the recovery composition mirrors that).
+//   3. Cross-verify the recovered y-bytes against the shares-file
+//      entry for the same share_index (defense-in-depth — catches a
+//      shares/envelopes file mismatch before Shamir reconstruction
+//      silently emits a garbage secret).
+//   4. Feed the T recovered shamir::Share values into shamir::combine.
+//   5. Output the recovered secret as hex (or JSON with --out / --json).
+//
+// Composition design:
+//   This CLI is intentionally THIN — it composes existing primitives
+//   (envelope::decrypt, shamir::combine) and existing file-shape
+//   conventions (matched against backup-create + shamir-combine). No
+//   crypto logic is duplicated; if envelope::decrypt or shamir::combine
+//   change, this CLI follows transparently.
+//
+// Failure modes (all exit 2 with a diagnostic):
+//   * Wrong passphrase: envelope::decrypt returns nullopt for an AEAD
+//     tag mismatch. Same exit code as `keyfile-decrypt` for consistency.
+//   * Insufficient shares (< T): shamir::combine returns nullopt or the
+//     reconstruction yields a different secret. We can't tell T from the
+//     inputs (the shares file doesn't carry threshold; the operator must
+//     supply >= T keyholders), so we treat "shamir::combine returned
+//     nullopt" as "insufficient or inconsistent shares". A reconstruction
+//     run with fewer than T shares may also return a syntactically-valid
+//     but wrong secret (Shamir's information-theoretic security property)
+//     — the shares-file cross-verification in step 3 catches that case.
+//   * Malformed inputs (missing files, bad JSON, share_index gap):
+//     exit 2 with a specific diagnostic.
+//
+// Structural errors (missing required flags, can't open files for read,
+// --out exists without --force) exit 1 — same convention as the other
+// wallet CLIs.
+int cmd_keyfile_recover(int argc, char** argv) {
+    std::string shares_path, envelopes_path, keyholders_path, out_path;
+    int threshold = -1;             // -1 sentinel = not supplied
+    bool force = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--backup-shares"    && i + 1 < argc) shares_path     = argv[++i];
+        else if (a == "--backup-envelopes" && i + 1 < argc) envelopes_path  = argv[++i];
+        else if (a == "--keyholders"       && i + 1 < argc) keyholders_path = argv[++i];
+        else if (a == "--out"              && i + 1 < argc) out_path        = argv[++i];
+        else if (a == "--threshold"        && i + 1 < argc) {
+            try { threshold = std::stoi(argv[++i]); }
+            catch (std::exception&) {
+                std::cerr << "keyfile-recover: --threshold must be an integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--force")                            force           = true;
+        else if (a == "--json")                             json_out        = true;
+        else {
+            std::cerr << "keyfile-recover: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet keyfile-recover "
+                         "--backup-shares <file> --backup-envelopes <file> "
+                         "--keyholders <file> [--threshold T] "
+                         "[--out <file>] [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (shares_path.empty() || envelopes_path.empty()
+        || keyholders_path.empty()) {
+        std::cerr << "Usage: determ-wallet keyfile-recover "
+                     "--backup-shares <file> --backup-envelopes <file> "
+                     "--keyholders <file> [--threshold T] "
+                     "[--out <file>] [--force] [--json]\n"
+                     "\n"
+                     "  High-level T-of-N recovery: composes envelope::decrypt\n"
+                     "  + shamir::combine. Reads the (shares, envelopes) pair\n"
+                     "  produced by `backup-create` and a T-of-N subset of\n"
+                     "  keyholder passphrases; reconstructs the original secret.\n"
+                     "\n"
+                     "  Keyholders file shape (SAME as backup-create input but\n"
+                     "  with only T of N entries supplied):\n"
+                     "    {\"keyholders\": [{\"share_index\": int, "
+                     "\"passphrase\": \"...\"}, ...]}\n"
+                     "\n"
+                     "  --threshold T (optional): explicitly check that the\n"
+                     "    keyholders subset has at least T entries before the\n"
+                     "    decrypt loop. The shares file does NOT carry T, so\n"
+                     "    without --threshold the CLI cannot detect an under-\n"
+                     "    threshold subset (Shamir's information-theoretic\n"
+                     "    security property means combining < T shares yields\n"
+                     "    a syntactically-valid but wrong secret, with no\n"
+                     "    failure signal at the shamir layer).\n";
+        return 1;
+    }
+    if (threshold == 0) {
+        std::cerr << "keyfile-recover: --threshold must be >= 1 (got 0)\n";
+        return 1;
+    }
+    if (threshold > 255) {
+        std::cerr << "keyfile-recover: --threshold must be <= 255 (got "
+                  << threshold << ")\n";
+        return 1;
+    }
+
+    // ── Load + parse shares file ────────────────────────────────────────
+    std::ifstream sf(shares_path);
+    if (!sf) {
+        std::cerr << "keyfile-recover: cannot open --backup-shares file: "
+                  << shares_path << "\n";
+        return 1;
+    }
+    std::string shares_blob((std::istreambuf_iterator<char>(sf)),
+                              std::istreambuf_iterator<char>());
+    nlohmann::json sj;
+    try { sj = nlohmann::json::parse(shares_blob); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-recover: shares JSON parse failed: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (!sj.is_object() || !sj.contains("shares") || !sj["shares"].is_array()) {
+        std::cerr << "keyfile-recover: shares file must be an object with "
+                     "'shares' array\n";
+        return 2;
+    }
+    const auto& shares_arr = sj["shares"];
+    if (shares_arr.empty()) {
+        std::cerr << "keyfile-recover: 'shares' array is empty\n";
+        return 2;
+    }
+    // Build x → y_hex map for the cross-verification check in step 3.
+    std::map<int, std::string> shares_y_by_x;
+    for (size_t i = 0; i < shares_arr.size(); ++i) {
+        const auto& el = shares_arr[i];
+        if (!el.is_object()
+            || !el.contains("x")     || !el["x"].is_number_integer()
+            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
+            std::cerr << "keyfile-recover: shares entry #" << i
+                      << " must have integer 'x' and string 'y_hex'\n";
+            return 2;
+        }
+        int x = el["x"].get<int>();
+        if (x < 1 || x > 255) {
+            std::cerr << "keyfile-recover: shares entry #" << i
+                      << ": x = " << x << " out of range [1, 255]\n";
+            return 2;
+        }
+        if (shares_y_by_x.count(x)) {
+            std::cerr << "keyfile-recover: duplicate x = " << x
+                      << " in shares file\n";
+            return 2;
+        }
+        shares_y_by_x[x] = el["y_hex"].get<std::string>();
+    }
+
+    // ── Load + parse envelopes file ─────────────────────────────────────
+    std::ifstream ef(envelopes_path);
+    if (!ef) {
+        std::cerr << "keyfile-recover: cannot open --backup-envelopes file: "
+                  << envelopes_path << "\n";
+        return 1;
+    }
+    std::string env_blob((std::istreambuf_iterator<char>(ef)),
+                           std::istreambuf_iterator<char>());
+    nlohmann::json ej;
+    try { ej = nlohmann::json::parse(env_blob); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-recover: envelopes JSON parse failed: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (!ej.is_object() || !ej.contains("envelopes") || !ej["envelopes"].is_array()) {
+        std::cerr << "keyfile-recover: envelopes file must be an object with "
+                     "'envelopes' array\n";
+        return 2;
+    }
+    const auto& env_arr = ej["envelopes"];
+    if (env_arr.empty()) {
+        std::cerr << "keyfile-recover: 'envelopes' array is empty\n";
+        return 2;
+    }
+    // Build share_index → envelope_blob map.
+    std::map<int, std::string> env_blob_by_idx;
+    for (size_t i = 0; i < env_arr.size(); ++i) {
+        const auto& el = env_arr[i];
+        if (!el.is_object()
+            || !el.contains("share_index")
+            || !el["share_index"].is_number_integer()
+            || !el.contains("envelope_blob")
+            || !el["envelope_blob"].is_string()) {
+            std::cerr << "keyfile-recover: envelopes entry #" << i
+                      << " must have integer 'share_index' and string "
+                         "'envelope_blob'\n";
+            return 2;
+        }
+        int idx = el["share_index"].get<int>();
+        if (idx < 1 || idx > 255) {
+            std::cerr << "keyfile-recover: envelopes entry #" << i
+                      << ": share_index = " << idx
+                      << " out of range [1, 255]\n";
+            return 2;
+        }
+        if (env_blob_by_idx.count(idx)) {
+            std::cerr << "keyfile-recover: duplicate share_index = " << idx
+                      << " in envelopes file\n";
+            return 2;
+        }
+        env_blob_by_idx[idx] = el["envelope_blob"].get<std::string>();
+    }
+
+    // ── Load + parse keyholders file (T-of-N subset) ────────────────────
+    std::ifstream kf(keyholders_path);
+    if (!kf) {
+        std::cerr << "keyfile-recover: cannot open --keyholders file: "
+                  << keyholders_path << "\n";
+        return 1;
+    }
+    std::string kh_blob((std::istreambuf_iterator<char>(kf)),
+                          std::istreambuf_iterator<char>());
+    nlohmann::json kj;
+    try { kj = nlohmann::json::parse(kh_blob); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-recover: keyholders JSON parse failed: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (!kj.is_object() || !kj.contains("keyholders") || !kj["keyholders"].is_array()) {
+        std::cerr << "keyfile-recover: keyholders file must be an object with "
+                     "'keyholders' array\n";
+        return 2;
+    }
+    const auto& kh_arr = kj["keyholders"];
+    if (kh_arr.empty()) {
+        std::cerr << "keyfile-recover: 'keyholders' array is empty (need at "
+                     "least 1 entry to attempt recovery)\n";
+        return 2;
+    }
+
+    // Parse each keyholder entry. Tracks share_index → passphrase mapping
+    // for the decrypt loop, and validates each share_index actually exists
+    // in BOTH the shares and envelopes files before any crypto work.
+    std::vector<std::pair<int, std::string>> kh_entries;
+    std::set<int> seen_kh_idx;
+    for (size_t i = 0; i < kh_arr.size(); ++i) {
+        const auto& el = kh_arr[i];
+        if (!el.is_object()
+            || !el.contains("share_index")
+            || !el["share_index"].is_number_integer()
+            || !el.contains("passphrase")
+            || !el["passphrase"].is_string()) {
+            std::cerr << "keyfile-recover: keyholders entry #" << i
+                      << " must have integer 'share_index' and string "
+                         "'passphrase'\n";
+            return 2;
+        }
+        int idx = el["share_index"].get<int>();
+        std::string pw = el["passphrase"].get<std::string>();
+        if (pw.empty()) {
+            std::cerr << "keyfile-recover: keyholders entry share_index="
+                      << idx << ": passphrase is empty\n";
+            return 2;
+        }
+        if (!seen_kh_idx.insert(idx).second) {
+            std::cerr << "keyfile-recover: duplicate share_index = " << idx
+                      << " in keyholders file\n";
+            return 2;
+        }
+        if (!env_blob_by_idx.count(idx)) {
+            std::cerr << "keyfile-recover: keyholders share_index=" << idx
+                      << " has no matching envelope in --backup-envelopes\n";
+            return 2;
+        }
+        if (!shares_y_by_x.count(idx)) {
+            std::cerr << "keyfile-recover: keyholders share_index=" << idx
+                      << " has no matching share in --backup-shares\n";
+            return 2;
+        }
+        kh_entries.emplace_back(idx, std::move(pw));
+    }
+
+    // ── Threshold check (if --threshold supplied) ────────────────────────
+    // Without --threshold the shares file carries no T, so Shamir's
+    // information-theoretic security property means combining < T shares
+    // yields a syntactically-valid but wrong secret. When the operator
+    // supplies T explicitly we can detect insufficient-share subsets
+    // BEFORE any crypto work — fail fast and clear rather than emit
+    // garbage. Same exit-2 convention as "wrong passphrase" / other
+    // recovery failures.
+    if (threshold > 0
+        && static_cast<int>(kh_entries.size()) < threshold) {
+        std::cerr << "keyfile-recover: insufficient shares for threshold "
+                     "reconstruction: " << kh_entries.size()
+                  << " keyholders supplied, --threshold = " << threshold
+                  << "\n";
+        return 2;
+    }
+
+    // ── --out preconditions (if supplied) ────────────────────────────────
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "keyfile-recover: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "keyfile-recover: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Decrypt each envelope; collect shamir::Share entries ─────────────
+    std::vector<shamir::Share> recovered_shares;
+    recovered_shares.reserve(kh_entries.size());
+    for (const auto& [idx, pw] : kh_entries) {
+        const std::string& blob = env_blob_by_idx[idx];
+        auto env_opt = envelope::deserialize(blob);
+        if (!env_opt) {
+            std::cerr << "keyfile-recover: envelope share_index=" << idx
+                      << ": envelope_blob deserialize failed "
+                         "(malformed envelope in --backup-envelopes)\n";
+            return 2;
+        }
+        // backup-create produces AAD-free envelopes — same here (empty aad).
+        auto pt_opt = envelope::decrypt(*env_opt, pw, {});
+        if (!pt_opt) {
+            std::cerr << "keyfile-recover: envelope share_index=" << idx
+                      << ": decrypt failed (wrong passphrase or corrupted "
+                         "envelope)\n";
+            return 2;
+        }
+        const auto& y_bytes = *pt_opt;
+        if (y_bytes.empty()) {
+            std::cerr << "keyfile-recover: envelope share_index=" << idx
+                      << ": decrypted plaintext is empty\n";
+            return 2;
+        }
+        // Cross-verify decrypted y against the shares-file y_hex. Catches
+        // a shares/envelopes file mismatch before Shamir reconstruction
+        // silently emits a garbage secret.
+        std::string y_hex_decrypted = to_hex(y_bytes);
+        const std::string& y_hex_expected = shares_y_by_x[idx];
+        if (y_hex_decrypted != y_hex_expected) {
+            std::cerr << "keyfile-recover: envelope share_index=" << idx
+                      << ": decrypted y-bytes do NOT match the y_hex in "
+                         "--backup-shares (envelope/shares file mismatch — "
+                         "the two files were likely produced by different "
+                         "backup-create runs)\n";
+            return 2;
+        }
+        shamir::Share s;
+        if (idx < 1 || idx > 255) {
+            std::cerr << "keyfile-recover: internal: share_index=" << idx
+                      << " out of byte range\n";
+            return 2;
+        }
+        s.x = static_cast<uint8_t>(idx);
+        s.y = y_bytes;
+        recovered_shares.push_back(std::move(s));
+    }
+
+    if (recovered_shares.empty()) {
+        std::cerr << "keyfile-recover: no shares recovered (internal — "
+                     "keyholders array was already validated as non-empty)\n";
+        return 2;
+    }
+
+    // ── Shamir reconstruction ───────────────────────────────────────────
+    auto secret_opt = shamir::combine(recovered_shares);
+    if (!secret_opt) {
+        std::cerr << "keyfile-recover: shamir::combine returned nullopt "
+                     "(insufficient shares for threshold reconstruction, or "
+                     "shares were structurally inconsistent at the shamir "
+                     "layer)\n";
+        return 2;
+    }
+    std::string secret_hex = to_hex(*secret_opt);
+
+    // ── Emit result ─────────────────────────────────────────────────────
+    if (!out_path.empty()) {
+        nlohmann::json doc;
+        doc["secret_hex"] = secret_hex;
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "keyfile-recover: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << doc.dump() << "\n";
+        if (!of) {
+            std::cerr << "keyfile-recover: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of.close();
+        // 0600 permissions tightening — best-effort on Windows.
+        {
+            std::error_code perm_ec;
+            std::filesystem::permissions(
+                out_path,
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                std::filesystem::perm_options::replace,
+                perm_ec);
+            (void)perm_ec;
+        }
+        if (json_out) {
+            // --json + --out: also echo the JSON doc to stdout so the
+            // operator's pipe-driven workflow sees the result.
+            std::cout << doc.dump() << "\n";
+        } else {
+            std::cout << "recovered secret written to " << out_path
+                      << " (" << recovered_shares.size()
+                      << " shares combined)\n";
+        }
+    } else if (json_out) {
+        nlohmann::json doc;
+        doc["secret_hex"] = secret_hex;
+        std::cout << doc.dump() << "\n";
+    } else {
+        std::cout << secret_hex << "\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -2984,6 +3442,27 @@ void print_usage() {
         "                                             for-byte. Wrong passphrase or tampered\n"
         "                                             envelope exits 2 (indistinguishable on\n"
         "                                             stderr); malformed --in exits 1.\n"
+        "  keyfile-recover --backup-shares <file>     High-level T-of-N recovery CLI: composes\n"
+        "                  --backup-envelopes <file>  envelope::decrypt + shamir::combine into a\n"
+        "                  --keyholders <file>        single call. Reads the (shares, envelopes)\n"
+        "                  [--threshold T]            pair produced by backup-create and a T-of-N\n"
+        "                  [--out <file>] [--force]   subset of keyholder passphrases; recovers\n"
+        "                  [--json]                   the original secret. Keyholders file shape\n"
+        "                                             is SAME as backup-create input but with\n"
+        "                                             only T of N entries supplied:\n"
+        "                                             {\"keyholders\": [{\"share_index\": int,\n"
+        "                                             \"passphrase\": \"...\"}, ...]}. --threshold\n"
+        "                                             is optional; when supplied, enforces that\n"
+        "                                             the keyholders subset has at least T entries\n"
+        "                                             (Shamir's info-theoretic security means an\n"
+        "                                             under-threshold subset would otherwise emit\n"
+        "                                             a syntactically-valid but wrong secret). By\n"
+        "                                             default prints the recovered secret hex to\n"
+        "                                             stdout; --out writes {\"secret_hex\": \"...\"}\n"
+        "                                             JSON; --json emits the same JSON to stdout.\n"
+        "                                             All failure modes (wrong passphrase,\n"
+        "                                             insufficient shares, share/envelope mismatch,\n"
+        "                                             malformed files) exit 2 with a diagnostic.\n"
         "  message-sign --priv <hex> --message <string|file:path>\n"
         "               --domain-tag <tag> [--json]\n"
         "                                             Sign a message with an Ed25519 priv key.\n"
@@ -3032,6 +3511,7 @@ int main(int argc, char** argv) {
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
     if (cmd == "keyfile-decrypt") return cmd_keyfile_decrypt(argc - 2, argv + 2);
+    if (cmd == "keyfile-recover") return cmd_keyfile_recover(argc - 2, argv + 2);
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
