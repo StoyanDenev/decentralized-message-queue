@@ -40,6 +40,7 @@
 #include <set>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #ifdef _WIN32
 #  include <windows.h>
 #else
@@ -1485,6 +1486,292 @@ int cmd_account_import(int argc, char** argv) {
     // produces exactly one account).
     std::cout << "address:     " << address     << "\n";
     std::cout << "privkey_hex: " << privkey_hex << "\n";
+    return 0;
+}
+
+// ── account-export — re-emit a wallet account file in various formats ──────
+//
+// Inverse of `account-create-batch` / `account-import` / `account-recover`:
+// reads an existing single-account JSON file (the canonical wallet shape
+//   { "address": "0x...", "privkey_hex": "..." })
+// and re-emits it in one of three external formats. Useful when an operator
+// needs to feed the secret material into a downstream tool with a different
+// expected shape (e.g., piping into `backup-create --secret`, or printing the
+// raw hex to a shell variable, or copy-pasting the full JSON into a hex
+// inspector).
+//
+// CLI:
+//   --in <file>: required. The single-account JSON file. Must contain at
+//                least `address` (string, "0x" + 64 lowercase hex) and
+//                `privkey_hex` (64-char lowercase hex). Extra fields are
+//                tolerated (they are ignored on `raw-hex` output, preserved
+//                on `json` passthrough, and dropped on `backup-bundle`).
+//   --format <name>: optional, default `raw-hex`. One of:
+//                * raw-hex       — print the 64-char privkey hex on stdout,
+//                                  followed by a single newline. Useful for
+//                                  shell substitution: `KEY=$(determ-wallet
+//                                  account-export --in acc.json)`.
+//                * json          — print the input account JSON verbatim
+//                                  (re-serialized with consistent shape).
+//                                  Useful for inspection / re-parsing in a
+//                                  different toolchain.
+//                * backup-bundle — print a JSON envelope of the shape
+//                                  { "seed_hex":      "<64 hex>",
+//                                    "pubkey_hex":    "<64 hex>",
+//                                    "anon_address":  "0x...",
+//                                    "derived_at_utc":"YYYY-MM-DDTHH:MM:SSZ" }
+//                                  ready to feed into `backup-create --secret
+//                                  <seed_hex>` (the seed_hex field is the
+//                                  required parameter for that CLI). The
+//                                  envelope is plaintext — actual AEAD
+//                                  wrapping requires a passphrase and lives
+//                                  in backup-create.
+//   --out <file>: optional. If set, writes the chosen format to file with
+//                 0600 permissions (best-effort on Windows; NTFS ACL).
+//                 Refuses overwrite without --force. Parent dir must exist.
+//   --force:      required to overwrite an existing --out.
+//   --json:       when set together with --format raw-hex, additionally
+//                 wraps the hex in a {"privkey_hex": "..."} JSON object
+//                 for parsing convenience. Ignored if --format is json or
+//                 backup-bundle (those formats are already JSON). Ignored
+//                 if --out is set without --format raw-hex.
+//
+// Output emission (stdout vs --out, mirrors account-create-batch / -import):
+//   default (no --out)  — emits format to stdout
+//   --out <file>        — writes format to file (0600); stdout shows a
+//                         one-line confirmation "exported <format>: <path>"
+//   The privkey_hex (or the bundle containing it) lives in the file rather
+//   than the terminal when --out is used, matching the wallet's existing
+//   "secret material to file by default, terminal only when explicit"
+//   convention.
+//
+// Exit codes:
+//   0 = success
+//   1 = argument / validation / I/O error (missing --in, bad format,
+//       malformed account JSON, missing parent dir, file-exists no --force,
+//       etc.)
+int cmd_account_export(int argc, char** argv) {
+    std::string in_path, format = "raw-hex", out_path;
+    bool force    = false;
+    bool json_out = false;
+    bool format_set_explicitly = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"     && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--format" && i + 1 < argc) {
+            format = argv[++i];
+            format_set_explicitly = true;
+        }
+        else if (a == "--out"    && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--force")                  force    = true;
+        else if (a == "--json")                   json_out = true;
+        else {
+            std::cerr << "account-export: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-export --in <file> "
+                         "[--format raw-hex|json|backup-bundle] "
+                         "[--out <file>] [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "account-export: --in is required (path to a "
+                     "single-account JSON file)\n";
+        std::cerr << "Usage: determ-wallet account-export --in <file> "
+                     "[--format raw-hex|json|backup-bundle] "
+                     "[--out <file>] [--force] [--json]\n";
+        return 1;
+    }
+    // Validate --format up front so we don't read the input file just to
+    // reject a typo'd format. Suppress this check for the silent default
+    // so the diagnostic actually fires when format_set_explicitly is true.
+    if (format != "raw-hex" && format != "json" && format != "backup-bundle") {
+        std::cerr << "account-export: --format must be one of "
+                     "{raw-hex, json, backup-bundle}; got '"
+                  << format << "'\n";
+        (void)format_set_explicitly;
+        return 1;
+    }
+
+    // ── Read + parse the input account file ─────────────────────────────────
+    // File-level failures (missing, unreadable) and structural failures
+    // (bad JSON, missing required keys) both exit 1. We don't split into
+    // 1/2 here because account-export is a passive transform — operators
+    // pointing it at the wrong file get the same "fix your input" feedback
+    // either way.
+    std::ifstream in_f(in_path);
+    if (!in_f) {
+        std::cerr << "account-export: cannot open --in: " << in_path << "\n";
+        return 1;
+    }
+    nlohmann::json acc_doc;
+    try {
+        in_f >> acc_doc;
+    } catch (std::exception& e) {
+        std::cerr << "account-export: --in is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!acc_doc.is_object()) {
+        std::cerr << "account-export: --in must be a JSON object "
+                     "{\"address\":..., \"privkey_hex\":...}; got non-object\n";
+        return 1;
+    }
+    if (!acc_doc.contains("address") || !acc_doc["address"].is_string()) {
+        std::cerr << "account-export: --in missing required string field "
+                     "'address'\n";
+        return 1;
+    }
+    if (!acc_doc.contains("privkey_hex")
+        || !acc_doc["privkey_hex"].is_string()) {
+        std::cerr << "account-export: --in missing required string field "
+                     "'privkey_hex'\n";
+        return 1;
+    }
+    std::string address     = acc_doc["address"].get<std::string>();
+    std::string privkey_hex = acc_doc["privkey_hex"].get<std::string>();
+
+    // ── Validate shape: address is 0x + 64 lowercase hex; privkey is 64 hex ─
+    // We deliberately accept exactly the canonical wallet shape here. If a
+    // future format adds longer or shorter forms, those callers should round-
+    // trip through account-import (which already supports the 128-hex form)
+    // before export.
+    if (address.size() != 66 || address.substr(0, 2) != "0x") {
+        std::cerr << "account-export: 'address' must be \"0x\" + 64 hex "
+                     "chars; got length " << address.size() << "\n";
+        return 1;
+    }
+    try { (void)from_hex(address.substr(2)); }
+    catch (std::exception& e) {
+        std::cerr << "account-export: 'address' hex body is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (privkey_hex.size() != 64) {
+        std::cerr << "account-export: 'privkey_hex' must be 64 hex chars "
+                     "(32-byte seed); got length " << privkey_hex.size()
+                  << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_bytes;
+    try { priv_bytes = from_hex(privkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "account-export: 'privkey_hex' is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (priv_bytes.size() != 32) {
+        std::cerr << "account-export: 'privkey_hex' decoded length must be "
+                     "32; got " << priv_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── --out preconditions ─────────────────────────────────────────────────
+    // Mirrors account-create-batch / account-import: parent dir must exist;
+    // destination must not exist unless --force. Surfaced before any output
+    // serialization so a misconfigured operator gets feedback fast.
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "account-export: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "account-export: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Build the output payload per --format ───────────────────────────────
+    // raw-hex:        plain 64-char hex (optionally JSON-wrapped if --json)
+    // json:           passthrough — re-serialize the input account JSON
+    // backup-bundle:  {seed_hex, pubkey_hex, anon_address, derived_at_utc}
+    //                 ready for `backup-create --secret <seed_hex>`
+    std::string payload;
+    if (format == "raw-hex") {
+        if (json_out) {
+            nlohmann::json doc = { {"privkey_hex", privkey_hex} };
+            payload = doc.dump();
+        } else {
+            payload = privkey_hex;
+        }
+    } else if (format == "json") {
+        // Passthrough — but emit with a deterministic key order so
+        // downstream diffs and round-trip tests are stable. nlohmann/json's
+        // default ordering is lexicographic for std::map-backed objects.
+        payload = acc_doc.dump(2);
+    } else {
+        // backup-bundle: derive an ISO-8601 UTC timestamp + emit the
+        // envelope-ready JSON. The seed_hex field is named to match
+        // backup-create's --secret <hex> input (which accepts the privkey
+        // seed verbatim).
+        // pubkey_hex is the address minus the "0x" prefix; we already
+        // validated it as 64 lowercase hex above.
+        std::string pubkey_hex = address.substr(2);
+
+        // ISO 8601 UTC. Use gmtime_r/gmtime_s for thread-safety where
+        // available; on MSVC the _s suffix is the canonical form, on
+        // POSIX it's the _r suffix.
+        auto now = std::time(nullptr);
+        std::tm tm_buf{};
+#ifdef _WIN32
+        gmtime_s(&tm_buf, &now);
+#else
+        gmtime_r(&now, &tm_buf);
+#endif
+        char ts[32] = {};
+        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+
+        nlohmann::json bundle = {
+            {"seed_hex",       privkey_hex},
+            {"pubkey_hex",     pubkey_hex},
+            {"anon_address",   address},
+            {"derived_at_utc", std::string(ts)},
+        };
+        payload = bundle.dump(2);
+    }
+
+    // ── Dispatch on output destination ─────────────────────────────────────
+    if (!out_path.empty()) {
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "account-export: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << payload;
+        // raw-hex is single-line; the JSON formats already include their
+        // own internal newlines from dump(2). Either way, always finish
+        // the file with a trailing newline so POSIX tools don't complain.
+        if (payload.empty() || payload.back() != '\n') f << "\n";
+        f.close();
+        if (!f) {
+            std::cerr << "account-export: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+        // 0600 permissions — owner-only read/write. On Windows the
+        // read/write bits are a no-op (NTFS ACL inherits from parent);
+        // we ignore the error code as non-fatal there.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+        std::cout << "exported " << format << ": " << out_path << "\n";
+        return 0;
+    }
+    // stdout — payload + single trailing newline (raw-hex needs the LF for
+    // shell-script ergonomics; the JSON formats look more natural with one
+    // too).
+    std::cout << payload;
+    if (payload.empty() || payload.back() != '\n') std::cout << "\n";
     return 0;
 }
 
@@ -4651,6 +4938,22 @@ void print_usage() {
         "                                             without --force); --json prints JSON to\n"
         "                                             stdout. Output shape (single account):\n"
         "                                             {\"address\":\"0x..\",\"privkey_hex\":\"..\"}.\n"
+        "  account-export --in <file>                 Re-emit a single-account JSON file in\n"
+        "                 [--format raw-hex|json|backup-bundle]\n"
+        "                 [--out <file>] [--force] [--json]\n"
+        "                                             one of three external formats:\n"
+        "                                              * raw-hex (default) prints the 64-char\n"
+        "                                                privkey hex on stdout (one line);\n"
+        "                                              * json passes the input account JSON\n"
+        "                                                through verbatim;\n"
+        "                                              * backup-bundle emits a JSON envelope\n"
+        "                                                {seed_hex, pubkey_hex, anon_address,\n"
+        "                                                derived_at_utc} ready for\n"
+        "                                                backup-create --secret <seed_hex>.\n"
+        "                                             --out writes to file (0600; refuses\n"
+        "                                             overwrite without --force). --json with\n"
+        "                                             --format raw-hex wraps the hex in a\n"
+        "                                             {\"privkey_hex\":\"...\"} JSON object.\n"
         "  backup-verify --shares <file> --envelopes <file> [--threshold T] [--json]\n"
         "                                             Composite structural verification of a\n"
         "                                             wallet backup (Shamir shares + per-share\n"
@@ -4788,6 +5091,7 @@ int main(int argc, char** argv) {
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
     if (cmd == "account-import")  return cmd_account_import (argc - 2, argv + 2);
+    if (cmd == "account-export")  return cmd_account_export (argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
