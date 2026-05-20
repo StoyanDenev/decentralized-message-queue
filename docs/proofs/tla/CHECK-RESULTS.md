@@ -1,4 +1,4 @@
-# FB14 — TLA+ model-check transcripts (template)
+# FB18 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -48,6 +48,9 @@ java -jar tla2tools.jar -config FeeAccounting.cfg FeeAccounting.tla
 java -jar tla2tools.jar -config SubsidyDistribution.cfg SubsidyDistribution.tla
 # FB13 — Governance PARAM_CHANGE state machine (submit / activate / forward)
 java -jar tla2tools.jar -config GovernanceParamChange.cfg GovernanceParamChange.tla
+
+# FB17 — Cross-shard applied-receipt-set restore lifecycle (TakeSnapshot / RestoreSnapshot / TryDuplicatePostRestore)
+java -jar tla2tools.jar -config AppliedReceiptRestore.cfg AppliedReceiptRestore.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -69,6 +72,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | FeeAccounting.tla (4 domains, H=4, A=3, F=2, S=20) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | SubsidyDistribution.tla (3 domains, B=4, H=4, NefPool=8, MaxCr=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | GovernanceParamChange.tla (3 keyholders, 2 whitelist, 1 off-whitelist, T=2, H=4, V=2) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| AppliedReceiptRestore.tla (2 shards, 3 hashes, 2 domains, A=3, H=4) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -251,6 +255,26 @@ Companion prose proof: `docs/proofs/SubsidyDistribution.md` (separately tracked;
 
 Companion prose proof: `docs/proofs/GovernanceParamChange.md` (separately tracked; the prose track is being assembled in parallel).
 
+### AppliedReceiptRestore.tla → cross-shard `applied_inbound_receipts_` snapshot/restore lifecycle (S-037 closure witness)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `applied_receipts` (SUBSET DedupKey — the dedup set), `balances` (Domains → Nat), `accumulated_inbound` (Nat), `snapshot_state` (SnapshotState record or NoSnapshot sentinel), `pending` (Seq of Receipt — head-first apply queue), `height` (0..MaxHeight action counter) |
+| `Inv_RestoreEqualsPre` | T-AR2 (post-restore-equals-snapshot): at every reachable state with `snapshot_state /= NoSnapshot`, either `applied_receipts = snapshot_state.applied_receipts` (immediate post-restore window) or the snapshot's set is a subset of the live set (post-snapshot extension via ApplyFirstReceipt). The action `RestoreSnapshot` writes back the snapshot's set verbatim — matches `Chain::restore_from_snapshot` at chain.cpp:1778-1783, the S-037 closure that rehydrates `applied_inbound_receipts_` from the new `applied_inbound_receipts` snapshot namespace |
+| `Inv_DedupPersistsAcrossRestore` | T-AR3 (the headline S-037 property): every key in `snapshot_state.applied_receipts` is also in the live `applied_receipts`. The pre-S-037 bug would have witnessed a counter-example because the snapshot did not serialize the dedup-set; restore would silently rewind to {} and a re-submitted receipt would credit a second time. Post-S-037 the live set is always a superset (or equal) — restore preserves verbatim. The contract that prevents the double-spend |
+| `Inv_FreshCreditPostRestore` | T-AR4: a receipt whose dedup-key is NOT in the live `applied_receipts` remains admissible by ApplyFirstReceipt post-restore. Restore is not a permanent freeze — only the snapshot-recorded keys are de-duplicated; fresh keys still credit. The operational claim is witnessed by the existence of reachable states where `|applied_receipts| > |snapshot_state.applied_receipts|` (SubmitReceipt → RestoreSnapshot → SubmitReceipt(fresh-key) → ApplyFirstReceipt trace) |
+| `Inv_AccumulatedConsistent` | T-AR5: `accumulated_inbound` stays consistent with `applied_receipts` contents across snapshot/restore. State-form bound: `accumulated_inbound >= snapshot_state.accumulated_inbound` at every reachable state with `snapshot_state /= NoSnapshot`. ApplyFirstReceipt only increments; RestoreSnapshot rewinds the field to snapshot's value exactly. The field tracks the live applied_receipts' amount sum faithfully — the per-block `block_inbound` counter at chain.cpp:1377-1380 lifted to chain-level monotone state |
+| `Inv_BalanceNonNegative` | per-recipient `balances[d] >= 0` at every reachable state — Nat-typed; documents the contract. ApplyFirstReceipt only credits (never debits); RestoreSnapshot writes Nat-typed snapshot values; ApplyDuplicate / TryDuplicatePostRestore / SubmitReceipt / TakeSnapshot preserve |
+| `Inv_DedupKeyIsPair` | T-R3 lifted from FB14 (CrossShardReceiptDedup.tla): each entry in `applied_receipts` is a `(src_shard, tx_hash)` pair record. Same `tx_hash` from two different `src_shards` is two distinct entries. Mirrors `std::pair<ShardId, std::string>` at chain.cpp:139. The invariant is preserved across snapshot/restore — the save/load round-trip does not collapse the pair structure into a single string |
+| `Prop_RestoreIdempotent` (temporal) | action-level: TakeSnapshot ∘ RestoreSnapshot is identity on `applied_receipts` when no intermediate ApplyFirstReceipt fires. State-form: after every RestoreSnapshot transition, `applied_receipts' = snapshot_state.applied_receipts`. Composed with TakeSnapshot's `snapshot_state'.applied_receipts = applied_receipts` semantics, the round-trip preserves the set verbatim |
+| `Prop_NoDoubleApply` (temporal) | action-level: every step that extends `applied_receipts` adds exactly one key, AND that key was NOT in `applied_receipts` pre-step. The structural witness — ApplyFirstReceipt's pre-condition `KeyOf(r) \notin applied_receipts` blocks re-firing on the same key; no other action extends the set (ApplyDuplicate / TryDuplicatePostRestore preserve; TakeSnapshot preserves; RestoreSnapshot rewinds to snapshot's set, which was itself a previously-built set satisfying the same property by induction). The temporal restatement of the no-double-credit property across snapshot/restore boundaries |
+
+**Spec status:** written; TLC verification pending (consistent with the other ten specs above). The configuration in `AppliedReceiptRestore.cfg` (2 shards, 3 tx-hashes, 2 domains, MaxAmount=3, MaxHeight=4) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `applied_receipts` (SUBSET DedupKey — the dedup set matching `applied_inbound_receipts_` at chain.cpp:204-206), `balances` (Domains → Nat — the per-recipient credit ledger), `accumulated_inbound` (Nat — chain-level lift of the per-block `block_inbound` counter at chain.cpp:1377-1380), `snapshot_state` (SnapshotState record or NoSnapshot sentinel — saved triple of applied_receipts + balances + accumulated_inbound), `pending` (Seq of Receipt — head-first apply queue), `height` (Nat — action counter bounding TLC). Actions modeled: `SubmitReceipt` (adversarial — appends to pending; the gossip-ratified ingress after V13 dst-dedup), `ApplyFirstReceipt` (fresh-key apply branch at chain.cpp:1363-1381 — T-R1 first-credit-wins), `ApplyDuplicate` (the silent-skip branch at chain.cpp:1365 `if (applied_inbound_receipts_.count(key)) continue;` — T-R2 subsequent-attempts-silent-noop), `TakeSnapshot` (saves the apply-state triple — matches chain.cpp:1586-1592, the S-037 closure adding the `applied_inbound_receipts` namespace), `RestoreSnapshot` (rewinds to the saved triple — matches chain.cpp:1778-1783), `TryDuplicatePostRestore` (the headline adversarial action — submits a receipt whose dedup-key is in the post-restore applied_receipts set, verifies ApplyDuplicate is the only enabled branch). The canonical S-037 closure witness trace (SubmitReceipt → ApplyFirstReceipt → TakeSnapshot → RestoreSnapshot, with applied_receipts equal to snapshot's at every step) is reachable within MaxHeight=4.
+
+This spec is the focused intersection of FB6 (Snapshot.tla — generic snapshot/restore round-trip identity) and FB14 (CrossShardReceiptDedup.tla — per-block dedup-set monotonicity). FB6 modeled the round-trip on (balances, counters); FB14 modeled the dedup-set under a SubmitReceipt / ApplyFirst / ApplyDuplicate / Snapshot / Restore / Equivocate adversary with one-shot save/load semantics. FB17 zooms in on the explicit snapshot lifecycle on the dedup-set, with TryDuplicatePostRestore as the dedicated adversarial action that verifies the T-AR3 cross-snapshot dedup contract that S-037 closed in the C++ implementation. The pre-S-037 bug shape (counter-factual) would have witnessed a counter-example for `Inv_DedupPersistsAcrossRestore` because the snapshot's `applied_inbound_receipts` namespace was missing entirely; the spec is the machine-checkable witness of the S-037 fix.
+
+Companion prose proof: `docs/proofs/AppliedReceiptRestore.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -330,6 +354,17 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `GovernanceParamChange.RejectSubmit*` | `src/node/validator.cpp::check_transactions` PARAM_CHANGE branch reject paths (lines 668, 705-708); the apply layer never sees the tx, so the staging is structurally blocked |
 | `GovernanceParamChange.Activate` | `src/chain/chain.cpp::activate_pending_params` at lines 471-497 (`while (it != pending_param_changes_.end() && it->first <= current_height)` walk; the switch over `name` mutates the Chain field; the `param_changed_hook_(name, value)` call at line 493 fires the T-G6 forwarding to the validator) |
 | `GovernanceParamChange.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs); `activate_pending_params(b.index)` is called from `apply_block` at line 676 |
+| `AppliedReceiptRestore.applied_receipts` | `src/chain/chain.cpp::applied_inbound_receipts_` (`std::set<std::pair<ShardId, std::string>>` at chain.cpp:204-206); the TLA model lifts the pair into a record [src_shard, tx_hash] for readable invariants; SET in TLA+ carries the unordered + dedup semantics |
+| `AppliedReceiptRestore.balances` | `src/chain/chain.cpp::accounts_` (the `balance` field of each AccountState entry; the TLA model collapses the multi-field AccountState into just `balance` since the nonce / stake / ed_pub side is FB7 / FB8 / FB5 territory) |
+| `AppliedReceiptRestore.accumulated_inbound` | local `block_inbound` accumulator at `src/chain/chain.cpp:1377-1380` (per-block; the TLA model lifts it to a chain-level monotone counter to expose the cross-block + cross-snapshot cumulative invariants — per-block resets are FB10 FeeAccounting territory) |
+| `AppliedReceiptRestore.snapshot_state` | the saved `applied_inbound_receipts` + balance namespace contents at `Chain::serialize_state` — the S-037 closure added the `applied_inbound_receipts` namespace at chain.cpp:1586-1592 to make this state explicitly serializable; the TLA model collapses the snapshot scope to the (applied_receipts, balances, accumulated_inbound) triple invariant-relevant to the S-037 closure |
+| `AppliedReceiptRestore.pending` | `node::Node::pending_inbound_receipts_` (the gossip-layer ingress queue; the TLA model uses Seq(Receipt) to enforce head-first apply semantics matching the C++ for-loop iteration at chain.cpp:1363); intentionally NOT included in snapshot_state because the C++ snapshot scope excludes the gossip-layer queue |
+| `AppliedReceiptRestore.SubmitReceipt` | `node::Node::on_cross_shard_receipt` ingress path + the post-V13-admission queue insertion at the chain.cpp:1377-1380 apply boundary; the TLA model abstracts the wire-level signature aggregation + V13 dedup admission into a single non-deterministic Append (FA7 covers the cryptographic admission) |
+| `AppliedReceiptRestore.ApplyFirstReceipt` | the fresh-key apply branch at `src/chain/chain.cpp:1363-1381`: the for-loop iteration at line 1363, the `applied_inbound_receipts_.count(key) == 0` gate at line 1365, the `accounts_[r.to].balance += r.amount` credit at line 1369, the `applied_inbound_receipts_.insert(key)` at line 1376, the `block_inbound += r.amount` at line 1378 (lifted to accumulated_inbound at the chain level) |
+| `AppliedReceiptRestore.ApplyDuplicate` | the silent-skip `continue` branch at `src/chain/chain.cpp:1365` — `if (applied_inbound_receipts_.count(key)) continue;`. The duplicate receipt is consumed from the iteration but no balance is credited, no key is inserted, and no accumulator is bumped |
+| `AppliedReceiptRestore.TakeSnapshot` | `src/chain/chain.cpp::Chain::serialize_state` — specifically the S-037-closure section at chain.cpp:1586-1592 that emits every entry of `applied_inbound_receipts_` as a (src_shard, tx_hash) pair into the snapshot's `applied_inbound_receipts` namespace. Pre-S-037 the namespace was absent and the dedup-set was silently dropped on restore |
+| `AppliedReceiptRestore.RestoreSnapshot` | `src/chain/chain.cpp::Chain::restore_from_snapshot` — specifically the S-037-closure section at chain.cpp:1778-1783 that consumes the `applied_inbound_receipts` namespace and rehydrates `applied_inbound_receipts_` verbatim from the saved entries. The TLA model's `applied_receipts' = snapshot_state.applied_receipts` post-state matches the C++'s set-construction at lines 1780-1782 |
+| `AppliedReceiptRestore.TryDuplicatePostRestore` | the headline adversarial action without a single C++ source-line — the C++ apply path itself does not distinguish "post-restore" from any other apply window. The TLA model lifts the adversarial submission of a snapshot-known dedup-key into an explicit action so the T-AR3 dedup-persistence property is observable as a state-machine guarantee. The structural witness in C++ is the in-memory `applied_inbound_receipts_` set being non-empty immediately after `restore_from_snapshot` returns; subsequent re-submissions of any snapshot-known key trip the chain.cpp:1365 short-circuit |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -377,6 +412,7 @@ The natural next step is wiring TLC into CI:
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry FeeAccounting; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry SubsidyDistribution; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange AppliedReceiptRestore; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
