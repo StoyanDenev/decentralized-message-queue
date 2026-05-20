@@ -47,15 +47,30 @@ JSON serialization shipped: optional fields (defaulted to empty + zero-hash when
 
 `make_contrib_commitment` extended with three optional view-root args (default `Hash{}`). Backward-compat preserved via the **all-zero short-circuit**: when all three view roots are zero, the commit hash is byte-identical to the pre-F2 commit. When any root is non-zero, the `DTM-F2-v1` domain separator is prepended before appending the three roots — prevents v1-sig replay under v2-envelope.
 
-### Sub-step 2 — Producer-side population (~0.5 day, NOT YET SHIPPED)
+### Sub-step 2 — Producer-side population (~0.5 day, **partially shipped**)
 
-In `src/node/producer.cpp`, when assembling Phase-1 contrib:
-- Snapshot the local view of `pending_equivocation_evidence_`, `pending_abort_records_`, `pending_inbound_receipts_` at `tx_commit_ms` timer fire
-- Compute `view_eq_root = compute_view_root(equivocation_event_hashes(snapshot))`, etc.
-- Populate `view_eq_list = sorted(snapshot)` truncated to 64 entries
-- Sign over the extended `make_contrib_commitment` with non-zero roots
+Status:
+- ✅ `make_contrib` signature extended with three optional view-list args
+  (`view_eq_list`, `view_abort_list`, `view_inbound_list`, all default `{}`).
+  When any non-empty, canonicalizes (sort+dedup) + computes Merkle roots +
+  populates ContribMsg view fields + binds into the commit hash via the
+  extended `make_contrib_commitment` (with `DTM-F2-v1` domain separator).
+- ✅ `Node::on_contrib` receive-path updated to thread the message's
+  view roots through commit re-derivation — sig-verify path AND the
+  S-006 same-generation equivocation-comparison path both now use the
+  F2-extended commit shape. v1 contribs (zero view roots) trigger the
+  short-circuit and remain byte-identical to pre-F2.
+- 🚧 Actual Phase-1 trigger site in `Node::start_contrib_round` still
+  passes empty F2 lists (default args). When the snapshot-and-hash code
+  lands (snapshot `pending_equivocation_evidence_` / `pending_abort_records_` /
+  `pending_inbound_receipts_`, hash each entry, truncate to 64), it gates
+  on `block_index >= chain_.genesis().v2_7_f2_active_from_height` and
+  pumps the resulting Hash vectors into the existing `make_contrib` call.
 
-Gated by `v2_7_f2_active_from_height` (already plumbed in `GenesisConfig`).
+The remaining work is local (a ~20-line patch in `Node::start_contrib_round`
+plus per-record canonical-hash helpers). Gated by `v2_7_f2_active_from_height`
+(already plumbed in `GenesisConfig`); defaults to 0 = active from genesis,
+sentinel UINT64_MAX = explicit disable for legacy chains.
 
 ### Sub-step 3 — Validator-side V-checks ✅ helpers shipped, wire-in pending
 

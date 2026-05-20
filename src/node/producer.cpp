@@ -555,7 +555,10 @@ ContribMsg make_contrib(const NodeKey& key,
                          const Hash& prev_hash,
                          uint64_t aborts_gen,
                          const std::vector<Hash>& tx_snapshot,
-                         const Hash& dh_input) {
+                         const Hash& dh_input,
+                         const std::vector<Hash>& view_eq_list,
+                         const std::vector<Hash>& view_abort_list,
+                         const std::vector<Hash>& view_inbound_list) {
     ContribMsg m;
     m.block_index = block_index;
     m.signer      = domain;
@@ -567,7 +570,35 @@ ContribMsg make_contrib(const NodeKey& key,
     m.tx_hashes.erase(std::unique(m.tx_hashes.begin(), m.tx_hashes.end()),
                       m.tx_hashes.end());
 
-    Hash commit = make_contrib_commitment(block_index, prev_hash, m.tx_hashes, dh_input);
+    // v2.7 F2 view-binding (sub-step 2 partial).
+    //
+    // If any view list is non-empty, canonicalize (sort + dedup) each
+    // list, compute its Merkle root, populate the ContribMsg view fields,
+    // and bind the three roots into the commit hash. When ALL lists are
+    // empty (default args / pre-F2 / F2-not-yet-active heights), the
+    // view fields stay zero/empty and the commit falls back to the v1
+    // short-circuit (byte-identical to pre-F2 commits).
+    auto canonicalize = [](std::vector<Hash> v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+        return v;
+    };
+    bool any_view = !view_eq_list.empty()
+                 || !view_abort_list.empty()
+                 || !view_inbound_list.empty();
+    if (any_view) {
+        m.view_eq_list      = canonicalize(view_eq_list);
+        m.view_abort_list   = canonicalize(view_abort_list);
+        m.view_inbound_list = canonicalize(view_inbound_list);
+        m.view_eq_root      = compute_view_root(m.view_eq_list);
+        m.view_abort_root   = compute_view_root(m.view_abort_list);
+        m.view_inbound_root = compute_view_root(m.view_inbound_list);
+    }
+    // else: m.view_X_root stays Hash{} (zero); m.view_X_list stays empty.
+
+    Hash commit = make_contrib_commitment(
+        block_index, prev_hash, m.tx_hashes, dh_input,
+        m.view_eq_root, m.view_abort_root, m.view_inbound_root);
     m.ed_sig = sign(key, commit.data(), commit.size());
     return m;
 }

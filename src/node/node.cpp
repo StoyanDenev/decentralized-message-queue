@@ -2075,8 +2075,17 @@ void Node::on_contrib(const ContribMsg& msg) {
     auto entry = registry_.find(msg.signer);
     if (!entry) return;
 
+    // v2.7 F2 sub-step 2: thread the message's view-roots into the commit
+    // hash. For v1 / F2-not-yet-active contribs, msg.view_*_root are all
+    // zero and the make_contrib_commitment short-circuit produces the
+    // pre-F2 byte-identical hash. For F2 contribs with non-zero roots,
+    // the verify uses the extended DTM-F2-v1 commit shape — must match
+    // what the sender computed in make_contrib.
     Hash commit = make_contrib_commitment(msg.block_index, msg.prev_hash,
-                                            msg.tx_hashes, msg.dh_input);
+                                            msg.tx_hashes, msg.dh_input,
+                                            msg.view_eq_root,
+                                            msg.view_abort_root,
+                                            msg.view_inbound_root);
     if (!crypto::verify(entry->pubkey, commit.data(), commit.size(), msg.ed_sig)) {
         std::cerr << "[node] invalid Contrib sig from " << msg.signer << "\n";
         return;
@@ -2112,9 +2121,15 @@ void Node::on_contrib(const ContribMsg& msg) {
     // separately at the next produced block.
     auto existing = pending_contribs_.find(msg.signer);
     if (existing != pending_contribs_.end()) {
+        // Same F2-aware commit re-derivation as the sig-verify path above:
+        // for v1 contribs all view roots are zero (short-circuit fires);
+        // for F2 contribs the DTM-F2-v1 path binds each member's view.
         Hash existing_commit = make_contrib_commitment(
             existing->second.block_index, existing->second.prev_hash,
-            existing->second.tx_hashes,   existing->second.dh_input);
+            existing->second.tx_hashes,   existing->second.dh_input,
+            existing->second.view_eq_root,
+            existing->second.view_abort_root,
+            existing->second.view_inbound_root);
         // commit (declared above for the sig-verify path) is the new
         // message's commitment.
         if (existing_commit != commit) {

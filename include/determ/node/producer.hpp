@@ -284,13 +284,38 @@ size_t count_round1_aborts(const std::vector<chain::AbortEvent>& aborts);
 //   BFT → ceil(2K/3)
 size_t required_block_sigs(chain::ConsensusMode mode, size_t committee_size);
 
+// Build a signed ContribMsg for this node's Phase-1 commit.
+//
+// v2.7 F2 forward-compat (sub-step 2 partial): the optional view-list
+// args carry this member's per-field view at Phase-1 commit time. When
+// any of the three lists is non-empty, the produced ContribMsg:
+//   - has its view_X_list field set to the sorted+deduped input
+//   - has its view_X_root field set to compute_view_root(view_X_list)
+//   - is signed over the extended make_contrib_commitment (which prepends
+//     the DTM-F2-v1 domain separator + binds the three roots)
+//
+// When ALL three lists are empty (the default — pre-F2 contribs and
+// F2-not-yet-active heights), the produced ContribMsg has zero-Hash
+// view_X_roots + empty view_X_lists, and the commit hash falls back
+// to the v1 short-circuit (byte-identical to pre-F2 commits). Pre-
+// existing callers do not need to change.
+//
+// The caller (typically `Node::start_contrib_round`) is responsible
+// for the height-gate logic: when `block_index < v2_7_f2_active_from_height`
+// the caller passes empty lists; at heights >= activation the caller
+// snapshots pending_equivocation_evidence_ / pending_abort_records_ /
+// pending_inbound_receipts_, hashes their entries, and passes the
+// resulting Hash vectors.
 ContribMsg make_contrib(const crypto::NodeKey& key,
                          const std::string& domain,
                          uint64_t block_index,
                          const Hash& prev_hash,
                          uint64_t aborts_gen,
                          const std::vector<Hash>& tx_snapshot,
-                         const Hash& dh_input);
+                         const Hash& dh_input,
+                         const std::vector<Hash>& view_eq_list      = {},
+                         const std::vector<Hash>& view_abort_list   = {},
+                         const std::vector<Hash>& view_inbound_list = {});
 
 BlockSigMsg make_block_sig(const crypto::NodeKey& key,
                             const std::string& domain,

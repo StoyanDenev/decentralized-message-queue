@@ -10073,6 +10073,143 @@ int main(int argc, char** argv) {
                   "validate_view_reconciliation: per-contrib V22 in reason");
         }
 
+        // === F2 sub-step 2 forward-prep: make_contrib with view lists ===
+
+        // 41. make_contrib with empty view lists → v1-compat (zero roots,
+        //     empty lists, sig verifies under v1-shape commit).
+        {
+            auto key = determ::crypto::generate_node_key();
+            std::vector<Hash> tx = {patterned_hash(0x80)};
+            Hash dh = patterned_hash(0x81);
+            Hash prev = patterned_hash(0x82);
+            auto m = make_contrib(key, "alice.tld", 100, prev, 0, tx, dh);
+
+            // View fields stay default.
+            auto zero_hash = [](const Hash& h) {
+                for (auto b : h) if (b != 0) return false;
+                return true;
+            };
+            check(zero_hash(m.view_eq_root)
+                  && zero_hash(m.view_abort_root)
+                  && zero_hash(m.view_inbound_root),
+                  "make_contrib (empty F2 args): view roots all zero (v1-compat)");
+            check(m.view_eq_list.empty()
+                  && m.view_abort_list.empty()
+                  && m.view_inbound_list.empty(),
+                  "make_contrib (empty F2 args): view lists all empty");
+
+            // Sig verifies under the v1 commit shape.
+            Hash v1_commit = make_contrib_commitment(100, prev, tx, dh);
+            check(determ::crypto::verify(key.pub, v1_commit.data(),
+                                          v1_commit.size(), m.ed_sig),
+                  "make_contrib (empty F2 args): sig verifies under v1 commit");
+        }
+
+        // 42. make_contrib with populated F2 view lists → populated roots,
+        //     populated lists, sig verifies under F2-shape commit.
+        {
+            auto key = determ::crypto::generate_node_key();
+            std::vector<Hash> tx = {patterned_hash(0x90)};
+            Hash dh   = patterned_hash(0x91);
+            Hash prev = patterned_hash(0x92);
+            std::vector<Hash> eq_view     = {patterned_hash(0xE1)};
+            std::vector<Hash> abort_view  = {patterned_hash(0xE2),
+                                              patterned_hash(0xE3)};
+            std::vector<Hash> in_view     = {patterned_hash(0xE4)};
+
+            auto m = make_contrib(key, "bob.tld", 101, prev, 0, tx, dh,
+                                   eq_view, abort_view, in_view);
+
+            check(m.view_eq_list      == eq_view,
+                  "make_contrib (F2 args): view_eq_list populated");
+            check(m.view_abort_list   == abort_view,
+                  "make_contrib (F2 args): view_abort_list populated");
+            check(m.view_inbound_list == in_view,
+                  "make_contrib (F2 args): view_inbound_list populated");
+            check(m.view_eq_root      == compute_view_root(eq_view),
+                  "make_contrib (F2 args): view_eq_root matches list");
+            check(m.view_abort_root   == compute_view_root(abort_view),
+                  "make_contrib (F2 args): view_abort_root matches list");
+            check(m.view_inbound_root == compute_view_root(in_view),
+                  "make_contrib (F2 args): view_inbound_root matches list");
+
+            // Sig verifies under the F2-shape commit (DTM-F2-v1 domain
+            // separator + view roots bound).
+            Hash f2_commit = make_contrib_commitment(101, prev, tx, dh,
+                                                       m.view_eq_root,
+                                                       m.view_abort_root,
+                                                       m.view_inbound_root);
+            check(determ::crypto::verify(key.pub, f2_commit.data(),
+                                          f2_commit.size(), m.ed_sig),
+                  "make_contrib (F2 args): sig verifies under F2 commit");
+
+            // Cross-shape negative: sig must NOT verify under v1 commit
+            // (the F2 commit shape includes DTM-F2-v1 + view roots).
+            Hash v1_commit = make_contrib_commitment(101, prev, tx, dh);
+            check(!determ::crypto::verify(key.pub, v1_commit.data(),
+                                           v1_commit.size(), m.ed_sig),
+                  "make_contrib (F2 args): v1 commit shape REJECTS F2 sig");
+        }
+
+        // 43. make_contrib canonicalizes (sorts + dedupes) input view lists.
+        //     A caller passing {A, A, B} produces {A, B} in the contrib.
+        {
+            auto key = determ::crypto::generate_node_key();
+            std::vector<Hash> tx = {patterned_hash(0x70)};
+            Hash dh   = patterned_hash(0x71);
+            Hash prev = patterned_hash(0x72);
+            std::vector<Hash> eq_dup = {patterned_hash(0xB2),
+                                         patterned_hash(0xB1),
+                                         patterned_hash(0xB2),
+                                         patterned_hash(0xB1)};
+            auto m = make_contrib(key, "carol.tld", 102, prev, 0, tx, dh,
+                                   eq_dup, {}, {});
+            check(m.view_eq_list.size() == 2,
+                  "make_contrib (F2 args): canonicalize dedupes view list");
+            check(m.view_eq_list[0] < m.view_eq_list[1],
+                  "make_contrib (F2 args): canonicalize sorts view list");
+        }
+
+        // 44. make_contrib: round-trip the produced contrib through the
+        //     receive-path commit derivation (mirrors on_contrib in
+        //     src/node/node.cpp). The receiver re-derives the commit from
+        //     msg's tx_hashes + dh_input + view_*_root and verifies the
+        //     sig under the signer's pubkey. Different view contents must
+        //     produce different sigs (binding).
+        {
+            auto key = determ::crypto::generate_node_key();
+            std::vector<Hash> tx = {patterned_hash(0x60)};
+            Hash dh   = patterned_hash(0x61);
+            Hash prev = patterned_hash(0x62);
+
+            auto m_view_A = make_contrib(key, "dave.tld", 103, prev, 0, tx, dh,
+                                          {patterned_hash(0xD1)}, {}, {});
+            auto m_view_B = make_contrib(key, "dave.tld", 103, prev, 0, tx, dh,
+                                          {patterned_hash(0xD2)}, {}, {});
+
+            // Receive-path: re-derive each commit from its msg's view roots.
+            auto recv_commit = [](const ContribMsg& m) {
+                return make_contrib_commitment(m.block_index, m.prev_hash,
+                                                 m.tx_hashes, m.dh_input,
+                                                 m.view_eq_root,
+                                                 m.view_abort_root,
+                                                 m.view_inbound_root);
+            };
+            Hash rc_A = recv_commit(m_view_A);
+            Hash rc_B = recv_commit(m_view_B);
+
+            check(determ::crypto::verify(key.pub, rc_A.data(), rc_A.size(),
+                                          m_view_A.ed_sig),
+                  "receive-path commit: F2 view A sig verifies");
+            check(determ::crypto::verify(key.pub, rc_B.data(), rc_B.size(),
+                                          m_view_B.ed_sig),
+                  "receive-path commit: F2 view B sig verifies");
+            check(rc_A != rc_B,
+                  "receive-path commit: different views produce different commits");
+            check(m_view_A.ed_sig != m_view_B.ed_sig,
+                  "receive-path commit: different views produce different sigs");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": view-root " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
