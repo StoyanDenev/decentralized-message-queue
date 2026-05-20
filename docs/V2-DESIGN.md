@@ -815,9 +815,32 @@ Layer-level estimates with shipped vs remaining split:
 
 Canonical execution order for the remaining work. Sequencing reflects critical-path dependencies (precondition before consumer), risk shape (highest-uncertainty items earliest within each phase), and commercial priority (privacy unblocks the largest deployment class).
 
+### Phase 0 — Deterministic-Simulation Framework (~3-4 weeks, before Phase A)
+
+The DSF is promoted ahead of Phase A (previously listed as a Phase D prerequisite). Provides deterministic Byzantine-bug coverage for every Phase A through D item as it lands. Subsumes A10 NH1 Stage 1 streams 1 + 2 (~3 months of work eliminated).
+
+**Status: spec resolved** in `docs/proofs/DSF-SPEC.md`. Virtual clock + virtual network + scriptable Byzantine actors + property checkers + 30-scenario initial set. ~3-4 weeks to ship from spec-review acceptance.
+
+**Why before Phase A:** Phase A items most vulnerable to subtle Byzantine bugs (v2.7 F2 gossip-async, v2.10 DKG complaint-phase, v2.12 cross-shard 2PC races) are exactly what DSF excels at probing. The prior v2.7 F2 naive-fix attempt that broke equivocation-slashing tests under gossip-async would have been caught by DSF before shipping. Ship DSF first; ship every Phase A through D item with DSF coverage built in.
+
+| Order | Item | Effort | Notes |
+|---|---|---|---|
+| 0.1 | Virtual-clock abstraction (`time::Clock`) | 2-3 days | Thread through Node/Validator/Producer/RPC/Gossip; mechanical refactor; production behavior unchanged |
+| 0.2 | Virtual-network abstraction (`net::Transport`) | 1 week | Wrap asio in `AsioTransport`; new `VirtualTransport` with per-link drop/latency/partition control |
+| 0.3 | Scenario DSL + simulator core | 3-5 days | C++ scenario classes; `Scenario::setup/run/check` lifecycle |
+| 0.4 | Property checker framework | 3-5 days | FA1, A1, FA6, FA7 invariants run after every step |
+| 0.5 | Random scenario generator | 3-5 days | Seeded variants; reproducibility test |
+| 0.6 | Replay tooling | 2-3 days | `determ-dsf run --scenario NAME --seed HEX` |
+| 0.7 | Initial 30-scenario set | 1 week | Selective-abort, equivocation, partition, cross-shard, DKG, F2, BFT escalation |
+| 0.8 | CI integration + docs | 2-3 days | Add to `tools/run_all.sh`; write `docs/DSF.md` |
+
+**Phase-0 exit criterion:** DSF running against current production code with the 30 initial scenarios; replay tooling functional; CI integration green.
+
 ### Phase A — v2-completing sprint (~8-9 weeks sequential)
 
 Single contiguous sprint that lands v2 Themes 1-7 fully. Items inside the phase can parallelize freely; the phase boundary is the synchronization point. Revised from prior ~6-week estimate after v2.10 DKG spec (Option C) raised A.4 from ~1 week to ~3-4 weeks — the increase reflects the genuine cost of trustless per-epoch DKG with PSS refresh, which is the cost of delivering v2.10's threat-model property under mutual distrust.
+
+Every Phase A item ships with DSF-tested behavior (Phase 0 prerequisite).
 
 | Order | Item | Effort | Why this order |
 |---|---|---|---|
@@ -875,12 +898,12 @@ The largest single architectural effort in Determ's roadmap. Removes the beacon 
 
 **Prerequisites:**
 - v2 + Theme 9 substantially shipped (Beaconless v2 builds on v2.1 state Merkle root, v2.2 light-client proofs, v2.10 FROST-Ed25519 threshold infrastructure)
-- Deterministic-simulation framework (S-035 Option 2, ~3-4 weeks) — needed to catch Byzantine bugs in the much-larger beaconless surface that integration tests can't drive
+- ~~Deterministic-simulation framework (S-035 Option 2)~~ — **already shipped from Phase 0** (promoted ahead of Phase A); Phase D inherits the DSF coverage built up during Phases A through C.
 
 | Order | Item | Effort | Why this order |
 |---|---|---|---|
-| D.0 | DSF (S-035 Option 2) | 3-4 weeks | **Beaconless v2 prerequisite.** Virtual clock + virtual network + scriptable Byzantine actors. Without DSF, Beaconless v2 bug-discovery rate is integration-test-bounded. |
-| D.1 | Light-client mesh infrastructure | 3-4 weeks | Foundational substrate; every other Beaconless v2 item builds on this. Lazy validation logic + per-source eviction. |
+| ~~D.0~~ | ~~DSF (S-035 Option 2)~~ | ~~3-4 weeks~~ | **Retired** — DSF shipped in Phase 0. Phase D starts directly at D.1. |
+| D.1 | Light-client mesh infrastructure | 3-4 weeks | Foundational substrate; every other Beaconless v2 item builds on this. Lazy validation logic + per-source eviction. Ships with DSF coverage from Phase 0. |
 | D.2 | Deployment manifest infrastructure | 2-3 weeks | Replaces beacon's trust-anchor role. K-of-K co-signing for mutations; cooldown-based default-accept prevents single-shard veto. |
 | D.3 | Committee-rotation log (per shard) | 1-2 weeks | Append-only on-chain log; light-client traversal; snapshot compaction every 100 epochs. |
 | D.4 | Cross-shard receipts with Merkle proofs | 2-3 weeks | Receipt format extension; source-side proof generation; receiver-side validation via light-client header. |
@@ -895,12 +918,15 @@ The largest single architectural effort in Determ's roadmap. Removes the beacon 
 
 | Phase | Window | Cumulative wall-clock |
 |---|---|---|
-| Phase A (v2 Themes 1-7) | ~8-9 weeks | ~8-9 weeks |
+| **Phase 0 (DSF)** | **~3-4 weeks before Phase A** | **~3-4 weeks** |
+| Phase A (v2 Themes 1-7) | ~8-9 weeks | ~11-13 weeks |
 | Phase B (Theme 8) | 3-5 months | ~5-7 months |
-| Phase C (Theme 9) | 4-6 weeks (DKG infrastructure shared with Phase A — Theme 9 effort reduced), partially parallel with later Phase B | ~6-9 months total (unchanged at the outer envelope; v2.10 work absorbed into Phase A) |
-| Phase D (Beaconless v2) | ~3-4 months (incl. DSF prereq), after Phase A/B/C | **~10-13 months total** for "Beaconless v2 complete" |
+| Phase C (Theme 9) | 4-6 weeks (DKG infrastructure shared with Phase A — Theme 9 effort reduced), partially parallel with later Phase B | ~6-9 months total |
+| Phase D (Beaconless v2) | **~3 months** (DSF prereq retired — already shipped in Phase 0), after Phase A/B/C | **~9-12 months total** for "Beaconless v2 complete" |
 
-Phase D is the natural "what's after v2 + Theme 9" effort. NH-track items run in parallel without gating any phase. NH1 (C99 rewrite, A10 Stage 1 entry) is a multi-month engineering bet; NH4 (military certification) is a calendar/operator-policy track; NH5 (dynamic BFT threshold) lands at C6 in Phase A; NH6 (regulatory mapping) lands incrementally with v2.24 in Phase B.
+**Net savings from DSF-before-Phase-A promotion:** Outer envelope drops from ~10-13 months to ~9-12 months. Phase 0 adds ~3-4 weeks upfront, but Phase D shrinks by ~3-4 weeks (DSF retired from D.0) AND A10 NH1 Stage 1 shrinks by ~2-3 months (streams 1+2 retired post-DSF). Net: ~1 month removed from the outer envelope, plus every Phase A through D item ships with deterministic-simulation Byzantine coverage rather than integration-test-only.
+
+Phase D is the natural "what's after v2 + Theme 9" effort. NH-track items run in parallel without gating any phase. NH1 (C99 rewrite, A10 Stage 1 entry — **reduced to streams 3+4 only after DSF promotion**, ~6 weeks instead of ~3-4 months) is a now-bounded engineering effort; NH4 (military certification) is a calendar/operator-policy track; NH5 (dynamic BFT threshold) lands at C6 in Phase A; NH6 (regulatory mapping) lands incrementally with v2.24 in Phase B.
 
 ### What is explicitly NOT in this sequencing
 
