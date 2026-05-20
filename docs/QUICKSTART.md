@@ -333,5 +333,5 @@ See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN
 - `README.md` §18.5 — wallet recovery (A2).
 - `README.md` §19 — formal verification (FA-track + FB-track).
 - `README.md` §17 — explicit non-goals (no smart contracts, no bridges, no oracles).
-- `tools/` — behavioral tests of every protocol feature (171 regression suites; `docs/README.md` has a representative table).
-- `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12 + FA-Apply-1..FA-Apply-16 + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness analytic, plus FB1–FB23 TLA+ specs).
+- `tools/` — behavioral tests of every protocol feature (173 regression suites; `docs/README.md` has a representative table).
+- `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12 + FA-Apply-1..FA-Apply-16 + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness analytic, plus FB1–FB24 TLA+ specs).
