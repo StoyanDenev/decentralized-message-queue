@@ -1,4 +1,4 @@
-# FB18 — TLA+ model-check transcripts (template)
+# FB20 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -59,6 +59,8 @@ java -jar tla2tools.jar -config EquivocationApply.cfg EquivocationApply.tla
 java -jar tla2tools.jar -config AbortApply.cfg AbortApply.tla
 # FB17 — Cross-shard applied-receipt-set restore lifecycle (TakeSnapshot / RestoreSnapshot / TryDuplicatePostRestore)
 java -jar tla2tools.jar -config AppliedReceiptRestore.cfg AppliedReceiptRestore.tla
+# FB19 — NEF pool drain (E1) state machine (SubmitRegister / ApplyFirstRegister / ApplyReRegister)
+java -jar tla2tools.jar -config NefPoolDrain.cfg NefPoolDrain.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -85,6 +87,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | AbortApply.tla (3 domains, MaxRound=4, InitialStake=30, SUSPENSION_SLASH=10) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | AbortApply.tla (3 domains, H=4, MaxStake=5, SlashNumerator=1, SlashDenominator=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | AppliedReceiptRestore.tla (2 shards, 3 hashes, 2 domains, A=3, H=4) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
+| NefPoolDrain.tla (3 domains, InitialNefPool=8, MaxHeight=4) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -361,6 +364,24 @@ Companion prose proof: `docs/proofs/AbortEventApply.md` (separately tracked; the
 This spec is the focused intersection of FB6 (Snapshot.tla — generic snapshot/restore round-trip identity) and FB14 (CrossShardReceiptDedup.tla — per-block dedup-set monotonicity). FB6 modeled the round-trip on (balances, counters); FB14 modeled the dedup-set under a SubmitReceipt / ApplyFirst / ApplyDuplicate / Snapshot / Restore / Equivocate adversary with one-shot save/load semantics. FB17 zooms in on the explicit snapshot lifecycle on the dedup-set, with TryDuplicatePostRestore as the dedicated adversarial action that verifies the T-AR3 cross-snapshot dedup contract that S-037 closed in the C++ implementation. The pre-S-037 bug shape (counter-factual) would have witnessed a counter-example for `Inv_DedupPersistsAcrossRestore` because the snapshot's `applied_inbound_receipts` namespace was missing entirely; the spec is the machine-checkable witness of the S-037 fix.
 
 Companion prose proof: `docs/proofs/AppliedReceiptRestore.md` (separately tracked; the prose track is being assembled in parallel).
+
+### NefPoolDrain.tla → E1 NEF pool drain state machine (SubmitRegister / ApplyFirstRegister / ApplyReRegister)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `registrants` (SUBSET Domains), `balances` (AllAddresses → 0..InitialNefPool — includes ZerothAddress as the pool home), `pending_register` (Seq(Domains)), `height` (Nat action counter) |
+| `Inv_PoolNonNegative` | `balances[ZerothAddress] >= 0` at every reachable state — the floor-half drain (`P \div 2`) is closed on Nat; once the pool reaches 0, the terminal `0 \div 2 = 0` keeps it there |
+| `Inv_GeometricExhaustion` | T-N1 quantified upper bound: for every `k \in 0..|Domains|`, if `|registrants| >= k` then `2^k * balances[ZerothAddress] <= InitialNefPool`. The K-th distinct first-time register applies the K-th floor-half; arithmetic gives `pool <= floor(P / 2^K)`. The headline geometric-drain witness — pre-existing FB11 had only the non-negativity floor, not the upper-bound progression |
+| `Inv_A1Conservation` | T-N5 supply identity: `balances[ZerothAddress] + sum_{d \in Domains} balances[d] = InitialNefPool` at every reachable state. Every NEF action is an internal pool→domain redistribution; no action mints or destroys. The sentinel-balance pattern collapses the FB11 `nef_pool` + `accounts` two-variable identity into a single sum-of-balances identity |
+| `Inv_DrainOnlyOnFirstRegister` | T-N2 action-level invariant: any `balances'[ZerothAddress] < balances[ZerothAddress]` step must be paired with a fresh domain entering `registrants`. The headline defense against the registration-churn drain attack — re-register cannot drain. Matches the `first_time_register` bool gate at `src/chain/chain.cpp:795-796` |
+| `Prop_EventualExhaustion` (temporal) | T-N6 eventual-progress: under fairness on SubmitRegister + ApplyFirstRegister, eventually `balances[ZerothAddress] = 0` OR `|registrants| = |Domains|` (all domains have first-registered and the pool has drained as far as the model's domain budget permits). The escape branch is required because TLC operates on bounded models — for `InitialNefPool = 8, |Domains| = 3`, the pool reaches 1 (not 0) after 3 first-registers; further drain requires more domains |
+| `Prop_RegistrationIsTerminal` (temporal) | T-N7 action-level: `d \in registrants => d \in registrants'` across every `[Next]_vars` step. Once a domain enters registrants, it stays. No Deregister action is modeled in this scope — for the NEF drain surface, registration is one-way and permanent. The temporal witness that the floor-half drain is monotone over the registrants partial order |
+
+**Spec status:** written; TLC verification pending (consistent with the other eleven specs above). The configuration in `NefPoolDrain.cfg` (3 domains {a, b, c}, InitialNefPool=8, MaxHeight=4, ZerothAddress=zeroth sentinel) is sized for an interactive TLC run in under 30 seconds on a single core. Variables modeled: `registrants` (SUBSET Domains — the set of domains that have first-registered), `balances` (AllAddresses → Nat — collapses the C++ `accounts_` map + the ZEROTH-address pool into a single function indexed by Domains \cup {ZerothAddress}; the sentinel-pattern lifts the A1 supply identity into a sum-of-balances over the lifted index set), `pending_register` (Seq(Domains) — the submitted-but-not-applied register-tx queue; matches the C++ apply order at chain.cpp:734 `for (auto& tx : b.transactions)`), `height` (Nat — action counter bounding TLC). Actions modeled: `SubmitRegister` (any caller can submit any domain for register — the adversarial surface), `ApplyFirstRegister` (the first-time apply branch at chain.cpp:813-833 — drains pool by floor-half, credits drained amount, adds domain to registrants), `ApplyReRegister` (the already-registered apply branch — consumes from pending without mutating drain state, witnesses T-N3). InitialNefPool=8 lets the floor-half drain fire 4 times (8 → 4 → 2 → 1 → 0) before reaching the absorbing 0-state; with 3 domains the model exhausts at pool=1 after 3 first-registers (T-N1 K=3 case). The T-N4 zero-pool noop branch (pool=0 → ApplyFirstRegister with 0 drain) is not reachable in the 3-domain InitialNefPool=8 cfg but is structurally witnessed by the ApplyFirstRegister action body — the same `drain = pool \div 2` formula, evaluated at pool=0, yields 0 with no further mutation; reproducibly reachable in a 4-domain InitialNefPool=8 or 3-domain InitialNefPool=4 cfg variant.
+
+**Distinction from FB11 SubsidyDistribution.tla:** the two specs together cover the NEF drain from complementary angles. FB11 models the NEF drain alongside block-subsidy distribution and collapses Submit + Apply into a single Register action (the apply-side enforcement is the focus); FB19 zooms in on the NEF-only surface and pulls the submit/apply lifecycle into an explicit pending sequence so the apply-order semantics + the re-register stutter are observable at the state-machine layer. The FB11 `Inv_NefDrainsOnceperDomain` is the action-level pair (registered FALSE→TRUE) witness; FB19's `Inv_DrainOnlyOnFirstRegister` is the same claim restated in terms of the registrants-set delta (set-membership growth). The headline FB19-specific invariant is `Inv_GeometricExhaustion` — the quantified upper bound `2^k * pool <= InitialNefPool` is not present in FB11; FB19 elevates the floor-half drain semantics to a parametric inequality over the number of distinct first-registers.
+
+Companion prose proof: `docs/proofs/NefPoolDrain.md` (separately tracked; the prose track is being assembled in parallel).
 
 ---
 
