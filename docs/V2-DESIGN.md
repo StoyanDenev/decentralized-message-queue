@@ -31,7 +31,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.19 DAPP_CALL tx + payload routing | ✅ shipped | Theme 7 substrate |
 | v2.20 Streaming subscription RPC | ⚠️ partial (spec resolved) | Polling shipped; full streaming pending. Spec resolved in §v2.20 below: `dapp_subscribe(domain, topic?, since?)` newline-JSON streaming with bounded per-subscriber queue, kill-on-backpressure semantics, catch-up replay window, heartbeat cadence, per-IP rate-limit via existing `net::RateLimiter` |
 | v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
-| v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over curve25519 (dalek-cryptography reference impl; shares v2.10's curve family via libsodium), ephemeral-DH amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
+| v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. **MODERN crypto profile only** (unavailable in FIPS profiles: `tactical` + `cluster`). Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over secp256k1 via libsecp256k1-zkp, ephemeral X25519 DH for amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
 | v2.24 Audit / compliance hooks | ⏳ not started | Theme 8. Simplified post-v2.22 spec — most infrastructure delivered by v2.22; v2.24 reduces to `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference tool. ~1-2 weeks |
 | v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
@@ -946,6 +946,8 @@ Determ stays in its lane (payment + identity). But "best-in-class at that lane" 
 
 ### v2.22 — Confidential transactions (Pedersen commitments + Bulletproofs)
 
+**Profile applicability.** Available only in **MODERN cryptographic profile** deployments (web / regional / global timing profiles). Not available in **FIPS profile** which is bundled with `tactical` (military / defense / embedded) AND `cluster` (in-house enterprise / financial services / regulated) timing profiles — no FIPS-validated zero-knowledge range proofs exist. FIPS-profile deployments use clear-amount TRANSFER txs + v2.24 audit hooks for regulator access. Per `CRYPTO-C99-SPEC.md` §2.Q10.
+
 **Motivation.** Today every TRANSFER amount is public on-chain. For payment use cases — payroll, vendor payments, B2B settlement, retail, regulated gambling — this is incompatible with normal commercial confidentiality. The alternative (every user using a mixer DApp) doesn't compose with audit-grade compliance.
 
 **Mechanism.** Replace TRANSFER's clear-text `amount: u64` with a Pedersen commitment `C = aG + bH` (where `a` is the amount and `b` is a blinding factor). Sender attaches a Bulletproof range proof that `0 ≤ a < 2^64` (no underflow) and a balance-conservation proof binding inputs and outputs. Recipient learns `a` via an ephemeral Diffie-Hellman handshake against the recipient's published `view_master_pk`; per-tx amount-encryption key derives via HKDF.
@@ -955,13 +957,13 @@ Determ stays in its lane (payment + identity). But "best-in-class at that lane" 
 | Sub-decision | Resolved choice | Why |
 |---|---|---|
 | View-key rotation cadence | **Per-epoch automatic rotation via HKDF** | Bounded exposure per epoch; zero on-chain rotation cost; maps to regulator audit cadence; no rotation discipline required |
-| Range-proof construction | **Bulletproofs over curve25519** | dalek-cryptography reference impl is canonical Bulletproofs implementation; same curve family as v2.10 FROST-Ed25519; preserves "two primitives" design value; no new cryptographic primitive family; aggregation-friendly; no trusted setup |
+| Range-proof construction | **Bulletproofs over secp256k1** (via libsecp256k1-zkp) | Most-production-tested C99 Bulletproof implementation (~5+ years in Liquid + Grin); Bitcoin-grade audit pedigree (libsecp256k1 secures ~$1T+ value); libsodium-independent (aligns with CRYPTO-C99-SPEC.md full libsodium removal); prime-order natively; no trusted setup. Adds secp256k1 as second curve family — deliberate trade-off for libsodium independence per CRYPTO-C99-SPEC.md §2.Q1 |
 | Sender-recipient handshake | **Ephemeral DH against recipient's `view_master_pk` + HKDF + XChaCha20-Poly1305 AEAD** | One-shot tx submission (no bidirectional interaction); forward secrecy via ephemeral; libsodium primitives already in tree |
 | Audit integration (v2.24) | **Dual-mode disclosure: `view_master_sk` (full) or per-epoch `vk_epoch_n` (scoped)** | Master = in-house compliance; per-epoch = external regulator with bounded audit window; maps to real regulator workflows |
 
 Each account has a long-term `view_master` keypair. Per-epoch view keys derive deterministically: `vk_epoch_n = HKDF(view_master_sk, "VK" || chain_id || account_addr || epoch_n)`. Recipients and auditors recompute the same derivation to decrypt amounts within epoch n. Compromised epoch keys expose only that epoch's amounts; subsequent epochs unaffected.
 
-**Tx-level encryption.** Sender generates ephemeral `eph_sk`; computes shared secret `ss = eph_sk · view_master_pk` (DH on ristretto255); derives `aek = HKDF(ss, "AMT" || epoch_n || tx_hash)`; encrypts amount as `amount_ct = AEAD(aek, amount_bytes, AAD = "TX-AMT" || tx_hash)`. Tx carries: commitment, range proof, `eph_pk`, `amount_ct`. Recipient (or auditor with master) decrypts via the same DH.
+**Tx-level encryption.** Sender generates ephemeral X25519 `eph_sk`; computes shared secret `ss = X25519_dh(eph_sk, view_master_pk)`; derives `aek = HKDF-SHA-256(ss, "AMT" || epoch_n || tx_hash)`; encrypts amount as `amount_ct = XChaCha20-Poly1305(aek, amount_bytes, AAD = "TX-AMT" || tx_hash)`. Tx carries: Pedersen commitment on secp256k1 (Bulletproof-compatible), range proof, X25519 `eph_pk`, `amount_ct`. Recipient (or auditor with X25519 view-master-sk) decrypts via the same DH. Two-curve protocol: X25519 for DH (curve25519 family); secp256k1 for commitment (matches Bulletproof primitive).
 
 **Emergency master compromise recovery.** `ROTATE_VIEW_MASTER` tx (analogous to v2.26 `ROTATE_KEY`) allows one-time recovery from catastrophic master compromise. Not for routine rotation (Option C handles routine rotation via HKDF) — only for emergency.
 
@@ -1243,9 +1245,17 @@ Layer-level estimates with shipped vs remaining split:
 
 Canonical execution order for the remaining work. Sequencing reflects critical-path dependencies (precondition before consumer), risk shape (highest-uncertainty items earliest within each phase), and commercial priority (privacy unblocks the largest deployment class).
 
-### Phase 0 — Deterministic-Simulation Framework (~3-4 weeks, before Phase A)
+### Phase 0 — Deterministic-Simulation Framework + C99 Cryptographic Stack (~15-17 weeks, before Phase A)
 
-The DSF is promoted ahead of Phase A (previously listed as a Phase D prerequisite). Provides deterministic Byzantine-bug coverage for every Phase A through D item as it lands. Subsumes A10 NH1 Stage 1 streams 1 + 2 (~3 months of work eliminated).
+Phase 0 has two parallel tracks:
+
+**Track 1: DSF (~3-4 weeks).** Deterministic-simulation framework — virtual clock + virtual network + scriptable Byzantine actors + property checkers + 30-scenario initial set. Promoted ahead of Phase A (previously listed as a Phase D prerequisite). Provides deterministic Byzantine-bug coverage for every Phase A through D item as it lands. Subsumes A10 NH1 Stage 1 streams 1 + 2 (~3 months of work eliminated). Per `docs/proofs/DSF-SPEC.md`.
+
+**Track 2: C99 cryptographic stack (~15-17 weeks).** Full libsodium replacement with vendored independent C99 primitives organized into modular sub-libraries. Per `docs/proofs/CRYPTO-C99-SPEC.md`. Delivers: SHA-256/SHA-512 (NIST), Ed25519 (Bernstein ref10), X25519 (curve25519-donna), ChaCha20-Poly1305 + XChaCha20 (RFC 8439), AES-256-GCM (NIST), Argon2id (P-H-C reference), secp256k1 + libsecp256k1-zkp (Bitcoin Core), FROST-Ed25519 (implemented from RFC 9591), OPRF on secp256k1 (voprf draft + RFC 9380). ristretto255 eliminated entirely. Three curves: Ed25519, X25519, secp256k1. Two underlying mathematical families (curve25519, secp256k1). Modular structure: `src/crypto/<primitive>/` with unified C99 API in `include/determ/crypto.h` + ergonomic C++ wrapper in `include/determ/crypto.hpp`.
+
+Track 1 and Track 2 are parallel (different engineering skill sets — distributed-systems + cryptographic engineering). Both must complete before Phase A starts. Combined wall-clock = max(Track 1, Track 2) = **~15-17 weeks**.
+
+If only one engineer is available, Track 1 (DSF) ships first as Phase A precondition; Track 2 (C99 crypto) defers to a later trigger event (NH1 Stage 2, NH4 FIPS commitment, or audit finding). The C99 crypto track is optional but recommended for libsodium-free posture + NH1/NH2/NH4 readiness from today.
 
 **Status: spec resolved** in `docs/proofs/DSF-SPEC.md`. Virtual clock + virtual network + scriptable Byzantine actors + property checkers + 30-scenario initial set. ~3-4 weeks to ship from spec-review acceptance.
 
@@ -1273,18 +1283,17 @@ Every Phase A item ships with DSF-tested behavior (Phase 0 prerequisite).
 | Order | Item | Effort | Why this order |
 |---|---|---|---|
 | A.1 | C3 gossip-out-of-lock, C6 BFT threshold bump | ~1.5 days | Smallest items; clears C-track to "all shipped." |
-| A.2 | R5 `tools/test_regional_shards.sh`, R6 README §17.6 update | ~1 day | Closes the R-track verification gap from the in-session sharding work. |
-| A.3 | E1 NEF lottery rewrite | ~2-3 days | Reconciles shipped geometric `pool/2` with the canonical lottery design (plan.md §E1). Independent of all other work. |
-| A.4 | A11 / v2.10 threshold randomness aggregation (incl. DKG infrastructure) | ~3 weeks | **Theme-9 precondition + shared foundation for v2.22/v2.25.** DKG spec resolved per Option C in `docs/proofs/v2.10-DKG-SPEC.md`; cost reflects epoch-boundary trustless DKG + PSS refresh + FROST-Ed25519 on curve25519 family (libsodium already vendored). Largest single item in Phase A; land first so any FROST port surprises surface early. |
+| A.2 | **v2.7 F2 view reconciliation** | ~3-4 days | **PROMOTED from prior A.8.** Spec resolved (F2-SPEC.md, per-field rules per Option D); awaiting pre-implementation review of the 5 decisions called out in F2-SPEC.md §6. Closes S-030 D2 at consensus layer (currently partial closure via S-033 apply-layer). Small, high-value, fully-spec'd → land early to derisk downstream items that compose with the consensus-round wire format (v2.10 partial-sig integration, v2.22 confidential tx commitment binding). Requires DSF coverage (Phase 0); prior naive F2 attempt failed under gossip-async — DSF reproduces that pattern deterministically. |
+| A.3 | R5 `tools/test_regional_shards.sh` + R6 README §17.6 + E1 NEF lottery rewrite + E9 `genesis_info` RPC | ~1 week | Bundled trivial cleanups (R-track verification gap + E1 code reconciliation + E9 follow-on). Independent of all other Phase A work. |
+| A.4 | A11 / v2.10 threshold randomness aggregation (incl. DKG infrastructure) | ~3 weeks | **Theme-9 precondition + shared foundation for v2.22/v2.25.** DKG spec resolved per Option C in `docs/proofs/v2.10-DKG-SPEC.md`; cost reflects epoch-boundary trustless DKG + PSS refresh + FROST-Ed25519 on curve25519 family (libsodium already vendored). Largest single item in Phase A; land here (not earlier) so senior-engineer focus is uninterrupted by smaller items; composes with v2.7 F2 at the consensus-round seam. |
 | A.5 | A2 / v2.14 OPAQUE wallet finisher | ~5-7 days | **Theme-9 precondition.** Single-server OPAQUE exercises the adapter shape T-OPAQUE will reuse. |
 | A.6 | A7 randomness binding RPC + reference DApp | ~1.5 days | Unlocks fair-lottery DApp + general application-layer randomness consumption. |
 | A.7 | A8 IdP-directory finisher | ~2-3 days | Builds on shipped v2.18/v2.19; light follow-on. |
-| A.8 | v2.7 F2 view reconciliation | ~3-4 days total | **Spec resolved (F2-SPEC.md, per-field rules per Option D).** Awaiting pre-implementation review of the 5 decisions called out in F2-SPEC.md §6. Closes S-030 D2 at consensus layer. |
-| A.9 | v2.8 Dilithium PQC migration | ~1-2 weeks | Largest cryptographic surface addition; wire-format break — flag-day. |
-| A.10 | v2.11 beacon-side auto-detect | ~2-3 days | Closes S-036 fully. |
-| A.11 | v2.12 cross-shard 2PC | ~1 week | Builds on shipped A9 Phase 2D atomic_scope. |
-| A.12 | v2.15 HD derivation + multi-sig | ~1 week | Wallet UX completer; orthogonal to consensus changes. |
-| A.13 | v2.20 streaming subscription RPC | ~3 days | Final Theme-7 polish. |
+| A.8 | v2.8 Dilithium PQC migration | ~1-2 weeks | Largest cryptographic surface addition; wire-format break — flag-day. |
+| A.9 | v2.11 beacon-side auto-detect | ~2-3 days | Closes S-036 fully. |
+| A.10 | v2.12 cross-shard 2PC | ~1 week | Builds on shipped A9 Phase 2D atomic_scope. |
+| A.11 | v2.15 HD derivation + multi-sig | ~1 week | Wallet UX completer; orthogonal to consensus changes. |
+| A.12 | v2.20 streaming subscription RPC | ~3 days | Final Theme-7 polish. |
 
 **Phase-A exit criterion:** Themes 1-7 fully shipped; v2.10 + v2.14 (Theme-9 preconditions) in tree; all SECURITY.md findings closed or formally deferred.
 
