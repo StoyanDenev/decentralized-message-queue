@@ -16,7 +16,7 @@
 This spec covers ONLY the architectural removal of the beacon as a special role and the redistribution of beacon functions across shards. It does NOT cover:
 
 - New consensus mechanism — Beaconless v2 reuses the existing K-of-K mutual-distrust consensus per shard. Only the cross-shard coordination layer changes.
-- New cryptographic primitives — uses the v2.10 BLS12-381 + FROST-BLS DKG infrastructure, v2.1 state Merkle root, v2.2 light-client proofs. All already-shipped or already-spec'd.
+- New cryptographic primitives — uses the v2.10 FROST-Ed25519 DKG infrastructure (curve25519 family via libsodium), v2.1 state Merkle root, v2.2 light-client proofs. All already-shipped or already-spec'd.
 - Horizontal-scale beyond ~hundreds of shards — Beaconless v2 raises the practical ceiling from ~50 to ~200-500 shards via lazy validation; beyond that, additional sharding-of-sharding work is a v3 concern.
 - Cross-deployment interop — Beaconless v2 is intra-deployment only. Cross-deployment bridges remain v2.23's scope (which also uses light-client mesh, so the infrastructures align).
 
@@ -60,7 +60,7 @@ The deployment manifest contains:
 - List of shard IDs in the deployment
 - Each shard's genesis hash
 - Each shard's initial committee (as of deployment creation)
-- Cryptographic primitives in use (BLS12-381, FROST-BLS, etc.)
+- Cryptographic primitives in use (curve25519 family, FROST-Ed25519, etc.)
 - Manifest version (incremented on mutation)
 - Co-signing record (every mutation signed by the existing committee of every shard, K-of-K per shard)
 
@@ -118,7 +118,7 @@ The log is stored as a per-shard data structure committed in each block's state_
 **Rationale.**
 - Cryptographically auditable: any historical committee verifiable by anyone with the deployment manifest.
 - Self-contained per shard: no cross-shard coordination needed for committee rotation.
-- Composes with v2.10 epoch-boundary DKG (FROST-BLS) — committee rotation already happens at epoch boundary; the log just records what's already deterministically derived.
+- Composes with v2.10 epoch-boundary DKG (FROST-Ed25519) — committee rotation already happens at epoch boundary; the log just records what's already deterministically derived.
 
 ### Q4: Cross-shard receipts — Merkle inclusion proofs
 
@@ -174,7 +174,7 @@ then this shard locally emits `MERGE_BEGIN(target=S)` in its next block. The MER
 
 **Decision: cross-shard randomness aggregation via per-epoch accumulator over each shard's threshold-signature output.**
 
-At each epoch boundary, every shard's K-of-K committee produces an epoch-end threshold signature (via v2.10 FROST-BLS DKG) over `("DTM-EPOCH-RAND" || epoch || shard_id || shard_state_root)`. These per-shard threshold signatures are gossiped across the deployment.
+At each epoch boundary, every shard's K-of-K committee produces an epoch-end threshold signature (via v2.10 FROST-Ed25519 DKG) over `("DTM-EPOCH-RAND" || epoch || shard_id || shard_state_root)`. These per-shard threshold signatures are gossiped across the deployment.
 
 The deployment-wide randomness for epoch N+1 is the accumulator:
 
@@ -270,7 +270,7 @@ Block {
 
 ### 4.6 Cross-shard randomness aggregation (~1-2 weeks)
 
-- Per-shard epoch-end threshold signature emission (uses v2.10 FROST-BLS).
+- Per-shard epoch-end threshold signature emission (uses v2.10 FROST-Ed25519).
 - Gossip replication of per-shard signatures.
 - Accumulator computation at epoch boundary.
 - Late-shard handling (subset recording in block header).

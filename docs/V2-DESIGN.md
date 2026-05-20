@@ -19,7 +19,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.7 F2 view reconciliation | ⏳ spec resolved, implementation pending | S-030 D2 closure. F2-SPEC.md per-field rules formalized: union (+V11) for evidence, union (+V10) for aborts, intersection for inbound_receipts, deterministic for the rest. ~3-4d to ship from spec-review acceptance |
 | v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
 | v2.9 Distributed VRF for committee selection | ⏳ not started | |
-| v2.10 Threshold randomness aggregation | 🔥 **active** | Promoted to defeat residual selective-abort attack. DKG spec resolved per Option C (epoch-boundary trustless DKG + PSS refresh + BLS12-381 + FROST-BLS) in `docs/proofs/v2.10-DKG-SPEC.md`; cost revised to ~3-4 weeks. See plan.md A11 for active task brief |
+| v2.10 Threshold randomness aggregation | 🔥 **active** | Promoted to defeat residual selective-abort attack. DKG spec resolved per Option C (epoch-boundary trustless DKG + PSS refresh + FROST-Ed25519 on curve25519 family) in `docs/proofs/v2.10-DKG-SPEC.md`; cost revised to ~3 weeks. See plan.md A11 for active task brief |
 | v2.11 Auto-detection beacon-side trigger (R4 v1.1) | ⏳ not started | |
 | v2.12 Cross-shard atomic primitives | ⏳ not started | |
 | v2.13 Fair-ordering primitive | 🔒 deferred (research) | Open research area; not on v2 critical path |
@@ -31,7 +31,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.19 DAPP_CALL tx + payload routing | ✅ shipped | Theme 7 substrate |
 | v2.20 Streaming subscription RPC | ⚠️ partial | Polling shipped; full streaming pending |
 | v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
-| v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over BLS12-381 (shares v2.10's curve), ephemeral-DH amount handshake, dual-mode audit disclosure. ~3 months to ship from spec-review acceptance |
+| v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over curve25519 (dalek-cryptography reference impl; shares v2.10's curve family via libsodium), ephemeral-DH amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
 | v2.24 Audit / compliance hooks | ⏳ not started | Theme 8. Simplified post-v2.22 spec — most infrastructure delivered by v2.22; v2.24 reduces to `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference tool. ~1-2 weeks |
 | v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
@@ -232,7 +232,7 @@ Defenses today (`SUSPENSION_SLASH = 10` per abort + BFT escalation) make the att
 
 **Earlier (now-deprecated) approach: aggregate-revealed-subset.** Compute `delay_output = SHA-256(delay_seed ‖ sort(revealed_secrets))` from the t members who revealed. This addresses K-of-K liveness stall but does NOT defeat selective abort — the silent K-t members still influence randomness by choosing whether to reveal (the aggregate depends on the revealed subset). Rejected in favor of true threshold signatures.
 
-**Current (active) mechanism: t-of-K threshold signatures.** Each committee member generates a `partial_sig_i = sign(secret_share_i, beacon_seed ‖ height)` using a t-of-K threshold-signature scheme (BLS12-381 or equivalent). Any `t = ceil(2K/3)` partial signatures combine into the SAME canonical `R = combine(partial_sig_{i1}, …, partial_sig_{it})`. The combined signature `R` replaces today's `delay_output`.
+**Current (active) mechanism: t-of-K threshold signatures.** Each committee member generates a `partial_sig_i = sign(secret_share_i, beacon_seed ‖ height)` using a t-of-K threshold-signature scheme (FROST-Ed25519 on curve25519 family, or equivalent). Any `t = ceil(2K/3)` partial signatures combine into the SAME canonical `R = combine(partial_sig_{i1}, …, partial_sig_{it})`. The combined signature `R` replaces today's `delay_output`.
 
 **Critical property.** Any `t` partial signatures produce the SAME `R`. A withholding adversary doesn't change `R` — the other `K-t` members' partials are sufficient. Selective abort becomes ineffective for biasing randomness.
 
@@ -242,7 +242,7 @@ Defenses today (`SUSPENSION_SLASH = 10` per abort + BFT escalation) make the att
 | Adversary chooses to reveal/abort based on whether R favors them | Adversary cannot prevent R; their choice is irrelevant |
 | Bias possible by paying SUSPENSION_SLASH per abort | Bias requires controlling ≥ K-t+1 members — standard Byzantine bound |
 
-**DKG design: Option C — epoch-boundary trustless DKG with proactive refresh.** v2.10's threshold signatures require each committee member to hold a share of a threshold private key. The shares are generated and refreshed via per-epoch FROST-BLS DKG; no trusted dealer; new validators acquire shares natively via the next epoch's DKG round; share refreshes preserve forward secrecy.
+**DKG design: Option C — epoch-boundary trustless DKG with proactive refresh.** v2.10's threshold signatures require each committee member to hold a share of a threshold private key. The shares are generated and refreshed via per-epoch FROST-Ed25519 DKG (on the curve25519 family via libsodium); no trusted dealer; new validators acquire shares natively via the next epoch's DKG round; share refreshes preserve forward secrecy.
 
 | DKG sub-decision | Resolved choice | Why |
 |---|---|---|
@@ -250,8 +250,8 @@ Defenses today (`SUSPENSION_SLASH = 10` per abort + BFT escalation) make the att
 | Trust model | **Trustless (no dealer)** | Matches K-of-K mutual-distrust posture; trusted dealer reintroduces operator privilege |
 | Rotation support | **Native via per-epoch DKG** | New validators acquire shares in next epoch's ceremony; departing validators simply don't participate |
 | Share refresh | **Proactive secret sharing (PSS)** in membership-unchanged case; fresh DKG on committee change | Forward secrecy at zero cost when membership stable; clean transition when committee changes |
-| Threshold scheme | **BLS12-381** | Most mature DKG protocols target it; production-grade `blst` implementation; shared with v2.22/v2.25 |
-| DKG protocol | **FROST-BLS** | Most actively maintained DKG protocol; two-round; tolerates ⌊(K-1)/3⌋ malicious participants during ceremony |
+| Threshold scheme | **Ed25519 / ristretto255 (curve25519 family)** | Already vendored via libsodium; preserves "two primitives" design value (SHA-256 + curve25519 family); no new pairing-friendly curve added to audit surface; shared with v2.22 (Bulletproofs/curve25519) and v2.25 (T-OPRF/ristretto255) |
+| DKG protocol | **FROST-Ed25519 (RFC 9591, May 2024)** | IETF-standardized; tolerates ⌊(K-1)/3⌋ malicious participants during ceremony; production reference impl in zcash/frost-ed25519 |
 | Per-profile timing | **R=5 blocks at tactical/cluster, R=3 at web/regional/global** | Sized to absorb network jitter while staying ≤5% of epoch duration |
 
 See `docs/proofs/v2.10-DKG-SPEC.md` for the full design specification, protocol description, wire-format details, implementation work units, failure-mode handling, regression-test plan, and rollback plan.
@@ -260,8 +260,8 @@ See `docs/proofs/v2.10-DKG-SPEC.md` for the full design specification, protocol 
 
 | Sub-component | Effort |
 |---|---|
-| BLS12-381 library vendoring (`blst`) | 3-5 days |
-| FROST-BLS DKG protocol | 1-1.5 weeks |
+| FROST-Ed25519 primitives on libsodium | 2-3 days |
+| FROST-Ed25519 DKG protocol | 1-1.5 weeks |
 | Epoch-boundary orchestration | 3-5 days |
 | Threshold-signature integration | 3-5 days |
 | Failure-mode handling | 3-5 days |
@@ -273,11 +273,11 @@ The 3-4x expansion vs. the prior estimate is the cost of delivering v2.10's thre
 
 **Wire-format implications.** `creator_dh_secrets` becomes `creator_partial_sigs` (per the v2.10 design). Three new gossip-layer message types for the DKG ceremony (`DKGCommitMsg`, `DKGShareMsg`, `DKGComplaintMsg`). Three new on-chain block fields (`epoch_public_key`, `dkg_status`, `dkg_excluded`). Not backward-compatible with v1 chains — flag-day upgrade required.
 
-**Composes with v2.9** (distributed VRF): VRF unbiasability + threshold randomness aggregation together close the entire randomness attack surface. Either alone is good; both together is best. v2.9 itself would build on the same BLS12-381 + DKG infrastructure shipped here.
+**Composes with v2.9** (distributed VRF): VRF unbiasability + threshold randomness aggregation together close the entire randomness attack surface. Either alone is good; both together is best. v2.9 itself would build on the same Ed25519 + DKG infrastructure shipped here.
 
-**Cascades to downstream items.** The BLS12-381 + DKG infrastructure shipped for v2.10 is a **shared foundation** for the threshold-cryptography layer of v2 + Theme 9:
-- **v2.25 T-OPAQUE OPRF** (Theme 9 DSSO) reuses the same curve and the same per-epoch share-distribution infrastructure (different label, same underlying secret sharing). Without v2.10's DKG, T-OPAQUE has no trust-minimized share-distribution path.
-- **v2.22 confidential transactions** (Theme 8) can share the BLS12-381 curve if Bulletproofs are instantiated over the same group, reducing total cryptographic-stack expansion.
+**Cascades to downstream items.** The curve25519-family DKG infrastructure shipped for v2.10 is a **shared foundation** for the threshold-cryptography layer of v2 + Theme 9, all on the unified curve family (no new pairing-friendly curve added):
+- **v2.25 T-OPAQUE OPRF** (Theme 9 DSSO) uses ristretto255 — same curve family as v2.10's FROST-Ed25519 (Ed25519 signatures + ristretto255 generic ECC are presentations of the same curve). Reuses the per-epoch share-distribution infrastructure. Without v2.10's DKG, T-OPAQUE has no trust-minimized share-distribution path.
+- **v2.22 confidential transactions** (Theme 8) uses Bulletproofs on curve25519 (dalek-cryptography reference impl, the original Bulletproofs target). Same curve family; shared libsodium primitives.
 - **v2.9 distributed VRF** (deferred) is natural follow-on once DKG infrastructure exists.
 
 **Closes:** residual selective-abort bias in randomness (the only remaining randomness-bias vector after commit-reveal closed the broader class). Strengthens FA3 information-theoretic argument from "K-of-K commit-reveal" to "t-of-K threshold aggregation," which is the strongest possible bound (matches Byzantine takeover threshold).
@@ -437,13 +437,13 @@ Determ stays in its lane (payment + identity). But "best-in-class at that lane" 
 | Sub-decision | Resolved choice | Why |
 |---|---|---|
 | View-key rotation cadence | **Per-epoch automatic rotation via HKDF** | Bounded exposure per epoch; zero on-chain rotation cost; maps to regulator audit cadence; no rotation discipline required |
-| Range-proof construction | **Bulletproofs over BLS12-381** | Curve already vendored via v2.10 DKG (`blst`); no second cryptographic primitive family; mature; aggregation-friendly; no trusted setup |
+| Range-proof construction | **Bulletproofs over curve25519** | dalek-cryptography reference impl is canonical Bulletproofs implementation; same curve family as v2.10 FROST-Ed25519; preserves "two primitives" design value; no new cryptographic primitive family; aggregation-friendly; no trusted setup |
 | Sender-recipient handshake | **Ephemeral DH against recipient's `view_master_pk` + HKDF + XChaCha20-Poly1305 AEAD** | One-shot tx submission (no bidirectional interaction); forward secrecy via ephemeral; libsodium primitives already in tree |
 | Audit integration (v2.24) | **Dual-mode disclosure: `view_master_sk` (full) or per-epoch `vk_epoch_n` (scoped)** | Master = in-house compliance; per-epoch = external regulator with bounded audit window; maps to real regulator workflows |
 
 Each account has a long-term `view_master` keypair. Per-epoch view keys derive deterministically: `vk_epoch_n = HKDF(view_master_sk, "VK" || chain_id || account_addr || epoch_n)`. Recipients and auditors recompute the same derivation to decrypt amounts within epoch n. Compromised epoch keys expose only that epoch's amounts; subsequent epochs unaffected.
 
-**Tx-level encryption.** Sender generates ephemeral `eph_sk`; computes shared secret `ss = eph_sk · view_master_pk` (DH on BLS12-381 G1); derives `aek = HKDF(ss, "AMT" || epoch_n || tx_hash)`; encrypts amount as `amount_ct = AEAD(aek, amount_bytes, AAD = "TX-AMT" || tx_hash)`. Tx carries: commitment, range proof, `eph_pk`, `amount_ct`. Recipient (or auditor with master) decrypts via the same DH.
+**Tx-level encryption.** Sender generates ephemeral `eph_sk`; computes shared secret `ss = eph_sk · view_master_pk` (DH on ristretto255); derives `aek = HKDF(ss, "AMT" || epoch_n || tx_hash)`; encrypts amount as `amount_ct = AEAD(aek, amount_bytes, AAD = "TX-AMT" || tx_hash)`. Tx carries: commitment, range proof, `eph_pk`, `amount_ct`. Recipient (or auditor with master) decrypts via the same DH.
 
 **Emergency master compromise recovery.** `ROTATE_VIEW_MASTER` tx (analogous to v2.26 `ROTATE_KEY`) allows one-time recovery from catastrophic master compromise. Not for routine rotation (Option C handles routine rotation via HKDF) — only for emergency.
 
@@ -451,7 +451,7 @@ Each account has a long-term `view_master` keypair. Per-epoch view keys derive d
 
 | Sub-component | Effort |
 |---|---|
-| Bulletproofs over BLS12-381 (vendor + port from curve25519 reference) | 4-6 weeks |
+| Bulletproofs over curve25519 (vendor dalek-cryptography reference directly) | 2-3 weeks |
 | Pedersen commitment integration | 2-3 weeks |
 | View-master + per-epoch HKDF derivation | 2 weeks |
 | Sender-recipient DH handshake (libsodium AEAD) | 1 week |
@@ -460,12 +460,12 @@ Each account has a long-term `view_master` keypair. Per-epoch view keys derive d
 | Tests + docs | 2 weeks |
 | Migration tooling | 1 week |
 
-**Shared infrastructure savings.** BLS12-381 library already vendored for v2.10 DKG — saves ~1 week of vendoring effort otherwise required for curve25519 Bulletproofs. Cascade benefit from v2.10's Option C choice.
+**Shared infrastructure savings.** libsodium already vendored (wallet/envelope.cpp + Theme-7 direct-to-DApp pattern + v2.10 DKG). Bulletproofs uses the same ristretto255 primitives. Same curve family across v2.10 (FROST-Ed25519), v2.22 (Bulletproofs/curve25519), and v2.25 (T-OPAQUE/ristretto255). One audit surface across all threshold-cryptography features.
 
 **Composes with.**
 - **v2.24 audit hooks** — concrete dual-mode disclosure mechanism (master vs per-epoch). v2.24 reduces to "add `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference auditor tool"; v2.22 provides the underlying view-key infrastructure.
 - **v2.26 key rotation** — `ROTATE_VIEW_MASTER` and `ROTATE_AUDIT_KEY` follow the same pattern as v2.26 `ROTATE_KEY`; shared cooldown semantics.
-- **v2.10 DKG infrastructure** — BLS12-381 + `blst` already vendored.
+- **v2.10 DKG infrastructure** — curve25519 family via libsodium already vendored; FROST-Ed25519 primitives shared.
 - **v2.25 DSSO (Theme 9)** — DSSO assertions can carry encrypted account-history summaries scoped to the RP via per-tx ephemeral DH (future composition; not in v2.22's scope).
 
 **Closes:** new capability (no existing finding). Enables real-world payment use cases that today need a separate privacy chain — including the gambling-industry deployments where high-roller bankroll confidentiality is a regulatory requirement.
@@ -554,7 +554,7 @@ A distributed-IdP framework with the K-of-K committee as the operator group + T-
 
 | Block | Status |
 |---|---|
-| v2.10 threshold randomness (BLS12-381 + DKG) | 🔥 active. Provides the threshold-crypto plumbing the T-OPAQUE share-distribution layer needs. |
+| v2.10 threshold randomness (curve25519 family + FROST-Ed25519 DKG) | 🔥 active. Provides the threshold-crypto plumbing the T-OPAQUE share-distribution layer needs. |
 | v2.14 OPAQUE wallet recovery | ⏳ not started. Exercises the single-server OPAQUE primitive in production; de-risks the threshold version. |
 | v2.18 DAPP_REGISTER | ✅ shipped. RP-registration channel. |
 | v2.19 DAPP_CALL | ✅ shipped. Challenge / assertion delivery channel. |
@@ -713,7 +713,7 @@ Layer-level estimates with shipped vs remaining split:
 | Composability (v2.12) | Cross-shard atomic primitives | 1 week | 0 (foundation: A9 Phase 2D atomic_scope shipped; cross-shard 2PC pending) | 1 week |
 | Wallet/operator (v2.14–v2.17) | OPAQUE port, HD derivation, RPC auth, encrypted keyfiles | 2 weeks | ✅ v2.16 + v2.17 shipped; v2.14 + v2.15 not started | ~1 week |
 | Application layer (v2.18–v2.20) | DApp substrate (registry + call + RPC + polling) | (was implicit, now itemized) ~1 week | ✅ v2.18 + v2.19 shipped, v2.20 polling shipped (streaming pending) | ~3 days for streaming |
-| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** | 0 (v2.22 spec resolved per `v2.22-PRIVACY-SPEC.md`; v2.24 scope reduced to ~1-2 weeks; BLS12-381 vendoring savings cascade from v2.10) | 3-5 months |
+| **Privacy & interop (v2.22–v2.24)** | **Confidential tx + cross-chain bridge + audit hooks** | **3-5 months** | 0 (v2.22 spec resolved per `v2.22-PRIVACY-SPEC.md`; v2.24 scope reduced to ~1-2 weeks; curve25519-family cascade from v2.10 — libsodium already vendored) | 3-5 months |
 
 **Themes 1-7 status:** ~6 weeks of work remaining (vs 12-16 weeks at start of session). Major absorbed: v2.1, v2.2 (foundation), v2.3, v2.4 (full A9), v2.5, v2.6, v2.16, v2.17, v2.18, v2.19, v2.20 polling.
 
@@ -734,7 +734,7 @@ Single contiguous sprint that lands v2 Themes 1-7 fully. Items inside the phase 
 | A.1 | C3 gossip-out-of-lock, C6 BFT threshold bump | ~1.5 days | Smallest items; clears C-track to "all shipped." |
 | A.2 | R5 `tools/test_regional_shards.sh`, R6 README §17.6 update | ~1 day | Closes the R-track verification gap from the in-session sharding work. |
 | A.3 | E1 NEF lottery rewrite | ~2-3 days | Reconciles shipped geometric `pool/2` with the canonical lottery design (plan.md §E1). Independent of all other work. |
-| A.4 | A11 / v2.10 threshold randomness aggregation (incl. DKG infrastructure) | ~3-4 weeks | **Theme-9 precondition + shared foundation for v2.22/v2.25.** DKG spec resolved per Option C in `docs/proofs/v2.10-DKG-SPEC.md`; revised cost reflects epoch-boundary trustless DKG + PSS refresh + BLS12-381 + FROST-BLS. Largest single item in Phase A; land first so any DKG / BLS vendoring surprises surface early. |
+| A.4 | A11 / v2.10 threshold randomness aggregation (incl. DKG infrastructure) | ~3 weeks | **Theme-9 precondition + shared foundation for v2.22/v2.25.** DKG spec resolved per Option C in `docs/proofs/v2.10-DKG-SPEC.md`; cost reflects epoch-boundary trustless DKG + PSS refresh + FROST-Ed25519 on curve25519 family (libsodium already vendored). Largest single item in Phase A; land first so any FROST port surprises surface early. |
 | A.5 | A2 / v2.14 OPAQUE wallet finisher | ~5-7 days | **Theme-9 precondition.** Single-server OPAQUE exercises the adapter shape T-OPAQUE will reuse. |
 | A.6 | A7 randomness binding RPC + reference DApp | ~1.5 days | Unlocks fair-lottery DApp + general application-layer randomness consumption. |
 | A.7 | A8 IdP-directory finisher | ~2-3 days | Builds on shipped v2.18/v2.19; light follow-on. |
@@ -753,7 +753,7 @@ Theme 8 is the largest remaining work block. Internal sequencing prioritizes the
 
 | Order | Item | Effort | Why this order |
 |---|---|---|---|
-| B.1 | v2.22 confidential transactions (per `v2.22-PRIVACY-SPEC.md`) | ~3 months | Unblocks all real-world payment use cases (B2B, payroll, retail, regulated gambling) that today need a separate privacy chain. Highest commercial leverage. Spec resolved per Option C — curve choice (BLS12-381) cascades from v2.10. |
+| B.1 | v2.22 confidential transactions (per `v2.22-PRIVACY-SPEC.md`) | ~2.5-3 months | Unblocks all real-world payment use cases (B2B, payroll, retail, regulated gambling) that today need a separate privacy chain. Highest commercial leverage. Spec resolved per Option C — curve choice (curve25519 family via libsodium) cascades from v2.10. |
 | B.2 (parallel with B.1) | v2.23 cross-chain bridge, Determ-to-Determ first | 1 month | Lowest-uncertainty bridge variant; uses Determ's own light-client + state_root machinery. Independent of v2.22. |
 | B.3 (after B.2) | v2.23 cross-chain bridge, Cosmos IBC | 2 months | Standardized spec; deferred from B.2 to avoid blocking confidential-tx work. |
 | B.4 (after B.1) | v2.24 audit / compliance hooks (per `v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6) | 1-2 weeks | **Reduced scope** post-v2.22 spec — v2.22 delivers the view-key infrastructure; v2.24 adds `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference auditor tool. Composes cleanly with v2.22's dual-mode disclosure. |
@@ -784,7 +784,7 @@ The largest single architectural effort in Determ's roadmap. Removes the beacon 
 **Status: spec resolved per Option A** in `docs/proofs/Beaconless-v2-SPEC.md`. All 6 interlinked foundational sub-questions formally resolved (cross-shard validation architecture, trust anchor, committee continuity, cross-shard receipts, decentralized merge detection, randomness mixing). Implementation pending pre-implementation review (8-point checklist in spec §8).
 
 **Prerequisites:**
-- v2 + Theme 9 substantially shipped (Beaconless v2 builds on v2.1 state Merkle root, v2.2 light-client proofs, v2.10 FROST-BLS threshold infrastructure)
+- v2 + Theme 9 substantially shipped (Beaconless v2 builds on v2.1 state Merkle root, v2.2 light-client proofs, v2.10 FROST-Ed25519 threshold infrastructure)
 - Deterministic-simulation framework (S-035 Option 2, ~3-4 weeks) — needed to catch Byzantine bugs in the much-larger beaconless surface that integration tests can't drive
 
 | Order | Item | Effort | Why this order |
@@ -795,7 +795,7 @@ The largest single architectural effort in Determ's roadmap. Removes the beacon 
 | D.3 | Committee-rotation log (per shard) | 1-2 weeks | Append-only on-chain log; light-client traversal; snapshot compaction every 100 epochs. |
 | D.4 | Cross-shard receipts with Merkle proofs | 2-3 weeks | Receipt format extension; source-side proof generation; receiver-side validation via light-client header. |
 | D.5 | Decentralized merge-detection | 1-2 weeks | Per-shard SHARD_TIP observation + Merritt-witness affidavits. Tolerates k Byzantine shards given num_shards > k(k+1). |
-| D.6 | Cross-shard randomness aggregation | 1-2 weeks | Per-epoch accumulator over threshold signatures (reuses v2.10 FROST-BLS). |
+| D.6 | Cross-shard randomness aggregation | 1-2 weeks | Per-epoch accumulator over threshold signatures (reuses v2.10 FROST-Ed25519). |
 | D.7 | `AUTONOMOUS_SHARD` chain_role + migration | 1-2 weeks | New chain_role; per-deployment flag-day migration tooling. |
 | D.8 | Tests + docs | 2 weeks | DSF-driven scenarios; integration test for 3-5 autonomous shard deployment; documentation refresh. |
 

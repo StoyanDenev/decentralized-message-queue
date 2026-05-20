@@ -25,7 +25,7 @@
 Currently genuinely outstanding:
 
 - **S-030 D2 full closure (v2.7 F2)** — design specification complete in `docs/proofs/F2-SPEC.md`; implementation ~3-4 days. D1 is effective-closed via S-033 state_root binding; D2 is partial-closed via the same mechanism (apply-layer rejection). v2.7 F2 closes D2 at the consensus layer (signatures gather only on view convergence).
-- **v2.10 threshold randomness aggregation** — 🔥 promoted to active in plan.md A11. Defeats residual selective-abort attack via t-of-K threshold signatures. **~3-4 weeks** including BLS12-381 vendoring (`blst`) + FROST-BLS DKG (Option C per `docs/proofs/v2.10-DKG-SPEC.md`: epoch-boundary trustless DKG with proactive secret-sharing refresh — supports validator rotation under mutual distrust). DKG infrastructure shared with v2.22 / v2.25.
+- **v2.10 threshold randomness aggregation** — 🔥 promoted to active in plan.md A11. Defeats residual selective-abort attack via t-of-K threshold signatures. **~3 weeks** including FROST-Ed25519 primitive port on already-vendored libsodium (Option C per `docs/proofs/v2.10-DKG-SPEC.md`: epoch-boundary trustless DKG with proactive secret-sharing refresh — supports validator rotation under mutual distrust). DKG infrastructure shared with v2.22 / v2.25; preserves "two primitives" design value (SHA-256 + curve25519 family).
 
 Closed in-session (retained here for audit trail; see §3 bodies):
 
@@ -1432,7 +1432,7 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
 1. ~~Track A small items~~ — **complete in-session**.
 2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
-3. v2.10 threshold randomness aggregation per plan.md A11 (**~3-4 weeks**, includes BLS12-381 `blst` vendoring + FROST-BLS DKG per Option C — epoch-boundary trustless DKG with PSS refresh; revised from prior ~1 week estimate after DKG spec).
+3. v2.10 threshold randomness aggregation per plan.md A11 (**~3 weeks**, includes FROST-Ed25519 primitive port on already-vendored libsodium per Option C — epoch-boundary trustless DKG with PSS refresh on the curve25519 family; revised from prior ~1 week estimate after DKG spec).
 
 Total remaining: ~4-5 weeks to "production-deployment-ready" posture. v2.10 is now the long pole; v2.7 F2 is small in comparison. Beyond that (v2.X), Theme 8 (privacy + interop) + Theme 9 (DSSO) extend the design space toward god-protocol completeness for Determ's lane. v2.10's DKG infrastructure is a shared foundation for v2.22 (curve choice) and v2.25 (T-OPAQUE OPRF) — landing it well amortizes across multiple downstream items.
 
