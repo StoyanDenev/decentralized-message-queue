@@ -190,6 +190,31 @@ struct GenesisConfig {
     uint32_t                        epoch_blocks{1000};             // E (Stage B1)
     Hash                            shard_address_salt{};           // CSPRNG-generated at build time
 
+    // v2.7 F2 migration gate (per docs/proofs/F2-V210-IMPLEMENTATION-PLAN.md
+    // sub-step 4). Block height at which F2 view-reconciliation activates:
+    //   < v2_7_f2_active_from_height  : producer omits view fields,
+    //                                   validator skips V21..V26
+    //                                   (pre-activation = v1 behavior)
+    //   >= v2_7_f2_active_from_height : producer populates view roots +
+    //                                   lists; validator runs V21..V26
+    // Default 0 = active from genesis (new deployments opt into F2 from
+    // block 1). To preserve byte-identical chain identity for existing
+    // pre-F2 deployments, leave this field absent from existing genesis
+    // files (zero default → field absent from compute_genesis_hash mixin
+    // for back-compat; mixed in only when non-zero).
+    //
+    // Sentinel UINT64_MAX = "never activate F2 on this chain" (operator
+    // explicitly disables; the chain stays on v1 commit shape forever).
+    uint64_t                        v2_7_f2_active_from_height{0};
+
+    // v2.10 threshold randomness migration gate. Same pattern: block
+    // height at which DKG ceremony + FROST-Ed25519 threshold-aggregation
+    // activates. Default 0 = active from genesis. v2.10 implementation
+    // is in progress (per F2-V210-IMPLEMENTATION-PLAN.md phases A-F);
+    // until the FROST primitives land in src/crypto/frost.cpp this field
+    // is declared but the apply-path enforcement is no-op (pre-Phase-D).
+    uint64_t                        v2_10_active_from_height{0};
+
     // rev.9 R1: per-shard committee region pin. Empty = global pool
     // (backward-compat — existing deployments hash-stable). Non-empty
     // restricts this chain's K-committee selection to validators

@@ -24,7 +24,7 @@ using json = nlohmann::json;
 json ContribMsg::to_json() const {
     json arr = json::array();
     for (auto& h : tx_hashes) arr.push_back(to_hex(h));
-    return {
+    json out = {
         {"block_index", block_index},
         {"signer",      signer},
         {"prev_hash",   to_hex(prev_hash)},
@@ -33,6 +33,36 @@ json ContribMsg::to_json() const {
         {"dh_input",    to_hex(dh_input)},
         {"ed_sig",      to_hex(ed_sig)}
     };
+    // v2.7 F2: emit view fields ONLY when any are non-default. This
+    // preserves byte-identical JSON with pre-F2 ContribMsg when no view
+    // is bound (backward compat with v1 peers + deterministic gossip
+    // bandwidth in pre-activation epochs).
+    auto is_zero_hash = [](const Hash& h) {
+        for (auto b : h) if (b != 0) return false;
+        return true;
+    };
+    bool has_view =
+        !is_zero_hash(view_eq_root) ||
+        !is_zero_hash(view_abort_root) ||
+        !is_zero_hash(view_inbound_root) ||
+        !view_eq_list.empty() ||
+        !view_abort_list.empty() ||
+        !view_inbound_list.empty();
+    if (has_view) {
+        out["view_eq_root"]      = to_hex(view_eq_root);
+        out["view_abort_root"]   = to_hex(view_abort_root);
+        out["view_inbound_root"] = to_hex(view_inbound_root);
+        json eq_arr = json::array();
+        for (auto& h : view_eq_list)      eq_arr.push_back(to_hex(h));
+        json ab_arr = json::array();
+        for (auto& h : view_abort_list)   ab_arr.push_back(to_hex(h));
+        json in_arr = json::array();
+        for (auto& h : view_inbound_list) in_arr.push_back(to_hex(h));
+        out["view_eq_list"]      = eq_arr;
+        out["view_abort_list"]   = ab_arr;
+        out["view_inbound_list"] = in_arr;
+    }
+    return out;
 }
 
 ContribMsg ContribMsg::from_json(const json& j) {
@@ -64,6 +94,44 @@ ContribMsg ContribMsg::from_json(const json& j) {
             m.tx_hashes.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
     m.dh_input = from_hex_arr<32>(json_require_hex(j, "dh_input", 64));
+
+    // v2.7 F2: optional view-reconciliation fields (per F2-SPEC.md §Q1/Q3/Q4).
+    // Backward-compat: pre-F2 ContribMsg omits these; default to zero/empty.
+    // When present, all three roots + all three lists must be present together
+    // (validator's V21..V26 cross-checks them); enforcement of "all-or-none"
+    // happens at the validator layer post-activation. Wire-level JSON here is
+    // lenient: missing fields default-zero, present fields S-018-validated.
+    if (j.contains("view_eq_root"))
+        m.view_eq_root = from_hex_arr<32>(json_require_hex(j, "view_eq_root", 64));
+    if (j.contains("view_abort_root"))
+        m.view_abort_root = from_hex_arr<32>(json_require_hex(j, "view_abort_root", 64));
+    if (j.contains("view_inbound_root"))
+        m.view_inbound_root = from_hex_arr<32>(json_require_hex(j, "view_inbound_root", 64));
+    if (j.contains("view_eq_list")) {
+        if (!j["view_eq_list"].is_array())
+            throw std::runtime_error(
+                "S-018: CONTRIB field 'view_eq_list' must be a JSON array "
+                "(got " + std::string(j["view_eq_list"].type_name()) + ")");
+        for (auto& h : j["view_eq_list"])
+            m.view_eq_list.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("view_abort_list")) {
+        if (!j["view_abort_list"].is_array())
+            throw std::runtime_error(
+                "S-018: CONTRIB field 'view_abort_list' must be a JSON array "
+                "(got " + std::string(j["view_abort_list"].type_name()) + ")");
+        for (auto& h : j["view_abort_list"])
+            m.view_abort_list.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("view_inbound_list")) {
+        if (!j["view_inbound_list"].is_array())
+            throw std::runtime_error(
+                "S-018: CONTRIB field 'view_inbound_list' must be a JSON array "
+                "(got " + std::string(j["view_inbound_list"].type_name()) + ")");
+        for (auto& h : j["view_inbound_list"])
+            m.view_inbound_list.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+
     m.ed_sig   = from_hex_arr<64>(json_require_hex(j, "ed_sig", 128));
     return m;
 }
@@ -150,7 +218,10 @@ BlockSigMsg BlockSigMsg::from_json(const json& j) {
 
 Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               const std::vector<Hash>& sorted_tx_hashes,
-                              const Hash& dh_input) {
+                              const Hash& dh_input,
+                              const Hash& view_eq_root,
+                              const Hash& view_abort_root,
+                              const Hash& view_inbound_root) {
     SHA256Builder inner;
     for (auto& h : sorted_tx_hashes) inner.append(h);
     Hash inner_root = inner.finalize();
@@ -160,6 +231,31 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
     b.append(prev_hash);
     b.append(inner_root);
     b.append(dh_input);
+
+    // v2.7 F2 backward-compat: when all three view roots are zero, fall
+    // through to the v1 commit shape (no extra appends). This preserves
+    // byte-identical hashes with pre-F2 nodes — critical for the
+    // pre-activation epoch where mixed-version peers might receive
+    // each other's ContribMsg. Post-activation, the producer always
+    // populates non-zero roots so the F2 path is always taken; the v1
+    // short-circuit is structurally unreachable.
+    auto is_zero_hash = [](const Hash& h) {
+        for (auto byte : h) if (byte != 0) return false;
+        return true;
+    };
+    bool any_view = !is_zero_hash(view_eq_root)
+                 || !is_zero_hash(view_abort_root)
+                 || !is_zero_hash(view_inbound_root);
+    if (any_view) {
+        // Domain separator: prepend the F2 schema tag so an attacker
+        // can't construct a v2-shaped pre-image that hashes to a v1
+        // commit value (and vice versa). Without this, a malicious
+        // peer could replay v1 sigs as if they bound F2 views.
+        b.append(std::string("DTM-F2-v1"));
+        b.append(view_eq_root);
+        b.append(view_abort_root);
+        b.append(view_inbound_root);
+    }
     return b.finalize();
 }
 

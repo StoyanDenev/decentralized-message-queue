@@ -8,6 +8,7 @@
 #include <determ/chain/params.hpp>
 #include <determ/crypto/profile_build.hpp>
 #include <determ/crypto/keys.hpp>
+#include <determ/crypto/frost.hpp>
 #include <determ/crypto/merkle.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -9576,6 +9577,213 @@ int main(int argc, char** argv) {
                   "reconcile_union: member-order independent");
             check(reconcile_intersection(m1) == reconcile_intersection(m2),
                   "reconcile_intersection: member-order independent");
+        }
+
+        // === Sub-step 1 + 2: make_contrib_commitment F2 extension ===
+        //
+        // The commit-binding side of F2: when view roots are populated,
+        // the commit hash MUST be distinct from the v1 commit (otherwise
+        // a v1-signed message could be replayed as if it bound F2 views).
+
+        // 18. v1 commit (no view roots) matches the pre-F2 hash via the
+        //     all-zero short-circuit.
+        {
+            std::vector<Hash> tx = {patterned_hash(0x01), patterned_hash(0x02)};
+            Hash dh = patterned_hash(0x03);
+            Hash v1_explicit = make_contrib_commitment(100, patterned_hash(0xAA), tx, dh);
+            Hash v1_zero_view = make_contrib_commitment(
+                100, patterned_hash(0xAA), tx, dh, Hash{}, Hash{}, Hash{});
+            check(v1_explicit == v1_zero_view,
+                  "make_contrib_commitment: all-zero views == v1 short-circuit");
+        }
+
+        // 19. ANY non-zero view root produces a DIFFERENT hash.
+        {
+            std::vector<Hash> tx = {patterned_hash(0x01)};
+            Hash dh = patterned_hash(0x03);
+            Hash v1 = make_contrib_commitment(100, patterned_hash(0xAA), tx, dh);
+            Hash with_eq = make_contrib_commitment(
+                100, patterned_hash(0xAA), tx, dh,
+                patterned_hash(0xEE), Hash{}, Hash{});
+            Hash with_ab = make_contrib_commitment(
+                100, patterned_hash(0xAA), tx, dh,
+                Hash{}, patterned_hash(0xAB), Hash{});
+            Hash with_in = make_contrib_commitment(
+                100, patterned_hash(0xAA), tx, dh,
+                Hash{}, Hash{}, patterned_hash(0xCC));
+            check(v1 != with_eq,
+                  "make_contrib_commitment: eq_root binds the hash");
+            check(v1 != with_ab,
+                  "make_contrib_commitment: abort_root binds the hash");
+            check(v1 != with_in,
+                  "make_contrib_commitment: inbound_root binds the hash");
+            check(with_eq != with_ab && with_eq != with_in && with_ab != with_in,
+                  "make_contrib_commitment: each root contributes independently");
+        }
+
+        // 20. F2 commit determinism (same view roots → same hash).
+        {
+            std::vector<Hash> tx = {patterned_hash(0x01)};
+            Hash dh = patterned_hash(0x03);
+            Hash a = make_contrib_commitment(
+                100, patterned_hash(0xAA), tx, dh,
+                patterned_hash(0xEE), patterned_hash(0xAB), patterned_hash(0xCC));
+            Hash b = make_contrib_commitment(
+                100, patterned_hash(0xAA), tx, dh,
+                patterned_hash(0xEE), patterned_hash(0xAB), patterned_hash(0xCC));
+            check(a == b,
+                  "make_contrib_commitment: F2 path deterministic");
+        }
+
+        // === ContribMsg to_json / from_json round-trip with F2 fields ===
+
+        // 21. ContribMsg with empty view fields: JSON round-trip preserves
+        //     (v1-compatible).
+        {
+            ContribMsg m;
+            m.block_index = 42;
+            m.signer      = "alice.tld";
+            m.prev_hash   = patterned_hash(0xAA);
+            m.aborts_gen  = 7;
+            m.tx_hashes   = {patterned_hash(0x01), patterned_hash(0x02)};
+            m.dh_input    = patterned_hash(0x03);
+            m.ed_sig.fill(0xFF);
+            json j = m.to_json();
+            check(!j.contains("view_eq_root"),
+                  "ContribMsg to_json: omits view fields when empty (v1 compat)");
+            ContribMsg m2 = ContribMsg::from_json(j);
+            check(m2.view_eq_root == Hash{} &&
+                  m2.view_abort_root == Hash{} &&
+                  m2.view_inbound_root == Hash{},
+                  "ContribMsg from_json: defaults view roots to zero when absent");
+            check(m2.view_eq_list.empty() && m2.view_abort_list.empty()
+                  && m2.view_inbound_list.empty(),
+                  "ContribMsg from_json: defaults view lists to empty when absent");
+        }
+
+        // 22. ContribMsg with populated view fields: JSON round-trip preserves.
+        {
+            ContribMsg m;
+            m.block_index = 42;
+            m.signer      = "alice.tld";
+            m.prev_hash   = patterned_hash(0xAA);
+            m.aborts_gen  = 7;
+            m.tx_hashes   = {patterned_hash(0x01)};
+            m.dh_input    = patterned_hash(0x03);
+            m.view_eq_root      = patterned_hash(0xEE);
+            m.view_abort_root   = patterned_hash(0xAB);
+            m.view_inbound_root = patterned_hash(0xCC);
+            m.view_eq_list      = {patterned_hash(0xE1), patterned_hash(0xE2)};
+            m.view_abort_list   = {patterned_hash(0xA1)};
+            m.view_inbound_list = {patterned_hash(0xC1), patterned_hash(0xC2),
+                                    patterned_hash(0xC3)};
+            m.ed_sig.fill(0xFF);
+            json j = m.to_json();
+            check(j.contains("view_eq_root") &&
+                  j.contains("view_abort_root") &&
+                  j.contains("view_inbound_root"),
+                  "ContribMsg to_json: emits view roots when populated");
+            check(j.contains("view_eq_list") &&
+                  j.contains("view_abort_list") &&
+                  j.contains("view_inbound_list"),
+                  "ContribMsg to_json: emits view lists when populated");
+            ContribMsg m2 = ContribMsg::from_json(j);
+            check(m2.view_eq_root == m.view_eq_root &&
+                  m2.view_abort_root == m.view_abort_root &&
+                  m2.view_inbound_root == m.view_inbound_root,
+                  "ContribMsg from_json: roots roundtrip exactly");
+            check(m2.view_eq_list == m.view_eq_list &&
+                  m2.view_abort_list == m.view_abort_list &&
+                  m2.view_inbound_list == m.view_inbound_list,
+                  "ContribMsg from_json: lists roundtrip exactly");
+        }
+
+        // 23. S-018 wrong-type rejection on view lists (defense-in-depth).
+        {
+            ContribMsg m;
+            m.block_index = 42;
+            m.signer      = "alice.tld";
+            m.prev_hash   = patterned_hash(0xAA);
+            m.dh_input    = patterned_hash(0x03);
+            m.ed_sig.fill(0x00);
+            json j = m.to_json();
+            j["view_eq_list"] = 42;  // wrong type — should throw
+            bool threw = false;
+            try { (void)ContribMsg::from_json(j); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "ContribMsg from_json: wrong-type view_eq_list throws S-018");
+        }
+
+        // === v2.10 Phase A scaffolding: FROST primitives throw cleanly ===
+        //
+        // All FROST primitives are declared (header `determ/crypto/frost.hpp`)
+        // and stubbed (src/crypto/frost.cpp) to throw `std::logic_error` with
+        // a clear "Phase A not yet implemented" diagnostic. This lets dependent
+        // Phase B (DKG ceremony) + Phase D (threshold-sig integration) code
+        // be drafted against a stable API contract.
+        //
+        // These assertions PIN the API contract: signatures match the header
+        // declarations; the runtime behavior is "throws not crashes". When
+        // Phase A actually ships (RFC 9591 logic on libsodium), only the
+        // `unimplemented()` calls in frost.cpp are replaced — the test below
+        // gets re-written to exercise real round-trips at that time.
+
+        // 24. frost_keygen_round1 throws with diagnostic.
+        {
+            bool threw = false; std::string what;
+            try { (void)determ::crypto::frost::frost_keygen_round1(1, 2, 3); }
+            catch (const std::logic_error& e) { threw = true; what = e.what(); }
+            check(threw && what.find("Phase A") != std::string::npos,
+                  "frost_keygen_round1: scaffolded, throws Phase-A logic_error");
+        }
+
+        // 25. frost_sign_round1 throws with diagnostic.
+        {
+            bool threw = false; std::string what;
+            determ::crypto::frost::LocalShare ls{};
+            try { (void)determ::crypto::frost::frost_sign_round1(ls); }
+            catch (const std::logic_error& e) { threw = true; what = e.what(); }
+            check(threw && what.find("Phase A") != std::string::npos,
+                  "frost_sign_round1: scaffolded, throws Phase-A logic_error");
+        }
+
+        // 26. frost_aggregate throws with diagnostic.
+        {
+            bool threw = false; std::string what;
+            determ::crypto::frost::CommitmentMap cm;
+            std::vector<std::pair<determ::crypto::frost::Identifier,
+                                   determ::crypto::frost::Scalar>> partials;
+            std::vector<uint8_t> msg;
+            determ::crypto::frost::Point gpk{};
+            try { (void)determ::crypto::frost::frost_aggregate(
+                cm, partials, msg, gpk); }
+            catch (const std::logic_error& e) { threw = true; what = e.what(); }
+            check(threw && what.find("Phase A") != std::string::npos,
+                  "frost_aggregate: scaffolded, throws Phase-A logic_error");
+        }
+
+        // 27. frost_verify throws with diagnostic (placeholder; will be
+        //     replaced with crypto_sign_verify_detached delegation in Phase A).
+        {
+            bool threw = false;
+            determ::crypto::frost::FrostSig sig{};
+            determ::crypto::frost::Point gpk{};
+            std::vector<uint8_t> msg;
+            try { (void)determ::crypto::frost::frost_verify(sig, gpk, msg); }
+            catch (const std::logic_error&) { threw = true; }
+            check(threw,
+                  "frost_verify: scaffolded, throws Phase-A logic_error");
+        }
+
+        // 28. Type sizes match RFC 9591 expectations (Ed25519 scalar/point/sig).
+        {
+            check(sizeof(determ::crypto::frost::Scalar) == 32,
+                  "FROST Scalar size = 32 bytes (Ed25519 scalar mod L)");
+            check(sizeof(determ::crypto::frost::Point) == 32,
+                  "FROST Point size = 32 bytes (Ed25519 compressed point)");
+            check(sizeof(determ::crypto::frost::FrostSig) == 64,
+                  "FROST signature size = 64 bytes (Ed25519 R || z)");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

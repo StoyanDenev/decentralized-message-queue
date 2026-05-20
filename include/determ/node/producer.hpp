@@ -25,6 +25,33 @@ struct ContribMsg {
     uint64_t           aborts_gen{0};
     std::vector<Hash>  tx_hashes;     // sorted ascending
     Hash               dh_input{};    // fresh 32 B
+
+    // ─── v2.7 F2 view-reconciliation fields ────────────────────────────────
+    //
+    // Per docs/proofs/F2-SPEC.md §Q1/Q3/Q4: each committee member commits
+    // to their view of three pool-fed fields at Phase-1 commit time. The
+    // roots bind the member to their committed view (no equivocation
+    // between Phase-1 commit and Phase-2 reveal). The actual lists travel
+    // alongside so the validator can re-derive the canonical reconciled
+    // list AND verify each member's Merkle binding.
+    //
+    // Per F2-SPEC.md §Q3 bandwidth budget: each list is capped at 64
+    // entries per member (the validator's V-check enforces this).
+    //
+    // Backward-compatibility: pre-F2 ContribMsg JSON omits these fields;
+    // the JSON roundtrip defaults them to zero-hash / empty-vector. Pre-
+    // F2 commit-signature compatibility is preserved by the rule that
+    // make_contrib_commitment() falls back to the v1 hash when ALL three
+    // view-roots are zero. The validator's V21..V26 checks fire only
+    // when v2_7_f2_active_from_height (genesis-pinned) is reached.
+    Hash               view_eq_root{};      // root over sorted equivocation_events view
+    Hash               view_abort_root{};   // root over sorted abort_events view
+    Hash               view_inbound_root{}; // root over sorted inbound_receipts view
+    std::vector<Hash>  view_eq_list;        // sorted, capped at 64 per Q3
+    std::vector<Hash>  view_abort_list;     // sorted, capped at 64 per Q3
+    std::vector<Hash>  view_inbound_list;   // sorted, capped at 64 per Q3
+    // ─── end v2.7 F2 ────────────────────────────────────────────────────────
+
     Signature          ed_sig{};      // Ed25519 over commit message
 
     nlohmann::json    to_json() const;
@@ -90,9 +117,26 @@ struct BlockSigMsg {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 // Domain-separated commitment that each creator's Ed25519 sig covers in Phase 1.
+//
+// v2.7 F2 extension: three view roots bound into the commit per F2-SPEC.md §Q4.
+// Default zero values preserve byte-identical commitment with the v1 (pre-F2)
+// commit shape for backward-compat. When `v2_7_f2_active_from_height` is
+// reached, the producer populates all three roots from its local pool snapshots
+// and the validator binds against them.
+//
+// The "all-zero ⇒ v1 commit" rule is structural, not flag-based: if a caller
+// passes zero hashes (no F2 view bound), the inner builder appends them but
+// the result is bit-identical to what the v1 builder would produce if the
+// v1 builder were extended with three null appends. To preserve EXACT v1
+// hashes for legacy peers, callers MUST NOT include the view-root args
+// (they're trailing default-zero); the implementation has an explicit
+// short-circuit when all three roots are zero (= v1 path).
 Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               const std::vector<Hash>& sorted_tx_hashes,
-                              const Hash& dh_input);
+                              const Hash& dh_input,
+                              const Hash& view_eq_root = Hash{},
+                              const Hash& view_abort_root = Hash{},
+                              const Hash& view_inbound_root = Hash{});
 
 // Canonical tx_root: union of K-committee tx_hashes lists. Used in strong
 // mode (K=M_pool, every creator on committee) — censorship requires every
