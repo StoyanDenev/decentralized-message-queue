@@ -1,4 +1,4 @@
-# FB7 — TLA+ model-check transcripts (template)
+# FB8 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -35,6 +35,9 @@ java -jar tla2tools.jar -config Snapshot.cfg Snapshot.tla
 
 # FB7 — Nonce gate / tx-replay defense
 java -jar tla2tools.jar -config Nonce.cfg Nonce.tla
+
+# FB8 — Stake lifecycle (STAKE / DEREGISTER / UNSTAKE)
+java -jar tla2tools.jar -config StakeLifecycle.cfg StakeLifecycle.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -51,6 +54,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | AccountState.tla (3 domains, B=4, N=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | Snapshot.tla (3 domains, H=4, B=5) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 | Nonce.tla (3 domains, N=4, A=2, B=5) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| StakeLifecycle.tla (3 domains, H=6, B=5, D=3) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -143,6 +147,25 @@ Companion prose proof: `docs/proofs/SnapshotInvariants.md` (separately tracked; 
 
 Companion prose proof: `docs/proofs/NonceMonotonicity.md` (separately tracked; the prose track is being assembled in parallel).
 
+### StakeLifecycle.tla → apply-layer STAKE / DEREGISTER / UNSTAKE state machine
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `accounts` (balance, stake_locked), `registry` (active, inactive_from), `unlock_heights` (Domains → 0..Sentinel), `height` |
+| `Inv_StakeNonNegative` | per-domain `stake_locked >= 0` at every reachable state — Nat-typed; documents the contract |
+| `Inv_BalanceNonNegative` | per-domain `balance >= 0` at every reachable state — Nat-typed; documents the contract |
+| `Inv_A1Conservation` | `sum(balance) + sum(stake_locked) = INITIAL_TOTAL` — Stake and Unstake are internal balance ↔ stake_locked redistributions; neither mints nor destroys (the headline A1 supply-conservation claim for the stake lifecycle) |
+| `Inv_DeregisterImpliesActiveOff` | `registry[d].active = FALSE ⇒ registry[d].inactive_from /= Sentinel` — the apply path always sets both fields together |
+| `Inv_UnlockMonotonic` | action-level: per-domain `unlock_heights[d]` is monotone non-decreasing across every `[Next]_vars` step — once armed by Deregister, the unlock_height never decreases; Unstake clears to Sentinel (the largest possible value, > MaxHeight + UnstakeDelay + 1 by ConfigOK) so the clear is also non-decreasing |
+| `Inv_NoEarlyUnstake` | action-level: any step that decreases `stake_locked[d]` must come from a state where `unlock_heights[d] /= Sentinel` AND `height >= unlock_heights[d]` — the headline safety claim that an attacker cannot drain locked stake before the protocol-prescribed delay has elapsed |
+| `Inv_StakeChangeOnlyViaStakeOrUnstake` | action-level: only Stake and Unstake mutate `stake_locked[d]` — Deregister, UnstakeFailEarly, and AdvanceHeight all preserve it |
+| `Prop_EventualUnstake` (temporal) | under fairness on `AdvanceHeight` + `Unstake(d)`, a deregistered account with `stake_locked > 0` and `unlock_height <= MaxHeight` eventually completes unstaking (`stake_locked = 0`) OR the model bound is reached (`height >= MaxHeight`) — the eventual-progress / no-stuck-stake guarantee for honest operators |
+| `Prop_StakeOrUnstakeOnly` (temporal) | `[][...]_vars` restatement of `Inv_StakeChangeOnlyViaStakeOrUnstake`: across every reachable transition, `stake_locked` only changes via Stake-shape or Unstake-shape deltas |
+
+**Spec status:** written; TLC verification pending (consistent with the other six specs above). The configuration in `StakeLifecycle.cfg` (3 domains, MaxHeight=6, MaxBalance=5, UnstakeDelay=3, Sentinel=1000) is sized for an interactive TLC run in under 30 seconds on a single core. Variables modeled: `accounts` (Domains → [balance, stake_locked]), `registry` (Domains → [active, inactive_from]), `unlock_heights` (Domains → 0..Sentinel), `height` (Nat). Actions modeled: `Stake` (balance → stake_locked move), `Deregister` (sets active = FALSE, arms unlock_height = height + 1 + UnstakeDelay), `Unstake` (gated by `height >= unlock_height`; refunds stake_locked → balance), `UnstakeFailEarly` (the fee-refund pre-unlock branch at `src/chain/chain.cpp:881`; a stutter on the lifecycle vars), `AdvanceHeight` (temporal driver). Sentinel=1000 is far larger than MaxHeight + UnstakeDelay + 1 = 10, so the clear-to-Sentinel transition on Unstake remains monotone non-decreasing (Inv_UnlockMonotonic). The Deregister-at-h=0..2 branch reaches the unlock window within MaxHeight; the Deregister-at-h>=3 branch exercises the "unlock_height > MaxHeight" escape in `Prop_EventualUnstake`. Fees are abstracted away — the C++ apply path charges a fee on every STAKE / DEREGISTER / UNSTAKE; the lifecycle invariants are orthogonal to fee accounting.
+
+Companion prose proof: `docs/proofs/StakeLifecycle.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -176,6 +199,15 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `Nonce.pending` | `node::Mempool::pending_` (the validator-side pool whose acceptance is governed by the same nonce equality check) — set-semantics model abstracts away validator selection order |
 | `Nonce.applied` | implicit: derived from the sequence of `apply_transactions` invocations across `chain::Chain::apply_block`. The TLA-level audit log is a state-machine projection of the chain's tx history |
 | `Nonce.RemoveFromPending` | mempool eviction in `node::Mempool` (stale-nonce gc, expiry, bounded-pool drop per S-008) |
+| `StakeLifecycle.accounts` | `src/chain/chain.cpp::accounts_` (balance field) + `src/chain/chain.cpp::stakes_` (StakeEntry.locked field) — the model collapses the two C++ maps into a single combined record per domain |
+| `StakeLifecycle.registry` | `src/chain/chain.cpp::registrants_` (RegistryEntry.active_from / inactive_from fields; the model's `active` bit collapses the `active_from <= h < inactive_from` window into a single boolean) |
+| `StakeLifecycle.unlock_heights` | `include/determ/chain/chain.hpp::StakeEntry::unlock_height` field; the Sentinel value corresponds to the C++ `UINT64_MAX` "no unstake armed" marker (see `src/chain/chain.cpp:139` and `:811`) |
+| `StakeLifecycle.height` | `src/chain/chain.cpp::current_height_` (advanced once per applied block) |
+| `StakeLifecycle.Stake` | `src/chain/chain.cpp::apply_transactions` STAKE branch at lines 858–871 (balance → stake_locked move; fee abstracted) |
+| `StakeLifecycle.Deregister` | `src/chain/chain.cpp::apply_transactions` DEREGISTER branch at lines 839–856 (sets `rit->second.inactive_from = height + derive_delay(...)` and `sit->second.unlock_height = inactive_from + unstake_delay_`) |
+| `StakeLifecycle.Unstake` | `src/chain/chain.cpp::apply_transactions` UNSTAKE success branch at lines 889–893 (`sit->second.locked -= amount; sender.balance += amount;`) |
+| `StakeLifecycle.UnstakeFailEarly` | the fee-refund pre-unlock branch at `src/chain/chain.cpp:881-888` (`height < sit->second.unlock_height` → refund fee, do not move value) |
+| `StakeLifecycle.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (one tick per applied block) |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -220,7 +252,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -231,7 +263,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The six TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, and tx-replay-defense properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The seven TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, and stake-lifecycle properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
