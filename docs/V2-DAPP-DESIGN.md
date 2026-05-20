@@ -532,6 +532,7 @@ The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients 
 - **DApp message-bus indexing + pub-sub backend** (per-DApp+topic LSM index, retention policy state machine, streaming `dapp_subscribe` with backpressure) — fleshed out in §11.7.4 below
 - **DApp subscriber anonymity / unlinkable DAPP_CALL** (linkable-ring-sig + ephemeral-key bearer-call modes that hide subscriber identity from validators while preserving anti-replay, fee accounting, and per-DApp rate-limit enforcement) — fleshed out in §11.7.6 below
 - **DApp API versioning + compatibility contracts** (semantic-versioned `api_version` declared on `DAPP_REGISTER`, subscriber min-version handshake, deprecation timeline, version-aware payload routing) — fleshed out in §11.7.7 below
+- **DApp commit/reveal pattern** (two-phase tx-pair envelope for ordering-sensitive ops: sealed-bid auctions, MEV-resistant orderbooks, sealed-vote governance, lottery entries; `DAPP_CALL` phase discriminator + per-DApp `m:` namespace nullifier set; no new tx types) — fleshed out in §11.7.8 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
 
 ---
@@ -1977,6 +1978,270 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 - **Q6: Cross-shard interaction with §11.7.2.** A cross-shard DAPP_CALL crosses shard boundaries via the source-shard outbound + destination-shard receipt mechanism. The `api_version` field rides in the original `DAPP_CALL` payload, so it's preserved across the receipt boundary by construction. The destination shard's apply-side validates `api_version` against the destination's view of `dapp_registry_[dapp].version_policy` (which is the canonical state). Recommended: no special-case handling needed; the cross-shard receipt envelope is version-transparent. Deferred to §11.7.2 implementation review.
 - **Q7: Operator-declared deprecation reason field.** Like §11.7.1's `reason` field, a `DAPP_REGISTER` policy update could carry an optional `deprecation_reason: utf8` per-version for off-chain audit. Not safety-critical. Deferred to v2.31.1.
 - **Q8: Validator-side version-coverage health metric.** Validator nodes could expose a metric `dapp_calls_by_version{dapp=X, version=V}` showing the current call-rate distribution across versions for a DApp. Useful for operators deciding when a version is safe to retire (low real-time traffic). Recommended: expose via `rpc_dapp_versions` response augmented with `recent_call_count_by_version`. Not safety-critical; pure operational ergonomic. Deferred to v2.31.1.
+
+---
+
+### 11.7.8 — DApp commit/reveal pattern: ordering-sensitive ops with two-phase tx-pair envelope
+
+**Tracking slot:** v2.33 (Theme 7 — DApp commit/reveal). Effort: ~5-7 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped), v2.4 COMPOSABLE_BATCH (shipped). No new cryptographic primitives (SHA-256 + Ed25519 already required); no new consensus primitives (the chain still serializes commits and reveals as ordinary `DAPP_CALL` txs). Strictly extends the `DAPP_CALL` payload envelope with a commit-phase / reveal-phase discriminator and adds an apply-path nullifier check so reveals can only land after a same-payload commit at a prior block.
+
+#### Problem statement
+
+A DApp's apply-side logic is, by design, off-chain (§8 Mode A/B/C); the chain serializes inputs and exposes them in block-order for the DApp to consume. For many DApp patterns this serialization is sufficient — chat messages, payment receipts, indexer notifications, simple polling — because the order in which calls land within a block (or across a small window of blocks) does not change the semantic outcome.
+
+However, an entire class of valuable DApp use cases is **ordering-sensitive**: the result depends on whether call A "won" against call B, where "won" means landed first per the chain's canonical ordering. Examples:
+
+1. **Sealed-bid auctions.** Bidders submit bid_value and the highest bid wins, but bidders MUST NOT see each other's bids before the close. A naive DAPP_CALL exposes the bid in plaintext (after the DApp decrypts, but committee operators running Mode B/C see the cleartext as the call applies). Even encrypted to the DApp's `service_pubkey`, a colluding committee operator who is also a bidder learns competing bids before the close.
+2. **MEV-resistant ordering for DApp-internal swaps.** A DApp running an on-chain orderbook (§1 L2 zk-VM pattern) wants to prevent front-running: a producer-aligned bidder cannot see incoming orders and submit a same-block beat.
+3. **Sealed-vote governance polls.** DApp-scoped governance with one-vote-per-subscriber where individual votes must remain private until poll close (to prevent vote-buying / coercion).
+4. **Lottery / raffle entries.** Participants commit entry tickets; the DApp reveals a chain-derived random number (e.g., from v2.10 threshold randomness) after the close; entries hash-equal to the random number win.
+5. **Anti-front-running for off-chain compute requests.** A DApp providing oracle / computation services where the answer's value depends on the question being secret until the oracle commits to its data input.
+
+The naive workaround — "DApp operators run a trusted off-chain coordinator that buffers bids and reveals at deadline" — is exactly the trust assumption the protocol substrate is designed to eliminate (§1: "the chain stays in its lane"). A protocol-level commit/reveal envelope lets DApps offer **trustless** sealed-bid semantics: the commit phase publishes only `H(payload || salt)`, the reveal phase publishes `payload || salt`, and the chain enforces that no reveal lands without a matching prior commit at least N blocks earlier.
+
+This matters because: (a) §10 privacy explicitly notes that `service_pubkey`-encrypted payloads are NOT secret from operators running the DApp (they have the key), so any operator-collusion threat model needs a payload-blinding primitive; (b) auction / poll / lottery DApps are common ecosystem requests that map cleanly onto the v2.4 COMPOSABLE_BATCH substrate; (c) without a protocol-level commit/reveal, every DApp re-invents one off-chain with different security assumptions, harming ecosystem composability.
+
+#### Mechanism sketch
+
+Extend the `DAPP_CALL` payload envelope with a `phase` discriminator: `phase=0` (regular, current v2.19 behavior — same byte layout), `phase=1` (commit, payload contains `commit_hash` + `commit_metadata`), `phase=2` (reveal, payload contains `original_payload` + `salt` + reference to the committing tx). The chain maintains a per-DApp commit nullifier set in a new `m:` namespace ("m:" for "commit"), keyed by `(dapp, commit_hash)`. A commit tx inserts its hash; a reveal tx looks up the hash from `H(reveal_payload || reveal_salt)`, verifies the commit exists, verifies the commit's `tx.from` matches the reveal's `tx.from`, verifies the reveal lands at least `min_reveal_delay_blocks` after the commit, and deletes the entry on apply (one-shot reveal; no double-reveal).
+
+Data structures:
+
+```cpp
+struct DAppCommitEntry {
+    uint64_t commit_block_height;   // block where the commit landed
+    Address  committer;             // tx.from of the commit tx
+    uint32_t commit_metadata;       // operator-defined u32 the DApp can use for routing (e.g., poll_id)
+    uint64_t expiry_block_height;   // commit auto-expires here; chain GCs unrevealed commits
+};
+
+struct DAppCommitPolicy {
+    uint8_t  enabled;                  // 0 = commit/reveal disabled (default; v2.18/v2.19/v2.24 entries materialize as this)
+                                       // 1 = enabled
+    uint32_t min_reveal_delay_blocks;  // minimum blocks between commit and reveal (≥ DAPP_COMMIT_MIN_DELAY = 4)
+    uint32_t max_reveal_window_blocks; // commit expires this many blocks after commit_block_height
+                                       // bounded ≤ DAPP_COMMIT_MAX_WINDOW = 8192 (~6 hours on regional profile)
+    uint8_t  reveal_policy;            // 0 = single-reveal (default; reveal consumes the commit)
+                                       // 1 = N-of-M aggregate-reveal (operator-supplied threshold for sealed-bid auction batches)
+    uint8_t  expiry_policy;            // 0 = silent-GC (commit deleted at expiry; no refund event)
+                                       // 1 = emit-expiry-event (chain emits a DAPP_COMMIT_EXPIRED event consumed by §11.7.4 streaming)
+};
+
+struct DAppEntry {
+    // ...existing fields (service_pubkey, endpoint_url, topics, retention, metadata,
+    //    registered_at, active_from, inactive_from)...
+    // ...v2.24, v2.28, v2.31 fields (key_history, current_version, rotation_pubkey,
+    //    rate_limit, version_policy)...
+    DAppCommitPolicy commit_policy;  // optional; enabled=0 means no commit/reveal (default)
+};
+```
+
+The commit/reveal state machine lives in the apply path. A `phase=1` (commit) `DAPP_CALL` payload binary layout:
+
+```
+[phase: u8 = 1]
+[commit_hash: 32B]              # H(reveal_payload || reveal_salt) where salt is ≥ 16 B
+[commit_metadata: u32 LE]       # opaque; passed through to the DApp
+[expiry_override_blocks: u32 LE]  # 0 = use DApp's max_reveal_window_blocks; else clamped to [min, dapp.max]
+```
+
+A `phase=2` (reveal) `DAPP_CALL` payload binary layout:
+
+```
+[phase: u8 = 2]
+[commit_hash: 32B]              # MUST match an entry in m:<dapp>:<hash>
+[commit_tx_hash: 32B]           # the originating commit tx's hash (anti-replay nullifier prefix)
+[reveal_payload_len: u32 LE]    # ≤ MAX_DAPP_CALL_PAYLOAD - 72 bytes (envelope overhead)
+[reveal_payload: bytes]         # the original cleartext the commit hashed over
+[reveal_salt_len: u8]           # 16 ≤ len ≤ 64
+[reveal_salt: bytes]            # the salt the committer mixed in
+```
+
+A `phase=0` (regular) `DAPP_CALL` is byte-identical to v2.19, preserving all backward-compat.
+
+Validator + apply rules for a DApp with `commit_policy.enabled = 1`:
+
+1. **Commit admission (phase=1):** validator decodes payload, verifies `expiry_override_blocks` is within `[min_reveal_delay_blocks, max_reveal_window_blocks]` (or zero), validates the §11.7.3 rate-limit bucket (commits and reveals each count as one call for rate-limit purposes), accepts. Apply: insert `m:<dapp>:<commit_hash>` → `DAppCommitEntry{commit_block_height=h, committer=tx.from, commit_metadata, expiry=h+window}`. If the key already exists (duplicate commit), reject with diagnostic `"commit hash already exists; choose a different salt"`. The duplicate-commit ban prevents griefing where an attacker front-runs an honest committer with the same hash.
+2. **Reveal admission (phase=2):** validator decodes payload, computes `expected = SHA-256(reveal_payload || reveal_salt)`, requires `expected == payload.commit_hash`, looks up `m:<dapp>:<commit_hash>` from the validator's registry cache, verifies the entry exists, verifies `entry.committer == tx.from` (anti-impersonation: only the original committer can reveal), verifies `entry.expiry_block_height ≥ h` (not expired), verifies `h ≥ entry.commit_block_height + dapp.commit_policy.min_reveal_delay_blocks` (delay satisfied). Apply: delete `m:<dapp>:<commit_hash>`, emit the reveal's `reveal_payload` to the DApp's normal `DAPP_CALL` consumption stream (with the original commit's metadata attached so the DApp can route it).
+3. **Expiry GC:** at every `apply_block_finalization`, the chain scans the per-DApp commit set and evicts entries with `expiry_block_height ≤ h`. To bound the GC cost, the chain maintains a per-block "expiry-due heap" (the same structure used for the §11.7.5 subscription-expiry sweep), so the per-block GC is `O(num_expiring_this_block + log num_total_commits)`. Evicted entries emit a `DAPP_COMMIT_EXPIRED` event iff `commit_policy.expiry_policy == 1`.
+4. **Commit/reveal pair routing:** the commit is NOT routed to the DApp's message stream — only the reveal is, and only on successful reveal. This means a DApp receiving the reveal can trust that the reveal_payload was committed-to at a specific prior block, providing the sealed-bid property: at commit time only the hash was public; at reveal time the cleartext is public but the auction window has already closed.
+
+Senders compose a commit/reveal pair as a workflow: submit commit tx at height H, wait for ≥ `min_reveal_delay_blocks`, submit reveal tx referencing the same hash. The two txs are independent — a sender who never reveals simply forfeits (and pays the commit's fee). This is the intended cost of participating in a sealed protocol.
+
+**Aggregate-reveal mode (`reveal_policy = 1`)** allows N-of-M batched reveals for ultra-high-throughput auctions: the DApp publishes a `DAPP_REGISTER op=0` policy update declaring `aggregate_threshold = N` and `aggregate_window = W`. The chain holds reveals in a transient batch buffer until W blocks pass; at block H + W, the chain emits all batched reveals as a single ordered burst to the DApp consumption stream. This eliminates a class of timing side-channels where the order of reveal arrival within the window otherwise leaks info. (Implementation note: the aggregate buffer is held in the same `m:` namespace under `m:<dapp>:agg:<batch_seq>`; bounded by `DAPP_COMMIT_AGG_MAX_PER_BATCH = 1024`.)
+
+#### Wire-format changes
+
+**No new tx-type slots.** Commits and reveals are both regular `DAPP_CALL` txs (TxType slot 10) — the discriminator is the first byte of the payload. This keeps the §3 enum stable and lets v2.19 nodes route both commits and reveals through the existing `DAPP_CALL` admission path (they just see opaque bytes).
+
+**Extension to `DAPP_REGISTER` payload** (extends §3.1):
+
+After the §11.7.7 v2.31 conditional tail (`version_policy`), append an optional commit/reveal policy block:
+
+```
+... existing payload through v2.31 version_policy tail ...
+[has_commit_policy: u8]      # 0 = absent (enabled = 0); 1 = present
+if has_commit_policy == 1 {
+    [enabled: u8]
+    [min_reveal_delay_blocks: u32 LE]
+    [max_reveal_window_blocks: u32 LE]
+    [reveal_policy: u8]
+    [expiry_policy: u8]
+    [aggregate_threshold: u32 LE]    # only if reveal_policy == 1
+    [aggregate_window_blocks: u32 LE]  # only if reveal_policy == 1
+}
+```
+
+Constraints: `min_reveal_delay_blocks ∈ [DAPP_COMMIT_MIN_DELAY=4, max_reveal_window_blocks)`, `max_reveal_window_blocks ∈ [DAPP_COMMIT_MIN_WINDOW=64, DAPP_COMMIT_MAX_WINDOW=8192]`, `aggregate_threshold ∈ [2, DAPP_COMMIT_AGG_MAX_PER_BATCH=1024]`, `aggregate_window_blocks ∈ [min_reveal_delay_blocks, max_reveal_window_blocks]`. A v2.31-shape DAPP_REGISTER (no commit policy tail) decodes to `has_commit_policy = 0` → `enabled = 0` (disabled). Backward-compat: byte-identical encoding for entries that never opt in.
+
+**State-commitment encoding** (extends §4 `d:` namespace canonical serialization):
+
+Append, AFTER the v2.31 tail (if present):
+
+```
+... existing fields through v2.31 version_policy ...
+|| u8(has_commit_policy)
+|| (if has_commit_policy: u8(enabled) || u32_be(min_reveal_delay_blocks) || u32_be(max_reveal_window_blocks)
+                         || u8(reveal_policy) || u8(expiry_policy)
+                         || (if reveal_policy==1: u32_be(aggregate_threshold) || u32_be(aggregate_window_blocks)))
+```
+
+**New `m:` namespace** (extends PROTOCOL.md §4.1.1):
+
+```
+"m:" + dapp_domain + ":" + commit_hash  → canonical_serialize(DAppCommitEntry)
+"m:" + dapp_domain + ":agg:" + u64_be(batch_seq)  → canonical_serialize(AggBatchEntry)  # only when reveal_policy=1
+```
+
+where `canonical_serialize(DAppCommitEntry) = u64_be(commit_block_height) || addr32(committer) || u32_be(commit_metadata) || u64_be(expiry_block_height)`. This namespace is part of the state_root via the standard sorted-leaves Merkle construction. Light clients verify a commit's existence via `state_proof("m", dapp_domain + ":" + commit_hash)`.
+
+**RPC new `dapp_commit_status(domain, commit_hash)`** returns: existence flag, committer, commit_block_height, expiry_block_height, blocks-remaining-until-eligible-reveal, blocks-remaining-until-expiry. Useful for wallet UX to show "you can reveal in N blocks" or "your commit expires in N blocks."
+
+**RPC extension `dapp_info(domain)`** returns `commit_policy` block + the current pending-commit count for the DApp (cheap counter from the `m:` namespace prefix scan, bounded by `DAPP_COMMIT_MAX_PENDING = 65536` per DApp).
+
+#### Apply-path changes
+
+Touch list (files in `src/chain/`, `src/node/`, `include/determ/`):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/dapp.hpp` | `DAppEntry`, new `DAppCommitPolicy`, new `DAppCommitEntry` | Add `commit_policy` field; define commit-entry shape |
+| `src/chain/transaction.cpp` | `binary_codec::encode/decode_tx` (DAPP_REGISTER + DAPP_CALL payloads) | Round-trip the conditional commit-policy suffix on DAPP_REGISTER; route DAPP_CALL phase discriminator |
+| `src/chain/chain.cpp` | `apply_transactions` switch for `DAPP_CALL` | Branch on payload[0] (phase): phase=0 is current v2.19 path; phase=1 inserts `m:` entry; phase=2 verifies commit + emits reveal payload + deletes `m:` entry |
+| `src/chain/chain.cpp` | `apply_block_finalization` | New sweep: GC expired `m:` entries (bounded by per-block expiry heap; matches §11.7.5 expiry-sweep pattern) |
+| `src/chain/chain.cpp` | `build_state_leaves` `d:` branch | Extend `canonical_serialize(DAppEntry)` to append conditional commit-policy suffix |
+| `src/chain/chain.cpp` | `build_state_leaves` new `m:` branch | Emit one leaf per pending commit entry (per DApp + commit_hash) |
+| `src/chain/chain.cpp` | `serialize_state` / `restore_from_snapshot` | Round-trip the extended `DAppEntry` commit_policy field + the full `m:` namespace pending-commit map (forward-closes S-037 for the extended schema) |
+| `src/node/validator.cpp` | `validate_tx` switch for `DAPP_CALL` | Phase=1: validate expiry override clamp; phase=2: recompute hash + look up `m:<dapp>:<hash>` + verify committer/delay/expiry; reject with structured diagnostics |
+| `src/node/node.cpp` | `rpc_dapp_info`, new `rpc_dapp_commit_status` | Return commit-policy summary + per-commit status |
+| `tools/test_dapp_commit_reveal.sh` | new | Regression: commit + reveal happy path; reveal-before-min-delay rejected; reveal-after-expiry rejected; wrong-committer reveal rejected; duplicate commit rejected; reveal payload mismatch rejected; expiry GC; aggregate-mode batch ordering |
+
+The validator-side commit hash uniqueness check uses the validator's registry cache (a read-only mirror of `m:` namespace per Phase 2C lock-free reader). Producers re-check at block-pack time against their authoritative registry to avoid double-insert races between mempool admission and block-finalize. The mempool-pending commit set is tracked transiently per the existing S-008 admission pattern so two senders cannot both have the same commit hash admitted simultaneously.
+
+The reveal apply emits the original `reveal_payload` to the DApp's normal `DAPP_CALL` consumption stream by synthesizing a `phase=0` envelope with the original `commit_metadata` and the original committer as `tx.from`. This means a Mode B/C operator running the DApp sees revealed payloads via its existing `dapp_messages` / `dapp_subscribe` (§11.7.4) interfaces, with no special-case wiring. The DApp distinguishes "first-time call" from "reveal of a prior commit" via the `commit_metadata` field (which would be zero for non-commit-reveal calls; operator-set for commit-reveal flows).
+
+#### Backward-compat story
+
+This is a **soft-fork** addition under the v2.18/v2.19/v2.24/v2.28/v2.31 substrate: no existing tx becomes invalid, no existing state_root computation changes for entries that never opt into commit/reveal. Coexistence:
+
+- v2.19 / v2.24 / v2.28 / v2.31 nodes (which don't understand the commit-policy DAPP_REGISTER extension or the phase discriminator) decode a v2.33 DAPP_REGISTER with commit policy and treat the extra trailing bytes either as unknown-rejected (under strict `binary_codec`) or silently-ignored (under lax). v2.33 MUST roll out as a coordinated migration with a `genesis_params.dapp_commit_reveal_active_from` height pin. Pre-activation, the chain MUST reject any DAPP_REGISTER payload with a non-empty commit-policy suffix at validator admission, AND any DAPP_CALL payload whose first byte is ≥ 1 (phases 1/2) at validator admission.
+- v2.18 through v2.31 entries (no commit policy) materialize transparently as `commit_policy.enabled = 0` (disabled). Their state-root contribution is unchanged.
+- The `m:` namespace contributions are new keys; chains with no DApps in commit-reveal mode generate zero such keys and produce byte-identical state-root contributions from the `m:` namespace.
+- The phase-discriminator convention extends DAPP_CALL without altering its existing path: a v2.33 DApp NOT opting into commit/reveal continues to receive `phase=0` calls (the existing flow) byte-for-byte.
+
+The activation pattern parallels v2.24 / v2.27 / v2.28 / v2.31 / A11 / S-033 activation pins.
+
+#### Threat model
+
+| Attack | v2.33 defense | New surface introduced |
+|---|---|---|
+| **Front-running: attacker watches the gossip mempool, sees a competing sealed-bid commit, computes a beating commit + submits same-block** | The commit phase publishes ONLY `H(payload || salt)`, not the cleartext. The attacker sees a 32-byte hash and cannot derive the underlying bid value. The attacker can submit their own commit at the same block (no order-dependence on commit phase — order matters only at reveal phase, by which time the auction window has closed). The salt requirement (≥ 16 bytes) makes brute-force preimage attacks infeasible against any non-trivial payload space. | None new at protocol layer. The DApp operator must educate users to choose payloads large enough that brute-force preimage attack is impractical (e.g., a 4-byte integer bid is brute-forceable; pad with random suffix). |
+| **Reveal-suppression: attacker sees the gossip mempool reveal, attempts to censor it from inclusion** | The chain's general censorship-resistance (proofs/Censorship.md, k_bft conjunction) applies. The reveal landing window (`max_reveal_window_blocks`) is operator-tuned to be wide enough to absorb worst-case censorship attempts. If a reveal is suppressed past expiry, the committer simply forfeits; this is symmetric to all other tx-censorship scenarios. The DApp's `expiry_policy=1` setting lets the chain emit a `DAPP_COMMIT_EXPIRED` event so the operator's off-chain logic can detect and react. | Censorship surface is identical to base DAPP_CALL censorship; no new lever. |
+| **Equivocation: attacker commits to multiple incompatible payloads under different salts, then reveals only the most-favorable** | Each commit is a separate tx with its own fee. An attacker submitting K commits pays K × fee_floor. The chain enforces single-reveal-per-commit, so the attacker cannot reuse a commit. The economic cost (K × fee × number of speculative commits) bounds the equivocation horizon. For sealed-bid auctions, the DApp can require commits to bind to a per-(subscriber, auction) unique-ID via the `commit_metadata` field; the apply path verifies `commit_metadata` uniqueness per (dapp, committer, auction_id) under operator-defined policy. | Yes: the DApp operator MAY supply a uniqueness predicate via `commit_metadata`. The chain doesn't enforce the predicate (it's opaque u32) but the operator can reject reveals whose metadata collides. Operator-side logic, not protocol. |
+| **Commit-spam: attacker submits 65536 commits to overflow `m:` namespace** | `DAPP_COMMIT_MAX_PENDING = 65536` per DApp; admissions beyond this fail at validator. §11.7.3 rate-limit policy applies to commits (commits count as `DAPP_CALL`s for bucket purposes). Combined: per-DApp commit pool is bounded, and per-DApp call-rate caps how fast it fills. Attacker pays §9 fee floor × 65536 to fill it, plus another 65536 × fee_floor to refill after expiry; not free. | Yes: per-DApp `DAPP_COMMIT_MAX_PENDING` is a new genesis-pinned cap. Storage cost bounded at `num_dapps × 65536 × commit_entry_size` ≈ a few hundred MB chain-wide under worst case, well below the §11.7.4 indexer budget. |
+| **Reveal-griefing: attacker observes a victim's commit, submits a phase=2 with the same hash but their own tx.from** | The apply path verifies `entry.committer == tx.from`. A reveal from a non-committer is rejected. Only the original committer can reveal their own commit. | None |
+| **Hash-grinding: attacker chooses salt to cause a hash collision with a victim's commit** | SHA-256 preimage resistance (proofs/Preliminaries.md (A3)). Computing a collision requires 2^128 work; infeasible. | None |
+| **Aggregate-mode ordering manipulation** | Aggregate buffer is per-(dapp, batch_seq); batch_seq is deterministic from height; the chain emits all batched reveals as a single ordered burst at batch close. Within the burst, order is canonical-deterministic (sort by `(commit_block_height ASC, commit_tx_hash ASC)`). Attackers cannot manipulate ordering within a batch. | Aggregate buffer adds `DAPP_COMMIT_AGG_MAX_PER_BATCH = 1024` × `DAPP_COMMIT_AGG_MAX_BATCHES_PER_DAPP = 16` = 16384 transient entries per DApp; bounded; cleared at each batch close. |
+| **Cross-shard commit/reveal** | §11.7.2 cross-shard DAPP_CALL receipts are version-transparent (per §11.7.7 Q6). A commit on shard A targeting a DApp on shard B is an outbound receipt that lands on shard B's apply with phase=1; the `m:` namespace lives on B. The reveal must also target shard B. If a sender's commit lands on shard B at block H_B, the reveal must satisfy `H_reveal ≥ H_B + min_reveal_delay_blocks` on shard B. Cross-shard latency may push the minimum effective delay beyond `min_reveal_delay_blocks` (matching the §11.7.3 Q4 destination-counter convention). | None new; semantics composes with §11.7.2 by treating shard B as the canonical apply site. |
+| **Light-client trust** | `m:` namespace is part of the state-root; commit existence is verifiable via state_proof. Light clients can verify that a commit exists at a given block without trusting any operator. | None new |
+
+The relevant cross-references in the existing threat-model docs: `proofs/Safety.md` L-1.3 (state-root inclusion of the new `m:` keys), `proofs/Preliminaries.md` (A3) SHA-256 collision resistance (commit hash uniqueness), `SECURITY.md` §S-007 (`DAPP_COMMIT_MAX_PENDING` cap prevents per-DApp storage bloat), `SECURITY.md` §S-008 (mempool admission for pending commits), `proofs/Censorship.md` (reveal censorship-resistance), `proofs/AccountStateInvariants.md` (no balance invariant change — commit/reveal is metadata-only).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `DAppCommitPolicy`, `DAppCommitEntry`, `DAppEntry` extension | 0.5 day | Mechanical; mirrors §11.7.1 / §11.7.3 / §11.7.5 / §11.7.7 conditional-tail pattern |
+| `binary_codec` extension: DAPP_REGISTER commit-policy tail + DAPP_CALL phase discriminator | 1 day | Two surfaces; phase discriminator gates payload layout per-byte |
+| `apply_transactions` DAPP_CALL phase branches (phase=0, phase=1, phase=2) | 1 day | Three branches with state mutations: commit insert, reveal verify + emit + delete |
+| `apply_block_finalization` expiry GC sweep | 0.5 day | Per-block expiry-heap pop loop; mirrors §11.7.5 expiry sweep |
+| `build_state_leaves` `d:` branch (conditional commit-policy suffix) + `m:` branch (new namespace) | 0.5 day | Standard sorted-leaves Merkle construction; per-DApp prefix |
+| `validate_tx` admission checks: phase=1 expiry-override clamp; phase=2 hash recompute + committer/delay/expiry verify | 1 day | Read-only against registry cache; structured diagnostics for each failure mode |
+| `rpc_dapp_info` extension + new `rpc_dapp_commit_status` | 0.5 day | JSON additions; mechanical |
+| `serialize_state` / `restore_from_snapshot` round-trip | 0.5 day | Forward-closes S-037 for the extended `DAppEntry` + `m:` namespace |
+| CLI: `determ dapp-commit --to <D> --payload-file <F> --salt <RAND>` + `determ dapp-reveal --commit-hash <H> --payload-file <F> --salt <RAND>` | 0.5 day | Wallet ergonomic; auto-generates salt if not supplied; saves salt to keyring under commit_hash for later reveal |
+| Aggregate-mode buffer + ordered batch emission | 0.5 day | Optional path (reveal_policy=1); transient `m:agg:` entries cleared at batch close |
+| Regression: `tools/test_dapp_commit_reveal.sh` (happy path; early reveal; late reveal; wrong committer; duplicate commit; hash mismatch; expiry GC; aggregate batch) | 1.5 days | Eight scenarios; matches v2.18 / v2.19 / v2.24 / v2.28 / v2.31 test-coverage depth |
+| Migration coordination: `genesis_params.dapp_commit_reveal_active_from` field + activation-height gate + documentation | 0.5 day | Same shape as v2.24 / v2.27 / v2.28 / v2.31 / A11 / S-033 activation pins |
+| **Total** | **~5-7 engineering days** | Single-developer estimate; +1 day if aggregate-mode interop testing with §11.7.4 streaming is required |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required. Extended with commit-policy conditional tail.
+- **v2.19 DAPP_CALL** — shipped. Required. Phase discriminator added to payload byte 0.
+- **v2.4 COMPOSABLE_BATCH** — shipped. Useful for atomic commit + payment composition (sealed-bid auction where the bid amount is escrowed via the same composable batch as the commit tx).
+- **v2.2 state_proof RPC** — shipped. Required for light-client verification of commits via `m:` namespace.
+- **S-033 state_root** — shipped. Required for cross-validator agreement on `m:` namespace contents.
+- **§11.7.3 v2.28 rate limiting** — spec'd. Recommended for DApps deploying commit/reveal (per-DApp bucket caps total commit + reveal call rate). v2.33 ships independently; without v2.28 the per-DApp `DAPP_COMMIT_MAX_PENDING` cap is the only volumetric safeguard.
+- **§11.7.4 v2.29 message-bus indexing** — spec'd. Recommended for streaming `DAPP_COMMIT_EXPIRED` events to subscribers. v2.33 ships independently; without v2.29, operators consume expiry events via polling.
+- **§11.7.7 v2.31 API versioning** — spec'd. Adjacent and independent. Commit-policy tail in DAPP_REGISTER serializes AFTER the §11.7.7 version_policy tail in canonical order.
+- **S-037 snapshot serialize/restore gap** — open. v2.33 implementation MUST round-trip the `commit_policy` extension + the `m:` namespace; ideally S-037 closes first as an independent patch.
+- **v2.10 threshold randomness** — not required (commit/reveal is deterministic from sender-chosen salts), but compositionally useful: a DApp can use v2.10 randomness as input to a sealed-bid tiebreaker, with the randomness emerging at reveal close.
+- **v2.14 OPAQUE** — not required.
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives.
+
+#### Cross-references
+
+- §3.1 `DAPP_REGISTER` byte layout — extended here with conditional commit-policy tail (after v2.31 version_policy tail)
+- §3.2 `DAPP_CALL` byte layout — phase discriminator added to payload byte 0 (phase=0 = current behavior; phase=1 commit; phase=2 reveal)
+- §4 `dapp_registry_` state-commitment via `d:` namespace — extended here with conditional tail
+- §4 new `m:` namespace — commits stored as state-Merkle leaves
+- §6 RPC surface — `dapp_info` extended; new `dapp_commit_status` RPC
+- §7 client wallet integration — `dapp-commit` + `dapp-reveal` CLI commands; salt keyring management
+- §8 DApp node operation modes — Mode B/C operators consume revealed payloads via existing `dapp_messages` / `dapp_subscribe` (§11.7.4) interfaces; no special wiring
+- §9 economic model — commits and reveals each pay §9 fee floor; equivocation-by-multiple-commit is bounded by per-commit fee
+- §10 privacy + off-chain channels — commit phase publishes ONLY hash; cleartext is sealed until reveal; protects against operator-collusion threat models
+- §11.7.1 DAPP_KEY_ROTATE — orthogonal; key rotation is for AEAD recipient, commits are for ordering-sensitive submissions
+- §11.7.2 cross-shard DAPP_CALL — commit and reveal must both target the same destination shard
+- §11.7.3 per-DApp rate limiting — commit + reveal both count as `DAPP_CALL`s for bucket purposes
+- §11.7.4 message-bus indexing — `DAPP_COMMIT_EXPIRED` events delivered via streaming subscribe
+- §11.7.5 economic primitives — commit/reveal composes with subscription policy (DApp may charge separately for commit vs reveal; operator policy)
+- §11.7.7 API versioning — `api_version` field rides in `reveal_payload` (commit phase doesn't expose version; reveal does)
+- §12 Q3 (DApp topic-routing) — adjacent; `commit_metadata` field is a per-commit routing channel orthogonal to topic
+- `V2-DESIGN.md` Theme 7 — formal spec for the deferred "DApp commit/reveal pattern" item
+- `proofs/Safety.md` L-1.3 — state-root inclusion of `m:` namespace
+- `proofs/Preliminaries.md` (A3) SHA-256 collision resistance — commit hash uniqueness
+- `proofs/Censorship.md` — reveal censorship-resistance bound by k_bft conjunction
+- `proofs/AccountStateInvariants.md` — no balance invariant change (commit/reveal is metadata-only)
+- `SECURITY.md` §S-007 — `DAPP_COMMIT_MAX_PENDING` cap prevents per-DApp registry bloat
+- `SECURITY.md` §S-008 — mempool admission tracks pending commits per-DApp
+- `SECURITY.md` §S-037 — forward-closes for the extended `DAppEntry` + new `m:` namespace
+- `PROTOCOL.md` §4.1.1 — `d:` namespace extended with v2.33 conditional tail; new `m:` namespace added
+- `src/chain/chain.cpp` `apply_transactions`, `apply_block_finalization`, `build_state_leaves` — touch sites
+- `src/node/validator.cpp` `validate_tx` — mempool admission for phase=1 and phase=2 DAPP_CALLs
+- `tools/test_dapp_register.sh` + `tools/test_dapp_call.sh` — sibling regression patterns; `tools/test_dapp_commit_reveal.sh` mirrors their shape
+
+#### Open questions deferred to implementation
+
+- **Q1: Salt minimum length.** Current spec requires `reveal_salt_len ≥ 16`. For low-entropy payload spaces (e.g., 4-byte bid amounts), 16 bytes is sufficient. For richer payloads, salts add overhead. Operator policy via `commit_metadata` could declare a minimum-bits requirement, but the chain doesn't enforce salt structure (only length). Recommended: keep 16-byte floor + operator-side documentation. Deferred to implementation.
+- **Q2: Aggregate-mode batch-seq derivation.** Aggregate batches are keyed by `batch_seq`. Should batch_seq advance by block (one batch per block past the aggregate_window) or by reveal count (advance after every `aggregate_threshold` reveals land)? Recommended: block-based (deterministic from height; matches `(h - registered_at) / aggregate_window_blocks`). Deferred to implementation.
+- **Q3: Reveal-payload size cap relative to commit fee.** A commit tx is small (~80 bytes); a reveal tx can carry up to `MAX_DAPP_CALL_PAYLOAD ≈ 16 KB` of revealed cleartext. Should the reveal fee scale with cleartext size, or use the standard DAPP_CALL fee? Recommended: standard fee (§9 fee floor); operators wanting per-byte cost should use §11.7.5 fee-share or subscription policies. Deferred to economic-policy review.
+- **Q4: Commit-and-pay atomic composition via COMPOSABLE_BATCH.** A sealed-bid auction wants commit-tx + payment-tx to be atomic (the payment is forfeit if the commit lands). v2.4 COMPOSABLE_BATCH already supports this — the wallet groups a commit + payment as one batch. No protocol change needed; documented in §7 wallet integration. Deferred to SDK contribution.
+- **Q5: Cross-DApp commit/reveal (one commit, multiple reveals across DApps)** — out of scope. A commit is scoped to a single DApp via the `m:<dapp>:<hash>` key. Multi-DApp reveals would require either duplicating the commit (each DApp's m: gets its own entry) or a new tx-type for global commits. Recommended: keep per-DApp scoping. Deferred unless ecosystem demand surfaces.
+- **Q6: Activation height vs already-existing DApps.** v2.18 through v2.31 entries default to `commit_policy.enabled = 0`. Per the §11.7.3 / §11.7.5 / §11.7.7 precedent, prospective-only. Deferred to genesis-config review.
+- **Q7: Commit hash domain separation.** The commit hash is `SHA-256(reveal_payload || reveal_salt)`. Should the hash be domain-separated with a tag like `SHA-256("DAPP_COMMIT_V1" || reveal_payload || reveal_salt)` to prevent cross-context hash reuse (e.g., a hash computed for an off-chain commitment in another protocol accidentally matching a DApp commit)? Recommended: yes, prefix with `DAPP_COMMIT_V1` 16-byte tag. Deferred to spec final pass.
+- **Q8: Reveal grace beyond expiry.** After `expiry_block_height`, the commit is GC'd. Should there be a short grace window (e.g., 4 blocks past expiry) where a reveal still succeeds but emits a `DAPP_COMMIT_REVEALED_LATE` event so the DApp can decide whether to honor it? Recommended: no — clean expiry semantics are simpler; operators wanting grace can set a larger `max_reveal_window_blocks`. Deferred unless ecosystem feedback requests it.
 
 ---
 
