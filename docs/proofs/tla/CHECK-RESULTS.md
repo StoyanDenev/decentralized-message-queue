@@ -1,4 +1,4 @@
-# FB9 — TLA+ model-check transcripts (template)
+# FB11 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -41,6 +41,9 @@ java -jar tla2tools.jar -config StakeLifecycle.cfg StakeLifecycle.tla
 
 # FB9 — DApp registry lifecycle (DAPP_REGISTER create / update / deactivate)
 java -jar tla2tools.jar -config DAppRegistry.cfg DAppRegistry.tla
+
+# FB11 — Subsidy distribution state machine (E1 / E3 / E4)
+java -jar tla2tools.jar -config SubsidyDistribution.cfg SubsidyDistribution.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -59,6 +62,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | Nonce.tla (3 domains, N=4, A=2, B=5) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | StakeLifecycle.tla (3 domains, H=6, B=5, D=3) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 | DAppRegistry.tla (3 domains, 2 topics, H=6, G=3, P=100) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| SubsidyDistribution.tla (3 domains, B=4, H=4, NefPool=8, MaxCr=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -188,6 +192,26 @@ Companion prose proof: `docs/proofs/StakeLifecycle.md` (separately tracked; the 
 
 Companion prose proof: `docs/proofs/DAppRegistryLifecycle.md` (separately tracked; the prose track is being assembled in parallel).
 
+### SubsidyDistribution.tla → block-subsidy distribution state machine (E1 NEF / E3 mode / E4 finite pool)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `accounts` (Domains → [balance, registered]), `nef_pool` (0..InitialNefPool), `accumulated_subsidy` (Nat), `height` (0..MaxHeight) |
+| `Inv_BalanceNonNegative` | per-domain `balance >= 0` at every reachable state — Nat-typed; documents the contract (no action subtracts from balance; Register / FinalizeBlock both credit non-negative amounts) |
+| `Inv_NefPoolNonNegative` | `nef_pool >= 0` at every reachable state — the floor-half drain (`nef_pool \div 2`) is closed on Nat; once the pool reaches zero, the terminal `0 \div 2 = 0` keeps it there |
+| `Inv_SubsidyConservation` | T-S1 supply identity: `SumBalances + nef_pool = INITIAL_BALANCES_SUM + accumulated_subsidy` — every Register is an internal pool→balance redistribution; every FinalizeBlock mints exactly BlockSubsidy to balances and advances accumulated_subsidy by the same amount. Matches the A1 supply-conservation check at `src/chain/chain.cpp:1397-1404` |
+| `Inv_AccumulatedSubsidyMonotonic` | action-level: `accumulated_subsidy' >= accumulated_subsidy` across every `[Next]_vars` step. Only FinalizeBlock with non-empty creators advances the field (by exactly BlockSubsidy); all other actions preserve it |
+| `Inv_EmptyCreatorsNoMint` | T-S2 structural witness: across every step, `accumulated_subsidy' \in {accumulated_subsidy, accumulated_subsidy + BlockSubsidy}` — the empty-creators branch of FinalizeBlock cannot mint. Matches the `if (total_distributed > 0 && !b.creators.empty())` guard at `src/chain/chain.cpp:1286` |
+| `Inv_NefDrainsOnceperDomain` | T-S6 action-level: any `nef_pool' < nef_pool` step must come paired with a domain flipping `registered FALSE -> TRUE`. The headline defense against the "registration-churn drain attack" — re-Register cannot drain the pool. Matches the `first_time_register` bool gate at `src/chain/chain.cpp:795-796` |
+| `Prop_EventualSubsidy` (temporal) | under fairness on FinalizeBlock-with-non-empty-creators (+ AdvanceHeightNoMint), eventually `accumulated_subsidy > 0` OR the model bound is reached (`height >= MaxHeight`) — the eventual-progress claim. The escape branch is required because TLC operates on bounded models |
+| `Prop_RegistrationIdempotent` (temporal) | `[][...]_vars` form of the T-S6 idempotency claim: a registered domain's balance can only change via FinalizeBlock (subsidy credit), never via ReRegister. ReRegister leaves vars UNCHANGED by definition, so the post-state balance equals the pre-state balance |
+
+**Spec status:** written; TLC verification pending (consistent with the other eight specs above). The configuration in `SubsidyDistribution.cfg` (3 domains, BlockSubsidy=4, MaxHeight=4, InitialNefPool=8, MaxCreators=3) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `accounts` (Domains → [balance, registered]), `nef_pool` (Nat, drains by floor-half on first-time Register), `accumulated_subsidy` (Nat, monotone non-decreasing), `height` (Nat, advances on FinalizeBlock / AdvanceHeightNoMint). Actions modeled: `Register` (first-time apply — drains NEF, sets registered = TRUE), `ReRegister` (key-rotation re-apply — NO NEF drain), `FinalizeBlock` (FLAT-mode subsidy distribution to creators with dust to creators[1]; empty-creators is the T-S2 no-op branch), `AdvanceHeightNoMint` (the LOTTERY-miss / FINITE_POOL-exhausted equivalent class). InitialNefPool=8 lets the floor-half drain fire 4 times before reaching zero (8 → 4 → 2 → 1 → 0), witnessing the terminal `0 \div 2 = 0` case. MaxCreators=3 = Cardinality(Domains) lets every possible distinct-creators sequence be enumerated (empty + 3 singletons + 6 ordered pairs + 6 ordered triples).
+
+**Subsidy mode modeled:** FLAT (E3 default, `subsidy_mode = 0` in C++). LOTTERY and FINITE_POOL alternatives are documented inline in the .tla file as commented-out FinalizeBlockLottery / FinalizeBlockFinitePool actions — both preserve the structural invariants (NefDrainsOnce, EmptyCreatorsNoMint, SubsidyConservation, NonNegative*, AccumulatedSubsidyMonotonic) and could be checked via cfg-level swap of the active Next disjunct. Prop_EventualSubsidy is FLAT-specific; LOTTERY admits a non-zero probability of no-payout blocks and FINITE_POOL terminates once the pool drains. Fees are abstracted away — the C++ apply path credits accumulated transaction fees on the same creator-distribution loop, but the subsidy invariants are orthogonal to fee accounting (FeeAccounting.tla / FB10 covers the fee track).
+
+Companion prose proof: `docs/proofs/SubsidyDistribution.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -241,6 +265,15 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `DAppRegistry.Deactivate` | DAPP_REGISTER op=1 branch at `src/chain/chain.cpp:1055-1062` (sets `dapp_registry_[tx.from].inactive_from = height + DAPP_GRACE_BLOCKS`) |
 | `DAppRegistry.DappActive` | apply-side DAPP_CALL gate at `src/chain/chain.cpp:1142` (`if (dapp.inactive_from <= height) ... skip credit`) — the TLA helper lifts this into a state predicate |
 | `DAppRegistry.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs) |
+| `SubsidyDistribution.accounts` | `src/chain/chain.cpp::accounts_` (map<string, AccountState>; balance field) — the model collapses the C++ AccountState to (balance, registered) because the subsidy track is orthogonal to nonces and stake |
+| `SubsidyDistribution.nef_pool` | `accounts_[ZEROTH_ADDRESS].balance` — the ZEROTH pool documented in `tools/test_nef_pool_drain.sh`; the TLA model lifts this into a dedicated variable to keep `accounts` Domains-indexed and the per-domain balance invariants clean |
+| `SubsidyDistribution.accumulated_subsidy` | `src/chain/chain.cpp::accumulated_subsidy_` — incremented at `chain.cpp:1391` (`accumulated_subsidy_ += subsidy_this_block`) inside the `if (total_distributed > 0 && !b.creators.empty())` guard at line 1390 |
+| `SubsidyDistribution.height` | `src/chain/chain.cpp::current_height_` (advanced once per applied block) |
+| `SubsidyDistribution.Register` | `src/chain/chain.cpp::apply_transactions` REGISTER branch at lines 778-836, specifically the E1 NEF transfer at lines 813-833 (the `first_time_register` branch that drains the ZEROTH pool by half and credits the registrant) |
+| `SubsidyDistribution.ReRegister` | same REGISTER branch with `first_time_register = false` (the `else` of the `registrants_.find(tx.from) == registrants_.end()` predicate at chain.cpp:795-796) — NO NEF drain, matching the comment "re-registrations (e.g., key rotation, region update) do not drain the pool" at chain.cpp:792-794 |
+| `SubsidyDistribution.FinalizeBlock` | `src/chain/chain.cpp::apply_block` subsidy-distribution loop at lines 1250-1305 (FLAT-mode base_subsidy = block_subsidy_; total_distributed = fees + subsidy_this_block; per_creator = total_distributed / m; dust to creators[0]) |
+| `SubsidyDistribution.FinalizeBlock` empty-creators branch | the `if (total_distributed > 0 && !b.creators.empty())` guard at `src/chain/chain.cpp:1286` — when creators is empty, the distribution loop is skipped and `accumulated_subsidy_` is not advanced (the `if (total_distributed > 0 && !b.creators.empty()) { accumulated_subsidy_ += subsidy_this_block; }` block at lines 1390-1392) |
+| `SubsidyDistribution.AdvanceHeightNoMint` | the LOTTERY-miss branch at `src/chain/chain.cpp:1263-1265` (`base_subsidy = 0`) and the FINITE_POOL-exhausted branch at `src/chain/chain.cpp:1269-1272` (`remaining = 0`) — both reduce to subsidy_this_block = 0 at the apply layer, which the same accumulated_subsidy_ tracking handles correctly (no mint = no advance) |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -285,7 +318,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry SubsidyDistribution; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -296,7 +329,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The eight TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, and DApp-registry-lifecycle properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and block-subsidy-distribution properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
