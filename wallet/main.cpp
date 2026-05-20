@@ -5155,6 +5155,268 @@ int cmd_message_verify(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// determ-wallet derive-shared-secret — X25519 Diffie-Hellman shared-secret
+// agreement between two anon-address holders, for off-chain message
+// encryption.
+//
+// Use case:
+//   Two anon-address holders (each with an Ed25519 keypair on-chain) want
+//   to send each other end-to-end encrypted off-chain messages WITHOUT
+//   negotiating a fresh session key over the network. Each party can
+//   independently compute the same 32-byte shared secret from
+//     - their own Ed25519 priv_seed (kept private), and
+//     - the peer's Ed25519 pubkey (public, IS the peer's anon-address).
+//   The shared secret is then used as a KDF input (e.g. HKDF-SHA-256) to
+//   derive symmetric AEAD keys for the actual ciphertext layer. This CLI
+//   does NOT do the KDF or AEAD itself — it just emits the raw X25519
+//   shared secret. The caller composes that with a KDF + AEAD primitive
+//   of their choice.
+//
+// Mechanism:
+//   1. Load the operator's wallet account JSON ({"address":"0x..",
+//      "privkey_hex":".."}, same shape account-export reads). The
+//      privkey_hex is a 32-byte Ed25519 priv_seed.
+//   2. Run crypto_sign_ed25519_seed_keypair to materialize the 64-byte
+//      Ed25519 SK (seed||pubkey).
+//   3. crypto_sign_ed25519_sk_to_curve25519 maps the Ed25519 SK to a
+//      32-byte X25519 SK. The libsodium primitive performs the standard
+//      RFC-7748 / RFC-8032 transform: SHA-512(priv_seed)[0..32] then
+//      clamp (clear bits 0-2 of byte 0, clear bit 7 of byte 31, set bit
+//      6 of byte 31).
+//   4. crypto_sign_ed25519_pk_to_curve25519 maps the peer's Ed25519 PK
+//      to a 32-byte X25519 PK (Edwards-curve y-coordinate -> Montgomery
+//      u-coordinate via (1+y)/(1-y) mod p).
+//   5. crypto_scalarmult(shared, my_x25519_sk, peer_x25519_pk) computes
+//      the 32-byte raw X25519 shared point. This IS the shared secret;
+//      DH symmetry guarantees A computing scalarmult(sk_A, pk_B) and B
+//      computing scalarmult(sk_B, pk_A) yield byte-identical outputs.
+//
+// CLI:
+//   --priv-keyfile <path>: path to a wallet account JSON file with
+//                          {"address":"0x..","privkey_hex":".."} shape
+//                          (same as account-export consumes). The
+//                          privkey_hex is the operator's 32-byte Ed25519
+//                          priv_seed.
+//   --pubkey <hex>:        peer's 32-byte Ed25519 pubkey (64 lowercase
+//                          hex chars). For anon-address holders this is
+//                          their anon-address minus the "0x" prefix.
+//   --json:                emit {"shared_secret_hex":"..."} on stdout
+//                          (default — task spec calls for the one-line
+//                          JSON form; the --json flag here is for parity
+//                          with sibling CLIs and is effectively a no-op).
+//
+// Output:
+//   {"shared_secret_hex": "<64 lowercase hex chars>"}
+//   exactly one line on stdout, terminated by LF.
+//
+// Exit codes:
+//   0  success
+//   1  args / IO / parse / hex-decode / shape error
+//   2  crypto failure (curve25519 conversion or scalarmult returned
+//      non-zero — should not happen with well-formed Ed25519 inputs;
+//      surfaced for defense-in-depth)
+//
+// Security notes:
+//   * The raw X25519 output should NOT be used as an AEAD key directly.
+//     Always feed it through a KDF first (HKDF-SHA-256, BLAKE2b, etc.)
+//     with a domain-separation tag binding the protocol context.
+//   * The shared secret IS deterministic from (priv_A, pub_B): two
+//     invocations with the same inputs always yield the same output.
+//     This is the DH-symmetry property the test exercises.
+//   * sodium_memzero is called on every intermediate SK buffer before
+//     return; the shared secret itself is the function's output so we
+//     don't scrub it (the caller is responsible for downstream handling).
+//
+// Why no AAD / no domain tag here:
+//   The raw X25519 primitive has no notion of context. Domain separation
+//   belongs in the KDF step the caller layers on top. Bundling a domain
+//   tag into THIS CLI would conflate the DH primitive with the higher-
+//   level protocol — those are separately-specified concerns.
+int cmd_derive_shared_secret(int argc, char** argv) {
+    std::string priv_keyfile, peer_pubkey_hex;
+    bool json_out = false;  // reserved for parity; output is always JSON
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv-keyfile" && i + 1 < argc) priv_keyfile    = argv[++i];
+        else if (a == "--pubkey"       && i + 1 < argc) peer_pubkey_hex = argv[++i];
+        else if (a == "--json")                         json_out        = true;
+        else {
+            std::cerr << "derive-shared-secret: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet derive-shared-secret "
+                         "--priv-keyfile <path> --pubkey <hex> [--json]\n";
+            return 1;
+        }
+    }
+    (void)json_out;  // output is always one-line JSON per task spec
+    if (priv_keyfile.empty() || peer_pubkey_hex.empty()) {
+        std::cerr << "Usage: determ-wallet derive-shared-secret "
+                     "--priv-keyfile <path> --pubkey <hex> [--json]\n"
+                     "\n"
+                     "  Computes a 32-byte X25519 Diffie-Hellman shared\n"
+                     "  secret between the priv-keyfile holder and the\n"
+                     "  --pubkey peer. Suitable as a KDF input for off-\n"
+                     "  chain message encryption between two anon-address\n"
+                     "  holders. Output: {\"shared_secret_hex\":\"...\"} JSON.\n";
+        return 1;
+    }
+
+    // ── Load the priv keyfile ──────────────────────────────────────────────
+    // Same shape as cmd_account_export consumes: a single-account JSON file
+    // with {"address":"0x..","privkey_hex":".."} where privkey_hex is the
+    // 32-byte Ed25519 priv_seed.
+    std::ifstream in_f(priv_keyfile);
+    if (!in_f) {
+        std::cerr << "derive-shared-secret: cannot open --priv-keyfile: "
+                  << priv_keyfile << "\n";
+        return 1;
+    }
+    nlohmann::json acc_doc;
+    try {
+        in_f >> acc_doc;
+    } catch (std::exception& e) {
+        std::cerr << "derive-shared-secret: --priv-keyfile is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!acc_doc.is_object()) {
+        std::cerr << "derive-shared-secret: --priv-keyfile must be a JSON "
+                     "object {\"address\":..., \"privkey_hex\":...}; got non-"
+                     "object\n";
+        return 1;
+    }
+    if (!acc_doc.contains("privkey_hex")
+        || !acc_doc["privkey_hex"].is_string()) {
+        std::cerr << "derive-shared-secret: --priv-keyfile missing required "
+                     "string field 'privkey_hex'\n";
+        return 1;
+    }
+    std::string priv_hex = acc_doc["privkey_hex"].get<std::string>();
+    if (priv_hex.size() != 64) {
+        std::cerr << "derive-shared-secret: 'privkey_hex' must be 64 hex "
+                     "chars (32-byte Ed25519 priv_seed); got length "
+                  << priv_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_seed;
+    try { priv_seed = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "derive-shared-secret: 'privkey_hex' is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (priv_seed.size() != 32) {
+        std::cerr << "derive-shared-secret: 'privkey_hex' decoded length "
+                     "must be 32; got " << priv_seed.size() << "\n";
+        return 1;
+    }
+
+    // ── Parse the peer pubkey hex ──────────────────────────────────────────
+    // 32-byte Ed25519 pubkey = 64 lowercase hex chars. We do NOT accept the
+    // "0x" prefix here — callers extracting from an anon-address must strip
+    // the prefix first. This matches the message-verify --pubkey convention.
+    if (peer_pubkey_hex.size() != 64) {
+        std::cerr << "derive-shared-secret: --pubkey must be 64 hex chars "
+                     "(32-byte Ed25519 pubkey); got length "
+                  << peer_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> peer_pub_bytes;
+    try { peer_pub_bytes = from_hex(peer_pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "derive-shared-secret: --pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (peer_pub_bytes.size() != 32) {
+        std::cerr << "derive-shared-secret: --pubkey decoded length must "
+                     "be 32; got " << peer_pub_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── Init libsodium ─────────────────────────────────────────────────────
+    if (!primitives::init_libsodium()) {
+        std::cerr << "derive-shared-secret: libsodium init failed\n";
+        return 1;
+    }
+
+    // ── Step 1: derive the operator's Ed25519 64-byte SK from the seed ─────
+    // libsodium's crypto_sign_ed25519_sk_to_curve25519 needs the full
+    // 64-byte SK (seed||pubkey), not just the 32-byte seed. Derive both
+    // halves from the 32-byte seed via crypto_sign_ed25519_seed_keypair —
+    // same primitive used by message-sign / account-import. The pubkey
+    // half is discarded (we only need the SK for the curve25519 transform).
+    static_assert(crypto_sign_PUBLICKEYBYTES == 32, "Ed25519 pk size mismatch");
+    static_assert(crypto_sign_SECRETKEYBYTES == 64, "Ed25519 sk size mismatch");
+    static_assert(crypto_sign_SEEDBYTES      == 32, "Ed25519 seed size mismatch");
+    static_assert(crypto_scalarmult_BYTES    == 32, "X25519 output size mismatch");
+    static_assert(crypto_scalarmult_SCALARBYTES == 32,
+                  "X25519 scalar size mismatch");
+
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> ed_pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> ed_sk{};
+    if (crypto_sign_ed25519_seed_keypair(ed_pub.data(), ed_sk.data(),
+                                         priv_seed.data()) != 0) {
+        std::cerr << "derive-shared-secret: crypto_sign_ed25519_seed_keypair "
+                     "failed (priv_seed not a valid Ed25519 seed)\n";
+        return 1;
+    }
+
+    // ── Step 2: Ed25519 SK -> X25519 SK ────────────────────────────────────
+    // RFC-7748-style transform: SHA-512(priv_seed)[0..32], clamp per spec.
+    // libsodium does this internally and returns a clamped 32-byte X25519
+    // secret scalar suitable for crypto_scalarmult.
+    std::array<uint8_t, crypto_scalarmult_SCALARBYTES> my_x25519_sk{};
+    if (crypto_sign_ed25519_sk_to_curve25519(my_x25519_sk.data(),
+                                              ed_sk.data()) != 0) {
+        sodium_memzero(ed_sk.data(),         ed_sk.size());
+        sodium_memzero(my_x25519_sk.data(),  my_x25519_sk.size());
+        std::cerr << "derive-shared-secret: crypto_sign_ed25519_sk_to_"
+                     "curve25519 failed\n";
+        return 2;
+    }
+    // ed_sk is no longer needed (X25519 SK already derived). Scrub it.
+    sodium_memzero(ed_sk.data(), ed_sk.size());
+
+    // ── Step 3: peer Ed25519 PK -> peer X25519 PK ──────────────────────────
+    // Maps the Edwards-curve y-coordinate to the Montgomery u-coordinate
+    // via (1+y)/(1-y) mod p. Returns non-zero if the pubkey is malformed
+    // (e.g. not a valid Edwards point); we surface that as exit 2.
+    std::array<uint8_t, crypto_scalarmult_BYTES> peer_x25519_pk{};
+    if (crypto_sign_ed25519_pk_to_curve25519(peer_x25519_pk.data(),
+                                              peer_pub_bytes.data()) != 0) {
+        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        std::cerr << "derive-shared-secret: crypto_sign_ed25519_pk_to_"
+                     "curve25519 failed (peer pubkey not a valid Ed25519 "
+                     "pubkey)\n";
+        return 2;
+    }
+
+    // ── Step 4: X25519 scalarmult ──────────────────────────────────────────
+    // crypto_scalarmult(out, sk, pk) computes the raw X25519 DH output.
+    // Returns non-zero ONLY if the result is the all-zero point (a small-
+    // subgroup attack indicator); libsodium rejects those automatically.
+    std::array<uint8_t, crypto_scalarmult_BYTES> shared{};
+    if (crypto_scalarmult(shared.data(),
+                           my_x25519_sk.data(),
+                           peer_x25519_pk.data()) != 0) {
+        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        sodium_memzero(shared.data(),       shared.size());
+        std::cerr << "derive-shared-secret: crypto_scalarmult failed "
+                     "(degenerate shared point — peer pubkey likely in a "
+                     "small subgroup)\n";
+        return 2;
+    }
+    // Scrub the X25519 SK now that the shared secret is computed.
+    sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+
+    // ── Emit the one-line JSON output ──────────────────────────────────────
+    // {"shared_secret_hex":"<64 lowercase hex>"}
+    // Use nlohmann::json::dump() (no indent) for compact single-line form.
+    nlohmann::json out_doc = { {"shared_secret_hex", to_hex(shared)} };
+    std::cout << out_doc.dump() << "\n";
+    return 0;
+}
+
 // determ-wallet tx-sign-verify — Verify the Ed25519 signature on a
 // Transaction JSON file using the chain's CANONICAL signing_bytes scheme
 // (NOT the off-chain domain-separated SHA-256 commitment used by
@@ -5627,6 +5889,20 @@ void print_usage() {
         "                                             message-sign. Exit 0 valid, 2 invalid\n"
         "                                             (auth-style alert), 1 args/parse error.\n"
         "                                             --domain-tag MUST match the sign-time tag.\n"
+        "  derive-shared-secret --priv-keyfile <path>\n"
+        "                       --pubkey <hex> [--json]\n"
+        "                                             Compute a 32-byte X25519 Diffie-Hellman\n"
+        "                                             shared secret between the priv-keyfile\n"
+        "                                             holder and the --pubkey peer. Suitable as a\n"
+        "                                             KDF input for off-chain message encryption\n"
+        "                                             between two anon-address holders. Uses\n"
+        "                                             libsodium's Ed25519->Curve25519 transform\n"
+        "                                             (crypto_sign_ed25519_sk_to_curve25519 +\n"
+        "                                             crypto_sign_ed25519_pk_to_curve25519) then\n"
+        "                                             crypto_scalarmult. DH-symmetric: A using\n"
+        "                                             (sk_A, pk_B) and B using (sk_B, pk_A) yield\n"
+        "                                             byte-identical secrets. Output:\n"
+        "                                             {\"shared_secret_hex\":\"...\"} one-line JSON.\n"
         "  tx-sign-verify --tx <file> --pubkey <hex> [--json]\n"
         "                                             Verify the Ed25519 signature on a Transaction\n"
         "                                             JSON file using the chain's canonical\n"
@@ -5687,6 +5963,7 @@ int main(int argc, char** argv) {
     if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
+    if (cmd == "derive-shared-secret") return cmd_derive_shared_secret(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
