@@ -51,6 +51,8 @@ java -jar tla2tools.jar -config GovernanceParamChange.cfg GovernanceParamChange.
 
 # FB14 — Cross-shard inbound-receipt dedup state machine
 java -jar tla2tools.jar -config CrossShardReceiptDedup.cfg CrossShardReceiptDedup.tla
+# FB15 — Equivocation slashing apply state machine (Equivocate / ApplyEquivocation / Ghost / AlreadyDeactivated)
+java -jar tla2tools.jar -config EquivocationApply.cfg EquivocationApply.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -73,6 +75,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | SubsidyDistribution.tla (3 domains, B=4, H=4, NefPool=8, MaxCr=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | GovernanceParamChange.tla (3 keyholders, 2 whitelist, 1 off-whitelist, T=2, H=4, V=2) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | CrossShardReceiptDedup.tla (3 shards, 2 domains, 2 hashes, MaxAmount=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| EquivocationApply.tla (3 domains, H=4, MaxStake=5, Sentinel=1000) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -273,6 +276,22 @@ Companion prose proof: `docs/proofs/GovernanceParamChange.md` (separately tracke
 This spec drills into the apply-side detail that FB3 (Receipts.tla) modeled at minimum granularity and FB2 (Sharding.tla) modeled at flow granularity. The triangle FB2 ↔ FB3 ↔ FB14 covers the cross-shard receipt mechanism from three complementary angles: emission + admission (FB2), per-block dedup-set monotonicity (FB3), and the apply-level dedup primitive with snapshot-survivable state + multi-shard tx_hash collision handling (FB14). The Inv_DedupKeyIsPair invariant is the non-trivial strengthening over FB3: a single-key model cannot witness the T-R3 "(s1, h1) and (s2, h1) are two distinct keys" property; FB14 makes the pair structure first-class and verifies the protocol's actual key type.
 
 Companion prose proof: `docs/proofs/CrossShardReceiptDedup.md` (separately tracked; the prose track is being assembled in parallel).
+### EquivocationApply.tla → FA6 equivocation-slashing apply state machine (Equivocate / Apply / Ghost / AlreadyDeactivated)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `registrants` (Domains → [active, inactive_from] with `inactive_from \in 0..Sentinel`), `stakes` (Domains → 0..MaxStake), `accumulated_slashed` (Nat-bounded by INITIAL_TOTAL_STAKE = MaxStake · |Domains|), `height` (0..MaxHeight), `pending_events` (Seq of EquivocationEvent) |
+| `Inv_StakeNonNegative` | per-domain `stakes[d] >= 0` at every reachable state — Nat-typed; documents the contract. Apply* branches zero stakes[d] (to 0, not negative); Equivocate / AdvanceHeight never decrement |
+| `Inv_SlashedNeverExceedsTotal` | A1-companion conservation: `SumStakes + accumulated_slashed <= INITIAL_TOTAL_STAKE` — every Apply* branch consumes from stakes[d] into accumulated_slashed (zero-sum on the pair). The Ghost branch is a no-op (stakes already 0); the active and AlreadyDeactivated branches drain stakes[d] -> 0 with the matching contribution. The <= is non-strict because Ghost contributes nothing |
+| `Inv_DeactivatedAfterSlash` | T-E1 atomic coupling: any domain with `stakes[d] = 0 /\ inactive_from /= Sentinel` has `active = FALSE` — the slash-and-deregister are applied together at `src/chain/chain.cpp:1344-1356` (the `if (sit != stakes_.end())` and `if (rit != registrants_.end())` branches are independent in the C++ but the apply-layer never sets one without the other reaching a consistent post-state). The structural witness of the coupling |
+| `Inv_SlashedMonotonic` | action-level: `accumulated_slashed' >= accumulated_slashed` across every `[Next]_vars` step. Only ApplyEquivocation and ApplyEquivocationAlreadyDeactivated add to the field, both by the pre-apply stakes[d] (a Nat); Equivocate / ApplyEquivocationGhost / AdvanceHeight preserve |
+| `Inv_NoDoubleSlash` | action-level: any single Apply* step contributes at most the pre-apply stakes[d] to accumulated_slashed. Multiple equivocation events for the same offender each fire Apply* separately, but the SECOND such event finds `stakes[d] = 0` (Ghost branch — no contribution). Encoded as: if `accumulated_slashed' > accumulated_slashed` for head offender d, then `accumulated_slashed' - accumulated_slashed = stakes[d]` (the pre-apply value) |
+| `Prop_EventualSlash` (temporal) | under fairness on `AdvanceHeight` + the three Apply* branches, any non-empty `pending_events` eventually drains. The three Apply* branches together cover the full guard space at the head (active → ApplyEquivocation; fully wound down → Ghost; inactive with stake → AlreadyDeactivated); fairness on the disjunction gives the eventual-progress claim. The MaxHeight escape covers the model-bound termination case |
+| `Prop_StateMonotone` (temporal) | `[][...]_vars` form: per-domain `stakes'[d] <= stakes[d]` at every step. No action increases stakes in this spec — there is no "un-slash" / "re-stake" branch in the apply-equivocation state machine (STAKE-tx restake is FB8 territory). Combined with `Inv_DeactivatedAfterSlash`, gives the full "slash is one-way and permanent" claim |
+
+**Spec status:** written; TLC verification pending (consistent with the other nine specs above). The configuration in `EquivocationApply.cfg` (3 domains, MaxHeight=4, MaxStake=5, Sentinel=1000) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `registrants` (Domains → [active, inactive_from] — matching the C++ `RegistryEntry` shape at `include/determ/chain/chain.hpp`; the model collapses `active_from` into a single `active` boolean since the apply path only consults `active_from <= h < inactive_from`), `stakes` (Domains → Nat — the locked stake amount; matches `StakeEntry::locked`), `accumulated_slashed` (Nat — matches `Chain::accumulated_slashed_` at chain.cpp:1395), `height` (Nat), `pending_events` (Seq of EquivocationEvent — abstracting the producer-side `pending_equivocations_` aggregation + the per-block `equivocation_events` field). Actions modeled: `Equivocate` (adversarial — appends to pending_events; abstracts EUF-CMA / V11), `ApplyEquivocation` (active branch — chain.cpp:1344-1356), `ApplyEquivocationGhost` (T-E4 branch — already wound down, no-op), `ApplyEquivocationAlreadyDeactivated` (dual-mechanism — inactive but still has stake), `AdvanceHeight` (temporal driver). Sentinel=1000 >> MaxHeight + 1 = 5 satisfies ConfigOK and keeps `height + 1` writes monotone away from the "never deactivated" marker. The three Apply* branches are mutually exclusive on their guards and together cover the full head-of-queue guard space, ensuring `Prop_EventualSlash` under fairness.
+
+Companion prose proof: `docs/proofs/EquivocationSlashingApply.md` (separately tracked; the prose track is being assembled in parallel).
 
 ---
 
@@ -365,6 +384,16 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `CrossShardReceiptDedup.Snapshot` | `src/chain/chain.cpp::Chain::serialize_state` lines 1586-1592 (the `applied_inbound_receipts` array emit; S-037 added this namespace to close the dapp_registry / applied_inbound_receipts snapshot gap) |
 | `CrossShardReceiptDedup.Restore` | `src/chain/chain.cpp:1778-1783` (the `applied_inbound_receipts` array consume in `Chain::restore_from_snapshot`; pairs back with the S-037 serialize-side fix) |
 | `CrossShardReceiptDedup.Equivocate` | wire-level adversary model: the same (src_shard, tx_hash) pair arrives via two distinct gossip paths (e.g., one from peer A's receipt-bundle gossip, another from peer B's block-relay path). The TLA model collapses both paths into a single Append-to-pending action; the apply-side dedup gate (ApplyFirst's pre-condition) catches the second one regardless of which path won the race |
+| `EquivocationApply.registrants` | `src/chain/chain.cpp::registrants_` (`map<string, RegistryEntry>` keyed by domain; RegistryEntry.active_from / inactive_from). The model collapses `active_from <= h < inactive_from` into a single `active` boolean per the apply-side guard at chain.cpp:1351-1355 |
+| `EquivocationApply.stakes` | `src/chain/chain.cpp::stakes_` (`map<string, StakeEntry>` keyed by domain; StakeEntry.locked field). The model uses a plain Nat per domain — the unlock_height field is FB8 (StakeLifecycle.tla) territory; the equivocation-apply branch consumes only the `locked` amount at chain.cpp:1348 |
+| `EquivocationApply.accumulated_slashed` | `src/chain/chain.cpp::accumulated_slashed_` — the A1 conservation counter incremented at chain.cpp:1395 (`accumulated_slashed_ += block_slashed`) after the per-block equivocation loop sums into `block_slashed` |
+| `EquivocationApply.height` | `src/chain/chain.cpp::current_height_` (advanced once per applied block; matches `b.index + 1` in the apply call at chain.cpp:1354) |
+| `EquivocationApply.pending_events` | producer-side `Producer::pending_equivocations_` + per-block `chain::Block::equivocation_events` field. The TLA model abstracts the producer-aggregation + block-baking + apply-drain pipeline into a single shared Seq with FIFO semantics — equivalent to the C++ "events emitted into the pool, drained head-first when included in a block, applied in block order" data flow |
+| `EquivocationApply.Equivocate` | the validator's V11 dual-signature acceptance + `EquivocationEvent` construction at `src/node/validator.cpp` + the gossip-relay path at `src/net/gossip.cpp`. The TLA model abstracts these into a single adversarial action; FA6 T-6 covers the soundness via EUF-CMA |
+| `EquivocationApply.ApplyEquivocation` (active branch) | `src/chain/chain.cpp::apply_block` equivocation loop at lines 1344-1356, specifically the `sit != stakes_.end()` and `rit != registrants_.end()` branches that fire together when the offender is still active: `block_slashed += sit->second.locked; sit->second.locked = 0; rit->second.inactive_from = b.index + 1;` |
+| `EquivocationApply.ApplyEquivocationGhost` (T-E4 branch) | the `sit == stakes_.end()` and `rit == registrants_.end()` no-op paths at chain.cpp:1346 / 1352 — when both `find` calls miss, the apply body skips entirely. The TLA model also covers the "registry-still-present but inactive_from already past" case as ghost-equivalent because the C++ unconditional overwrite at line 1354 produces an idempotent end-state |
+| `EquivocationApply.ApplyEquivocationAlreadyDeactivated` (dual-mechanism branch) | the case where the offender's `registrants_[d].active_from <= h < inactive_from` window has already closed (prior DEREGISTER) but `stakes_[d].locked > 0` — the C++ apply still slashes (chain.cpp:1346-1350), realizing the STAKE_INCLUSION / DOMAIN_INCLUSION unification documented in the comment block at chain.cpp:1337-1343 |
+| `EquivocationApply.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs); the temporal driver that lets `height + 1` advance past prior `inactive_from` values |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -413,6 +442,7 @@ The natural next step is wiring TLC into CI:
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry SubsidyDistribution; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry CrossShardReceiptDedup; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange EquivocationApply; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -427,6 +457,7 @@ The nine TLA+ specifications cover the state-machine layer of Determ's safety, a
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and block-subsidy-distribution properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and governance-parameter-change properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 The ten TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and cross-shard-receipt-dedup properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The ten TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, governance-parameter-change, and equivocation-slashing-apply properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
