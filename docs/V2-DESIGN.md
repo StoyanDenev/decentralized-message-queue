@@ -33,7 +33,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
 | v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. **MODERN crypto profile only** (unavailable in FIPS profiles: `tactical` + `cluster`). Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over secp256k1 via libsecp256k1-zkp, ephemeral X25519 DH for amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
-| v2.24 Audit / compliance hooks | ⏳ not started | Theme 8. Simplified post-v2.22 spec — most infrastructure delivered by v2.22; v2.24 reduces to `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference tool. ~1-2 weeks |
+| v2.24 Audit / compliance hooks | ⏳ spec resolved, implementation pending | Theme 8. Spec deepened in §v2.24 below: `ROTATE_AUDIT_KEY` (TxType 12) + `LOG_AUDIT_ACCESS` (TxType 13) + `audit_view_master_pk` field + audit-mode RPC (`audit_decrypt_tx` / `audit_decrypt_master` / `audit_list_access_log`) + state-root `u:`/`g:`/`l:` namespaces + FIPS-profile clear-amount fallback + snapshot-restore gate (mirrors S-037/S-038 closure). ~2-3 weeks MODERN, ~1.5 weeks FIPS-only |
 | v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
 | v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
@@ -1105,7 +1105,7 @@ Each account has a long-term `view_master` keypair. Per-epoch view keys derive d
 **Shared infrastructure savings.** libsodium already vendored (wallet/envelope.cpp + Theme-7 direct-to-DApp pattern + v2.10 DKG). Bulletproofs uses the same ristretto255 primitives. Same curve family across v2.10 (FROST-Ed25519), v2.22 (Bulletproofs/curve25519), and v2.25 (T-OPAQUE/ristretto255). One audit surface across all threshold-cryptography features.
 
 **Composes with.**
-- **v2.24 audit hooks** — concrete dual-mode disclosure mechanism (master vs per-epoch). v2.24 reduces to "add `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference auditor tool"; v2.22 provides the underlying view-key infrastructure.
+- **v2.24 audit hooks** — concrete dual-mode disclosure mechanism (master vs per-epoch). v2.24 builds on v2.22's view-key infrastructure with `ROTATE_AUDIT_KEY` + `LOG_AUDIT_ACCESS` tx types, audit-mode RPC, and a FIPS-profile clear-amount fallback so the same audit tooling serves both MODERN and FIPS deployments. See §v2.24 below for the full spec.
 - **v2.26 key rotation** — `ROTATE_VIEW_MASTER` and `ROTATE_AUDIT_KEY` follow the same pattern as v2.26 `ROTATE_KEY`; shared cooldown semantics.
 - **v2.10 DKG infrastructure** — curve25519 family via libsodium already vendored; FROST-Ed25519 primitives shared.
 - **v2.25 DSSO (Theme 9)** — DSSO assertions can carry encrypted account-history summaries scoped to the RP via per-tx ephemeral DH (future composition; not in v2.22's scope).
@@ -1132,31 +1132,176 @@ Phasing:
 
 ### v2.24 — Audit / compliance hooks
 
-**Motivation.** Privacy by default (v2.22) needs an explicit opt-in for regulated deployments to expose amounts/parties to designated auditors (KYC/AML/tax authorities). Without this, Determ is unusable for any payment business with counterparty-disclosure obligations.
+**Problem overview.** Determ's intended commercial deployments — payroll rails, B2B settlement, regulated gambling, custodial wallet services, CBDC pilots, and the future v2.25 DSSO substrate — sit inside KYC/AML/tax/sanctions perimeters that mandate counterparty disclosure on demand. Three structural gaps in v1.x make those deployments un-shippable today:
 
-**Mechanism (simplified post-v2.22 spec).** v2.22 already delivers the view-key infrastructure (`view_master_pk` per account + per-epoch HKDF derivation + ephemeral-DH amount encryption). v2.24 adds:
+1. **No disclosure primitive at all in v1.x.** TRANSFER amounts are clear-text on-chain, but counterparty identities are only domain strings or anon-addresses. Regulators don't want grep — they want a per-tx tuple `(from_identity, to_identity, amount, timestamp, jurisdiction-relevant memo)` with a verifiable derivation chain back to the operator. v1.x has no API surface that produces that record under audit-grade isolation.
 
-1. **`audit_view_master_pk` field on Account** — optional; absent = no standing auditor; present = named auditor has standing pre-authorization to derive view keys via DH against the auditor's published pubkey.
-2. **`ROTATE_AUDIT_KEY` tx** — analogous to v2.26 `ROTATE_KEY`; rotation cooldown applies.
-3. **Audit-mode RPC** — `audit_decrypt_tx(tx_hash, vk_epoch_n) → amount` for off-chain auditor tooling.
-4. **`LOG_AUDIT_ACCESS` tx** (optional) — on-chain record of disclosure events for deployments requiring auditable audit access.
-5. **Reference auditor tool** — takes `view_master_sk` (or per-epoch keys) + audit-mode RPC; produces compliance reports (CSV / JSON).
+2. **v2.22 makes the gap worse before it makes it better.** Once Bulletproofs land, amounts become Pedersen commitments. The auditor cannot grep TRANSFER amounts anymore — they need the per-epoch view-key derivation infrastructure (`vk_epoch_n = HKDF(view_master_sk, "VK" || chain_id || account_addr || epoch_n)`) and the per-tx ephemeral-DH amount-handshake (`aek = HKDF-SHA-256(ss, "AMT" || epoch_n || tx_hash)`) to recover any amount at all. Without v2.24, the v2.22 chain is *more* opaque to auditors than the v1.x chain. The compliance posture goes backwards.
 
-Two disclosure modes (defined in v2.22 spec §2.Q4):
-- **Master mode**: auditor receives `view_master_sk` — full access to all amounts to/from this account, ever. For in-house compliance officers with permanent audit relationships.
-- **Per-epoch mode**: auditor receives `vk_epoch_n` for specific epochs — bounded access. For external regulators with quarterly/annual audit windows.
+3. **FIPS-profile deployments (`tactical` + `cluster`) cannot use Bulletproofs.** Per `CRYPTO-C99-SPEC.md` §2.Q10, no FIPS-validated zero-knowledge range-proof construction exists, so MODERN-only v2.22 is unavailable in those deployments. They run clear-amount TRANSFER permanently. But they still need disclosure tooling — a regulated CBDC pilot or defense-payroll deployment on the `tactical` profile must produce per-tx audit reports against the *clear-amount* tx stream. v2.24 must serve both worlds: it is the layer that hides the v2.22 vs. clear-amount distinction from the auditor.
 
-**Cost (reduced post-v2.22 spec).** ~1-2 weeks (vs. prior 2-3 week estimate). v2.22 delivers the view-key infrastructure; v2.24 adds the auditor-facing tx types + tooling on top.
+v2.24 closes all three by adding the auditor-facing tx types, RPC, and tooling on top of the v2.22 view-key infrastructure, with a FIPS-profile fallback that operates against clear-amount TRANSFER directly.
 
-| Sub-component | Effort |
-|---|---|
-| `audit_view_master_pk` field on Account + apply path | 2-3 days |
-| `ROTATE_AUDIT_KEY` tx (analogous to v2.26) | 3-5 days |
-| Audit-mode RPC | 2-3 days |
-| `LOG_AUDIT_ACCESS` tx (optional) | 2 days |
-| Reference auditor tool | 3-5 days |
+**Wire-format additions.**
 
-**Closes:** removes the "Determ is unusable for regulated payments" objection. Composes cleanly with v2.22's privacy infrastructure — see `docs/proofs/v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6 for the integration spec.
+Three new on-chain artefacts. `TxType` slot allocation continues from v2.26's `ROTATE_KEY = 11`:
+
+```
+TxType::ROTATE_AUDIT_KEY = 12   # analogous to ROTATE_KEY; rotates audit_view_master_pk
+TxType::LOG_AUDIT_ACCESS = 13   # optional disclosure-event receipt
+```
+
+Account schema gains one optional field:
+
+```
+[audit_view_master_pk: PubKey32 | absent]   # X25519 pubkey of designated auditor; absent = no standing auditor
+[audit_key_set_height: u64]                 # block at which audit_view_master_pk was last established
+```
+
+`ROTATE_AUDIT_KEY` payload (binary codec):
+
+```
+[version: u8 = 1]
+[op: u8]                       # 0 = set/rotate, 1 = clear (remove standing auditor)
+[new_audit_pk: PubKey32]       # zero for op=1
+[effective_height_delta: u16]  # clamped [AUDIT_MIN_DELAY, AUDIT_MAX_DELAY]
+[reason_code: u8]              # 0=routine, 1=regulator-change, 2=jurisdiction-change, 3=auditor-key-compromise
+[account_key_sig: Signature64] # Ed25519 over (chain_id || "ROTATE_AUDIT_KEY" || account_addr || new_audit_pk || effective_height || reason_code || nonce)
+```
+
+`LOG_AUDIT_ACCESS` payload (binary codec):
+
+```
+[version: u8 = 1]
+[disclosure_mode: u8]          # 0 = master, 1 = per-epoch
+[scope_first_epoch: u32]       # inclusive
+[scope_last_epoch: u32]        # inclusive; equals scope_first_epoch for single-epoch disclosure
+[recipient_hash: Hash32]       # SHA-256(auditor public identifier || disclosure_request_id)
+[purpose_code: u16]            # 0=routine, 1=criminal-investigation, 2=civil-litigation, 3=tax-audit, 4=other
+[memo_hash: Hash32]            # SHA-256 of off-chain disclosure ticket; zero if no ticket
+```
+
+`LOG_AUDIT_ACCESS` is signed by the account-holder's primary key (outer `Transaction::sig`) — only the data subject (or their delegate, e.g. v2.15 multi-sig threshold) can record disclosure events on their own account. This prevents an auditor unilaterally publishing forged disclosure-receipts.
+
+Five new genesis-pinned constants live in `include/determ/chain/params.hpp` (same pattern as v2.26's rotation constants):
+
+| Constant | Default | Notes |
+|---|---|---|
+| `AUDIT_MIN_DELAY` | 5 blocks | Smallest activation delay for `ROTATE_AUDIT_KEY` |
+| `AUDIT_MAX_DELAY` | 1024 blocks | Bounds the duration of "audit-key rotation pending" state |
+| `AUDIT_ROTATE_COOLDOWN` | 256 blocks | Minimum gap between successive audit-key rotations per account |
+| `AUDIT_LOG_RETENTION` | 0 (forever) | Optional pruning bound for `LOG_AUDIT_ACCESS` records; 0 = no pruning |
+| `AUDIT_DEFAULT_KEY` | genesis-config | If set, every fresh REGISTER inherits this audit pubkey unless explicitly cleared |
+
+`AUDIT_DEFAULT_KEY` is the deployment-policy lever: a CBDC deployment can mandate a regulator-pinned audit key at genesis; a permissionless deployment leaves it empty so the field is opt-in per account.
+
+**Apply-path integration.**
+
+Functions extended (no rewrites — every change mirrors a v2.26 pattern):
+
+- `BlockValidator::validate_tx` (src/node/validator.cpp): for `TxType::ROTATE_AUDIT_KEY` rejects if (i) the account does not exist; (ii) the embedded `account_key_sig` fails verification against the account's current `ed_pub`; (iii) `effective_height_delta` is out of clamp range; (iv) `current_height - audit_key_set_height < AUDIT_ROTATE_COOLDOWN`; (v) `op=0` with `new_audit_pk` all-zero. For `TxType::LOG_AUDIT_ACCESS` rejects only if `scope_first_epoch > scope_last_epoch` or `scope_last_epoch > current_epoch`. The outer-sig path is the standard one — no new verifier code.
+
+- `Chain::apply_transactions` (src/chain/chain.cpp): on `ROTATE_AUDIT_KEY` accept, queues a `PendingAuditRotation` entry exactly per the v2.26 deferred-apply pattern:
+
+  ```cpp
+  struct PendingAuditRotation {
+      PubKey   new_audit_pk{};
+      uint64_t effective_height{0};
+      uint8_t  op{0};            // 0 = set/rotate, 1 = clear
+      uint8_t  reason_code{0};
+      uint64_t enqueued_at{0};
+  };
+  std::map<AccountAddr, PendingAuditRotation> pending_audit_rotations_;
+  ```
+
+  On `LOG_AUDIT_ACCESS` accept, appends to a per-account ringbuffer `audit_access_log_[account_addr]` capped at 128 entries per account (older entries evicted; pruning bounded by `AUDIT_LOG_RETENTION` if non-zero). The ringbuffer is **not** in the apply path's hot loop — it's an append-only side-channel keyed off the tx itself.
+
+- `Chain::on_block_apply_end`: walks `pending_audit_rotations_`. For every entry whose `effective_height == current_height`, flips `accounts_[addr].audit_view_master_pk = entry.new_audit_pk` (or clears it for op=1) and updates `audit_key_set_height = current_height`. Bounded by `pending_audit_rotations_.size() ≤ accounts_.size()` per block via the per-account cooldown.
+
+- `Chain::serialize_state` / `restore_from_snapshot`: `pending_audit_rotations_` + `audit_access_log_` ringbuffer added to the snapshot tail. New state-root namespaces:
+  - `u:` for "audit pubkey" — `accounts_[addr].audit_view_master_pk` non-empty entries (lookup key: addr → audit_pk).
+  - `g:` for "audit pending rotation" — `pending_audit_rotations_` entries (lookup key: addr → serialised PendingAuditRotation).
+  - `l:` for "audit log" — `audit_access_log_` per-account head pointer (lookup key: addr → head_index, ringbuffer contents themselves snapshotted as part of the account record).
+
+  All three contribute to state_root via the standard leaf-builder. Snapshot restore is now exercised end-to-end by the same `tools/test_dapp_snapshot.sh` pattern that closed S-037 / S-038 — a new `tools/test_audit_snapshot.sh` is part of the v2.24 ship gate.
+
+- `compute_block_digest`: no change. `ROTATE_AUDIT_KEY` and `LOG_AUDIT_ACCESS` are ordinary `Transaction` records riding through the existing union-tx-root + Phase-2 reveal path unmodified.
+
+- RPC additions in `src/rpc/rpc_server.cpp`:
+  - `audit_decrypt_tx(tx_hash, vk_epoch_n) → { amount, from, to, epoch, error? }` — auditor supplies the per-epoch view key, server runs the v2.22 amount-handshake decryption and returns the cleartext tuple. Server holds no auditor secrets; the operator runs an isolated audit-mode node bound to a separate RPC socket (audit-mode flag in `Config::audit_mode` gates the RPC).
+  - `audit_decrypt_master(account_addr, view_master_sk) → stream<{tx_hash, amount, from, to, epoch}>` — master-mode disclosure; streams every TRANSFER touching the account. Newline-JSON streaming per v2.20.
+  - `audit_list_access_log(account_addr, since_height?) → [{tx_hash, height, disclosure_mode, scope, recipient_hash, purpose_code}, ...]` — returns the on-chain LOG_AUDIT_ACCESS ringbuffer for the account.
+
+  Audit-mode RPC is **always** gated by HMAC auth (v2.16) — there is no localhost-only fallback. A misconfigured audit node otherwise becomes a universal disclosure oracle.
+
+**FIPS-profile path (no v2.22).** In `tactical` and `cluster` deployments where v2.22 is unavailable:
+
+- `audit_view_master_pk` field still exists on Account but its semantic flips: it is the X25519 pubkey of the auditor for *clear-amount* TRANSFER access policy, not for amount-decryption. The same `ROTATE_AUDIT_KEY` tx and `LOG_AUDIT_ACCESS` tx ship unchanged.
+- `audit_decrypt_tx` and `audit_decrypt_master` become no-ops returning the clear-amount fields directly (or refuse with `{error: "fips-profile-clear-amounts"}` to signal the caller they don't need to decrypt). The reference auditor tool detects profile via the manifest and skips decryption automatically.
+- `LOG_AUDIT_ACCESS` purpose is then on-chain provenance of disclosure events even when the data being disclosed is already public — useful for chain-of-custody and "who looked at my account" notifications.
+
+This dual-profile semantics means v2.24 ships **once** and serves both worlds. The tool surface is identical; only the underlying decryption path differs.
+
+**Threat model.**
+
+Five concrete threats v2.24 must defeat:
+
+1. **Auditor unilaterally exfiltrates an account's history without the account-holder's consent.** Mitigation: `audit_view_master_pk` is set *by the account-holder* via `ROTATE_AUDIT_KEY` signed with the account's primary key. The auditor cannot establish standing access without the account-holder's authorising signature. The `AUDIT_DEFAULT_KEY` genesis lever is the policy choice — deployments that mandate auditor-default explicitly opt-in at genesis. A permissionless deployment leaves `AUDIT_DEFAULT_KEY` empty and every account is auditor-free unless they say otherwise.
+
+2. **Compromised auditor key drains historical disclosure access.** Mitigation: `ROTATE_AUDIT_KEY` op=0 reason_code=3 retires the compromised auditor key; new tx amount-decryptions go to the new key from `effective_height` forward. Critically: v2.22's per-epoch HKDF derivation means historical epoch keys (`vk_epoch_n` for n < current) are not affected by the audit-key rotation — the compromised auditor still has the per-epoch keys they were already issued. The bounded-window property is structural, not enforced by v2.24. Operator playbook for true revocation: rotate the *account's* `view_master` via the v2.22 emergency `ROTATE_VIEW_MASTER`, which invalidates all future per-epoch derivations.
+
+3. **Operator runs the audit-mode RPC unauthenticated and becomes a universal disclosure oracle.** Mitigation: the audit-mode flag in `Config::audit_mode` *requires* HMAC auth (v2.16) — there is no localhost-only exemption. A node started with `--audit-mode` but without an RPC auth secret refuses to start. Audit-mode RPC traffic is also rate-limited via the shared `net::RateLimiter` (S-014) at a profile-default ceiling of 1 query/sec per peer-IP — bulk historical exfiltration is bandwidth-bounded.
+
+4. **Auditor publishes forged `LOG_AUDIT_ACCESS` records to discredit a target account.** Mitigation: `LOG_AUDIT_ACCESS` is signed by the *account-holder's* primary key, not the auditor's. An auditor cannot unilaterally publish disclosure receipts against an account they have no signing authority over. (The companion off-chain disclosure ticket — `memo_hash` — is the audit-trail artefact the auditor signs; on-chain receipt is the account-holder's chain-of-custody record.)
+
+5. **State-root drift between snapshot-restored nodes when the `u:` / `g:` / `l:` namespaces are absent from `Chain::serialize_state`.** Mitigation: the v2.24 ship gate explicitly mirrors the S-037 / S-038 closure — `tools/test_audit_snapshot.sh` runs the full register-rotate-disclose-snapshot-restore cycle on three nodes and asserts byte-identical state_root after restore. The state_root verification gate (S-033) catches the drift on the receiving node before the next block is accepted. This is the structural lesson learned from S-037: every new state-contributing namespace ships with an end-to-end snapshot test, no exceptions.
+
+**Effort table (refined).**
+
+| Sub-component | Effort | Depends on |
+|---|---|---|
+| `audit_view_master_pk` field on Account + apply path + state_root `u:` namespace | 2-3 days | v2.22 (MODERN) or none (FIPS) |
+| `ROTATE_AUDIT_KEY` tx + `PendingAuditRotation` + `g:` namespace | 3-5 days | v2.26 pattern reuse |
+| `LOG_AUDIT_ACCESS` tx + ringbuffer + `l:` namespace | 2-3 days | none |
+| Audit-mode RPC (`audit_decrypt_tx` / `audit_decrypt_master` / `audit_list_access_log`) | 3-4 days | v2.16 HMAC auth + v2.20 streaming for master-mode |
+| FIPS-profile clear-amount path | 1-2 days | none |
+| `tools/test_audit_snapshot.sh` + `tools/test_audit_rotate.sh` + `tools/test_audit_disclose.sh` | 2-3 days | none |
+| Reference auditor tool (CSV/JSON compliance reports) | 3-5 days | RPC above |
+| Docs (CLI-REFERENCE, PROTOCOL §10.x audit RPCs, SECURITY threat-model writeup) | 2 days | all above |
+
+Total: ~2-3 weeks for the MODERN-profile path, ~1.5 weeks for the FIPS-only path (skip the decryption work). The previous ~1-2 week estimate was light — the snapshot-restore test alone is non-trivial.
+
+**Dependencies.**
+
+- **Hard precondition: v2.16 (HMAC RPC auth)** — shipped. The audit-mode RPC must run under HMAC; without it the threat-model item 3 is unmitigated. ✅
+- **Hard precondition (MODERN profile): v2.22 (Bulletproofs + per-epoch HKDF view-key infrastructure)** — spec-resolved, implementation pending. The decryption RPCs reduce to no-ops without it; the apply-path changes ship independently.
+- **Soft precondition: v2.20 (streaming subscription RPC)** — spec-resolved, polling shipped. Master-mode disclosure streams via the same newline-JSON kill-on-backpressure pattern; without v2.20 streaming, master-mode falls back to paged polling RPC (functional but slower).
+- **Pattern dependency: v2.26 (ROTATE_KEY)** — shipped pattern lifted directly into `ROTATE_AUDIT_KEY`. No new design risk; same cooldown, deferred-apply, snapshot serialisation.
+- **Composition: v2.15 (multi-sig)** — `ROTATE_AUDIT_KEY` SHOULD respect `multisig_policies_[account]` exactly per v2.26's wiring. Single-signer accounts unchanged; multi-sig accounts gate audit-key rotation by the same M-of-N threshold as primary-key rotation.
+
+**Cross-references.**
+
+- `docs/proofs/v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6 — view-key derivation chain and dual-mode (master vs per-epoch) disclosure semantics.
+- v2.26 (above) — pattern source for `ROTATE_AUDIT_KEY` apply path, cooldown, deferred-apply, snapshot serialisation.
+- v2.15 (above) — multi-sig composition for the audit-key rotation gate.
+- v2.20 (above) — streaming substrate for `audit_decrypt_master`.
+- `CRYPTO-C99-SPEC.md` §2.Q10 — FIPS-profile incompatibility of Bulletproofs, motivating the dual-profile semantics in v2.24.
+- v2.25 (Theme 9, below) — DSSO assertion-issuance flows can carry per-RP-scoped account-history summaries via the v2.22 ephemeral-DH primitive; v2.24's `LOG_AUDIT_ACCESS` records become the audit trail for DSSO-mediated disclosures.
+- S-037 / S-038 closure note — the snapshot-restore test gate is structural, not optional.
+
+**Open questions.**
+
+1. **Multi-auditor support.** Today the field is `audit_view_master_pk` (singular). Some deployments (cross-jurisdiction CBDC, multi-regulator gambling) need multiple standing auditors per account. Defer to v2.24.1: extend to `audit_view_master_pks: [PubKey32]` capped at 8 entries; the per-tx ephemeral-DH amount-handshake then includes one envelope per auditor. Cost: +1 week. Out of scope for v2.24.0.
+
+2. **Auditor revocation by chain governance.** A jurisdiction-wide bad-auditor situation (e.g., regulator-key compromise affecting many accounts) needs a chain-governance path to force-rotate the audit key across many accounts simultaneously. Defer: this is a permissioned-deployment governance feature, not a base-layer concern. Operator playbook: tooling that batches per-account `ROTATE_AUDIT_KEY` txs.
+
+3. **Privacy of the audit-access log itself.** `LOG_AUDIT_ACCESS` makes disclosure events public. For deployments where the *existence* of a disclosure is itself sensitive (criminal investigation, sanctions), the log is wrong by default. Resolution: `LOG_AUDIT_ACCESS` is optional (no tx → no on-chain receipt); deployments with disclosure-confidentiality requirements simply don't emit it. The off-chain disclosure ticket (memo_hash zeroed) is the only record.
+
+4. **Audit-mode RPC bandwidth ceilings.** Default profile ceiling of 1 query/sec is tight for in-house compliance officers running batch reports. Resolution: per-account-quota in the auditor's HMAC credential set — the operator's RPC auth config can grant elevated quotas to specific auditor IDs. Implementation rides on the existing `Config` infrastructure.
+
+5. **Cross-shard disclosure cohesion.** An account whose TRANSFER history spans multiple shards (post-regional-sharding) needs the auditor to query each shard separately and merge. Resolution: the reference auditor tool handles shard discovery via the `manifest` RPC + per-shard `audit_decrypt_master` streams. No protocol change; operator-tool work.
+
+**Closes:** removes the "Determ is unusable for regulated payments" objection in both MODERN and FIPS profiles. Composes cleanly with v2.22's privacy infrastructure (MODERN) and ships as a thin disclosure-provenance layer on clear-amount TRANSFER (FIPS). End-state: a regulated CBDC pilot on the `tactical` profile and a permissionless privacy-payment deployment on the `web` profile use the *same* auditor tool against the *same* `audit_decrypt_tx` / `LOG_AUDIT_ACCESS` surface — the audit story is profile-independent.
 
 ---
 
@@ -1578,7 +1723,7 @@ Theme 8 is the largest remaining work block. Internal sequencing prioritizes the
 | B.1 | v2.22 confidential transactions (per `v2.22-PRIVACY-SPEC.md`) | ~2.5-3 months | Unblocks all real-world payment use cases (B2B, payroll, retail, regulated gambling) that today need a separate privacy chain. Highest commercial leverage. Spec resolved per Option C — curve choice (curve25519 family via libsodium) cascades from v2.10. |
 | B.2 (parallel with B.1) | v2.23 cross-chain bridge, Determ-to-Determ first | 1 month | Lowest-uncertainty bridge variant; uses Determ's own light-client + state_root machinery. Independent of v2.22. |
 | B.3 (after B.2) | v2.23 cross-chain bridge, Cosmos IBC | 2 months | Standardized spec; deferred from B.2 to avoid blocking confidential-tx work. |
-| B.4 (after B.1) | v2.24 audit / compliance hooks (per `v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6) | 1-2 weeks | **Reduced scope** post-v2.22 spec — v2.22 delivers the view-key infrastructure; v2.24 adds `audit_view_master_pk` field + `ROTATE_AUDIT_KEY` tx + reference auditor tool. Composes cleanly with v2.22's dual-mode disclosure. |
+| B.4 (after B.1) | v2.24 audit / compliance hooks (per §v2.24 spec + `v2.22-PRIVACY-SPEC.md` §2.Q4 + §4.6) | 2-3 weeks MODERN / 1.5 weeks FIPS-only | Spec deepened in §v2.24: `ROTATE_AUDIT_KEY` + `LOG_AUDIT_ACCESS` tx types, audit-mode RPC trio, state-root `u:`/`g:`/`l:` namespaces with mandatory snapshot-restore test gate (S-037/S-038 pattern), and a FIPS-profile clear-amount fallback so the same auditor tool serves both crypto profiles. |
 
 Defer indefinitely: v2.23 Bitcoin SPV bridge (2 months, low priority), v2.23 Ethereum bridge (6+ months, blocked on SNARK-of-Ethereum-light-client tooling maturity).
 
