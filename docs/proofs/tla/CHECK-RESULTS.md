@@ -66,6 +66,9 @@ java -jar tla2tools.jar -config NefPoolDrain.cfg NefPoolDrain.tla
 
 # FB20 — Composed per-block apply pipeline (ConstructBlock / ApplyBlock / AdvanceHeight)
 java -jar tla2tools.jar -config MultiEventComposition.cfg MultiEventComposition.tla
+
+# FB21 — Stake-forfeiture cascade (STAKE / DEREGISTER / UNSTAKE / Equivocate interleavings)
+java -jar tla2tools.jar -config StakeForfeitureCascade.cfg StakeForfeitureCascade.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -95,6 +98,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | CrossShardOutboundApply.tla (2 domains, 2 shards, MyShard=s1, A=3, F=2, B=10, H=4) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 | NefPoolDrain.tla (3 domains, InitialNefPool=8, MaxHeight=4) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 | MultiEventComposition.tla (3 domains, MaxAmount=2, MaxStake=5, H=3, 2 hashes, 2 shards) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| StakeForfeitureCascade.tla (2 domains, MaxHeight=4, MaxStake=5, UnstakeDelay=2, Sentinel=1000) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -430,6 +434,37 @@ Companion prose proof: `docs/proofs/NefPoolDrain.md` (separately tracked; the pr
 This spec is the FB-track composition of FB5 (AccountState — transfers), FB14 (CrossShardReceiptDedup — receipts), FB15 (EquivocationApply — equivocations), FB16 (AbortApply — aborts), and FB10 (FeeAccounting) + FB11 (SubsidyDistribution) — fee + subsidy distribution. Each prior spec verifies its sub-event class in isolation; FB20 verifies that COMPOSITION does not break any single-event invariant AND that the canonical apply order is fixed at the C++ source-line level. The deterministic-pipeline contract (T-MC3) is the headline composition-spec property — validators receiving sub-event sequences in any interleaving across producer-aggregation + gossip + admission ALL produce the same post-apply state because the C++ apply path replays in the canonical order regardless of arrival order. The DedupKey type is shared verbatim with FB14, ensuring the cross-block dedup-set's structure is preserved under composition.
 
 Companion prose proof: `docs/proofs/MultiEventComposition.md` (separately tracked; the prose track is being assembled in parallel).
+
+### StakeForfeitureCascade.tla → STAKE / DEREGISTER / UNSTAKE / Equivocate cascade state machine
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | T-C1: shape of `accounts` (Domains → [balance, stake_locked]), `registrants` (Domains → [active, inactive_from]), `unlock_heights` (Domains → 0..Sentinel), `accumulated_slashed` (0..INITIAL_TOTAL_VALUE), `height` (0..MaxHeight), `pending` (Seq(Event) with kind ∈ {STAKE, DEREGISTER, UNSTAKE, EQUIVOCATE}) |
+| `Inv_StakeNonNegative` | T-C2: `accounts[d].stake_locked >= 0` at every reachable state — the composed cascade never drives the field negative. Nat-typed; documents the contract. ApplyStake adds, UnstakePost zeroes, ApplyEquivocate zeroes; no action subtracts below 0 |
+| `Inv_NoBalanceOnSlashedAccount` | T-C3: structural witness that an Equivocate-deactivated registry entry (active=FALSE AND inactive_from /= Sentinel AND inactive_from = height OR inactive_from = height + 1) has stake_locked = 0 post-slash — the headline "slash is one-way, full-forfeiture is permanent" claim lifted into the cascade |
+| `Inv_A1Conservation` | T-C6: composed cascade supply identity: `SumBalances + SumStakes + accumulated_slashed = INITIAL_TOTAL_VALUE` at every reachable state. The headline supply-conservation claim for the full cascade. Every action preserves the sum: ApplyStake is balance → stake_locked, UnstakePost is stake_locked → balance, ApplyEquivocate is stake_locked → accumulated_slashed (rebooking), all other actions are stutters on the value-bearing variables |
+| `Inv_UnstakePostSlashIsNoOp` | T-C4: post-slash UnstakePost is harmless. Action-form: applying UnstakePost when stake_locked[d] = 0 is a stutter on (balance, stake_locked) — balance' = balance + 0 = balance. The structural witness that the post-slash UnstakePost compose-then-fire ordering does not double-credit the offender. Matches the C++ apply-path's `sit->second.locked -= amount` reduction at locked=0 |
+| `Inv_OrderSensitivity` | T-C5: action-form witness that Equivocate-then-UnstakePost vs UnstakePost-then-Equivocate yield diverging (balance) end-states. The composed cascade is order-sensitive on (balance) but order-insensitive on (stake_locked, accumulated_slashed-sum). TLC enumerates both branches under the action interleaving and verifies the two distinct end-states are reachable. The headline "composition outcome depends on event order" claim of FB21 |
+| `Inv_SlashedMonotonic` | FB15 lifted to the cascade: `accumulated_slashed >= 0` and no action decreases it. ApplyEquivocate only adds, all other actions preserve. Cross-cascade verification that the FB15 monotonicity is robust under the cascade interleaving |
+| `Inv_UnlockMonotonic` | FB8 lifted to the cascade: per-domain `unlock_heights[d]` is monotone non-decreasing across every `[Next]_vars` step. ApplyDeregister arms, UnstakePost clears-to-Sentinel (the largest possible value, > MaxHeight + UnstakeDelay + 1 by ConfigOK). Cross-cascade verification of FB8's headline non-decrease claim |
+| `Prop_EventualResolution` (temporal) | T-C7: under WF on AdvanceHeight + each Apply* action, the pending queue eventually drains to empty OR the model bound is reached (`height >= MaxHeight`). Apply-time progress guarantee for the full cascade; the bounded-model escape clause keeps TLC tractable |
+| `Prop_NoDoubleForfeit` (temporal) | T-C8: across every `[Next]_vars` step, a single domain contributes at most pre-step `stake_locked[d]` to accumulated_slashed. The second equivocation for the same offender hits the ApplyEquivocateGhost branch and contributes 0 — the structural witness of FB15 T-E4 lifted into the cascade. Combined with `Inv_SlashedMonotonic`, gives the full "an account can only be fully-slashed once" guarantee |
+
+**Spec status:** written; TLC verification pending (consistent with the other twelve specs above). The configuration in `StakeForfeitureCascade.cfg` (2 domains {a, b}, MaxHeight=4, MaxStake=5, UnstakeDelay=2, Sentinel=1000) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `accounts` (Domains → [balance: Nat, stake_locked: Nat] — collapses the C++ `accounts_` balance + `stakes_` locked fields into a single record per domain since the cascade is the smallest scope where they must be tracked atomically), `registrants` (Domains → [active: BOOLEAN, inactive_from: 0..Sentinel] — same shape as FB8 + FB15), `unlock_heights` (Domains → 0..Sentinel — the FB8 unlock-arming field), `accumulated_slashed` (Nat — shared with FB15 / FB16 / FB20 via the chain.cpp:1395 accumulator), `height` (Nat — chain-height action counter, bounds TLC), `pending` (Seq(Event) — admission queue with FIFO drain). Actions modeled: `SubmitStake`, `SubmitDeregister`, `SubmitUnstake`, `SubmitEquivocate` (adversarial admission — the validator could be byzantine; the apply-layer guards filter out the truly invalid claims), `ApplyStake` (balance → stake_locked move on success), `ApplyStakeReject` (insufficient-balance silent-skip stutter), `ApplyDeregister` (arms unlock_height = height + 1 + UnstakeDelay), `ApplyDeregisterRejectAlreadyInactive` (second-DEREGISTER stutter — FB8 stricter model), `UnstakePre` (pre-unlock fee-refund branch at chain.cpp:881-888), `UnstakePost` (post-unlock refund branch at chain.cpp:889-893), `ApplyEquivocate` (full forfeiture + registry deactivation — chain.cpp:1344-1356), `ApplyEquivocateGhost` (stake_locked = 0 second-equivocation no-op — FB15 T-E4), `AdvanceHeight` (temporal driver). UnstakeDelay=2 + MaxHeight=4 gives the model enough headroom to exercise both pre-unlock and post-unlock UNSTAKE attempts under either ordering with Equivocate.
+
+The headline cross-domain coverage matrix:
+
+  * **Stake → Deregister → wait → Unstake** (happy path; FB8 territory verified as the no-slash baseline)
+  * **Stake → Equivocate** (immediate slash; stake_locked → 0 / accumulated_slashed += stake)
+  * **Stake → Deregister → Equivocate → UnstakePost** (order A — slash first; UnstakePost is no-op per T-C4)
+  * **Stake → Deregister → UnstakePost → Equivocate** (order B — Unstake first; Equivocate hits ghost branch per T-C8)
+  * **Stake → UnstakePre (pre-unlock)** (fee-refund stutter; FB8 UnstakeFailEarly lifted)
+  * **Stake → Equivocate → Equivocate** (second equivocation hits ghost branch; T-C8 verifies it contributes 0)
+  * **Two-domain isolation**: cross-domain "slash one, don't touch the other" — Inv_A1Conservation across the second domain witnesses the slash is account-scoped
+
+The order-sensitivity contract (T-C5) is the distinguishing claim of FB21 against its predecessors. FB8 verifies the happy-path lifecycle in isolation (no equivocation surface). FB15 verifies the slash lifecycle in isolation (no UNSTAKE surface). FB16 verifies bounded slashing in isolation (no full-forfeiture surface; the `std::min` floor). FB20 verifies the composed pipeline at the block level, but the four sub-event classes apply within a single canonical step and there is no in-block ordering ambiguity to observe. FB21 zooms in on the STAKE-axis specifically and admits the cross-event interleaving across BLOCK boundaries — the same account can have a STAKE event admitted in block N, a DEREGISTER in block N+1, an EQUIVOCATE and an UNSTAKE both submitted (in either order) for block N+2 — and TLC exhausts every reachable ordering. The diverging end-states (balance = pre-stake-balance vs balance = pre-stake-balance + amount) witness that the cascade is composition-order-sensitive on value but composition-order-invariant on slash mass.
+
+Companion prose proof: `docs/proofs/StakeForfeitureCascade.md` (separately tracked; the prose track is being assembled in parallel).
 
 ---
 
