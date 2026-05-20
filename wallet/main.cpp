@@ -1281,6 +1281,274 @@ int cmd_account_create_batch(int argc, char** argv) {
     return 0;
 }
 
+// ── account-derive-batch — deterministic batch derivation from a master seed ─
+//
+// Sibling of `account-create-batch`. Where account-create-batch generates N
+// keypairs from fresh CSPRNG draws (so back-to-back invocations produce
+// disjoint sets), account-derive-batch derives N keypairs from a single
+// 32-byte master seed using SHA-256 domain separation. The same master
+// seed ALWAYS produces the same N accounts; different seeds always produce
+// disjoint sets (with cryptographic probability).
+//
+// Algorithm (SLIP-0010-style hardened-only derivation, flat array — no
+// hierarchical paths):
+//
+//     for i in 0..N-1:
+//         seed_i      = SHA-256(master_seed || u32_le(i))
+//         keypair_i   = crypto_sign_ed25519_seed_keypair(seed_i)
+//         address_i   = "0x" + lowercase hex(pubkey_i)
+//
+// The little-endian u32 width (NOT a variable-length encoding) keeps the
+// pre-image deterministic across platforms. Caller's master seed enters
+// the SHA-256 as a domain separator: an adversary who learns seed_i for
+// some i still cannot derive seed_j for j != i (SHA-256 one-wayness),
+// and cannot derive the master seed itself.
+//
+// Operator use cases:
+//   1. Cold-wallet provisioning from a single backed-up seed. The operator
+//      stores ONE 32-byte secret offline; on-demand they derive N receive
+//      addresses, fund them, and never need to back up the per-account
+//      private keys. Recovery only requires the master seed.
+//   2. Test-fixture generation. CI pipelines pin a fixed master seed and
+//      get reproducible account sets across machines and runs.
+//   3. Recovery scenarios. If individual per-account privkeys are lost,
+//      the entire set is recoverable from the master seed alone.
+//
+// CLI:
+//   --seed <hex>:  REQUIRED. Exactly 64 hex chars (32 bytes).
+//   --count N:     REQUIRED. 1 <= N <= 10000 (same cap as
+//                  account-create-batch — operator safety net).
+//   --out <file>:  optional. Writes JSON to file with 0600 perms (refuses
+//                  overwrite without --force).
+//   --json:        prints the same JSON to stdout (ignored if --out is set).
+//   --force:       overwrite an existing --out.
+//
+// Output JSON shape (--out / --json):
+//   {
+//     "master_seed_hash_hex": "<64-hex SHA-256 of the master seed>",
+//     "count":                N,
+//     "accounts": [
+//       {"index": 0, "address": "0x...", "privkey_hex": "..."},
+//       ...
+//     ]
+//   }
+//
+// The `master_seed_hash_hex` field lets the operator verify (out-of-band)
+// that a derivation run matches an expected master seed WITHOUT exposing
+// the seed itself in the output file. This is the SHA-256 of the raw seed
+// bytes (NOT a derived sub-seed). Knowledge of this hash alone reveals no
+// information about the master seed beyond what a brute-force preimage
+// search would require.
+//
+// Default human format (no --out, no --json) mirrors account-create-batch:
+//     account[i]: address=0x... privkey_hex=...
+// One line per account, deterministic order (i = 0..N-1).
+//
+// Exit codes:
+//   0 = success
+//   1 = argument / validation / I/O error
+int cmd_account_derive_batch(int argc, char** argv) {
+    std::string seed_hex;
+    int count = 0;
+    std::string out_path;
+    bool json_out = false;
+    bool force    = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--seed"  && i + 1 < argc) seed_hex = argv[++i];
+        else if (a == "--count" && i + 1 < argc) {
+            try { count = std::stoi(argv[++i]); }
+            catch (std::exception&) {
+                std::cerr << "account-derive-batch: --count must be an integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--out"   && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--json")                  json_out = true;
+        else if (a == "--force")                 force    = true;
+        else {
+            std::cerr << "account-derive-batch: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-derive-batch --seed <hex> "
+                         "--count N [--out <file>] [--json] [--force]\n";
+            return 1;
+        }
+    }
+
+    // ── Validate --seed (exactly 64 hex chars = 32 bytes) ───────────────────
+    if (seed_hex.empty()) {
+        std::cerr << "account-derive-batch: --seed is required (32-byte master "
+                     "seed = exactly 64 hex chars)\n";
+        std::cerr << "Usage: determ-wallet account-derive-batch --seed <hex> "
+                     "--count N [--out <file>] [--json] [--force]\n";
+        return 1;
+    }
+    if (seed_hex.size() != 64) {
+        std::cerr << "account-derive-batch: --seed must be exactly 64 hex chars "
+                     "(32-byte master seed); got " << seed_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> seed_bytes;
+    try { seed_bytes = from_hex(seed_hex); }
+    catch (std::exception& e) {
+        std::cerr << "account-derive-batch: invalid --seed hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (seed_bytes.size() != 32) {
+        // Belt-and-suspenders; the 64-char check above already covered it.
+        std::cerr << "account-derive-batch: --seed decoded length must be 32; "
+                     "got " << seed_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── Validate --count ────────────────────────────────────────────────────
+    if (count <= 0) {
+        std::cerr << "account-derive-batch: --count must be >= 1 (got "
+                  << count << ")\n";
+        return 1;
+    }
+    constexpr int MAX_COUNT = 10000;
+    if (count > MAX_COUNT) {
+        std::cerr << "account-derive-batch: --count must be <= " << MAX_COUNT
+                  << " (got " << count << "). If you genuinely need more, "
+                     "invoke the command multiple times and concatenate; "
+                     "the cap is an operator safety net against fat-finger "
+                     "automation errors.\n";
+        return 1;
+    }
+
+    // ── --out preconditions checked BEFORE derivation ───────────────────────
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "account-derive-batch: --out parent directory does "
+                         "not exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "account-derive-batch: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Init libsodium for the Ed25519 seed-keypair primitive ───────────────
+    if (!primitives::init_libsodium()) {
+        std::cerr << "account-derive-batch: libsodium init failed\n";
+        return 1;
+    }
+    static_assert(crypto_sign_PUBLICKEYBYTES == 32, "Ed25519 pk size mismatch");
+    static_assert(crypto_sign_SECRETKEYBYTES == 64, "Ed25519 sk size mismatch");
+    static_assert(crypto_sign_SEEDBYTES      == 32, "Ed25519 seed size mismatch");
+
+    // ── Compute master_seed_hash for output (does NOT leak the seed) ────────
+    std::array<uint8_t, 32> master_hash{};
+    SHA256(seed_bytes.data(), seed_bytes.size(), master_hash.data());
+
+    // ── Derive accounts deterministically ───────────────────────────────────
+    // seed_i = SHA-256(master_seed || u32_le(i))
+    //
+    // The u32_le encoding is fixed-width (4 bytes) and platform-independent
+    // — this is what makes the derivation reproducible across machines.
+    // A variable-width encoding (e.g. varint) could shift collision domains
+    // between caller environments.
+    nlohmann::json arr = nlohmann::json::array();
+    for (int i = 0; i < count; ++i) {
+        // Build preimage: master_seed (32 B) || u32_le(i) (4 B) = 36 B.
+        std::array<uint8_t, 36> preimage{};
+        std::memcpy(preimage.data(), seed_bytes.data(), 32);
+        uint32_t idx = static_cast<uint32_t>(i);
+        preimage[32] = static_cast<uint8_t>((idx >>  0) & 0xff);
+        preimage[33] = static_cast<uint8_t>((idx >>  8) & 0xff);
+        preimage[34] = static_cast<uint8_t>((idx >> 16) & 0xff);
+        preimage[35] = static_cast<uint8_t>((idx >> 24) & 0xff);
+
+        std::array<uint8_t, 32> sub_seed{};
+        SHA256(preimage.data(), preimage.size(), sub_seed.data());
+
+        std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+        std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+        if (crypto_sign_ed25519_seed_keypair(pub.data(), sk.data(),
+                                             sub_seed.data()) != 0) {
+            // SHA-256 outputs are uniformly distributed over a 256-bit
+            // range; the probability that a single output happens to be
+            // rejected by ed25519 keygen is effectively zero. If we ever
+            // hit this, the OS RNG / SHA-256 / libsodium are mis-wired.
+            sodium_memzero(sub_seed.data(), sub_seed.size());
+            sodium_memzero(sk.data(),       sk.size());
+            std::cerr << "account-derive-batch: crypto_sign_ed25519_seed_"
+                         "keypair failed at index " << i
+                      << " (this is essentially impossible for SHA-256-"
+                         "uniform input — investigate the build)\n";
+            return 1;
+        }
+        // Per-account secret material lives in two places now: sub_seed
+        // and the leading 32 B of sk. Zero the libsodium sk; serialize
+        // the sub_seed as the privkey_hex (the canonical wallet-format
+        // 32-byte seed, matching account-create-batch).
+        sodium_memzero(sk.data(), sk.size());
+
+        std::string address = "0x" + to_hex(pub);
+        std::string privkey_hex = to_hex(sub_seed);
+        arr.push_back({
+            {"index",       i},
+            {"address",     address},
+            {"privkey_hex", privkey_hex},
+        });
+        sodium_memzero(sub_seed.data(), sub_seed.size());
+    }
+
+    // ── Build the output JSON document ──────────────────────────────────────
+    nlohmann::json doc;
+    doc["master_seed_hash_hex"] = to_hex(master_hash);
+    doc["count"]                = count;
+    doc["accounts"]             = std::move(arr);
+
+    // ── Zero the master seed bytes now that derivation is done ─────────────
+    // doc still holds the per-account privkey_hex strings (which is the
+    // intended output); only the original master seed is wiped here.
+    sodium_memzero(seed_bytes.data(), seed_bytes.size());
+
+    // ── Dispatch on output mode ─────────────────────────────────────────────
+    if (!out_path.empty()) {
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "account-derive-batch: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << doc.dump(2) << "\n";
+        f.close();
+        // 0600 owner-only perms. On Windows the call is a no-op for the
+        // read/write bits (NTFS ACL inherits from parent); non-fatal.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        std::cout << "derived " << count << " accounts to " << out_path << "\n";
+        return 0;
+    }
+    if (json_out) {
+        std::cout << doc.dump(2) << "\n";
+        return 0;
+    }
+    // Default human format — one line per account.
+    // Matches the task spec verbatim: "account[i]: address=0x... privkey_hex=..."
+    for (int i = 0; i < count; ++i) {
+        std::cout << "account[" << i << "]: address="
+                  << doc["accounts"][i]["address"].get<std::string>()
+                  << " privkey_hex="
+                  << doc["accounts"][i]["privkey_hex"].get<std::string>()
+                  << "\n";
+    }
+    return 0;
+}
+
 // ── account-import — import an existing Ed25519 privkey as a wallet account ─
 //
 // Companion to `account-create-batch`. Where account-create-batch generates
@@ -5205,6 +5473,23 @@ void print_usage() {
         "                                             JSON file (refuses overwrite without\n"
         "                                             --force); --json prints JSON to stdout\n"
         "                                             (ignored if --out is set). 1<=N<=10000.\n"
+        "  account-derive-batch --seed <hex>          DETERMINISTIC sibling of account-create-\n"
+        "                       --count N            batch: derive N accounts from a single\n"
+        "                       [--out <file>] [--json] [--force]\n"
+        "                                             32-byte master seed (64 hex). Algorithm:\n"
+        "                                             seed_i = SHA-256(master_seed || u32_le(i));\n"
+        "                                             keypair_i = ed25519_seed_keypair(seed_i).\n"
+        "                                             Same master seed always produces the same\n"
+        "                                             accounts; different seeds produce disjoint\n"
+        "                                             sets. Use for cold-wallet provisioning\n"
+        "                                             from a single backed-up seed, reproducible\n"
+        "                                             test fixtures, or recovery from a master\n"
+        "                                             seed. Default human prints one line per\n"
+        "                                             account; --out writes JSON file (0600)\n"
+        "                                             with {master_seed_hash_hex, count,\n"
+        "                                             accounts:[{index,address,privkey_hex}]}\n"
+        "                                             (the master seed itself is NEVER emitted).\n"
+        "                                             --json same JSON to stdout. 1<=N<=10000.\n"
         "  account-import --priv <hex>                Import an existing Ed25519 private key\n"
         "                 [--out <file>] [--force] [--json]\n"
         "                                             into the wallet's anon-account JSON\n"
@@ -5390,6 +5675,7 @@ int main(int argc, char** argv) {
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
+    if (cmd == "account-derive-batch") return cmd_account_derive_batch(argc - 2, argv + 2);
     if (cmd == "account-import")  return cmd_account_import (argc - 2, argv + 2);
     if (cmd == "account-export")  return cmd_account_export (argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
