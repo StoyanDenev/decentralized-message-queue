@@ -530,6 +530,7 @@ The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients 
 - **Cross-shard DApp routing** (DAPP_CALL crossing shard boundaries) — fleshed out in §11.7.2 below
 - **Per-DApp rate limiting / quota** (operator-declared call-rate ceiling enforced at validator admission) — fleshed out in §11.7.3 below
 - **DApp message-bus indexing + pub-sub backend** (per-DApp+topic LSM index, retention policy state machine, streaming `dapp_subscribe` with backpressure) — fleshed out in §11.7.4 below
+- **DApp API versioning + compatibility contracts** (semantic-versioned `api_version` declared on `DAPP_REGISTER`, subscriber min-version handshake, deprecation timeline, version-aware payload routing) — fleshed out in §11.7.7 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
 
 ---
@@ -1560,6 +1561,206 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 - **Q6: Activation height vs already-existing DApps.** v2.18 entries default to `bond_amount = 0, subscription_policy.kind = 0`. Per the §11.7.4 Q7 precedent, prospective-only is recommended: existing pre-activation DApps remain bond-less unless they explicitly opt in via a `DAPP_REGISTER op=0` update. Deferred to genesis-config review.
 - **Q7: Bond reduction without full withdraw.** Operator MAY want to reduce bond from B to B' < B without deregistering. Current spec requires `DAPP_BOND_WITHDRAW` (cooldown-gated) + new `DAPP_REGISTER` (re-register with B'). A `DAPP_BOND_ADJUST` tx (op=0 increase, op=1 decrease-with-cooldown) would be cleaner. Deferred: ship without; revisit if operators report friction.
 - **Q8: Auditable subscription cancellation reason.** Like §11.7.1 `reason` field, `DAPP_SUBSCRIBE op=2` (cancel) could carry an optional `reason: utf8` field for off-chain compliance / analytics. Not safety-critical. Deferred to v2.30.1.
+
+---
+
+### 11.7.7 — DApp API versioning + compatibility contracts: semantic versioning, subscriber handshake, and deprecation timeline
+
+**Tracking slot:** v2.31 (Theme 7 — DApp ecosystem coordination). Effort: ~4-6 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped); orthogonal to §11.7.1 (key rotation), §11.7.4 (indexing), §11.7.5 (economics) — composes with all of them. No new cryptographic primitives. Genesis-pinned activation height required for the new conditional-tail fields.
+
+#### Problem statement
+
+The v2.18 / v2.19 substrate treats DApp payloads as opaque bytes. The chain authenticates, orders, and stores; the DApp interprets. This minimalism is by design — it keeps consensus small and the DApp ecosystem unconstrained. But it leaves an **ecosystem-coordination gap** that every nontrivial DApp will hit within months of going live: the wire-format contract between DApp servers and DApp clients evolves over time, and there is no on-chain primitive to negotiate which version of the contract a particular `DAPP_CALL` speaks.
+
+Three concrete symptoms of the gap:
+
+1. **Silent client breakage on operator upgrade.** A DApp operator ships v2 of their payload schema — say, adding a new required field to the call envelope and tightening a field-length constraint. v1 clients continue submitting v1-encoded `DAPP_CALL`s; the operator's apply-side handler now rejects them. From the chain's perspective the calls are well-formed (sig valid, fee paid, in-block); from the user's perspective they're black holes. The chain has no surface to tell the user "your client is too old."
+2. **No staged-rollout primitive.** Even if a DApp wants to support both v1 and v2 during a transition window, today's substrate forces the DApp's server to do version sniffing on raw ciphertext bytes — a brittle pattern that doesn't scale beyond two coexisting versions. There is no way for the operator to **announce** the transition window on-chain so subscribers can self-upgrade ahead of the cutoff.
+3. **Subscriber compatibility coupling with §11.7.5 economic bond.** A subscriber who pre-paid a subscription against v1 of the API has a legitimate refund claim if the operator unilaterally cuts over to v2 without a deprecation window. §11.7.5's refund-from-bond mechanism handles operator-side deactivation, but it does NOT address the much more common operator-side version-incompatibility cutover. Subscribers need a **read-before-pay** primitive: "this DApp is currently at v3; v2 will be deprecated at height H; v1 is already deprecated since height H-X." Without that, subscription pricing is a leap of faith.
+
+This problem matters because: (a) every long-lived API in the wild evolves — TLS versions, HTTP methods, gRPC schemas, REST endpoint deprecation — and the same pressure applies to DApps; (b) the §11.7.5 subscription model creates a stronger commitment from operator to subscriber than v2.18's pure per-call model, and that commitment must include API stability or a documented deprecation timeline; (c) DApp SDK authors need a stable on-chain target to encode against (today's `endpoint_url` opaque-string field doesn't suffice — that's a transport-level pointer, not an API-version assertion); (d) light-client wallets that submit `DAPP_CALL`s on behalf of users have no way to refuse-to-send when the encoded version would be rejected; today they discover incompatibility only via subsequent failed `dapp_messages` queries (or via off-chain probing of `endpoint_url`).
+
+The v2.31 design pins API versioning at the registry level (operator declares supported versions + deprecation timeline) and at the call level (every `DAPP_CALL` declares which API version its payload speaks), with a validator-side fast-rejection path for known-deprecated versions.
+
+#### Mechanism sketch
+
+Extend `DAppEntry` (registry side) with a `version_policy` substructure: a list of `(version, status, deprecation_height)` triples that declares which API versions the operator currently supports, which are deprecated (still accepted, scheduled for removal), and which are retired (rejected). Extend `DAPP_CALL` (call side) with an `api_version` field. Validator admission checks call's `api_version` against the operator's policy; deprecated versions admitted with a warning event; retired versions rejected at admission with explicit error code; unknown (future) versions rejected as "operator does not yet support this version."
+
+Operators rotate the policy via `DAPP_REGISTER op=0` updates: adding a new supported version, marking an old version deprecated with a future `deprecation_height`, or retiring a version after the deprecation window expires. The chain enforces the operator's stated timeline (cannot retire a version before the previously-declared `deprecation_height`; cannot shrink a deprecation window without subscriber refund).
+
+Versioning is **semantic-versioned by convention** (the chain treats `api_version` as an opaque u16) but the operator's policy uses major-version semantics: a new major version is a breaking change; deprecation timelines apply to major versions. Minor/patch evolution is handled off-chain by the DApp's own server-side logic (within a major version, the server is free to accept multiple minor revisions).
+
+Subscriber-side: clients query `rpc_dapp_versions(domain)` to discover the policy before submitting any `DAPP_CALL`. Wallets refuse-to-send when the client's encoded version is `retired` in the operator's policy. Wallets warn-on-send when the encoded version is `deprecated`. The §11.7.4 streaming subscription delivers a `version_policy_changed` event whenever the operator updates the policy, letting long-lived subscribers track the timeline in real time.
+
+#### Wire-format changes
+
+**Extension to `DAppEntry`** (extends §4, appended after the §11.7.5 conditional-tail):
+
+```cpp
+struct DAppApiVersion {
+    uint16_t version;             // operator-defined major version (e.g., 1, 2, 3)
+    uint8_t  status;              // 0 = supported, 1 = deprecated, 2 = retired
+    uint64_t deprecation_height;  // height at which `deprecated` flips to `retired`; UINT64_MAX if not scheduled
+    uint64_t declared_at;         // height of the DAPP_REGISTER that introduced/updated this entry
+};
+
+struct DAppEntry {
+    // ...existing fields through §11.7.5 conditional tail...
+    std::vector<DAppApiVersion>  version_policy;       // ordered ascending by version
+    uint16_t                     default_version;      // version returned to clients that don't specify one
+    uint16_t                     minimum_active_version; // versions below this are auto-retired
+};
+```
+
+**Extension to `DAPP_REGISTER` payload** (extends §3.1, appended after the §11.7.5 fee-share-validator-bp tail):
+
+```
+... existing fields through §11.7.5 tail ...
+[version_policy_count: u8]                # 0 = no policy declared (v2.18 compat); ≥ 1 otherwise
+[for each entry:
+  [version: u16 LE]                       # major version
+  [status: u8]                            # 0 = supported, 1 = deprecated, 2 = retired
+  [deprecation_height: u64 LE]            # UINT64_MAX if not yet scheduled
+]
+[default_version: u16 LE]                 # if version_policy_count > 0, otherwise omitted
+[minimum_active_version: u16 LE]          # if version_policy_count > 0, otherwise omitted
+```
+
+**Extension to `DAPP_CALL` payload** (extends §3.2, inserted between existing `topic` field and `payload`):
+
+```
+... existing fields through topic ...
+[api_version: u16 LE]                     # 0 = unspecified (treated as DApp's default_version)
+[payload_len: u32 LE]
+[payload: bytes]
+```
+
+The `api_version = 0` sentinel preserves byte-compatibility with v2.18/v2.19 calls: a v2.18-encoded `DAPP_CALL` that omits the field is interpreted post-v2.31 as `api_version = 0` (i.e., "let the DApp decide"). This keeps existing in-flight calls valid across the activation boundary.
+
+**State-commitment encoding** (extends §4 `d:` namespace canonical serialization, appended after §11.7.5 tail):
+
+```
+... existing canonical_serialize(DAppEntry) including §11.7.5 suffix ...
+|| u64_be(version_policy.size())
+|| for each entry:
+     u64_be(version) || u64_be(status) || u64_be(deprecation_height) || u64_be(declared_at)
+|| u64_be(default_version)
+|| u64_be(minimum_active_version)
+```
+
+Conditional-serialization rule (mirrors §11.7.1, §11.7.5): the v2.31 extension MAY be omitted from the canonical serialization if `version_policy.empty() && default_version == 0 && minimum_active_version == 0`. v2.18 entries that never declared a policy default to this state, preserving state_root byte-for-byte across the activation height.
+
+No new tx types. No new state-Merkle namespaces. The extension is strictly additive on `DAppEntry` and on the `DAPP_CALL` payload envelope.
+
+#### Apply-path integration
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/dapp.hpp` | `DAppEntry`, new `DAppApiVersion` struct | Add `version_policy`, `default_version`, `minimum_active_version` |
+| `include/determ/chain/transaction.hpp` | `DAppCallPayload` struct | Add `api_version` field (post-topic, pre-payload) |
+| `src/chain/transaction.cpp` | `binary_codec::encode/decode_tx` | Extend `DAPP_CALL` decoder for `api_version` (with v2.18 fallback to 0); extend `DAPP_REGISTER` decoder for `version_policy` tail |
+| `src/chain/chain.cpp` | `apply_transactions` switch — `DAPP_REGISTER op=0` case | Validate version_policy monotonicity (no duplicate versions; status transitions valid: supported → deprecated → retired only); enforce `deprecation_height ≥ current_height + MIN_DEPRECATION_BLOCKS` for any new `deprecated` entry; reject if operator attempts to retire a version before its declared `deprecation_height` |
+| `src/chain/chain.cpp` | `apply_transactions` switch — `DAPP_CALL` case | Look up recipient DApp's `version_policy`. If `payload.api_version != 0`, find the entry; reject (with explicit error code `DAPP_VERSION_RETIRED`) if status is `retired` OR if version not in policy. Accept (emit warning event) if status is `deprecated`. Accept silently if status is `supported`. If `payload.api_version == 0`, treat as `default_version` |
+| `src/chain/chain.cpp` | `apply_block_finalization` | At each block, sweep `dapp_registry_` for entries with `deprecation_height == current_height`: flip status from `deprecated` to `retired`. Emit `version_retired` event. Bounded O(N_dapps); amortized cheap (most blocks have zero deprecation expirations) |
+| `src/chain/chain.cpp` | `build_state_leaves` | Extend `d:` namespace canonical serializer for the conditional v2.31 tail |
+| `src/chain/chain.cpp` | `serialize_state` / `restore_from_snapshot` | Round-trip `version_policy`, `default_version`, `minimum_active_version`. Forward-closes S-037 in tandem with §11.7.1 / §11.7.5 |
+| `src/node/validator.cpp` | `validate_tx_shape` (mempool admission) | Fast-reject `DAPP_CALL` for retired versions at mempool admission (before consensus). Mirror the apply-path logic but cheaper — operates on registry cache, no state mutation |
+| `src/node/node.cpp` | new `rpc_dapp_versions(domain)` | Return full `version_policy` JSON + `default_version` + `minimum_active_version` |
+| `src/node/node.cpp` | `rpc_dapp_info` extension | Include compact policy summary in existing JSON (full policy via `rpc_dapp_versions`) |
+| `src/wallet/main.cpp` | `dapp-call` CLI | New flag `--api-version <N>`; auto-resolve via `rpc_dapp_versions` lookup if omitted; warn-on-deprecated; refuse-on-retired |
+| `tools/test_dapp_versioning.sh` | new | Regression: declare policy, submit call with valid/deprecated/retired/unknown version, observe correct admission/rejection; verify deprecation_height auto-transition; verify subscriber-side refund coordination with §11.7.5 |
+
+The block-finalize sweep is the only novel structural piece. It mirrors the §11.7.5 per-block credit hook in shape (iterate registry, check a height boundary, take action) but the per-block cost is strictly bounded by `O(N_dapps_with_policy)` which is itself bounded by `DAPP_MAX_REGISTRY_SIZE`. In practice the inner loop body is a cheap status flip; no balance arithmetic, no Merkle recomputation per-DApp.
+
+#### Backward-compat story
+
+**Soft-fork under v2.18/v2.19 substrate** with a height-pinned activation per the §11.7.1 / §11.7.5 / A11 / S-033 pattern. Coexistence:
+
+- v2.18 / v2.19 nodes treat the extended `DAPP_CALL` (with `api_version` field) as malformed if their decoder is bounded to the v2.18 length. **Breaking consensus change**; v2.31 must roll out as a coordinated migration with `genesis_params.dapp_versioning_active_from`.
+- Pre-activation: chain decoders refuse to parse the v2.31 tail on `DAPP_REGISTER`; `DAPP_CALL` decoders refuse to parse beyond the v2.18 envelope. Operators MAY NOT declare `version_policy` before activation.
+- Post-activation: existing v2.18 DAPP entries materialize transparently as `version_policy.empty() && default_version == 0 && minimum_active_version == 0`. Per the conditional-serialization rule, their state_root contribution is unchanged from v2.18.
+- Existing v2.18 DApps MAY opt-in to versioning post-activation by issuing a `DAPP_REGISTER op=0` update with a policy declared. The first policy declaration establishes the v1 baseline.
+- v2.18 `DAPP_CALL`s submitted post-activation (encoding without the `api_version` field) are interpreted as `api_version = 0`. If the recipient DApp has declared a policy, the call uses the DApp's `default_version`. If no policy is declared, behavior is identical to v2.18 (payload-opaque routing).
+- The §11.7.5 subscription refund coordination: if v2.31 activation occurs while subscriptions are open, no automatic refund triggers (subscribers remain bound to the operator's pre-activation API). When the operator first declares a policy post-activation, any breaking-change retire-without-deprecation-window would still trigger §11.7.5's refund-from-bond path. So the activation itself is non-breaking; only operator's subsequent policy choices are subject to the deprecation-window constraint.
+
+#### Threat model
+
+| Attack | v2.31 defense | New surface introduced |
+|---|---|---|
+| **Operator-side rug-pull via abrupt version retirement** | Validator-enforced `MIN_DEPRECATION_BLOCKS` (genesis-pinned, suggested 50000 ~ ≥ 1 week at 4s block time): any `DAPP_REGISTER` update marking a version `deprecated` MUST set `deprecation_height ≥ current_height + MIN_DEPRECATION_BLOCKS`. Operators cannot retire a version that has subscribers without honoring the deprecation window. If an operator updates the policy to a shorter window for an existing `deprecated` entry, the update is rejected (declared timelines are monotonically protective). If a subscriber holds a paid subscription against version V at the moment V is retired, the §11.7.5 refund-from-bond path triggers with `periods_remaining × period_fee` per affected subscriber. Bond insufficiency prorates the refund. | The `MIN_DEPRECATION_BLOCKS` floor adds a hard genesis parameter. Operators MAY honor longer windows voluntarily; the floor is a minimum. |
+| **Version-confusion attack — attacker submits `DAPP_CALL` with mismatched `api_version` to trigger DApp parser bugs** | The chain treats `api_version` as a routing label only — it does NOT validate that the payload bytes match the version's schema. Schema validation is the DApp's responsibility. If a DApp's parser is buggy under version mismatch, that's a DApp bug, not a chain bug. The chain DOES enforce that the version is in the operator's policy (so attacker cannot send `version = 99999` to confuse handlers that don't know about it), which narrows the attack to versions the operator explicitly chose to support. | None new. The chain's contract is "this call asserts version V; the DApp's V handler is responsible for safety." Same opacity boundary as v2.18 payloads. |
+| **Subscription bait-and-switch — operator declares v2 policy at subscription time, then immediately deprecates v2 in favor of v3** | The §11.7.5 subscription cadence `min_periods` field gives subscribers a minimum commitment from the operator's side (operator-declared min subscription length). Combined with `MIN_DEPRECATION_BLOCKS` ≥ subscription period (recommended default), any single-period subscription is safe: the operator cannot retire v2 within the subscription's paid window without triggering the refund-from-bond mechanism. Subscribers who pre-pay long subscriptions accept the operator's policy-stability promise within the deprecation-window constraint. | A reckless operator can still cycle deprecations every `MIN_DEPRECATION_BLOCKS` and churn subscribers. Market mechanism: subscribers will avoid such operators. Chain mechanism: the §11.7.5 bond floor is the economic backstop. |
+| **Policy-injection attack on registry — attacker writes garbage policy to fill state** | Per-DApp `version_policy.size() ≤ DAPP_MAX_VERSION_POLICY_ENTRIES` (genesis-pinned, suggested 16). Operators cannot declare more than 16 concurrent supported/deprecated versions. Any update exceeding the cap is rejected. Total state cost per DApp is bounded `O(16 × DAppApiVersion)` ~ 16 × 19 B = ~304 B per DApp, which dominates over the per-DApp existing cost in a minor way. | Yes: per-DApp registry entry grows by ~304 B in the worst case. With `DAPP_MAX_REGISTRY_SIZE` of (say) 65536 entries, aggregate added state is ~20 MB, acceptable for a long-lived chain. |
+| **Mempool-flooding via known-retired calls** | The validator-side fast-reject path at mempool admission (§validate_tx_shape) rejects retired versions before consensus inclusion. The operator's policy is read from the registry cache (lock-free per Phase 2C); admission cost is O(log N_versions_per_dapp) which is O(4) at the cap. So an attacker submitting retired-version calls pays the wire cost + tx_hash compute but the calls never enter the mempool, never propagate, and never burn validator fee. | None — fast-reject is consistent with existing tx-shape validation. |
+| **Operator forging deprecation_height to back-date deprecation** | `deprecation_height ≥ current_height + MIN_DEPRECATION_BLOCKS` is enforced strictly at apply (current_height is the apply-time block height, not the operator's declaration). The operator can declare a far-future `deprecation_height` (which is operator-friendly, lengthening the window beyond the floor) but cannot declare a past or near-future height. | None — apply-time height-bound enforcement is the same shape as v2.18 `inactive_from = current_height + GRACE_PERIOD`. |
+| **Cross-DApp version-policy collusion** | Each DApp's policy is independent; no chain-level coordination across DApps. Two DApps could collude off-chain to coordinate breaking changes (e.g., a "DApp federation" deprecates v1 simultaneously to force migration) but the chain provides no mechanism to enforce or detect this. Each subscriber's economic exposure remains per-DApp; cross-DApp collusion is a market dynamic, not a protocol surface. | None — policy isolation is by design (mirrors §11.7.5's per-DApp bond isolation). |
+| **Light-client wallet refuses-to-send under retired policy** | Wallets that query `rpc_dapp_versions` before submitting `DAPP_CALL` MAY refuse-to-send (or warn-and-confirm) on `retired` or `deprecated` versions. This is wallet UX policy, not chain enforcement; the chain still rejects retired versions at apply. A wallet that doesn't query the policy submits anyway and discovers the rejection via tx-status RPC. | None — wallet-side opt-in. |
+
+The cross-references to existing threat docs: `proofs/Safety.md` L-1.3 (state-root inclusion of `version_policy` via `d:` namespace tail), `proofs/AccountStateInvariants.md` (no balance invariant change; versioning is metadata-only), `SECURITY.md` §S-007 (`DAPP_MAX_VERSION_POLICY_ENTRIES` cap prevents unbounded registry growth), §S-018 (the new JSON `rpc_dapp_versions` response is subject to JSON schema validation when shipped).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `DAppApiVersion` struct + `DAppEntry` extension + `DAPP_CALL` payload extension | 0.5 day | Mechanical; mirrors §11.7.1 / §11.7.5 conditional-tail shape |
+| Encoder/decoder + payload validation (monotonicity, status transitions, deprecation-window floor) | 1 day | Includes the `api_version = 0` v2.18 fallback handling |
+| `apply_transactions` switch — `DAPP_REGISTER op=0` policy validation + `DAPP_CALL` version-routing | 1 day | Policy update validation is the largest code surface; admission lookup is small |
+| `apply_block_finalization` deprecation sweep | 0.5 day | New per-block scheduled operation; bounded `O(N_dapps_with_policy)`; cheap inner loop |
+| Validator-side fast-reject path in `validate_tx_shape` | 0.5 day | Reads registry cache; lock-free per Phase 2C |
+| `build_state_leaves` extension + `serialize_state` / `restore_from_snapshot` round-trip | 0.5 day | Conditional-tail rule preserves state_root for non-versioned DApps; S-037 forward-closure for versioned ones |
+| `rpc_dapp_versions` + `rpc_dapp_info` extension | 0.5 day | New RPC method + extend existing JSON |
+| CLI: `determ dapp-call --api-version`, `determ dapp-register --policy <JSON>` | 0.5 day | Wallet ergonomics; auto-resolution of default_version when `--api-version` omitted |
+| Regression: `tools/test_dapp_versioning.sh` (declare policy, submit valid/deprecated/retired/unknown calls, observe transitions, refund-coordination with §11.7.5) | 1.5 days | Five scenarios |
+| Migration coordination: `genesis_params.dapp_versioning_active_from` + activation-height gate + documentation | 0.5 day | Same shape as §11.7.1 / §11.7.5 / A11 / S-033 activation pins |
+| **Total** | **~4-6 engineering days** | Single-developer estimate; small relative to §11.7.5 because no new tx types and no new state-Merkle namespaces |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required. Extended with version_policy tail.
+- **v2.19 DAPP_CALL** — shipped. Required. Extended with api_version field.
+- **§11.7.5 v2.30 DApp economic primitives** — spec'd. Recommended but not strictly required: the refund-from-bond mechanism is the natural economic backstop when an operator violates the deprecation timeline. v2.31 can ship before v2.30 (versioning works standalone; refund coordination simply isn't operationalized until §11.7.5 ships). Shipping order: v2.30 then v2.31 is the cleanest.
+- **§11.7.4 v2.29 message-bus indexing** — spec'd. Recommended for the `version_policy_changed` streaming event delivery to long-lived subscribers. v2.31 ships independently; without v2.29, subscribers learn of policy changes only via polling `rpc_dapp_versions`.
+- **§11.7.1 v2.24 DApp key rotation** — spec'd. Adjacent and independent. Version rotation is an API-level concept; key rotation is a cryptographic concept. The two are orthogonal but both extend `DAppEntry` via conditional-tail rules, so the canonical-serialization extension ordering must be coordinated at implementation time (v2.24 tail first, then v2.30 tail, then v2.31 tail; documented in §4.1.1 of PROTOCOL.md when each ships).
+- **v2.2 state_proof RPC** — shipped. Required for light-client policy proofs (subscribers can verify the operator's current policy via state_proof on `d:` namespace).
+- **S-037** — open. v2.31 implementation MUST round-trip `version_policy` in snapshot serialize/restore or it inherits S-037's symptom. Recommended: ship S-037 fix BEFORE v2.31 activation.
+- **v2.10 threshold randomness** — not required.
+- **v2.14 OPAQUE** — not required.
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives. Strictly extends `DAppEntry` and the `DAPP_CALL` payload envelope.
+
+#### Cross-references
+
+- §3.1 `DAPP_REGISTER` payload — extended with `version_policy` + `default_version` + `minimum_active_version` conditional tail
+- §3.2 `DAPP_CALL` payload — extended with `api_version` field between `topic` and `payload`
+- §4 `dapp_registry_` state-commitment via `d:` namespace — extended with conditional v2.31 tail (after §11.7.1 + §11.7.5 tails when present)
+- §6 RPC surface — new `rpc_dapp_versions(domain)`; extend `rpc_dapp_info` with compact policy summary
+- §9 Economic model — v2.31 does not introduce new economic primitives but composes with §11.7.5 (refund-from-bond triggers on operator-side timeline violations)
+- §10 Privacy & off-chain channels — `api_version` is plaintext in the `DAPP_CALL` envelope (NOT encrypted); operators who want version privacy must use opaque version IDs (e.g., random u16 values rather than monotonic 1, 2, 3); the recommended pattern is monotonic versioning (transparent ecosystem coordination outweighs the minor metadata leak)
+- §11.7.1 DAPP_KEY_ROTATE — orthogonal; key rotation is cryptographic, version rotation is API-level. Both extend `DAppEntry` via conditional-tail rules; implementation ordering of the tails must be coordinated
+- §11.7.4 message-bus indexing — v2.29's `version_policy_changed` event delivers policy updates to long-lived subscribers via the streaming RPC
+- §11.7.5 DApp economic primitives — v2.30's refund-from-bond is the economic backstop when an operator violates v2.31's deprecation timeline; the `MIN_DEPRECATION_BLOCKS` floor SHOULD be ≥ §11.7.5's `min_periods × period_blocks` for any DApp running both
+- §12 Q2 (DAPP_CALL payload cap genesis-pinned vs governance-mutable) — adjacent; `DAPP_MAX_VERSION_POLICY_ENTRIES` and `MIN_DEPRECATION_BLOCKS` are also governance-mutable candidates
+- `V2-DESIGN.md` Theme 7 — formal spec for the deferred "DApp API versioning + compatibility contracts" item
+- `proofs/Safety.md` L-1.3 — state-root inclusion of `version_policy` via `d:` namespace tail
+- `proofs/AccountStateInvariants.md` — no balance invariant change (versioning is metadata-only)
+- `SECURITY.md` §S-007 — `DAPP_MAX_VERSION_POLICY_ENTRIES` cap prevents registry bloat
+- `SECURITY.md` §S-018 — JSON schema validation covers the new `rpc_dapp_versions` response shape
+- `SECURITY.md` §S-037 — forward-closes the snapshot serialize/restore gap for the extended schema
+- `PROTOCOL.md` §4.1.1 — `d:` namespace canonical serialization extended with v2.31 conditional tail
+- `src/chain/chain.cpp` `build_state_leaves`, `apply_transactions`, `apply_block_finalization` — touch sites
+- `src/node/validator.cpp` `validate_tx_shape` — mempool admission fast-reject path
+- `tools/test_dapp_register.sh` + `tools/test_dapp_call.sh` — sibling regression patterns; `tools/test_dapp_versioning.sh` mirrors their shape
+
+#### Open questions deferred to implementation
+
+- **Q1: Semantic versioning vs monotonic integer versions.** The current spec treats `api_version` as an opaque u16 with monotonic ascending convention. A full SemVer (`major.minor.patch`) would require a 3-tuple per version. Recommended: monotonic u16 with operator-side convention that major changes increment the integer and minor/patch changes are off-chain. Trades off-chain flexibility for on-chain compactness. Deferred to ecosystem feedback.
+- **Q2: Should `api_version` be encrypted as part of the payload, or remain plaintext in the envelope (chosen)?** Encrypting it would hide version metadata from on-chain observers; the cost is that the chain can't validate the version against the operator's policy at admission (the chain would have to defer all version validation to the DApp's apply-side, which weakens the contract). Chosen: plaintext in envelope. Operators who want metadata-privacy use opaque version IDs.
+- **Q3: Multi-version policy update atomicity.** A `DAPP_REGISTER op=0` update overwrites the entire `version_policy` array atomically. An alternative would be incremental ops (`DAPP_VERSION_ADD`, `DAPP_VERSION_DEPRECATE`, `DAPP_VERSION_RETIRE`) — three new tx types. Chosen: full-array overwrite. Simpler; one tx type; matches the §11.7.5 `subscription_policy` overwrite pattern. Deferred: revisit if operators report friction.
+- **Q4: Subscribers tracking which version their subscription was bought against.** §11.7.5's `SubscriberEntry` does NOT currently include an `api_version` field. Subscribers implicitly subscribe at the DApp's `default_version` at subscription time. If the operator later changes `default_version`, the subscription is unaffected (subscribers can still submit calls under the previously-default version as long as it's still in the policy with status `supported` or `deprecated`). Recommended: do not couple subscriptions to versions; subscriptions are economic, versions are technical. Deferred: revisit if real-world DApps report version-bound subscription confusion.
+- **Q5: Activation height vs already-existing DApps.** v2.18 entries default to empty `version_policy`. Per the §11.7.4 Q7 + §11.7.5 Q6 precedent, prospective-only: existing pre-activation DApps remain policy-less unless they opt in. v2.18 `DAPP_CALL`s post-activation that omit `api_version` (encoded with v2.18 schema) are interpreted as `api_version = 0`, which gracefully degrades to "let the DApp decide." Deferred to genesis-config review.
+- **Q6: Cross-shard interaction with §11.7.2.** A cross-shard DAPP_CALL crosses shard boundaries via the source-shard outbound + destination-shard receipt mechanism. The `api_version` field rides in the original `DAPP_CALL` payload, so it's preserved across the receipt boundary by construction. The destination shard's apply-side validates `api_version` against the destination's view of `dapp_registry_[dapp].version_policy` (which is the canonical state). Recommended: no special-case handling needed; the cross-shard receipt envelope is version-transparent. Deferred to §11.7.2 implementation review.
+- **Q7: Operator-declared deprecation reason field.** Like §11.7.1's `reason` field, a `DAPP_REGISTER` policy update could carry an optional `deprecation_reason: utf8` per-version for off-chain audit. Not safety-critical. Deferred to v2.31.1.
+- **Q8: Validator-side version-coverage health metric.** Validator nodes could expose a metric `dapp_calls_by_version{dapp=X, version=V}` showing the current call-rate distribution across versions for a DApp. Useful for operators deciding when a version is safe to retire (low real-time traffic). Recommended: expose via `rpc_dapp_versions` response augmented with `recent_call_count_by_version`. Not safety-critical; pure operational ergonomic. Deferred to v2.31.1.
 
 ---
 
