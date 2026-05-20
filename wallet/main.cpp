@@ -235,6 +235,110 @@ int cmd_envelope(int argc, char** argv) {
     return 1;
 }
 
+// Diagnostic CLI: inspect an envelope file without decrypting.
+//
+// Use cases:
+//   * Forensic inspection of stale recovery artifacts on disk.
+//   * Operators verifying a candidate file is actually an envelope
+//     (right magic + sane salt/nonce sizes) before paying the PBKDF2
+//     cost of a decrypt attempt.
+//   * Tooling (monitoring scripts, log aggregators) that wants the
+//     KDF parameters in structured form (--json).
+//
+// Parses the canonical serialized blob via envelope::deserialize and
+// reports the header fields. NEVER calls AES-GCM — no key derivation,
+// no tag verification, no plaintext recovery. A password is therefore
+// not required and not accepted.
+//
+// Wire format (recap from envelope.hpp):
+//   "DWE1" magic (4B) | salt_len/salt | pbkdf2_iters (u32 LE)
+//   | nonce (12B) | aad_len/aad | ct_len/(ciphertext || 16B tag)
+// The serialized form is dot-separated lowercase hex of those fields.
+int cmd_inspect_envelope(int argc, char** argv) {
+    std::string in_path;
+    bool json_output = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"   && i + 1 < argc) in_path = argv[++i];
+        else if (a == "--json")                 json_output = true;
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ-wallet inspect-envelope --in <file> [--json]\n";
+        return 1;
+    }
+    std::ifstream f(in_path);
+    if (!f) {
+        std::cerr << "inspect-envelope: cannot open --in: " << in_path << "\n";
+        return 1;
+    }
+    std::string blob((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    // Strip surrounding whitespace and any trailing CR/LF — the file may
+    // have been written via shell redirection which appends a newline.
+    auto is_ws = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    while (!blob.empty() && is_ws(blob.front())) blob.erase(blob.begin());
+    while (!blob.empty() && is_ws(blob.back()))  blob.pop_back();
+    if (blob.empty()) {
+        std::cerr << "inspect-envelope: file is empty: " << in_path << "\n";
+        return 1;
+    }
+
+    auto env_opt = envelope::deserialize(blob);
+    if (!env_opt) {
+        std::cerr << "inspect-envelope: malformed envelope "
+                     "(bad magic, truncated, or non-hex content)\n";
+        return 2;
+    }
+    const auto& env = *env_opt;
+
+    // ciphertext stored as (body || 16B tag). Report them separately so
+    // operators can sanity-check both the body length and the tag.
+    constexpr size_t TAG_LEN = 16;
+    const size_t ct_total = env.ciphertext.size();
+    const size_t ct_body  = ct_total - TAG_LEN;
+    const bool   aad_present = !env.aad.empty();
+
+    if (json_output) {
+        // Hand-built JSON: deliberately minimal — no nested objects, no
+        // arrays of bytes. Keep the schema flat so monitoring scripts can
+        // parse with jq/Python json with zero ambiguity. Hex strings are
+        // lowercase to match envelope::serialize convention.
+        std::cout << "{"
+                  << "\"format\":\"DWE1\","
+                  << "\"version\":1,"
+                  << "\"pbkdf2_iters\":" << env.pbkdf2_iters << ","
+                  << "\"salt_len\":"     << env.salt.size()  << ","
+                  << "\"salt_hex\":\""   << to_hex(env.salt) << "\","
+                  << "\"nonce_len\":"    << env.nonce.size() << ","
+                  << "\"nonce_hex\":\""  << to_hex(env.nonce)<< "\","
+                  << "\"aad_present\":"  << (aad_present ? "true" : "false") << ","
+                  << "\"aad_len\":"      << env.aad.size()   << ","
+                  << "\"aad_hex\":\""    << to_hex(env.aad)  << "\","
+                  << "\"ciphertext_len\":" << ct_total       << ","
+                  << "\"ciphertext_body_len\":" << ct_body   << ","
+                  << "\"tag_len\":"      << TAG_LEN
+                  << "}\n";
+    } else {
+        std::cout << "envelope file:   " << in_path           << "\n";
+        std::cout << "format:          DWE1 (version 1)\n";
+        std::cout << "pbkdf2_iters:    " << env.pbkdf2_iters  << "\n";
+        std::cout << "salt_len:        " << env.salt.size()   << " bytes\n";
+        std::cout << "salt_hex:        " << to_hex(env.salt)  << "\n";
+        std::cout << "nonce_len:       " << env.nonce.size()  << " bytes\n";
+        std::cout << "nonce_hex:       " << to_hex(env.nonce) << "\n";
+        std::cout << "aad_present:     " << (aad_present ? "true" : "false") << "\n";
+        std::cout << "aad_len:         " << env.aad.size()    << " bytes\n";
+        if (aad_present)
+            std::cout << "aad_hex:         " << to_hex(env.aad) << "\n";
+        std::cout << "ciphertext_len:  " << ct_total          << " bytes\n";
+        std::cout << "  body:          " << ct_body           << " bytes\n";
+        std::cout << "  tag:           " << TAG_LEN           << " bytes (GCM)\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -431,6 +535,8 @@ void print_usage() {
         "                    --password <str> [--aad <hex>] [--iters <N>]\n"
         "  envelope decrypt --envelope <blob>         Unwrap an envelope\n"
         "                    --password <str> [--aad <hex>]\n"
+        "  inspect-envelope --in <file> [--json]      Dump envelope header metadata\n"
+        "                                             (no decryption, no password)\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -454,6 +560,7 @@ int main(int argc, char** argv) {
     std::string cmd = argv[1];
     if (cmd == "shamir")          return cmd_shamir         (argc - 2, argv + 2);
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
+    if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
