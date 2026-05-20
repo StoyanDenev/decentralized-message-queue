@@ -1,4 +1,4 @@
-# FB14 — TLA+ model-check transcripts (template)
+# FB15 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -48,6 +48,9 @@ java -jar tla2tools.jar -config FeeAccounting.cfg FeeAccounting.tla
 java -jar tla2tools.jar -config SubsidyDistribution.cfg SubsidyDistribution.tla
 # FB13 — Governance PARAM_CHANGE state machine (submit / activate / forward)
 java -jar tla2tools.jar -config GovernanceParamChange.cfg GovernanceParamChange.tla
+
+# FB14 — Cross-shard inbound-receipt dedup state machine
+java -jar tla2tools.jar -config CrossShardReceiptDedup.cfg CrossShardReceiptDedup.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -69,6 +72,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | FeeAccounting.tla (4 domains, H=4, A=3, F=2, S=20) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | SubsidyDistribution.tla (3 domains, B=4, H=4, NefPool=8, MaxCr=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | GovernanceParamChange.tla (3 keyholders, 2 whitelist, 1 off-whitelist, T=2, H=4, V=2) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| CrossShardReceiptDedup.tla (3 shards, 2 domains, 2 hashes, MaxAmount=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -251,6 +255,25 @@ Companion prose proof: `docs/proofs/SubsidyDistribution.md` (separately tracked;
 
 Companion prose proof: `docs/proofs/GovernanceParamChange.md` (separately tracked; the prose track is being assembled in parallel).
 
+### CrossShardReceiptDedup.tla → cross-shard inbound-receipt dedup state machine (T-R1 / T-R2 / T-R3 / T-R4)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `accounts` (Domains → [balance: Nat]), `applied_receipts` (SUBSET DedupKey), `accumulated_inbound` (Nat), `pending_receipts` (Seq(Receipt)), `snapshot_state` (SnapshotState or NoSnapshot), `history` (Seq(DedupKey)) |
+| `Inv_BalanceNonNegative` | per-recipient `balance >= 0` at every reachable state — Nat-typed; documents the contract. ApplyFirst only credits (never debits); Restore preserves Nat-typed values from the snapshot |
+| `Inv_AccumulatedInboundMonotonic` | `accumulated_inbound >= 0` at every reachable state — Nat-typed lower bound (the strict monotonicity claim across non-Restore steps lives in the action-form Prop_DedupAlwaysHolds + the structure of ApplyFirst increments) |
+| `Inv_DedupKeyIsPair` | T-R3 state-machine companion: every entry in `applied_receipts` is a `(src_shard, tx_hash)` pair — same `tx_hash` from different `src_shards` are distinct keys. Mirrors the C++ `std::pair<ShardId, std::string>` key type at `src/chain/chain.cpp:139` (the `applied_inbound_receipts_` definition) |
+| `Inv_NoDoubleCredit` | T-R1 + T-R2 composed: per-recipient balance change equals the sum of UNIQUE receipt amounts targeting that recipient (no duplicate-inflation). State-form upper bound: `balance <= MaxAmount * Cardinality(applied_receipts)` — the tighter equality lives in the temporal `Prop_DedupAlwaysHolds` |
+| `Inv_AppliedImpliesCredited` | every entry in `applied_receipts` was installed by exactly one `ApplyFirst` step. Structurally enforced: ApplyFirst's pre-condition `KeyOf(r) \notin applied_receipts` blocks re-firing on the same key; the `history` sequence witnesses one entry per applied key |
+| `Prop_DedupAlwaysHolds` (temporal) | action-form: every transition is one of (a) UNCHANGED applied_receipts (SubmitReceipt / Equivocate / ApplyDuplicate / Snapshot), (b) extension by exactly one DedupKey (ApplyFirst), or (c) replacement by snapshot_state.applied_receipts (Restore) — no other delta is permitted |
+| `Prop_EventualApply` (temporal) | under fairness on `ApplyFirst`, any pending receipt with a fresh key eventually applies (`k \in applied_receipts`) OR the queue drains via duplicate-apply (`Len(pending_receipts) = 0`) — the eventual-progress / no-stuck-pending guarantee |
+
+**Spec status:** written; TLC verification pending (consistent with the other nine specs above). The configuration in `CrossShardReceiptDedup.cfg` (3 shards, 2 domains, 2 hashes, MaxAmount=3, MaxHeight=4) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `accounts` (Domains → [balance: Nat] — per-recipient credit ledger), `applied_receipts` (SUBSET DedupKey — the protocol's `applied_inbound_receipts_` lifted into TLA+ set semantics), `accumulated_inbound` (Nat — monotone counter, the chain-level lift of the C++ per-block `block_inbound` accumulator at chain.cpp:1377-1380), `pending_receipts` (Seq(Receipt) — submitted but not yet applied), `snapshot_state` (SnapshotState or NoSnapshot — last serialized triple, models the S-033 + S-037 + S-038 round-trip), `history` (Seq(DedupKey) — audit log of ApplyFirst credits, witnesses Inv_AppliedImpliesCredited). Actions modeled: `SubmitReceipt` (legitimate ingress — any well-formed receipt may be queued; the apply-side dedup gate is the safety net), `ApplyFirst` (the fresh-key apply branch at chain.cpp:1363-1381 — credits recipient, inserts key, bumps counter), `ApplyDuplicate` (the silent-skip duplicate branch at chain.cpp:1365 `if (applied_inbound_receipts_.count(key)) continue;`), `Snapshot` (S-037 serialize step at chain.cpp:1586-1592), `Restore` (S-037 restore step at chain.cpp:1778-1783; the T-R4 dedup-set-survives-restore property), `Equivocate` (adversarial — the same dedup-key arrives via two different submission paths, modeling worst-case wire-level replay/race). The 11-field C++ CrossShardReceipt struct is abstracted to the four invariant-relevant fields (src_shard, tx_hash, to, amount) — the remaining seven (dst_shard, src_block_index, src_block_hash, from, fee, nonce, dst_addr_hint) are FA7 cryptographic-binding territory, orthogonal to the apply-side dedup primitive.
+
+This spec drills into the apply-side detail that FB3 (Receipts.tla) modeled at minimum granularity and FB2 (Sharding.tla) modeled at flow granularity. The triangle FB2 ↔ FB3 ↔ FB14 covers the cross-shard receipt mechanism from three complementary angles: emission + admission (FB2), per-block dedup-set monotonicity (FB3), and the apply-level dedup primitive with snapshot-survivable state + multi-shard tx_hash collision handling (FB14). The Inv_DedupKeyIsPair invariant is the non-trivial strengthening over FB3: a single-key model cannot witness the T-R3 "(s1, h1) and (s2, h1) are two distinct keys" property; FB14 makes the pair structure first-class and verifies the protocol's actual key type.
+
+Companion prose proof: `docs/proofs/CrossShardReceiptDedup.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -330,6 +353,18 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `GovernanceParamChange.RejectSubmit*` | `src/node/validator.cpp::check_transactions` PARAM_CHANGE branch reject paths (lines 668, 705-708); the apply layer never sees the tx, so the staging is structurally blocked |
 | `GovernanceParamChange.Activate` | `src/chain/chain.cpp::activate_pending_params` at lines 471-497 (`while (it != pending_param_changes_.end() && it->first <= current_height)` walk; the switch over `name` mutates the Chain field; the `param_changed_hook_(name, value)` call at line 493 fires the T-G6 forwarding to the validator) |
 | `GovernanceParamChange.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs); `activate_pending_params(b.index)` is called from `apply_block` at line 676 |
+| `CrossShardReceiptDedup.accounts` | `src/chain/chain.cpp::accounts_` (map<string, AccountState>; balance field) — the model collapses AccountState to (balance) since the nonce / stake / ed_pub side is FB7 / FB8 / FB5 territory |
+| `CrossShardReceiptDedup.applied_receipts` | `src/chain/chain.cpp::applied_inbound_receipts_` (`std::set<std::pair<ShardId, std::string>>` declared at `include/determ/chain/chain.hpp`; the membership predicate is `inbound_receipt_applied()` at chain.cpp:204-206) |
+| `CrossShardReceiptDedup.accumulated_inbound` | local `block_inbound` accumulator at `src/chain/chain.cpp:1377-1380` (per-block; the TLA model lifts it to a chain-level monotone counter to expose the cross-block cumulative invariants — per-block resets are FB10 FeeAccounting territory) |
+| `CrossShardReceiptDedup.pending_receipts` | `node::Node::pending_inbound_receipts_` (the gossip-ratified inbound queue waiting for apply); the TLA model abstracts the V13 admission step (FA7 territory) and starts from the post-admission queue |
+| `CrossShardReceiptDedup.snapshot_state` | `src/chain/chain.cpp::Chain::serialize_state` / `restore_from_snapshot` (the `applied_inbound_receipts` namespace at chain.cpp:1586-1592 + 1778-1783 — the S-037 addition that closed the dapp_registry / applied_inbound_receipts snapshot-namespace gap) |
+| `CrossShardReceiptDedup.history` | implicit: derived from the sequence of ApplyFirst invocations across `Chain::apply_transactions` inbound-receipt loops. The TLA-level audit log is a state-machine projection of the chain's credit history; the C++ has no explicit history vector (the applied_inbound_receipts_ set IS the history-projected key set) |
+| `CrossShardReceiptDedup.SubmitReceipt` | the gossip-ratification path at `src/node/node.cpp::on_cross_shard_receipt_bundle` (post K-of-K signature verification on the source block); the receipt is enqueued for inclusion in a future block's `inbound_receipts` field |
+| `CrossShardReceiptDedup.ApplyFirst` | `src/chain/chain.cpp:1363-1381` inbound-receipt apply loop, specifically the fresh-key branch (the path through `if (applied_inbound_receipts_.count(key)) continue;` where the count returns 0): credit recipient balance via `checked_add_u64` (S-007), insert key, bump `block_inbound` |
+| `CrossShardReceiptDedup.ApplyDuplicate` | `src/chain/chain.cpp:1365` — the `if (applied_inbound_receipts_.count(key)) continue;` silent-skip branch. No balance credit, no key insertion, no counter bump. The C++ `continue` advances the loop past the duplicate; the TLA model consumes from pending_receipts to mirror the apply-progress (the C++ tx-list iteration is the apply-order ground truth) |
+| `CrossShardReceiptDedup.Snapshot` | `src/chain/chain.cpp::Chain::serialize_state` lines 1586-1592 (the `applied_inbound_receipts` array emit; S-037 added this namespace to close the dapp_registry / applied_inbound_receipts snapshot gap) |
+| `CrossShardReceiptDedup.Restore` | `src/chain/chain.cpp:1778-1783` (the `applied_inbound_receipts` array consume in `Chain::restore_from_snapshot`; pairs back with the S-037 serialize-side fix) |
+| `CrossShardReceiptDedup.Equivocate` | wire-level adversary model: the same (src_shard, tx_hash) pair arrives via two distinct gossip paths (e.g., one from peer A's receipt-bundle gossip, another from peer B's block-relay path). The TLA model collapses both paths into a single Append-to-pending action; the apply-side dedup gate (ApplyFirst's pre-condition) catches the second one regardless of which path won the race |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -377,6 +412,7 @@ The natural next step is wiring TLC into CI:
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry FeeAccounting; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry SubsidyDistribution; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry CrossShardReceiptDedup; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -390,6 +426,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and per-block fee-accounting properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and block-subsidy-distribution properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and governance-parameter-change properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The ten TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and cross-shard-receipt-dedup properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
