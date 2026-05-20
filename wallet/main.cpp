@@ -36,6 +36,13 @@
 #include <array>
 #include <set>
 #include <cstring>
+#include <cstdlib>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <unistd.h>
+#  include <termios.h>
+#endif
 
 using namespace determ::wallet;
 
@@ -1707,6 +1714,358 @@ int cmd_backup_create(int argc, char** argv) {
     return 0;
 }
 
+// ── keyfile-create — S-004 encrypted node_key.json producer ────────────────
+//
+// `determ` daemon supports loading both plaintext and passphrase-encrypted
+// node_key.json files (the latter closes S-004: validator private key
+// exposed at rest). This CLI is the operator-side workflow for producing
+// the encrypted form OFFLINE on a wallet host that doesn't share an
+// address space with the networked daemon.
+//
+// Inputs:
+//   --priv <hex>          : Ed25519 seed (32 B = 64 hex) OR full keypair
+//                            (64 B = 128 hex: 32 seed || 32 pub). Both
+//                            accepted; the pubkey is derived/verified.
+//   --passphrase-from src : `file:<path>` — first line of file
+//                           `env:<VARNAME>` — environment variable
+//                           `prompt` — interactive stdin no-echo prompt
+//   --out <file>          : output path (refuses overwrite without --force)
+//   [--force]             : permit overwriting an existing --out file
+//   [--json]              : emit a structured summary on stdout
+//
+// Canonical encrypted-keyfile shape (mirrors `determ account create
+// --passphrase` from src/main.cpp::cmd_account_create — established
+// precedent for envelope-wrapped key files):
+//
+//   line 1: "DETERM-NODE-V1 <pubkey_hex>\n"
+//   line 2: "<envelope_blob>\n"
+//
+//   <pubkey_hex>   = 64-char lowercase hex of the Ed25519 public key.
+//                    Stored in plaintext so operators can identify which
+//                    validator the file belongs to without decrypting.
+//                    Also bound into the envelope AAD as a tamper-evident
+//                    anchor — substituting another validator's encrypted
+//                    blob under the same passphrase will fail GCM tag
+//                    verification.
+//   <envelope_blob> = canonical DWE1 envelope serialization (dot-separated
+//                     lowercase hex; see wallet/envelope.hpp). The
+//                     plaintext inside the envelope is the same JSON the
+//                     daemon's plaintext load path consumes:
+//                       {"pubkey": "<hex>", "priv_seed": "<hex>"}
+//                     which matches src/crypto/keys.cpp::load_node_key
+//                     byte-for-byte (S-018 field validation applies).
+//   AAD            = pubkey_hex bytes (ASCII, lowercase, 64 bytes).
+//
+// File permissions: best-effort 0600 (owner read+write only). On Unix
+// this is a real chmod via std::filesystem::permissions; on Windows the
+// call resolves to a best-effort owner-only ACL.
+//
+// Round-trip note: the test wrapper exercises decrypt via the wallet's
+// own `envelope decrypt` CLI (the same envelope library the daemon's
+// encrypted-keyfile load path uses), so the entire produce→consume loop
+// is verified without touching `src/`.
+
+// passphrase_from_source — read the operator passphrase per --passphrase-from.
+//
+// Supported source specifiers:
+//   "file:<path>"  — first line of the file (newline-stripped). Empty
+//                    file or empty first line is rejected. Convenient
+//                    for ops scripts: the passphrase lives in a
+//                    permission-restricted file, not on the CLI.
+//   "env:<NAME>"   — value of environment variable <NAME>. Empty value
+//                    is rejected. Variable must be exported in the
+//                    shell environment.
+//   "prompt"       — interactive read from stdin with terminal echo
+//                    disabled (best-effort: Windows + POSIX termios).
+//                    Falls back to plain getline if no tty / no termios
+//                    available.
+//
+// Returns the passphrase on success; sets `err` and returns empty on
+// failure. Caller surfaces `err` on stderr.
+std::string passphrase_from_source(const std::string& spec, std::string& err) {
+    err.clear();
+    if (spec.empty()) {
+        err = "passphrase source is empty";
+        return "";
+    }
+    if (spec.rfind("file:", 0) == 0) {
+        std::string path = spec.substr(5);
+        if (path.empty()) { err = "file: source has empty path"; return ""; }
+        std::ifstream f(path);
+        if (!f) {
+            err = "cannot open passphrase file: " + path;
+            return "";
+        }
+        std::string line;
+        if (!std::getline(f, line)) {
+            err = "passphrase file is empty: " + path;
+            return "";
+        }
+        // Strip trailing CR (Windows-style line endings) but preserve
+        // intentional internal whitespace — the operator may have
+        // chosen a passphrase containing spaces.
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (line.empty()) {
+            err = "passphrase file first line is empty: " + path;
+            return "";
+        }
+        return line;
+    }
+    if (spec.rfind("env:", 0) == 0) {
+        std::string name = spec.substr(4);
+        if (name.empty()) { err = "env: source has empty variable name"; return ""; }
+        const char* v = std::getenv(name.c_str());
+        if (!v || !*v) {
+            err = "environment variable not set or empty: " + name;
+            return "";
+        }
+        return std::string(v);
+    }
+    if (spec == "prompt") {
+        // Interactive no-echo read. Best-effort across platforms; if
+        // disabling echo fails we still read the line (operator may be
+        // running in a non-tty context — they're warned via stderr).
+        std::cerr << "Passphrase: " << std::flush;
+#ifdef _WIN32
+        HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD orig = 0;
+        bool echo_off = (hStdin != INVALID_HANDLE_VALUE
+                         && GetConsoleMode(hStdin, &orig)
+                         && SetConsoleMode(hStdin, orig & ~ENABLE_ECHO_INPUT));
+        std::string pw;
+        std::getline(std::cin, pw);
+        if (echo_off) SetConsoleMode(hStdin, orig);
+        std::cerr << "\n";
+        if (pw.empty()) { err = "empty passphrase from prompt"; return ""; }
+        return pw;
+#else
+        termios old_t{}, new_t{};
+        bool echo_off = (tcgetattr(STDIN_FILENO, &old_t) == 0);
+        if (echo_off) {
+            new_t = old_t;
+            new_t.c_lflag &= ~ECHO;
+            if (tcsetattr(STDIN_FILENO, TCSANOW, &new_t) != 0) echo_off = false;
+        }
+        std::string pw;
+        std::getline(std::cin, pw);
+        if (echo_off) tcsetattr(STDIN_FILENO, TCSANOW, &old_t);
+        std::cerr << "\n";
+        if (pw.empty()) { err = "empty passphrase from prompt"; return ""; }
+        return pw;
+#endif
+    }
+    err = "unknown passphrase source '" + spec
+        + "'; expected file:<path>, env:<NAME>, or prompt";
+    return "";
+}
+
+int cmd_keyfile_create(int argc, char** argv) {
+    std::string priv_hex, pass_src, out_path;
+    bool force = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv"            && i + 1 < argc) priv_hex = argv[++i];
+        else if (a == "--passphrase-from" && i + 1 < argc) pass_src = argv[++i];
+        else if (a == "--out"             && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--force")                           force    = true;
+        else if (a == "--json")                            json_out = true;
+        else {
+            std::cerr << "keyfile-create: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet keyfile-create --priv <hex> "
+                         "--passphrase-from <file:path|env:NAME|prompt> "
+                         "--out <file> [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (priv_hex.empty() || pass_src.empty() || out_path.empty()) {
+        std::cerr << "Usage: determ-wallet keyfile-create --priv <hex> "
+                     "--passphrase-from <file:path|env:NAME|prompt> "
+                     "--out <file> [--force] [--json]\n";
+        return 1;
+    }
+
+    // ── Validate --priv length (must be 32 B seed or 64 B keypair) ──────────
+    if (priv_hex.size() != 64 && priv_hex.size() != 128) {
+        std::cerr << "keyfile-create: --priv must be 64 hex chars (32-byte seed) "
+                     "or 128 hex chars (32-byte seed || 32-byte pubkey); got "
+                  << priv_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_bytes;
+    try { priv_bytes = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-create: invalid --priv hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (priv_bytes.size() != 32 && priv_bytes.size() != 64) {
+        // Belt-and-suspenders; the size check above already covered this.
+        std::cerr << "keyfile-create: --priv decoded length must be 32 or 64; "
+                     "got " << priv_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── Derive / verify pubkey from seed ────────────────────────────────────
+    // Ed25519 layout: the 32-byte seed deterministically derives the
+    // 32-byte public key. If the operator passed a 64-byte form, we
+    // still derive from the seed and verify the supplied pubkey
+    // matches — a mismatch is almost always operator error (mixed up
+    // two key pairs).
+    std::array<uint8_t, 32> seed{};
+    std::memcpy(seed.data(), priv_bytes.data(), 32);
+    std::array<uint8_t, 32> derived_pub{};
+    {
+        EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
+            EVP_PKEY_ED25519, nullptr, seed.data(), 32);
+        if (!pkey) {
+            std::cerr << "keyfile-create: EVP_PKEY_new_raw_private_key failed "
+                         "(seed not a valid Ed25519 private key)\n";
+            return 1;
+        }
+        size_t pub_len = derived_pub.size();
+        if (EVP_PKEY_get_raw_public_key(pkey, derived_pub.data(), &pub_len) <= 0
+            || pub_len != 32) {
+            EVP_PKEY_free(pkey);
+            std::cerr << "keyfile-create: EVP_PKEY_get_raw_public_key failed\n";
+            return 1;
+        }
+        EVP_PKEY_free(pkey);
+    }
+    if (priv_bytes.size() == 64) {
+        std::array<uint8_t, 32> supplied_pub{};
+        std::memcpy(supplied_pub.data(), priv_bytes.data() + 32, 32);
+        if (supplied_pub != derived_pub) {
+            std::cerr << "keyfile-create: --priv mismatch: 64-byte form's tail "
+                         "32 bytes don't match the pubkey derived from the "
+                         "seed (operator likely concatenated the wrong "
+                         "pubkey)\n";
+            return 1;
+        }
+    }
+    std::string pubkey_hex   = to_hex(derived_pub);
+    std::string priv_seed_hex = to_hex(seed);
+
+    // ── Read passphrase from configured source ──────────────────────────────
+    std::string err;
+    std::string passphrase = passphrase_from_source(pass_src, err);
+    if (passphrase.empty()) {
+        std::cerr << "keyfile-create: " << err << "\n";
+        return 1;
+    }
+
+    // ── --out preconditions: parent dir exists; file absent (or --force) ────
+    {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "keyfile-create: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "keyfile-create: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Build the canonical keyfile JSON (plaintext-inside-envelope) ────────
+    // Matches src/crypto/keys.cpp::load_node_key exactly: top-level
+    // object with `pubkey` (64-hex) and `priv_seed` (64-hex) string
+    // fields. Both are required + S-018 length-validated by the daemon.
+    nlohmann::json keyfile_json = {
+        {"pubkey",    pubkey_hex},
+        {"priv_seed", priv_seed_hex}
+    };
+    std::string pt_str = keyfile_json.dump(2);
+    std::vector<uint8_t> pt_bytes(pt_str.begin(), pt_str.end());
+
+    // AAD = ASCII bytes of pubkey hex. Binds the envelope to this
+    // validator's public key — a tampered envelope substituted from
+    // another validator (same passphrase) will fail GCM tag verification.
+    std::vector<uint8_t> aad(pubkey_hex.begin(), pubkey_hex.end());
+
+    // ── Encrypt + write the canonical 2-line file ───────────────────────────
+    std::string blob;
+    try {
+        auto env  = envelope::encrypt(pt_bytes, passphrase, aad);
+        blob      = envelope::serialize(env);
+    } catch (std::exception& e) {
+        std::cerr << "keyfile-create: envelope encrypt failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // ── Self-test round-trip: decrypt the freshly-written envelope ──────────
+    // Catches any drift between encrypt + decrypt paths before the
+    // operator ships the file. Cheap belt-and-suspenders: a wrong
+    // passphrase / corrupted blob fails here BEFORE we touch --out.
+    {
+        auto roundtrip_env = envelope::deserialize(blob);
+        if (!roundtrip_env) {
+            std::cerr << "keyfile-create: internal: just-emitted envelope "
+                         "blob fails deserialize\n";
+            return 1;
+        }
+        auto rt_pt = envelope::decrypt(*roundtrip_env, passphrase, aad);
+        if (!rt_pt) {
+            std::cerr << "keyfile-create: internal: just-emitted envelope "
+                         "fails decrypt round-trip\n";
+            return 1;
+        }
+        if (*rt_pt != pt_bytes) {
+            std::cerr << "keyfile-create: internal: round-trip plaintext "
+                         "mismatch\n";
+            return 1;
+        }
+    }
+
+    {
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "keyfile-create: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << "DETERM-NODE-V1 " << pubkey_hex << "\n";
+        f << blob << "\n";
+        f.close();
+        if (!f) {
+            std::cerr << "keyfile-create: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+
+    // 0600 permissions tightening — best-effort on Windows.
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    if (json_out) {
+        nlohmann::json r;
+        r["pubkey"]      = pubkey_hex;
+        r["out"]         = out_path;
+        r["format"]      = "DETERM-NODE-V1";
+        r["envelope"]    = "DWE1";
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "wrote encrypted node keyfile to " << out_path << "\n";
+        std::cout << "  pubkey: " << pubkey_hex << "\n";
+        std::cout << "  format: DETERM-NODE-V1 (header) + DWE1 envelope\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -1939,6 +2298,17 @@ void print_usage() {
         "                                             length(keyholders); 1<=T<=N<=255.\n"
         "                                             Refuses to overwrite existing output files\n"
         "                                             without --force.\n"
+        "  keyfile-create --priv <hex>                Produce a passphrase-encrypted\n"
+        "                 --passphrase-from <src>     node_key.json for the determ daemon\n"
+        "                 --out <file> [--force] [--json]\n"
+        "                                             (S-004: validator key at rest). --priv\n"
+        "                                             is a 32-byte seed (64 hex) or 64-byte\n"
+        "                                             keypair (128 hex). --passphrase-from is\n"
+        "                                             file:<path>, env:<NAME>, or prompt.\n"
+        "                                             Output shape: header line\n"
+        "                                             'DETERM-NODE-V1 <pubkey_hex>' followed\n"
+        "                                             by a DWE1 envelope blob (plaintext =\n"
+        "                                             {\"pubkey\": \"...\", \"priv_seed\": \"...\"}).\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -1969,6 +2339,7 @@ int main(int argc, char** argv) {
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
+    if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
