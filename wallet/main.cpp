@@ -2366,6 +2366,188 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
     return 0;
 }
 
+// ── keyfile-info — passive diagnostic for an encrypted node keyfile ─────────
+//
+// S-004 keyfile-shape complement to `inspect-envelope`. Reads a 2-line
+// encrypted node keyfile (DETERM-NODE-V1 header + DWE1 envelope blob),
+// parses both, and emits the combined metadata WITHOUT decrypting (no
+// passphrase, no AEAD, no plaintext recovery).
+//
+// Use cases:
+//   * Operator sanity check before attempting decrypt (correct file? right
+//     validator pubkey? PBKDF2 iters consistent with the deployment policy?).
+//   * Fleet inventory: enumerate all encrypted keyfiles, dump (pubkey,
+//     anon-address) without ever needing the passphrase.
+//   * Forensic triage: a tampered file is rejected with a distinguishing
+//     exit code (2) so monitoring can route alerts.
+//
+// Exit codes:
+//   0 — valid keyfile shape, metadata emitted.
+//   1 — file-system error (missing file, parent dir issue, argparse).
+//   2 — structural malformation (wrong header magic, bad pubkey hex, bad
+//        envelope serialization). Distinguishes "operator pointed at a
+//        non-keyfile" or "tampering" from "file not found".
+//
+// Output (default human form):
+//   keyfile:           <path>
+//   header_version:    DETERM-NODE-V1
+//   pubkey_hex:        <64-hex>
+//   anon_address:      0x<64-hex>
+//   envelope:
+//     format:          DWE1 (version 1)
+//     pbkdf2_iters:    <N>
+//     salt_len:        <n> bytes
+//     nonce_len:       12 bytes
+//     ciphertext_len:  <n> bytes
+//     aad_present:     true|false
+//
+// JSON shape (--json):
+//   {"valid":true,
+//    "header_version":"DETERM-NODE-V1",
+//    "pubkey_hex":"...",
+//    "anon_address":"0x...",
+//    "envelope":{
+//      "pbkdf2_iters":<N>,
+//      "salt_len":<n>,
+//      "nonce_len":12,
+//      "ct_len":<n>,
+//      "aad_present":false}}
+//
+// Anon-address derivation: matches `make_anon_address` (and the
+// `account-create-batch` precedent in this same binary): the address is
+// simply "0x" followed by the lowercase hex of the 32-byte pubkey. The
+// hex is already present in the header byte-for-byte; the "0x" prefix is
+// the only addition. This is a sanity-check column for operators eyeballing
+// fleet inventories: header pubkey + derived address always line up unless
+// the header was hand-tampered (in which case the hex-validation step
+// above rejects with exit 2).
+int cmd_keyfile_info(int argc, char** argv) {
+    std::string in_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in" && i + 1 < argc) in_path = argv[++i];
+        else if (a == "--json")                json_out = true;
+        else {
+            std::cerr << "keyfile-info: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet keyfile-info --in <file> [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ-wallet keyfile-info --in <file> [--json]\n";
+        return 1;
+    }
+
+    // ── Read --in and parse the canonical 2-line format ────────────────────
+    // File-level failures (missing, unreadable) exit 1. Structural failures
+    // (wrong header magic, truncated, bad hex, bad envelope) exit 2. The
+    // split lets monitoring scripts distinguish "pointed at the wrong
+    // path" from "file is corrupted / not a keyfile".
+    std::string header_line, blob_line;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "keyfile-info: cannot open --in: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, header_line)) {
+            // Empty file is structurally malformed — there's no header line
+            // at all. Use exit 2 (malformed) rather than 1, since the file
+            // is reachable but its shape is wrong.
+            std::cerr << "keyfile-info: --in is empty (no header line): "
+                      << in_path << "\n";
+            return 2;
+        }
+        if (!std::getline(f, blob_line)) {
+            std::cerr << "keyfile-info: --in is missing the envelope-blob "
+                         "line (expected 2-line format: header + blob): "
+                      << in_path << "\n";
+            return 2;
+        }
+        // Strip trailing CR (Windows-style line endings) for portability.
+        while (!header_line.empty()
+               && (header_line.back() == '\r' || header_line.back() == '\n'))
+            header_line.pop_back();
+        while (!blob_line.empty()
+               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
+            blob_line.pop_back();
+    }
+
+    // ── Header shape: "DETERM-NODE-V1 <pubkey_hex>" ─────────────────────────
+    const std::string header_magic = "DETERM-NODE-V1 ";
+    if (header_line.rfind(header_magic, 0) != 0) {
+        std::cerr << "keyfile-info: --in header does not start with "
+                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
+                     "keyfile)\n";
+        return 2;
+    }
+    std::string pubkey_hex = header_line.substr(header_magic.size());
+    if (pubkey_hex.size() != 64) {
+        std::cerr << "keyfile-info: --in header pubkey must be 64 hex "
+                     "chars (32-byte Ed25519 pubkey); got "
+                  << pubkey_hex.size() << "\n";
+        return 2;
+    }
+    try { (void)from_hex(pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-info: --in header pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (blob_line.empty()) {
+        std::cerr << "keyfile-info: --in envelope blob line is empty\n";
+        return 2;
+    }
+
+    // ── Deserialize envelope blob (no AEAD, no key derivation) ─────────────
+    auto env_opt = envelope::deserialize(blob_line);
+    if (!env_opt) {
+        std::cerr << "keyfile-info: --in envelope blob is malformed "
+                     "(not a valid DWE1 serialization)\n";
+        return 2;
+    }
+    const auto& env = *env_opt;
+
+    // Anon-address: matches src/main.cpp::make_anon_address and the
+    // account-create-batch precedent above — "0x" + lowercase hex(pub).
+    std::string anon_address = "0x" + pubkey_hex;
+
+    const bool aad_present = !env.aad.empty();
+
+    if (json_out) {
+        // Flat schema for monitoring scripts. The nested "envelope"
+        // sub-object mirrors the spec in the command's doc-block above.
+        std::cout << "{"
+                  << "\"valid\":true,"
+                  << "\"header_version\":\"DETERM-NODE-V1\","
+                  << "\"pubkey_hex\":\""   << pubkey_hex   << "\","
+                  << "\"anon_address\":\"" << anon_address << "\","
+                  << "\"envelope\":{"
+                  << "\"pbkdf2_iters\":"   << env.pbkdf2_iters << ","
+                  << "\"salt_len\":"       << env.salt.size()  << ","
+                  << "\"nonce_len\":"      << env.nonce.size() << ","
+                  << "\"ct_len\":"         << env.ciphertext.size() << ","
+                  << "\"aad_present\":"    << (aad_present ? "true" : "false")
+                  << "}"
+                  << "}\n";
+    } else {
+        std::cout << "keyfile:           " << in_path           << "\n";
+        std::cout << "header_version:    DETERM-NODE-V1\n";
+        std::cout << "pubkey_hex:        " << pubkey_hex        << "\n";
+        std::cout << "anon_address:      " << anon_address      << "\n";
+        std::cout << "envelope:\n";
+        std::cout << "  format:          DWE1 (version 1)\n";
+        std::cout << "  pbkdf2_iters:    " << env.pbkdf2_iters  << "\n";
+        std::cout << "  salt_len:        " << env.salt.size()   << " bytes\n";
+        std::cout << "  nonce_len:       " << env.nonce.size()  << " bytes\n";
+        std::cout << "  ciphertext_len:  " << env.ciphertext.size() << " bytes\n";
+        std::cout << "  aad_present:     " << (aad_present ? "true" : "false")
+                  << "\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -2984,6 +3166,15 @@ void print_usage() {
         "                                             for-byte. Wrong passphrase or tampered\n"
         "                                             envelope exits 2 (indistinguishable on\n"
         "                                             stderr); malformed --in exits 1.\n"
+        "  keyfile-info --in <file> [--json]          Passive diagnostic for an encrypted node\n"
+        "                                             keyfile (S-004). Parses the 2-line\n"
+        "                                             DETERM-NODE-V1 + DWE1 envelope shape and\n"
+        "                                             dumps header pubkey, derived anon-address,\n"
+        "                                             and envelope metadata (pbkdf2_iters,\n"
+        "                                             salt/nonce/ct lengths, AAD presence)\n"
+        "                                             WITHOUT decrypting (no passphrase, no\n"
+        "                                             plaintext recovery). Exit 0 valid, 1 file\n"
+        "                                             error, 2 malformed.\n"
         "  message-sign --priv <hex> --message <string|file:path>\n"
         "               --domain-tag <tag> [--json]\n"
         "                                             Sign a message with an Ed25519 priv key.\n"
@@ -3032,6 +3223,7 @@ int main(int argc, char** argv) {
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
     if (cmd == "keyfile-decrypt") return cmd_keyfile_decrypt(argc - 2, argv + 2);
+    if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
