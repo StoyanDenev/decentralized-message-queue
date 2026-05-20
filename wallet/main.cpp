@@ -24,12 +24,14 @@
 #include "recovery.hpp"
 #include "opaque_primitives.hpp"
 #include "opaque_adapter.hpp"
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
 #include <fstream>
 #include <string>
 #include <vector>
+#include <set>
 #include <cstring>
 
 using namespace determ::wallet;
@@ -154,6 +156,179 @@ int cmd_shamir(int argc, char** argv) {
     if (sub == "combine") return cmd_shamir_combine(argc - 1, argv + 1);
     std::cerr << "Unknown shamir subcommand: " << sub << "\n";
     return 1;
+}
+
+// Raw-primitive CLIs: expose shamir::split / ::combine directly with
+// JSON-first output, independent of the recovery envelope flow. Useful
+// for operator workflows that need to print physical shares, split a
+// non-wallet secret, or feed shares into a different transport. The
+// legacy `shamir {split|combine}` subcommand group above stays for
+// backward compatibility with existing test fixtures + the
+// colon-separated wire format.
+int cmd_shamir_split_raw(int argc, char** argv) {
+    std::string secret_hex;
+    int threshold = -1, shares = -1;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--secret"    && i + 1 < argc) secret_hex = argv[++i];
+        else if (a == "--threshold" && i + 1 < argc) threshold  = std::stoi(argv[++i]);
+        else if (a == "--shares"    && i + 1 < argc) shares     = std::stoi(argv[++i]);
+        else if (a == "--json")                      json_out   = true;
+    }
+    if (secret_hex.empty() || threshold < 0 || shares < 0) {
+        std::cerr << "Usage: determ-wallet shamir-split --secret <hex> "
+                     "--threshold T --shares N [--json]\n";
+        return 1;
+    }
+    if (threshold < 1) {
+        std::cerr << "shamir-split: --threshold must be >= 1\n"; return 1;
+    }
+    if (shares < threshold) {
+        std::cerr << "shamir-split: --shares (" << shares
+                  << ") must be >= --threshold (" << threshold << ")\n";
+        return 1;
+    }
+    if (shares > 255) {
+        std::cerr << "shamir-split: --shares must be <= 255\n"; return 1;
+    }
+    if (secret_hex.size() % 2 != 0) {
+        std::cerr << "shamir-split: --secret hex must have even length\n";
+        return 1;
+    }
+    std::vector<uint8_t> secret;
+    try { secret = from_hex(secret_hex); }
+    catch (std::exception& e) {
+        std::cerr << "shamir-split: invalid --secret hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (secret.empty()) {
+        std::cerr << "shamir-split: --secret must be non-empty\n"; return 1;
+    }
+    std::vector<shamir::Share> out;
+    try {
+        out = shamir::split(secret,
+                              static_cast<uint8_t>(threshold),
+                              static_cast<uint8_t>(shares));
+    } catch (std::exception& e) {
+        std::cerr << "shamir-split: " << e.what() << "\n"; return 1;
+    }
+    if (json_out) {
+        nlohmann::json j;
+        j["shares"] = nlohmann::json::array();
+        for (auto& s : out) {
+            j["shares"].push_back({
+                {"x",      static_cast<int>(s.x)},
+                {"y_hex",  to_hex(s.y)},
+            });
+        }
+        std::cout << j.dump() << "\n";
+    } else {
+        for (size_t i = 0; i < out.size(); ++i) {
+            std::cout << "Share " << (i + 1) << ": x="
+                      << static_cast<int>(out[i].x) << " y="
+                      << to_hex(out[i].y) << "\n";
+        }
+    }
+    return 0;
+}
+
+int cmd_shamir_combine_raw(int argc, char** argv) {
+    std::string shares_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--shares" && i + 1 < argc) shares_path = argv[++i];
+        else if (a == "--json")                   json_out    = true;
+    }
+    if (shares_path.empty()) {
+        std::cerr << "Usage: determ-wallet shamir-combine --shares <file> "
+                     "[--json]\n";
+        return 1;
+    }
+    std::ifstream f(shares_path);
+    if (!f) {
+        std::cerr << "shamir-combine: cannot open --shares file: "
+                  << shares_path << "\n";
+        return 1;
+    }
+    std::string blob((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    nlohmann::json j;
+    try { j = nlohmann::json::parse(blob); }
+    catch (std::exception& e) {
+        std::cerr << "shamir-combine: JSON parse failed: " << e.what() << "\n";
+        return 1;
+    }
+    if (!j.contains("shares") || !j["shares"].is_array()) {
+        std::cerr << "shamir-combine: JSON missing 'shares' array\n";
+        return 1;
+    }
+    std::vector<shamir::Share> in;
+    std::set<int> seen_x;
+    size_t y_len = 0;
+    for (auto& el : j["shares"]) {
+        if (!el.is_object()
+            || !el.contains("x")     || !el["x"].is_number_integer()
+            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
+            std::cerr << "shamir-combine: each share must have integer 'x' "
+                         "and string 'y_hex'\n";
+            return 1;
+        }
+        int x = el["x"].get<int>();
+        if (x < 1 || x > 255) {
+            std::cerr << "shamir-combine: x must be in [1,255], got "
+                      << x << "\n";
+            return 1;
+        }
+        if (!seen_x.insert(x).second) {
+            std::cerr << "shamir-combine: duplicate x = " << x << "\n";
+            return 1;
+        }
+        std::string y_hex = el["y_hex"].get<std::string>();
+        if (y_hex.size() % 2 != 0) {
+            std::cerr << "shamir-combine: y_hex must have even length "
+                         "(x=" << x << ")\n";
+            return 1;
+        }
+        shamir::Share s;
+        s.x = static_cast<uint8_t>(x);
+        try { s.y = from_hex(y_hex); }
+        catch (std::exception& e) {
+            std::cerr << "shamir-combine: y_hex parse failed (x=" << x
+                      << "): " << e.what() << "\n";
+            return 1;
+        }
+        if (s.y.empty()) {
+            std::cerr << "shamir-combine: y_hex empty (x=" << x << ")\n";
+            return 1;
+        }
+        if (y_len == 0) y_len = s.y.size();
+        else if (s.y.size() != y_len) {
+            std::cerr << "shamir-combine: share y lengths mismatch "
+                         "(x=" << x << ": " << s.y.size()
+                      << " vs first: " << y_len << ")\n";
+            return 1;
+        }
+        in.push_back(std::move(s));
+    }
+    if (in.empty()) {
+        std::cerr << "shamir-combine: 'shares' array is empty\n"; return 1;
+    }
+    auto out = shamir::combine(in);
+    if (!out) {
+        std::cerr << "shamir-combine: reconstruction failed (shares "
+                     "inconsistent at the shamir layer)\n";
+        return 1;
+    }
+    if (json_out) {
+        nlohmann::json r;
+        r["secret_hex"] = to_hex(*out);
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << to_hex(*out) << "\n";
+    }
+    return 0;
 }
 
 int cmd_envelope_encrypt(int argc, char** argv) {
@@ -427,6 +602,9 @@ void print_usage() {
         "Commands:\n"
         "  shamir split <hex> -t <T> -n <N>           Split secret into N shares\n"
         "  shamir combine <share> ...                 Reconstruct secret from >=T shares\n"
+        "  shamir-split --secret <hex> --threshold T --shares N [--json]\n"
+        "                                             Raw-primitive split (JSON-first output)\n"
+        "  shamir-combine --shares <file> [--json]    Raw-primitive combine from JSON share file\n"
         "  envelope encrypt --plaintext <hex>         AEAD-wrap a share or seed\n"
         "                    --password <str> [--aad <hex>] [--iters <N>]\n"
         "  envelope decrypt --envelope <blob>         Unwrap an envelope\n"
@@ -453,6 +631,8 @@ int main(int argc, char** argv) {
     if (argc < 2) { print_usage(); return 1; }
     std::string cmd = argv[1];
     if (cmd == "shamir")          return cmd_shamir         (argc - 2, argv + 2);
+    if (cmd == "shamir-split")    return cmd_shamir_split_raw  (argc - 2, argv + 2);
+    if (cmd == "shamir-combine")  return cmd_shamir_combine_raw(argc - 2, argv + 2);
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
