@@ -530,6 +530,7 @@ The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients 
 - **Cross-shard DApp routing** (DAPP_CALL crossing shard boundaries) — fleshed out in §11.7.2 below
 - **Per-DApp rate limiting / quota** (operator-declared call-rate ceiling enforced at validator admission) — fleshed out in §11.7.3 below
 - **DApp message-bus indexing + pub-sub backend** (per-DApp+topic LSM index, retention policy state machine, streaming `dapp_subscribe` with backpressure) — fleshed out in §11.7.4 below
+- **DApp subscriber anonymity / unlinkable DAPP_CALL** (linkable-ring-sig + ephemeral-key bearer-call modes that hide subscriber identity from validators while preserving anti-replay, fee accounting, and per-DApp rate-limit enforcement) — fleshed out in §11.7.6 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
 
 ---
@@ -1560,6 +1561,229 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 - **Q6: Activation height vs already-existing DApps.** v2.18 entries default to `bond_amount = 0, subscription_policy.kind = 0`. Per the §11.7.4 Q7 precedent, prospective-only is recommended: existing pre-activation DApps remain bond-less unless they explicitly opt in via a `DAPP_REGISTER op=0` update. Deferred to genesis-config review.
 - **Q7: Bond reduction without full withdraw.** Operator MAY want to reduce bond from B to B' < B without deregistering. Current spec requires `DAPP_BOND_WITHDRAW` (cooldown-gated) + new `DAPP_REGISTER` (re-register with B'). A `DAPP_BOND_ADJUST` tx (op=0 increase, op=1 decrease-with-cooldown) would be cleaner. Deferred: ship without; revisit if operators report friction.
 - **Q8: Auditable subscription cancellation reason.** Like §11.7.1 `reason` field, `DAPP_SUBSCRIBE op=2` (cancel) could carry an optional `reason: utf8` field for off-chain compliance / analytics. Not safety-critical. Deferred to v2.30.1.
+
+---
+
+### 11.7.6 — DApp subscriber anonymity: unlinkable DAPP_CALL with linkable-ring-sig + ephemeral-key bearer modes
+
+**Tracking slot:** v2.32 (Theme 7 — DApp privacy). Effort: ~8-10 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped), v2.30 (DApp economics §11.7.5 — required for the subscriber-set commitment that the ring sig draws from in Mode A); v2.10 threshold randomness (NOT required — anonymity is sender-side, not consensus-side). The new linkable-ring-signature primitive is the one new cryptographic dependency; Mode B uses only existing Ed25519 + libsodium sealed-box primitives. Genesis-pinned activation height required.
+
+#### Problem statement
+
+§10 "Privacy caveats" identifies the central gap directly: *"even with encrypted payload, the chain reveals (sender, recipient DApp, timestamp, payload size). A user's pattern of DApp interaction is on-chain forever."* The v2.19 DAPP_CALL substrate authenticates senders via `tx.from + sig` over `signing_bytes`; the sender pubkey (or registered domain) is in the clear on every call. For a privacy-preserving DApp — anonymous polling, whistleblower channels, anonymous oracle queries, private analytics submission, anonymous DSSO assertions where the RP must not learn which deployment-A user authenticated — the v1.x anon-address primitive (bearer key, no registered identity) only hides the **registered-identity** of the sender; it does NOT hide the **pubkey itself**, which is the actual linkability primitive. Three concrete gaps remain:
+
+1. **Anon-address senders are still self-linkable across calls.** A user submitting two DAPP_CALLs from the same anon address `0x<pubkey>` is trivially correlated by any validator, gossip relayer, or block-stream observer. The privacy guarantee §10 hints at is *anonymous-sender to the DApp* (via libsodium sealed-box ephemeral key inside `ciphertext`), but not *anonymous-sender to the chain*. A DApp that wants to publish "1000 anonymous responses to question X" finds the chain has already pre-linked them by sender pubkey.
+2. **Validator + producer can build a perfect interaction graph.** Every node has block stream access. Pattern-of-life inference (which DApps a user calls, at what cadence, in what topic mix) is a strict superset of payment-graph analysis. §11.7.5 subscription registries make this worse — a subscriber's `subscribers_[D][P]` entry is in the state-root, queryable by anyone who can run a state_proof.
+3. **No protocol-level fee-payment anonymity.** Even if the ciphertext sender is unlinkable, `tx.fee` debits a known account. The chain knows *someone* paid for *this DAPP_CALL*; pairing call frequency with fee-payment cadence breaks the anonymity set down to plausible payers. A privacy DApp ecosystem needs at minimum a "subscriber set posts a periodic fee bundle ahead of time, individual calls draw against the bundle without per-call payer identification" pattern.
+
+This problem matters because: (a) the canonical Theme-9 DSSO design (`V2-DESIGN.md` v2.25/v2.26) explicitly mentions "anonymous assertions" as a valuable downstream pattern, but the v2.19 substrate cannot deliver them; (b) regulated-disclosure use cases (anonymous tip lines, KYC-attested-but-pseudonymous-call patterns under §11.7.5 subscriptions) need a chain-level primitive, not an off-chain workaround; (c) the zk-VM L2 God Stack pattern (§1) benefits significantly if Layer-1 DAPP_CALL submission to the L2 settlement DApp is itself unlinkable — composing privacy across L1 + L2.
+
+The v2.32 design ships **two anonymity modes** (operator-selectable per DApp at registration time): **Mode A — Linkable Ring Signature** for subscriber-set call attestation with chain-enforced anti-double-call within a window, and **Mode B — Ephemeral Bearer Tokens** for one-shot anonymous calls drawing against a pre-funded anonymity pool. The two modes are co-installable; a single DApp may accept both (subscribers use Mode A, drive-by callers use Mode B) declared via a bit-field in the policy.
+
+#### Mechanism sketch
+
+**Mode A — Linkable Ring Signature over subscriber set.** The §11.7.5 `subscribers_[dapp_domain]` registry, already committed to state-root via the `"u:"` namespace, becomes the anonymity set. A subscriber signs a DAPP_CALL with a linkable ring signature (LRS) over the full subscriber-set pubkey list at height `h`, proving "I am one of these N subscribers" without revealing which one. The LRS scheme (chosen: Liu-Wei-Wong LSAG, well-studied, ~2KB sig for ring of 256) emits a **key image** as a side-output: an Ed25519-curve point deterministically derived from the signer's secret key and the DApp domain. Two LRS signatures from the same subscriber within the same anti-replay window (genesis-pinned, suggested 1 day in blocks) produce the same key image — the chain detects double-call and rejects the duplicate, preserving per-subscriber rate limiting from §11.7.3 *without* learning subscriber identity. After the window rolls over, key images expire and new calls become unlinkable to prior ones.
+
+**Mode B — Ephemeral Bearer Tokens.** A DApp operator pre-funds an **anonymity pool** account (anonymous shared balance, no per-subscriber tracking). The pool publishes a **bearer-token root** — a Merkle root of N freshly-minted single-use ephemeral pubkeys, each authorized to make exactly one DAPP_CALL. The minting operator distributes the corresponding secret keys via off-chain channels (one-time tokens; the operator is trusted not to reuse them, slashed if they do via §11.7.5 bond). A caller submits a DAPP_CALL with `tx.from = <ephemeral pubkey>`, signed by the ephemeral secret key, with an inclusion proof against the bearer-token root. The chain verifies the inclusion proof and the signature, debits the call's fee from the anonymity pool (not from a per-caller balance), and marks the ephemeral pubkey as **spent** in a per-pool nullifier set (mirrors Mode A's key-image set but per-pool not per-subscriber). The caller's actual identity is decoupled from the on-chain witnesses: only the pool operator knows which off-chain identity received which ephemeral key, and rotating pools every N blocks prevents long-term correlation.
+
+The two modes share three protocol primitives: (i) a **nullifier set** per DApp (Merkle-committed in the state-root via a new `"n:"` namespace) that prevents double-spending across both modes uniformly, (ii) an **anonymity pool balance** field on the DAppEntry that funds Mode B calls and that subscribers in Mode A may optionally pre-fund (the LRS scheme can be extended to prove "I have paid into the pool" without revealing the payment), and (iii) a per-DApp **anonymity_policy** declared at registration that selects mode availability + window length.
+
+#### Wire-format changes
+
+**Extension to `DAPP_REGISTER` payload** (§3.1, appended after the §11.7.5 fee-share suffix when present):
+
+```
+... existing fields through fee_share_validator_bp ...
+[anonymity_policy: u8]              # bitfield: bit0 = Mode A enabled, bit1 = Mode B enabled, bit2 = require-anon-only (reject plaintext sender)
+[ring_window_blocks: u32 LE]        # Mode A anti-replay window (genesis-clamped to [MIN, MAX]; suggested 21600 ~ 1 day)
+[anonymity_pool_pubkey: 32B]        # Mode B pool account pubkey (for off-chain pre-funding via TRANSFER); zero if Mode B disabled
+[bearer_root_count: u8]             # number of distinct bearer-token roots currently active (max 16; per-pool rotation)
+bearer_root_count × {
+    [root: 32B]                     # Merkle root over ≤ DAPP_BEARER_ROOT_MAX_LEAVES (suggested 4096) ephemeral pubkeys
+    [issued_at: u64 LE]             # block height the root was first published
+    [expires_at: u64 LE]            # block height after which the root is rejected (operator MUST rotate)
+}
+```
+
+**New tx-type slots** (extend §3 enum, alongside §11.7.1 + §11.7.5):
+
+```cpp
+enum class TxType : uint8_t {
+    ...existing 0..13 (incl. DAPP_BOND_WITHDRAW = 13 from §11.7.5)...,
+    DAPP_CALL_ANON      = 14,   // anonymous DAPP_CALL via Mode A or Mode B
+    DAPP_BEARER_ISSUE   = 15,   // publish a new bearer-token root (Mode B operator op)
+};
+```
+
+**`DAPP_CALL_ANON` payload** (anonymous variant of §3.2 DAPP_CALL):
+
+```
+[mode: u8]                       # 1 = Mode A linkable ring sig; 2 = Mode B bearer token
+[dapp_domain_len: u8]
+[dapp_domain: utf8]              # target DApp (replaces tx.to which is set to dapp_domain)
+[topic_len: u8]
+[topic: utf8]                    # same topic semantics as DAPP_CALL
+[ciphertext_len: u32 LE]
+[ciphertext: bytes]              # same opaque-payload semantics
+[nullifier: 32B]                 # Mode A: LRS key image; Mode B: spent-ephemeral-pubkey marker
+[if mode == 1:                   # Mode A: linkable ring signature
+  [ring_root: 32B]               # Merkle root over the subscriber pubkey list at signing height
+  [ring_height: u64 LE]          # height at which ring_root was observed (must be within ring_window_blocks of current h)
+  [ring_size: u16 LE]            # number of signers in the ring (capped DAPP_RING_MAX = 256)
+  [lrs_sig: var]                 # LSAG signature; size = 32 + ring_size × 32 bytes ≈ up to 8 KB
+]
+[if mode == 2:                   # Mode B: bearer token
+  [bearer_root: 32B]             # which active root this token belongs to
+  [bearer_pubkey: 32B]           # the ephemeral pubkey (matches a leaf under bearer_root)
+  [bearer_proof: var]            # Merkle inclusion proof of bearer_pubkey under bearer_root (log2(leaves) × 32 bytes)
+  [bearer_sig: 64B]              # Ed25519 sig by the ephemeral secret key over signing_bytes
+]
+```
+
+`tx.from` is the **anonymity pool pubkey** in both modes (so the chain can debit fees uniformly). `tx.nonce` is unused — anti-replay is by `nullifier` not by sender-nonce, since the sender is anonymous. `tx.amount` (the DApp credit leg) is debited from the anonymity pool too; subscribers in Mode A who want to pay individually use the standard DAPP_CALL instead.
+
+**`DAPP_BEARER_ISSUE` payload** (Mode B operator-side root publication):
+
+```
+[op: u8]                         # 0 = publish new root, 1 = retire root early (emergency)
+[dapp_domain_len: u8]
+[dapp_domain: utf8]              # must equal tx.from (owning domain or rotation_pubkey per §11.7.1)
+[new_root: 32B]                  # Merkle root over leaf-pubkeys (zero on op=1)
+[leaf_count: u16 LE]             # number of leaves (≤ DAPP_BEARER_ROOT_MAX_LEAVES)
+[lifetime_blocks: u32 LE]        # how many blocks the root is valid (clamped to [DAPP_BEARER_ROOT_MIN_LIFETIME, MAX])
+[retiring_root: 32B]             # on op=1: the root to retire early; on op=0: zero
+```
+
+**State-commitment encoding** (extends §4 `d:` namespace canonical serialization, appended after the §11.7.5 economics suffix when present):
+
+```
+... existing canonical_serialize(DAppEntry) including §11.7.5 suffix ...
+|| u64_be(anonymity_policy)
+|| u64_be(ring_window_blocks)
+|| anonymity_pool_pubkey                 # 32 bytes
+|| u64_be(bearer_root_count)
+|| (each: bearer_root || u64_be(issued_at) || u64_be(expires_at))
+```
+
+Conditional-serialization rule (mirrors §11.7.1 + §11.7.5): the extension MAY be omitted if `anonymity_policy == 0 && ring_window_blocks == 0 && anonymity_pool_pubkey == zero && bearer_root_count == 0`. Pre-v2.32 entries default to this state, preserving state_root byte-for-byte across the activation height.
+
+**Nullifier set state-Merkle namespace** (new `"n:"` namespace): `"n:" + dapp_domain || nullifier → u64_be(seen_at_height)`. The nullifier map is **window-pruned**: entries with `seen_at_height + ring_window_blocks < h` are eligible for eviction at the next block (the chain runs the prune as part of `apply_block_finalization`, the same hook §11.7.5 uses for subscription period-credit). Pruning is deterministic and committed in state-root delta — full nodes that miss the prune block (snapshot-restore) recompute from the snapshot tail's window.
+
+#### Apply-path changes
+
+Touch list (files in `src/chain/` and `src/node/`):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/transaction.hpp` | `TxType` enum | Add `DAPP_CALL_ANON = 14`, `DAPP_BEARER_ISSUE = 15` |
+| `include/determ/chain/dapp.hpp` (extension) | `DAppEntry` | Add `anonymity_policy`, `ring_window_blocks`, `anonymity_pool_pubkey`, `bearer_roots` vector |
+| `include/determ/chain/dapp.hpp` (new struct) | `BearerRoot` | `{root, issued_at, expires_at, leaf_count}` |
+| `include/determ/crypto/lrs.hpp` (new) | `lrs_verify`, `lrs_key_image` | LSAG verify-only; signing lives in wallet, never in node |
+| `src/chain/transaction.cpp` | `binary_codec::encode/decode_tx` | Add `DAPP_CALL_ANON` and `DAPP_BEARER_ISSUE` payload cases |
+| `src/chain/chain.cpp` | `apply_transactions` switch | Two new cases. `DAPP_CALL_ANON`: validate mode, verify nullifier-unseen, verify mode-specific sig + inclusion, mark nullifier-seen, debit pool, credit DApp. `DAPP_BEARER_ISSUE`: validate authorization (mirrors §11.7.1 `DAPP_KEY_ROTATE`), update `bearer_roots` |
+| `src/chain/chain.cpp` | `build_state_leaves` | Extend `d:` branch (conditional suffix per §11.7.6 wire format); add new `n:` namespace |
+| `src/chain/chain.cpp` | `apply_block_finalization` | Prune nullifier entries with `seen_at_height + ring_window_blocks < h`; emit prune-delta in state-root |
+| `src/chain/chain.cpp` | `serialize_state` / `restore_from_snapshot` | Round-trip `bearer_roots`, `anonymity_policy`, nullifier map. Forward-closes S-037 for the extended schema (must be wired or inherits S-037's symptom) |
+| `src/node/validator.cpp` | `validate_tx_shape` | New cases for `DAPP_CALL_ANON` (mode-flag check, ring-size ≤ cap, ciphertext-size ≤ cap, ring_height fresh enough) and `DAPP_BEARER_ISSUE` (lifetime in range, leaf_count ≤ cap) |
+| `src/node/node.cpp` | `rpc_dapp_info` | Return `anonymity_policy` + active `bearer_roots` (light clients need the active bearer roots to construct Mode B inclusion proofs) |
+| `src/node/node.cpp` | new `rpc_dapp_anon_subscribers(domain, height)` | Returns the subscriber-set Merkle root + leaves for use as a Mode A ring (~256 × 32 B = 8 KB per response, cap-bounded) |
+| `tools/test_dapp_anonymity.sh` | new | Regression: Mode A ring sig + double-call rejection + window expiry, Mode B bearer issue + spend + nullifier rejection, cross-mode nullifier-uniqueness, snapshot round-trip |
+| `tools/test_dapp_lrs_vectors.sh` | new | Cryptographic vector tests against a known LSAG reference impl |
+
+The two new switch cases mirror `DAPP_CALL` and `DAPP_KEY_ROTATE` shapes (charge_fee → validate → mutate → no nonce-advance for `DAPP_CALL_ANON` since sender has no nonce). The lazy-snapshot integration is inherited from §5's Phase 2A/2B pattern; the new nullifier map participates via the same machinery.
+
+**Concurrency.** The nullifier check is a SET-MEMBERSHIP + INSERT pair under `state_mutex_`. To preserve the §11.7.5 lock-free reader path, nullifier reads (`rpc_dapp_anon_nullifier_check`) use the Phase 2C `CommittedStateBundle`; writes serialize with all other state mutations.
+
+#### Backward-compat story
+
+This is a **soft-fork** addition under the v2.18 / v2.19 / §11.7.5 substrate: no existing tx becomes invalid, no existing state_root computation changes for entries that never enable anonymity. Coexistence rules:
+
+- Pre-activation, `DAPP_CALL_ANON` and `DAPP_BEARER_ISSUE` are unknown tx-types — pre-v2.32 nodes reject the containing block. Activation is height-pinned via `genesis_params.dapp_anonymity_active_from` (same pattern as A11 / S-033 / §11.7.1).
+- Post-activation, the chain enforces: `DAPP_CALL_ANON` to a DApp with `anonymity_policy == 0` is REJECTED with `"dapp does not accept anon calls"`; `DAPP_CALL` to a DApp with `anonymity_policy & 4` (require-anon-only bit) is REJECTED with `"dapp accepts only anon calls"`. This lets privacy-mandated DApps cleanly enforce their policy at the protocol level.
+- v2.18 / v2.19 / §11.7.1 / §11.7.5 entries materialize transparently as `anonymity_policy = 0, bearer_roots = []`. Their `state_root` contribution is unchanged by §11.7.6's conditional-suffix rule.
+- The nullifier-namespace `"n:"` adds new state-root inputs but only for chains that exercise anonymity; pre-activation chains have an empty `"n:"` namespace (zero leaf in the per-namespace Merkle), preserving state_root continuity.
+
+The coordinated migration follows the same pattern as §11.7.1 + §11.7.5: validators upgrade in advance, light clients note the schema version transition, the new namespace becomes observable in state-proofs only after the activation height.
+
+#### Threat model
+
+| Attack | v2.32 defense | New surface introduced |
+|---|---|---|
+| **Per-call linkability via fixed sender pubkey** | Mode A: signer is hidden in the ring of ≤256 subscribers; chain learns only "one of these N signed." Mode B: signer's ephemeral pubkey is fresh per call, unlinkable to off-chain identity except via the operator's bearer-distribution channel (operator-trusted per §11.7.5 bond). | None — strictly improves on v2.19's "anon-address is self-linkable" |
+| **Cross-call correlation by tracking the same anon pubkey** | Mode A: same subscriber signing twice in the same window produces the same key image → second call rejected (which is the rate-limit primitive, but it also visibly "ages out" at window boundary — observers learn cardinality but not identities). Mode B: every call uses a fresh ephemeral pubkey; rotating bearer roots regularly (e.g., every 1000 blocks) prevents long-term correlation across roots. | The key image itself is a deterministic function of (signer secret, DApp domain). Across DApps, the same subscriber generates DIFFERENT key images — DApp-A's key image cannot be linked to DApp-B's. But ACROSS WINDOWS for the same DApp, the same subscriber's repeat-call calls produce the same image, which lets an observer count "how many distinct subscribers called in window W" (an information leak slightly worse than full anonymity). Operator-side mitigation: rotate the subscriber set frequently (subscribe / unsubscribe creates a new subscriber-set ring; LRS rings reference snapshot-at-height so old rings are still verifiable for replay-window analysis). |
+| **Double-call within window via Mode A** | Key image deterministic + chain-side nullifier set. Second LSAG signature with same (secret, domain, window) produces identical key image → REJECTED with `"nullifier already spent"`. Window-rollover (height ≥ `ring_height + ring_window_blocks`) frees the image; new calls become valid. | Window choice trades off rate-limit granularity vs anonymity-set churn. Short windows (1 hour) give fine rate control but force ring-root re-publish more often. Long windows (1 week) give large anonymity sets but coarser rate limits. Genesis-clamped to [MIN, MAX]; per-DApp choice in the clamp range. |
+| **Operator-side fraud in Mode B (reissue same ephemeral pubkey twice across roots)** | The nullifier check is per-pubkey global within a DApp domain, not per-root. An ephemeral pubkey that appears in two bearer roots is spent on first use and rejected on second use, regardless of which root the second submitter claims. The operator who issued a duplicate is detectable on-chain (two `DAPP_BEARER_ISSUE` txs with overlapping leaf sets — provable via inclusion-witness disclosure) → slash via §11.7.5 bond. | New slashable event surface: bearer-root leaf-set collision. Detection requires the operator (or any honest observer) to publish a `DAPP_BEARER_SLASH` proof showing two roots containing the same pubkey. Detection effort is operator-side (the chain stores roots but not leaves); typical light-client cost is ~64 KB per investigation. |
+| **Fee-payment de-anonymization** | Both modes debit `tx.fee` + `tx.amount` from a pool account (DApp's `anonymity_pool_pubkey`), not from a per-caller account. The chain learns "the pool paid"; it does not learn "user X paid." Off-chain, subscribers pre-fund the pool via standard TRANSFER (Mode A) or the operator pre-funds the pool from its operating capital (Mode B). | The pool's funding ledger IS public — observers see TRANSFER into the pool from sender S, and TRANSFER out as DAPP_CALL_ANON fees. Anonymity set is the set of payers-into-the-pool, NOT the universe of all chain users. For Mode A this is the subscriber set (already public per §11.7.5 `"u:"` namespace); for Mode B this is whoever the operator chooses to disclose. Compensating control: subscribers can use anonymous-routing TRANSFER (v3-deferred, not v2.32 scope) to fund the pool from anon accounts. |
+| **Sybil ring inflation** | The Mode A ring is constrained to current `subscribers_[D]` set per §11.7.5. Sybil-resistant by the §11.7.5 subscription cost (`period_fee × min_periods`). Mode B is constrained to the operator's published bearer roots; Sybil resistance is operator-trusted (the operator is the only Mode B issuer). | The ring's effective k-anonymity is `ring_size`, NOT `subscribers_[D].size()`. A signer who chooses `ring_size = 2` is only 2-anonymous. Wallet-side default MUST be `ring_size = min(256, subscribers_[D].size())`. Wallets that ship with smaller defaults are user-hostile; documentation MUST warn. |
+| **Replay across deployments / chains** | The LSAG key image binds the signer secret to the **DApp domain** (a chain-local namespace) and the chain's `chain_id` (included in the LSAG message domain-separator). Replay across chains is rejected because the verifier checks `chain_id`. The bearer-token Merkle root similarly binds `chain_id` in its leaf encoding. | New cryptographic primitive (LSAG) requires careful vector tests against reference impls + side-channel review for the signing path (which runs in user wallets, not on validators). Vector test included in `tools/test_dapp_lrs_vectors.sh`. |
+| **State-bloat via nullifier accumulation** | `apply_block_finalization` prunes expired nullifiers; per-DApp nullifier set size is bounded by `subscribers_[D].size() × max(1, blocks-in-window)` for Mode A (one entry per signing event, expired after window) and by `total bearer-leaves-spent` for Mode B (entries expire when the root expires, max DAPP_BEARER_ROOT_MAX_LEAVES × bearer_root_count = ~64 K entries per DApp). | Pruning is a per-block cost in `apply_block_finalization`. Per-block prune work is bounded by ~256 nullifiers per DApp per window-rollover-block; with 1000 active DApps that's ~256 K cleanup ops at window-boundaries. The bookkeeping can be amortized via expiry-indexed buckets; full-scan-per-block is acceptable for v2.32 launch. |
+| **Side-channel: payload size + topic leakage** | The mode-flag, ring root, and bearer root are PUBLIC. An observer learns the DApp, topic, and approximate payload size of every anon call (sees ciphertext_len). Combined with timing analysis, an adversary may infer who-called-whom across direct-message correlations. | This is fundamental to the substrate (the chain MUST see ciphertext to commit it). DApps wanting stronger metadata privacy layer mix-net / onion-routing on top (per §10 "Privacy caveats" existing guidance). v2.32 ships padding helpers in the wallet SDK (`crypto_box_seal_padded`); chain-side enforcement of padding is out of scope. |
+| **Light-client trust in nullifier state** | Light clients verify the nullifier set via state_proof over the `"n:"` namespace (v2.2 RPC). Pre-call check ("is my key image already spent?") via `rpc_dapp_anon_nullifier_check(domain, image)` returns a state_proof; light client verifies against the chain head's state_root. | New RPC surface; same auth + rate-limit treatment as `dapp_messages` (S-001 HMAC + S-014 token bucket). No new auth primitives. |
+| **Quantum-future advance on Ed25519 / LSAG** | Same caveat as §10 already documents for libsodium sealed-box. Historical nullifiers and ring signatures could in principle be retroactively de-anonymized given a quantum attacker on Ed25519. v2.32 inherits this caveat; post-quantum mitigation is a Theme-12 future-work item (NIST-PQC signature substitution). | None new beyond what §10 already discloses. |
+
+The relevant cross-references in the existing threat-model docs: `proofs/Safety.md` L-1.3 (state-root inclusion of `"n:"` namespace), `proofs/CrossShardReceipts.md` T-7 (cross-shard nullifier visibility — out of scope for v2.32; v3-deferred), `proofs/EquivocationSlashing.md` H2 (equivocating bearer-root-issue is well-defined ordering by intra-block tx index, no new equivocation surface), `SECURITY.md` §S-001 (HMAC-RPC for the new anon-check RPC), §S-014 (token bucket covers the new RPC + new tx submission), `SECURITY.md` §S-008 (mempool admission for anon txs piggybacks on per-pool fee accounting).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `TxType::DAPP_CALL_ANON` + `DAPP_BEARER_ISSUE` enum + struct extensions | 0.5 day | Mechanical |
+| Encoder/decoder + payload validation for both new tx-types | 1 day | Mirrors §11.7.5 + §11.7.1 shapes |
+| LSAG verify implementation (`include/determ/crypto/lrs.hpp`) | 2 days | Verify-only; vector-tested against Monero LSAG reference (well-published) |
+| LSAG sign implementation (wallet-side, separate from node) | 1.5 days | Lives in wallet/main.cpp; node never signs |
+| `apply_transactions` switch cases + nullifier check + pool debit | 1.5 days | Two cases + cross-mode nullifier uniqueness |
+| `build_state_leaves` + new `n:` namespace + d-namespace conditional suffix | 1 day | Preserves state_root byte-for-byte for non-anonymity entries |
+| `apply_block_finalization` nullifier pruning | 0.5 day | Window-bucket sweep |
+| `serialize_state` / `restore_from_snapshot` for nullifier + bearer_roots | 0.5 day | Forward-closes S-037 for the extended schema |
+| `rpc_dapp_info` + new `rpc_dapp_anon_subscribers` + new `rpc_dapp_anon_nullifier_check` | 1 day | Three RPC additions + state_proof generation |
+| CLI: `determ dapp-call-anon --mode A|B --domain D [...]`, `determ dapp-bearer-issue --domain D --leaves <file>` | 1 day | Wallet ergonomics including LSAG signing wrapper |
+| Regression: `tools/test_dapp_anonymity.sh` (Mode A normal, Mode A double, Mode A window-rollover, Mode B issue + spend, Mode B replay, snapshot round-trip, cross-shard reject) | 2 days | Seven scenarios |
+| LSAG vector tests: `tools/test_dapp_lrs_vectors.sh` | 1 day | Cryptographic correctness against reference vectors |
+| Migration coordination: genesis_params + activation gate + docs | 0.5 day | Mirror §11.7.1 / §11.7.5 |
+| **Total** | **~8-10 engineering days** | Single-developer estimate; +2-3 days if LSAG sec review demands a formal proof against the textbook scheme. |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required for the `dapp_registry_` substrate.
+- **v2.19 DAPP_CALL** — shipped. Required for the call substrate that anonymity extends.
+- **v2.10 threshold randomness** — NOT required. Anonymity is sender-side; consensus randomness plays no role.
+- **§11.7.5 DApp economics (v2.30)** — REQUIRED. The Mode A ring draws from `subscribers_[D]` which is the §11.7.5 namespace. Without §11.7.5 there's no committed subscriber set to ring over. Mode B is partially decoupleable (operator-supplied bearer roots don't need subscribers), but the anonymity-pool funding flow assumes §11.7.5 pool accounting.
+- **§11.7.1 DAPP_KEY_ROTATE (v2.24)** — RECOMMENDED. Bearer-root issuance authorization defaults to the owning-domain key; pre-configuring a `rotation_pubkey` keeps the owning-domain cold while a hot key rotates bearer roots. Strict dependency: none (works without §11.7.1).
+- **v2.4 COMPOSABLE_BATCH** — shipped. Useful for atomic "fund pool + emit bearer root" patterns.
+- **v2.2 state_proof RPC** — shipped. Required for light-client verification of `n:` namespace and the extended `d:` namespace.
+- **No new gossip primitives.** No new consensus primitives. One new cryptographic primitive (LSAG, well-studied).
+- **OUT OF SCOPE for v2.32:** cross-shard anonymous calls (the nullifier set is per-shard local; cross-shard anonymity requires beacon-relay of nullifier deltas, which is significant additional design — defer to v3 or to §11.7.2's cross-shard work as a co-deliverable).
+
+#### Cross-references
+
+- §3.2 `DAPP_CALL` byte layout — `DAPP_CALL_ANON` payload conventions match wherever applicable
+- §4 `dapp_registry_` state-commitment via `d:` namespace — extended here with conditional suffix
+- §9 Anti-spam stake — anonymity pool ≠ per-subscriber stake; the §9 stake floor applies to the DApp's owning domain, the anonymity pool is a separate account
+- §10 Privacy & off-chain channels — "Privacy caveats" paragraph operationalized: metadata leakage reduced from sender pubkey-grained to ring-grained / bearer-root-grained
+- §11.7.1 DAPP_KEY_ROTATE — sibling authorization-delegation pattern (rotation_pubkey extends to bearer-root issuance)
+- §11.7.3 Per-DApp rate limiting — Mode A nullifier window-key-image is the anonymity-preserving variant of §11.7.3's per-subscriber bucket
+- §11.7.4 Message-bus indexing — anonymous calls are indexed by (domain, topic, height) like regular calls; the indexer does NOT see subscriber identity, only nullifier
+- §11.7.5 DApp economics — subscriber-set commitment is the Mode A anonymity set; anonymity pool funding ties into the §11.7.5 bond + fee-share machinery
+- `V2-DESIGN.md` Theme 9 (v2.25/v2.26 DSSO) — anonymous DSSO assertions are a canonical downstream use case
+- `V2-DESIGN.md` Theme 11 (v2.32 cross-shard anonymity) — explicit deferral; v2.32 ships single-shard only
+- `proofs/Safety.md` L-1.3 — state-root inclusion semantics for `n:` namespace
+- `proofs/CrossShardReceipts.md` T-7 — cross-shard nullifier propagation; OUT OF SCOPE for v2.32 (v3-deferred)
+- `SECURITY.md` §S-037 — forward-closes the snapshot-serialize/restore gap for the extended `DAppEntry` schema (the v2.32 implementation MUST round-trip `bearer_roots`, nullifier map, and anonymity_policy)
+- `PROTOCOL.md` §4.1.1 — `d:` namespace canonical serialization extension + new `n:` namespace
+- `src/chain/chain.cpp` `build_state_leaves` + `apply_transactions` + `apply_block_finalization` — touch sites
+- `include/determ/crypto/lrs.hpp` — new cryptographic primitive (verify-only on node, sign-only in wallet)
+- `tools/test_dapp_register.sh` + `tools/test_dapp_call.sh` — sibling regression patterns; `tools/test_dapp_anonymity.sh` mirrors their shape
+
+#### Open questions deferred to implementation
+
+- **Q1: LSAG vs alternatives (BLS aggregation, zk-SNARK group sig).** LSAG is the simplest scheme with mature reference impls (Monero shipped it in production for years). BLS aggregation would reduce sig size at the cost of pairing arithmetic + a more complex anti-replay primitive. zk-SNARK group sigs are smaller still but require a trusted setup or universal CRS. Chosen: LSAG. Revisit if ring sizes >> 256 become operationally necessary.
+- **Q2: Ring size cap (256, chosen).** Larger rings give bigger anonymity sets but linearly larger sigs (~8 KB at 256; ~32 KB at 1024). At 256 the sig fits within the 16 KB MAX_DAPP_CALL_PAYLOAD cap of §3.1. Operators wanting larger rings can argue for raising the cap via governance (§12 Q2 governance-mutable cap).
+- **Q3: Window length default.** Suggested 21600 blocks (~1 day at 4s block time) balances rate-limit granularity vs anonymity-set churn. Operator-tunable in [MIN, MAX] genesis-clamp. Deferred: empirical tuning post-launch.
+- **Q4: Mode B bearer-token distribution.** The protocol defines the on-chain primitive; how operators distribute bearer secret keys (off-chain encrypted email, in-band via direct-to-DApp §10 channel, via a separate "claim" RPC) is application-layer policy. Reference implementation: in-band claim via a one-shot HTTPS endpoint published in `endpoint_url`. Deferred to a SDK contribution.
+- **Q5: Pool refund on DApp deactivation.** When a DApp `op=1` deactivates, the anonymity pool may hold unspent funds. v2.32 ships with: pool balance is auto-credited to the owning domain at `inactive_from + DAPP_BOND_UNLOCK_COOLDOWN_BLOCKS` (mirrors §11.7.5 bond unlock). Subscribers in Mode A who pre-funded the pool MAY refund individually via a `DAPP_POOL_REFUND` tx (new tx-type 16, payload = subscriber_pubkey + LRS over current subscribers proving membership). Deferred to v2.32.1.
+- **Q6: Cross-mode nullifier uniqueness.** Currently both modes share the per-DApp `"n:"` namespace, so a 32-byte collision between Mode A key image and Mode B ephemeral pubkey would silently merge anti-replay state. The 2^256 birthday space makes this negligible (~2^128 work), but a tagged scheme (`mode-prefix || nullifier`) is cleaner. Chosen: tagged. Update to `"n:" + dapp_domain || mode_byte || nullifier`. Deferred to spec final pass.
+- **Q7: Activation height vs already-existing DApps.** v2.18 / v2.19 / §11.7.1 / §11.7.5 entries default to `anonymity_policy = 0` (no anonymity). Per the §11.7.5 Q6 precedent, prospective-only: existing DApps keep their non-anon mode unless they opt in via a `DAPP_REGISTER op=0` update. Deferred to genesis-config review.
+- **Q8: Anonymous-fee-into-pool channel.** v2.32 funds the pool via standard TRANSFER, which leaves a public trail "subscriber S funded pool P." For full payer anonymity, an anonymous TRANSFER primitive is needed — this is a v3-deferred chain-wide feature (anonymous payments), not a DApp-scoped extension. v2.32 explicitly acknowledges this as a privacy ceiling and documents the gap.
 
 ---
 
