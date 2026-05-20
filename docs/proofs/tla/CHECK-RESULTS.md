@@ -1,4 +1,4 @@
-# FB14 — TLA+ model-check transcripts (template)
+# FB17 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -48,6 +48,9 @@ java -jar tla2tools.jar -config FeeAccounting.cfg FeeAccounting.tla
 java -jar tla2tools.jar -config SubsidyDistribution.cfg SubsidyDistribution.tla
 # FB13 — Governance PARAM_CHANGE state machine (submit / activate / forward)
 java -jar tla2tools.jar -config GovernanceParamChange.cfg GovernanceParamChange.tla
+
+# FB16 — AbortEvent apply state machine (RecordAbort / ApplyPhase1Abort / ApplyPhase2Abort / ApplyAbortDomainInclusion)
+java -jar tla2tools.jar -config AbortApply.cfg AbortApply.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -69,6 +72,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | FeeAccounting.tla (4 domains, H=4, A=3, F=2, S=20) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | SubsidyDistribution.tla (3 domains, B=4, H=4, NefPool=8, MaxCr=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | GovernanceParamChange.tla (3 keyholders, 2 whitelist, 1 off-whitelist, T=2, H=4, V=2) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| AbortApply.tla (3 domains, MaxRound=4, InitialStake=30, SUSPENSION_SLASH=10) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -251,6 +255,29 @@ Companion prose proof: `docs/proofs/SubsidyDistribution.md` (separately tracked;
 
 Companion prose proof: `docs/proofs/GovernanceParamChange.md` (separately tracked; the prose track is being assembled in parallel).
 
+### AbortApply.tla → AbortEvent apply state machine (RecordAbort / Phase1 / Phase2 / DomainInclusion)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `stakes` (Domains → 0..InitialStake), `abort_records` (Domains → [count: Nat] — the S-032 cache shape), `accumulated_slashed` (Nat-bounded by INITIAL_TOTAL_STAKE = InitialStake · \|Domains\|), `round` (0..MaxRound), `pending` (Seq of AbortEvent with phase ∈ {1, 2}), `registry_untouched` (BOOLEAN sentinel for T-A4) |
+| `Inv_StakeNonNegative` | per-domain `stakes[d] >= 0` at every reachable state — Nat-typed; documents the contract. ApplyPhase1Abort uses the `min(stakes[d], SUSPENSION_SLASH)` floor at chain.cpp:1324 to bound the deduction; the other Apply* branches and RecordAbort / AdvanceRound never decrement stakes |
+| `Inv_NoFullForfeitureOnAbort` | T-A1 + headline distinction from equivocation T-E1: action-level invariant that any step reducing `stakes[d]` to 0 (post = 0, pre > 0) must come from a state where `pre < SUSPENSION_SLASH`. The boundary case `pre = SUSPENSION_SLASH → post = 0` is the strict-equality drain; the `min()` floor at chain.cpp:1324 structurally prevents post < 0. Equivocation has no such bound — `EquivocationApply.ApplyEquivocation` zeroes `stakes[d]` regardless of pre-apply value |
+| `Inv_AbortRecordsMonotonic` | T-A3 / S-032 cache contract: per-domain `abort_records'[d].count >= abort_records[d].count` across every `[Next]_vars` step. Every Apply* branch increments by exactly 1 (chain.cpp:1319); RecordAbort / AdvanceRound preserve. The S-032 cache is the authoritative count consumed by `build_from_chain` for suspension-tracker accounting; its monotonicity is what lets snapshot/restore round-trip the count without replay |
+| `Inv_NoRegistryDeactivation` | T-A4 structural witness: the `registry_untouched` BOOLEAN sentinel stays TRUE across every reachable state because no AbortEvent apply branch ever mutates registry state. Mirrors the chain.cpp:1313-1328 apply loop's structural absence of any `registrants_[...] = ...` assignment, in pointed contrast to chain.cpp:1354's `rit->second.inactive_from = b.index + 1` in the equivocation loop. The complementary claim that equivocation DOES deactivate is `EquivocationApply.Inv_DeactivatedAfterSlash`; the two specs jointly witness the abort-vs-equivocation asymmetry at the apply layer |
+| `Inv_SlashedMonotonic` | action-level: `accumulated_slashed' >= accumulated_slashed` across every `[Next]_vars` step. Only ApplyPhase1Abort mutates the field, by the non-negative `deduct = min(stakes[d], SUSPENSION_SLASH)` value (a Nat). ApplyPhase2Abort / ApplyAbortDomainInclusion / RecordAbort / AdvanceRound all preserve. Matches `Chain::accumulated_slashed_` monotonicity at chain.cpp:1395 |
+| `Prop_EventualApply` (temporal) | under fairness on `AdvanceRound` + the three Apply* branches, any non-empty `pending` eventually drains. The three Apply* branches together cover the full guard space at the head ((phase 1, stake > 0) → Phase1; (phase 2, stake > 0) → Phase2; (any phase, stake = 0) → DomainInclusion); fairness on the disjunction gives the eventual-progress claim. The MaxRound escape covers the model-bound termination case |
+| `Prop_Phase2NoSlash` (temporal) | T-A2 headline: `[][...]_vars` action invariant — a step whose head pending event has `phase = 2` AND fires Apply* (consumes from pending) preserves `accumulated_slashed`. The abort-event apply path distinguishes Phase-1 (slash + record) from Phase-2 (record only); equivocation has no such phase distinction. Matches the `if (ae.round != 1) continue;` guard at chain.cpp:1314 that short-circuits the slash branch while leaving the abort_records bump at chain.cpp:1317-1320 untouched |
+
+**Spec status:** written; TLC verification pending (consistent with the other ten specs above). The configuration in `AbortApply.cfg` (3 domains, MaxRound=4, InitialStake=30, SUSPENSION_SLASH=10) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `stakes` (Domains → Nat — matching `StakeEntry::locked` at `include/determ/chain/chain.hpp`; the unlock_height field is FB8 / StakeLifecycle.tla territory and not consumed by the AbortEvent apply path), `abort_records` (Domains → [count: Nat] — the S-032 cache shape at `include/determ/chain/chain.hpp::AbortRecord`; the `last_block` field is also bumped at chain.cpp:1320 but is FA-track / suspension-tracker territory and orthogonal to the apply-layer invariants), `accumulated_slashed` (Nat — matches `Chain::accumulated_slashed_` at chain.cpp:1395), `round` (Nat — temporal driver; the consensus-round counter, separate from block index), `pending` (Seq of AbortEvent — abstracting the producer-side aggregation + per-block `Block::abort_events` field), `registry_untouched` (BOOLEAN — sentinel proving T-A4 vacuously). Actions modeled: `RecordAbort` (adversarial — appends to pending; abstracts V8 abort-claim verification + signature aggregation), `ApplyPhase1Abort` (slash + record at chain.cpp:1313-1328 with `round == 1`), `ApplyPhase2Abort` (record only — the `round != 1` skip at chain.cpp:1314 + the unconditional records bump at chain.cpp:1317-1320), `ApplyAbortDomainInclusion` (T-A5 — `stakes[d] = 0` collapses the phase distinction; matches the chain.cpp:1322-1323 `stakes_.find == stakes_.end()` short-circuit while the abort_records bump still fires), `AdvanceRound` (temporal driver). InitialStake=30 with SUSPENSION_SLASH=10 lets stakes[d] visit {30, 20, 10, 0} — three Phase-1 aborts exhaustively drain a domain; the boundary `pre = SUSPENSION_SLASH → post = 0` step witnesses Inv_NoFullForfeitureOnAbort's strict-inequality contract. The three Apply* branches are mutually exclusive on their guards and together cover the full head-of-queue guard space, ensuring Prop_EventualApply under fairness.
+
+**Distinction from FB15 EquivocationApply.tla:** the two specs together cover the two production "slash" mechanisms — abort-suspension and equivocation. Three structural asymmetries are encoded in the invariants:
+
+1. **Bounded vs full slash.** AbortApply's `Inv_NoFullForfeitureOnAbort` allows a single-step drain to 0 only when pre-apply stake was already below SUSPENSION_SLASH; EquivocationApply has no such bound — `ApplyEquivocation` zeroes stakes regardless of pre-apply value (full forfeiture).
+2. **Phase-discriminated slash.** AbortApply's `Prop_Phase2NoSlash` carves out the Phase-2 records-only branch; EquivocationApply has no phase axis — every event slashes.
+3. **No registry deactivation.** AbortApply's `Inv_NoRegistryDeactivation` is structurally vacuous (no action flips the sentinel); EquivocationApply's `Inv_DeactivatedAfterSlash` is the headline registry-mutation invariant. AbortEvent never sets `inactive_from`; equivocation always does (chain.cpp:1354).
+
+Companion prose proof: `docs/proofs/AbortEventApply.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -330,6 +357,17 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `GovernanceParamChange.RejectSubmit*` | `src/node/validator.cpp::check_transactions` PARAM_CHANGE branch reject paths (lines 668, 705-708); the apply layer never sees the tx, so the staging is structurally blocked |
 | `GovernanceParamChange.Activate` | `src/chain/chain.cpp::activate_pending_params` at lines 471-497 (`while (it != pending_param_changes_.end() && it->first <= current_height)` walk; the switch over `name` mutates the Chain field; the `param_changed_hook_(name, value)` call at line 493 fires the T-G6 forwarding to the validator) |
 | `GovernanceParamChange.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs); `activate_pending_params(b.index)` is called from `apply_block` at line 676 |
+| `AbortApply.stakes` | `src/chain/chain.cpp::stakes_` (`map<string, StakeEntry>` keyed by domain; StakeEntry.locked field). The model uses a plain Nat per domain — the unlock_height field is FB8 (StakeLifecycle.tla) territory; the abort-apply branch consumes only the `locked` amount at chain.cpp:1324-1327 |
+| `AbortApply.abort_records` | `src/chain/chain.cpp::abort_records_` (`map<string, AbortRecord>` keyed by domain — the S-032 cache; AbortRecord shape declared at `include/determ/chain/chain.hpp`). The model uses [count: Nat] — the `last_block` field at chain.cpp:1320 is the suspension-tracker's sliding-window pivot and FA-track territory, orthogonal to the apply-layer monotonicity claim Inv_AbortRecordsMonotonic |
+| `AbortApply.accumulated_slashed` | `src/chain/chain.cpp::accumulated_slashed_` — the A1 conservation counter incremented at chain.cpp:1395 (`accumulated_slashed_ += block_slashed`) after the per-block abort + equivocation loops sum into `block_slashed` (chain.cpp:1327, 1348). Shared with the FB15 EquivocationApply spec — both abort-suspension and equivocation contribute to the same counter; the two specs together exhaust the slash-bearing apply paths |
+| `AbortApply.round` | producer-side `Producer::current_round_` counter (separate from `Chain::current_height_`); a single block can carry abort events from up to two rounds (Phase-1 and Phase-2) per height. The TLA model uses `round` as the temporal driver to let the queue-drain semantics observe multi-round interleavings without coupling to block-index advancement |
+| `AbortApply.pending` | producer-side `Producer::pending_aborts_` + per-block `chain::Block::abort_events` field at `src/chain/block.cpp:95-117`. The TLA model abstracts the producer-aggregation + block-baking + apply-drain pipeline into a single shared Seq with FIFO semantics — equivalent to the C++ "abort claims emitted into the pool, drained head-first when included in a block, applied in block order" data flow |
+| `AbortApply.registry_untouched` | structural witness: NO C++ line in the chain.cpp:1313-1328 AbortEvent apply loop assigns to `registrants_[...]`. The sentinel BOOLEAN encodes this absence positively — its initialization to TRUE and the spec's structural absence of any action that flips it to FALSE together discharge T-A4 vacuously. The complementary EquivocationApply.tla witness is the active `registrants_[d].inactive_from = b.index + 1` mutation at chain.cpp:1354, which DOES touch registry |
+| `AbortApply.RecordAbort` | the validator's V8 abort-claim acceptance + `AbortEvent` construction at `src/node/validator.cpp` + the gossip-relay path at `src/net/gossip.cpp:217` (`chain::AbortEvent::from_json` for incoming gossip). The TLA model abstracts these into a single adversarial action; the FA-Apply-AbortEvent prose proof covers the soundness via EUF-CMA |
+| `AbortApply.ApplyPhase1Abort` | `src/chain/chain.cpp::apply_block` abort loop body at lines 1313-1328 with `ae.round == 1`: the S-032 cache bump at lines 1317-1320 (`__ensure_abort_records(); ar.count++; ar.last_block = b.index;`) FOLLOWED by the slash branch at lines 1322-1327 (`auto sit = stakes_.find(ae.aborting_node); if (sit == stakes_.end()) continue; uint64_t deduct = std::min<uint64_t>(suspension_slash_, sit->second.locked); __ensure_stakes(); sit->second.locked -= deduct; block_slashed += deduct;`). The `std::min` floor at line 1324 is the structural witness of Inv_NoFullForfeitureOnAbort |
+| `AbortApply.ApplyPhase2Abort` | the `if (ae.round != 1) continue;` skip at chain.cpp:1314 SHORT-CIRCUITS the slash branch — BUT the abort_records bump at chain.cpp:1317-1320 fires UNCONDITIONALLY (it precedes the slash short-circuit in the apply body). The TLA model splits this into a separate action for clarity; Prop_Phase2NoSlash's `accumulated_slashed' = accumulated_slashed` clause is the temporal restatement of the chain.cpp:1314 guard |
+| `AbortApply.ApplyAbortDomainInclusion` | the `stakes_.find(ae.aborting_node) == stakes_.end()` short-circuit at chain.cpp:1322-1323 (where `find == end()` returns true OR the located stake has `locked = 0`); the slash branch at chain.cpp:1324-1327 is skipped while the abort_records bump at chain.cpp:1317-1320 still fires. Models the DOMAIN_INCLUSION-mode chains (no stake to slash; the records cache drives suspension-tracker accounting through the same `build_from_chain` reader) |
+| `AbortApply.AdvanceRound` | `src/node/producer.cpp` round-counter advance (the temporal driver; see `count_round1_aborts` at producer.cpp:211); independent of `Chain::current_height_` because multiple rounds can fire within a single block — the abort_records.count++ semantics is per-event, not per-block-finalize |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -377,6 +415,7 @@ The natural next step is wiring TLC into CI:
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry FeeAccounting; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry SubsidyDistribution; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange AbortApply; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
