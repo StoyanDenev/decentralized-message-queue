@@ -25,12 +25,15 @@
 #include "opaque_primitives.hpp"
 #include "opaque_adapter.hpp"
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <vector>
+#include <array>
 #include <set>
 #include <cstring>
 
@@ -42,6 +45,16 @@ std::string to_hex(const std::vector<uint8_t>& v) {
     std::ostringstream o;
     o << std::hex << std::setfill('0');
     for (auto b : v) o << std::setw(2) << static_cast<int>(b);
+    return o.str();
+}
+
+// Fixed-size overload used by the Ed25519 keygen path (pubkey and
+// priv-seed are both exactly 32 bytes). Returns 64 lowercase hex chars.
+template <size_t N>
+std::string to_hex(const std::array<uint8_t, N>& a) {
+    std::ostringstream o;
+    o << std::hex << std::setfill('0');
+    for (auto b : a) o << std::setw(2) << static_cast<int>(b);
     return o.str();
 }
 
@@ -725,6 +738,201 @@ int cmd_inspect_envelope(int argc, char** argv) {
     return 0;
 }
 
+// Operator-workflow CLI: batch-generate N fresh anonymous account keypairs
+// in one invocation. Useful for:
+//   * Cold-storage provisioning (mint a batch of receive addresses to
+//     distribute to clients, with privkeys kept offline).
+//   * Faucet bootstrapping (pre-mint addresses to fund + hand out).
+//   * Test-fixture generation (deterministic build of test corpora —
+//     each call still produces fresh randomness; the "deterministic"
+//     part is the on-disk JSON shape, not the values).
+//
+// Each entry: Ed25519 keypair (OpenSSL EVP) → anon-address derivation
+// ("0x" + lowercase hex(pubkey)). Mirrors the shape produced by the
+// `determ account create` command but batched, so an operator doesn't
+// pay process-startup cost per account.
+//
+// Output modes (mutually-exclusive precedence):
+//   default (no flags) — human format to stdout, one block per account:
+//       Account 1:
+//         address:     0x...
+//         privkey_hex: ...
+//   --out <file>        — write a JSON file {accounts: [{address, privkey_hex}, ...]}
+//                         and print only a one-line confirmation to stdout.
+//                         The privkey material lives in the file, not the terminal.
+//   --json (no --out)   — write the same JSON shape to stdout.
+//   --out + --json      — --out wins (explicit operator choice; no
+//                         JSON to stdout even though --json was set).
+//
+// Safety guards:
+//   * 1 <= N <= 10000. Operator-side cap; generating > 10k keypairs in
+//     one call is almost certainly an automation bug (a power-of-ten
+//     fat-finger), not a real workflow. Belt-and-suspenders against
+//     accidentally writing a 5-MB privkey blob.
+//   * --out file overwrite refused unless --force. Privkey loss via
+//     accidental overwrite is unrecoverable; force a deliberate ack.
+//   * --out parent directory must exist (no mkdirp). Surfacing the
+//     missing-directory error early is friendlier than silently
+//     creating an unintended directory tree.
+//
+// Privkey emission:
+//   Unlike `determ account create` (which gates plaintext stdout
+//   behind --allow-plaintext-stdout due to S-004), this command's
+//   default human mode emits plaintext privkeys because the typical
+//   workflow REDIRECTS to a file (`> accounts.txt`) or pipes to a
+//   processing tool. For terminal-leakage-sensitive use, operators
+//   should pass --out <file> (which gets owner-only permissions on
+//   POSIX via std::filesystem::permissions; on Windows we rely on
+//   the default ACL of the parent directory). This deviation is
+//   intentional: batch generation has no sensible "encrypt at rest"
+//   default because the operator's intent is downstream automation.
+int cmd_account_create_batch(int argc, char** argv) {
+    int count = 0;
+    std::string out_path;
+    bool json_out = false;
+    bool force = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--count" && i + 1 < argc) {
+            try { count = std::stoi(argv[++i]); }
+            catch (std::exception&) {
+                std::cerr << "account-create-batch: --count must be an integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--out"   && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--json")                  json_out = true;
+        else if (a == "--force")                 force    = true;
+        else {
+            std::cerr << "account-create-batch: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-create-batch --count N "
+                         "[--out <file>] [--json] [--force]\n";
+            return 1;
+        }
+    }
+    if (count <= 0) {
+        std::cerr << "account-create-batch: --count must be >= 1 (got "
+                  << count << ")\n";
+        return 1;
+    }
+    constexpr int MAX_COUNT = 10000;
+    if (count > MAX_COUNT) {
+        std::cerr << "account-create-batch: --count must be <= " << MAX_COUNT
+                  << " (got " << count << "). If you genuinely need more, "
+                     "invoke the command multiple times and concatenate; "
+                     "the cap is an operator safety net against fat-finger "
+                     "automation errors.\n";
+        return 1;
+    }
+    // --out preconditions: parent dir must exist; destination file
+    // must not exist (unless --force). Surfacing these before keygen
+    // means we don't generate N keypairs and then discard them.
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "account-create-batch: --out parent directory does "
+                         "not exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "account-create-batch: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // Build the accounts array via OpenSSL Ed25519 keygen. EVP_PKEY_keygen
+    // ultimately pulls from OpenSSL's CSPRNG (seeded from the OS RNG at
+    // library init), so each iteration gets fresh material.
+    nlohmann::json arr = nlohmann::json::array();
+    for (int i = 0; i < count; ++i) {
+        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+        if (!ctx) {
+            std::cerr << "account-create-batch: EVP_PKEY_CTX_new_id failed\n";
+            return 1;
+        }
+        if (EVP_PKEY_keygen_init(ctx) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            std::cerr << "account-create-batch: EVP_PKEY_keygen_init failed\n";
+            return 1;
+        }
+        EVP_PKEY* pkey = nullptr;
+        if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            std::cerr << "account-create-batch: EVP_PKEY_keygen failed\n";
+            return 1;
+        }
+        EVP_PKEY_CTX_free(ctx);
+        std::array<uint8_t, 32> pub{};
+        std::array<uint8_t, 32> priv_seed{};
+        size_t len = pub.size();
+        if (EVP_PKEY_get_raw_public_key(pkey, pub.data(), &len) <= 0
+            || len != 32) {
+            EVP_PKEY_free(pkey);
+            std::cerr << "account-create-batch: get_raw_public_key failed\n";
+            return 1;
+        }
+        len = priv_seed.size();
+        if (EVP_PKEY_get_raw_private_key(pkey, priv_seed.data(), &len) <= 0
+            || len != 32) {
+            EVP_PKEY_free(pkey);
+            std::cerr << "account-create-batch: get_raw_private_key failed\n";
+            return 1;
+        }
+        EVP_PKEY_free(pkey);
+
+        std::string address = "0x" + to_hex(pub);           // matches make_anon_address
+        std::string privkey_hex = to_hex(priv_seed);        // 64 lowercase hex
+        arr.push_back({
+            {"address",     address},
+            {"privkey_hex", privkey_hex},
+        });
+    }
+
+    // Dispatch on output mode.
+    if (!out_path.empty()) {
+        nlohmann::json doc;
+        doc["accounts"] = std::move(arr);
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "account-create-batch: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << doc.dump(2) << "\n";
+        f.close();
+        // POSIX permissions tightening — owner-only read/write. On
+        // Windows the call is a no-op for the read/write bits (NTFS
+        // ACL inherits from parent); we ignore the error code there.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        // Intentionally non-fatal on perm-set failure: file is written;
+        // operator may need to chmod manually on exotic filesystems.
+        std::cout << "wrote " << count << " accounts to " << out_path << "\n";
+        return 0;
+    }
+    if (json_out) {
+        nlohmann::json doc;
+        doc["accounts"] = std::move(arr);
+        std::cout << doc.dump(2) << "\n";
+        return 0;
+    }
+    // Default human format.
+    for (size_t i = 0; i < arr.size(); ++i) {
+        std::cout << "Account " << (i + 1) << ":\n"
+                  << "  address:     " << arr[i]["address"].get<std::string>()     << "\n"
+                  << "  privkey_hex: " << arr[i]["privkey_hex"].get<std::string>() << "\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -929,6 +1137,13 @@ void print_usage() {
         "                    --password <str> [--aad <hex>]\n"
         "  inspect-envelope --in <file> [--json]      Dump envelope header metadata\n"
         "                                             (no decryption, no password)\n"
+        "  account-create-batch --count N             Batch-generate N anonymous account\n"
+        "                       [--out <file>] [--json] [--force]\n"
+        "                                             keypairs (Ed25519 -> anon-address).\n"
+        "                                             Default human output; --out writes a\n"
+        "                                             JSON file (refuses overwrite without\n"
+        "                                             --force); --json prints JSON to stdout\n"
+        "                                             (ignored if --out is set). 1<=N<=10000.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -956,6 +1171,7 @@ int main(int argc, char** argv) {
     if (cmd == "shamir-verify")   return cmd_shamir_verify   (argc - 2, argv + 2);
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
+    if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
