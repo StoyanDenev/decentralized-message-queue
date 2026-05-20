@@ -43,7 +43,7 @@ Init ==
 \* This action models the per-block apply path in
 \* src/chain/chain.cpp::apply_transactions's inbound-receipt loop
 \* (search for `for (auto& r : b.inbound_receipts)` to locate the
-\* current line range — at ~L1361 as of this revision):
+\* current line range — at ~L1363 as of this revision):
 \*   if (applied_inbound_receipts_.count(key)) continue;  ← idempotency
 \*   accounts_[r.to].balance += r.amount;
 \*   applied_inbound_receipts_.insert(key);
