@@ -380,3 +380,14 @@ The wallet's `is_stub()` flag exposes whether the linked OPAQUE adapter is the d
 - `0` — success
 - `1` — parsing error, missing argument, RPC failure, or assertion failure
 - `2` — cryptographic failure (AEAD tag mismatch, OPAQUE authentication rejected, recovery reconstruction failed)
+
+## Operator analytical scripts (tools/operator_*.sh)
+
+Lightweight bash wrappers that compose multiple `determ` CLI/RPC calls into single-purpose operator diagnostic workflows. All are read-only (RPC only), require a daemon already listening on the supplied `--rpc-port` (default `7778`), source `tools/common.sh` for the platform-detected binary path, and accept `--help` for inline usage. Distinct from `tools/test_*.sh` (regression tests with embedded fixtures + assertions): operator scripts target a live production/staging daemon and emit a 1-line digest plus a meaningful exit code suitable for monitoring-system alert gates.
+
+| Script | Purpose |
+|---|---|
+| `tools/operator_supply_check.sh [--rpc-port N] [--verbose]` | Verifies the A1 unitary-supply invariant on a running daemon. Calls `determ supply --json` and inspects `a1_invariant_ok`. Default mode emits a 1-line summary (`A1 OK (live=… expected=…, port N)` or `A1 VIOLATED (…)`); `--verbose` additionally prints the full supply JSON envelope. JSON parsing prefers `jq`; falls back to `grep`/`sed` when `jq` is unavailable. **Exit codes**: 0 invariant holds, 2 invariant VIOLATED (operator alert gate), 1 RPC error / malformed response. |
+| `tools/operator_chain_health.sh [--rpc-port N] [--json]` | Multi-RPC "health digest" — checks (a) daemon responding via `determ head --json`, (b) A1 invariant via `determ supply --json` (tolerates supply exit 2 — that's a red flag, not an RPC error), (c) at least 1 peer via `determ peers --count`. Default human output prints `[OK]`/`[X] ` marks per check plus height/head_hash/peer count; `--json` emits a single-line `{daemon_responding, a1_invariant_ok, peers_ok, height, head_hash, peer_count, rpc_port}` envelope. **Exit codes**: 0 all green, 2 any red (operator alert gate), 1 RPC error. |
+| `tools/operator_fork_watch.sh --node-a host:port --node-b host:port [--window N] [--field NAME]` | Cross-node fork detection wrapper around `determ check-fork`. Resolves each node's current head independently via `determ head --field height`, picks the smaller as the window's upper bound, computes `from = max(0, head - window + 1)` (default `--window 10`), then invokes `check-fork` on the resulting range comparing `--field` (default `state_root`; other allowed values: `block_hash`, `prev_hash`, `index`, `timestamp`). On divergence, re-queries with `--json` to extract the exact divergence height for the diagnostic. **Exit codes**: 0 nodes in sync over the window (1-line `divergence=NONE` summary), 2 fork detected at height H (1-line `divergence=AT H` summary, operator alert gate), 1 RPC error / unreachable node / bad args. |
+
