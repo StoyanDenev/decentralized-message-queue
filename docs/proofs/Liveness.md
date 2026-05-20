@@ -12,7 +12,7 @@ Unlike the cryptographic-soundness proofs (FA1 safety, FA2 censorship, FA3 selec
 
 **Setup.** Fix a height `h`. Let `N := |V|` be the validator pool size at `h`. Let `p ∈ [0, 1)` be the per-validator unavailability rate over a round window — the probability that any given honest validator fails to broadcast its Phase-1 contribution before the round timer fires. (Sources: network jitter, momentary load spikes, restart events; **not** Byzantine behavior, which is modeled separately.)
 
-Let `K` be the genesis-pinned committee size. Let `M := ⌈2K/3⌉` be the BFT-escalation effective committee size. Let `T_threshold := bft_escalation_threshold` (genesis-pinned, default 5).
+Let `K` be the genesis-pinned committee size. Let `k_bft := ⌈2K/3⌉` be the BFT-escalation shrunk committee size (i.e. `|K_h| = k_bft` in BFT mode; see BFTSafety.md §3). Let `Q := ⌈2·k_bft/3⌉` be the within-committee 2/3 quorum required to finalize a BFT-mode block. Let `T_threshold := bft_escalation_threshold` (genesis-pinned, default 5).
 
 **Theorem T-4 (Liveness).** Under the assumptions:
 
@@ -34,7 +34,7 @@ In plain terms: the chain *can* stall transiently (a few rounds of aborts under 
 
 **Corollary T-4.1 (Steady-state throughput).** For `K = 3`, `p = 0.05`: `(1-p)^K = 0.857`, expected MD-mode rounds per block ≈ 1.17, throughput penalty over the noise-free baseline ≈ 17%.
 
-For `K = 3`, `p = 0.20`: `(1-p)^K = 0.512`, expected MD-mode rounds ≈ 1.95, but with `T_threshold = 5` aborts the chain escalates within ~5 rounds, BFT-mode then finalizes with `M = 2` of `K = 3` survivors.
+For `K = 3`, `p = 0.20`: `(1-p)^K = 0.512`, expected MD-mode rounds ≈ 1.95, but with `T_threshold = 5` aborts the chain escalates within ~5 rounds. BFT-mode then finalizes with a shrunken committee of `k_bft = ⌈2·3/3⌉ = 2` and within-committee quorum `Q = ⌈2·2/3⌉ = 2` — degenerate for `K = 3` (both shrink rules collapse), but distinct for `K ≥ 6`.
 
 ---
 
@@ -66,22 +66,22 @@ The number of rounds to the first `X_r = 1` is a Geometric(q) random variable wi
 
 ### Lemma L-4.3 — BFT escalation bound
 
-Under (L3) and the assumption that after `T_threshold` consecutive aborts at the same height, BFT mode engages with the smaller committee `M := |K_h| = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q := ⌈2M/3⌉`:
+Under (L3) and the assumption that after `T_threshold` consecutive aborts at the same height, BFT mode engages with the shrunken committee `|K_h| = k_bft = ⌈2K/3⌉` and the within-committee 2/3 quorum `Q = ⌈2·k_bft/3⌉`:
 
-The probability that a BFT-mode round at height `h` finalizes is at least `Pr[≥ Q of M committee members live] · Pr[BFT trigger condition met]`. The trigger requires `M` of `K` original committee members to be live so that a BFT committee can be drawn from the abort-narrowed pool.
+The probability that a BFT-mode round at height `h` finalizes is at least `Pr[BFT trigger condition met] · Pr[≥ Q of k_bft committee members live and sign Phase 2]`. We separate the two:
 
-**Proof.** When BFT mode engages, the BFT committee has size `M` (drawn from the eligible pool that survived the abort wave). The block has `M` `creator_block_sigs[]` slots; at least `Q` of them must be nonzero. So:
+- **Trigger condition** (entering BFT mode): four gates must hold (per `src/node/node.cpp::check_if_selected` and PROTOCOL.md §5.3) — (1) `bft_enabled`, (2) `total_aborts ≥ T_threshold`, (3) available pool `< K`, (4) available pool `≥ k_bft`. The pool-size gates require `k_bft ≤ |pool| < K`, i.e. at least `k_bft` of the original `K` candidates remain selectable (the rest have aborted out under H4/H5 of Preliminaries §4).
+- **Finalize condition** (a BFT round produces a finalized block): all `k_bft` committee members contribute Phase 1 (Phase-1 unanimity over the shrunken committee — the same rule MD applies, just over `k_bft` slots), and at least `Q` of the `k_bft` `creator_block_sigs[]` slots are nonzero. Up to `k_bft − Q` slots may be sentinel-filled.
 
-- The trigger condition needs `≥ M` of the original `K` to be live (so the abort-narrowed pool has enough to form a BFT committee).
-- Within the `M`-member BFT committee, all `M` must contribute Phase 1 (Phase-1 unanimity is the same rule MD applies, just to a smaller committee), and at least `Q` of them must sign Phase 2.
+**Proof.** When BFT mode engages, the block has `k_bft` `creator_block_sigs[]` slots; at least `Q` of them must be nonzero (Preliminaries §5 V8 + BFTSafety.md). So the finalize step is governed by `Pr[≥ Q of k_bft sign Phase 2]`.
 
-For `K = 3`, `M = 2`, `Q = 2`: trigger requires 2 of 3 live, and the BFT committee of 2 needs both to sign. Pr[≥ 2 of 3 live] = `(1-p)^3 + 3·(1-p)^2·p = (1-p)^2 · (1 + 2p)`. For `p = 0.20`: `(0.8)² · 1.4 = 0.896` — much higher than MD's `(0.8)^3 = 0.512`.
+For `K = 3`, `k_bft = 2`, `Q = 2` (degenerate — `Q = k_bft`, so no sentinel slack within the BFT committee): trigger requires the pool to lose ≥ 1 of 3 to local aborts; within the BFT committee of 2, both must sign. `Pr[≥ Q = 2 of k_bft = 2 live]` = `(1-p)^2`. For `p = 0.20`: `0.64` — higher than MD's `(1-p)^3 = 0.512` because k_bft < K.
 
-For `K = 6`, `M = 4`, `Q = 3`: trigger requires 4 of 6 live; within the BFT committee, at most one sentinel allowed. Pr[BFT finalizes] is correspondingly larger than MD's `(1-p)^6` at the same `p`.
+For `K = 6`, `k_bft = 4`, `Q = 3`: trigger requires the pool to lose ≥ 1 of 6 yet retain ≥ 4; within the BFT committee, up to one sentinel allowed. `Pr[≥ Q = 3 of k_bft = 4 sign Phase 2]` = `(1-p)^4 + 4·(1-p)^3·p` = `(1-p)^3 · (1 + 3p)`. For `p = 0.20`: `(0.8)^3 · 1.6 = 0.819` — much higher than MD's `(1-p)^6 ≈ 0.262`.
 
-The BFT-mode probability is monotone non-decreasing in `(1-p)` and strictly higher than MD's all-live probability whenever `K > M ≥ 1` (which holds for any `K ≥ 2`). So BFT escalation strictly improves liveness odds at the cost of conditional safety (FA5).
+The BFT-mode finalize probability is monotone non-decreasing in `(1-p)` and strictly higher than MD's all-live probability whenever `K > k_bft ≥ 1` (which holds for any `K ≥ 3` because `⌈2K/3⌉ < K`). At `K = 3` the within-committee shrink collapses (`Q = k_bft`) but BFT still helps because the committee itself shrinks (`k_bft = 2 < K = 3`); for `K ≥ 6` both shrink dimensions contribute. So BFT escalation strictly improves liveness odds at the cost of conditional safety (FA5).
 
-The "bounded to `T_threshold` rounds" claim follows from the protocol-level rule: once `T_threshold` aborts accumulate at the same height, the next round is BFT-mode (Preliminaries §5 V8 + producer's escalation gate in `src/node/node.cpp::check_if_selected`).   ∎
+The "bounded to `T_threshold` rounds" claim follows from the protocol-level rule: once `T_threshold` aborts accumulate at the same height, the next round is BFT-mode subject to gates (3) and (4) above (Preliminaries §5 V8 + producer's escalation gate in `src/node/node.cpp::check_if_selected`).   ∎
 
 ### Lemma L-4.4 — Synchrony sufficiency for round completion
 
@@ -120,9 +120,9 @@ For `p = 0.20`, `K = 3`, `T_threshold = 5`: probability `≈ 0.488^5 ≈ 0.028`.
 
 **Step 2 — BFT-mode contribution.**
 
-When MD fails `T_threshold` times, BFT escalation engages. By L-4.3, BFT-mode finalization probability per round is `(1-p)^M · (1 + (K-M)p / (1-p))` or similar binomial; concretely much higher than MD's `(1-p)^K`.
+When MD fails `T_threshold` times AND the four BFT-escalation gates (L-4.3) hold, BFT escalation engages. By L-4.3, BFT-mode finalization probability per round is `Pr[≥ Q of k_bft sign Phase 2]` — a binomial tail in `(1-p)` over the shrunken committee, concretely much higher than MD's `(1-p)^K` because `k_bft < K`.
 
-Expected BFT-mode rounds to finalize is `≤ 1 / Pr[≥M of K live]`. For typical parameters, this is `≤ 2` rounds.
+Expected BFT-mode rounds to finalize is `≤ 1 / Pr[≥ Q of k_bft sign Phase 2]`. For typical parameters, this is `≤ 2` rounds.
 
 **Step 3 — Combining.**
 
@@ -214,7 +214,7 @@ In practice, monitoring at the operator level: if expected rounds per block exce
 T-4 establishes BFT escalation as a *liveness* mechanism. FA5 establishes that BFT-mode blocks are safe under `f_h < |K_h|/3` Byzantine within the smaller BFT committee (`|K_h| = ⌈2K/3⌉`). These are complementary:
 
 - T-4 says: BFT escalation increases the probability that *some* block finalizes.
-- FA5 says: BFT blocks are safe under conditions tighter than MD-mode (need ≥ `|K_h| − f_h` honest in the BFT committee with `f_h < |K_h|/3`, vs ≥ 1 in MD).
+- FA5 says: BFT blocks are safe under conditions tighter than MD-mode (need at least `Q = ⌈2|K_h|/3⌉` signatures from the BFT committee, which holds whenever `f_h < |K_h|/3`, vs the MD requirement of ≥ 1 honest signer).
 
 Together: BFT escalation chooses liveness over safety; operators accept this trade for the small fraction of blocks that need it.
 
@@ -236,7 +236,7 @@ A reviewer can confirm the protocol's liveness story by reading these source pat
 
 - Round timer is configurable per profile (T_round = max(tx_commit_ms, block_sig_ms) + slack).
 - Aborts increment a per-height counter and re-randomize the committee.
-- BFT escalation engages when the counter hits `bft_escalation_threshold` and the pool can't form a full-K committee.
+- BFT escalation engages only when all four gates hold: `bft_enabled`, `total_aborts ≥ bft_escalation_threshold`, available pool `< K`, and available pool `≥ ⌈2K/3⌉` (= `k_bft`).
 - No infinite-loop construction exists in the abort/retry path — rounds bounded by `T_threshold` for MD, then by BFT-mode geometric bound for the rest.
 
 ---
