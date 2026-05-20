@@ -1,4 +1,4 @@
-# FB9 — TLA+ model-check transcripts (template)
+# FB10 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -41,6 +41,9 @@ java -jar tla2tools.jar -config StakeLifecycle.cfg StakeLifecycle.tla
 
 # FB9 — DApp registry lifecycle (DAPP_REGISTER create / update / deactivate)
 java -jar tla2tools.jar -config DAppRegistry.cfg DAppRegistry.tla
+
+# FB10 — Fee accounting (per-tx charging + per-block equal-share + dust distribution)
+java -jar tla2tools.jar -config FeeAccounting.cfg FeeAccounting.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -59,6 +62,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | Nonce.tla (3 domains, N=4, A=2, B=5) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | StakeLifecycle.tla (3 domains, H=6, B=5, D=3) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 | DAppRegistry.tla (3 domains, 2 topics, H=6, G=3, P=100) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| FeeAccounting.tla (4 domains, H=4, A=3, F=2, S=20) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -188,6 +192,24 @@ Companion prose proof: `docs/proofs/StakeLifecycle.md` (separately tracked; the 
 
 Companion prose proof: `docs/proofs/DAppRegistryLifecycle.md` (separately tracked; the prose track is being assembled in parallel).
 
+### FeeAccounting.tla → per-tx fee charging + per-block equal-share distribution state machine
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `accounts` (Domains → [balance: 0..TotalSupplyInitial]), `pending_txs` (Seq(Tx)), `block_creators` (Seq(Domains)), `block_total_fees` (0..TotalSupplyInitial), `height` (0..MaxHeight) |
+| `Inv_BalanceNonNegative` | per-domain `balance >= 0` at every reachable state — Nat-typed; documents the contract. The ApplyTx guard `balance >= amount + fee` keeps the post-state in Nat |
+| `Inv_BlockTotalFeesNonNegative` | `block_total_fees >= 0` at every reachable state — only ApplyTx adds (never subtracts), FinalizeBlockWithCreators resets to 0, FinalizeBlockEmpty preserves |
+| `Inv_A1Conservation` | `sum(balance) + block_total_fees = TotalSupplyInitial` — the headline supply-conservation claim including the in-flight fee pool. Every action preserves the sum: ApplyTx is sender → recipient + sender → pool, FinalizeBlockWithCreators is pool → creators, all others are stutters on the conservation-relevant variables |
+| `Inv_FeeDistributionDeterministic` | state-level invariant: at every reachable state with non-empty creators, the (per_creator, dust) pair is determined by (block_total_fees, Len(block_creators)) via floor + mod — no fresh randomness, no per-node state outside (X, C) enters the calculation; the consensus-grade determinism contract for the distribution loop |
+| `Inv_NoFeeOnSkip` | action-level invariant: if the head tx fails the balance gate AND is consumed from pending_txs, then accounts is unchanged AND block_total_fees is unchanged — rules out a hypothetical "charge before check" bug that would silently drain senders on insufficient balance |
+| `Inv_EmptyCreatorsNoDistribute` | action-level invariant: if a finalization step fires with `block_creators = <<>>`, then `block_total_fees` is preserved across the step — the T-F5 "no leak on empty creators" claim. The pool carries forward to the next block's accumulation (idealized preservation; see FeeAccounting.tla file header for the modeling-vs-implementation discussion) |
+| `Prop_EventualFeeDrain` (temporal) | under fairness on `FinalizeBlock` + `StartNextBlock`, any non-zero `block_total_fees` with non-empty creators and `height < MaxHeight` eventually drains to creator balances (`block_total_fees = 0`) OR the model bound is reached (`height >= MaxHeight`) — the eventual-progress / no-stuck-fees guarantee |
+| `Prop_SupplyConservation` (temporal) | `[][...]_vars` restatement of `Inv_A1Conservation`: across every reachable state, the total supply identity holds — the dual treatment of conservation as both state-level and temporal-level invariant, parallel to AccountState.tla + StakeLifecycle.tla |
+
+**Spec status:** written; TLC verification pending (consistent with the other eight specs above). The configuration in `FeeAccounting.cfg` (4 domains, MaxHeight=4, MaxAmount=3, MaxFee=2, TotalSupplyInitial=20) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `accounts` (Domains → [balance]), `pending_txs` (Seq(Tx) — unapplied tx queue), `block_creators` (Seq(Domains) — current block's creator set; order matters because dust goes to creators[1] in 1-indexed TLA / creators[0] in 0-indexed C++), `block_total_fees` (Nat — accumulated fee pool for the current block), `height` (Nat). Actions modeled: `SubmitTx` (any tx becomes pending), `ApplyTx` (success-path debit + credit + fee-accumulate at chain.cpp:742-770), `ApplyTxInsufficientBalance` (silent-skip `continue` branch at chain.cpp:744 — the safety-net abstracting the validator-side admission check), `FinalizeBlockWithCreators` (the distribution loop at chain.cpp:1286-1305 with `per_creator = total_fees \div m` + `dust = total_fees mod m` to creators[1]), `FinalizeBlockEmpty` (the T-F5 empty-creators branch — preserves block_total_fees), `StartNextBlock` (committee assignment between finalizations). Only the TRANSFER tx type is modeled — every fee-bearing tx routes through the same `charge_fee` helper, so modeling TRANSFER alone exhausts the fee state-machine surface. Subsidy + lottery distribution is out of scope (it follows the same equal-share + dust rule and is additive to the fee stream). The TotalSupplyInitial=20 across 4 domains gives each domain a 5-balance starting allocation; MaxAmount=3 + MaxFee=2 means individual txs cost up to 5, so both the apply-success and apply-insufficient branches are routinely reachable.
+
+Companion prose proof: `docs/proofs/FeeAccounting.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -241,6 +263,15 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `DAppRegistry.Deactivate` | DAPP_REGISTER op=1 branch at `src/chain/chain.cpp:1055-1062` (sets `dapp_registry_[tx.from].inactive_from = height + DAPP_GRACE_BLOCKS`) |
 | `DAppRegistry.DappActive` | apply-side DAPP_CALL gate at `src/chain/chain.cpp:1142` (`if (dapp.inactive_from <= height) ... skip credit`) — the TLA helper lifts this into a state predicate |
 | `DAppRegistry.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs) |
+| `FeeAccounting.accounts` | `src/chain/chain.cpp::accounts_` (the balance field of each AccountState entry; the TLA model collapses the multi-field AccountState into just `balance` since the nonce + ed_pub side is FB7 / FB5 territory) |
+| `FeeAccounting.pending_txs` | implicit: derived from the `b.transactions` sequence consumed by `apply_transactions` at `src/chain/chain.cpp:734`. The model lifts it into an explicit Seq(Tx) so that the consume-head semantics matches the C++ `for (auto& tx : b.transactions)` iteration order |
+| `FeeAccounting.block_creators` | `chain::Block::creators` field consumed by the distribution loop at `src/chain/chain.cpp:1286-1305`; the TLA model uses Seq(Domains) (preserving order so that `creators[1]` is the dust-recipient — TLA is 1-indexed where C++ is 0-indexed for the same slot) |
+| `FeeAccounting.block_total_fees` | local `total_fees` accumulator at `src/chain/chain.cpp:720`, reset to 0 at the start of every `apply_block` invocation, accumulated per-tx via the `charge_fee` helper at lines 727-732 + the per-branch `total_fees += tx.fee` calls (lines 730, 767, 868, 1221), drained at the line 1286 distribution loop |
+| `FeeAccounting.ApplyTx` | TRANSFER success branch at `src/chain/chain.cpp:742-770` (debit `sender.balance -= cost`, credit `accounts_[tx.to].balance += tx.amount`, accumulate `total_fees += tx.fee` at line 767) |
+| `FeeAccounting.ApplyTxInsufficientBalance` | the `continue` silent-skip at `src/chain/chain.cpp:744` (`if (sender.balance < cost) continue;`) — no balance mutation, no fee accumulation, no nonce advance |
+| `FeeAccounting.FinalizeBlockWithCreators` | the distribution loop at `src/chain/chain.cpp:1286-1305`: `per_creator = total_distributed / m` (line 1288), `remainder = total_distributed % m` (line 1289), credits each creator with `per_creator` (lines 1290-1297), credits `creators[0]` with `remainder` (lines 1299-1304). The TLA model factors out the subsidy stream (handled by the same loop on the C++ side via `total_distributed = total_fees + subsidy_this_block`) and models only the fee path |
+| `FeeAccounting.FinalizeBlockEmpty` | the implicit no-distribution branch at `src/chain/chain.cpp:1286` (`if (total_distributed > 0 && !b.creators.empty())` — if creators is empty, the for-loop never executes). The TLA model formalizes the T-F5 empty-creators "no leak" claim as a preservation invariant on `block_total_fees` |
+| `FeeAccounting.StartNextBlock` | `chain::Block::creators` assignment happens during block production (validator-side committee selection); the TLA model lifts it into an explicit pre-apply action to make the empty-vs-non-empty committee branching observable at the state-machine layer |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -285,7 +316,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry FeeAccounting; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -296,7 +327,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The eight TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, and DApp-registry-lifecycle properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and per-block fee-accounting properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
