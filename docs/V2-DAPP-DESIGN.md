@@ -505,10 +505,10 @@ Phased shipping plan, each phase is a single bounded commit.
 - `dapp_lockfree` accessor on Chain (read path used by `rpc_dapp_info` does not require `state_mutex_`)
 - ~30 LOC, mechanical — landed alongside Phase 7.1
 
-### Phase 7.4 — Streaming subscription RPC — ⚠️ partial (polling shipped, streaming pending; ~3 days remaining)
+### Phase 7.4 — Streaming subscription RPC — ⚠️ partial (polling shipped, streaming pending; full spec at §11.7.4 below)
 
 - ✅ Polling subset: `dapp_messages(domain, from_height, to_height, topic)` shipped under Phase 7.2 as a retrospective query (caller polls every N seconds with `from = last_scanned + 1`).
-- ⏳ Streaming pending: `dapp_subscribe(domain, topic?)` — newline-JSON streaming over the RPC socket; per-block hook fires after `enqueue_save`; subscribers' filters check `tx.to == domain` for each DAPP_CALL in the new block. Backpressure: bounded per-subscriber queue with disconnect-on-overflow. Regression: spawn 1 DApp-style subscriber, submit a `DAPP_CALL`, verify the event is delivered within K blocks.
+- ⏳ Streaming pending: `dapp_subscribe(domain, topic?)` — newline-JSON streaming over the RPC socket; per-block hook fires after `enqueue_save`; subscribers' filters check `tx.to == domain` for each DAPP_CALL in the new block. Backpressure: bounded per-subscriber queue with disconnect-on-overflow. Regression: spawn 1 DApp-style subscriber, submit a `DAPP_CALL`, verify the event is delivered within K blocks. **Full design (streaming + per-DApp+topic indexer + retention policy state machine) fleshed out in §11.7.4 below.**
 
 ### Phase 7.5 — DApp SDK + reference implementation (~1 week, ecosystem)
 
@@ -529,6 +529,7 @@ The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients 
 - **DApp upgrade flows** (versioned `service_pubkey` rotation with grace period) — fleshed out in §11.7.1 below
 - **Cross-shard DApp routing** (DAPP_CALL crossing shard boundaries) — fleshed out in §11.7.2 below
 - **Per-DApp rate limiting / quota** (operator-declared call-rate ceiling enforced at validator admission) — fleshed out in §11.7.3 below
+- **DApp message-bus indexing + pub-sub backend** (per-DApp+topic LSM index, retention policy state machine, streaming `dapp_subscribe` with backpressure) — fleshed out in §11.7.4 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
 
 ---
@@ -1138,6 +1139,233 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 - **Q4: Cross-shard arrival counter attribution.** A v2.27 cross-shard DAPP_CALL arriving at the destination shard at height H_dst counts against the destination's bucket. Should the counter timestamp be the source-shard's H_src (when the call was emitted) or H_dst (when it was applied)? Options: (a) H_dst — simpler, matches local apply semantics; (b) H_src — preserves the call's "logical time" but breaks the simple `(h - registered_at) / window_blocks` formula. Recommended: option (a). The CROSS_SHARD_RECEIPT_LATENCY soak window means H_dst is typically H_src + 3-5 blocks, a bounded skew. Deferred to implementation.
 - **Q5: Policy=2 (reject-at-apply-with-fee-retained) UX.** Is policy=2 useful in practice, or does it amount to "fee burn for spam absorption"? The spam-absorption interpretation suggests policy=2 is the right choice for high-value DApps that want to charge attackers max-rate even when dropping their calls. The fee-burn interpretation suggests policy=1 (reject-at-validator) gives better UX without losing security. Recommended: ship both; let operators choose. Monitor real-world usage at v2.28+1 to see if one dominates.
 - **Q6: Genesis preset for `DAPP_RATE_*` constants.** What are sensible defaults for `DAPP_RATE_MIN_WINDOW_BLOCKS`, `DAPP_RATE_BURST_MAX`, `DAPP_RATE_DEFER_MAX_WINDOW_BLOCKS`, `DAPP_RATE_PER_SENDER_MAX_BUCKETS`? The §11.7.3 text suggests 4 / 65536 / 64 / 65536 respectively. These should be tuned with the regional/global/cluster profile presets per `params.hpp` so the rate-limit semantics scale with the chain's block cadence. Deferred to genesis-config review during v2.28 implementation.
+
+---
+
+### 11.7.4 — DApp message-bus indexing + pub-sub backend: from polling to true streaming
+
+**Tracking slot:** v2.29 (Theme 7 — DApp message-bus). Effort: ~6-8 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped), v2.20 polling `dapp_messages` (shipped). No new cryptographic, consensus, or gossip primitives — strictly extends the indexer + RPC layers with a per-DApp+topic message index, a retention policy state machine, and a per-subscriber streaming socket with bounded queue + backpressure.
+
+#### Problem statement
+
+Phase 7.4 shipped only the polling subset: `dapp_messages(domain, from_height, to_height, topic)` returns up to 256 events per page, and clients re-poll periodically. The full design intent — `dapp_subscribe(domain, topic?)` streaming finalized DAPP_CALL events to a long-lived RPC socket — remains open. Beyond the missing streaming RPC, three deeper substrate gaps emerge once a chain accumulates non-trivial DApp traffic:
+
+1. **No backend index.** Today's `dapp_messages` implementation scans the block stream linearly from `from_height` to `to_height`, filtering by `tx.to == domain` and (optionally) topic. At low volume this is acceptable; at any non-trivial scale (say, 100 DApps × 16 calls/block × 86400 blocks/day ≈ 138M calls/day) the linear scan becomes O(blocks × txs/block) per query, which is unsustainable for full-history retrospection. A DApp validator-node booting fresh and needing to replay its message history pays O(total chain volume) instead of O(its own DApp volume).
+2. **No retention policy state machine.** §3.1's `retention: u8` field (0 = full, 1 = pruneable after K blocks) is currently a no-op — the field exists in `DAppEntry` and contributes to the state-root, but no apply-path or storage-layer code consumes it. A DApp that opts into pruning has no way to actually free the storage; full nodes carry every DAPP_CALL ciphertext forever. This contradicts the §3.1 contract and §10's pointer-pattern recommendation for large payloads (the pointer pattern is moot if the chain keeps the pointer references forever anyway).
+3. **No structured backpressure on streaming.** The §6 `dapp_subscribe` thumbnail mentions "bounded per-subscriber queue with disconnect-on-overflow" but does not specify queue depth, drop policy, gap-recovery, or subscriber resync semantics. Without these, a streaming RPC is either trivially unsafe (unbounded queue grows until OOM) or trivially unusable (every subscriber gets disconnected under any traffic burst).
+
+This matters because:
+
+- **L2 / zk-VM and DSSO patterns** (§1) are predicated on the chain providing a reliable, queryable message bus. An L2 batch-commitment indexer needs to replay every batch DAPP_CALL since genesis; a DSSO RP needs to filter every challenge/response pair targeting it.
+- **Federation Coordinator DApps** (§14) emit governance + identity-linking DAPP_CALLs that must remain queryable for federation audit purposes. Cross-deployment manifest hash verification depends on the DApp's message history being recoverable.
+- **The §11.7.4 polling-only substrate** is acceptable for early-stage DApps with sparse traffic but is the limiting factor preventing graduation to high-throughput production use.
+
+The v2.29 message-bus flow resolves this by: (a) standing up a per-DApp+topic LSM-style index keyed by `(domain, topic, height, intra_block_index)` with optional in-memory bloom filters for fast existence checks; (b) implementing the §3.1 retention policy as a height-windowed pruner that walks the index + block bodies + state_root contribution; (c) shipping the streaming `dapp_subscribe` RPC with explicit backpressure, gap detection, and resync-from-height semantics.
+
+#### Mechanism sketch
+
+**(a) Per-DApp+topic message index.** A persistent index on disk (one file per DApp, LSM-tree organized by `(topic, height, intra_block_index)`), maintained by an indexer process running alongside the chain. The indexer subscribes to the existing per-block hook (the same hook that fires after `enqueue_save` per Phase 2C). For each block finalized, the indexer:
+
+1. Iterates `b.transactions` filtering `tx.type == DAPP_CALL`.
+2. For each matching tx, computes the index key `(tx.to, topic, b.index, tx_index)` and writes a 32-byte entry: `(tx_hash[16], offset_into_block_body[8], ciphertext_size[4], flags[4])`. The ciphertext stays in the block body on disk; the index just points at it.
+3. Optionally bumps an in-memory bloom filter `(domain, topic_byte_prefix) → bloom32` so existence queries hit the bloom first and skip the disk seek on misses.
+4. Commits the index update atomically with the chain.save tip update — index-tip-height invariant: `index_tip >= chain_tip - 1` (one-block lag tolerated for crash recovery).
+
+The indexer is **derived state**: it is reconstructible from the block stream alone, does NOT contribute to the state-root (no new namespace key), and can be rebuilt by a node operator without consensus interaction. A snapshot bootstrap (`SNAPSHOT_RESPONSE` per §11 of PROTOCOL.md) does not need to include the indexer state; the receiver rebuilds the index from the block stream as it catches up. This is the cleanest separation: the chain commits to message ORDER + CONTENT (block bodies + tx_root + state_root); the index is just a node-local performance optimization.
+
+**(b) Retention policy state machine.** The §3.1 `retention: u8` field gains real semantics:
+
+- `retention = 0` (full, default): block bodies for DAPP_CALL txs are retained indefinitely. Same as today.
+- `retention = 1` (pruneable after K blocks): block bodies for DAPP_CALL txs targeting this DApp are eligible for pruning K blocks after their inclusion. The chain MUST retain the block header + tx_root + state_root + the tx's hash (in `applied_inbound_receipts_` for cross-shard, in `tx_root` Merkle leaf for same-shard) so the inclusion proof remains verifiable; only the ciphertext bytes are reclaimed. K is chain-default `DAPP_RETENTION_PRUNE_BLOCKS` (suggested 50000 ≈ ~3 days on regional profile), genesis-pinned, governance-mutable per Q2.
+- `retention = 2` (operator-pinned-window): operator declares a retention window `W` blocks at DAPP_REGISTER time. The chain prunes ciphertext W blocks after inclusion. W is clamped to `[DAPP_RETENTION_MIN_BLOCKS, DAPP_RETENTION_MAX_BLOCKS]` (suggested 100 / 10_000_000).
+- `retention = 3` (rolling-cap): operator declares a maximum total stored bytes for this DApp's history. When the cap is reached, oldest ciphertexts are pruned first. Cap clamped to `[DAPP_RETENTION_CAP_MIN_BYTES, DAPP_RETENTION_CAP_MAX_BYTES]` (suggested 1 MB / 100 GB). This is the "S3-class object-store" model — most useful for high-volume DApps that need a bounded operational footprint.
+
+Pruning runs as an async background worker (mirrors the existing `enqueue_save` worker pattern; no consensus path interaction). The worker:
+
+1. Iterates `dapp_registry_` entries with `retention != 0`.
+2. For each pruneable DApp, walks the per-DApp index for entries past the retention threshold.
+3. For each eligible entry, locates the ciphertext in the block body, overwrites it with a deterministic sentinel `b"\xFF\xFF\xFF\xFF" + sha256(original)[:28]` (32 bytes), and marks the index entry's flags `PRUNED = 0x01`.
+4. The sentinel preserves block-body byte-length invariants (no block-hash recomputation needed; the block-hash is computed over `block_digest` which already excludes ciphertext content per §4.1 — see PROTOCOL.md). The block's `tx_root` Merkle leaf is computed over the original ciphertext hash, which is preserved in the sentinel's hash suffix; inclusion proofs verify against the original hash.
+5. `dapp_messages` returning a pruned entry omits the ciphertext field and sets `"pruned": true`; light clients see "this DApp call was included at height H but its content has been pruned per the retention policy."
+
+The retention policy itself is committed via the `d:` namespace state-root (the existing v2.18 encoding already includes `retention`). A DApp operator changing retention via DAPP_REGISTER update applies prospectively — already-pruned ciphertexts cannot be un-pruned, but the new policy takes effect from the update's apply height.
+
+**(c) Streaming `dapp_subscribe` RPC with backpressure.** The streaming RPC connects to the same HMAC-RPC-authenticated socket as other RPCs (per S-001), subscribes to one or more (domain, topic?) pairs, and receives newline-JSON events as blocks finalize. Wire shape:
+
+```
+// client → server
+{"jsonrpc":"2.0","method":"dapp_subscribe","params":{
+    "domain":"foo.example",
+    "topic":null,                       // null = all topics
+    "from_height": 12345,               // optional; null = "from current tip"
+    "include_pruned": false             // omit events whose ciphertext has been pruned
+},"id":42}
+
+// server → client (one line per event)
+{"jsonrpc":"2.0","id":42,"result":{"event":"dapp_call","block_index":12346,"intra_block_index":3,
+    "tx_hash":"...","from":"alice.example","to":"foo.example","topic":"orders",
+    "amount":100,"ciphertext":"<hex>","source_shard":2}}
+{"jsonrpc":"2.0","id":42,"result":{"event":"resync_marker","up_to_height":12345}}
+{"jsonrpc":"2.0","id":42,"result":{"event":"backpressure_dropped","first_lost":12500,"count":42}}
+```
+
+Backpressure: each subscription owns a bounded per-subscriber queue of depth `DAPP_SUBSCRIBE_QUEUE_DEPTH` (suggested 1024 events) on the server side. When the queue fills (subscriber is slow), the server's options:
+
+- **Drop-oldest mode (default).** Server drops events from the front of the queue and emits a single `backpressure_dropped` event summarizing the gap when the queue drains. Subscriber knows it missed events and can rebind via `dapp_messages` for the lost range.
+- **Disconnect mode (opt-in via subscription parameter `on_full: "disconnect"`).** Server closes the connection. Subscriber reconnects with `from_height = last_received + 1`.
+- **Pause mode (opt-in via `on_full: "pause"`).** Server pauses sending; subscriber's TCP receive window naturally throttles. Only safe if the subscriber will eventually catch up; risk is server-side queue accumulation if subscriber is permanently slow.
+
+The `from_height` parameter enables **gap-recovery**: a subscriber that missed events (server restart, network blip, backpressure-drop) reconnects specifying `from_height = last_known_good_height + 1`. The server serves the indexed range first (replaying historical events), then transitions to live streaming when caught up. A `resync_marker` event marks the boundary.
+
+Per-subscription rate-limit: a single RPC connection MUST NOT subscribe to more than `DAPP_SUBSCRIBE_MAX_PER_CONN` (suggested 32) DApp+topic pairs. Aggregate subscriber count is bounded by the RPC layer's existing connection cap (per S-014 per-peer-IP token bucket).
+
+#### Wire-format changes
+
+**No on-chain wire changes.** The §3.1 DAPP_REGISTER and §3.2 DAPP_CALL byte layouts are unchanged. The indexer is derived state; retention semantics are an apply-path interpretation of the existing `retention: u8` field; streaming RPC is a node-local concern, not a consensus surface.
+
+**RPC additions** (`src/node/node.cpp`):
+
+- `dapp_subscribe(domain, topic?, from_height?, on_full?, include_pruned?)` — new long-lived streaming method.
+- `dapp_messages` (existing) gains optional pagination cursor `after_token: string` returning a server-generated opaque token to enable seek-based pagination over the index, replacing the current limit-256-per-call offset-style. Backward-compat: omit `after_token` to get the v2.20 behavior.
+- New `dapp_index_status(domain?)` — returns indexer health: `{index_tip, chain_tip, lag, bloom_hit_rate, prune_eligible_count}`.
+
+**Index file format** (`<data_dir>/dapp_index/<domain>.idx`):
+
+```
+[file header: 64 bytes]
+    magic:           u64_be  "DAPPIDX1"
+    domain_hash:     32 B    SHA256(domain) for tamper-detection
+    schema_version:  u32_be  starts at 1
+    flags:           u32_be  reserved
+    last_indexed_height: u64_be
+    entry_count:     u64_be
+
+[entries: 64 bytes each, sorted by (topic_hash, height_be, intra_block_index_be)]
+    topic_hash:           16 B    SHA256(topic)[:16]; sentinel 0x00*16 for "no topic"
+    height:               u64_be
+    intra_block_index:    u32_be
+    tx_hash:              16 B    first 128 bits of tx_hash (collision-tolerant for indexing)
+    offset_into_block_body: u32_be
+    ciphertext_size:      u32_be
+    flags:                u32_be  PRUNED | CROSS_SHARD | other
+    reserved:             u32_be  alignment
+
+[bloom filter: 4 KB per (domain, topic) pair, optional]
+```
+
+Sorted-by-key layout permits O(log n) seek for `(topic, from_height)` range queries via binary search. The index is rewritten on each compaction pass (background); a small write-ahead log (`<domain>.idx.wal`) accumulates new entries since the last compaction and is merged on startup or every `DAPP_INDEX_COMPACT_INTERVAL_BLOCKS` (suggested 10000).
+
+#### Apply-path integration
+
+Touch list (files in `src/chain/`, `src/node/`, `include/determ/`):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/dapp.hpp` | `DAppEntry` | No struct change; the `retention` field already exists |
+| `src/chain/chain.cpp` | `apply_transactions` DAPP_CALL apply branch (chain.cpp:1133-1224) | No change to apply semantics; ciphertext storage remains in `b.transactions[*].payload` |
+| `src/chain/chain.cpp` | `serialize_state` | No change; index is derived, not state-root committed |
+| `src/node/node.cpp` | `enqueue_save` post-hook | New hook: after a block is durably saved, fire the indexer with `(b, block_offset_in_chain_file)` |
+| `src/node/dapp_indexer.cpp` (new) | `DAppIndexer::on_block(Block, offset)` | Iterate `b.transactions`, append matching DAPP_CALLs to the per-DApp WAL, update in-memory bloom, periodically compact |
+| `src/node/dapp_indexer.cpp` (new) | `DAppIndexer::query(domain, topic?, from_height, to_height, limit, after_token?)` | Bloom-check existence; if present, binary-search the index; return up to `limit` results + next `after_token` |
+| `src/node/dapp_indexer.cpp` (new) | `DAppIndexer::run_pruner()` | Async background worker; walks pruneable DApps, applies retention policy, overwrites ciphertext with sentinel, marks index entry `PRUNED` |
+| `src/node/node.cpp` | `rpc_dapp_messages` | Replace linear-scan with `DAppIndexer::query()`; preserve v2.20 response shape; add `after_token` cursor support |
+| `src/node/node.cpp` | new `rpc_dapp_subscribe` | Long-lived RPC method; allocates per-subscriber queue; subscribes to the per-block hook; serves historical-then-live transitions; honors backpressure policy |
+| `src/node/node.cpp` | new `rpc_dapp_index_status` | Returns indexer health JSON |
+| `include/determ/chain/params.hpp` | constants | Add `DAPP_RETENTION_PRUNE_BLOCKS`, `DAPP_RETENTION_MIN_BLOCKS`, `DAPP_RETENTION_MAX_BLOCKS`, `DAPP_RETENTION_CAP_MIN_BYTES`, `DAPP_RETENTION_CAP_MAX_BYTES`, `DAPP_SUBSCRIBE_QUEUE_DEPTH`, `DAPP_SUBSCRIBE_MAX_PER_CONN`, `DAPP_INDEX_COMPACT_INTERVAL_BLOCKS` |
+| `tools/test_dapp_index.sh` | new | Regression: indexer correctness, bloom-filter false-positive bound, compaction idempotence, crash-recovery from WAL |
+| `tools/test_dapp_subscribe.sh` | new | Regression: streaming delivery, backpressure-drop, gap-recovery via `from_height`, pause-mode, disconnect-mode |
+| `tools/test_dapp_retention.sh` | new | Regression: retention=1/2/3 prune semantics, sentinel hash preservation, inclusion-proof preservation post-prune |
+
+The indexer is implemented as a separate `.cpp` file behind a `DAppIndexer` class. The chain layer is unchanged at the apply path — the indexer only consumes the existing post-save block hook. This preserves the cleanest possible separation: a node operator could disable the indexer entirely (and fall back to the v2.20 linear scan) without affecting consensus.
+
+#### Backward-compat story
+
+This is a **soft, node-local addition** under the v2.18/v2.19/v2.20 substrate: no consensus change, no wire change, no state-root change. Coexistence:
+
+- v2.20 nodes (without the indexer) continue to serve `dapp_messages` via linear scan. Their responses are byte-identical to v2.29 nodes for the same query when both nodes have all the requested history. v2.29 nodes are simply faster.
+- The retention policy is the one **breaking** change: a chain that activates retention pruning at height `genesis_params.dapp_retention_active_from` MUST coordinate this — v2.20 nodes that don't prune will diverge from v2.29 nodes that do, because the v2.20 block bodies retain the original ciphertext while v2.29 block bodies have the sentinel. **Critical:** the sentinel approach was chosen specifically so that the BLOCK HASH does not change (block_digest excludes ciphertext content per §4.1 / PROTOCOL.md), so the v2.20 vs v2.29 divergence is in block-body bytes-on-disk only, not in consensus state. A v2.20 node fetching a snapshot from a v2.29 node receives the sentinel-overwritten ciphertext; queries against pruned entries return `"pruned": true` on both versions. **This relies on the §4.1 block_digest invariant holding rigorously** — if any future protocol change adds ciphertext bytes to the digest, this design must be revised.
+- Coordination: an activation-height pin (`genesis_params.dapp_retention_active_from`) ensures all nodes prune on the same schedule. Pre-activation, `retention != 0` declarations in DAPP_REGISTER are accepted but the prune worker is dormant.
+- Streaming `dapp_subscribe` is purely additive; v2.20 clients ignore the new RPC method.
+
+The activation pattern parallels v2.24 / v2.27 / v2.28 / A11 / S-033 activation pins.
+
+#### Threat model
+
+| Attack | v2.29 defense | New surface introduced |
+|---|---|---|
+| **Indexer-corruption attack on a single node** | The indexer is derived state. A node operator who detects corruption (`dapp_index_status` reports inconsistent `index_tip` vs `chain_tip`) can wipe `<data_dir>/dapp_index/` and rebuild from the block stream. No consensus impact; no neighbor-node impact. | None — indexer is derived state. |
+| **Light-client trust on pruned messages** | The block's `tx_root` Merkle leaf is computed over `SHA256(tx)` which includes the original ciphertext. Post-prune, the sentinel's hash suffix preserves the original SHA256's first 28 bytes; a light client verifying inclusion via tx_root can compare against the sentinel-stored hash. The first 4 bytes of the sentinel (`0xFFFFFFFF`) are a magic prefix signaling "this is a pruned ciphertext" so an honest decoder distinguishes pruned from corrupted. | Light clients learn an additional rule: ciphertext starting with `0xFFFFFFFF` is pruned-content sentinel, not real ciphertext. Documented in PROTOCOL.md §11 retention extension. |
+| **Subscriber DoS: malicious subscriber holds the streaming socket open without reading** | Bounded per-subscriber queue (default 1024 events). Drop-oldest policy reclaims memory automatically. Disconnect-mode opt-in for operators who prefer hard cuts. The S-014 per-peer-IP token bucket caps connection establishment rate so an attacker cannot rotate connections to keep many slow-reader queues alive. | Yes: per-subscriber queue is new server-side state. Bounded by `DAPP_SUBSCRIBE_QUEUE_DEPTH × max_subscribers`. Worst case ~1024 × 1024 events × ~200 B each = ~200 MB across all subscribers, acceptable for a production full node. |
+| **Indexer-state-bloat attack: attacker creates many DApps + topics to maximize index file count + bloom filter memory** | Indexer state is bounded by `(num_dapps × num_topics_per_dapp)` which is itself bounded by `DAPP_MIN_STAKE` (§9 Sybil floor) and `topic_count ≤ 32` per DApp (§3.1). Worst case: `DAPP_MAX_REGISTRY_SIZE × 32` index files. At reasonable parameters (say 65536 DApps × 32 topics × 4 KB bloom each) the bloom filter aggregate is ~8 GB, manageable but non-trivial; full nodes opting out of bloom filters fall back to disk seek. | Yes: aggregate bloom-filter memory grows linearly with chain-wide DApp + topic count. A node operator can disable bloom filters globally (`Config::dapp_indexer_bloom_enabled = false`) trading query latency for memory. |
+| **Replay-old-ciphertext after prune** | The sentinel's hash suffix commits to the original SHA256. A third party who has the original ciphertext stored off-chain can re-publish it; verifiers compare its SHA256 to the sentinel's hash suffix and confirm it matches the originally-included ciphertext. This is consistent with the §10 "the chain is permanent ciphertext storage" caveat — pruning frees the chain's local copy but does NOT make the ciphertext truly unrecoverable. | None new — pruning is a node-local storage reclaim, not a confidentiality primitive. |
+| **Retention-policy abuse: operator declares `retention=3` cap=1 MB to keep their own history minimal but spams enormous individual payloads** | The per-call MAX_DAPP_CALL_PAYLOAD (§3.1, 16 KB suggested) caps individual payloads. The combined effect is that a DApp with cap=1 MB and 16 KB per call retains at most ~64 calls, rotating older ones out. This is operator-side policy; not a third-party abuse vector. | None |
+| **Subscriber gap-recovery race** | A subscriber reconnects with `from_height = last_received + 1`. The server serves the indexed range from `from_height` to `current_tip`, then transitions to live. During the historical replay, new live events queue behind. The `resync_marker` event marks the transition. A subscriber that crashed mid-replay can re-reconnect with the same `from_height`; replay is idempotent. | None — gap recovery is deterministic from the indexed history. |
+| **Pruned-content-claims-malicious-content scenario** | A user who included a DAPP_CALL with payload P that was later pruned cannot deny inclusion (the tx_hash + tx_root Merkle leaf prove inclusion). They CAN claim "the content was different" because only the sentinel hash is recoverable. The chain's audit-trail commitment is therefore preserved at the hash level but loses content-level commitment for pruned items. Operators choosing `retention != 0` accept this tradeoff. | This is a deliberate tradeoff in the §3.1 retention contract; users should understand that opting into a pruning DApp means their post-prune-window content claims are hash-only. UX surface: wallet warns "this DApp prunes messages after X blocks" at DAPP_CALL submit time. |
+| **Backpressure-drop event injection by adversarial subscriber** | The `backpressure_dropped` event is server-generated; subscribers cannot forge it. A subscriber receiving a `backpressure_dropped` event whose `count > 0` knows it missed events and can `dapp_messages` for the lost range to recover. | None |
+
+The relevant cross-references in the existing threat-model docs: `proofs/Safety.md` L-1.3 (state-root is preserved regardless of retention pruning because retention only touches block bodies, not the state-root commitment), `proofs/CrossShardReceipts.md` T-5 (cross-shard DAPP_CALL inclusion proofs survive pruning because the source-block tx_root is preserved), `SECURITY.md` §S-001 (HMAC-RPC auth covers the new streaming socket), §S-014 (per-peer-IP rate limit covers new connections), §S-008 (mempool admission unchanged).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `DAppIndexer` class + file format + WAL | 2 days | Disk format, compaction, crash-recovery |
+| Per-block hook integration in `enqueue_save` | 0.5 day | Mechanical; mirrors existing chain.save flow |
+| Bloom filter + binary-search query path | 1 day | Standard bloom-32 implementation; sorted-key binary search |
+| Retention policy state machine + async pruner | 1.5 days | Iterate DApps, walk index, sentinel-overwrite ciphertext, mark PRUNED |
+| `rpc_dapp_messages` cutover from linear-scan to indexer | 0.5 day | Preserve v2.20 response shape; add `after_token` cursor |
+| `rpc_dapp_subscribe` streaming with backpressure | 1.5 days | Long-lived socket, bounded queue, three drop policies, gap recovery |
+| `rpc_dapp_index_status` + monitoring hooks | 0.5 day | Health JSON; integration with existing metrics |
+| Genesis-params + activation-height for retention | 0.5 day | Same shape as v2.24 / v2.27 / v2.28 / A11 / S-033 pins |
+| Regressions: `test_dapp_index.sh`, `test_dapp_subscribe.sh`, `test_dapp_retention.sh` | 2 days | Three full scripts covering correctness + crash recovery + retention semantics + streaming backpressure |
+| **Total** | **~6-8 engineering days** | Single-developer estimate; +1 day if integration with §11.7.3 deferred-policy events needs joint subscribe testing |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required for `retention` field semantics.
+- **v2.19 DAPP_CALL** — shipped. Required for the message stream the indexer consumes.
+- **v2.20 polling `dapp_messages`** — shipped. v2.29 cutover preserves response shape + adds cursor.
+- **Phase 2C lock-free reader path** — shipped. Required for `rpc_dapp_index_status` to query `dapp_registry_` without blocking apply.
+- **§4.1 block_digest invariant** — shipped, MUST hold. Pruning relies on ciphertext bytes being absent from block_digest so the block hash is preserved post-prune. Any future protocol change adding ciphertext to the digest requires revising this design.
+- **S-014 per-peer-IP token bucket** — shipped. Caps streaming-connection establishment rate.
+- **S-033 state_root + S-038 producer-side wiring** — shipped. v2.29 does NOT extend state_root; retention pruning is local-storage-only.
+- **§11.7.1 DAPP_KEY_ROTATE, §11.7.2 cross-shard, §11.7.3 rate-limit** — adjacent, all independent. v2.29 can ship in any order relative to these; the indexer's per-block hook is policy-agnostic.
+- **v2.10 threshold randomness** — not required.
+- **v2.14 OPAQUE** — not required.
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives.
+
+#### Cross-references
+
+- §3.1 `DAPP_REGISTER` `retention: u8` field — v2.29 implements the field's semantics for the first time (v2.18 reserved the field; v2.29 wires it to the pruner)
+- §3.2 `DAPP_CALL` payload — unchanged; v2.29 is purely indexer/RPC/retention infrastructure
+- §6 RPC surface — `dapp_subscribe` upgraded from "pending" to "specified"; `dapp_messages` gains `after_token` cursor; new `dapp_index_status`
+- §10 off-chain large payloads (pointer pattern) — v2.29 makes the pointer pattern operationally meaningful by allowing the on-chain pointer to be pruned per retention policy
+- §11 Phase 7.4 — v2.29 IS the formal spec for Phase 7.4's "streaming subscription pending" subset
+- §11.7.1 DAPP_KEY_ROTATE — orthogonal; rotation is control plane, indexer is data plane
+- §11.7.2 cross-shard DAPP_CALL — v2.29's per-DApp index handles cross-shard arrivals via the `source_shard` field already in `dapp_messages`
+- §11.7.3 per-DApp rate-limit — orthogonal; rate-limit caps admission, indexer indexes whatever is admitted
+- §12 Q8 "Determ node bandwidth cost of carrying DApp messages" — v2.29 retention pruning is part of the answer (along with §11.7.3 rate-limiting)
+- `V2-DESIGN.md` Theme 7 — formal spec for Phase 7.4 streaming + the deferred message-bus indexing item
+- `proofs/Safety.md` L-1.3 — state-root preserved across retention pruning (pruning touches block bodies only, not state-root inputs)
+- `proofs/CrossShardReceipts.md` T-5 — cross-shard inclusion proofs survive pruning
+- `PROTOCOL.md` §4.1 block_digest invariant — load-bearing for the post-prune block-hash preservation
+- `PROTOCOL.md` §11 snapshot field set — v2.29 indexer is derived state, NOT in snapshot (rebuilt at boot)
+- `SECURITY.md` §S-001 HMAC-RPC — covers the new streaming socket
+- `SECURITY.md` §S-014 per-peer-IP token bucket — covers new connection establishment
+- `src/node/node.cpp` `enqueue_save` post-hook — touch site for the indexer subscription
+- `src/node/dapp_indexer.cpp` — new file; class + file format + WAL + bloom + pruner
+- `tools/test_dapp_index.sh`, `test_dapp_subscribe.sh`, `test_dapp_retention.sh` — new regressions
+
+#### Open questions deferred to implementation
+
+- **Q1: Bloom filter sizing per-(domain, topic) vs per-domain.** Per-(domain, topic) bloom (4 KB each) gives faster topic-specific queries; per-domain bloom (4 KB total) saves memory but costs an extra index seek for topic-misses. Recommended: per-(domain, topic) for high-volume DApps, per-domain for low-volume. Operators tune via `Config::dapp_indexer_bloom_granularity` (default: per-domain; auto-promote to per-(domain, topic) at >100K calls per DApp). Deferred to implementation.
+- **Q2: Retention-policy governance-mutability.** `DAPP_RETENTION_PRUNE_BLOCKS` and the cap constants are tuning knobs. Genesis-pinned (simpler) or governance-mutable via PARAM_CHANGE (more flexible)? Per §12 Q2 precedent (DAPP_CALL payload cap is recommended governance-mutable), recommended: governance-mutable. Deferred to genesis-config review.
+- **Q3: Subscriber checkpointing.** Should the server periodically emit "checkpoint" events letting subscribers persist last-good-height to disk and resume after crashes? Or is it the subscriber's responsibility to track? Recommended: subscriber-tracked (simpler protocol); server emits a checkpoint event every N blocks (suggested 1024) as a convenience. Deferred to implementation.
+- **Q4: Cross-shard synthetic DAPP_CALL indexing (interaction with §11.7.2).** A cross-shard DAPP_CALL arriving at the destination shard materializes as a synthetic event. The destination's indexer SHOULD index these alongside same-shard DAPP_CALLs (with `source_shard != my_shard`). The source shard's indexer SHOULD ALSO index the outbound DAPP_CALL (it's still in the source block's `b.transactions`) for source-shard audit purposes. Both indexer paths are derived state; both rebuild from block stream. Recommended: index on both sides. Deferred to implementation.
+- **Q5: Compaction storm risk.** If multiple DApps' indexes hit the `DAPP_INDEX_COMPACT_INTERVAL_BLOCKS` boundary simultaneously, compaction storms could spike disk I/O. Mitigation: stagger compaction via a per-DApp hash-based offset (compact at `(block_index + hash(domain) mod interval) % interval == 0`). Recommended: stagger. Deferred to implementation.
+- **Q6: Subscriber authentication on the streaming socket.** The HMAC-RPC auth (S-001) is per-request; a long-lived streaming socket needs a different auth model (one-time auth at subscribe, or periodic re-auth). Recommended: one-time auth at subscribe; the existing RPC connection's HMAC handshake covers the subscription's authority; subsequent events on the same socket inherit it. Deferred to implementation.
+- **Q7: Retention activation height vs already-existing DApps.** When `genesis_params.dapp_retention_active_from` activates, existing DApps with `retention != 0` declared pre-activation should be pruneable. But should their already-included calls (from before activation) be retroactively pruned, or only calls from `activation_height` onwards? Recommended: prospective only — calls from before `activation_height` are retained regardless of declared retention. Avoids retroactive surprise for early DApp users. Deferred to genesis-config review.
 
 ---
 
