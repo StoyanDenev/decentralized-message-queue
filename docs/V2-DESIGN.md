@@ -1095,15 +1095,165 @@ A distributed-IdP framework with the K-of-K committee as the operator group + T-
 
 ### v2.26 — On-chain key rotation
 
-**Motivation.** Today the only way to retire a compromised key is `DEREGISTER` + re-`REGISTER` under a new domain — losing the on-chain identity. For wallet UX this is unacceptable; for a DSSO that anchors user identity on-chain it's catastrophic (one wallet loss = identity loss across every RP that ever accepted that identity).
+**Problem overview.** Today the only path to retire a compromised Ed25519 key is `DEREGISTER` + re-`REGISTER` under a new domain. The chain-level effect is: (i) the old `RegistryEntry` in `Chain::registrants_` transitions to `inactive_from = inclusion_height + REGISTRATION_DELAY_WINDOW`; (ii) the associated `AccountState::unlock_height` is held at `UINT64_MAX` until `inactive_from`, then set to `inactive_from + UNSTAKE_DELAY`; (iii) the operator submits a fresh `REGISTER` under a *different* `domain` string with the new pubkey, paying the stake-cost again and losing the prior domain string forever. For three deployment classes this is structurally unacceptable:
 
-**Mechanism.** New `ROTATE_KEY` tx type. Payload: new pubkey + old-key signature over `(domain, old_pubkey, new_pubkey, effective_height)`. Validator verifies the old-key signature; apply updates the registry entry to point at the new key from `effective_height` forward. Old key remains valid for the brief grace window so in-flight signatures finalise; rejected after grace.
+1. **Validator operators.** A validator who must rotate must surrender their committee position for at least `REGISTRATION_DELAY_WINDOW + REGISTRATION_DELAY` blocks (the inactive_from cascade plus the new-registration delay). On regional/global profiles this is minutes; on tactical it is seconds, but compounded across rotations the operator's effective uptime drops. Worse, the rotated identity is a different domain — every external reference to `validator-7.consortium` becomes `validator-7-rotated.consortium`, breaking peer config files, monitoring dashboards, and SLA contracts that name the validator by domain.
 
-Optional: rotation cooldown (one rotation per N blocks per domain) to prevent griefing attacks.
+2. **Wallet users (UX).** A user who suspects key compromise must today choose between leaving the compromised key valid for the unlock-height window (during which the attacker can drain stake + transact under the identity) or losing the entire identity by re-REGISTERing. There is no path that preserves the on-chain identity while invalidating the compromised key.
 
-**Cost.** 1 week. New tx type + validator path + apply path + wallet CLI verb (`determ rotate-key`) + regression test.
+3. **DSSO production posture (v2.25).** The distributed-IdP framework anchors user identity on-chain; every relying party that has ever accepted a Determ identity assertion is keyed on `sub = user_identity`. If `user_identity` is a registered domain and the user loses control of the key, the user must abandon the identity across every RP they have ever used. The DSSO becomes a one-shot identity primitive — wallet loss equals universal logout with no recovery path. This is strictly worse than the centralized IdP it replaces (every commercial IdP supports password reset and key rotation).
 
-**Closes:** identity continuity. Unblocks v2.25's production posture.
+v2.26 introduces an in-place key-rotation primitive that preserves the on-chain identity (domain string, REGISTER history, stake, anti-spam standing, registry slot, DApp owner-link, committee-position continuity) while retiring the old key. Rotation is structurally distinct from DEREGISTER/REGISTER — no stake unlock, no domain change, no registry-position reshuffle.
+
+**Wire-format additions.**
+
+New `TxType::ROTATE_KEY = 11` (next free slot after `DAPP_CALL = 10` per `include/determ/chain/block.hpp:180`). Payload (binary codec):
+
+```
+[version: u8 = 1]            # forward-compat byte, reserved 0xFF
+[op: u8]                     # 0 = rotate, 1 = revoke-only (no replacement)
+[new_pubkey: PubKey32]       # zero for op=1
+[effective_height_delta: u16] # blocks from inclusion to activation; clamped [ROTATE_MIN_DELAY, ROTATE_MAX_DELAY]
+[grace_blocks: u16]          # overlap window during which old key remains accepted; clamped [0, ROTATE_GRACE_MAX]
+[reason_code: u8]            # 0=routine, 1=suspected-compromise, 2=scheduled, 3=lost-device, 4..=reserved
+[old_key_sig: Signature64]   # Ed25519 over (chain_id || "ROTATE_KEY" || domain || old_pubkey || new_pubkey || effective_height || grace_blocks || reason_code || nonce)
+```
+
+The outer `Transaction::sig` is the **new** key's signature over `signing_bytes()` (proving the rotator possesses the new private key, not just its public counterpart — defeats unwitting-key-substitution attacks where an attacker chooses a `new_pubkey` they cannot sign for). The embedded `old_key_sig` proves the rotator possesses the old private key. Both signatures must verify; the validator checks the old-key signature before the outer signature so a stale `old_pubkey` is rejected before crypto-on-attacker-supplied-data work.
+
+| New constant | Default | Notes |
+|---|---|---|
+| `ROTATE_MIN_DELAY` | 5 blocks | Smallest activation delay — gives observers a finalisation window to detect dueling rotations |
+| `ROTATE_MAX_DELAY` | 1024 blocks | Bounds the duration of "rotation is queued" state per domain |
+| `ROTATE_GRACE_MAX` | 32 blocks | Caps the overlap window during which both keys validate — prevents indefinite dual-key validity |
+| `ROTATE_COOLDOWN` | 256 blocks | Minimum gap between successive rotations on the same domain — bounds griefing-via-rotation-storms |
+| `ROTATE_PENDING_CAP` | 1 per domain | At most one rotation queued at any time per domain — second `ROTATE_KEY` against a pending domain rejects unless `op=1` (revoke) |
+
+All five constants live in `include/determ/chain/params.hpp` mirrored from `GenesisConfig` (same pattern as `merge_threshold_blocks`, `REGISTRATION_DELAY_WINDOW`). Genesis-pinned so all nodes agree on rotation policy.
+
+**Apply-path integration.**
+
+Functions extended (no rewrites):
+
+- `BlockValidator::validate_tx` (src/node/validator.cpp): for `TxType::ROTATE_KEY` rejects if (i) the domain is not in `Chain::registrants_` or is past `inactive_from`; (ii) `old_pubkey` (derived implicit from registry lookup, not on the wire) does not match the `RegistryEntry::ed_pub`; (iii) the embedded `old_key_sig` fails verification; (iv) a pending rotation already exists for this domain (see `pending_rotations_` below) and the current tx is not a `revoke` against that pending entry; (v) the cooldown window since the last applied rotation has not elapsed; (vi) `effective_height_delta` or `grace_blocks` are out of clamp range. Validation runs against the validator's `tentative_chain` snapshot exactly like every other validator-gated tx — the rotation predicate is deterministic against finalised state.
+
+- `Chain::apply_transactions` (src/chain/chain.cpp): on accept, queues a `PendingRotation` entry rather than immediately mutating `RegistryEntry::ed_pub`:
+
+```cpp
+struct PendingRotation {
+    PubKey   new_pubkey{};
+    uint64_t effective_height{0};
+    uint64_t grace_until{0};    // effective_height + grace_blocks
+    uint8_t  op{0};             // 0 = rotate, 1 = revoke
+    uint8_t  reason_code{0};
+    uint64_t enqueued_at{0};
+    uint64_t last_rotation_height{0}; // for cooldown
+};
+std::map<std::string /*domain*/, PendingRotation> pending_rotations_;
+```
+
+This deferred-apply pattern matches the existing `DAPP_GRACE_BLOCKS` and `REGISTRATION_DELAY_WINDOW` machinery — the on-chain effect is deterministic from current state but the **pointer flip** in `RegistryEntry::ed_pub` happens at the activation block, not the inclusion block.
+
+- `Chain::on_block_apply_end` (the per-block tick that already handles `inactive_from` cascades and `merge_state_` finalisation): walks `pending_rotations_`. For every entry whose `effective_height == current_height`, flips `registrants_[domain].ed_pub = entry.new_pubkey` (for op=0) or marks the entry `inactive_from = current_height + 1` (for op=1 revoke). For every entry whose `grace_until == current_height`, removes the old-key dual-validity flag (see validator dual-window check below). Walking is amortised O(pending) per block; cap of 1 pending per domain × `registrants_.size()` keeps this bounded.
+
+- `BlockValidator::validate_tx` dual-window check: between `effective_height` and `grace_until`, **both** the old key (still in `RegistryEntry::ed_pub` pre-flip, or `PendingRotation::old_pubkey` post-flip via a small `recent_rotations_` ringbuffer) and the new key validate outgoing txs from this domain. This closes the in-flight-signatures gap — a tx signed by the soon-to-be-retired key at block H lands in a block at H+3, with effective_height=H+5, and validates because the dual window is still open. After `grace_until`, only the new key validates.
+
+- `Chain::serialize_state` / `restore_from_snapshot`: `pending_rotations_` + `recent_rotations_` ringbuffer added to the snapshot tail. New state-root namespace `o:` for "operator rotation" (lookup key: domain → serialised PendingRotation) contributes to state_root via the existing leaf-builder pattern (mirrors the v2.15 `s:` namespace addition for multi-sig policies).
+
+- `compute_block_digest` (the signing-bytes builder): no change. ROTATE_KEY txs are ordinary `Transaction` records and ride through the existing union-tx-root + Phase-2 reveal path unmodified.
+
+**Composition with multi-sig (v2.15).** When `multisig_policies_[domain]` exists for the rotating domain, ROTATE_KEY requires `aux_sigs` meeting the policy's threshold M-of-N — exactly per the v2.15 cross-reference. Practically: the validator gate at `validate_tx` checks `multisig_policies_[tx.from]` BEFORE running the old-key-sig check; if present and the policy threshold is not met by `aux_sigs`, reject. The `old_key_sig` embedded field then becomes one of the M required signatures (the policy's primary slot, which holds the REGISTER key). This wiring means v2.26 ships v2.15-aware from day one — there is no transient window where multi-sig accounts have an un-gated rotation path.
+
+**Effective-height race-window timeline.** A worked example illustrates how the dual-window and grace_blocks fields interact, using the default `ROTATE_MIN_DELAY=5` and a chosen `grace_blocks=3`:
+
+```
+block H        : ROTATE_KEY included in block. pending_rotations_[domain] = { new_pubkey, effective=H+5, grace_until=H+8 }
+blocks H+1..4  : Old key still authoritative. New key NOT yet valid. Anyone signing with new key is rejected.
+                 In-flight txs already signed by the old key continue to be accepted normally.
+block H+5      : Pointer flip in on_block_apply_end. registrants_[domain].ed_pub = new_pubkey.
+                 Dual-validity window opens: both old and new key signatures validate.
+blocks H+6..7  : Dual-validity. New txs SHOULD sign with new key; old in-flight txs still finalise.
+block H+8      : grace_until reached. on_block_apply_end clears recent_rotations_[domain].
+                 From H+8 onward, only new_pubkey validates. Old key is dead.
+```
+
+The dual-validity window exists to prevent in-flight tx rejection (txs signed at H+4, propagated through gossip, landing in block H+6). For `reason_code=1` (compromised key), operators set `grace_blocks=0` — the window collapses to a single block and the old key is dead immediately at H+5 effective. The trade-off: in-flight legitimate txs in that block die with the attacker's potential txs; operator accepts this for compromise scenarios.
+
+**Genesis-mode bootstrap considerations.** Genesis-pinned validators (the K bootstrap validators encoded in `GenesisConfig::genesis_validators`) are a special case for v2.26:
+
+1. **Rotation of a genesis validator's key.** Genesis validators are listed by `(domain, ed_pub)` in the genesis schema; the chain's `Chain::Chain` constructor seeds `registrants_` from this list. A rotation of a genesis validator's key flips the entry in `registrants_` per the normal apply path — the genesis schema becomes stale for fast-sync verification of the rotated validator's signature on early blocks. Resolution: fast-sync verifies signatures against `RegistryEntry::ed_pub` at the *target* block, not the genesis-pinned value, via the state-root namespace. Rotated genesis validators continue to sign blocks under their current key; the genesis schema's `ed_pub` is the *initial* value, not the eternal one.
+
+2. **Rotation cooldown vs genesis.** A genesis validator at block 0 with cooldown=256 cannot rotate until block 256. This is intentional — the initial network must reach steady state before any genesis validator can rotate. Operators wishing to immediately rotate a genesis validator (perhaps because the genesis key was generated insecurely) must wait the cooldown, or update the genesis file pre-launch (the recommended path).
+
+3. **All-genesis-validators-rotate scenario.** No safety concern; the K-of-K mutual-distrust posture is preserved at every block because each rotation is gated by its own old-key-sig + outer new-key-sig. The chain remains operational throughout; observers' static views of "who controls this validator slot" update at each rotation's effective height.
+
+**Composition with v2.10 threshold randomness (DKG shares).** Validators in the committee hold per-epoch FROST-Ed25519 shares. A ROTATE_KEY on a *validator* domain has implications beyond the registry entry:
+
+| Concern | v2.26 resolution |
+|---|---|
+| Active-epoch share continuity | The current epoch's DKG share is bound to the old key (the share-distribution ciphertext was encrypted to `old_pubkey`). Rotation does NOT re-derive the active share — the validator continues to use the old share until the next epoch DKG. The validator's identity in the FROST signing is the share, not the registry pubkey directly; rotation does not break in-epoch signing. |
+| Next-epoch participation | At the next epoch boundary, the DKG ceremony's share-distribution targets `new_pubkey` (looked up from the now-flipped `RegistryEntry::ed_pub`). The validator participates in the next epoch under the new key with no special handling. |
+| Cross-epoch rotation race | A rotation queued with `effective_height` straddling an epoch boundary (rotation activates mid-DKG) is rejected at validate-time: `effective_height < next_epoch_start || effective_height > next_epoch_start + EPOCH_LENGTH/4`. This guard widens the no-rotate window around DKG ceremonies. |
+| Compromise during epoch | A validator whose old key is compromised and who rotates mid-epoch retains the compromised share for the rest of the epoch — but the share alone is useless without a quorum of other shares (the t-of-K threshold). The attacker's compromised share contributes to randomness only if they also gather t-1 other compromised shares, which is the standard t-of-K assumption. v2.26 does not weaken or strengthen this; it preserves the property. |
+
+**Threat model.**
+
+| Attack | v2.26 defense | New surface introduced |
+|---|---|---|
+| **Stolen-key drain.** Attacker exfiltrates a validator's signing key during a maintenance window. Without rotation, the operator must DEREGISTER (loses committee position) and re-REGISTER (pays stake again, loses domain string). | Operator submits ROTATE_KEY with `reason_code=1` from a backup keyfile or hardware wallet. Effective at `H + 5` (`ROTATE_MIN_DELAY`). Attacker has at most 5 blocks of post-rotation-issuance window before the new key takes effect; with grace=0 (operator preference for compromised-key case), the old key is dead at `H+5` exactly. Domain continuity preserved; stake stays staked; committee position retained. | The 5-block window (or the grace overlap if larger) is the exposure interval; smaller `ROTATE_MIN_DELAY` would shrink this but at the cost of finalisation race risk. |
+| **Unwitting-key-substitution.** Attacker submits a ROTATE_KEY against a target domain, claiming a `new_pubkey` they don't actually own (perhaps a key whose private half they know is held by a victim — to redirect future txs through that victim's signing surface). | Outer `Transaction::sig` is the new key's signature over `signing_bytes()`. An attacker without the new private key cannot produce this signature; tx rejects at outer-sig verify. Standard PoP (proof-of-possession) pattern. | None — the dual-signature requirement is intrinsic. |
+| **Rotation-replay across forks.** Attacker captures a valid ROTATE_KEY from a testnet or sibling chain and replays on production. | `old_key_sig` is over `chain_id || "ROTATE_KEY" || domain || ...`; chain_id binding rejects cross-chain replay (same primitive as ordinary tx replay defense per S-002 closure). | None. |
+| **Rotation-griefing storm.** Attacker who has briefly compromised a key (perhaps via a stolen-but-not-yet-detected leak) rotates the domain to a key they control, then rotates again (and again) to make every observer's cache thrash. Or: legitimate-but-malicious operator rotates 1000× to bloat state. | `ROTATE_COOLDOWN = 256` blocks between successive rotations on the same domain. `ROTATE_PENDING_CAP = 1` rejects a second queued rotation. State-root and snapshot bytes for `pending_rotations_` are bounded by `registrants_.size()` (no unbounded growth via rotation history beyond the tracked ringbuffer). | Cooldown can itself be weaponised: a legitimate operator who is rotating after a compromise cannot then re-rotate within 256 blocks if they discover the new key is also compromised. Defense: ROTATE_KEY with `op=1` (revoke-only, no replacement) is exempt from cooldown — gives the operator an emergency-kill-switch path that doesn't require choosing a new key. After revoke, the domain enters `inactive_from = current_height + 1` and the operator re-REGISTERs cleanly. This is strictly worse than rotation (loses continuity) but better than running with a known-compromised key. |
+| **Validator-committee disruption.** Rotation of a sitting committee member's key mid-block could break ongoing Phase-2 signatures or Phase-1 commits if the gossip layer caches keys. | Apply-path defers the pointer flip to `effective_height` (≥ `current_height + ROTATE_MIN_DELAY = 5`). Phase-2 reveals for the current block are already in flight; they reference the old key, and the old key is still authoritative for ≥ 5 more blocks. Cross-epoch-DKG races are blocked by the `effective_height` clamp above. | None — the deferred-apply pattern is structurally race-free. |
+| **DSSO identity-takeover.** Attacker observes a user's signed-assertion token at some RP, then later compromises the user's key. Without rotation, attacker has indefinite identity control. | User rotates with `reason_code=1` at any RP that supports v2.26-aware re-auth. RPs that consume v2.25 assertions can check `assertion.iat < domain.last_rotation_height` and reject pre-rotation assertions (RP-side policy; chain provides the `last_rotation_height` via the existing `state_proof` RPC reading `pending_rotations_` history). RP-side enforcement; the chain provides the timestamp + verification primitives. | RP-side complexity (must track last-rotation-height per identity). Documented as the DSSO production-deployment guide; not a chain protocol concern. |
+| **Rotation-as-deplatforming.** A coalition of attackers gains brief control of a domain's key (perhaps via wallet phishing) and rotates to a new key they control, locking out the legitimate owner. | The owner's only recourse is the `MULTISIG_POLICY` gate from v2.15 — if the account is multi-sig, the rotation requires M signatures and the attacker is stopped at the policy gate. For single-key accounts, the rotation completes and the legitimate owner is locked out. Defense is **operational**: v2.26 ships with a strong recommendation to enable multi-sig on any account of business or DSSO value. This is documented in `docs/V2-DESIGN.md` cross-references + a CLI warning when `determ rotate-key` is invoked on a single-sig account. | The recommendation is advisory; the chain does not forbid single-sig rotation (forbidding would block legitimate solo operators). |
+| **Compromised-but-still-signing race.** Attacker has the old key; legitimate owner submits ROTATE_KEY; attacker races to submit a competing tx (drain stake, transfer funds) before `effective_height`. | The dual-window check makes both keys valid during `[effective_height, grace_until]` for incoming validation, but the rotation itself enters `pending_rotations_` at the **inclusion** block, not the effective block. Operator can submit a ROTATE_KEY with `grace_blocks=0` and `op=1` (revoke) immediately after a normal rotation if they detect attacker activity during the 5-block window. This is the second-rotate-via-revoke escape valve mentioned above. | The 5-block exposure interval remains; smaller is at the cost of network propagation safety. |
+
+**Effort table.**
+
+| Sub-component | Effort |
+|---|---|
+| `TxType::ROTATE_KEY = 11` enum slot + binary codec (`block.hpp`/`block.cpp`) | 0.5 day |
+| Validator gate (`validator.cpp::validate_rotate_key`) — old-sig + new-sig PoP, cooldown, pending-cap, clamp ranges, multisig threshold | 1 day |
+| `PendingRotation` struct + `pending_rotations_` field + cooldown ringbuffer | 0.5 day |
+| Apply-path (`chain.cpp::apply_rotate_key` + deferred pointer flip in `on_block_apply_end`) | 1 day |
+| Dual-window validator check (both keys accepted during grace) + ringbuffer of `recent_rotations_` | 0.5 day |
+| Snapshot serialise/restore + new `o:` state-root namespace + leaf-builder integration | 1 day |
+| Wallet CLI: `determ wallet rotate-key --from <domain> --new-key <path> [--grace <N>] [--reason <code>] [--op revoke]` + co-sign verb for multi-sig accounts | 1 day |
+| Multi-sig (v2.15) gating wiring + tests | 0.5 day |
+| v2.10 cross-epoch DKG guard (effective_height-vs-epoch clamp) | 0.5 day |
+| Regression tests: happy-path rotation, PoP-missing reject, cooldown reject, pending-cap reject, revoke-op path, multi-sig threshold gate, dual-window in-flight tx, cross-epoch DKG guard, snapshot/restore round-trip, state-root namespace round-trip | 2 days |
+| Documentation refresh (PROTOCOL.md tx-type table + apply-path §, SECURITY.md threat-model entry, README.md §10.x rotation flow, V2-DAPP-DESIGN.md DSSO production-deployment guide) | 1 day |
+
+**Total: ~9-10 days focused work** (revised from the prior "~1 week" estimate after spelling out the dual-window + cooldown + v2.10/v2.15 composition + state-root integration).
+
+**Dependencies.**
+
+- **v2.15 (HD + multi-sig)** — coupled. v2.26 ships the multi-sig-gated rotation wiring from day one (avoids the transient un-gated window). v2.15 must land first or co-land; recommended order in Phase A (A.11) followed by Phase C (C.1) reflects this.
+- **v2.10 (threshold randomness with DKG)** — soft dependency for validator-domain rotations. v2.26 ships without v2.10 (the cross-epoch guard becomes a no-op when DKG is not active); once v2.10 lands, the guard activates automatically. No flag-day required.
+- **v2.1 (state Merkle root)** — ✅ shipped. New `o:` namespace integrates via the existing leaf-builder pattern.
+- **v2.25 (DSSO)** — v2.26 is a **precondition** for v2.25's production posture per Phase C.1 sequencing. v2.25 itself does not need v2.26 to ship as a research-mode primitive, but no real RP will accept DSSO assertions without a rotation primitive in the chain.
+- **v2.4 (atomic_scope)** — ✅ shipped. The `pending_rotations_` insert and the deferred pointer flip both ride inside `atomic_scope` so block-level rollback is clean.
+
+**Cross-references.**
+
+- `include/determ/chain/block.hpp:25` — `TxType::REGISTER = 1` and `DEREGISTER = 2`; ROTATE_KEY occupies `= 11` (next free after `DAPP_CALL = 10`).
+- `include/determ/chain/chain.hpp:32` — `struct RegistryEntry { PubKey ed_pub; ... }`; the `ed_pub` field is the pointer flipped at activation.
+- `include/determ/chain/chain.hpp:542` — `std::map<std::string, RegistryEntry> registrants_`; gains a sibling `std::map<std::string, PendingRotation> pending_rotations_`.
+- v2.15 (this document) — multi-sig policy gates ROTATE_KEY when present.
+- v2.10 (this document) — cross-epoch DKG guard composes with the rotation effective-height clamp.
+- v2.25 (this document) — DSSO production posture depends on this primitive.
+- SECURITY.md §S-004 (encrypted keyfiles) — the operational rotation flow assumes the new key is generated and protected via the v2.17 envelope; v2.26 does not loosen that assumption.
+
+**Open questions.**
+
+1. **Domain history for DSSO RPs.** Should the chain expose a per-domain rotation history via a dedicated RPC (`rotation_history domain=X`) or rely on RPs walking the block index? Recommended: a lightweight RPC backed by a per-domain head-of-history pointer in `RegistryEntry::last_rotation_height` (4 bytes added). Avoids RP-side block scanning at the cost of an extra registry field.
+2. **Cooldown bypass for multi-sig accounts.** For an M-of-N account where the multi-sig threshold was already met, should `ROTATE_COOLDOWN` be lifted (the multi-sig itself proves the operator's intent, removing the griefing concern)? Recommended: no, keep cooldown — multi-sig prevents single-signer griefing but does not prevent threshold-collusion griefing.
+3. **REGISTER pubkey vs DAPP_REGISTER service_pubkey rotation.** v2.26 rotates the REGISTER pubkey only. DApp `service_pubkey` (per `DAppEntry::service_pubkey` at `include/determ/chain/chain.hpp:57`) is already rotatable via a fresh `DAPP_REGISTER op=0` from the domain owner — no new primitive needed. Document the asymmetry in the V2-DAPP-DESIGN.md DSSO production-deployment guide.
+4. **Hardware-wallet support for ROTATE_KEY.** Ledger/Trezor sign arbitrary Ed25519 over hashed messages; the embedded `old_key_sig` is a standard Ed25519 sign over a SHA-256-hashed envelope. Wallet UX shows "Rotate operator key for domain X to new key Y" before signing. No new device firmware required; out of v2.26's critical path.
+5. **Recovery from total key loss (no old key available).** v2.26 cannot help — the embedded `old_key_sig` is unforgeable, by design. Recovery from total loss requires either (a) v2.14 OPAQUE wallet recovery (per-account recovery envelope), or (b) v2.15 multi-sig (other signers can rotate), or (c) v2.25 DSSO recovery flow (committee-assisted re-bind). v2.26 makes recovery *possible* via these paths; it does not itself recover from total loss.
+
+**Closes.** Identity continuity for validator operators, wallet users, and DSSO identities. Unblocks v2.25's production posture per Phase C.1 sequencing. The single-key-loss = identity-loss catastrophe becomes single-key-loss = rotation-event, preserving the on-chain anchor that every downstream system depends on.
 
 ---
 
