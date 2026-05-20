@@ -816,13 +816,167 @@ New attack surface introduced:
 
 ### v2.13 — Fair-ordering primitive
 
-**Motivation.** Determ's union-tx-root means inclusion is collaborative (FA2), but the *ordering* within a block is producer-chosen. For DEX deployments, MEV-extractive orderings (frontrun, sandwich) are possible at the committee level.
+**Status header.** Indefinitely deferred (research). Not on the v2 critical path. This section is the *design hypothesis* — what Determ would ship if the research consolidates or a workload-driven case appears. See also the scope-clarification appendix at the bottom of this document ("v2.13 fair ordering — scope clarification") which explains *why* this item is parked rather than scheduled.
 
-**Mechanism.** Per-block commit-reveal on tx ordering. Phase-1 commits include a hash of the producer's intended tx ordering. Phase-2 reveals the ordering. The block's canonical ordering is derived from the K revealed orderings via a fair-aggregation rule (e.g., random-shuffle seeded by `cumulative_rand`, or Aequitas-style intersection ordering).
+**Problem statement.** Determ's collaborative inclusion (FA2) is strong: a transaction included by any creator in the K-committee lands in the block via the union over `creator_tx_lists`, and the committed `tx_root` is the union root. What FA2 does **not** govern is the **intra-block ordering** of those transactions — the *position* a particular tx occupies in the apply sequence. The current implementation orders by `(creator_index, tx_index_within_creator_list)`, then by tx hash inside each creator's list (per `ContribMsg::tx_hashes // sorted ascending`). The block producer picks the order in which their own list is laid down, and the committee's order is fixed by the canonical creator-selection order. Three structural consequences follow:
 
-**Cost.** Multi-week. Validator change, ordering-rule design (which is itself a hard problem — see Aequitas, Themis literature).
+1. **MEV-extractive orderings at the committee level.** A creator who observes a pending tx (e.g., a large DEX swap) in mempool gossip can construct their own contribution to include a frontrun tx ahead of the victim in their `tx_hashes` list. Because the validator-side rule sorts each creator's list internally by hash (not by submission time), the frontrunner picks a tx whose hash sorts low and is therefore placed early. Sandwich attacks are the symmetric pair of frontrun+backrun. For DEX-class deployments (order books, AMM swaps), this is the canonical MEV concern. Determ's K-committee structure raises the **cost** of extractive ordering (an attacker needs to be a creator at the right height) but does not eliminate it.
+2. **Implicit fairness assumption load-bearing on FA2 only.** FA2's guarantee — "any honest creator's tx makes it in" — is about inclusion, not ordering. A DEX deployed on Determ today inherits FA2 against censorship but no protocol-level guarantee against intra-block reorder. The DEX would have to derive ordering fairness from outside the chain (e.g., off-chain order-book sequencing with on-chain settlement only). That reintroduces a trust singleton (the sequencer), which is incompatible with Determ's mutual-distrust posture.
+3. **No structural reason ordering can't be made fair.** The same K-committee that makes inclusion collaborative could make ordering collaborative. The Phase-1 ContribMsg already binds each creator's `tx_hashes` list; extending the binding to include an *ordering attestation* (or rotating the ordering rule to a deterministic function of K-committee inputs) is a wire-format addition, not a structural rearchitecture. The reason this is parked, not impossible, is research-completeness — see below.
 
-**Status.** Considered, deprioritized — fair ordering is an open research area. Not on the v2 roadmap; flagged for future protocol families built on Determ.
+**Mechanism (design hypothesis).** Per-block commit-reveal on intra-block tx ordering, layered onto the existing two-phase commit. The hypothesis has three independent moving parts; each is a sub-decision the protocol must pin at integration time.
+
+- **Part A: Phase-1 ordering attestation.** `ContribMsg` gains one optional field: `ordering_attestation: OrderingAttestation`. Wire shape: `struct OrderingAttestation { uint8_t rule_id; Hash committed_order_hash; std::vector<TimestampedHash> seen_at; }`. `rule_id` selects the fair-aggregation rule (table below). `committed_order_hash` binds the creator's view of the canonical order before reveal — a SHA-256 over the rule-specific commit material. `seen_at` is a list of `(tx_hash, local_observed_at_us)` pairs covering the creator's view of mempool arrival times, used by receive-order rules (Aequitas family). This field is **omitted from `compute_block_digest`** when `rule_id == 0` (the legacy "producer-chosen order" sentinel) to preserve backward-compat; signing_bytes binds it only when non-zero, same backward-compat envelope used by S-033 state_root and R4 partner_subset_hash.
+- **Part B: Phase-2 reveal + aggregation.** After K Phase-1 messages arrive (the existing seal point for `delay_seed`), each creator runs the rule-specific aggregation deterministically over the K attestations and produces the canonical intra-block order. The aggregation is a pure function — same K inputs at every member yield the same output (V-1 consistency rule). The result is bound into `compute_block_digest` via a new field `canonical_order_root: Hash` (a Merkle root over the resulting tx-order tuple), which is included in signing_bytes only when `rule_id != 0`.
+- **Part C: Validator enforcement.** `BlockValidator` recomputes the canonical order from the K Phase-1 attestations and verifies `canonical_order_root` matches before any block signature is honored. A producer who deviates from the rule's output produces a block that no other creator will Phase-2 sign — the block fails to reach the existing M-of-K signature gate and aborts. Existing slashing (FA6 / S-006 equivocation) covers the case where a creator's Phase-1 ordering attestation contradicts their Phase-2 reveal at the same generation.
+
+**Ordering-rule candidates (the open research dimension).**
+
+| Rule | Mechanism | Pros | Cons |
+|---|---|---|---|
+| **R-1: Random shuffle seeded by `cumulative_rand`** | Use the existing v2.10 threshold-randomness output (or v1.x `cumulative_rand`) to seed a Fisher-Yates shuffle over the union tx set. No creator timestamps consumed. | Trivial to implement once v2.10 lands; aggregation is a single deterministic shuffle; no Phase-1 wire growth (just `rule_id`); MEV becomes pure lottery — frontrunner pays for a block-slot probability, not a guaranteed position. | Does not prevent MEV — converts it from deterministic to probabilistic; sophisticated MEV bots model the lottery and still extract over a long horizon. Defeats sandwich attacks (the attacker cannot guarantee both bracket positions) but not pure frontrun in expectation. |
+| **R-2: Aequitas (γ-fair receive order)** | Each creator timestamps observed txs in `seen_at`. The aggregation rule produces an order in which tx A precedes tx B iff a `γ` fraction of K creators saw A before B locally. Ties broken by tx hash. | Strongest MEV resistance in literature — the producer cannot reorder past the receive-order quorum. Maps cleanly to Determ's K-committee model: the K creators are exactly the "γ-fair witnesses." | **Liveness fragility.** Aequitas as published has liveness gaps when the receive-order graph is cyclic (Condorcet-style ties). Mitigated by introducing a tie-break (hash), but the tie-break leaks back to producer-influenceable ordering in the cyclic case. Phase-1 wire growth: `O(tx_count)` bytes per creator for `seen_at`, bounded by the existing per-message-type cap (S-022: 1 MB Phase-1 chatter ceiling — would constrain block tx count under Aequitas more tightly than today). Clock-skew sensitivity: the ±30s timestamp window (existing validator gate) is loose relative to Aequitas's microsecond receive-order semantics. |
+| **R-3: Themis (Pompē-style batch ordering)** | Similar to Aequitas but uses a graph-condensation step to resolve cyclic ties deterministically. Stronger liveness than R-2 at the cost of more complex aggregation logic. | Stronger liveness than R-2; same MEV resistance. | More complex implementation; the graph-condensation is `O(n^2)` in tx count per block, which interacts badly with Determ's high-throughput profiles (web / regional / global). Still under active research as of last survey. |
+| **R-4: First-Come First-Served by source-shard receipt admission** | For cross-shard txs only: order by `inbound_receipts_eligible_for_inclusion` admission height + receipt index. For same-shard txs: fall back to R-1 random shuffle. | Hybrid; trivial to implement; cross-shard txs get deterministic ordering for "free" via the existing receipt-admission machinery. | Same-shard MEV (the more common case for DEX deployments inside one shard) gets only R-1's probabilistic protection. Solves a small slice of the problem. |
+| **R-5: Deferred (rule selected at activation time)** | Ship the wire substrate (Parts A + B + C) with `rule_id = 0` reserved as "producer-chosen" and slots 1..N reserved for future rules. Defer rule choice to a governance moment when research consolidates. | Decouples engineering work from research deadlock. The substrate is forward-compatible; switching to R-1, R-2, R-3, or R-4 becomes a flag-day height. | Substrate work without immediate benefit — operators get nothing until a real rule activates. Risks being a sunk cost if research never consolidates. |
+
+The honest recommendation is **R-5 + R-1 at activation**: ship the substrate with `rule_id = 0` and `rule_id = 1` (random shuffle via threshold randomness) initially, leaving R-2/R-3 as future rule_id slots once Aequitas-class liveness questions are answered in the literature. R-1 provides immediate sandwich-attack protection (probabilistic) and the substrate keeps the door open for stronger rules without further protocol surgery.
+
+**Wire-format changes.**
+
+| Slot | Use | Notes |
+|---|---|---|
+| `ContribMsg::ordering_attestation` (new optional field) | Phase-1 ordering commit | Backward-compat: serialized only when `rule_id != 0`; absent in binary codec preserves today's "producer-chosen" semantics. Signing bytes bind it when present (same backward-compat envelope as S-033 state_root / R4 partner_subset_hash). |
+| `Block::canonical_order_root: Hash` (new optional field) | Phase-2 canonical order root | Backward-compat: zero-valued when `rule_id == 0`, bound into `compute_block_digest` only when non-zero. |
+| `struct OrderingAttestation` | Per-creator commit | Carries `rule_id`, `committed_order_hash`, optional `seen_at` (R-2/R-3 only). |
+| `struct TimestampedHash { Hash tx_hash; uint64_t local_observed_at_us; }` | Receive-order witness | 40 bytes per tx. Used by R-2/R-3 only. Bounded by S-022 Phase-1 cap. |
+| `Chain::canonical_order_rule_id` (genesis-pinned constant) | Active rule selector | Pinned at activation height; rule changes require flag-day governance. |
+| State-root contribution | None | The canonical order is *derived* from `tx_root` + the K `ordering_attestation` values; it does not itself contribute a new state_root namespace. The result is bound by `Block::canonical_order_root` field + signing_bytes only. |
+
+**Apply-path changes.**
+
+- `Producer::on_contrib` — parse and validate `ordering_attestation` if `rule_id != 0`. Reject contribs whose `committed_order_hash` is inconsistent with their `tx_hashes` (per-rule consistency check).
+- `Node::try_finalize_round` — when K contribs have sealed, run the aggregation function `compute_canonical_order(K_attestations, tx_root) -> OrderedTxList` and bind the resulting Merkle root into `body.canonical_order_root` before broadcasting Phase-2 sigs. Mirrors how `body.state_root` is populated via the tentative-chain dry-run (S-038 wiring).
+- `BlockValidator::validate_block` — recompute the canonical order from the embedded K attestations + `tx_root`; reject the block if `canonical_order_root` doesn't match.
+- `Chain::apply_transactions` — apply txs in `canonical_order_root` order when `rule_id != 0`, falling back to today's `(creator_idx, hash)` order when `rule_id == 0`. The apply path is otherwise unchanged.
+- Equivocation detection: an `ordering_attestation` whose `committed_order_hash` differs across two ContribMsgs at the same `(block_index, signer, aborts_gen)` is detected by the existing S-006 ContribMsg same-generation equivocation rule — no new detection code, just a new field surface for the existing hashing comparison.
+
+**Backward-compat story.** Strictly additive when `rule_id == 0`. v1.x nodes running pre-v2.13 software refuse blocks where `Block::canonical_order_root != 0` ("unknown field" in their binary codec); v2.13 nodes refuse blocks from v1.x peers only after the activation height (governed by genesis-pinned `canonical_order_active_from_height`). Below activation, both produce zero-valued ordering attestation + zero-valued canonical_order_root and produce identical blocks. At activation, every node must be on v2.13. Snapshot interop: snapshots from a v2.13-active chain encode the rule_id at the genesis-config layer; v1.x nodes reject such snapshots at the version-string gate (existing snapshot-version mechanism).
+
+**Threat model.** What R-1 (random shuffle) at activation defeats:
+
+- **Deterministic sandwich attacks.** An attacker who frontruns and backruns a victim cannot guarantee the bracket; the lottery breaks the bracket pattern in expectation. Pure frontrun is still extractable in expectation but loses the multiplicative sandwich premium.
+- **Producer-level ordering manipulation.** The producer (Phase-2 broadcaster) cannot choose the order — it's a deterministic function of K Phase-1 inputs + threshold randomness. Any deviation fails validator-side recomputation, no signatures gather, the round aborts. Per-creator self-frontrun (placing one's own tx ahead of an observed mempool tx in one's own `tx_hashes`) is still possible at Phase-1 contribution time — R-1 mixes the result probabilistically across the union, but doesn't prevent the contribution itself.
+
+What R-2/R-3 (Aequitas/Themis) at a future activation defeat additionally:
+
+- **Per-creator self-frontrun.** A creator who self-frontruns relies on placing the predatory tx before the victim in the union order. R-2 places the predatory tx by *receive-order quorum* across K creators — the attacker must control γ·K creators' clocks to shift their `seen_at` timestamps, which the K-committee mutual-distrust assumption (FA1) already forbids.
+
+New attack surface introduced (substrate-level):
+
+- **Phase-1 wire amplification.** R-2/R-3 require per-tx timestamp data. The S-022 1 MB Phase-1 cap accommodates ~20K tx hashes today; with `TimestampedHash` (40 bytes) the per-creator Phase-1 ceiling shrinks to ~25K timestamped txs. For payment-class workloads this is non-binding; for DEX-class workloads at high throughput it would force tighter block sizing or rule_id = R-1 / R-4 selection. The cap itself is unchanged.
+- **Aggregation-rule liveness gap.** R-2/R-3 cyclic ties (if hit) cause the aggregation to fall through to the hash tie-break, which is producer-influenceable in the cyclic case. The frequency of cyclic ties under realistic mempool conditions is an empirical question with no settled answer; this is one of the open-research items keeping the rule choice deferred.
+- **Cross-shard ordering composition with v2.12.** A `CROSS_SHARD_SWAP_COMMIT` whose ordering depends on R-2 receive-order at the destination shard could interact with the swap's `timeout_height` — if R-2 ordering pushes the COMMIT past the timeout deadline within a block, the swap times out despite landing in the block. Resolved by R-4 (FCFS for cross-shard receipts) overriding R-1/R-2/R-3 for any tx that carries a `swap_id`, restoring the FA7 atomicity assumption.
+
+**Effort estimate.** ~3-4 weeks once the rule is chosen, plus indefinite research preamble.
+
+| Sub-component | Effort |
+|---|---|
+| Wire-format additions (`ordering_attestation`, `canonical_order_root`) + binary codec + JSON | 2 days |
+| Producer-side: aggregation function for R-1 (random shuffle via threshold rand) | 1 day |
+| Producer-side: aggregation function for R-2 (Aequitas γ-fair) | 1 week (the open-research dimension reduces here once a rule is pinned) |
+| Producer-side: aggregation function for R-3 / R-4 (deferred slots) | additional 1-2 weeks each, post-research |
+| Validator gate (`canonical_order_root` recomputation + match) | 2 days |
+| Apply-path: respect `canonical_order_root` ordering when `rule_id != 0` | 1 day |
+| Equivocation surface extension (S-006 hashing includes new field) | 1 day |
+| Backward-compat envelope (signing_bytes conditional binding) | 1 day |
+| Regression tests (R-1 happy path, R-1 same-generation equivocation, backward-compat below activation) | 1 week |
+| Documentation refresh (PROTOCOL.md §4.1 signing_bytes table; §5.3 BFT gate interaction; SECURITY.md MEV-resistance posture) | 2 days |
+
+**Dependencies.**
+
+- **v2.10 (threshold randomness aggregation)** — required for R-1 (the random shuffle's seed must be unpredictable to a malicious creator at Phase-1 commit time; v1.x `cumulative_rand` is producer-influenceable). Until v2.10 ships, R-1 reduces to "producer can grind the shuffle by varying their `dh_input`" — defeats the substrate's purpose.
+- **S-022 (per-message-type size caps)** — ✅ shipped. R-2/R-3 timestamp witnesses live under the Phase-1 1 MB ceiling; the cap is the structural bound on block tx count under receive-order rules.
+- **S-006 (ContribMsg same-generation equivocation)** — ✅ shipped. The new `ordering_attestation` field enters the existing detection envelope without code change.
+- **S-033 + S-038 (state_root population + verification gate)** — ✅ shipped. The same backward-compat envelope (zero-valued field excluded from signing_bytes) is reused for `canonical_order_root`.
+- **v2.12 (cross-shard swap)** — recommended composition point: R-4 (FCFS by receipt admission) for cross-shard tx ordering, R-1/R-2/R-3 for same-shard. Without R-4 the swap timeout interaction (above) remains a sharp edge for DEX-class deployments.
+- **No dependency on v2.22 (confidential tx)** — orthogonal; Pedersen-committed amounts do not change the ordering question (the *order* of opaque-amount txs is still extractable by any party who observes the mempool's plaintext tx-hash stream prior to commitment).
+
+**Cross-references.**
+
+- ContribMsg struct: `include/determ/node/producer.hpp:18` — the field that grows by one optional attestation.
+- compute_block_digest: `src/node/producer.cpp::compute_block_digest` (and the documented signing_bytes coverage at PROTOCOL.md §4.1) — the bind site for `canonical_order_root`.
+- FA2 (collaborative inclusion): `docs/proofs/Censorship.md` — adjacent invariant; v2.13 strengthens FA2 from "any honest creator's tx is included" to "any honest creator's tx is included *and* its position within the block is governed by a deterministic, K-committee-collective rule rather than producer choice."
+- FA6 (equivocation slashing): `docs/proofs/EquivocationSlashing.md` — S-006 detection covers the new field via the existing same-generation hashing rule.
+- S-022 (size caps): `docs/SECURITY.md §S-022` — the wire ceiling that bounds receive-order rules.
+- v2.10 (threshold randomness): this document above — the precondition for R-1 to be non-grindable.
+- v2.12 (cross-shard atomic primitives): this document above — the composition partner for R-4.
+- Scope-clarification appendix at the bottom of this document — the *why-deferred* counterpart to this *how-it-would-work* spec.
+
+**Profile-specific timing analysis.** The aggregation cost lands inside the Phase-1 → Phase-2 seal window. Determ's six timing profiles (`include/determ/chain/params.hpp`) bound the budget differently:
+
+| Profile | Phase-1 seal budget | R-1 cost (random shuffle) | R-2 cost (Aequitas γ-fair) |
+|---|---|---|---|
+| tactical (20/20/10 ms) | ~10 ms | O(n log n) — fits at n ≤ 10K tx/block | O(n²) — does not fit at any n > ~100 tx/block; effectively rules R-2 out |
+| cluster (50/50/25 ms) | ~25 ms | Fits at n ≤ 50K | Fits at n ≤ ~500 with γ=2/3 K |
+| regional (300/300/150 ms) | ~150 ms | Fits at any realistic n | Fits at n ≤ ~5K |
+| global (600/600/300 ms) | ~300 ms | Fits at any realistic n | Fits at n ≤ ~10K |
+| web (2000/2000/1000 ms) | ~1000 ms | Fits at any realistic n | Fits at any realistic n |
+| regional_test / global_test | mirrors prod sibling | mirrors prod sibling | mirrors prod sibling |
+
+Practical implication: R-1 is profile-agnostic; R-2 is web/global-profile-only in its current literature form. Tactical and cluster profiles would have to either stay at `rule_id = 0` (producer-chosen, current behavior) or activate R-1 (random shuffle) only — Aequitas-class rules are simply too expensive for the BFT-quorum seal window at those latencies. This is one of the reasons the rule choice cannot be a one-size-fits-all genesis constant; the natural extension is **per-profile rule_id selection** (`canonical_order_rule_id` as a profile-keyed map rather than a scalar). The substrate accommodates this by treating `rule_id` as a runtime input to the aggregation function rather than a compile-time constant.
+
+**Activation gating + MEV measurement story.** A protocol change costing 3-4 weeks of focused work plus indefinite research preamble should not ship speculatively. The proposed activation gate has three signals:
+
+1. **Use-case-driven trigger.** A deployment built on Determ (most likely a DApp under the v2.18 / v2.19 substrate, less likely a fork) operates an order book or AMM at sustained throughput. Without this, R-1's value is theoretical and R-2/R-3's value is undefined.
+2. **MEV measurement substrate.** Before activation, the chain would ship a *passive* MEV observation harness — a `tools/mev_observe.py` script that consumes the chain's tx stream + block stream and computes the ex-post extractable value under (a) the existing producer-chosen order and (b) a counterfactual R-1 / R-2 / R-3 order. Output: ledger-period MEV histograms. This is operator-runnable today on any sufficiently-active Determ chain; no protocol change required to ship the observer. The observer's output drives the rule selection.
+3. **Research consolidation signal.** Either (a) the Aequitas / Themis line consolidates on a liveness-guaranteed primitive with published cyclic-tie analysis, or (b) Pompē / Quartz / a successor produces a primitive whose aggregation cost fits within tactical/cluster profile budgets. Until one of these lands, R-1 remains the only ship-able rule, and R-1's MEV reduction is probabilistic-only — strong against sandwich attacks, weak against pure frontrun in expectation.
+
+**Why a substrate-only ship is the realistic disposition.** Three reasons the design hypothesis above is the disposition, not the ship plan:
+
+1. **No current deployment binds.** Determ's stated scope (payment + identity) does not exhibit MEV-extractable patterns. Payment txs commute (Alice pays Bob, Carol pays Dave — order does not change the outcome modulo nonce sequencing inside one account). Identity txs (REGISTER, DEREGISTER, ROTATE_KEY) are single-account state mutations with no cross-account ordering value. The cost/benefit ratio for v2.13 against Determ-native workloads is wrong.
+2. **The substrate is not free.** Even the minimal Part A + Part B + Part C with `rule_id = 0` as the only initial rule is 3-4 weeks of consensus-layer work touching `ContribMsg`, `compute_block_digest`, `BlockValidator`, `Chain::apply_transactions`, plus equivocation and snapshot/state-root interop. That is comparable to v2.7 F2 (the largest open critical-path item) or v2.10 threshold randomness (the current active item). Shipping it speculatively would consume the team's bandwidth on infrastructure for a use case that may never materialize on Determ.
+3. **Forward-compat is preserved without shipping.** The wire-format slots (Block field, ContribMsg field, signing_bytes conditional binding) follow Determ's existing backward-compat envelope (S-033 state_root, R4 partner_subset_hash). At any future activation height, the substrate can be added without breaking v1.x-era blocks below the activation height. There is no protocol-shape cost to deferring.
+
+The honest disposition is: **the design is sound, the engineering is tractable, the use case has not yet arrived.** If and when a DEX-class deployment on Determ shows a measurable MEV cost via the observation harness above, v2.13 becomes a candidate for promotion to Phase D or v3. Until then, it remains in the design space — documented, not shipped.
+
+**Comparative-protocol survey (what other chains ship).** Snapshot of the fair-ordering landscape across production and research chains, useful for benchmarking the design hypothesis:
+
+| Chain / protocol | Approach | Status | Relevance to Determ |
+|---|---|---|---|
+| Ethereum + Flashbots / MEV-Boost | Off-chain block-builder marketplace; builder reorders txs and pays validator a portion of extracted MEV | Production (high adoption) | Inapplicable — accepts MEV exists, monetizes it through a sidecar market. Determ's mutual-distrust posture forbids a builder oligopoly. |
+| Ethereum proposer-builder separation (PBS, EIP-7732) | Builder produces block body; proposer commits to it; in-protocol version of Flashbots | Spec, partial activation | Architecturally similar to Determ's producer/committee split, but PBS still leaves ordering to the builder. Does not solve the underlying MEV problem; only legitimizes builder market structure. |
+| Aleo / Aequitas-derived | γ-fair receive order from K-validator committee | Research / partial | The closest match to Determ's K-committee model. Cyclic-tie liveness gap is known and unsolved as of last survey. |
+| Penumbra | Cryptographic batch auction (Tendermint-on-CometBFT base) | Production (Cosmos zone) | Per-block batch auction at a single clearing price for DEX trades. Solves DEX-specific MEV by changing the *market mechanism*, not the ordering rule. Determ could ship this as a Theme 7 DApp pattern without changing the consensus layer — see V2-DAPP-DESIGN.md for the substrate. |
+| Solana | First-come-first-served at the leader; no fairness primitive | Production | Frequent reports of validator MEV. Solana's high throughput makes Aequitas-class rules infeasible at the consensus layer; their answer is "trust the validator's NTP-anchored arrival queue." Not portable to Determ. |
+| Chainlink Fair Sequencing Services (FSS) | Off-chain decentralized committee orders transactions before chain inclusion | Spec / limited deployment | An off-chain version of what v2.13 would do in-protocol. Adds an external trust assumption (the FSS committee) — incompatible with Determ's "no trust singleton" posture. |
+| Pompē | Quasi-linear FCFS over a randomized committee | Research | Conceptually similar to R-1 but with timing inputs. Liveness analysis pending. |
+
+The survey supports the substrate-only disposition: every production deployment of an MEV-mitigating ordering rule today is either (a) off-chain (Flashbots, FSS), (b) DEX-mechanism-level (Penumbra batch auctions), or (c) accepts MEV as economically intermediated (Ethereum PBS). No production chain has shipped an in-protocol γ-fair ordering primitive with proven cyclic-tie liveness. Determ shipping v2.13 as substrate-only matches the conservative bet: defer until the research consolidates rather than be the first production deployment of an unproven primitive.
+
+**Deployment scenarios where v2.13 would matter most.** Not all DEX-class workloads weight MEV resistance equally; the matrix below frames where the substrate is worth turning on:
+
+| Scenario | MEV exposure | v2.13 value | Realistic activation rule |
+|---|---|---|---|
+| Payment / payroll DApp on Determ | Effectively zero (txs commute under apply order) | None | `rule_id = 0` (no activation needed) |
+| Identity-only DApp (DSSO under v2.25) | Effectively zero | None | `rule_id = 0` |
+| AMM (constant-product DEX) DApp | Moderate — sandwich attacks possible on large swaps | Moderate — R-1 breaks deterministic sandwich, retains expectation-frontrun | `rule_id = 1` (R-1, random shuffle) |
+| Order-book DEX DApp | High — both frontrun and sandwich extractable | High — R-1 inadequate; R-2/R-3 needed | Deferred until R-2/R-3 research consolidates |
+| Cross-shard DEX (per v2.12 + DEX DApp combo) | High — additional cross-shard timing windows | Same as order-book DEX + R-4 for cross-shard tx | Deferred + R-4 required |
+| Regulated audit-grade payment chain (FIPS profile) | Effectively zero — clear-amount TRANSFER with v2.24 audit hooks; no DEX | None | `rule_id = 0`; v2.13 not needed in this lane |
+| Confidential-amount privacy chain (v2.22 active) | Mid — ordering still extractable from tx-hash arrival stream even if amounts are committed | Moderate — R-1 reduces expected-value extraction by ~50% (random-shuffle bound) | `rule_id = 1` recommended once v2.10 + v2.13 both ship |
+
+The scenarios that bind on full v2.13 are the order-book and cross-shard DEX cases — both of which Determ does not natively serve. The scenarios where v2.13's substrate-with-R-1 would matter are the AMM and privacy-chain cases — both DApp-layer compositions that may emerge organically once Theme 7 has a richer ecosystem. The realistic ship trigger is therefore the appearance of an AMM-class DApp with measurable user-side MEV cost, observed via the harness described under "Activation gating" above.
+
+**Open research questions to track.** Items whose resolution would unblock a real ship decision:
+
+- **Cyclic-tie frequency under realistic mempool conditions.** Empirical question; needs a public dataset of MEV-active chain mempools + receive-order timing data per validator. Not currently available in the Aequitas / Themis literature.
+- **Liveness-guaranteed γ-fair primitive.** Theoretical question; current literature has liveness-degrades-to-hash-tie-break behavior in cyclic cases. A primitive with liveness independent of tie structure would be the clean ship candidate.
+- **Clock-skew tolerance.** Aequitas assumes microsecond receive-order semantics; Determ's ±30s timestamp window is ~7 orders of magnitude looser. Either tighten the chain-wide clock-sync requirement (introduces a new operational dependency — NTP / chrony at the K-committee, not just BFT-block-window enforcement) or coarsen the receive-order rule (introduces deliberate "tie-zone" intervals, which weakens MEV resistance proportionally).
+- **Interaction with v2.10 threshold randomness latency.** R-1's seed must be unpredictable at Phase-1 commit time. v2.10's threshold-randomness aggregation lands at Phase-2 seal — *after* Phase-1 commits are fixed. The seed sourcing question (use v2.10's beacon for shuffling but pin the commit-time mempool view via a different mechanism) is a sub-question of "R-1 implementation given v2.10's actual ordering of operations." Not blocking the design, but blocking the implementation — needs a half-day decision once R-1 is real.
+- **Per-profile rule_id selection vs. genesis-pinned.** The profile-timing analysis above suggests rules should be per-profile, not chain-wide. Whether to expose this as a genesis-config field or as a hard-coded per-profile lookup table is an operability question that needs answering before the substrate ships.
+
+**Closes.** Nothing in v1.x — Determ's payment + identity scope does not bind on intra-block MEV. The capability is in scope for DEX-class deployments that may be built *on* Determ (DApps in the v2.18 / v2.19 substrate, or future protocol families) — for those, v2.13 closes the producer-level MEV gap and makes K-committee mutual-distrust extend from inclusion (FA2) to ordering. Strictly additive; no v1.x finding closure depends on v2.13. Tracked indefinitely deferred — the substrate is ready to design but waits on (a) a use-case-driven trigger and (b) ordering-rule research consolidating on R-2 or R-3, whichever lands first.
 
 ---
 
