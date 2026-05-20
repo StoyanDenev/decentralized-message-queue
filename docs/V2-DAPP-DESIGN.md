@@ -383,7 +383,9 @@ Chain commits to the hash; actual payload lives off-chain (IPFS, S3, anything co
 - Destination shard credits DApp + emits an inbound DAPP_CALL "event" (logically a tx, materialized in destination's block stream)
 - DApp's validator-node on the destination shard sees the event and processes
 
-Cross-shard adds latency (1-2 blocks on destination) but is otherwise identical to in-shard.
+Cross-shard adds latency (`CROSS_SHARD_RECEIPT_LATENCY = 3` blocks on destination — same S-016 soak as TRANSFER) but is otherwise identical to in-shard.
+
+**Implementation status.** Today (v2.19) cross-shard DAPP_CALL is rejected at mempool admission (`validator.cpp:914-918`) and at apply (`chain.cpp:1201-1209`). The full design — extending `CrossShardReceipt` with a `dapp_payload` carrier, threading source-emit + destination-credit-and-materialize paths, accounting against the 4 MB `CROSS_SHARD_RECEIPT_BUNDLE` cap, and coordinating activation via a `genesis_params.cross_shard_dapp_call_active_from` height pin — is **fleshed out in §11.7.2 below**. Effort: ~5-7 days; ships as v2.27 (Theme 7 — DApp cross-shard).
 
 ### Privacy caveats
 
@@ -514,17 +516,16 @@ Out of scope for the chain. Reference DApp written as a small process that:
 - Implements a sample app (suggested: public bulletin board)
 - Documents the SDK pattern in `docs/DAPP-SDK.md`
 
-### Phase 7.6 — Cross-shard DApp routing (~3 days, depends on regional-sharding completion)
+### Phase 7.6 — Cross-shard DApp routing (~5-7 days, depends on regional-sharding completion) — fleshed out in §11.7.2 below
 
-- DAPP_CALL across shards via inbound-receipt path
-- Beacon-side relay extension to carry payload bytes (currently relays only amount + receipt)
-- Block-size accounting (large DAPP_CALL payloads → block size cap consideration)
+The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients today (chain.cpp:1201-1209: "v2.19 single-shard only: cross-shard DAPP_CALL is Phase 7.6 follow-on"). Lifting that rejection requires extending `CrossShardReceipt` to carry the opaque DAPP_CALL payload bytes alongside the standard amount/fee/nonce, threading the destination shard's apply-path to materialize the message in its block stream, and bounding the new payload-size accounting against the existing 4 MB `CROSS_SHARD_RECEIPT_BUNDLE` cap. See §11.7.2 for the full design.
 
 ### Phase 7.7+ (deferred)
 
 - `DAPP_REPLY` distinct tx type
 - DApp slashing (proof-of-misbehavior tx types)
 - **DApp upgrade flows** (versioned `service_pubkey` rotation with grace period) — fleshed out in §11.7.1 below
+- **Cross-shard DApp routing** (DAPP_CALL crossing shard boundaries) — fleshed out in §11.7.2 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
 
 ---
@@ -714,6 +715,192 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 - `src/chain/chain.cpp` `build_state_leaves` — touch site for the conditional suffix
 - `tools/test_dapp_register.sh` + `tools/test_dapp_call.sh` — sibling regression patterns; `tools/test_dapp_key_rotate.sh` mirrors their shape
 - v2.18 / v2.19 in-process determ subcommands (`test-dapp-register`, `test-dapp-call`) — pattern for `test-dapp-key-rotate`
+
+---
+
+### 11.7.2 — Cross-shard DApp routing: extending DAPP_CALL across shard boundaries
+
+**Tracking slot:** v2.27 (Theme 7 — DApp cross-shard). Effort: ~5-7 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped), R0-R7 regional-sharding (shipped), B3 cross-shard receipt path (shipped). No new cryptographic, consensus, or gossip primitives — strictly extends the existing `CrossShardReceipt` carrier shape.
+
+#### Problem statement
+
+The v2.19 single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients. The exact rejection lives at `src/chain/chain.cpp:1201-1209` (`if (is_cross_shard(tx.to)) { ... break; }`) with the comment "v2.19 single-shard only: cross-shard DAPP_CALL is Phase 7.6 follow-on (requires beacon-relay extension to carry payload bytes across shards)". The validator at `src/node/validator.cpp:914-918` carries the matching mempool-side reject ("DAPP_CALL cross-shard not supported in v2.19 (deferred to Phase 7.6)").
+
+This rejection is a substrate-completeness gap rather than a safety property. The single-shard restriction means:
+
+1. **DApp discovery is global, but DApp interaction is local.** A user on shard 3 querying `dapp_info("foo.example")` via the v2.2 light-client path correctly resolves the DApp's `service_pubkey` and `endpoint_url` regardless of which shard hosts the DApp's registered domain. Yet if the DApp's domain routes to a different shard, the user cannot submit an on-chain DAPP_CALL targeting it — the user must either fall back to the §10 direct-to-DApp off-chain channel (losing the on-chain audit trail) or move to the DApp's home shard (which contradicts the regional-sharding design goal that users stay on their home shard).
+2. **Multi-region DApp deployments are forced into Mode D (sharded DApp).** A globally-popular DApp wanting users on every shard must either register a distinct domain per shard (`dapp-shard-0.example`, `dapp-shard-1.example`, ...) or accept that ~⌊(N-1)/N⌋ of its potential users cannot interact on-chain. The §8 Mode D recommendation works for cooperating DApp operators but is friction for any single-domain ecosystem (a DSSO RP per Theme 9, an L2 settlement DApp per the zk-VM God Stack pattern, a federated oracle).
+3. **Payment + message bundling is restricted.** v2.19's headline ergonomic — `DAPP_CALL` carries `tx.amount` natively so "pay + call" fits in one tx — silently degrades to "pay separately on home shard, hope the DApp's off-chain logic correlates" when the DApp is cross-shard. The v2.4 `COMPOSABLE_BATCH` workaround does not help here because the batch is atomic only within a single block on a single shard.
+
+The v2.27 cross-shard DAPP_CALL flow resolves this by extending the existing `CrossShardReceipt` shape to carry an opaque `dapp_payload` byte vector, threading the destination shard's apply path to materialize the message in its block stream as an inbound DAPP_CALL event, and bounding the new payload-size accounting against the existing 4 MB `CROSS_SHARD_RECEIPT_BUNDLE` body cap (`include/determ/net/messages.hpp` `max_message_bytes(MsgType::CROSS_SHARD_RECEIPT_BUNDLE)`).
+
+#### Mechanism sketch
+
+Treat a cross-shard DAPP_CALL as a TRANSFER-equivalent at the source side (debit + emit receipt) and a DAPP_CALL-equivalent at the destination side (credit + observable in block stream + filterable by `dapp_messages` RPC). The new wire surface is a single optional field on `CrossShardReceipt`:
+
+```cpp
+struct CrossShardReceipt {
+    // ...existing v1.x fields (src_shard, dst_shard, src_block_index,
+    //    src_block_hash, tx_hash, from, to, amount, fee, nonce)...
+
+    // v2.27 cross-shard DApp extension. Empty for TRANSFER-originated
+    // receipts (backward-compat). Non-empty iff the receipt originated
+    // from a DAPP_CALL whose `to` routes to a different shard. Carries
+    // the original DAPP_CALL payload verbatim: [topic_len:u8][topic:utf8]
+    // [ct_len:u32 LE][ciphertext:bytes]. The destination shard's apply
+    // path re-validates topic against the local dapp_registry_ entry
+    // and inserts a synthetic DAPP_CALL into the destination block's
+    // observable stream.
+    std::vector<uint8_t> dapp_payload;
+};
+```
+
+Lifecycle of a cross-shard DAPP_CALL `T` from sender `S` (on shard A) to DApp domain `D` (whose `to` routes to shard B):
+
+1. **Mempool admission (shard A).** Validator at `validator.cpp:914-918` lifts its cross-shard reject only when `v2.27_active_from <= chain_height`. Pre-activation: reject as today. Post-activation: route through the cross-shard DAPP_CALL admission path.
+2. **Source-side validation (shard A).** Shard A's producer / validator cannot resolve D in its own `dapp_registry_` because D is registered on shard B. The chain MUST therefore validate against an authoritative cross-shard DApp registry view. Two options:
+   - **Option B1: Light-client proof carried in tx.** Sender provides a `state_proof("d", D)` against shard B's latest known state_root. Shard A validates the proof against the beacon-anchored state-root from the most recent shard-tip header. Cost: ~3 KB extra payload per cross-shard DAPP_CALL.
+   - **Option B2: Trust-on-emit, validate-on-arrival.** Shard A admits the tx with shape-only checks (topic_len, ct_len, payload framing) and emits the receipt unconditionally. Shard B's apply-path resolves D in its local `dapp_registry_`; if D is missing or inactive at the destination height, the receipt is **dropped** (debit on A is retained as a fee paid to A's validators, identical to the v1.x B3 fee semantics where source-side fees are always retained even if the destination credit fails).
+
+   **Recommended: Option B2.** It mirrors the existing B3 TRANSFER semantics where the source shard does not need to know whether the destination address exists (anon addresses are valid; registered domains may have been deactivated between submission and apply). The asymmetric outcome (sender pays the fee, message vanishes) is consistent with v2.19's same-shard handling of DAPP_CALL targeting a deactivated DApp (chain.cpp:1142-1146 retains the fee on `dapp.inactive_from <= height`). A separate `dapp-missing` receipt-return path is out of scope for v2.27; failed deliveries are observable via the on-chain audit trail and the DApp can reply via Theme-7 conventions.
+3. **Source block production (shard A).** When shard A's producer at `producer.cpp:434` iterates transactions and encounters a cross-shard DAPP_CALL, it emits a `CrossShardReceipt` with `dapp_payload = tx.payload` (mirroring the existing TRANSFER cross-shard branch at producer.cpp:449-465). The sender is debited `tx.amount + tx.fee`; the local credit branch is suppressed. The receipt joins `b.cross_shard_receipts`.
+4. **Gossip relay (beacon).** The existing `CROSS_SHARD_RECEIPT_BUNDLE` message carries the full source block (per `make_cross_shard_receipt_bundle` in `include/determ/net/messages.hpp:265`). Adding `dapp_payload` to `CrossShardReceipt` automatically extends the bundle's wire footprint by the payload's size. The 4 MB `max_message_bytes(MsgType::CROSS_SHARD_RECEIPT_BUNDLE)` cap absorbs the increment without code change (single 16 KB DAPP_CALL ciphertext on a block with hundreds of receipts stays well under 4 MB; see size-budget table below).
+5. **Destination-side admission (shard B).** Shard B's `on_cross_shard_receipt_bundle` handler (`src/node/node.cpp:1612-1649`) accepts the bundle as today, dedupes by `(src_shard, tx_hash)`, stores in `pending_inbound_receipts_` with first-seen height. The S-016 Option-2 admission latency (`CROSS_SHARD_RECEIPT_LATENCY = 3` blocks, `src/node/node.cpp:1574`) applies unchanged — cross-shard DAPP_CALL receipts wait the same 3-block soak before inclusion as cross-shard TRANSFER receipts.
+6. **Destination block production (shard B).** When shard B's producer assembles a block, `inbound_receipts_eligible_for_inclusion` (node.cpp:1577) returns the soaked-and-ready receipts. The producer bakes them into `b.inbound_receipts` as today. The apply path at `chain.cpp:1363-1381` credits `r.to` with `r.amount` (existing behavior). When `r.dapp_payload` is non-empty, the apply path additionally:
+   - Resolves `r.to` in the local `dapp_registry_`. If missing or `inactive_from <= b.index`, the credit is retained but no DAPP_CALL event is materialized — the message is silently dropped at the destination (per B2 recommendation above).
+   - Re-validates the payload framing (topic_len, ct_len, total size) using the same checks as the v2.19 same-shard DAPP_CALL apply branch (chain.cpp:1150-1200). On framing failure, again credit is retained, message dropped.
+   - Re-validates the topic against the local DApp's registered topics (chain.cpp:1166-1176). On topic mismatch, again credit retained, message dropped.
+   - On all checks passing, the receipt is observable as a "synthetic DAPP_CALL" in the destination block stream. Implementation: `dapp_messages` RPC returns matching inbound receipts alongside same-shard DAPP_CALLs, distinguished by an explicit `source_shard != my_shard_id` field in the JSON response. The synthetic DAPP_CALL's height is `b.index` on shard B; its `(src_shard, tx_hash)` pair retains the original identity for cross-shard traceability.
+7. **Block-stream observable.** Subscribers via the (pending) `dapp_subscribe` RPC see the synthetic DAPP_CALL emit at the destination block's finalization, exactly the same way `inbound_receipts` are observable today on TRANSFER cross-shard paths.
+
+#### Wire-format changes
+
+**Extension to `CrossShardReceipt`** (`include/determ/chain/block.hpp:339`):
+
+Append a single new field `dapp_payload: std::vector<uint8_t>` after the existing `nonce: uint64_t`. The JSON encoding (`to_json` / `from_json` on `CrossShardReceipt`) gains an optional `"dapp_payload": "<hex>"` key. The field is omitted when empty, preserving backward-compat with v1.x receipts: any v1.x JSON file decodes to `dapp_payload = {}` and serializes to a byte-identical JSON form, hence the state-root contribution via `applied_inbound_receipts_` (chain.cpp:331-332 `"i:" + src_be8 + tx_hash` namespace) is unchanged for TRANSFER-only chains.
+
+**State-root contribution.** The `i:` namespace key (`include/determ/chain/chain.hpp:605` `applied_inbound_receipts_`) is `{src_shard, tx_hash}`, a 40-byte composite. Extending the receipt with `dapp_payload` does NOT widen the key — the value hash (per chain.cpp:332-337) MAY incorporate the payload digest if needed for tamper-evidence of "this DApp call was actually delivered", but the conservative minimum is to leave the value as today (`"applied" / "✓"`) and rely on the source-shard block's K-of-K signature (transitively covering `dapp_payload` via the source block's `tx_root` since the original DAPP_CALL is in `src_block.transactions`). The destination's `applied_inbound_receipts_` entry plus the source block's identity (`src_block_index, src_block_hash, tx_hash`) is sufficient for any light client to verify cross-shard delivery + recover the original payload.
+
+**`dapp_messages` RPC extension.** Add an optional `include_cross_shard: bool` parameter (default `true`). When true, the response interleaves same-shard DAPP_CALL txs and synthetic DAPP_CALLs from `inbound_receipts` with non-empty `dapp_payload`, ordered by `(block_index, intra_block_index)` on the destination shard. Each entry has a `source_shard` field distinguishing the origin.
+
+**`CROSS_SHARD_RECEIPT_BUNDLE` cap accounting.** No code change to `max_message_bytes` is required. Size budget under v2.27:
+
+| Scenario | Receipt count / block | Bytes per receipt | Total bundle |
+|---|---|---|---|
+| TRANSFER-only (v1.x baseline) | up to ~10,000 | ~140 B (fixed fields + short strings) | ~1.4 MB |
+| Mixed (90% TRANSFER + 10% DAPP_CALL @ 16 KB payload) | 1000 + 100 | ~140 B + ~16 KB × 100 | ~1.7 MB |
+| DApp-heavy (50% TRANSFER + 50% DAPP_CALL @ 16 KB) | 100 + 100 | ~14 KB + ~1.6 MB | ~1.8 MB |
+| Pathological (all DAPP_CALL @ MAX_DAPP_CALL_PAYLOAD ≈ 16 KB) | 200 | ~16 KB | ~3.2 MB |
+
+The 4 MB cap holds with comfortable headroom across realistic mixes. A worst-case attacker filling a block with maximum-size cross-shard DAPP_CALLs (200 × 16 KB = 3.2 MB) is bounded by the per-block tx count (the chain's tx-count limit per profile, `params.hpp`) and the per-tx fee floor (§9 economic model). The fee floor at `block_subsidy / 64` per DAPP_CALL means a 200-DAPP_CALL spam block costs the attacker ~3× the block subsidy, an order-of-magnitude penalty.
+
+#### Apply-path changes
+
+Touch list (files in `src/chain/`, `src/node/`, and `include/determ/`):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/block.hpp` (`CrossShardReceipt`) | struct definition + `to_json` / `from_json` | Add `dapp_payload: std::vector<uint8_t>` field; omit when empty in JSON; hex-encode when non-empty |
+| `src/chain/block.cpp` | `CrossShardReceipt::to_json` / `from_json` | Round-trip the new field; preserve empty-vector default for v1.x deserialization |
+| `src/node/producer.cpp` | `produce` (tx switch case for `DAPP_CALL` — currently absent; mirror `TRANSFER`'s cross-shard branch at producer.cpp:449-465) | Detect cross-shard DAPP_CALL via `chain.is_cross_shard(tx.to)`; emit receipt with `dapp_payload = tx.payload`; suppress local credit; do NOT call same-shard apply branch |
+| `src/node/validator.cpp` | `check_cross_shard_receipts` (validator.cpp:1081) | Extend pairing: cross-shard DAPP_CALLs in `b.transactions` MUST have matching `cross_shard_receipts` entries; field equality check on `dapp_payload == tx.payload` |
+| `src/node/validator.cpp` | `validate_tx` switch case for `DAPP_CALL` (validator.cpp:914-918) | Replace the unconditional reject with: pre-v2.27 height → reject (today's behavior); post-v2.27 height → shape-only validation, defer DApp-existence/topic checks to destination apply (per Option B2 recommendation above) |
+| `src/chain/chain.cpp` | `apply_transactions` switch case for `DAPP_CALL` (chain.cpp:1133-1224) | Replace the cross-shard reject at chain.cpp:1201-1209 with the source-side emit branch: debit sender, append to `block_outbound`, emit receipt (mirror TRANSFER's branch at chain.cpp:752-765) |
+| `src/chain/chain.cpp` | `apply_transactions` inbound-receipt loop (chain.cpp:1363-1381) | After the existing credit, when `r.dapp_payload` is non-empty: resolve `r.to` in `dapp_registry_`; on missing/inactive/topic-mismatch/framing-fail, retain credit but skip the synthetic DAPP_CALL emit; on success, no state mutation (DAPP_CALL is observable via the receipt itself, no per-DApp inbox map) |
+| `src/node/node.cpp` | `rpc_dapp_messages` | Include synthetic DAPP_CALLs from `applied_inbound_receipts_` with non-empty `dapp_payload`; add `source_shard` field per entry; honor optional `include_cross_shard: bool` filter |
+| `include/determ/net/messages.hpp` | `max_message_bytes(MsgType::CROSS_SHARD_RECEIPT_BUNDLE)` | No change — 4 MB cap suffices per the size-budget analysis above |
+| `tools/test_cross_shard_dapp_call.sh` | new | Regression: scheduled cross-shard DAPP_CALL, payload round-trip, missing-DApp drop, topic-mismatch drop, framing-fail drop, S-016 latency soak, size-cap stress |
+
+The new producer / apply / validator hooks mirror the existing B3 TRANSFER cross-shard machinery one-for-one. There is no new gossip message type, no new RPC type, no new state field on Chain. The extension is strictly additive on `CrossShardReceipt`.
+
+#### Backward-compat story
+
+This is a **soft-fork** addition under the v2.18/v2.19 substrate: no existing tx becomes invalid, no existing receipt-bundle format changes for chains with TRANSFER-only cross-shard traffic. Coexistence:
+
+- v2.19 nodes (which carry the cross-shard reject at validator.cpp:914-918 and chain.cpp:1201-1209) cannot validate or apply v2.27 cross-shard DAPP_CALLs. A v2.27 producer emitting cross-shard DAPP_CALL receipts would diverge from v2.19 validators applying their inbound receipts. This is therefore a **consensus-breaking** change at the apply layer; v2.27 must roll out as a coordinated migration with a `genesis_params.cross_shard_dapp_call_active_from` height pin.
+- Until that height, the chain MUST reject cross-shard DAPP_CALLs at mempool admission (today's behavior). After that height, both producer and validator MUST handle them per the spec above.
+- v1.x `CrossShardReceipt` JSON without `dapp_payload` decodes to an empty `dapp_payload` field, byte-identical state-root contribution. v2.27 receipts with `dapp_payload != {}` produce a JSON form that v2.19 readers cannot decode (unknown JSON key — depending on JSON library's strictness, either silently dropped or rejected). The coordinated migration ensures no v2.19 reader is in the network when v2.27 receipts begin emitting.
+- Chains that never carry cross-shard DAPP_CALL produce byte-identical block streams and state_roots pre- and post-activation. This preserves the v2.27 zero-impact-on-non-users property mirroring the v2.18 → v2.24 DApp-key-rotate transition (§11.7.1 backward-compat).
+- The activation pattern parallels v2.24 DApp key rotate (`genesis_params.dapp_key_rotate_active_from`), A11 threshold randomness, and S-033 state_root activation. Validators upgrade in advance; light clients note the schema-version transition.
+
+#### Threat model
+
+| Attack | v2.27 defense | New surface introduced |
+|---|---|---|
+| **Spam: attacker floods cross-shard DAPP_CALLs to inflate gossip + block size** | Per-tx fee floor at `block_subsidy / 64` (§9). At pathological 200 × 16 KB = 3.2 MB bundle, the attacker pays ~3× block subsidy. The 4 MB `max_message_bytes` cap drops oversize bundles. Block-side tx count limit (per `params.hpp` profile) bounds receipts per block. | None new beyond the v1.x B3 receipt-spam surface. The fee floor scales with `tx.payload.size()` in spirit (paying for the bandwidth consumed) but is not explicitly per-byte; if real-world spam emerges, v2.X.1 could bind `min_fee = base + ciphertext_len / K`. |
+| **DApp-existence equivocation: receipt arrives at shard B, but a `DAPP_REGISTER op=1` deactivated D one block earlier** | Per Option B2, the destination apply path resolves D at the destination block's height; deactivated DApps drop the synthetic DAPP_CALL emit but retain the credit (mirroring the v2.19 same-shard handling at chain.cpp:1142-1146). No equivocation surface: the chain's serializability + state_root commitment ensures both shards agree on whether D is active at any given height. | None — falls out of normal apply semantics |
+| **Cross-shard DApp-state divergence** (a DApp operator running validator-nodes on multiple shards sees the same DAPP_CALL apply on one shard but not another, due to receipt-loss in transit) | The B3 / S-016 substrate already ensures exactly-once delivery via `applied_inbound_receipts_` dedup keyed on `(src_shard, tx_hash)`. The CROSS_SHARD_RECEIPT_BUNDLE relay is best-effort but the destination chain only credits + emits on first observation; duplicate bundles are no-ops. Receipt loss in transit is bounded by gossip-retry; the same mechanism that ensures TRANSFER cross-shard liveness ensures DAPP_CALL cross-shard liveness. | None — inherits the v1.x B3 liveness story |
+| **State-bloat via large `dapp_payload`** | `MAX_DAPP_CALL_PAYLOAD` (genesis-pinned; suggested 16 KB per v2.19) caps per-receipt payload. The CROSS_SHARD_RECEIPT_BUNDLE 4 MB cap caps per-block aggregate. Per-DApp aggregate is governance-mutable via the §9 fee model (operator pays for storage). | The synthetic DAPP_CALL is observable on the destination's `dapp_messages` RPC indefinitely (subject to v1.x block-retention policy). Light clients can prune by height window. |
+| **Receipt-payload tampering by beacon-relay node** | Beacon relays the source block verbatim per the v1.x B3.3 contract (`Node::on_cross_shard_receipt_bundle` in node.cpp:1612 simply re-broadcasts). The source block's K-of-K signature transitively binds `dapp_payload` via the source block's `tx_root` (the original DAPP_CALL is in `src_block.transactions`, and its `tx.payload == receipt.dapp_payload`). Destination validators verify this binding before apply. | None — inherits the v1.x B3 source-binding story |
+| **Replay of cross-shard DAPP_CALL on destination shard** | `applied_inbound_receipts_` dedup keyed on `(src_shard, tx_hash)`. A second arrival of the same receipt is silently skipped at chain.cpp:1365. Sender's source-shard nonce on the original DAPP_CALL provides the source-side replay barrier. | None |
+| **Adversary on shard A submits DAPP_CALL to "victim DApp on shard B" with garbage payload** | Source-side validation is shape-only per Option B2; destination apply retains the fee + drops the synthetic DAPP_CALL emit on framing-fail or topic-mismatch. The victim DApp never sees the garbage; only its balance is incremented by `r.amount` (which the adversary actually paid). This is asymmetric: adversary funds the victim DApp's account, victim DApp sees nothing. | Operator-side caveat: a DApp receiving unexpected balance increments via cross-shard credits should consult the `dapp_messages` audit trail to determine which receipts carried payload-drops vs which were legitimate. UX guidance documented in §7 client wallet integration. |
+| **Cross-shard DAPP_CALL latency abuse** | The S-016 `CROSS_SHARD_RECEIPT_LATENCY = 3` blocks soak applies. Senders observe a 3-block-on-destination latency window vs same-shard DAPP_CALL's 1-block window. Wallet UX SHOULD surface "cross-shard" in the send-confirmation flow per the §7 wallet integration recommendation. | None new — inherits the v1.x B3 latency story |
+| **Light-client trust** | Light clients verify the destination block's `inbound_receipts` via existing tx-in-block Merkle (block `tx_root` extension for the inbound-receipts vector, already shipped under R0-R7). The source block's K-of-K binding is verifiable independently via the beacon-anchored shard tip and the v2.2 state_proof RPC. Cross-shard DAPP_CALL delivery is therefore fully light-client-verifiable end-to-end. | None |
+
+The relevant cross-references in the existing threat-model docs: `proofs/CrossShardReceipts.md` T-5/T-6 (delivery exactly-once + idempotent apply), `proofs/Safety.md` L-1.3 (state-root inclusion of `applied_inbound_receipts_`), `proofs/UnderQuorumMerge.md` (merge-state interaction — cross-shard DAPP_CALL receipts are subject to the same merge-event eligibility rules as TRANSFER receipts).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `CrossShardReceipt::dapp_payload` field + JSON round-trip | 0.5 day | Mechanical addition |
+| Producer extension for cross-shard DAPP_CALL emit | 0.5 day | Mirrors TRANSFER's cross-shard branch at producer.cpp:449-465 |
+| Validator extension to remove cross-shard reject + extend pairing check | 0.5 day | Shape-only validation; defer DApp existence to apply |
+| Source-side apply extension at chain.cpp:1201-1209 | 0.5 day | Replace unconditional reject with debit + emit-receipt branch |
+| Destination-side apply extension at chain.cpp:1363-1381 | 1 day | Resolve D, re-validate framing + topic, conditionally emit observable DAPP_CALL |
+| `rpc_dapp_messages` extension for cross-shard inclusion | 0.5 day | Interleave same-shard + synthetic; add `source_shard` field; honor filter |
+| Migration coordination: genesis_params + activation-height gate + documentation | 0.5 day | Same shape as A11 / S-033 / v2.24 activation pins |
+| Regression: `tools/test_cross_shard_dapp_call.sh` (delivery, drop, S-016 soak, size-cap stress, dedup) | 1.5 days | Six scenarios; matches v2.18 / v2.19 / B3 test-coverage depth |
+| In-process subcommand `determ test-cross-shard-dapp-call` (sibling to `test-dapp-call`) | 0.5 day | CLI entry point for the regression script |
+| **Total** | **~5-7 engineering days** | Single-developer estimate; +1-2 days if integration with merge-state under R7 needs a dedicated test |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required for destination-side DApp resolution.
+- **v2.19 DAPP_CALL** — shipped. Required for the underlying tx type, payload framing, and topic-validation scaffolding.
+- **R0-R7 regional sharding** — shipped. Required for cross-shard receipt path (B3.1 through B3.4) and S-016 latency-soak machinery.
+- **B3 cross-shard receipt path** — shipped. Required for `CROSS_SHARD_RECEIPT_BUNDLE` gossip, beacon-relay, `pending_inbound_receipts_`, and `applied_inbound_receipts_` state.
+- **v2.4 COMPOSABLE_BATCH** — shipped, but not required. A future v2.X composability extension could allow a batch containing both same-shard and cross-shard DAPP_CALLs; deferred as a separate item.
+- **v2.24 DAPP_KEY_ROTATE (§11.7.1)** — adjacent, independent. Cross-shard DAPP_CALLs to a DApp whose key has just rotated benefit from the §11.7.1 grace-window mechanism — the destination shard sees the rotation via the state_root commitment, and the grace window's `DAPP_KEY_GRACE_MIN_BLOCKS ≥ CROSS_SHARD_RECEIPT_LATENCY + 3` floor (per §11.7.1 threat model) ensures senders on remote shards reading a stale `dapp_info` have margin to recover.
+- **v2.10 threshold randomness** — not required (cross-shard routing is deterministic from shard_id_for_address).
+- **v2.7 F2 Phase-1 intersection rule** — not required for shipping v2.27, but recommended as a follow-up to remove the S-016 Option-2 round-retry surface that the latency-soak partially masks.
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives.
+
+#### Cross-references
+
+- §3.2 `DAPP_CALL` payload framing — v2.27 receipt carries the same byte layout verbatim
+- §3.2 "Cross-shard: if `tx.to` routes to a different shard, the standard cross-shard receipt path handles the payment leg; the message payload goes with the receipt (see §10 below for the cross-shard nuance)" — v2.27 closes the deferred design
+- §4 `dapp_registry_` state-commitment via `d:` namespace — destination-side resolution path
+- §5 apply-path semantics — extended at chain.cpp:1201-1209 (source emit) and chain.cpp:1363-1381 (destination credit + synthetic emit)
+- §6 RPC surface — `dapp_messages` extension with `source_shard` field
+- §7 client wallet integration — `dapp-call` CLI gains a "cross-shard latency: 3 blocks" hint in the confirmation flow
+- §8 DApp node operation modes — Mode D (sharded DApp) becomes optional rather than mandatory for global DApps
+- §9 economic model — fee floor scales attack cost; per-byte fee tightening is a v2.X.1 follow-up if real-world spam emerges
+- §10 cross-shard DApp calls (paragraph at lines 378-386) — v2.27 supersedes the 4-bullet thumbnail with this fleshed-out spec
+- §11.7.1 DAPP_KEY_ROTATE — adjacent design; grace-window floor coordinates with `CROSS_SHARD_RECEIPT_LATENCY`
+- `V2-DESIGN.md` Theme 7 v2.21+ (cross-shard DApp routing) — this is the formal spec for that deferred item
+- `V2-DESIGN.md` Theme 9 (v2.25 DSSO) — DSSO RPs can now route challenges + assertions across shards via cross-shard DAPP_CALL, unblocking the multi-region DSSO deployment pattern
+- `proofs/CrossShardReceipts.md` T-5 (exactly-once delivery), T-6 (idempotent apply) — extended to cover `dapp_payload` carrier without new safety obligations
+- `proofs/Safety.md` L-1.3 — state-root inclusion of `applied_inbound_receipts_` extended to carry `dapp_payload` hash optionally
+- `proofs/UnderQuorumMerge.md` — merge-state interaction with cross-shard DAPP_CALL is identical to TRANSFER (no special merge-mode handling required)
+- `PROTOCOL.md` §4.1.1 — `i:` namespace canonical serialization; backward-compat preserved (empty `dapp_payload` produces byte-identical encoding)
+- `PROTOCOL.md` §11 cross-shard receipt-bundle wire format — extended carrier shape
+- `SECURITY.md` §S-016 (cross-shard receipt latency) — unchanged; v2.27 honors the same soak window
+- `src/chain/chain.cpp` `apply_transactions` — touch sites at chain.cpp:1201-1209 (source emit) and chain.cpp:1363-1381 (destination credit + synthetic emit)
+- `src/node/producer.cpp` `produce` — touch site for cross-shard DAPP_CALL emit (mirror producer.cpp:449-465)
+- `src/node/validator.cpp` `validate_tx` + `check_cross_shard_receipts` — touch sites at validator.cpp:914-918 and validator.cpp:1081
+- `src/node/node.cpp` `on_cross_shard_receipt_bundle` (node.cpp:1612), `inbound_receipts_eligible_for_inclusion` (node.cpp:1577) — no code change required; inherit the existing handling
+- `tools/test_cross_shard_dapp_call.sh` — new regression mirroring `test_cross_shard_transfer.sh` + `test_dapp_call.sh` patterns
+- v2.19 in-process determ subcommand (`test-dapp-call`) — pattern for `test-cross-shard-dapp-call`
+
+#### Open questions deferred to implementation
+
+- **Q1: Per-byte fee tightening.** The v2.27 spec uses the §9 fee floor as written (`block_subsidy / 64` per DAPP_CALL, height-flat). A per-byte tightening (`base + ciphertext_len / K`) would harden against worst-case 16 KB payload spam more aggressively, at the cost of a more complex fee schedule. Deferred to v2.X.1 (post-launch monitoring); the v2.27 launch uses the simpler height-flat floor.
+- **Q2: dapp_payload digest in `i:` namespace value.** Conservative minimum is unchanged value (`"✓"`); a defensive maximum is to commit `SHA256(dapp_payload)` in the value hash. The conservative choice preserves byte-identical state-root for TRANSFER-only chains; the defensive choice slightly hardens light-client tamper-evidence for cross-shard DAPP_CALL delivery audit trails. Recommended: ship conservative; promote to defensive only if a light-client use case demands it.
+- **Q3: Bundled cross-shard COMPOSABLE_BATCH.** A composable batch containing both same-shard and cross-shard DAPP_CALLs would atomically commit both legs only on the source shard; the cross-shard leg's destination application is asynchronous per the receipt-latency soak. This atomicity asymmetry should be documented but not blocked; the v2.27 spec accepts it as part of the cross-shard latency model. Deferred to a v2.X follow-up if a use case emerges where same-block destination apply is required (would require the v2.12 atomic-cross-shard-swap machinery; see V2-DESIGN.md v2.12).
+- **Q4: Cross-shard DApp deactivation race.** If shard A admits a cross-shard DAPP_CALL at height H_A targeting D, and D is deactivated on shard B at height H_B (with H_B < H_apply_on_B), the receipt drops silently per Option B2. An alternative is to refund `r.amount` to the sender via a reverse cross-shard receipt. Refund is symmetric and arguably more user-friendly, but introduces a recursive cross-shard receipt pattern (refund-of-refund-of-refund). The v2.27 spec ships the simpler drop-and-credit-DApp pattern; refund is a v2.X.1 follow-up if user-experience research shows the drop pattern is too confusing in practice.
+- **Q5: dapp_subscribe synthetic-event filtering.** The pending streaming `dapp_subscribe` RPC (v2.20 / Phase 7.4) needs to interleave synthetic cross-shard DAPP_CALLs with same-shard DAPP_CALLs. Recommended: subscribers see the same event shape with an additional `source_shard` JSON field. Backpressure semantics unchanged; bounded per-subscriber queue applies symmetrically. This is a v2.20 concern more than a v2.27 concern, but the spec is noted here so the v2.20 implementation has a clean target shape.
 
 ---
 
