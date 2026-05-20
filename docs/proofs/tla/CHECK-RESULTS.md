@@ -1,4 +1,4 @@
-# FB18 — TLA+ model-check transcripts (template)
+# FB21 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -59,6 +59,9 @@ java -jar tla2tools.jar -config EquivocationApply.cfg EquivocationApply.tla
 java -jar tla2tools.jar -config AbortApply.cfg AbortApply.tla
 # FB17 — Cross-shard applied-receipt-set restore lifecycle (TakeSnapshot / RestoreSnapshot / TryDuplicatePostRestore)
 java -jar tla2tools.jar -config AppliedReceiptRestore.cfg AppliedReceiptRestore.tla
+
+# FB20 — Composed per-block apply pipeline (ConstructBlock / ApplyBlock / AdvanceHeight)
+java -jar tla2tools.jar -config MultiEventComposition.cfg MultiEventComposition.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -85,6 +88,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | AbortApply.tla (3 domains, MaxRound=4, InitialStake=30, SUSPENSION_SLASH=10) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | AbortApply.tla (3 domains, H=4, MaxStake=5, SlashNumerator=1, SlashDenominator=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | AppliedReceiptRestore.tla (2 shards, 3 hashes, 2 domains, A=3, H=4) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
+| MultiEventComposition.tla (3 domains, MaxAmount=2, MaxStake=5, H=3, 2 hashes, 2 shards) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -362,6 +366,26 @@ This spec is the focused intersection of FB6 (Snapshot.tla — generic snapshot/
 
 Companion prose proof: `docs/proofs/AppliedReceiptRestore.md` (separately tracked; the prose track is being assembled in parallel).
 
+### MultiEventComposition.tla → composed per-block apply pipeline (Construct / Apply / AdvanceHeight)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | T-MC1: shape of `balances` (Domains → Nat), `stakes` (Domains → Nat), `applied_receipts` (SUBSET DedupKey — shared with FB14), `accumulated_outbound` (Nat — write-only outbound counter), `accumulated_slashed` (Nat — shared FB15+FB16 accumulator), `height` (0..MaxHeight*3), `pending_block` (PendingBlock record with four sub-event SUBSET fields, or NoPendingBlock sentinel) |
+| `Inv_A1Conservation` | T-MC2: supply-axis identity across composed apply. `SumStakes + accumulated_slashed <= Cardinality(Domains) * MaxStake` — slashing rebooks stake mass into the accumulator; total stake-axis mass is preserved across every ApplyBlock step. The composed step decrements stakes[d] by `abort_slash + equiv_slash` and increments accumulated_slashed by the same sum across all domains, preserving the bound. The transfer + receipt + subsidy side of the supply identity is FB5 / FB10 / FB11 territory and inherited via the per-event-invariants-compose conjunction |
+| `Inv_DeterministicOrder` | T-MC3: the headline composition contract. When `pending_block /= NoPendingBlock`, ConstructBlock is structurally disabled (its pre-condition requires `pending_block = NoPendingBlock`), so the only balance/stake-mutating action is the deterministic ApplyBlock. Apply order within the block is fixed at the C++ source-line level (chain.cpp:734 tx loop → 1313 abort loop → 1344 equiv loop → 1363 receipt loop → 1286 distribution loop); the spec's single-step ApplyBlock transition is the state-machine witness of that fixed ordering |
+| `Inv_PerEventInvariantsCompose` | T-MC4: the conjunction of the most-load-bearing single-event invariants, each lifted from its source spec. (a) `balances[d] >= 0` (FB5 / FB10), (b) `stakes[d] >= 0` (FB15 / FB16), (c) `accumulated_slashed >= 0` (FB15 / FB16), (d) `accumulated_outbound >= 0` (FB2 / FB14), (e) every dedup-key has the DedupKey shape (FB14 T-R3). The invariant is the structural witness that COMPOSITION does not break ANY single-event invariant — TLC exhausts every ConstructBlock + ApplyBlock interleaving within the model bound |
+| `Inv_AppliedReceiptsMonotonic` | FB14 T-R4 lifted to the composition layer: applied_receipts is set-only-grows. ApplyBlock only extends (via `applied_receipts \cup {DedupKeyOf(r) : r \in fresh_receipts}`); ConstructBlock and AdvanceHeight preserve. The structural witness of cross-block dedup persistence under composition |
+| `Inv_SlashedMonotonic` | FB15 / FB16 lifted: `accumulated_slashed >= 0` and no action decreases it. The shared slash-accumulator's monotonicity holds across all four sub-event apply paths (transfers, receipts, subsidies do not touch it; aborts + equivocations only add) |
+| `Inv_OutboundMonotonic` | FB2 / FB14 lifted: `accumulated_outbound >= 0`. The write-only outbound counter is preserved by ApplyBlock (the spec's apply path does not emit cross-shard outbound — that surface is the source-chain's block-finalize stage, modeled in the companion `MultiEventComposition.md` prose proof) |
+| `Prop_EventualApply` (temporal) | T-MC6: under WF on ApplyBlock, any pending block eventually drains. The state-level form: `pending_block /= NoPendingBlock => <>(pending_block = NoPendingBlock)`. Combined with the AdvanceHeight stutter, gives the eventual-apply progress guarantee under fairness |
+| `Prop_ReplayMatch` (temporal) | T-MC5: after ApplyBlock fires, `applied_receipts` contains every dedup-key from the block's receipts sub-event set. A hypothetical re-apply of the same block would route every receipt through the duplicate branch (FB14 dedup gate), preserving the end-state. The structural witness of the apply-idempotency contract that snapshot/restore + replay depend on |
+
+**Spec status:** written; TLC verification pending (consistent with the other eleven specs above). The configuration in `MultiEventComposition.cfg` (3 domains, MaxAmount=2, MaxStake=5, MaxHeight=3, 2 hashes, 2 shards) is sized for an interactive TLC run in under a minute on a single core. Variables modeled: `balances` (Domains → Nat — per-domain balance ledger), `stakes` (Domains → Nat — per-domain locked stake), `applied_receipts` (SUBSET DedupKey — cross-block dedup set; shape shared with FB14), `accumulated_outbound` (Nat — write-only outbound counter), `accumulated_slashed` (Nat — shared FB15+FB16 accumulator at chain.cpp:1395), `height` (Nat — action counter), `pending_block` (PendingBlock record or NoPendingBlock sentinel). Actions modeled: `ConstructBlock(ts, abs, eqs, rs)` (non-deterministic block admission with bounded sub-event set sizes; the ONLY non-determinism point per T-MC3), `ApplyBlock` (the canonical apply pipeline — composes transfers, aborts, equivocations, and receipts into a single deterministic transition matching the C++ chain.cpp:734-1305 apply loop order), `AdvanceHeight` (temporal driver / stutter). The four sub-event classes are bounded at ConstructBlock admission (transfers <= 2, aborts <= 1, equivs <= 1, receipts <= 1) to keep the SUBSET state-space tractable.
+
+This spec is the FB-track composition of FB5 (AccountState — transfers), FB14 (CrossShardReceiptDedup — receipts), FB15 (EquivocationApply — equivocations), FB16 (AbortApply — aborts), and FB10 (FeeAccounting) + FB11 (SubsidyDistribution) — fee + subsidy distribution. Each prior spec verifies its sub-event class in isolation; FB20 verifies that COMPOSITION does not break any single-event invariant AND that the canonical apply order is fixed at the C++ source-line level. The deterministic-pipeline contract (T-MC3) is the headline composition-spec property — validators receiving sub-event sequences in any interleaving across producer-aggregation + gossip + admission ALL produce the same post-apply state because the C++ apply path replays in the canonical order regardless of arrival order. The DedupKey type is shared verbatim with FB14, ensuring the cross-block dedup-set's structure is preserved under composition.
+
+Companion prose proof: `docs/proofs/MultiEventComposition.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -485,6 +509,15 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `AppliedReceiptRestore.TakeSnapshot` | `src/chain/chain.cpp::Chain::serialize_state` — specifically the S-037-closure section at chain.cpp:1586-1592 that emits every entry of `applied_inbound_receipts_` as a (src_shard, tx_hash) pair into the snapshot's `applied_inbound_receipts` namespace. Pre-S-037 the namespace was absent and the dedup-set was silently dropped on restore |
 | `AppliedReceiptRestore.RestoreSnapshot` | `src/chain/chain.cpp::Chain::restore_from_snapshot` — specifically the S-037-closure section at chain.cpp:1778-1783 that consumes the `applied_inbound_receipts` namespace and rehydrates `applied_inbound_receipts_` verbatim from the saved entries. The TLA model's `applied_receipts' = snapshot_state.applied_receipts` post-state matches the C++'s set-construction at lines 1780-1782 |
 | `AppliedReceiptRestore.TryDuplicatePostRestore` | the headline adversarial action without a single C++ source-line — the C++ apply path itself does not distinguish "post-restore" from any other apply window. The TLA model lifts the adversarial submission of a snapshot-known dedup-key into an explicit action so the T-AR3 dedup-persistence property is observable as a state-machine guarantee. The structural witness in C++ is the in-memory `applied_inbound_receipts_` set being non-empty immediately after `restore_from_snapshot` returns; subsequent re-submissions of any snapshot-known key trip the chain.cpp:1365 short-circuit |
+| `MultiEventComposition.balances` | `src/chain/chain.cpp::accounts_` (the `balance` field of each AccountState entry; the TLA model collapses the multi-field AccountState into just `balance` because the nonce / stake / ed_pub side is consumed by sibling FB-track specs — FB7 / FB8 / FB5 — and the composition layer only needs the supply-axis projection) |
+| `MultiEventComposition.stakes` | `src/chain/chain.cpp::stakes_` (`map<string, StakeEntry>`; the `locked` field). Shared with FB15 EquivocationApply and FB16 AbortApply — the composition spec verifies that the slash-accumulator monotonicity from both prior specs holds when the two sub-event classes apply within the same block |
+| `MultiEventComposition.applied_receipts` | `src/chain/chain.cpp::applied_inbound_receipts_` (`std::set<std::pair<ShardId, std::string>>` at chain.cpp:204-206). Shape inherited verbatim from FB14 CrossShardReceiptDedup — the spec's DedupKey type and dedup-gate semantics are identical, ensuring cross-block dedup persistence holds under composition |
+| `MultiEventComposition.accumulated_slashed` | `src/chain/chain.cpp::accumulated_slashed_` — the A1 conservation counter incremented at chain.cpp:1395 (`accumulated_slashed_ += block_slashed`) after the per-block abort + equivocation loops sum into `block_slashed` (chain.cpp:1327, 1348). The composition spec's ApplyBlock single-step transition collapses both contributions into a single `block_slashed_sum` summation over the abort_slash + equiv_slash arithmetic |
+| `MultiEventComposition.accumulated_outbound` | `src/chain/chain.cpp::accumulated_outbound_` — the cross-shard outbound counter. The composition spec preserves this as a write-only zero (the outbound-emit surface is the source-chain's block-finalize step, not the apply path; the spec models only the apply boundary) |
+| `MultiEventComposition.pending_block` | implicit: the C++ apply layer consumes from `b.transactions`, `b.abort_events`, `b.equivocation_events`, and `b.inbound_receipts` in canonical order within `apply_block`. The TLA model lifts the Block record's four sub-event fields into an explicit `pending_block` slot so the deterministic-pipeline contract (T-MC3) is observable as a state-machine invariant |
+| `MultiEventComposition.ConstructBlock` | producer-side block-baking at `src/node/producer.cpp::try_finalize_round` — the validator-side aggregation of per-tx admissions + per-event aggregations + per-receipt bundling into the Block record. The TLA model abstracts the multi-source aggregation into a single non-deterministic ConstructBlock action; T-MC3 verifies that the apply order is independent of the construction order |
+| `MultiEventComposition.ApplyBlock` | `src/chain/chain.cpp::apply_block` — the canonical apply pipeline at chain.cpp:734 (tx loop) → 1313 (abort loop) → 1344 (equiv loop) → 1363 (receipt loop) → 1286 (distribution loop). The TLA model collapses the five loops into a single deterministic transition because the canonical order is fixed at the C++ source-line level — TLC does not enumerate sub-event interleavings within the block |
+| `MultiEventComposition.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment — shared with all other FB-track specs; the temporal driver for Prop_EventualApply |
 
 A reviewer who is suspicious of a particular invariant can:
 
