@@ -1,4 +1,4 @@
-# FB12 — TLA+ model-check transcripts (template)
+# FB14 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -46,6 +46,8 @@ java -jar tla2tools.jar -config DAppRegistry.cfg DAppRegistry.tla
 java -jar tla2tools.jar -config FeeAccounting.cfg FeeAccounting.tla
 # FB11 — Subsidy distribution state machine (E1 / E3 / E4)
 java -jar tla2tools.jar -config SubsidyDistribution.cfg SubsidyDistribution.tla
+# FB13 — Governance PARAM_CHANGE state machine (submit / activate / forward)
+java -jar tla2tools.jar -config GovernanceParamChange.cfg GovernanceParamChange.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -66,6 +68,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | DAppRegistry.tla (3 domains, 2 topics, H=6, G=3, P=100) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | FeeAccounting.tla (4 domains, H=4, A=3, F=2, S=20) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | SubsidyDistribution.tla (3 domains, B=4, H=4, NefPool=8, MaxCr=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| GovernanceParamChange.tla (3 keyholders, 2 whitelist, 1 off-whitelist, T=2, H=4, V=2) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -231,6 +234,22 @@ Companion prose proof: `docs/proofs/FeeAccounting.md` (separately tracked; the p
 **Subsidy mode modeled:** FLAT (E3 default, `subsidy_mode = 0` in C++). LOTTERY and FINITE_POOL alternatives are documented inline in the .tla file as commented-out FinalizeBlockLottery / FinalizeBlockFinitePool actions — both preserve the structural invariants (NefDrainsOnce, EmptyCreatorsNoMint, SubsidyConservation, NonNegative*, AccumulatedSubsidyMonotonic) and could be checked via cfg-level swap of the active Next disjunct. Prop_EventualSubsidy is FLAT-specific; LOTTERY admits a non-zero probability of no-payout blocks and FINITE_POOL terminates once the pool drains. Fees are abstracted away — the C++ apply path credits accumulated transaction fees on the same creator-distribution loop, but the subsidy invariants are orthogonal to fee accounting (FeeAccounting.tla / FB10 covers the fee track).
 
 Companion prose proof: `docs/proofs/SubsidyDistribution.md` (separately tracked; the prose track is being assembled in parallel).
+### GovernanceParamChange.tla → A5 PARAM_CHANGE state machine (submit / activate / forward)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `chain_param` / `validator_param` (Nat-bounded by MaxValue), `pending` (Seq of PendingEntry record with name/value/effective/sigs), `height` (0..MaxHeight) |
+| `Inv_WhitelistRespected` | T-G2 / T-11 state-machine companion: every entry in `pending` has `name \in Whitelist` — the validator's `kWhitelist` check at `src/node/validator.cpp::check_transactions` line 668 mirrored as an action-level guard |
+| `Inv_ThresholdRespected` | T-G3 / T-10 state-machine companion: every entry in `pending` carries `sigs \subseteq Keyholders /\ Cardinality(sigs) >= Threshold` — the validator's per-sig + count gate at `src/node/validator.cpp::check_transactions` lines 695-708 mirrored as an action-level guard |
+| `Inv_NoEarlyActivation` | T-G5 head-first eligibility: any eligible entry (effective <= height) is at the head of the pending sequence — no "stuck" entries past their effective_height; encodes the C++ ascending-eff `std::map` iteration semantics of `Chain::activate_pending_params` |
+| `Inv_ValidatorChainSync` | T-G6 forwarding: across every reachable state, `validator_param = chain_param` — the ParamChangedHook installed at `src/node/node.cpp` constructor fires inline with the chain-state mutation; the spec encodes this by mutating both variables in the same Activate step |
+| `Inv_NoDoubleApply` | T-G7 drained-exactly-once: action-level invariant that `pending'` is either equal to `pending` (stutter), a one-element-shorter sequence (Activate removed one entry), or `Append(pending, e)` (SubmitParamChange added one entry); no other delta is permitted, so each pending entry mutates the chain at most once |
+| `Prop_EventualActivation` (temporal) | under fairness on `AdvanceHeight` + `Activate`, any pending entry whose `effective_height` is reachable within the model bound eventually drains (`chain_param = e.value`) OR the model bound was reached (`height >= MaxHeight`) — the eventual-progress / no-stuck-pending guarantee |
+| `Prop_UnauthorizedRejection` (temporal) | `[][...]_vars` form of `Inv_WhitelistRespected /\ Inv_ThresholdRespected`: across every reachable state, no entry in `pending` has an unauthorized submitter — the headline T-10 + T-11 state-machine claim |
+
+**Spec status:** written; TLC verification pending (consistent with the other eight specs above). The configuration in `GovernanceParamChange.cfg` (3 keyholders, 2 whitelist names, 1 off-whitelist name, Threshold=2, MaxHeight=4, MaxValue=2) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `chain_param` (Nat-bounded by MaxValue), `validator_param` (Nat-bounded by MaxValue, kept in sync by the T-G6 forwarding hook), `pending` (Seq of PendingEntry — name/value/effective/sigs; the C++ uses `std::map<eff_height, vector<pair<string, vector<uint8_t>>>>`, the model collapses to a sequence with insertion-order semantics), `height` (Nat). Actions modeled: `SubmitParamChange` (legitimate path — appends to pending iff name in whitelist + sig set above threshold + sig set subset of keyholders), `RejectSubmitOffWhitelist` (adversarial — silent no-op witnessing Inv_WhitelistRespected), `RejectSubmitBelowThreshold` (adversarial — silent no-op witnessing Inv_ThresholdRespected), `RejectSubmitNonKeyholder` (adversarial — silent no-op witnessing the subset side of Inv_ThresholdRespected; defined in the spec, optional in `Next` for tractability), `Activate` (drains the first eligible entry; mutates chain_param + validator_param in lockstep per T-G6), `AdvanceHeight` (temporal driver). Threshold=2 with |Keyholders|=3 is the smallest non-trivial M-of-N case; default N-of-N (Threshold = |Keyholders|) is a cfg variant. The eight-name whitelist of the real protocol (MIN_STAKE, SUSPENSION_SLASH, UNSTAKE_DELAY, bft_escalation_threshold, param_keyholders, param_threshold, tx_commit_ms, block_sig_ms, abort_claim_ms) is abstracted to a single state variable — the state-machine properties of staging + activation + forwarding are uniform across whitelist names; modeling one is sufficient. The Cartesian-product lift to multi-parameter is mechanical.
+
+Companion prose proof: `docs/proofs/GovernanceParamChange.md` (separately tracked; the prose track is being assembled in parallel).
 
 ---
 
@@ -303,6 +322,14 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `SubsidyDistribution.FinalizeBlock` | `src/chain/chain.cpp::apply_block` subsidy-distribution loop at lines 1250-1305 (FLAT-mode base_subsidy = block_subsidy_; total_distributed = fees + subsidy_this_block; per_creator = total_distributed / m; dust to creators[0]) |
 | `SubsidyDistribution.FinalizeBlock` empty-creators branch | the `if (total_distributed > 0 && !b.creators.empty())` guard at `src/chain/chain.cpp:1286` — when creators is empty, the distribution loop is skipped and `accumulated_subsidy_` is not advanced (the `if (total_distributed > 0 && !b.creators.empty()) { accumulated_subsidy_ += subsidy_this_block; }` block at lines 1390-1392) |
 | `SubsidyDistribution.AdvanceHeightNoMint` | the LOTTERY-miss branch at `src/chain/chain.cpp:1263-1265` (`base_subsidy = 0`) and the FINITE_POOL-exhausted branch at `src/chain/chain.cpp:1269-1272` (`remaining = 0`) — both reduce to subsidy_this_block = 0 at the apply layer, which the same accumulated_subsidy_ tracking handles correctly (no mint = no advance) |
+| `GovernanceParamChange.chain_param` | `src/chain/chain.cpp::min_stake_` / `suspension_slash_` / `unstake_delay_` (the three Chain-instance whitelist fields, abstracted to a single state variable) |
+| `GovernanceParamChange.validator_param` | `src/node/validator.cpp::param_keyholders_` / `param_threshold_` / `bft_escalation_threshold_` (the validator-mirrored fields, also abstracted to a single state variable) |
+| `GovernanceParamChange.pending` | `src/chain/chain.cpp::pending_param_changes_` (`std::map<uint64_t, vector<pair<string, vector<uint8_t>>>>`; the TLA model collapses the map-of-vectors structure into a single Seq because the ascending-key + insertion-order iteration is equivalent under realistic submission orderings) |
+| `GovernanceParamChange.height` | `src/chain/chain.cpp::current_height_` (advanced once per applied block) |
+| `GovernanceParamChange.SubmitParamChange` | `src/chain/chain.cpp::apply_transactions` PARAM_CHANGE branch at lines 900-927, specifically the `stage_param_change(eff, std::move(name), std::move(value))` call at line 921; gated by the validator's whitelist + threshold check at `src/node/validator.cpp::check_transactions` PARAM_CHANGE branch (lines 621-708) |
+| `GovernanceParamChange.RejectSubmit*` | `src/node/validator.cpp::check_transactions` PARAM_CHANGE branch reject paths (lines 668, 705-708); the apply layer never sees the tx, so the staging is structurally blocked |
+| `GovernanceParamChange.Activate` | `src/chain/chain.cpp::activate_pending_params` at lines 471-497 (`while (it != pending_param_changes_.end() && it->first <= current_height)` walk; the switch over `name` mutates the Chain field; the `param_changed_hook_(name, value)` call at line 493 fires the T-G6 forwarding to the validator) |
+| `GovernanceParamChange.AdvanceHeight` | `src/chain/chain.cpp::Chain::apply_block` block-index increment (shared with all other FB-track specs); `activate_pending_params(b.index)` is called from `apply_block` at line 676 |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -349,6 +376,7 @@ The natural next step is wiring TLC into CI:
     cd docs/proofs/tla
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry FeeAccounting; do
     for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry SubsidyDistribution; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce StakeLifecycle DAppRegistry GovernanceParamChange; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -361,6 +389,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and per-block fee-accounting properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and block-subsidy-distribution properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The nine TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, tx-replay-defense, stake-lifecycle, DApp-registry-lifecycle, and governance-parameter-change properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
