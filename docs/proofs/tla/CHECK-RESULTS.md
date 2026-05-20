@@ -1,4 +1,4 @@
-# FB16 — TLA+ model-check transcripts (template)
+# FB17 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -53,6 +53,9 @@ java -jar tla2tools.jar -config GovernanceParamChange.cfg GovernanceParamChange.
 java -jar tla2tools.jar -config CrossShardReceiptDedup.cfg CrossShardReceiptDedup.tla
 # FB15 — Equivocation slashing apply state machine (Equivocate / ApplyEquivocation / Ghost / AlreadyDeactivated)
 java -jar tla2tools.jar -config EquivocationApply.cfg EquivocationApply.tla
+
+# FB16 — AbortEvent apply state machine (Phase1Slash / Phase2NoSlash / Ghost / Idempotent)
+java -jar tla2tools.jar -config AbortApply.cfg AbortApply.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -76,6 +79,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | GovernanceParamChange.tla (3 keyholders, 2 whitelist, 1 off-whitelist, T=2, H=4, V=2) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | CrossShardReceiptDedup.tla (3 shards, 2 domains, 2 hashes, MaxAmount=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | EquivocationApply.tla (3 domains, H=4, MaxStake=5, Sentinel=1000) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| AbortApply.tla (3 domains, H=4, MaxStake=5, SlashNumerator=1, SlashDenominator=3) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -292,6 +296,25 @@ Companion prose proof: `docs/proofs/CrossShardReceiptDedup.md` (separately track
 **Spec status:** written; TLC verification pending (consistent with the other nine specs above). The configuration in `EquivocationApply.cfg` (3 domains, MaxHeight=4, MaxStake=5, Sentinel=1000) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `registrants` (Domains → [active, inactive_from] — matching the C++ `RegistryEntry` shape at `include/determ/chain/chain.hpp`; the model collapses `active_from` into a single `active` boolean since the apply path only consults `active_from <= h < inactive_from`), `stakes` (Domains → Nat — the locked stake amount; matches `StakeEntry::locked`), `accumulated_slashed` (Nat — matches `Chain::accumulated_slashed_` at chain.cpp:1395), `height` (Nat), `pending_events` (Seq of EquivocationEvent — abstracting the producer-side `pending_equivocations_` aggregation + the per-block `equivocation_events` field). Actions modeled: `Equivocate` (adversarial — appends to pending_events; abstracts EUF-CMA / V11), `ApplyEquivocation` (active branch — chain.cpp:1344-1356), `ApplyEquivocationGhost` (T-E4 branch — already wound down, no-op), `ApplyEquivocationAlreadyDeactivated` (dual-mechanism — inactive but still has stake), `AdvanceHeight` (temporal driver). Sentinel=1000 >> MaxHeight + 1 = 5 satisfies ConfigOK and keeps `height + 1` writes monotone away from the "never deactivated" marker. The three Apply* branches are mutually exclusive on their guards and together cover the full head-of-queue guard space, ensuring `Prop_EventualSlash` under fairness.
 
 Companion prose proof: `docs/proofs/EquivocationSlashingApply.md` (separately tracked; the prose track is being assembled in parallel).
+
+### AbortApply.tla → FA5 AbortEvent apply state machine (Phase1Slash / Phase2NoSlash / Ghost / Idempotent)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `registrants` (Domains → [active, inactive_from]), `stakes` (Domains → 0..MaxStake), `accumulated_slashed` (Nat-bounded by INITIAL_TOTAL_STAKE = MaxStake · |Domains|), `height` (0..MaxHeight), `pending_events` (Seq of AbortEvent with `phase \in {1, 2}` discriminator) |
+| `Inv_StakeNonNegative` | per-domain `stakes[d] >= 0` at every reachable state — Nat-typed; documents the contract. Phase-1 Apply branches debit stakes[d] by the proportional formula (floor((stakes[d] * SlashNumerator) / SlashDenominator)) which is bounded above by stakes[d] itself; Phase-2 Apply / Ghost / AdvanceHeight never decrement |
+| `Inv_SlashedMonotonic` | action-level: `accumulated_slashed' >= accumulated_slashed` across every `[Next]_vars` step. Only ApplyPhase1Slash contributes (via the proportional formula); Equivocate / ApplyPhase2NoSlash / ApplyGhost / AdvanceHeight preserve. The action-level witness of the slash-is-one-way property at the apply layer |
+| `Inv_Phase1ProportionalSlash` | T-A1 contract: when a Phase-1 AbortEvent applies to a domain with `stakes[d] > 0`, the slash amount equals `floor((stakes[d] * SlashNumerator) / SlashDenominator)` (matching the C++ proportional formula in `Chain::apply_block_locked` AbortEvent Phase-1 branch). The structural witness that Phase-1 is proportional, not full-forfeiture (FA-Apply-10 distinction between AbortEvent Phase-1 and EquivocationEvent) |
+| `Inv_Phase2NoSlash` | T-A2 contract: any Phase-2 AbortEvent apply step preserves `stakes[d]` and `accumulated_slashed` byte-for-byte. Phase-2 is informational only — no stake mutation. The structural witness for the protocol-design distinction in FA5 (Phase-2 indicates honest disagreement on a Byzantine input rather than provable misbehavior) |
+| `Inv_RegistryUnchanged` | T-A3 contract: no Apply* branch in this spec flips `registrants[d].active` or writes `registrants[d].inactive_from`. AbortEvent never deactivates the offender — unlike EquivocationEvent (FB15 / FA-Apply-10) which atomically slashes AND deactivates. The structural witness for the "abort is recoverable, equivocation is terminal" distinction |
+| `Prop_EventualAbortApply` (temporal) | under fairness on `AdvanceHeight` + the three Apply* branches, any non-empty `pending_events` eventually drains. The three Apply* branches together cover the full guard space at the head (Phase-1 active → ApplyPhase1Slash; Phase-2 active → ApplyPhase2NoSlash; absent-from-stakes → ApplyGhost); fairness on the disjunction gives the eventual-progress claim. The MaxHeight escape covers the model-bound termination case |
+| `Prop_StateMonotone` (temporal) | `[][...]_vars` form: per-domain `stakes'[d] <= stakes[d]` at every step. No action increases stakes in this spec — there is no "un-slash" / "re-stake" branch in the apply-abort state machine (STAKE-tx restake is FB8 territory). Combined with `Inv_Phase1ProportionalSlash` + `Inv_Phase2NoSlash`, gives the full "Phase-1 slash is bounded + one-way; Phase-2 is no-op" claim |
+
+**Spec status:** written; TLC verification pending (consistent with the other ten specs above). The configuration in `AbortApply.cfg` (3 domains, MaxHeight=4, MaxStake=5, SlashNumerator=1, SlashDenominator=3 — modeling a 1/3-proportional slash to match the protocol's anti-cartel formula at apply time) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `registrants` (Domains → [active, inactive_from] — matching the C++ `RegistryEntry` shape; the model preserves the full shape to give `Inv_RegistryUnchanged` first-class structural witness without needing to consult an auxiliary "did this step modify registrants" predicate), `stakes` (Domains → Nat — the locked stake amount; matches `StakeEntry::locked`), `accumulated_slashed` (Nat — matches `Chain::accumulated_slashed_`), `height` (Nat), `pending_events` (Seq of AbortEvent with a `phase` discriminator). Actions modeled: `Equivocate` (adversarial — appends a Phase-1 or Phase-2 AbortEvent to pending_events), `ApplyPhase1Slash` (active branch with `phase = 1`), `ApplyPhase2NoSlash` (active branch with `phase = 2`), `ApplyGhost` (ghost-evidence branch — domain absent from stakes), `AdvanceHeight` (temporal driver). The three Apply* branches are mutually exclusive on their guards (phase discriminator + stakes membership) and together cover the full head-of-queue guard space, ensuring `Prop_EventualAbortApply` under fairness.
+
+This spec is the companion to FB15 (EquivocationApply.tla) — together they model the full slashing surface at the apply layer. The two specs differ on three axes that match the FA5 / FA6 protocol-design distinction: (1) Phase-1 AbortEvent is *proportional* slash (`Inv_Phase1ProportionalSlash`); EquivocationEvent is *full* forfeiture, (2) Phase-2 AbortEvent is *no-op* (`Inv_Phase2NoSlash`); there is no Phase-2 equivalent for EquivocationEvent, (3) AbortEvent never flips `registrants[d].active` (`Inv_RegistryUnchanged`); EquivocationEvent atomically deactivates. The shared structure (Apply / Ghost / AdvanceHeight; monotone `accumulated_slashed`; non-negative `stakes`) is the apply-layer slashing-correctness contract; the differences are the FA5 vs FA6 protocol-design contract.
+
+Companion prose proof: `docs/proofs/AbortEventApply.md` (separately tracked; the prose track is being assembled in parallel).
 
 ---
 
