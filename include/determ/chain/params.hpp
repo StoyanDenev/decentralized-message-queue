@@ -169,10 +169,12 @@ inline constexpr TimingProfile PROFILE_GLOBAL {
 //   - NO CONFIDENTIAL TRANSACTIONS (no FIPS-validated range proofs)
 //   - AES-256-GCM instead of XChaCha20-Poly1305 (FIPS-validated AEAD)
 //
-// Non-military "tactical-shape" deployments (commercial drones, industrial
-// robots without FIPS requirement) that want sub-30ms blocks but not FIPS
-// crypto should use a non-tactical profile (e.g., cluster or a custom
-// genesis with tactical timing + modern crypto).
+// Non-regulated "tactical-shape" deployments (commercial drones, industrial
+// robots without FIPS requirement) that want sub-50ms blocks but not FIPS
+// crypto have no direct profile — both fast profiles (tactical, cluster)
+// bundle FIPS. Use `regional` (~150ms, MODERN) and accept the latency cost,
+// or use a custom genesis with tactical/cluster timing + MODERN crypto
+// override (advanced path, bypasses the bundling invariant).
 inline constexpr TimingProfile PROFILE_TACTICAL {
     20, 20, 10, 3, 3, ChainRole::SHARD, ShardingMode::EXTENDED,
     CryptoProfile::FIPS

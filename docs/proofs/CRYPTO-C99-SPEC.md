@@ -45,7 +45,7 @@ Out of scope:
 
 **Why not single-family.** Bulletproofs structurally need a prime-order group with discrete-log hardness + efficient scalar arithmetic. ristretto255 (curve25519 family quotient) is the canonical choice but has only one mature C99 implementation (libsodium). libsecp256k1-zkp is the most-production-tested C99 Bulletproof library and uses secp256k1. Accepting a second curve family for the prime-order needs is the trade-off that delivers (a) no libsodium dependency, (b) battle-tested Bulletproofs from Bitcoin's ecosystem.
 
-**Why NIST P-256 is also in the stack (for FIPS profile).** NIST P-256 IS a third curve — added because the tactical profile bundles FIPS-compliant cryptography (per §2.Q11), and secp256k1 is not in NIST's FIPS-validated curve list. P-256 is FIPS 186-5 validated. P-256 supplants secp256k1 only in FIPS-profile deployments (tactical); modern-profile deployments use secp256k1.
+**Why NIST P-256 is also in the stack (for FIPS profile).** NIST P-256 IS a third curve — added because both the `tactical` and `cluster` profiles bundle FIPS-compliant cryptography (per §2.Q10), and secp256k1 is not in NIST's FIPS-validated curve list. P-256 is FIPS 186-5 validated. P-256 supplants secp256k1 only in FIPS-profile deployments (`tactical` + `cluster`); MODERN-profile deployments (`web` / `regional` / `global`) use secp256k1.
 
 **BLS12-381 remains rejected** for "two primitives" reasons; that decision stands.
 
@@ -428,20 +428,20 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 | **Confidential transactions (v2.22 Bulletproofs)** | ✅ Available | ❌ **UNAVAILABLE — no FIPS-validated range proofs exist** |
 | Theme 9 DSSO OPRF (v2.25) | secp256k1 voprf | **NIST P-256 voprf** |
 
-**Critical caveat: confidential transactions unavailable in FIPS profile.** Tactical deployments cannot use v2.22 confidential transactions. This is structurally required — NIST has not standardized zero-knowledge range proofs (Bulletproofs included), so no FIPS-validated implementation exists. Tactical deployments must use clear-amount TRANSFER tx exclusively. Documented as accepted trade-off for FIPS compliance.
+**Critical caveat: confidential transactions unavailable in FIPS profiles.** Both `tactical` (military / defense) and `cluster` (in-house enterprise / financial services / regulated) deployments cannot use v2.22 confidential transactions. This is structurally required — NIST has not standardized zero-knowledge range proofs (Bulletproofs included), so no FIPS-validated implementation exists. FIPS-profile deployments must use clear-amount TRANSFER tx exclusively + v2.24 audit hooks for regulator access. Documented as accepted trade-off for FIPS compliance.
 
-**Non-military tactical-shape deployments.** Operators wanting sub-30ms blocks for non-military embedded scenarios (commercial delivery drones, industrial robotics without FIPS requirement, etc.) cannot use the `tactical` profile name directly because it bundles FIPS. Options:
+**Non-FIPS sub-50ms deployments.** Operators wanting sub-50ms blocks for non-regulated scenarios (commercial delivery drones, industrial robotics without FIPS requirement, high-frequency commercial settlement without compliance constraint) cannot use the `tactical` or `cluster` profile names directly because both bundle FIPS. The closest MODERN profile is `regional` (~150ms). Options:
 
-1. Use a non-tactical profile (e.g., `cluster` with crypto-MODERN, ~50ms blocks)
-2. Custom genesis with tactical timing parameters + manual crypto-profile override (genesis advanced-config path; not recommended for new deployments)
-3. Wait for v2.x to add a `tactical_civilian` profile if commercial demand surfaces (currently not planned)
+1. Use `regional` (~150ms, MODERN crypto) — accept the latency cost in exchange for stronger primitives + confidential transactions
+2. Custom genesis with tactical/cluster timing parameters + manual crypto-profile override (genesis advanced-config path; not recommended for new deployments — bypasses the bundling invariant)
+3. Wait for v2.x to add a `tactical_civilian` or `cluster_civilian` profile if commercial demand surfaces (currently not planned)
 
 **Adoption rationale.** Bundling crypto with timing in the profile selection delivers:
 - **One operator decision instead of two** (just pick the profile)
-- **Reflects real-world alignment** (tactical IS the FIPS use case)
-- **Prevents misconfiguration** (can't accidentally deploy military hardware with non-FIPS crypto)
+- **Reflects real-world alignment** (low-latency regulated deployments — military `tactical` + financial `cluster` — ARE the FIPS use cases)
+- **Prevents misconfiguration** (can't accidentally deploy regulated hardware with non-FIPS crypto)
 - **Simplifies the genesis schema** (no separate `crypto_profile` field needed)
-- **Test profiles match production posture** (tactical_test = FIPS_test; ensures CI catches FIPS-specific issues)
+- **Test profiles match production posture** (tactical_test = FIPS, cluster_test = FIPS; ensures CI catches FIPS-specific issues)
 
 ---
 
@@ -507,12 +507,36 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Test vectors from RFC 9591 Appendix C
 - Reference cross-check: zcash/frost-ed25519 (Rust) output comparison
 
-### 3.9 OPRF on secp256k1 from voprf draft + RFC 9380 (~7 days)
+### 3.8b PBKDF2-HMAC-SHA-256 for FIPS profile (~1 day)
 
-- Implement OPRF-secp256k1 cipher suite from voprf draft
+- Implement RFC 8018 PBKDF2 (FIPS-validated SP 800-132)
+- Used by `cluster` + `tactical` profile keyfile encryption (instead of Argon2id)
+- Trivial wrapper over HMAC-SHA-256
+- Test vectors from NIST CAVP
+
+### 3.8c NIST P-256 for FIPS profile (~5 days)
+
+- Vendor P-256 from a mature C99 source (BearSSL or NIST reference)
+- ECDH + scalar multiplication
+- Field arithmetic (mod p256 prime)
+- Constant-time discipline
+- Test vectors from NIST CAVP
+- Used by FIPS-profile (cluster + tactical) prime-order operations
+
+### 3.9a OPRF on secp256k1 from voprf draft + RFC 9380 (~7 days)
+
+- Implement OPRF-secp256k1 cipher suite from voprf draft (used by MODERN profile)
 - Hash-to-curve for secp256k1 per RFC 9380 (SSWU map)
 - DLEQ proof generation + verification (for verifiable OPRF)
 - Test vectors from voprf draft + RFC 9380
+
+### 3.9b OPRF on NIST P-256 from voprf draft + RFC 9380 (~4 days)
+
+- Implement OPRF-P256 cipher suite from voprf draft (used by FIPS profile / cluster + tactical)
+- Hash-to-curve for P-256 per RFC 9380 (SSWU map for P-256)
+- DLEQ proof generation + verification on P-256 group
+- Test vectors from voprf draft + RFC 9380 P-256 mode
+- Smaller than 3.9a because P-256 primitives already in `src/crypto/p256/` from §3.8c
 
 ### 3.10 Constant-time primitives (~1 day)
 
@@ -567,25 +591,28 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 
 ## 4. Total estimated cost
 
-| Sub-component | Effort |
-|---|---|
-| SHA-256/SHA-512 + HMAC + HKDF | 2 days |
-| Ed25519 (ref10) | 6 days |
-| X25519 (curve25519-donna) | 4 days |
-| ChaCha20-Poly1305 + XChaCha20 | 4 days |
-| AES-256-GCM | 6 days |
-| Argon2id (P-H-C) | 6 days |
-| secp256k1 + libsecp256k1-zkp | 10 days |
-| FROST-Ed25519 from RFC 9591 | 7-10 days |
-| OPRF on secp256k1 | 7 days |
-| Constant-time primitives | 1 day |
-| Unified API + C++ wrapper | 3 days |
-| Constant-time verification framework | 3-5 days |
-| Test-vector validation | 3-5 days |
-| Build system + module structure | 3 days |
-| Migration of existing callers | 5 days |
-| Documentation | 3 days |
-| **Total** | **~75-85 working days = ~15-17 weeks (~3.5-4 months) of senior crypto engineering** |
+| Sub-component | Effort | Profile |
+|---|---|---|
+| SHA-256/SHA-512 + HMAC + HKDF | 2 days | Both |
+| Ed25519 (ref10) | 6 days | Both |
+| X25519 (curve25519-donna) | 4 days | Both |
+| ChaCha20-Poly1305 + XChaCha20 | 4 days | MODERN |
+| AES-256-GCM | 6 days | FIPS |
+| Argon2id (P-H-C) | 6 days | MODERN |
+| PBKDF2-HMAC-SHA-256 | 1 day | FIPS |
+| secp256k1 + libsecp256k1-zkp | 10 days | MODERN |
+| NIST P-256 | 5 days | FIPS |
+| FROST-Ed25519 from RFC 9591 | 7-10 days | Both |
+| OPRF on secp256k1 | 7 days | MODERN |
+| OPRF on NIST P-256 | 4 days | FIPS |
+| Constant-time primitives | 1 day | Both |
+| Unified API + C++ wrapper (incl. profile-aware AEAD/KDF/curve selection) | 4 days | Both |
+| Constant-time verification framework | 3-5 days | Both |
+| Test-vector validation | 4-6 days | Both |
+| Build system + module structure | 3 days | Both |
+| Migration of existing callers | 5 days | Both |
+| Documentation | 3 days | Both |
+| **Total** | **~85-95 working days = ~17-19 weeks (~4-4.5 months) of senior crypto engineering** |
 
 Larger than the prior ~6-8 week estimate because the user's full vision includes:
 - secp256k1 + libsecp256k1-zkp integration (not just libsodium vendor)
@@ -596,7 +623,7 @@ Larger than the prior ~6-8 week estimate because the user's full vision includes
 
 This is a comprehensive cryptographic-stack overhaul.
 
-**Scheduling:** runs as Phase 0 Track 2, parallel with DSF construction (Track 1, ~3-4 weeks). If two cryptographic engineers + one DS engineer are available, all three tracks complete in ~15-17 weeks before Phase A starts. Outer envelope grows from ~9-12 months to ~12-15 months (adds ~3 months for the C99 crypto overhaul).
+**Scheduling:** runs as Phase 0 Track 2, parallel with DSF construction (Track 1, ~3-4 weeks). If two cryptographic engineers + one DS engineer are available, all three tracks complete in ~17-19 weeks before Phase A starts. Outer envelope grows from ~9-12 months to ~12-15 months (adds ~3-4 months for the dual-profile C99 crypto overhaul covering both MODERN and FIPS cryptographic stacks).
 
 If only one engineer is available, total adds ~3.5-4 months to the schedule — pushing outer envelope to ~13-16 months. Trade-off against permanent NH1/NH2/NH4 readiness + zero libsodium dependence.
 
@@ -665,7 +692,8 @@ This spec is recommended to be reviewed before implementation. Reviewers should 
 7. **Q7 test-vector sources.** Canonical sources per primitive identified and acceptable?
 8. **Q8 cross-platform targets.** Required targets list (x86-64, ARM64, Linux, Windows, MINIX) acceptable?
 9. **Q9 libsodium removal trigger.** Acceptable to keep libsodium until cross-validation clean for ~4 weeks?
-10. **Total cost.** ~15-17 weeks senior cryptographic engineering acceptable vs. ~6-8 weeks libsodium-derived alternative?
+10. **Total cost.** ~17-19 weeks senior cryptographic engineering acceptable for dual-profile (MODERN + FIPS) coverage vs. ~6-8 weeks libsodium-derived alternative?
+11. **Profile bundling (Q10).** Cryptographic profile (MODERN vs FIPS) bundled into `TimingProfile` rather than orthogonal genesis field. `cluster` + `tactical` bundle FIPS; `web` + `regional` + `global` bundle MODERN. Acceptable that confidential transactions (v2.22) are unavailable in FIPS profiles?
 
 Once these are confirmed, implementation can proceed against §3 work units.
 

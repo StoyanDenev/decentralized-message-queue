@@ -596,26 +596,34 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 
 ### 13.1 Timing profiles
 
-A profile is a **complete deployment archetype**: timing, committee size, chain role, and sharding mode are all pinned together. To change role or sharding mode, pick a different profile — there is no separate CLI override.
+A profile is a **complete deployment archetype**: timing, committee size, chain role, sharding mode, AND cryptographic posture are all pinned together. To change any of these, pick a different profile — there is no separate CLI override.
 
-| Profile | M | K | tx_commit_ms | block_sig_ms | abort_claim_ms | role | sharding_mode | target block time |
+| Profile | M | K | block time | role | sharding_mode | crypto | confidential tx | Primary use case |
 |---|---|---|---|---|---|---|---|---|
-| `cluster` | 3 | 3 (strong) | 50 | 50 | 25 | BEACON | CURRENT | ~125 ms |
-| `web` (default) | 3 | 2 (hybrid) | 200 | 200 | 100 | SHARD | EXTENDED | ~500 ms |
-| `regional` | 5 | 4 (hybrid) | 300 | 300 | 150 | SHARD | CURRENT | ~750 ms |
-| `global` | 7 | 5 (hybrid) | 600 | 600 | 300 | BEACON | EXTENDED | ~1.5 s |
-| `tactical` | 3 | 3 (strong) | 20 | 20 | 10 | SHARD | EXTENDED | ~50 ms |
+| **`cluster`** | 3 | 3 (strong) | ~125 ms | BEACON | CURRENT | **FIPS** | ❌ | **In-house enterprise, financial services, banking settlement, regulated single-org chains, single-org CBDC, HIPAA-strict healthcare** |
+| `web` (default) | 3 | 2 (hybrid) | ~500 ms | SHARD | EXTENDED | MODERN | ✅ | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
+| `regional` | 5 | 4 (hybrid) | ~750 ms | SHARD | CURRENT | MODERN | ✅ | Regional / continental RTT, state lottery, multi-region commercial |
+| `global` | 7 | 5 (hybrid) | ~1.5 s | BEACON | EXTENDED | MODERN | ✅ | Inter-continental hub-and-spoke, international CBDC federation |
+| **`tactical`** | 3 | 3 (strong) | ~50 ms | SHARD | EXTENDED | **FIPS** | ❌ | **Military, defense, drone swarm, embedded mobile units, DoD deployments** |
 
-**Test variants** — sub-30 ms rounds for fast CI execution (`tx_commit_ms = block_sig_ms = 5`, `abort_claim_ms = 3`). Each test profile mirrors its production sibling's M / K / role / sharding_mode:
+Timing fields (`tx_commit_ms` / `block_sig_ms` / `abort_claim_ms`): cluster `50/50/25`, web `200/200/100`, regional `300/300/150`, global `600/600/300`, tactical `20/20/10`.
 
-| Profile | M | K | role | sharding_mode |
-|---|---|---|---|---|
-| `single_test` | 3 | 3 (strong) | SINGLE | NONE |
-| `cluster_test` | 3 | 3 (strong) | BEACON | CURRENT |
-| `web_test` | 3 | 2 (hybrid) | SHARD | EXTENDED |
-| `regional_test` | 5 | 4 (hybrid) | SHARD | CURRENT |
-| `global_test` | 7 | 5 (hybrid) | BEACON | EXTENDED |
-| `tactical_test` | 3 | 3 (strong) | SHARD | EXTENDED |
+**Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack: AES-256-GCM AEAD, PBKDF2-HMAC-SHA-256 KDF, NIST P-256 prime-order operations, Ed25519 (FIPS 186-5) signatures, X25519 (SP 800-186) KX. Confidential transactions (Bulletproofs) are not available in FIPS profiles because no FIPS-validated zero-knowledge range proof construction exists. FIPS profiles use clear-amount TRANSFER with v2.24 audit hooks.
+
+The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, secp256k1 prime-order operations + Bulletproofs, Ed25519 signatures, X25519 KX. Full v2.22 confidential-transaction support.
+
+See `docs/proofs/CRYPTO-C99-SPEC.md` §2.Q10 for full cryptographic-profile rationale and feature-availability matrix.
+
+**Test variants** — sub-30 ms rounds for fast CI execution (`tx_commit_ms = block_sig_ms = 5`, `abort_claim_ms = 3`). Each test profile mirrors its production sibling's M / K / role / sharding_mode / crypto profile:
+
+| Profile | M | K | role | sharding_mode | crypto |
+|---|---|---|---|---|---|
+| `single_test` | 3 | 3 (strong) | SINGLE | NONE | MODERN |
+| `cluster_test` | 3 | 3 (strong) | BEACON | CURRENT | **FIPS** |
+| `web_test` | 3 | 2 (hybrid) | SHARD | EXTENDED | MODERN |
+| `regional_test` | 5 | 4 (hybrid) | SHARD | CURRENT | MODERN |
+| `global_test` | 7 | 5 (hybrid) | BEACON | EXTENDED | MODERN |
+| `tactical_test` | 3 | 3 (strong) | SHARD | EXTENDED | **FIPS** |
 
 `ShardingMode` values:
 - **`NONE`** — single-chain deployment, no sharding (test-only).

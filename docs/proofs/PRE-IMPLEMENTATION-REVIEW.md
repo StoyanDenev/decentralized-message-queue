@@ -20,10 +20,10 @@
 ## Spec 1: CRYPTO-C99-SPEC.md (cryptographic stack foundation)
 
 **Reference:** `docs/proofs/CRYPTO-C99-SPEC.md`
-**Author summary:** Vendor every cryptographic primitive Determ uses as independent C99 source organized into modular sub-libraries. Eliminate libsodium dependency entirely. Three curves: Ed25519, X25519, secp256k1. Two underlying mathematical families: curve25519, secp256k1. ristretto255 eliminated entirely.
-**Effort if accepted:** ~15-17 weeks senior cryptographic engineering, Phase 0 Track 2 parallel with DSF.
+**Author summary:** Vendor every cryptographic primitive Determ uses as independent C99 source organized into modular sub-libraries. Eliminate libsodium dependency entirely. Dual-profile design: MODERN profile (Ed25519, X25519, secp256k1, Bulletproofs, XChaCha20-Poly1305, Argon2id) for `web`/`regional`/`global`; FIPS profile (Ed25519 FIPS 186-5, X25519, NIST P-256, AES-256-GCM, PBKDF2) for `cluster`/`tactical`. Crypto profile bundled into `TimingProfile`. ristretto255 eliminated entirely.
+**Effort if accepted:** ~17-19 weeks senior cryptographic engineering, Phase 0 Track 2 parallel with DSF.
 
-### Decision checklist (10 items)
+### Decision checklist (11 items)
 
 - [ ] **C99-1: Two curve families accepted.** curve25519 family (Ed25519 + X25519) + secp256k1 family. Three curves total; two underlying mathematical families. Alternative: stay single-family with vendored libsodium ristretto255 — retains libsodium-derived code.
 - [ ] **C99-2: ristretto255 elimination accepted.** v2.10 FROST → Ed25519 per RFC 9591; v2.22 DH → X25519; v2.22 Bulletproofs → secp256k1; v2.25 OPRF → secp256k1. Zero ristretto255 callers. Alternative: keep ristretto255 (vendor libsodium or implement from IETF draft independently).
@@ -34,7 +34,8 @@
 - [ ] **C99-7: Test-vector validation approach accepted.** Per-primitive canonical test vectors from NIST CAVP, RFC references, P-H-C, libsecp256k1 test suite, RFC 9591 Appendix C, voprf draft. CI gate on vectors. Cross-validation against libsodium outputs during migration.
 - [ ] **C99-8: Cross-platform targets accepted.** x86-64 + ARM64 + Linux + Windows + MINIX (NH1 secondary OS). Pure C99 baseline + optional SIMD-optimized variants gated by build flag.
 - [ ] **C99-9: libsodium removal trigger accepted.** Defer-libsodium-removal until cross-validation has been clean for ~4 weeks of production exposure (per CRYPTO-C99-SPEC §5 risks).
-- [ ] **C99-10: Total cost ~15-17 weeks accepted.** Phase 0 Track 2 parallel with DSF (Track 1, ~3-4 weeks). Phase 0 wall-clock = max(Track 1, Track 2) = ~15-17 weeks. If single engineer: Track 1 ships first; Track 2 defers to trigger event.
+- [ ] **C99-10: Total cost ~17-19 weeks accepted.** Phase 0 Track 2 parallel with DSF (Track 1, ~3-4 weeks). Phase 0 wall-clock = max(Track 1, Track 2) = ~17-19 weeks. If single engineer: Track 1 ships first; Track 2 defers to trigger event.
+- [ ] **C99-11: Dual-profile bundling accepted.** `CryptoProfile { MODERN, FIPS }` bundled into `TimingProfile` rather than orthogonal genesis field. `cluster` + `tactical` bundle FIPS (AES-256-GCM, PBKDF2, NIST P-256, no Bulletproofs); `web` + `regional` + `global` bundle MODERN (XChaCha20-Poly1305, Argon2id, secp256k1, Bulletproofs). Accepts that v2.22 confidential transactions are unavailable in FIPS profiles (no FIPS-validated Bulletproofs exist). Alternative: orthogonal profile axis (5 timing × 2 crypto = 10 combinations).
 
 **If accepted:** unlocks Phase 0 Track 2 engineering. Constrains the primitive substrate referenced by v2.10/v2.22/v2.25/Beaconless v2 specs.
 
@@ -138,13 +139,13 @@
 
 | Spec | Items | Spec doc size | Suggested review time |
 |---|---|---|---|
-| CRYPTO-C99-SPEC.md | 10 | ~560 lines | ~1 day |
+| CRYPTO-C99-SPEC.md | 11 | ~560 lines | ~1 day |
 | DSF-SPEC.md | 6 | ~365 lines | ~half day |
 | F2-SPEC.md | 5 | ~270 lines | ~half day |
 | v2.10-DKG-SPEC.md | 5 | ~360 lines | ~half day |
 | v2.22-PRIVACY-SPEC.md | 5 | ~340 lines | ~half day |
 | Beaconless-v2-SPEC.md | 8 | ~440 lines | ~1 day |
-| **Total** | **39 items** | **~2335 lines** | **~4-5 days** |
+| **Total** | **40 items** | **~2335 lines** | **~4-5 days** |
 
 **A single focused review week (5 working days) clears all six specs.**
 
@@ -154,7 +155,7 @@
 
 | Day | Spec | Output |
 |---|---|---|
-| Day 1 (morning) | CRYPTO-C99-SPEC.md | 10 decision Accept/Reject; constrains all downstream |
+| Day 1 (morning) | CRYPTO-C99-SPEC.md | 11 decision Accept/Reject; constrains all downstream |
 | Day 1 (afternoon) | DSF-SPEC.md | 6 decision Accept/Reject |
 | Day 2 (morning) | F2-SPEC.md | 5 decision Accept/Reject |
 | Day 2 (afternoon) | v2.10-DKG-SPEC.md | 5 decision Accept/Reject |
@@ -172,9 +173,9 @@ After review-week completion:
 
 ## What review-week completion enables
 
-Once all 39 decisions are accepted (or revised + re-approved):
+Once all 40 decisions are accepted (or revised + re-approved):
 
-**Phase 0 begins.** Two parallel tracks (DSF + C99 crypto) launch immediately. ~15-17 weeks until Phase A start.
+**Phase 0 begins.** Two parallel tracks (DSF + C99 crypto) launch immediately. ~17-19 weeks until Phase A start.
 
 **No further design questions remain on the documented roadmap.** All cascading questions formally resolved. Engineering execution begins.
 

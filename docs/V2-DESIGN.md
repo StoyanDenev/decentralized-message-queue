@@ -1245,15 +1245,15 @@ Layer-level estimates with shipped vs remaining split:
 
 Canonical execution order for the remaining work. Sequencing reflects critical-path dependencies (precondition before consumer), risk shape (highest-uncertainty items earliest within each phase), and commercial priority (privacy unblocks the largest deployment class).
 
-### Phase 0 — Deterministic-Simulation Framework + C99 Cryptographic Stack (~15-17 weeks, before Phase A)
+### Phase 0 — Deterministic-Simulation Framework + C99 Cryptographic Stack (~17-19 weeks, before Phase A)
 
 Phase 0 has two parallel tracks:
 
 **Track 1: DSF (~3-4 weeks).** Deterministic-simulation framework — virtual clock + virtual network + scriptable Byzantine actors + property checkers + 30-scenario initial set. Promoted ahead of Phase A (previously listed as a Phase D prerequisite). Provides deterministic Byzantine-bug coverage for every Phase A through D item as it lands. Subsumes A10 NH1 Stage 1 streams 1 + 2 (~3 months of work eliminated). Per `docs/proofs/DSF-SPEC.md`.
 
-**Track 2: C99 cryptographic stack (~15-17 weeks).** Full libsodium replacement with vendored independent C99 primitives organized into modular sub-libraries. Per `docs/proofs/CRYPTO-C99-SPEC.md`. Delivers: SHA-256/SHA-512 (NIST), Ed25519 (Bernstein ref10), X25519 (curve25519-donna), ChaCha20-Poly1305 + XChaCha20 (RFC 8439), AES-256-GCM (NIST), Argon2id (P-H-C reference), secp256k1 + libsecp256k1-zkp (Bitcoin Core), FROST-Ed25519 (implemented from RFC 9591), OPRF on secp256k1 (voprf draft + RFC 9380). ristretto255 eliminated entirely. Three curves: Ed25519, X25519, secp256k1. Two underlying mathematical families (curve25519, secp256k1). Modular structure: `src/crypto/<primitive>/` with unified C99 API in `include/determ/crypto.h` + ergonomic C++ wrapper in `include/determ/crypto.hpp`.
+**Track 2: C99 cryptographic stack (~17-19 weeks).** Full libsodium replacement with vendored independent C99 primitives organized into modular sub-libraries. Per `docs/proofs/CRYPTO-C99-SPEC.md`. Delivers: SHA-256/SHA-512 (NIST), Ed25519 (Bernstein ref10), X25519 (curve25519-donna), ChaCha20-Poly1305 + XChaCha20 (RFC 8439), AES-256-GCM (NIST), Argon2id (P-H-C reference), secp256k1 + libsecp256k1-zkp (Bitcoin Core), FROST-Ed25519 (implemented from RFC 9591), OPRF on secp256k1 (voprf draft + RFC 9380). ristretto255 eliminated entirely. Three curves: Ed25519, X25519, secp256k1. Two underlying mathematical families (curve25519, secp256k1). Modular structure: `src/crypto/<primitive>/` with unified C99 API in `include/determ/crypto.h` + ergonomic C++ wrapper in `include/determ/crypto.hpp`.
 
-Track 1 and Track 2 are parallel (different engineering skill sets — distributed-systems + cryptographic engineering). Both must complete before Phase A starts. Combined wall-clock = max(Track 1, Track 2) = **~15-17 weeks**.
+Track 1 and Track 2 are parallel (different engineering skill sets — distributed-systems + cryptographic engineering). Both must complete before Phase A starts. Combined wall-clock = max(Track 1, Track 2) = **~17-19 weeks**.
 
 If only one engineer is available, Track 1 (DSF) ships first as Phase A precondition; Track 2 (C99 crypto) defers to a later trigger event (NH1 Stage 2, NH4 FIPS commitment, or audit finding). The C99 crypto track is optional but recommended for libsodium-free posture + NH1/NH2/NH4 readiness from today.
 
