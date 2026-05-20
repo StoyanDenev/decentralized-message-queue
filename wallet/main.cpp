@@ -942,6 +942,214 @@ int cmd_account_create_batch(int argc, char** argv) {
     return 0;
 }
 
+// ── account-import — import an existing Ed25519 privkey as a wallet account ─
+//
+// Companion to `account-create-batch`. Where account-create-batch generates
+// fresh CSPRNG-drawn material, account-import accepts a pre-existing private
+// key supplied by the operator and converts it to the wallet's anon-account
+// JSON shape. Typical use cases:
+//
+//   1. Shamir recovery — operator runs `shamir-combine` to reconstruct a
+//      32-byte seed, then pipes the hex into account-import to materialize
+//      the wallet-format JSON file the daemon and tooling consume.
+//   2. Cross-wallet migration — any external Ed25519-compatible wallet that
+//      can export a 32-byte seed (or 64-byte seed||pubkey concatenation) can
+//      be transplanted into Determ's anon-account format with a single call.
+//   3. Test-fixture creation — supplying a deterministic seed lets test
+//      suites pin reproducible addresses without bringing the CSPRNG into
+//      the test's trusted boundary.
+//
+// CLI:
+//   --priv <hex>: 64 hex chars (32-byte seed) OR 128 hex chars (seed || pub).
+//                 The 64-byte form is supported for symmetry with external
+//                 wallets that export the libsodium-shaped secret key
+//                 (seed concatenated with the derived pubkey). When 64 bytes
+//                 are supplied, we verify that the seed-derived pubkey
+//                 matches the supplied tail-32 bytes; mismatch is rejected
+//                 because it almost always means the operator concatenated
+//                 the wrong pubkey or hit a transcription error.
+//   --out <file>: optional. If set, writes a single-account JSON file with
+//                 0600 permissions (best-effort on Windows; NTFS ACL).
+//                 Refuses overwrite without --force. Parent dir must exist.
+//   --force:      required to overwrite an existing --out.
+//   --json:       prints {"address":..., "privkey_hex":...} to stdout
+//                 instead of the human-readable two-line format. Ignored
+//                 if --out is also set.
+//
+// Output JSON shape (matches a single element of account-create-batch's array):
+//   { "address": "0x<64-hex-of-pubkey>", "privkey_hex": "<64-hex-of-seed>" }
+//
+// Exit codes:
+//   0 = success
+//   1 = argument / validation / I/O error (including mismatched 64-byte form)
+int cmd_account_import(int argc, char** argv) {
+    std::string priv_hex, out_path;
+    bool force    = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv"  && i + 1 < argc) priv_hex = argv[++i];
+        else if (a == "--out"   && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--force")                 force    = true;
+        else if (a == "--json")                  json_out = true;
+        else {
+            std::cerr << "account-import: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-import --priv <hex> "
+                         "[--out <file>] [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (priv_hex.empty()) {
+        std::cerr << "account-import: --priv is required (32-byte seed = 64 "
+                     "hex chars, or 64-byte keypair = 128 hex chars)\n";
+        std::cerr << "Usage: determ-wallet account-import --priv <hex> "
+                     "[--out <file>] [--force] [--json]\n";
+        return 1;
+    }
+
+    // ── Validate --priv length (must be 32 B seed or 64 B keypair) ──────────
+    // Same convention as keyfile-create. Surfacing this before from_hex
+    // gives a more actionable error message than "odd length" on, say,
+    // a 65-char paste.
+    if (priv_hex.size() != 64 && priv_hex.size() != 128) {
+        std::cerr << "account-import: --priv must be 64 hex chars (32-byte "
+                     "seed) or 128 hex chars (32-byte seed || 32-byte pubkey); "
+                     "got " << priv_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_bytes;
+    try { priv_bytes = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "account-import: invalid --priv hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (priv_bytes.size() != 32 && priv_bytes.size() != 64) {
+        // Belt-and-suspenders; the size check above already covered this.
+        std::cerr << "account-import: --priv decoded length must be 32 or 64; "
+                     "got " << priv_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── --out preconditions checked BEFORE keygen ───────────────────────────
+    // Surfacing parent-dir-missing / file-exists errors before the
+    // libsodium call means we don't burn cycles on derivation only to
+    // discard the result. (For account-import this is cheap, but it
+    // matches the account-create-batch ergonomics — fail fast on the
+    // operator's I/O misconfig.)
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "account-import: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "account-import: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Init libsodium + derive keypair from seed ───────────────────────────
+    // Task spec: use crypto_sign_ed25519_seed_keypair. This is functionally
+    // equivalent to crypto_sign_seed_keypair (both produce the same Ed25519
+    // pub/sk from a 32-byte seed) but the _ed25519_ form is the explicit
+    // alias for cases where the caller wants to be unambiguous about the
+    // curve. Using the same primitive that message-sign uses keeps the
+    // wallet's secret-handling surface uniform on libsodium.
+    if (!primitives::init_libsodium()) {
+        std::cerr << "account-import: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, 32> seed{};
+    std::memcpy(seed.data(), priv_bytes.data(), 32);
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> derived_pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    static_assert(crypto_sign_PUBLICKEYBYTES == 32, "Ed25519 pk size mismatch");
+    static_assert(crypto_sign_SECRETKEYBYTES == 64, "Ed25519 sk size mismatch");
+    static_assert(crypto_sign_SEEDBYTES      == 32, "Ed25519 seed size mismatch");
+    if (crypto_sign_ed25519_seed_keypair(derived_pub.data(), sk.data(),
+                                         seed.data()) != 0) {
+        std::cerr << "account-import: crypto_sign_ed25519_seed_keypair failed "
+                     "(seed not a valid Ed25519 private key)\n";
+        return 1;
+    }
+    // Zero the libsodium-derived 64-byte sk — it contains seed||pubkey, both
+    // of which already live in `seed` / `derived_pub`, so the duplicate is
+    // unnecessary post-derivation. seed itself stays live for the JSON emit.
+    sodium_memzero(sk.data(), sk.size());
+
+    // ── 64-byte-form pubkey mismatch check (defense-in-depth) ───────────────
+    // Same logic as keyfile-create: if the operator pasted a 64-byte form,
+    // the trailing 32 bytes MUST match the seed-derived pubkey. A mismatch
+    // is almost always a transcription error or a mixed-up keypair.
+    if (priv_bytes.size() == 64) {
+        std::array<uint8_t, 32> supplied_pub{};
+        std::memcpy(supplied_pub.data(), priv_bytes.data() + 32, 32);
+        if (supplied_pub != derived_pub) {
+            std::cerr << "account-import: --priv mismatch: 64-byte form's "
+                         "tail 32 bytes don't match the pubkey derived from "
+                         "the seed (operator likely concatenated the wrong "
+                         "pubkey, or copy-paste hit a transcription error)\n";
+            return 1;
+        }
+    }
+
+    // ── Build the anon-account record ───────────────────────────────────────
+    // Matches account-create-batch byte-for-byte: address is "0x" + lowercase
+    // hex of the 32-byte pubkey (the canonical anon-address derivation in
+    // src/wallet/account.cpp::make_anon_address); privkey_hex is the 32-byte
+    // seed (NOT the 64-byte libsodium sk).
+    std::string address     = "0x" + to_hex(derived_pub);
+    std::string privkey_hex = to_hex(seed);
+    nlohmann::json record = {
+        {"address",     address},
+        {"privkey_hex", privkey_hex},
+    };
+
+    // ── Dispatch on output mode ─────────────────────────────────────────────
+    if (!out_path.empty()) {
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "account-import: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << record.dump(2) << "\n";
+        f.close();
+        if (!f) {
+            std::cerr << "account-import: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+        // 0600 permissions — owner-only read/write. On Windows the
+        // read/write bits are a no-op (NTFS ACL inherits from parent);
+        // we ignore the error code as non-fatal there.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+        std::cout << "imported account: " << address << "\n";
+        return 0;
+    }
+    if (json_out) {
+        std::cout << record.dump() << "\n";
+        return 0;
+    }
+    // Default human format — same two-field layout as account-create-batch's
+    // per-account block, sans the "Account N:" header (since import always
+    // produces exactly one account).
+    std::cout << "address:     " << address     << "\n";
+    std::cout << "privkey_hex: " << privkey_hex << "\n";
+    return 0;
+}
+
 // Diagnostic CLI: structural verification of a complete wallet backup
 // (Shamir share-set + per-share AEAD envelopes) WITHOUT decrypting.
 //
@@ -2941,6 +3149,20 @@ void print_usage() {
         "                                             JSON file (refuses overwrite without\n"
         "                                             --force); --json prints JSON to stdout\n"
         "                                             (ignored if --out is set). 1<=N<=10000.\n"
+        "  account-import --priv <hex>                Import an existing Ed25519 private key\n"
+        "                 [--out <file>] [--force] [--json]\n"
+        "                                             into the wallet's anon-account JSON\n"
+        "                                             format (companion to account-create-\n"
+        "                                             batch, which generates fresh keys).\n"
+        "                                             --priv accepts 64 hex chars (32-byte\n"
+        "                                             seed) or 128 hex chars (32-byte seed ||\n"
+        "                                             32-byte pubkey); 64-byte form is\n"
+        "                                             validated against the seed-derived\n"
+        "                                             pubkey. --out writes the JSON to file\n"
+        "                                             with 0600 perms (refuses overwrite\n"
+        "                                             without --force); --json prints JSON to\n"
+        "                                             stdout. Output shape (single account):\n"
+        "                                             {\"address\":\"0x..\",\"privkey_hex\":\"..\"}.\n"
         "  backup-verify --shares <file> --envelopes <file> [--threshold T] [--json]\n"
         "                                             Composite structural verification of a\n"
         "                                             wallet backup (Shamir shares + per-share\n"
@@ -3028,6 +3250,7 @@ int main(int argc, char** argv) {
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
+    if (cmd == "account-import")  return cmd_account_import (argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
