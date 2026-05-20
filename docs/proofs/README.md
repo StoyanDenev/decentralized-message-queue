@@ -31,6 +31,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA11 | [EconomicSoundness.md](EconomicSoundness.md) | A1 unitary supply invariant + E1/E3/E4 preservation | ✓ |
 | FA12 | [WalletRecovery.md](WalletRecovery.md) | A2 wallet recovery: Shamir ITS + AEAD + OPAQUE composition | ✓ |
 | FA-Apply | [AccountStateInvariants.md](AccountStateInvariants.md) | AccountState invariants (I-1..I-6): non-negative balance, nonce monotonicity, balance/stake independence, account auto-creation paths, balance arithmetic channels, A1 contribution | ✓ |
+| FA-Apply-2 | [SnapshotEquivalence.md](SnapshotEquivalence.md) | Snapshot ↔ replay equivalence (T-S1..T-S6): serialize-restore identity, apply-after-restore equivalence, cross-namespace coverage of the S-033 state_root, idempotent restore, version-gate soundness, determinism — depends critically on S-033 state_root binding + S-038 producer-side state_root population | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
@@ -40,7 +41,8 @@ FB-track (TLA+ machine-checkable):
 | FB2 | [tla/Sharding.tla](tla/Sharding.tla) — multi-shard receipt flow | ✓ spec, model-check pending TLC install |
 | FB3 | [tla/Receipts.tla](tla/Receipts.tla) — receipt dedup state machine | ✓ spec, model-check pending TLC install |
 | FB4 | [tla/AccountState.tla](tla/AccountState.tla) — AccountState invariants (companion to FA-Apply) | ✓ spec, model-check pending TLC install |
-| FB5 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
+| FB5 | [tla/Snapshot.tla](tla/Snapshot.tla) — snapshot + restore state machine (companion to FA-Apply-2; 5 invariants SerializeRestoreIdentity / ApplyAfterRestoreEquivalence / VersionGateSoundness / DeterministicSerialization / StateRootBindsApply + 2 temporal props EventualSnapshotConsistency / RestoreIsCorrect) | ✓ spec, model-check pending TLC install |
+| FB6 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
 
 **Closure analyses and specs** (companion documents — not core FA/FB theorems, but cited alongside them):
 
