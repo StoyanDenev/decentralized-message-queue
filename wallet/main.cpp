@@ -331,6 +331,217 @@ int cmd_shamir_combine_raw(int argc, char** argv) {
     return 0;
 }
 
+// Diagnostic CLI: structural verification of a Shamir share-set file
+// WITHOUT reconstructing the secret.
+//
+// Use cases:
+//   * Operators distributing physical shares — verify a share envelope
+//     is well-formed before mailing it.
+//   * Pre-reconstruction sanity check — before attempting a costly
+//     T-of-N combine (which may need T-1 other shares hand-delivered),
+//     verify that the shares already on hand are structurally consistent.
+//   * Tooling (operator scripts, monitoring) that wants share-set
+//     metadata in structured form (--json) without leaking the secret.
+//
+// Verification checks (all structural; no GF(2^8) reconstruction):
+//   1. JSON parseable.
+//   2. Top-level is object with "shares" array.
+//   3. shares array non-empty.
+//   4. Each share has integer x in [1, 255] and string y_hex with even length.
+//   5. All x values DISTINCT (Shamir invariant — same x = same point on the
+//      polynomial; reconstruction would fail at the Lagrange step).
+//   6. All y_hex values share the SAME byte length (Shamir invariant —
+//      every share is derived from a polynomial over the same secret-size
+//      domain).
+//   7. y_hex contains only hex characters [0-9a-fA-F].
+//   8. If --threshold T is supplied, also report whether share count >= T
+//      (informational; insufficient share count is NOT a structural error).
+//
+// Exit codes:
+//   0  structurally valid (and threshold met if --threshold supplied)
+//   1  bad args / missing file / JSON parse error
+//   2  structurally invalid (operator alert gate — one of checks 2-7 failed)
+//
+// Insufficient-share-count when --threshold is supplied returns 0 with an
+// [INFO] line (it's diagnostic, not a structural defect).
+int cmd_shamir_verify(int argc, char** argv) {
+    std::string shares_path;
+    int threshold = -1;       // -1 sentinel = not supplied
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--shares"    && i + 1 < argc) shares_path = argv[++i];
+        else if (a == "--threshold" && i + 1 < argc) threshold   = std::stoi(argv[++i]);
+        else if (a == "--json")                       json_out    = true;
+    }
+    if (shares_path.empty()) {
+        std::cerr << "Usage: determ-wallet shamir-verify --shares <file> "
+                     "[--threshold T] [--json]\n";
+        return 1;
+    }
+    std::ifstream f(shares_path);
+    if (!f) {
+        if (json_out) {
+            std::cout << "{\"valid\":false,\"errors\":[\"cannot open file\"]}\n";
+        } else {
+            std::cerr << "shamir-verify: cannot open --shares file: "
+                      << shares_path << "\n";
+        }
+        return 1;
+    }
+    std::string blob((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    nlohmann::json j;
+    try { j = nlohmann::json::parse(blob); }
+    catch (std::exception& e) {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"] = false;
+            r["errors"] = nlohmann::json::array({std::string("JSON parse error: ") + e.what()});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "shamir-verify: JSON parse failed: " << e.what() << "\n";
+        }
+        return 1;
+    }
+
+    auto report_fail = [&](const std::string& reason) {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"] = false;
+            r["errors"] = nlohmann::json::array({reason});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "[FAIL] " << reason << "\n";
+        }
+    };
+
+    if (!j.is_object() || !j.contains("shares") || !j["shares"].is_array()) {
+        report_fail("top-level must be object with 'shares' array");
+        return 2;
+    }
+    const auto& arr = j["shares"];
+    if (arr.empty()) {
+        report_fail("shares array is empty");
+        return 2;
+    }
+
+    // Cheap hex-validity check (independent of from_hex which throws on
+    // odd length; we want to distinguish bad-char from odd-length so the
+    // operator gets a precise diagnostic).
+    auto is_hex_char = [](char c) {
+        return (c >= '0' && c <= '9')
+            || (c >= 'a' && c <= 'f')
+            || (c >= 'A' && c <= 'F');
+    };
+
+    std::set<int> seen_x;
+    int x_min = 256, x_max = -1;
+    size_t y_byte_len = 0;
+    bool y_len_consistent = true;
+
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const auto& el = arr[i];
+        if (!el.is_object()
+            || !el.contains("x")     || !el["x"].is_number_integer()
+            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
+            report_fail("share #" + std::to_string(i)
+                        + ": must have integer 'x' and string 'y_hex'");
+            return 2;
+        }
+        int x = el["x"].get<int>();
+        if (x < 1 || x > 255) {
+            report_fail("share #" + std::to_string(i) + ": x = "
+                        + std::to_string(x) + " out of range [1, 255]");
+            return 2;
+        }
+        if (!seen_x.insert(x).second) {
+            report_fail("duplicate x = " + std::to_string(x)
+                        + " (Shamir invariant: all x must be distinct)");
+            return 2;
+        }
+        if (x < x_min) x_min = x;
+        if (x > x_max) x_max = x;
+
+        std::string y_hex = el["y_hex"].get<std::string>();
+        if (y_hex.size() % 2 != 0) {
+            report_fail("share x=" + std::to_string(x)
+                        + ": y_hex has odd length (" + std::to_string(y_hex.size()) + ")");
+            return 2;
+        }
+        for (char c : y_hex) {
+            if (!is_hex_char(c)) {
+                report_fail("share x=" + std::to_string(x)
+                            + ": y_hex contains non-hex character");
+                return 2;
+            }
+        }
+        size_t this_y_len = y_hex.size() / 2;
+        if (this_y_len == 0) {
+            report_fail("share x=" + std::to_string(x) + ": y_hex is empty");
+            return 2;
+        }
+        if (y_byte_len == 0) {
+            y_byte_len = this_y_len;
+        } else if (this_y_len != y_byte_len) {
+            // Flag the inconsistency precisely; reject (operator alert).
+            report_fail("share x=" + std::to_string(x) + ": y_hex length "
+                        + std::to_string(this_y_len)
+                        + " bytes differs from first share's "
+                        + std::to_string(y_byte_len)
+                        + " bytes (Shamir invariant: all shares must share "
+                        + "the same secret-size domain)");
+            y_len_consistent = false;
+            return 2;
+        }
+    }
+
+    const int share_count    = static_cast<int>(arr.size());
+    const int distinct_x_cnt = static_cast<int>(seen_x.size());
+    // threshold_satisfied tri-state: nullopt = not supplied, true = met,
+    // false = supplied but insufficient. The supplied-but-insufficient
+    // case is INFORMATIONAL (exit 0) — see header doc for rationale.
+    std::optional<bool> threshold_satisfied;
+    if (threshold >= 0) threshold_satisfied = (share_count >= threshold);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["valid"]              = true;
+        r["share_count"]        = share_count;
+        r["distinct_x"]         = distinct_x_cnt;
+        r["x_range"]            = nlohmann::json::array({x_min, x_max});
+        r["y_byte_length"]      = y_byte_len;
+        r["consistent_lengths"] = y_len_consistent;  // always true at this point
+        if (threshold_satisfied.has_value()) {
+            r["threshold_satisfied"] = *threshold_satisfied;
+        } else {
+            r["threshold_satisfied"] = nullptr;
+        }
+        r["errors"] = nlohmann::json::array();
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "=== shamir share-set verification ===\n";
+        std::cout << "Shares present: "      << share_count << "\n";
+        std::cout << "Distinct x values: "   << distinct_x_cnt
+                  << " (range: " << x_min << ".." << x_max << ")\n";
+        std::cout << "y_hex byte-length: "   << y_byte_len
+                  << " bytes (consistent across all shares)\n";
+        std::cout << "[OK] Structural verification passed\n";
+        if (threshold_satisfied.has_value()) {
+            if (*threshold_satisfied) {
+                std::cout << "[OK] Share count (" << share_count
+                          << ") >= threshold (" << threshold
+                          << ") -- sufficient for reconstruction\n";
+            } else {
+                std::cout << "[INFO] Share count (" << share_count
+                          << ") < threshold (" << threshold
+                          << ") -- insufficient for reconstruction\n";
+            }
+        }
+    }
+    return 0;
+}
+
 int cmd_envelope_encrypt(int argc, char** argv) {
     std::string plaintext_hex, password, aad_hex;
     uint32_t iters = envelope::DEFAULT_PBKDF2_ITERS;
@@ -709,6 +920,9 @@ void print_usage() {
         "  shamir-split --secret <hex> --threshold T --shares N [--json]\n"
         "                                             Raw-primitive split (JSON-first output)\n"
         "  shamir-combine --shares <file> [--json]    Raw-primitive combine from JSON share file\n"
+        "  shamir-verify --shares <file> [--threshold T] [--json]\n"
+        "                                             Structural verification of a share-set\n"
+        "                                             (no reconstruction; no secret material)\n"
         "  envelope encrypt --plaintext <hex>         AEAD-wrap a share or seed\n"
         "                    --password <str> [--aad <hex>] [--iters <N>]\n"
         "  envelope decrypt --envelope <blob>         Unwrap an envelope\n"
@@ -739,6 +953,7 @@ int main(int argc, char** argv) {
     if (cmd == "shamir")          return cmd_shamir         (argc - 2, argv + 2);
     if (cmd == "shamir-split")    return cmd_shamir_split_raw  (argc - 2, argv + 2);
     if (cmd == "shamir-combine")  return cmd_shamir_combine_raw(argc - 2, argv + 2);
+    if (cmd == "shamir-verify")   return cmd_shamir_verify   (argc - 2, argv + 2);
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
