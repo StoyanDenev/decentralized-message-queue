@@ -3365,6 +3365,10 @@ int cmd_keyfile_recover(int argc, char** argv) {
         std::cout << doc.dump() << "\n";
     } else {
         std::cout << secret_hex << "\n";
+    }
+    return 0;
+}
+
 // ── keyfile-info — passive diagnostic for an encrypted node keyfile ─────────
 //
 // S-004 keyfile-shape complement to `inspect-envelope`. Reads a 2-line
