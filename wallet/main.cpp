@@ -2066,6 +2066,304 @@ int cmd_keyfile_create(int argc, char** argv) {
     return 0;
 }
 
+// ── keyfile-decrypt — S-004 encrypted node_key.json reverse path ───────────
+//
+// Inverse of `cmd_keyfile_create`. Operator workflow for one-shot offline
+// operations: migrate an encrypted validator key to a different node,
+// recover from a passphrase-protected backup, or debug a key that the
+// daemon refuses to load. The daemon itself supports loading the
+// encrypted form directly at runtime — this CLI exists for the cases
+// where the plaintext form is required (e.g., reviewing the key
+// material, exporting to a different runtime, key-archive workflow).
+//
+// Inputs:
+//   --in <file>           : encrypted keyfile produced by keyfile-create.
+//                           Canonical 2-line format:
+//                              line 1: "DETERM-NODE-V1 <pubkey_hex>\n"
+//                              line 2: "<DWE1 envelope blob>\n"
+//   --passphrase-from src : same as keyfile-create — `file:<path>`,
+//                           `env:<NAME>`, or `prompt` (no-echo interactive)
+//   --out <file>          : output path for the plaintext node_key.json.
+//                           Daemon loader: src/crypto/keys.cpp::load_node_key
+//   [--force]             : permit overwriting an existing --out file
+//   [--json]              : emit a structured summary on stdout
+//
+// Process:
+//   1. Read --in; parse the 2-line canonical format (header + blob).
+//   2. Resolve --passphrase-from to passphrase bytes.
+//   3. envelope::decrypt(blob, passphrase, aad=pubkey_hex_bytes).
+//      AAD binding from keyfile-create ensures the envelope is bound to
+//      the validator pubkey — tampering with the header line (e.g.,
+//      substituting another validator's pubkey) breaks AEAD verification.
+//   4. Parse decrypted plaintext as {"pubkey": "<hex>", "priv_seed": "<hex>"}.
+//   5. Verify inner pubkey matches header pubkey (defense-in-depth — they
+//      must match by construction; mismatch indicates a corrupted file
+//      or a deliberately-malformed keyfile produced outside the canonical
+//      keyfile-create path).
+//   6. Write a canonical plaintext node_key.json matching
+//      src/crypto/keys.cpp::save_node_key byte-for-byte (j.dump(2)).
+//   7. Apply 0600 owner-only permissions (best-effort).
+//
+// Diagnostic policy:
+//   * Wrong passphrase OR tampered envelope OR mismatched AAD →
+//     **exit 2** with a single "wrong passphrase or corrupted keyfile"
+//     diagnostic. We deliberately do NOT distinguish these cases on
+//     stderr — an attacker probing with various passphrases must not
+//     be able to distinguish "your passphrase is wrong" from "the file
+//     I gave you is malformed". They are indistinguishable to a
+//     plaintext-recovering oracle.
+//   * Structural problems with the --in file (wrong header magic,
+//     malformed blob, unparseable plaintext JSON, mismatched pubkey
+//     after decrypt) → **exit 1** with a specific diagnostic.
+//     Distinguishing these is fine because they don't depend on
+//     passphrase knowledge: an attacker who already has the file
+//     can see them locally.
+int cmd_keyfile_decrypt(int argc, char** argv) {
+    std::string in_path, pass_src, out_path;
+    bool force = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"              && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--passphrase-from" && i + 1 < argc) pass_src = argv[++i];
+        else if (a == "--out"             && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--force")                           force    = true;
+        else if (a == "--json")                            json_out = true;
+        else {
+            std::cerr << "keyfile-decrypt: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet keyfile-decrypt --in <file> "
+                         "--passphrase-from <file:path|env:NAME|prompt> "
+                         "--out <file> [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty() || pass_src.empty() || out_path.empty()) {
+        std::cerr << "Usage: determ-wallet keyfile-decrypt --in <file> "
+                     "--passphrase-from <file:path|env:NAME|prompt> "
+                     "--out <file> [--force] [--json]\n";
+        return 1;
+    }
+
+    // ── Read --in and parse the canonical 2-line format ────────────────────
+    std::string header_line, blob_line;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "keyfile-decrypt: cannot open --in: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, header_line)) {
+            std::cerr << "keyfile-decrypt: --in is empty: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, blob_line)) {
+            std::cerr << "keyfile-decrypt: --in is missing the envelope-blob "
+                         "line (expected 2-line format: header + blob): "
+                      << in_path << "\n";
+            return 1;
+        }
+        // Strip trailing CR (Windows-style line endings) for portability.
+        while (!header_line.empty()
+               && (header_line.back() == '\r' || header_line.back() == '\n'))
+            header_line.pop_back();
+        while (!blob_line.empty()
+               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
+            blob_line.pop_back();
+    }
+
+    // Header shape: "DETERM-NODE-V1 <pubkey_hex>"
+    const std::string header_magic = "DETERM-NODE-V1 ";
+    if (header_line.rfind(header_magic, 0) != 0) {
+        std::cerr << "keyfile-decrypt: --in header does not start with "
+                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
+                     "keyfile)\n";
+        return 1;
+    }
+    std::string header_pubkey_hex = header_line.substr(header_magic.size());
+    if (header_pubkey_hex.size() != 64) {
+        std::cerr << "keyfile-decrypt: --in header pubkey must be 64 hex "
+                     "chars (32-byte Ed25519 pubkey); got "
+                  << header_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    // Validate the header pubkey is well-formed hex. Done before passphrase
+    // read so a structurally-broken file fails fast without prompting.
+    try { (void)from_hex(header_pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-decrypt: --in header pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (blob_line.empty()) {
+        std::cerr << "keyfile-decrypt: --in envelope blob line is empty\n";
+        return 1;
+    }
+
+    // ── Read passphrase ────────────────────────────────────────────────────
+    std::string err;
+    std::string passphrase = passphrase_from_source(pass_src, err);
+    if (passphrase.empty()) {
+        std::cerr << "keyfile-decrypt: " << err << "\n";
+        return 1;
+    }
+
+    // ── --out preconditions ────────────────────────────────────────────────
+    {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "keyfile-decrypt: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "keyfile-decrypt: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Deserialize envelope blob ──────────────────────────────────────────
+    // A blob that fails to deserialize is a structural problem with the
+    // --in file — exit 1 with a specific diagnostic. Distinguishing from
+    // wrong-passphrase here is fine because it doesn't depend on
+    // passphrase knowledge.
+    auto env_opt = envelope::deserialize(blob_line);
+    if (!env_opt) {
+        std::cerr << "keyfile-decrypt: --in envelope blob is malformed "
+                     "(not a valid DWE1 serialization)\n";
+        return 1;
+    }
+
+    // ── Decrypt with pubkey_hex as AAD ─────────────────────────────────────
+    // AAD binding: keyfile-create binds the header pubkey into the GCM
+    // AAD. Any tampering with the header pubkey (or substitution of an
+    // envelope from a different validator) breaks AEAD verification
+    // here — same exit code / diagnostic as wrong passphrase, so an
+    // attacker cannot distinguish.
+    std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
+    auto pt_opt = envelope::decrypt(*env_opt, passphrase, aad);
+    if (!pt_opt) {
+        std::cerr << "keyfile-decrypt: wrong passphrase or corrupted "
+                     "keyfile\n";
+        return 2;
+    }
+    std::string pt_str(pt_opt->begin(), pt_opt->end());
+
+    // ── Parse decrypted plaintext as canonical node_key JSON ───────────────
+    // The decrypted plaintext is the same {"pubkey","priv_seed"} JSON the
+    // daemon's load_node_key path consumes. Bad JSON here is a structural
+    // problem (caller used keyfile-decrypt on a non-keyfile-create envelope)
+    // — exit 1 with a specific diagnostic.
+    nlohmann::json keyfile_json;
+    try {
+        keyfile_json = nlohmann::json::parse(pt_str);
+    } catch (std::exception& e) {
+        std::cerr << "keyfile-decrypt: decrypted plaintext is not valid JSON "
+                     "(this is not a canonical encrypted node keyfile): "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!keyfile_json.is_object()
+        || !keyfile_json.contains("pubkey")
+        || !keyfile_json.contains("priv_seed")
+        || !keyfile_json["pubkey"].is_string()
+        || !keyfile_json["priv_seed"].is_string()) {
+        std::cerr << "keyfile-decrypt: decrypted plaintext is missing the "
+                     "required 'pubkey' / 'priv_seed' string fields\n";
+        return 1;
+    }
+    std::string inner_pubkey_hex = keyfile_json["pubkey"].get<std::string>();
+    std::string priv_seed_hex    = keyfile_json["priv_seed"].get<std::string>();
+    if (inner_pubkey_hex.size() != 64) {
+        std::cerr << "keyfile-decrypt: inner 'pubkey' must be 64 hex chars; "
+                     "got " << inner_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    if (priv_seed_hex.size() != 64) {
+        std::cerr << "keyfile-decrypt: inner 'priv_seed' must be 64 hex "
+                     "chars; got " << priv_seed_hex.size() << "\n";
+        return 1;
+    }
+    // Hex validation (defense-in-depth — the daemon's S-018 path enforces
+    // this, but the operator probably wants the wallet to catch it first).
+    try { (void)from_hex(inner_pubkey_hex); (void)from_hex(priv_seed_hex); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-decrypt: inner JSON contains invalid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // ── Header-vs-inner pubkey defense-in-depth check ──────────────────────
+    // The AAD already ties the header pubkey to the ciphertext, so a
+    // mismatch here can only happen if a keyfile was hand-crafted outside
+    // the canonical keyfile-create path. We surface it as a structural
+    // problem with a clear diagnostic rather than silently using one or
+    // the other — the operator should investigate provenance.
+    if (inner_pubkey_hex != header_pubkey_hex) {
+        std::cerr << "keyfile-decrypt: inner 'pubkey' (" << inner_pubkey_hex
+                  << ") does not match header pubkey (" << header_pubkey_hex
+                  << "); the encrypted blob was not produced by the "
+                     "canonical keyfile-create path\n";
+        return 1;
+    }
+
+    // ── Format canonical plaintext node_key.json ───────────────────────────
+    // Matches src/crypto/keys.cpp::save_node_key byte-for-byte: nlohmann
+    // dump with indent=2, fields {"pubkey","priv_seed"} as 64-hex strings.
+    // The daemon's load_node_key only requires the two named fields to be
+    // present, but we preserve the indented canonical shape so an operator
+    // diffing wallet-decrypted vs. daemon-saved outputs sees equality.
+    nlohmann::json out_json = {
+        {"pubkey",    inner_pubkey_hex},
+        {"priv_seed", priv_seed_hex}
+    };
+    std::string out_str = out_json.dump(2);
+
+    {
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "keyfile-decrypt: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << out_str;
+        f.close();
+        if (!f) {
+            std::cerr << "keyfile-decrypt: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+
+    // 0600 permissions tightening — best-effort on Windows.
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    if (json_out) {
+        nlohmann::json r;
+        r["pubkey"]   = inner_pubkey_hex;
+        r["out"]      = out_path;
+        r["format"]   = "node_key.json";
+        r["from"]     = "DETERM-NODE-V1";
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "wrote plaintext node keyfile to " << out_path << "\n";
+        std::cout << "  pubkey: " << inner_pubkey_hex << "\n";
+        std::cout << "  format: node_key.json (daemon plaintext load path)\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -2309,6 +2607,17 @@ void print_usage() {
         "                                             'DETERM-NODE-V1 <pubkey_hex>' followed\n"
         "                                             by a DWE1 envelope blob (plaintext =\n"
         "                                             {\"pubkey\": \"...\", \"priv_seed\": \"...\"}).\n"
+        "  keyfile-decrypt --in <file>                Inverse of keyfile-create. Decrypts a\n"
+        "                  --passphrase-from <src>    passphrase-encrypted node_key.json back to\n"
+        "                  --out <file> [--force] [--json]\n"
+        "                                             plaintext for offline operator workflows\n"
+        "                                             (migration, recovery, debugging). --in is\n"
+        "                                             the 2-line canonical format produced by\n"
+        "                                             keyfile-create. --out is written matching\n"
+        "                                             src/crypto/keys.cpp::save_node_key byte-\n"
+        "                                             for-byte. Wrong passphrase or tampered\n"
+        "                                             envelope exits 2 (indistinguishable on\n"
+        "                                             stderr); malformed --in exits 1.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -2340,6 +2649,7 @@ int main(int argc, char** argv) {
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
+    if (cmd == "keyfile-decrypt") return cmd_keyfile_decrypt(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
