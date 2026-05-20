@@ -933,6 +933,419 @@ int cmd_account_create_batch(int argc, char** argv) {
     return 0;
 }
 
+// Diagnostic CLI: structural verification of a complete wallet backup
+// (Shamir share-set + per-share AEAD envelopes) WITHOUT decrypting.
+//
+// A "backup" in the Determ wallet model is the combination of:
+//   1. A Shamir share-set file (output of `shamir-split --json`):
+//        {"shares": [{"x": int, "y_hex": "..."}, ...]}
+//   2. A per-share AEAD envelopes file (one envelope per share, each
+//      wrapped with a per-keyholder passphrase). No prior CLI emits this
+//      composite, so this command defines the canonical shape:
+//        {"envelopes": [{"share_index": int,
+//                        "envelope_blob": "<canonical envelope blob>"},
+//                       ...]}
+//      `share_index` corresponds 1:1 to the Shamir share's `x` field;
+//      `envelope_blob` is the dot-separated canonical form emitted by
+//      `envelope encrypt` / serialize().
+//
+// Together the two files let any T-of-N keyholders decrypt their share
+// (each with their own passphrase) and feed the resulting plaintext
+// shares to `shamir-combine` for secret reconstruction. This CLI
+// verifies the two files are STRUCTURALLY consistent (every share has
+// a matching envelope, no duplicates, no gaps, every envelope blob
+// deserializes and has sane metadata) — WITHOUT requiring any
+// passphrase and WITHOUT performing AES-GCM.
+//
+// Use cases:
+//   * Pre-distribution sanity check by the secret owner — confirm the
+//     pair was written correctly before mailing physical copies.
+//   * Pre-recovery validation by the coordinator — confirm the
+//     recovered files are well-formed before convening T keyholders.
+//   * Operator tooling — monitoring scripts that want backup health
+//     in structured form (--json) without secret material.
+//
+// Verification checks (all structural; no AEAD, no Shamir recovery):
+//   1. Both files parse as JSON.
+//   2. Shares file has expected shape (mirrors shamir-verify checks:
+//      object with non-empty "shares" array; each entry has int x in
+//      [1, 255] and hex y_hex with consistent even length).
+//   3. Envelopes file has expected shape (object with "envelopes" array;
+//      each entry has int share_index in [1, 255] and string envelope_blob).
+//   4. share_count == envelope_count.
+//   5. Share x-values match envelope share_index values 1:1 (no
+//      duplicates, no gaps, full bijection).
+//   6. Each envelope_blob deserializes via envelope::deserialize.
+//   7. Each envelope's metadata is structurally valid:
+//      PBKDF2 iters > 0, salt non-empty, nonce exactly 12B,
+//      ciphertext >= 16B (so the GCM tag fits).
+//   8. If --threshold T is supplied: also report whether share count
+//      >= T (informational; insufficient share count is NOT a
+//      structural error — same convention as shamir-verify).
+//
+// Exit codes:
+//   0  structurally valid (and threshold met if --threshold supplied)
+//   1  bad args / missing file / JSON parse error
+//   2  structurally invalid (operator alert gate — any of checks 2-7 failed)
+//
+// Insufficient-share-count when --threshold is supplied returns 0
+// (informational), matching shamir-verify's convention.
+int cmd_backup_verify(int argc, char** argv) {
+    std::string shares_path, envelopes_path;
+    int threshold = -1;       // -1 sentinel = not supplied
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--shares"    && i + 1 < argc) shares_path    = argv[++i];
+        else if (a == "--envelopes" && i + 1 < argc) envelopes_path = argv[++i];
+        else if (a == "--threshold" && i + 1 < argc) threshold      = std::stoi(argv[++i]);
+        else if (a == "--json")                       json_out       = true;
+    }
+    if (shares_path.empty() || envelopes_path.empty()) {
+        std::cerr << "Usage: determ-wallet backup-verify "
+                     "--shares <file> --envelopes <file> "
+                     "[--threshold T] [--json]\n"
+                     "\n"
+                     "  Verifies structural integrity of a complete wallet backup\n"
+                     "  (Shamir shares + per-share AEAD envelopes) without decrypting.\n"
+                     "\n"
+                     "  Shares file shape:    {\"shares\":    [{\"x\": int, \"y_hex\": \"...\"}, ...]}\n"
+                     "  Envelopes file shape: {\"envelopes\": [{\"share_index\": int, "
+                     "\"envelope_blob\": \"...\"}, ...]}\n";
+        return 1;
+    }
+
+    // Helper: structured error reporter. In --json mode emits the JSON
+    // doc to stdout (so monitoring scripts see a complete result on
+    // every invocation, success or fail); in human mode emits the
+    // [FAIL] line to stderr.
+    auto report_fail = [&](const std::string& reason,
+                           const std::string& share_count_hint = "") {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"]               = false;
+            r["shares_file"]         = shares_path;
+            r["envelopes_file"]      = envelopes_path;
+            r["share_count"]         = 0;
+            r["envelope_count"]      = 0;
+            r["mapping_consistent"]  = false;
+            r["envelope_details"]    = nlohmann::json::array();
+            r["threshold_satisfied"] = nullptr;
+            r["errors"]              = nlohmann::json::array({reason});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "[FAIL] " << reason << "\n";
+        }
+        (void)share_count_hint;
+    };
+
+    // ── Load + parse the shares file ────────────────────────────────────
+    std::ifstream sf(shares_path);
+    if (!sf) {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"]  = false;
+            r["errors"] = nlohmann::json::array(
+                {std::string("cannot open --shares file: ") + shares_path});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "backup-verify: cannot open --shares file: "
+                      << shares_path << "\n";
+        }
+        return 1;
+    }
+    std::string shares_blob((std::istreambuf_iterator<char>(sf)),
+                              std::istreambuf_iterator<char>());
+    nlohmann::json sj;
+    try { sj = nlohmann::json::parse(shares_blob); }
+    catch (std::exception& e) {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"]  = false;
+            r["errors"] = nlohmann::json::array(
+                {std::string("shares JSON parse error: ") + e.what()});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "backup-verify: shares JSON parse failed: "
+                      << e.what() << "\n";
+        }
+        return 1;
+    }
+
+    // ── Load + parse the envelopes file ─────────────────────────────────
+    std::ifstream ef(envelopes_path);
+    if (!ef) {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"]  = false;
+            r["errors"] = nlohmann::json::array(
+                {std::string("cannot open --envelopes file: ") + envelopes_path});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "backup-verify: cannot open --envelopes file: "
+                      << envelopes_path << "\n";
+        }
+        return 1;
+    }
+    std::string envs_blob((std::istreambuf_iterator<char>(ef)),
+                            std::istreambuf_iterator<char>());
+    nlohmann::json ej;
+    try { ej = nlohmann::json::parse(envs_blob); }
+    catch (std::exception& e) {
+        if (json_out) {
+            nlohmann::json r;
+            r["valid"]  = false;
+            r["errors"] = nlohmann::json::array(
+                {std::string("envelopes JSON parse error: ") + e.what()});
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "backup-verify: envelopes JSON parse failed: "
+                      << e.what() << "\n";
+        }
+        return 1;
+    }
+
+    // ── Validate shares file shape ──────────────────────────────────────
+    if (!sj.is_object() || !sj.contains("shares") || !sj["shares"].is_array()) {
+        report_fail("shares file: top-level must be object with 'shares' array");
+        return 2;
+    }
+    const auto& shares_arr = sj["shares"];
+    if (shares_arr.empty()) {
+        report_fail("shares file: 'shares' array is empty");
+        return 2;
+    }
+
+    auto is_hex_char = [](char c) {
+        return (c >= '0' && c <= '9')
+            || (c >= 'a' && c <= 'f')
+            || (c >= 'A' && c <= 'F');
+    };
+
+    std::set<int> share_x;
+    int x_min = 256, x_max = -1;
+    size_t y_byte_len = 0;
+    for (size_t i = 0; i < shares_arr.size(); ++i) {
+        const auto& el = shares_arr[i];
+        if (!el.is_object()
+            || !el.contains("x")     || !el["x"].is_number_integer()
+            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
+            report_fail("shares file: share #" + std::to_string(i)
+                        + " must have integer 'x' and string 'y_hex'");
+            return 2;
+        }
+        int x = el["x"].get<int>();
+        if (x < 1 || x > 255) {
+            report_fail("shares file: share #" + std::to_string(i)
+                        + ": x = " + std::to_string(x)
+                        + " out of range [1, 255]");
+            return 2;
+        }
+        if (!share_x.insert(x).second) {
+            report_fail("shares file: duplicate x = " + std::to_string(x));
+            return 2;
+        }
+        if (x < x_min) x_min = x;
+        if (x > x_max) x_max = x;
+
+        std::string y_hex = el["y_hex"].get<std::string>();
+        if (y_hex.size() % 2 != 0) {
+            report_fail("shares file: share x=" + std::to_string(x)
+                        + ": y_hex has odd length");
+            return 2;
+        }
+        for (char c : y_hex) {
+            if (!is_hex_char(c)) {
+                report_fail("shares file: share x=" + std::to_string(x)
+                            + ": y_hex contains non-hex character");
+                return 2;
+            }
+        }
+        size_t this_y_len = y_hex.size() / 2;
+        if (this_y_len == 0) {
+            report_fail("shares file: share x=" + std::to_string(x)
+                        + ": y_hex is empty");
+            return 2;
+        }
+        if (y_byte_len == 0) y_byte_len = this_y_len;
+        else if (this_y_len != y_byte_len) {
+            report_fail("shares file: share x=" + std::to_string(x)
+                        + ": y_hex length differs from first share");
+            return 2;
+        }
+    }
+
+    // ── Validate envelopes file shape ───────────────────────────────────
+    if (!ej.is_object() || !ej.contains("envelopes") || !ej["envelopes"].is_array()) {
+        report_fail("envelopes file: top-level must be object with 'envelopes' array");
+        return 2;
+    }
+    const auto& env_arr = ej["envelopes"];
+    if (env_arr.empty()) {
+        report_fail("envelopes file: 'envelopes' array is empty");
+        return 2;
+    }
+
+    // Parse each envelope entry; collect per-entry diagnostics for the
+    // envelope_details JSON output.
+    struct EnvDetail {
+        int      share_index{0};
+        uint32_t pbkdf2_iters{0};
+        size_t   salt_len{0};
+        size_t   nonce_len{0};
+        size_t   aad_len{0};
+        size_t   ct_len{0};
+        bool     ok{false};
+    };
+    std::vector<EnvDetail> details;
+    std::set<int> env_idx;
+    for (size_t i = 0; i < env_arr.size(); ++i) {
+        const auto& el = env_arr[i];
+        if (!el.is_object()
+            || !el.contains("share_index")
+            || !el["share_index"].is_number_integer()
+            || !el.contains("envelope_blob")
+            || !el["envelope_blob"].is_string()) {
+            report_fail("envelopes file: entry #" + std::to_string(i)
+                        + " must have integer 'share_index' and string 'envelope_blob'");
+            return 2;
+        }
+        int idx = el["share_index"].get<int>();
+        if (idx < 1 || idx > 255) {
+            report_fail("envelopes file: entry #" + std::to_string(i)
+                        + ": share_index = " + std::to_string(idx)
+                        + " out of range [1, 255]");
+            return 2;
+        }
+        if (!env_idx.insert(idx).second) {
+            report_fail("envelopes file: duplicate share_index = "
+                        + std::to_string(idx));
+            return 2;
+        }
+        std::string blob = el["envelope_blob"].get<std::string>();
+        auto env_opt = envelope::deserialize(blob);
+        if (!env_opt) {
+            report_fail("envelopes file: entry share_index="
+                        + std::to_string(idx)
+                        + ": envelope_blob deserialize failed "
+                        + "(bad magic, truncated, or non-hex content)");
+            return 2;
+        }
+        const auto& env = *env_opt;
+        // Per-envelope structural sanity checks. envelope::deserialize
+        // already enforces salt >= 8B, nonce == 12B, ciphertext >= 16B,
+        // but recheck here so the JSON output reports the actual values
+        // and a future deserialize-relaxation doesn't silently bypass.
+        if (env.pbkdf2_iters == 0) {
+            report_fail("envelopes file: entry share_index="
+                        + std::to_string(idx) + ": pbkdf2_iters is zero");
+            return 2;
+        }
+        if (env.salt.empty()) {
+            report_fail("envelopes file: entry share_index="
+                        + std::to_string(idx) + ": salt is empty");
+            return 2;
+        }
+        if (env.nonce.size() != 12) {
+            report_fail("envelopes file: entry share_index="
+                        + std::to_string(idx) + ": nonce is not 12 bytes");
+            return 2;
+        }
+        if (env.ciphertext.size() < 16) {
+            report_fail("envelopes file: entry share_index="
+                        + std::to_string(idx)
+                        + ": ciphertext too short to contain GCM tag");
+            return 2;
+        }
+        details.push_back({idx, env.pbkdf2_iters,
+                            env.salt.size(), env.nonce.size(),
+                            env.aad.size(),  env.ciphertext.size(),
+                            true});
+    }
+
+    // ── Cross-file consistency: counts + 1:1 index mapping ──────────────
+    const int share_count    = static_cast<int>(shares_arr.size());
+    const int envelope_count = static_cast<int>(env_arr.size());
+    bool mapping_consistent = true;
+    if (share_count != envelope_count) {
+        report_fail("share count (" + std::to_string(share_count)
+                    + ") != envelope count (" + std::to_string(envelope_count) + ")");
+        return 2;
+    }
+    if (share_x != env_idx) {
+        mapping_consistent = false;
+        report_fail("share x-values do not match envelope share_index values 1:1 "
+                    "(some shares lack an envelope, or vice versa)");
+        return 2;
+    }
+
+    // Threshold tri-state: nullopt = not supplied, true = met,
+    // false = supplied but insufficient. Insufficient is INFORMATIONAL
+    // (exit 0), matching shamir-verify convention.
+    std::optional<bool> threshold_satisfied;
+    if (threshold >= 0) threshold_satisfied = (share_count >= threshold);
+
+    // ── Emit result ─────────────────────────────────────────────────────
+    if (json_out) {
+        nlohmann::json r;
+        r["valid"]              = true;
+        r["shares_file"]        = shares_path;
+        r["envelopes_file"]     = envelopes_path;
+        r["share_count"]        = share_count;
+        r["envelope_count"]     = envelope_count;
+        r["mapping_consistent"] = mapping_consistent;
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& d : details) {
+            arr.push_back({
+                {"share_index",  d.share_index},
+                {"pbkdf2_iters", d.pbkdf2_iters},
+                {"salt_len",     d.salt_len},
+                {"nonce_len",    d.nonce_len},
+                {"aad_len",      d.aad_len},
+                {"ciphertext_len", d.ct_len},
+            });
+        }
+        r["envelope_details"] = std::move(arr);
+        if (threshold_satisfied.has_value()) {
+            r["threshold_satisfied"] = *threshold_satisfied;
+        } else {
+            r["threshold_satisfied"] = nullptr;
+        }
+        r["errors"] = nlohmann::json::array();
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "=== Wallet backup verification ===\n";
+        std::cout << "Shares file:    " << shares_path
+                  << " (" << share_count << " shares, x range "
+                  << x_min << ".." << x_max << ")\n";
+        std::cout << "Envelopes file: " << envelopes_path
+                  << " (" << envelope_count << " envelopes)\n";
+        std::cout << "Share-to-envelope mapping: [OK] 1:1 by share_index\n";
+        std::cout << "Envelope structural integrity:\n";
+        for (const auto& d : details) {
+            std::cout << "  Envelope " << d.share_index
+                      << ": PBKDF2=" << d.pbkdf2_iters
+                      << ", salt="   << d.salt_len  << "B"
+                      << ", nonce="  << d.nonce_len << "B"
+                      << ", ct="     << d.ct_len    << "B [OK]\n";
+        }
+        std::cout << "[OK] Backup structurally valid ("
+                  << envelope_count << " envelopes, threshold-ready)\n";
+        if (threshold_satisfied.has_value()) {
+            if (*threshold_satisfied) {
+                std::cout << "[OK] Share count (" << share_count
+                          << ") >= threshold (" << threshold
+                          << ") -- sufficient for recovery\n";
+            } else {
+                std::cout << "[INFO] Share count (" << share_count
+                          << ") < threshold (" << threshold
+                          << ") -- insufficient for recovery\n";
+            }
+        }
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -1144,6 +1557,15 @@ void print_usage() {
         "                                             JSON file (refuses overwrite without\n"
         "                                             --force); --json prints JSON to stdout\n"
         "                                             (ignored if --out is set). 1<=N<=10000.\n"
+        "  backup-verify --shares <file> --envelopes <file> [--threshold T] [--json]\n"
+        "                                             Composite structural verification of a\n"
+        "                                             wallet backup (Shamir shares + per-share\n"
+        "                                             AEAD envelopes). No decryption, no\n"
+        "                                             password required. Shares file shape:\n"
+        "                                             {\"shares\": [{\"x\": int, \"y_hex\": \"...\"}, ...]}.\n"
+        "                                             Envelopes file shape:\n"
+        "                                             {\"envelopes\": [{\"share_index\": int,\n"
+        "                                             \"envelope_blob\": \"...\"}, ...]}.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -1172,6 +1594,7 @@ int main(int argc, char** argv) {
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
+    if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
