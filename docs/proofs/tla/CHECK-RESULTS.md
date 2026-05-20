@@ -1,4 +1,4 @@
-# FB6 — TLA+ model-check transcripts (template)
+# FB7 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
@@ -32,6 +32,9 @@ java -jar tla2tools.jar -config AccountState.cfg AccountState.tla
 
 # FB6 — Snapshot + restore state machine
 java -jar tla2tools.jar -config Snapshot.cfg Snapshot.tla
+
+# FB7 — Nonce gate / tx-replay defense
+java -jar tla2tools.jar -config Nonce.cfg Nonce.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -47,6 +50,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | Receipts.tla (3 IDs, 6 blocks) | ~10² | < 1s |
 | AccountState.tla (3 domains, B=4, N=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 | Snapshot.tla (3 domains, H=4, B=5) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
+| Nonce.tla (3 domains, N=4, A=2, B=5) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -119,6 +123,26 @@ Companion prose proof: `docs/proofs/AccountStateInvariants.md` (separately writt
 
 Companion prose proof: `docs/proofs/SnapshotInvariants.md` (separately tracked; the prose track is being assembled in parallel).
 
+### Nonce.tla → apply-layer nonce gate / tx-replay defense
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `accounts` (next_nonce, balance), `pending` (SUBSET Tx), `applied` (SUBSET Tx) |
+| `Inv_GenesisLowerBound` | at Init and at every reachable state, `accounts[d].next_nonce >= 0` (genesis discipline + monotonicity) |
+| `Inv_StrictNonceGate` | for every applied tx t: `t.nonce < accounts[t.from].next_nonce` — state-form witness that the strict-equality gate fired and then advanced |
+| `Inv_ReplayImpossible` | for every applied tx t: `t.nonce /= accounts[t.from].next_nonce` — the ApplyTx guard never re-fires on an already-applied tx |
+| `Inv_NoStaleApplied` | strict-inequality strengthening: `accounts[t.from].next_nonce > t.nonce` for every t in applied — the core replay-defense state-machine statement |
+| `Inv_NonceMonotonic` | action-level: per-account `next_nonce` is monotone non-decreasing across every `[Next]_vars` step |
+| `Inv_AppliedMonotone` | action-level: `applied` is monotone non-shrinking — combined with `Inv_ReplayImpossible`, gives the full "T applied at S1 ⇒ T cannot apply at any later S2" guarantee |
+| `Inv_PerAccountIndependence` | action-level: a step that mutates `accounts[a]` leaves `accounts[b]` untouched for any `b /= a` — rules out cross-account coupling in the nonce field |
+| `Inv_ApplyAdvancesNonce` | action-level: every successful ApplyTx step advances exactly one account's `next_nonce` by exactly 1 (and only debits that account's balance) — structural witness for ReplayImpossible + NoStaleApplied |
+| `Prop_EventualNonceAdvance` (temporal) | under weak fairness on ApplyTx, any honest tx submitted at the current `next_nonce` (with sufficient balance and `next_nonce < MaxNonce`) either eventually applies or is gc'd from pending |
+| `Prop_NoStaleApplied` (temporal) | `[][...]_vars` form of `Inv_NoStaleApplied`: across every reachable state, no past-nonce tx is in `applied` — the temporal restatement of the replay-defense theorem |
+
+**Spec status:** written; TLC verification pending (consistent with the other five specs above). The configuration in `Nonce.cfg` (3 domains, MaxNonce=4, MaxAmount=2, MaxBalance=5) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `accounts` (Domains → [next_nonce, balance]), `pending` (SUBSET Tx, mempool model), `applied` (SUBSET Tx, audit log driving the replay-defense invariants). Actions modeled: `SubmitTx` (any caller can request any nonce — the adversarial surface), `ApplyTx` (the strict-equality gate at the line 739 `tx.nonce != sender.next_nonce` check), `RemoveFromPending` (mempool gc, important for the liveness escape in `Prop_EventualNonceAdvance`). The model collapses non-TRANSFER tx types into the single TRANSFER-shape because every tx type funnels through the same nonce gate before any per-type body runs — modeling one shape is sufficient for replay defense, and the body-specific semantics are FB5 (AccountState.tla) territory.
+
+Companion prose proof: `docs/proofs/NonceMonotonicity.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -146,6 +170,12 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `Snapshot.StateRoot` | `chain::Block::compute_state_root` (10 namespaces; the spec collapses them to the safety-critical subset — see Snapshot.tla file header) |
 | `Snapshot.AppendBlock` | `src/chain/chain.cpp::apply_block` + `on_block_applied` (advances height, mutates balances/nonces/counters, recomputes state_root, populates head.state_root via S-038 wiring) |
 | `Snapshot.RejectMalformedSnapshot` | the wrong-version path inside `Chain::restore_from_snapshot` — the `if (v != 1) throw` branch at line 1707 (S-037 / S-018 cousin) |
+| `Nonce.accounts` | `src/chain/chain.cpp::accounts_` (map<string, AccountState>; `next_nonce` field) |
+| `Nonce.ApplyTx` guard | `src/chain/chain.cpp::apply_transactions` line 739: `if (tx.nonce != sender.next_nonce) continue;` — the strict-equality nonce gate |
+| `Nonce.ApplyTx` body | per-type apply bodies in `apply_transactions` (TRANSFER lines 742–770, REGISTER lines 772–, etc.); all funnel through the same nonce gate and increment `sender.next_nonce++` on success |
+| `Nonce.pending` | `node::Mempool::pending_` (the validator-side pool whose acceptance is governed by the same nonce equality check) — set-semantics model abstracts away validator selection order |
+| `Nonce.applied` | implicit: derived from the sequence of `apply_transactions` invocations across `chain::Chain::apply_block`. The TLA-level audit log is a state-machine projection of the chain's tx history |
+| `Nonce.RemoveFromPending` | mempool eviction in `node::Mempool` (stale-nonce gc, expiry, bounded-pool drop per S-008) |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -190,7 +220,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts AccountState Snapshot; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot Nonce; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -201,7 +231,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The five TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, and snapshot/restore properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The six TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, snapshot/restore, and tx-replay-defense properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
