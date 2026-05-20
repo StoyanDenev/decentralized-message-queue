@@ -564,6 +564,343 @@ int cmd_shamir_verify(int argc, char** argv) {
     return 0;
 }
 
+// ── shamir-rotate — Proactive Secret Sharing (PSS) polynomial refresh ─────
+//
+// Refresh the Shamir polynomial WITHOUT changing the underlying secret.
+// Defense against share leakage over time: a keyholder periodically
+// rotates their physical share so accumulated compromise of any prior
+// snapshot of < T shares conveys nothing about the current share set.
+//
+// Mechanism (Herzberg-style "share refresh"):
+//   1. Read --shares file (same `{"shares":[{x, y_hex}, ...]}` shape as
+//      shamir-split / backup-create output).
+//   2. Structurally validate (distinct x in [1,255], consistent y-byte
+//      lengths, even-length lowercase hex, non-empty).
+//   3. Require length(shares) >= T (insufficient = exit 2 with diagnostic
+//      mirroring the shamir-verify convention for under-threshold gates
+//      that are NOT structural defects — but for ROTATE the threshold IS
+//      a precondition: we must reconstruct to refresh, so insufficient
+//      input is a hard failure, not informational).
+//   4. Reconstruct the secret via shamir::combine (Lagrange at x=0).
+//   5. Run a FRESH shamir::split of the SAME secret with N = max(input.x)
+//      and threshold T. shamir::split always emits x = 1..N consecutively;
+//      because operators expect "Share-K's holder remains Share-K", we
+//      preserve x-coordinates by filtering the freshly-split shares down
+//      to the input's x-set. (The discarded shares for x not in the input
+//      set are never written anywhere.)
+//   6. Verify (belt-and-suspenders): the new shares' combine() recovers
+//      the SAME secret as the input. Mismatch is an internal-error exit 1
+//      (would indicate a shamir-layer regression — not expected to fire).
+//   7. Write the new share-set to --shares-out using the same JSON shape
+//      as the input. Refuses overwrite without --force.
+//
+// Security property: the new shares lie on a DIFFERENT polynomial than
+// the input (T-1 fresh random coefficients drawn from OpenSSL RAND_bytes
+// inside shamir::split). Combining T old shares yields S; combining T
+// new shares yields S; combining a mix of old + new (any T-1 from one,
+// 1 from the other) yields garbage indistinguishable from a wrong secret
+// (information-theoretic property of SSS over GF(2^8)). That mix-failure
+// is what makes "rotate" meaningful: an attacker who held a stale subset
+// of < T shares cannot combine them with one new share to recover S.
+//
+// Exit codes:
+//   0  rotated successfully; --shares-out written.
+//   1  bad args, file I/O error, JSON parse error, structural malformedness,
+//      output already exists without --force.
+//   2  insufficient input shares (< T supplied). Diagnostic gate: rotate
+//      cannot proceed without crossing the threshold.
+//
+// What this CLI does NOT do:
+//   * Change N or T. The output set has the SAME size and threshold as
+//     the input.
+//   * Touch envelopes. Only the bare share file is rotated. Operators
+//     re-wrap each new share via `backup-create` (or equivalent) under
+//     the same per-keyholder passphrases as the prior backup if they
+//     want a refreshed envelope artifact.
+//   * Change the secret. Rotating a share-set never alters the secret
+//     it reconstructs.
+int cmd_shamir_rotate(int argc, char** argv) {
+    std::string shares_path, shares_out;
+    int threshold = -1;
+    bool force = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--shares"     && i + 1 < argc) shares_path = argv[++i];
+        else if (a == "--threshold"  && i + 1 < argc) {
+            try { threshold = std::stoi(argv[++i]); }
+            catch (...) {
+                std::cerr << "shamir-rotate: --threshold must be an integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--shares-out" && i + 1 < argc) shares_out = argv[++i];
+        else if (a == "--force")                      force      = true;
+        else if (a == "--json")                       json_out   = true;
+        else {
+            std::cerr << "shamir-rotate: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet shamir-rotate --shares <file> "
+                         "--threshold T --shares-out <file> [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (shares_path.empty() || threshold < 0 || shares_out.empty()) {
+        std::cerr << "Usage: determ-wallet shamir-rotate --shares <file> "
+                     "--threshold T --shares-out <file> [--force] [--json]\n";
+        return 1;
+    }
+    if (threshold < 1) {
+        std::cerr << "shamir-rotate: --threshold must be >= 1 (got "
+                  << threshold << ")\n";
+        return 1;
+    }
+    if (threshold > 255) {
+        std::cerr << "shamir-rotate: --threshold must be <= 255 (got "
+                  << threshold << ")\n";
+        return 1;
+    }
+    if (shares_path == shares_out) {
+        std::cerr << "shamir-rotate: --shares and --shares-out must not "
+                     "point at the same file (cannot rotate in place; "
+                     "the read pass and write pass would collide)\n";
+        return 1;
+    }
+
+    // ── Read + parse input shares file ───────────────────────────────────
+    std::ifstream f(shares_path);
+    if (!f) {
+        std::cerr << "shamir-rotate: cannot open --shares file: "
+                  << shares_path << "\n";
+        return 1;
+    }
+    std::string blob((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    nlohmann::json j;
+    try { j = nlohmann::json::parse(blob); }
+    catch (std::exception& e) {
+        std::cerr << "shamir-rotate: JSON parse failed: " << e.what() << "\n";
+        return 1;
+    }
+    if (!j.is_object() || !j.contains("shares") || !j["shares"].is_array()) {
+        std::cerr << "shamir-rotate: --shares JSON must be object with "
+                     "'shares' array\n";
+        return 1;
+    }
+    const auto& arr = j["shares"];
+    if (arr.empty()) {
+        std::cerr << "shamir-rotate: --shares array is empty\n"; return 1;
+    }
+
+    // Structural validation mirrors shamir-combine + shamir-verify so the
+    // rotate CLI never reaches the cryptographic layer with malformed
+    // input. Diagnostics are precise so operators can fix shares files
+    // before a costly distribution event.
+    std::vector<shamir::Share> in_shares;
+    std::set<int> seen_x;
+    int x_max_in = 0;
+    size_t y_len = 0;
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const auto& el = arr[i];
+        if (!el.is_object()
+            || !el.contains("x")     || !el["x"].is_number_integer()
+            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
+            std::cerr << "shamir-rotate: share #" << i
+                      << " must have integer 'x' and string 'y_hex'\n";
+            return 1;
+        }
+        int x = el["x"].get<int>();
+        if (x < 1 || x > 255) {
+            std::cerr << "shamir-rotate: x = " << x << " out of range "
+                         "[1, 255]\n";
+            return 1;
+        }
+        if (!seen_x.insert(x).second) {
+            std::cerr << "shamir-rotate: duplicate x = " << x
+                      << " (Shamir invariant: all x must be distinct)\n";
+            return 1;
+        }
+        if (x > x_max_in) x_max_in = x;
+        std::string y_hex = el["y_hex"].get<std::string>();
+        if (y_hex.size() % 2 != 0) {
+            std::cerr << "shamir-rotate: y_hex for x=" << x
+                      << " has odd length\n";
+            return 1;
+        }
+        shamir::Share s;
+        s.x = static_cast<uint8_t>(x);
+        try { s.y = from_hex(y_hex); }
+        catch (std::exception& e) {
+            std::cerr << "shamir-rotate: y_hex parse failed for x=" << x
+                      << ": " << e.what() << "\n";
+            return 1;
+        }
+        if (s.y.empty()) {
+            std::cerr << "shamir-rotate: y_hex empty for x=" << x << "\n";
+            return 1;
+        }
+        if (y_len == 0) y_len = s.y.size();
+        else if (s.y.size() != y_len) {
+            std::cerr << "shamir-rotate: share x=" << x
+                      << " y-length " << s.y.size()
+                      << " differs from first share's " << y_len << "\n";
+            return 1;
+        }
+        in_shares.push_back(std::move(s));
+    }
+
+    const int n_in = static_cast<int>(in_shares.size());
+
+    // ── Threshold precondition: rotation requires reconstruction ─────────
+    // Unlike shamir-verify (where under-threshold is informational), here
+    // we MUST cross the threshold to recover the secret. Exit 2 is the
+    // operator-alert gate documented in the header.
+    if (n_in < threshold) {
+        std::cerr << "shamir-rotate: insufficient input shares ("
+                  << n_in << " supplied, --threshold " << threshold
+                  << " required for reconstruction); rotation cannot "
+                     "proceed\n";
+        return 2;
+    }
+
+    // ── Reconstruct the secret via existing combine ──────────────────────
+    auto secret_opt = shamir::combine(in_shares);
+    if (!secret_opt) {
+        // shamir::combine rejects on (duplicate x | mismatched y sizes |
+        // empty) — all of which the structural pass above already filters.
+        // Reaching here implies a deeper inconsistency; surface verbatim.
+        std::cerr << "shamir-rotate: secret reconstruction failed at the "
+                     "shamir layer (shares structurally valid but mutually "
+                     "inconsistent — corrupt y values?)\n";
+        return 1;
+    }
+    const std::vector<uint8_t>& secret = *secret_opt;
+
+    // ── Fresh split preserving input x-coordinates ───────────────────────
+    // shamir::split assigns x = 1..N consecutively. To preserve arbitrary
+    // input x-coordinates (operators expect "Share-K's holder stays
+    // Share-K"), split with N = max(input.x) and then filter down to the
+    // input x-set. The freshly-drawn polynomial is the same for all x
+    // (shamir::split builds ONE polynomial per secret byte using fresh
+    // T-1 random coefficients), so the kept shares are mathematically
+    // equivalent to those that would have been emitted by a hypothetical
+    // split-at-arbitrary-x routine.
+    std::vector<shamir::Share> all_new;
+    try {
+        all_new = shamir::split(secret,
+                                  static_cast<uint8_t>(threshold),
+                                  static_cast<uint8_t>(x_max_in));
+    } catch (std::exception& e) {
+        std::cerr << "shamir-rotate: shamir::split failed: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Filter all_new down to input x-set, preserving the input order so
+    // the output JSON layout matches the input layout 1:1.
+    std::vector<shamir::Share> new_shares;
+    new_shares.reserve(n_in);
+    for (const auto& src : in_shares) {
+        bool found = false;
+        for (const auto& cand : all_new) {
+            if (cand.x == src.x) {
+                new_shares.push_back(cand);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // shamir::split always emits x = 1..x_max_in, and every input
+            // x is in [1, x_max_in] by construction, so this branch is
+            // unreachable. Guard anyway — internal-error gate.
+            std::cerr << "shamir-rotate: internal: x=" << static_cast<int>(src.x)
+                      << " not present in fresh split output\n";
+            return 1;
+        }
+    }
+
+    // ── Verification round-trip ──────────────────────────────────────────
+    // Belt-and-suspenders check: the new share-set must reconstruct the
+    // SAME secret as the input. A mismatch would indicate a shamir-layer
+    // regression (shouldn't fire); treat as internal-error exit 1.
+    auto verify_opt = shamir::combine(new_shares);
+    if (!verify_opt) {
+        std::cerr << "shamir-rotate: internal: fresh share-set failed to "
+                     "combine (shamir layer rejected its own output)\n";
+        return 1;
+    }
+    if (*verify_opt != secret) {
+        std::cerr << "shamir-rotate: internal: fresh share-set combines to "
+                     "a different secret (shamir layer regression)\n";
+        return 1;
+    }
+
+    // ── Output overwrite gate ────────────────────────────────────────────
+    if (std::filesystem::exists(shares_out) && !force) {
+        std::cerr << "shamir-rotate: --shares-out file already exists: "
+                  << shares_out
+                  << " (use --force to overwrite; refusing by default to "
+                     "avoid destroying a prior rotated share-set)\n";
+        return 1;
+    }
+
+    // ── Write the new share-set ──────────────────────────────────────────
+    nlohmann::json out_doc;
+    out_doc["shares"] = nlohmann::json::array();
+    for (const auto& s : new_shares) {
+        out_doc["shares"].push_back({
+            {"x",     static_cast<int>(s.x)},
+            {"y_hex", to_hex(s.y)},
+        });
+    }
+    {
+        std::ofstream of(shares_out);
+        if (!of) {
+            std::cerr << "shamir-rotate: cannot open --shares-out for write: "
+                      << shares_out << "\n";
+            return 1;
+        }
+        of << out_doc.dump() << "\n";
+        if (!of) {
+            std::cerr << "shamir-rotate: write failed on --shares-out: "
+                      << shares_out << "\n";
+            return 1;
+        }
+    }
+    // Owner-only perms (POSIX); no-op on Windows.
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            shares_out,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────────
+    if (json_out) {
+        nlohmann::json r;
+        r["share_count"]   = n_in;
+        r["threshold"]     = threshold;
+        r["secret_bytes"]  = secret.size();
+        r["shares_file"]   = shares_out;
+        r["rotated"]       = true;
+        // NEVER emit secret material in the summary. The whole point of
+        // rotation is to refresh the polynomial without exposing the
+        // secret; leaking it here would defeat the purpose.
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "=== shamir-rotate (PSS polynomial refresh) ===\n";
+        std::cout << "Input shares:    " << n_in << " (>= threshold "
+                  << threshold << ")\n";
+        std::cout << "Secret bytes:    " << secret.size()
+                  << " (reconstructed and verified)\n";
+        std::cout << "Output shares:   " << n_in
+                  << " (same N, same x-coordinates, fresh polynomial)\n";
+        std::cout << "Written to:      " << shares_out << "\n";
+        std::cout << "[OK] Polynomial refreshed; secret invariant.\n";
+    }
+    return 0;
+}
+
 int cmd_envelope_encrypt(int argc, char** argv) {
     std::string plaintext_hex, password, aad_hex;
     uint32_t iters = envelope::DEFAULT_PBKDF2_ITERS;
@@ -2928,6 +3265,17 @@ void print_usage() {
         "  shamir-verify --shares <file> [--threshold T] [--json]\n"
         "                                             Structural verification of a share-set\n"
         "                                             (no reconstruction; no secret material)\n"
+        "  shamir-rotate --shares <file> --threshold T --shares-out <file>\n"
+        "                [--force] [--json]\n"
+        "                                             Proactive Secret Sharing (PSS) polynomial\n"
+        "                                             refresh. Reconstructs the secret from >= T\n"
+        "                                             input shares, then draws a FRESH polynomial\n"
+        "                                             and emits a new share-set with the SAME N\n"
+        "                                             and SAME x-coordinates. Old shares become\n"
+        "                                             useless (different polynomial); new shares\n"
+        "                                             reconstruct the SAME secret. Defense against\n"
+        "                                             share leakage over time. Insufficient input\n"
+        "                                             (< T) exits 2.\n"
         "  envelope encrypt --plaintext <hex>         AEAD-wrap a share or seed\n"
         "                    --password <str> [--aad <hex>] [--iters <N>]\n"
         "  envelope decrypt --envelope <blob>         Unwrap an envelope\n"
@@ -3025,6 +3373,7 @@ int main(int argc, char** argv) {
     if (cmd == "shamir-split")    return cmd_shamir_split_raw  (argc - 2, argv + 2);
     if (cmd == "shamir-combine")  return cmd_shamir_combine_raw(argc - 2, argv + 2);
     if (cmd == "shamir-verify")   return cmd_shamir_verify   (argc - 2, argv + 2);
+    if (cmd == "shamir-rotate")   return cmd_shamir_rotate   (argc - 2, argv + 2);
     if (cmd == "envelope")        return cmd_envelope       (argc - 2, argv + 2);
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
