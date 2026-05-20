@@ -1,6 +1,6 @@
 # S-002 mempool signature verification + the binary-codec dependency
 
-This document records an in-session attempt to close S-002 (mempool accepts unverified signatures, enabling forged-sig DoS amplification) and the latent pre-existing bug it surfaced in `src/net/binary_codec.cpp`. Both findings need to be fixed together; this doc captures the dependency so the next attempt doesn't repeat the discovery cycle.
+This document records the closure of S-002 (mempool accepts unverified signatures, enabling forged-sig DoS amplification) and the latent pre-existing bug it surfaced in `src/net/binary_codec.cpp`. Both findings shipped together; this doc captures the dependency that made the paired fix necessary. **Status: closed — see §6.**
 
 ## 1. The fix attempt
 
@@ -56,9 +56,9 @@ Neither case crashes loudly, so the binary-codec bug stayed latent. The bearer t
 
 The S-002 fix exposed the bug clearly: with sig-verify on, the post-decode tx fails verification on the gossip path, gets silently dropped, n2/n3 never see the tx, and the test's "all 3 nodes converge" assertion fails.
 
-## 4. The correct fix sequence
+## 4. The fix sequence (shipped)
 
-Two paired commits, in order:
+Two paired commits, in order — this is the sequence that landed:
 
 ### 4.1 Fix `decode_tx_frame` to read amount/fee/nonce
 

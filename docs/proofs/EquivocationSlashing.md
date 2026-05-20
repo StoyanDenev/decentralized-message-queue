@@ -54,11 +54,11 @@ By V11, the event carries `(σ_a, σ_b, d_a, d_b)` with:
 - `Verify(pk_i, d_b, σ_b) = 1`
 - `d_a ≠ d_b`
 
-By H2 (Preliminaries §4), `v_i` signs at most one digest per (height, round) pair. The block's V11 places both signatures at the same height `h`. Two cases:
+By H2 (Preliminaries §4), `v_i` signs at most one `compute_block_digest` per (height, round) AND at most one `make_contrib_commitment` per (height, aborts_gen) (S-006 closure — see §5 for the two implementation sites). The block's V11 places both signatures at the same height `h`. V11 is digest-agnostic: it checks "two distinct hashes both verifying under the same registered key," and applies identically whether the two hashes are `block_digest`s or contrib commitments. Two cases below cover the block-digest mechanism; the contrib-commitment mechanism is symmetric (substitute `(height, aborts_gen)` for `(height, round)` and `make_contrib_commitment` for `compute_block_digest`):
 
-**Case (a): Both signatures are over digests at the same round `r` at height `h`.**
+**Case (a): Both signatures are over digests at the same round `r` at height `h`** (or, in the contrib-commitment branch: same `(height, aborts_gen)`).
 
-By H2 with `(h, r)` fixed, `v_i` has signed at most one digest. If both `σ_a` and `σ_b` exist with `d_a ≠ d_b` both verifying under `pk_i`, then at least one of them is a signature `v_i` did not produce. The party that produced it must have done so without `v_i`'s private key — i.e., must have forged it. By A1 (EUF-CMA), the probability of such a forgery is `≤ 2⁻¹²⁸`.
+By H2 with `(h, r)` fixed (or `(h, aborts_gen)` fixed for the Phase-1 branch), `v_i` has signed at most one such digest/commitment. If both `σ_a` and `σ_b` exist with `d_a ≠ d_b` both verifying under `pk_i`, then at least one of them is a signature `v_i` did not produce. The party that produced it must have done so without `v_i`'s private key — i.e., must have forged it. By A1 (EUF-CMA), the probability of such a forgery is `≤ 2⁻¹²⁸`.
 
 **Case (b): The two signatures are over digests at the same height `h` but different rounds (e.g., `σ_a` at round `r`, `σ_b` at round `r+1`).**
 

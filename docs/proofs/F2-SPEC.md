@@ -3,7 +3,7 @@
 **Status:** specification only. No code. Resolves the 9 open design questions identified in the post-mortem of the prior naive F2 attempt. Implementation should not begin until this document's design choices are reviewed and committed.
 
 **Companion documents:**
-- `S030-D2-Analysis.md` — analysis of D2 + why naive F2 broke + S-033 partial closure
+- `S030-D2-Analysis.md` — analysis of D2 + why naive F2 broke + S-033 + S-038 partial closure (apply-layer gate now firing)
 - `V2-DESIGN.md` v2.7 — v2 design space entry
 - `Safety.md` §5.3 — current safety claim with D2 footnote
 - `SECURITY.md` S-030 — the underlying audit finding
