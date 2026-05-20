@@ -4100,6 +4100,287 @@ int cmd_message_verify(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// determ-wallet tx-sign-verify — Verify the Ed25519 signature on a
+// Transaction JSON file using the chain's CANONICAL signing_bytes scheme
+// (NOT the off-chain domain-separated SHA-256 commitment used by
+// message-sign / message-verify).
+//
+// Use cases:
+//   * Operator receives a signed Transaction off the wire (RPC submit
+//     queue, manual relay, off-chain batch packaging) and wants to
+//     confirm the sig is valid before broadcasting / submitting.
+//   * Inspect-before-submit: a signing-tier wallet hands a fully signed
+//     tx to an operator who wants to verify byte-for-byte that the sig
+//     binds the body fields they're about to broadcast.
+//   * Forensic post-mortem: a tx was rejected at the validator; reproduce
+//     the validator's verify call locally to confirm whether the sig was
+//     malformed vs. some other validation gate failed.
+//
+// Distinction from message-sign / message-verify:
+//   - message-sign signs SHA-256(domain_tag || message_bytes) for off-chain
+//     uses (SIWE auth, attestations); the on-chain Transaction sig scheme
+//     is a different, protocol-pinned canonical form. The two are NOT
+//     interchangeable: a message-sign sig is NOT a valid tx sig and vice
+//     versa, by design (cross-context replay prevention).
+//
+// Canonical signing_bytes layout (matches src/chain/block.cpp Transaction::signing_bytes):
+//   [type:                u8 — TxType enum value]
+//   [from:                utf8 bytes verbatim, NO len prefix]
+//   [0x00:                NUL terminator separating from from to]
+//   [to:                  utf8 bytes verbatim, NO len prefix]
+//   [0x00:                NUL terminator after to]
+//   [amount:              u64 BIG-ENDIAN (8 bytes, MSB first)]
+//   [fee:                 u64 BIG-ENDIAN]
+//   [nonce:               u64 BIG-ENDIAN]
+//   [payload:             raw bytes (already-decoded hex from JSON)]
+//
+// Sender pubkey resolution:
+//   The Transaction JSON does NOT carry the sender's pubkey explicitly
+//   (the chain looks it up via the registry for domain senders, or
+//   parses it out of the anon-address for anon senders). For this CLI,
+//   we deliberately REQUIRE --pubkey to be supplied explicitly, because:
+//     * The wallet binary has no chain registry to consult.
+//     * Anon-address senders carry the pubkey IN their address (the
+//       `0x` + 64 hex chars = the Ed25519 pubkey), but rather than
+//       silently auto-derive we make the operator pass it explicitly —
+//       this prevents an off-by-one-style mistake where the verifier
+//       trusts the address-derived pubkey when the operator actually
+//       meant to verify against a registry-bound key.
+//     * Cross-binary surface invariant: --pubkey ALWAYS comes from
+//       outside the JSON, so the verifier can't be fooled by a forged
+//       JSON that names a different signer.
+//
+// CLI:
+//   --tx <file>:     path to a JSON file containing a Transaction
+//                    (fields: type, from, to, amount, fee, nonce,
+//                    payload, sig, hash). The same shape `account-
+//                    create-batch` test wrappers produce + the same
+//                    shape `Transaction::to_json` emits.
+//   --pubkey <hex>:  64 hex chars (32-byte Ed25519 pubkey) of the
+//                    presumed signer. REQUIRED.
+//   --json:          emit a JSON document; otherwise human lines.
+//
+// Output:
+//   Human mode:
+//     valid:                             true | false
+//     tx_hash_hex:                       <64 hex chars>
+//     computed_signing_bytes_sha256:     <64 hex chars>
+//   --json mode:
+//     {"valid": bool,
+//      "tx_hash_hex": "<64 hex>",
+//      "computed_signing_bytes_sha256": "<64 hex>"}
+//
+// Exit codes:
+//   0  signature valid
+//   1  args / parse / IO / JSON-shape / hex-decode error
+//   2  signature invalid — auth-style alert (distinct from arg errors
+//      so monitoring scripts can differentiate "bad input" from
+//      "input shape is fine but the sig doesn't validate")
+//
+// Why exit 2 for invalid: matches the convention used by message-verify,
+// keyfile-decrypt, envelope decrypt — all use 2 for "structurally fine,
+// authentication failed."
+//
+// Output field rationale:
+//   - `tx_hash_hex` is the SHA-256(signing_bytes) value the chain
+//     computes as Transaction::compute_hash. This is the value that
+//     appears as `hash` on the JSON and as the leaf in tx_root. We
+//     compute + report it independently to let operators cross-check
+//     the JSON-supplied `hash` field is consistent with the body.
+//   - `computed_signing_bytes_sha256` is the same value (SHA-256 of
+//     signing_bytes); it's exposed under a distinct field name so a
+//     consumer that just wants "the hash of what was signed" can grab
+//     it without conflating it with the tx's identity hash (they happen
+//     to coincide for tx sigs, but that's a property of the scheme, not
+//     a definition — message-verify's analogous field is named
+//     message_hash_hex; keeping a parallel name keeps the JSON-shape
+//     convention consistent).
+int cmd_tx_sign_verify(int argc, char** argv) {
+    std::string tx_path, pubkey_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--tx"     && i + 1 < argc) tx_path    = argv[++i];
+        else if (a == "--pubkey" && i + 1 < argc) pubkey_hex = argv[++i];
+        else if (a == "--json")                   json_out   = true;
+        else {
+            std::cerr << "tx-sign-verify: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet tx-sign-verify --tx <file> "
+                         "--pubkey <hex> [--json]\n";
+            return 1;
+        }
+    }
+    if (tx_path.empty() || pubkey_hex.empty()) {
+        std::cerr << "Usage: determ-wallet tx-sign-verify --tx <file> "
+                     "--pubkey <hex> [--json]\n"
+                     "\n"
+                     "  Verifies the Ed25519 sig on a Transaction JSON file\n"
+                     "  using the chain's canonical signing_bytes scheme\n"
+                     "  (matches src/chain/block.cpp Transaction::signing_bytes).\n"
+                     "  Distinct from message-sign (off-chain domain-separated\n"
+                     "  scheme). Exit 0 valid, 2 invalid (auth-style alert),\n"
+                     "  1 args/parse/IO error.\n";
+        return 1;
+    }
+
+    if (pubkey_hex.size() != 64) {
+        std::cerr << "tx-sign-verify: --pubkey must be exactly 64 hex chars "
+                     "(32-byte Ed25519 pubkey); got " << pubkey_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> pub_bytes;
+    try { pub_bytes = from_hex(pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "tx-sign-verify: invalid --pubkey hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (pub_bytes.size() != 32) {
+        std::cerr << "tx-sign-verify: --pubkey decoded to " << pub_bytes.size()
+                  << " bytes (expected 32)\n";
+        return 1;
+    }
+
+    // Read and parse the Transaction JSON. We do the parse here rather than
+    // delegating to determ::chain::Transaction::from_json because we want
+    // the wallet binary to stay decoupled from the chain library (the
+    // wallet target deliberately doesn't link against the chain lib in
+    // CMakeLists.txt — separation-of-concerns; wallet handles secrets,
+    // chain handles consensus). Re-encoding signing_bytes in ~20 lines
+    // here is the cheaper trade-off vs. dragging the chain lib into the
+    // wallet's TCB.
+    std::ifstream tx_f(tx_path);
+    if (!tx_f) {
+        std::cerr << "tx-sign-verify: cannot open --tx file: " << tx_path << "\n";
+        return 1;
+    }
+    nlohmann::json j;
+    try { tx_f >> j; }
+    catch (std::exception& e) {
+        std::cerr << "tx-sign-verify: --tx file is not valid JSON: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Required fields. Treat missing or wrong-typed as a parse error
+    // (rc=1), not an auth failure (rc=2): the JSON shape is broken,
+    // not the sig.
+    int      tx_type;
+    std::string from_str, to_str, payload_hex, sig_hex;
+    uint64_t amount, fee, nonce;
+    try {
+        if (!j.contains("type")    || !j["type"].is_number())     throw std::runtime_error("missing/wrong-typed 'type' (expected integer)");
+        if (!j.contains("from")    || !j["from"].is_string())     throw std::runtime_error("missing/wrong-typed 'from' (expected string)");
+        if (!j.contains("to")      || !j["to"].is_string())       throw std::runtime_error("missing/wrong-typed 'to' (expected string)");
+        if (!j.contains("amount")  || !j["amount"].is_number())   throw std::runtime_error("missing/wrong-typed 'amount' (expected integer)");
+        if (!j.contains("nonce")   || !j["nonce"].is_number())    throw std::runtime_error("missing/wrong-typed 'nonce' (expected integer)");
+        if (!j.contains("payload") || !j["payload"].is_string())  throw std::runtime_error("missing/wrong-typed 'payload' (expected hex string)");
+        if (!j.contains("sig")     || !j["sig"].is_string())      throw std::runtime_error("missing/wrong-typed 'sig' (expected hex string)");
+
+        tx_type     = j["type"].get<int>();
+        from_str    = j["from"].get<std::string>();
+        to_str      = j["to"].get<std::string>();
+        amount      = j["amount"].get<uint64_t>();
+        // `fee` is optional (matches chain's Transaction::from_json which
+        // defaults to 0); the chain's signing_bytes always includes the
+        // 8-byte fee field, so a missing JSON field == fee=0.
+        fee         = j.value("fee", uint64_t{0});
+        nonce       = j["nonce"].get<uint64_t>();
+        payload_hex = j["payload"].get<std::string>();
+        sig_hex     = j["sig"].get<std::string>();
+    } catch (std::exception& e) {
+        std::cerr << "tx-sign-verify: --tx JSON shape error: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Range-check the type byte. TxType is a u8 in the wire encoding;
+    // values outside [0, 255] would corrupt the first byte of
+    // signing_bytes silently. Reject them up front with a clean diagnostic.
+    if (tx_type < 0 || tx_type > 255) {
+        std::cerr << "tx-sign-verify: 'type' value " << tx_type
+                  << " out of range (expected 0..255 for u8 wire encoding)\n";
+        return 1;
+    }
+
+    // Decode the hex-encoded fields.
+    std::vector<uint8_t> payload_bytes, sig_bytes;
+    try { payload_bytes = from_hex(payload_hex); }
+    catch (std::exception& e) {
+        std::cerr << "tx-sign-verify: invalid 'payload' hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (sig_hex.size() != 128) {
+        std::cerr << "tx-sign-verify: 'sig' must be exactly 128 hex chars "
+                     "(64-byte Ed25519 signature); got " << sig_hex.size() << "\n";
+        return 1;
+    }
+    try { sig_bytes = from_hex(sig_hex); }
+    catch (std::exception& e) {
+        std::cerr << "tx-sign-verify: invalid 'sig' hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (sig_bytes.size() != 64) {
+        std::cerr << "tx-sign-verify: sig decoded to " << sig_bytes.size()
+                  << " bytes (expected 64)\n";
+        return 1;
+    }
+
+    // Reconstruct signing_bytes — byte-for-byte identical to what
+    // src/chain/block.cpp Transaction::signing_bytes produces. Any drift
+    // here would make every wallet-verified tx fail the chain's verify,
+    // so the layout below is intentionally simple + reviewable.
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload_bytes.size());
+    sb.push_back(static_cast<uint8_t>(tx_type));
+    sb.insert(sb.end(), from_str.begin(), from_str.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    // u64 BIG-ENDIAN encodings of amount / fee / nonce, in that order.
+    // Chain code does the same shift-pattern (`(x >> (i*8)) & 0xFF` for
+    // i = 7 down to 0). Keep the loops explicit rather than using a
+    // helper — copy-paste hazard vs. one canonical reference.
+    for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+    sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
+
+    // Compute SHA-256(signing_bytes) — this is BOTH the chain's
+    // Transaction::compute_hash result (the value that appears as `hash`
+    // in the JSON + as the tx_root leaf) AND the value we expose as
+    // computed_signing_bytes_sha256 for the operator to cross-check.
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+
+    // Init libsodium (idempotent) and verify the sig.
+    if (!primitives::init_libsodium()) {
+        std::cerr << "tx-sign-verify: libsodium init failed\n";
+        return 1;
+    }
+    // crypto_sign_verify_detached signs/verifies the message bytes
+    // directly (Ed25519 is hash-and-sign internally — it hashes with
+    // SHA-512 as part of the algorithm). The chain's verify path
+    // (src/crypto/keys.cpp::verify via EVP_DigestVerify on EVP_PKEY_ED25519)
+    // does the same thing: both operate on the raw signing_bytes message,
+    // NOT on a pre-hashed digest. A sig produced by either path is
+    // verifiable by the other.
+    int rc = crypto_sign_verify_detached(sig_bytes.data(),
+                                          sb.data(), sb.size(),
+                                          pub_bytes.data());
+    const bool valid = (rc == 0);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["valid"]                          = valid;
+        r["tx_hash_hex"]                    = to_hex(sb_sha);
+        r["computed_signing_bytes_sha256"]  = to_hex(sb_sha);
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "valid:                          " << (valid ? "true" : "false") << "\n";
+        std::cout << "tx_hash_hex:                    " << to_hex(sb_sha) << "\n";
+        std::cout << "computed_signing_bytes_sha256:  " << to_hex(sb_sha) << "\n";
+    }
+    return valid ? 0 : 2;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -4240,6 +4521,25 @@ void print_usage() {
         "                                             message-sign. Exit 0 valid, 2 invalid\n"
         "                                             (auth-style alert), 1 args/parse error.\n"
         "                                             --domain-tag MUST match the sign-time tag.\n"
+        "  tx-sign-verify --tx <file> --pubkey <hex> [--json]\n"
+        "                                             Verify the Ed25519 signature on a Transaction\n"
+        "                                             JSON file using the chain's canonical\n"
+        "                                             signing_bytes scheme (matches src/chain/\n"
+        "                                             block.cpp Transaction::signing_bytes). Reads\n"
+        "                                             a JSON {type,from,to,amount,fee,nonce,\n"
+        "                                             payload,sig,hash} record, reconstructs\n"
+        "                                             signing_bytes byte-for-byte, and checks the\n"
+        "                                             sig against --pubkey. --pubkey is REQUIRED:\n"
+        "                                             the wallet has no chain registry to look up\n"
+        "                                             the sender's key; anon-addr senders' pubkey\n"
+        "                                             IS their address (drop 0x prefix) but must\n"
+        "                                             be passed explicitly to prevent off-by-one\n"
+        "                                             trust mistakes. Distinct from message-sign\n"
+        "                                             (off-chain domain-separated scheme); sigs\n"
+        "                                             are NOT interchangeable. Exit 0 valid, 2\n"
+        "                                             invalid (auth-style alert), 1 args/parse/\n"
+        "                                             IO error. Output: {valid, tx_hash_hex,\n"
+        "                                             computed_signing_bytes_sha256}.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -4278,6 +4578,7 @@ int main(int argc, char** argv) {
     if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
+    if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
