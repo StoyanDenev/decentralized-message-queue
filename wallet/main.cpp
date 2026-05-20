@@ -3369,6 +3369,506 @@ int cmd_keyfile_recover(int argc, char** argv) {
     return 0;
 }
 
+// ── account-recover — composite T-of-N wallet recovery CLI ─────────────────
+//
+// `account-recover` is the operator-facing "give me back my wallet account"
+// CLI: it composes `keyfile-recover` (Shamir + envelope) with `account-import`
+// (Ed25519 seed → anon-account JSON) into a SINGLE call, so the operator
+// runs ONE command instead of two.
+//
+// Pipeline:
+//   1. Run the keyfile-recover steps verbatim: decrypt T envelopes via
+//      passphrases, cross-verify against shares, run shamir::combine →
+//      recover a 32-byte secret (Ed25519 seed).
+//   2. Treat the recovered secret as a 32-byte Ed25519 seed.
+//   3. Derive the public key via libsodium crypto_sign_ed25519_seed_keypair
+//      (same primitive used by account-import — keeps the wallet's
+//      secret-handling surface uniform on libsodium).
+//   4. Emit the anon-account JSON {"address":"0x..","privkey_hex":".."}
+//      (same shape as account-import / account-create-batch single record).
+//
+// CLI:
+//   --shares      <file>: shares file emitted by backup-create's
+//                         --shares-out (shape: {"shares":[{"x":int,
+//                         "y_hex":"..."}, ...]}).
+//   --envelopes   <file>: envelopes file emitted by backup-create's
+//                         --envelopes-out (shape: {"envelopes":
+//                         [{"share_index":int,"envelope_blob":"..."}, ...]}).
+//   --keyholders  <file>: T-of-N subset of keyholder passphrases (shape:
+//                         {"keyholders":[{"share_index":int,
+//                         "passphrase":"..."}, ...]}). MUST have >= T entries.
+//   --threshold  T      : required (unlike keyfile-recover where it's
+//                         optional). The seed-derivation step requires the
+//                         RIGHT seed — Shamir's information-theoretic
+//                         security means combining < T shares yields a
+//                         syntactically-valid but wrong 32-byte secret, and
+//                         account-recover MUST NOT silently emit a wrong
+//                         wallet account. T is required so we can hard-fail
+//                         under-threshold subsets before any keygen.
+//   [--out  <file>]     : if supplied, write the anon-account JSON
+//                         {"address":"0x..","privkey_hex":".."} to <file>
+//                         with 0600 perms instead of stdout.
+//   [--force]           : permit overwriting an existing --out file.
+//   [--json]            : print the JSON doc to stdout (ignored if --out
+//                         is supplied; --out always writes JSON).
+//
+// Output (default human): "recovered account: address=0x... privkey_hex=..."
+// Output (--out):         {"address":"0x..","privkey_hex":".."} to file, 0600
+// Output (--json):        same JSON to stdout
+//
+// Exit codes:
+//   0 — success.
+//   1 — args / file I/O / --out preconditions (matches keyfile-recover +
+//       account-import structural-error convention).
+//   2 — recovery failure (wrong passphrase, insufficient shares, share/
+//       envelope mismatch, malformed inputs). SAME exit-2 convention as
+//       keyfile-recover so monitoring scripts that already alert on the
+//       inner CLI's exit 2 will continue to fire correctly when wrapped.
+//
+// Composition design:
+//   This CLI is intentionally THIN — it composes the SAME primitives
+//   (envelope::decrypt, shamir::combine, crypto_sign_ed25519_seed_keypair)
+//   that the constituent CLIs use. No crypto logic is duplicated. If
+//   keyfile-recover or account-import change, this CLI follows transparently.
+//
+// Seed-length contract:
+//   The recovered Shamir secret MUST be exactly 32 bytes (= Ed25519 seed
+//   size). If a 16-byte / 64-byte / other-length secret is recovered, we
+//   reject with exit 2 — that's not an Ed25519 seed, so this is the wrong
+//   recovery flow for that backup. Operators with non-32-byte backups
+//   should use `keyfile-recover` directly + `account-import` separately.
+int cmd_account_recover(int argc, char** argv) {
+    std::string shares_path, envelopes_path, keyholders_path, out_path;
+    int threshold = -1;             // -1 sentinel = not supplied
+    bool force = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--shares"     && i + 1 < argc) shares_path     = argv[++i];
+        else if (a == "--envelopes"  && i + 1 < argc) envelopes_path  = argv[++i];
+        else if (a == "--keyholders" && i + 1 < argc) keyholders_path = argv[++i];
+        else if (a == "--out"        && i + 1 < argc) out_path        = argv[++i];
+        else if (a == "--threshold"  && i + 1 < argc) {
+            try { threshold = std::stoi(argv[++i]); }
+            catch (std::exception&) {
+                std::cerr << "account-recover: --threshold must be an integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--force")                      force           = true;
+        else if (a == "--json")                       json_out        = true;
+        else {
+            std::cerr << "account-recover: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-recover "
+                         "--shares <file> --envelopes <file> "
+                         "--keyholders <file> --threshold T "
+                         "[--out <file>] [--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (shares_path.empty() || envelopes_path.empty()
+        || keyholders_path.empty() || threshold < 0) {
+        std::cerr << "Usage: determ-wallet account-recover "
+                     "--shares <file> --envelopes <file> "
+                     "--keyholders <file> --threshold T "
+                     "[--out <file>] [--force] [--json]\n"
+                     "\n"
+                     "  Composite wallet recovery: composes keyfile-recover\n"
+                     "  (Shamir + envelope) with account-import (Ed25519 seed\n"
+                     "  -> anon-account JSON). Reads the (shares, envelopes)\n"
+                     "  pair produced by `backup-create` and a T-of-N subset\n"
+                     "  of keyholder passphrases; emits the recovered wallet\n"
+                     "  account as JSON {\"address\":\"0x..\",\"privkey_hex\":\"..\"}.\n"
+                     "\n"
+                     "  --threshold T is REQUIRED (unlike keyfile-recover where\n"
+                     "  it is optional): account-recover MUST NOT silently emit\n"
+                     "  a wrong wallet account, and Shamir's info-theoretic\n"
+                     "  security means combining < T shares yields a wrong but\n"
+                     "  syntactically-valid 32-byte secret. T lets us hard-fail\n"
+                     "  under-threshold subsets before any keygen.\n";
+        return 1;
+    }
+    if (threshold == 0) {
+        std::cerr << "account-recover: --threshold must be >= 1 (got 0)\n";
+        return 1;
+    }
+    if (threshold > 255) {
+        std::cerr << "account-recover: --threshold must be <= 255 (got "
+                  << threshold << ")\n";
+        return 1;
+    }
+
+    // ── Load + parse shares file ────────────────────────────────────────
+    std::ifstream sf(shares_path);
+    if (!sf) {
+        std::cerr << "account-recover: cannot open --shares file: "
+                  << shares_path << "\n";
+        return 1;
+    }
+    std::string shares_blob((std::istreambuf_iterator<char>(sf)),
+                              std::istreambuf_iterator<char>());
+    nlohmann::json sj;
+    try { sj = nlohmann::json::parse(shares_blob); }
+    catch (std::exception& e) {
+        std::cerr << "account-recover: shares JSON parse failed: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (!sj.is_object() || !sj.contains("shares") || !sj["shares"].is_array()) {
+        std::cerr << "account-recover: shares file must be an object with "
+                     "'shares' array\n";
+        return 2;
+    }
+    const auto& shares_arr = sj["shares"];
+    if (shares_arr.empty()) {
+        std::cerr << "account-recover: 'shares' array is empty\n";
+        return 2;
+    }
+    // Build x → y_hex map for the cross-verification step.
+    std::map<int, std::string> shares_y_by_x;
+    for (size_t i = 0; i < shares_arr.size(); ++i) {
+        const auto& el = shares_arr[i];
+        if (!el.is_object()
+            || !el.contains("x")     || !el["x"].is_number_integer()
+            || !el.contains("y_hex") || !el["y_hex"].is_string()) {
+            std::cerr << "account-recover: shares entry #" << i
+                      << " must have integer 'x' and string 'y_hex'\n";
+            return 2;
+        }
+        int x = el["x"].get<int>();
+        if (x < 1 || x > 255) {
+            std::cerr << "account-recover: shares entry #" << i
+                      << ": x = " << x << " out of range [1, 255]\n";
+            return 2;
+        }
+        if (shares_y_by_x.count(x)) {
+            std::cerr << "account-recover: duplicate x = " << x
+                      << " in shares file\n";
+            return 2;
+        }
+        shares_y_by_x[x] = el["y_hex"].get<std::string>();
+    }
+
+    // ── Load + parse envelopes file ─────────────────────────────────────
+    std::ifstream ef(envelopes_path);
+    if (!ef) {
+        std::cerr << "account-recover: cannot open --envelopes file: "
+                  << envelopes_path << "\n";
+        return 1;
+    }
+    std::string env_blob((std::istreambuf_iterator<char>(ef)),
+                           std::istreambuf_iterator<char>());
+    nlohmann::json ej;
+    try { ej = nlohmann::json::parse(env_blob); }
+    catch (std::exception& e) {
+        std::cerr << "account-recover: envelopes JSON parse failed: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (!ej.is_object() || !ej.contains("envelopes") || !ej["envelopes"].is_array()) {
+        std::cerr << "account-recover: envelopes file must be an object with "
+                     "'envelopes' array\n";
+        return 2;
+    }
+    const auto& env_arr = ej["envelopes"];
+    if (env_arr.empty()) {
+        std::cerr << "account-recover: 'envelopes' array is empty\n";
+        return 2;
+    }
+    std::map<int, std::string> env_blob_by_idx;
+    for (size_t i = 0; i < env_arr.size(); ++i) {
+        const auto& el = env_arr[i];
+        if (!el.is_object()
+            || !el.contains("share_index")
+            || !el["share_index"].is_number_integer()
+            || !el.contains("envelope_blob")
+            || !el["envelope_blob"].is_string()) {
+            std::cerr << "account-recover: envelopes entry #" << i
+                      << " must have integer 'share_index' and string "
+                         "'envelope_blob'\n";
+            return 2;
+        }
+        int idx = el["share_index"].get<int>();
+        if (idx < 1 || idx > 255) {
+            std::cerr << "account-recover: envelopes entry #" << i
+                      << ": share_index = " << idx
+                      << " out of range [1, 255]\n";
+            return 2;
+        }
+        if (env_blob_by_idx.count(idx)) {
+            std::cerr << "account-recover: duplicate share_index = " << idx
+                      << " in envelopes file\n";
+            return 2;
+        }
+        env_blob_by_idx[idx] = el["envelope_blob"].get<std::string>();
+    }
+
+    // ── Load + parse keyholders file (T-of-N subset) ────────────────────
+    std::ifstream kf(keyholders_path);
+    if (!kf) {
+        std::cerr << "account-recover: cannot open --keyholders file: "
+                  << keyholders_path << "\n";
+        return 1;
+    }
+    std::string kh_blob((std::istreambuf_iterator<char>(kf)),
+                          std::istreambuf_iterator<char>());
+    nlohmann::json kj;
+    try { kj = nlohmann::json::parse(kh_blob); }
+    catch (std::exception& e) {
+        std::cerr << "account-recover: keyholders JSON parse failed: "
+                  << e.what() << "\n";
+        return 2;
+    }
+    if (!kj.is_object() || !kj.contains("keyholders") || !kj["keyholders"].is_array()) {
+        std::cerr << "account-recover: keyholders file must be an object with "
+                     "'keyholders' array\n";
+        return 2;
+    }
+    const auto& kh_arr = kj["keyholders"];
+    if (kh_arr.empty()) {
+        std::cerr << "account-recover: 'keyholders' array is empty (need at "
+                     "least 1 entry to attempt recovery)\n";
+        return 2;
+    }
+
+    std::vector<std::pair<int, std::string>> kh_entries;
+    std::set<int> seen_kh_idx;
+    for (size_t i = 0; i < kh_arr.size(); ++i) {
+        const auto& el = kh_arr[i];
+        if (!el.is_object()
+            || !el.contains("share_index")
+            || !el["share_index"].is_number_integer()
+            || !el.contains("passphrase")
+            || !el["passphrase"].is_string()) {
+            std::cerr << "account-recover: keyholders entry #" << i
+                      << " must have integer 'share_index' and string "
+                         "'passphrase'\n";
+            return 2;
+        }
+        int idx = el["share_index"].get<int>();
+        std::string pw = el["passphrase"].get<std::string>();
+        if (pw.empty()) {
+            std::cerr << "account-recover: keyholders entry share_index="
+                      << idx << ": passphrase is empty\n";
+            return 2;
+        }
+        if (!seen_kh_idx.insert(idx).second) {
+            std::cerr << "account-recover: duplicate share_index = " << idx
+                      << " in keyholders file\n";
+            return 2;
+        }
+        if (!env_blob_by_idx.count(idx)) {
+            std::cerr << "account-recover: keyholders share_index=" << idx
+                      << " has no matching envelope in --envelopes\n";
+            return 2;
+        }
+        if (!shares_y_by_x.count(idx)) {
+            std::cerr << "account-recover: keyholders share_index=" << idx
+                      << " has no matching share in --shares\n";
+            return 2;
+        }
+        kh_entries.emplace_back(idx, std::move(pw));
+    }
+
+    // ── Threshold check (REQUIRED here, unlike keyfile-recover) ─────────
+    // Under-threshold subsets MUST hard-fail before keygen. Shamir's
+    // information-theoretic security means combining < T shares yields a
+    // syntactically-valid 32-byte but WRONG secret — and account-recover
+    // would happily derive a wallet account from that wrong secret. The
+    // operator would then have a working-looking account file for an
+    // address that owns no funds. Exit 2 here matches the wrong-passphrase
+    // exit code (both mean "recovery failed").
+    if (static_cast<int>(kh_entries.size()) < threshold) {
+        std::cerr << "account-recover: insufficient shares for threshold "
+                     "reconstruction: " << kh_entries.size()
+                  << " keyholders supplied, --threshold = " << threshold
+                  << "\n";
+        return 2;
+    }
+
+    // ── --out preconditions (if supplied) ────────────────────────────────
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "account-recover: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "account-recover: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Decrypt each envelope; collect shamir::Share entries ─────────────
+    std::vector<shamir::Share> recovered_shares;
+    recovered_shares.reserve(kh_entries.size());
+    for (const auto& [idx, pw] : kh_entries) {
+        const std::string& blob = env_blob_by_idx[idx];
+        auto env_opt = envelope::deserialize(blob);
+        if (!env_opt) {
+            std::cerr << "account-recover: envelope share_index=" << idx
+                      << ": envelope_blob deserialize failed "
+                         "(malformed envelope in --envelopes)\n";
+            return 2;
+        }
+        // backup-create produces AAD-free envelopes — same here (empty aad).
+        auto pt_opt = envelope::decrypt(*env_opt, pw, {});
+        if (!pt_opt) {
+            std::cerr << "account-recover: envelope share_index=" << idx
+                      << ": decrypt failed (wrong passphrase or corrupted "
+                         "envelope)\n";
+            return 2;
+        }
+        const auto& y_bytes = *pt_opt;
+        if (y_bytes.empty()) {
+            std::cerr << "account-recover: envelope share_index=" << idx
+                      << ": decrypted plaintext is empty\n";
+            return 2;
+        }
+        // Cross-verify decrypted y against the shares-file y_hex. Catches
+        // a shares/envelopes file mismatch before Shamir reconstruction
+        // silently emits a garbage secret.
+        std::string y_hex_decrypted = to_hex(y_bytes);
+        const std::string& y_hex_expected = shares_y_by_x[idx];
+        if (y_hex_decrypted != y_hex_expected) {
+            std::cerr << "account-recover: envelope share_index=" << idx
+                      << ": decrypted y-bytes do NOT match the y_hex in "
+                         "--shares (envelope/shares file mismatch — the "
+                         "two files were likely produced by different "
+                         "backup-create runs)\n";
+            return 2;
+        }
+        shamir::Share s;
+        if (idx < 1 || idx > 255) {
+            std::cerr << "account-recover: internal: share_index=" << idx
+                      << " out of byte range\n";
+            return 2;
+        }
+        s.x = static_cast<uint8_t>(idx);
+        s.y = y_bytes;
+        recovered_shares.push_back(std::move(s));
+    }
+
+    if (recovered_shares.empty()) {
+        std::cerr << "account-recover: no shares recovered (internal — "
+                     "keyholders array was already validated as non-empty)\n";
+        return 2;
+    }
+
+    // ── Shamir reconstruction ───────────────────────────────────────────
+    auto secret_opt = shamir::combine(recovered_shares);
+    if (!secret_opt) {
+        std::cerr << "account-recover: shamir::combine returned nullopt "
+                     "(insufficient shares for threshold reconstruction, or "
+                     "shares were structurally inconsistent at the shamir "
+                     "layer)\n";
+        return 2;
+    }
+    const std::vector<uint8_t>& secret = *secret_opt;
+
+    // ── Seed-length contract: Ed25519 requires exactly 32 bytes ─────────
+    // A non-32-byte recovered secret means this backup wasn't created
+    // from a wallet-account Ed25519 seed — operator should use
+    // keyfile-recover directly. We refuse to feed a wrong-sized secret
+    // into crypto_sign_ed25519_seed_keypair (which expects exactly 32).
+    static_assert(crypto_sign_SEEDBYTES == 32, "Ed25519 seed size mismatch");
+    if (secret.size() != crypto_sign_SEEDBYTES) {
+        std::cerr << "account-recover: recovered secret is " << secret.size()
+                  << " bytes, but Ed25519 seed requires exactly 32 bytes. "
+                     "This backup was likely created from a non-wallet "
+                     "secret (use `keyfile-recover` directly instead).\n";
+        return 2;
+    }
+
+    // ── Init libsodium + derive Ed25519 keypair from the recovered seed ─
+    // Same primitive as account-import (crypto_sign_ed25519_seed_keypair).
+    // The 64-byte sk it produces is seed||pubkey; we hold both halves
+    // separately so we zero sk immediately after the call.
+    if (!primitives::init_libsodium()) {
+        std::cerr << "account-recover: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, 32> seed{};
+    std::memcpy(seed.data(), secret.data(), 32);
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> derived_pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    static_assert(crypto_sign_PUBLICKEYBYTES == 32, "Ed25519 pk size mismatch");
+    static_assert(crypto_sign_SECRETKEYBYTES == 64, "Ed25519 sk size mismatch");
+    if (crypto_sign_ed25519_seed_keypair(derived_pub.data(), sk.data(),
+                                         seed.data()) != 0) {
+        std::cerr << "account-recover: crypto_sign_ed25519_seed_keypair failed "
+                     "(recovered seed not a valid Ed25519 private key — "
+                     "almost certainly a corrupted Shamir reconstruction)\n";
+        sodium_memzero(seed.data(), seed.size());
+        return 2;
+    }
+    // Zero the libsodium 64-byte sk — its content (seed||pubkey) is already
+    // held in `seed` / `derived_pub`, so the duplicate is unnecessary.
+    sodium_memzero(sk.data(), sk.size());
+
+    // ── Build the anon-account record ──────────────────────────────────
+    // Matches account-import / account-create-batch byte-for-byte:
+    // address is "0x" + lowercase hex of the 32-byte pubkey; privkey_hex
+    // is the 32-byte seed (NOT the 64-byte libsodium sk).
+    std::string address     = "0x" + to_hex(derived_pub);
+    std::string privkey_hex = to_hex(seed);
+    nlohmann::json record = {
+        {"address",     address},
+        {"privkey_hex", privkey_hex},
+    };
+
+    // Zero the local seed copy now that we've serialized it to hex.
+    sodium_memzero(seed.data(), seed.size());
+
+    // ── Emit result ────────────────────────────────────────────────────
+    if (!out_path.empty()) {
+        std::ofstream f(out_path);
+        if (!f) {
+            std::cerr << "account-recover: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << record.dump(2) << "\n";
+        f.close();
+        if (!f) {
+            std::cerr << "account-recover: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+        // 0600 permissions — owner-only read/write. Best-effort on Windows
+        // (NTFS ACL inherits from parent); non-fatal on perm-set failure.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+        if (json_out) {
+            // --json + --out: also echo to stdout for pipe-driven workflows.
+            std::cout << record.dump() << "\n";
+        } else {
+            std::cout << "recovered account written to " << out_path
+                      << " (" << recovered_shares.size()
+                      << " shares combined): address=" << address << "\n";
+        }
+        return 0;
+    }
+    if (json_out) {
+        std::cout << record.dump() << "\n";
+        return 0;
+    }
+    // Default human format — single line, both fields, no header (since
+    // recovery always yields exactly one account).
+    std::cout << "recovered account: address=" << address
+              << " privkey_hex=" << privkey_hex << "\n";
+    return 0;
+}
+
 // ── keyfile-info — passive diagnostic for an encrypted node keyfile ─────────
 //
 // S-004 keyfile-shape complement to `inspect-envelope`. Reads a 2-line
@@ -4215,6 +4715,24 @@ void print_usage() {
         "                                             All failure modes (wrong passphrase,\n"
         "                                             insufficient shares, share/envelope mismatch,\n"
         "                                             malformed files) exit 2 with a diagnostic.\n"
+        "  account-recover --shares <file>            Composite wallet recovery: composes\n"
+        "                  --envelopes <file>         keyfile-recover (Shamir + envelope) with\n"
+        "                  --keyholders <file>        account-import (Ed25519 seed -> anon-account\n"
+        "                  --threshold T              JSON) in a single call. Reads the (shares,\n"
+        "                  [--out <file>] [--force]   envelopes) pair produced by backup-create\n"
+        "                  [--json]                   and a T-of-N subset of keyholder passphrases;\n"
+        "                                             recovers the original 32-byte Ed25519 seed\n"
+        "                                             and emits the wallet anon-account JSON\n"
+        "                                             {\"address\":\"0x..\",\"privkey_hex\":\"..\"}.\n"
+        "                                             --threshold T is REQUIRED (Shamir's info-\n"
+        "                                             theoretic security means combining < T shares\n"
+        "                                             would silently emit a wrong-but-syntactically-\n"
+        "                                             valid wallet account). Default human prints\n"
+        "                                             one line; --out writes the JSON to file with\n"
+        "                                             0600 perms; --json prints JSON to stdout. All\n"
+        "                                             failure modes (wrong passphrase, insufficient\n"
+        "                                             shares, mismatch, non-32-byte recovered\n"
+        "                                             secret) exit 2 with a diagnostic.\n"
         "  keyfile-info --in <file> [--json]          Passive diagnostic for an encrypted node\n"
         "                                             keyfile (S-004). Parses the 2-line\n"
         "                                             DETERM-NODE-V1 + DWE1 envelope shape and\n"
@@ -4275,6 +4793,7 @@ int main(int argc, char** argv) {
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
     if (cmd == "keyfile-decrypt") return cmd_keyfile_decrypt(argc - 2, argv + 2);
     if (cmd == "keyfile-recover") return cmd_keyfile_recover(argc - 2, argv + 2);
+    if (cmd == "account-recover") return cmd_account_recover(argc - 2, argv + 2);
     if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
