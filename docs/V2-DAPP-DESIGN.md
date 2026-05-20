@@ -32,6 +32,8 @@ Determ is a payment + identity chain by intent. It is not a programmable platfor
 
 **The distributed-IdP / DSSO special case.** A second class of canonical DApp pattern is **federated single-sign-on built on the K-of-K committee as a mutual-distrust identity provider**. The framework comes from the academic literature on mutual-distrust IdP designs (PAKE-as-black-box); Determ's contribution is to map the K-of-K committee onto the operator group and substitute **T-OPAQUE** for the original-paper SRP, which yields a SIWE-class "Sign-In With Determ" flow that authenticates users against the chain without trusting any single Determ node and without exposing user passwords or recovery secrets to any committee member below the threshold. RPs (relying parties) register via the existing v2.18 DAPP_REGISTER channel; challenges and signed assertions ride the existing v2.19 DAPP_CALL rails. The flow is specified in detail in [`V2-DESIGN.md`](V2-DESIGN.md) → Theme 9 (v2.25 + v2.26). From Determ's perspective, every DSSO RP is again just a Theme 7 DApp; the protocol-side additions (Theme 9) are the threshold-PAKE primitive and the assertion token format, not new DApp infrastructure.
 
+**The cross-deployment federation special case.** A third canonical DApp pattern is **multi-deployment coordination as an ecosystem product** rather than a protocol feature. Each Determ deployment runs its own genesis, chain_id, and committee; cross-deployment value transfer is handled by the v2.23 bridge. Federation goes beyond that: shared identity registry across deployment members, federated DSSO recognizable across the federation, cross-deployment audit aggregation, federation-level governance for member admission / dispute resolution. Earlier drafts considered this a v3 protocol feature; the cleaner answer is to deliver it at the DApp layer using v2.18 (DAPP_REGISTER for the federation coordinator DApp's identity), v2.19 (DAPP_CALL for cross-deployment messaging), v2.23 (light-client proofs to verify cross-deployment claims), and v2.25 + v2.26 (DSSO assertions co-signed at federation scope). The protocol substrate already provides everything needed. Validator portability is the one federation capability that doesn't cleanly fit the DApp layer (slashing economics are per-chain), but it lacks documented commercial demand. Full design pattern: see §14 below.
+
 ---
 
 ## 2. Conceptual model
@@ -1213,6 +1215,154 @@ This design extends Determ to support an application ecosystem WITHOUT becoming 
 - Protocol breaking changes (just two new tx-type slots and a new state field)
 
 **Estimated total cost (Phases 7.1 through 7.4):** 8-10 days focused work. Phase 7.5+ is ecosystem-driven and uncapped.
+
+---
+
+## 14. Cross-deployment federation DApp (canonical pattern, v3-deferred ecosystem deliverable)
+
+Federation across multiple Determ deployments — shared identity, federated DSSO, cross-deployment audit, federation governance — is **delivered as a Theme-7 DApp**, not as a protocol feature. The substrate primitives shipped in v2 + Theme 9 + Phase D are sufficient; no protocol-level changes are required.
+
+**Status: v3-deferred ecosystem deliverable.** Not on the Determ team's protocol roadmap. Documented here as a canonical pattern so that operator consortiums have a reference design when commercial demand surfaces (regulated-vertical multi-jurisdiction deployments, CBDC federations, industry consortium payment rails). Estimated effort: ~1.5-2 months operator-side per federation. Multiple federation DApps can coexist with different governance, audit, and identity-linking policies — the protocol substrate doesn't constrain federation policy.
+
+**Why v3-deferred rather than current scope:**
+- No documented commercial partnership currently demands it
+- Building federations before real deployment partnerships exist risks designing for hypothetical use cases
+- DApp-layer position lets each consortium tailor the federation to their specific regulatory / operational needs
+- Protocol substrate is ready *today* (v2.18 + v2.19 + v2.23 + v2.25 + v2.26 already shipped or spec-resolved); consortiums can build whenever their commercial timing aligns
+
+### 14.1 Motivation
+
+A Determ deployment is an island by default — its own genesis, its own chain_id, its own committee, its own identity registry, its own DSSO scope. v2.23 cross-chain bridge enables value transfer between Determ deployments, but identity remains per-deployment. Several commercial patterns need more:
+
+- **Per-jurisdiction regulated deployments interoperating.** UK-licensed gambling Determ + Malta-licensed Determ + Singapore-licensed Determ — federated for player KYC + cross-jurisdiction settlement, separate for jurisdictional compliance.
+- **National CBDC federations.** Multiple country-level CBDCs federated for cross-border identity verification, separate for monetary policy.
+- **Industry consortium payment rails.** Banks A, B, C each run their own Determ deployment with own customer data + audit relationships, federated for inter-bank settlement.
+- **Multi-region single-organization deployment.** One organization running deployments in EU / US / APAC for data-residency compliance, federated for unified customer experience.
+
+The shared structural concern: **users registered on deployment A want to be recognizable on deployment B** without trusting any single party.
+
+### 14.2 Pattern
+
+Each federation member deployment registers a **Federation Coordinator DApp** via v2.18 DAPP_REGISTER. The DApp's identity (`service_pubkey` + `endpoint_url`) is published on its host chain. Across federation members, the DApps coordinate via DAPP_CALL messages + v2.23 bridge primitives.
+
+**On-chain state (per deployment):**
+
+```
+FederationCoordinator (DApp identity) {
+  service_pubkey: Ed25519                 // registered via v2.18 DAPP_REGISTER
+  endpoint_url:   string                  // off-chain coordination endpoint
+  manifest_hash:  Hash                    // current federation manifest digest
+}
+```
+
+**Off-chain state (held by each deployment's Federation Coordinator DApp):**
+
+```
+FederationManifest {
+  members: [
+    {
+      chain_id:           string
+      deployment_genesis: Hash             // chain identity anchor
+      coordinator_dapp:   PubKey           // DApp identity on that chain
+      bridge_endpoint:    string           // v2.23 bridge endpoint
+      auditor_pubkeys:    [PubKey ...]     // federation-scope auditor(s)
+    },
+    ...
+  ],
+  admission_quorum:   u32                  // K-of-N for new member admission
+  governance_version: u64                  // monotonic version
+}
+```
+
+The manifest is published off-chain (e.g., via IPFS, HTTP, or distributed via DAPP_CALL gossip) and its hash is committed on each member chain via the Federation Coordinator's published `manifest_hash` field. Members verify manifest authenticity by:
+1. Fetching the manifest from any source
+2. Computing its hash
+3. Comparing against `manifest_hash` published by the local Federation Coordinator
+
+### 14.3 Operations
+
+**Member admission (federation governance):**
+
+1. Prospective new member submits `PROPOSE_MEMBER` via DAPP_CALL to each existing Federation Coordinator
+2. Existing members verify the prospective member's chain (genesis hash matches claimed deployment, coordinator DApp registered) via v2.23 light-client proof against the prospective member's chain
+3. Existing members each submit `VOTE_MEMBER` co-signing approval
+4. When K-of-N approval threshold reached, each member's Federation Coordinator updates the manifest and publishes the new `manifest_hash` on-chain
+
+**Identity linking (user-facing):**
+
+1. User registers normally on deployment A (gets on-chain anon or registered identity per v1.x REGISTER tx)
+2. User wants their identity recognized on deployment B
+3. User submits a `LINK_IDENTITY` DAPP_CALL on deployment B's Federation Coordinator, including a v2.23 light-client proof that the user is registered on deployment A at height H
+4. Federation Coordinator on deployment B verifies the proof against deployment A's committee-signed header (via the bridge's light-client mesh)
+5. On verification, deployment B's Federation Coordinator publishes a linked-identity record on its chain (via DAPP_CALL emitting a state change in the DApp's off-chain database, with a hash committed on-chain)
+
+**Federated DSSO assertion:**
+
+1. User authenticates via T-OPAQUE on deployment A (per v2.25 DSSO)
+2. Determ A's K-of-K committee issues a deployment-A-scope assertion
+3. The Federation Coordinator DApp on A submits the assertion to other federation members via DAPP_CALL
+4. Each receiving Federation Coordinator co-signs at federation scope (DApp's service_pubkey signs over the assertion + federation manifest hash)
+5. Relying parties on any federation member verify the federation-scope assertion against the local Federation Coordinator's published service_pubkey
+
+**Cross-deployment audit:**
+
+1. Federation members co-decide on auditor pubkey(s) at manifest level
+2. Each member chain updates its v2.24 `audit_view_master_pk` field for federation-scope accounts to delegate to the federation auditor
+3. Auditor's view-key reads audit data across all federation members via per-deployment v2.24 audit-mode RPC
+4. Coordination logic (which auditor reads which deployment, when, for what purpose) is DApp policy, not protocol enforcement
+
+### 14.4 What's protocol-supported vs DApp-supported
+
+| Capability | Protocol-enforced | DApp-enforced |
+|---|---|---|
+| Cross-deployment value transfer | ✅ v2.23 bridge with light-client proofs | — |
+| Cross-deployment identity claims | Proof verification via v2.23 | Federation coordinator decides which claims are accepted |
+| Federation-scope DSSO assertions | DApp service_pubkey signature | Federation coordinator co-signing logic |
+| Cross-deployment audit disclosure | v2.24 per-account `audit_view_master_pk` | Federation-level auditor designation |
+| Member admission/removal | — | Federation coordinator K-of-N voting |
+| Federation manifest | Hash committed on-chain via DApp registration | Off-chain replication + verification |
+| Dispute resolution | — | DApp governance logic |
+
+### 14.5 What this pattern does NOT deliver
+
+**Validator portability.** Validators staked on deployment A cannot serve deployment B's committee selection. Slashing economics are per-chain by design (mutual-distrust isolation between deployments). A federation DApp can signal which validators are federation-active (informational metadata), but the actual committee-eligible set remains per-chain. This is the one federation capability that would require protocol-level cross-deployment slashing economics — which break the mutual-distrust isolation between deployments and have no documented commercial use case demanding them.
+
+**Atomic cross-federation governance.** Federation manifest updates require K-of-N coordination across member chains; this happens via DAPP_CALL + manifest re-publication. A member chain that doesn't update its manifest hash promptly creates a temporary inconsistency. DApp-layer resolution (e.g., "members must update within N blocks or lose federation-active status") suffices for most cases; protocol-level atomicity isn't structurally available without breaking per-deployment autonomy.
+
+**Forced compliance.** Federation members can publish federation policies (audit cadence, KYC requirements, etc.) in the manifest, but enforcement is DApp-layer trust — relying parties verify against the manifest; bad members can be voted out. Cryptographic enforcement is limited to what v2.22/v2.24 already provide (auditor view-key disclosure).
+
+These limitations are acceptable for documented commercial use cases. Federations form among parties who already have off-chain legal relationships (regulatory licensing, consortium agreements, multi-org governance); DApp-layer trust composes with those existing relationships.
+
+### 14.6 Estimated implementation cost
+
+| Sub-component | Effort (operator/consortium side) |
+|---|---|
+| Federation Coordinator DApp (service code, manifest management) | 2-3 weeks |
+| Federation governance logic (admission, voting, removal) | 1-2 weeks |
+| Identity-linking flow | 1 week |
+| Federation-scope DSSO assertion logic | 1 week |
+| Cross-deployment audit coordination | 1 week |
+| Testing + integration | 1-2 weeks |
+
+**Total: ~1.5-2 months** per federation, operator-side (each consortium builds their own Federation Coordinator DApp tailored to their use case). The Determ protocol provides the substrate; the consortium provides the policy.
+
+Multiple federation DApps can exist concurrently — a gambling federation, a CBDC federation, a B2B-payment federation could each run independently with different governance, audit rules, and identity-linking semantics. The protocol doesn't pick winners.
+
+### 14.7 Composition with other Theme-7 patterns
+
+A Federation Coordinator DApp can compose with:
+- **Direct-to-DApp delivery (§10):** federation-coordinator-to-coordinator messages ride libsodium sealed-box for confidentiality
+- **zk-VM L2 (§1, §10):** an L2 deployed across multiple federation members can use the federation as its identity layer
+- **Theme 9 DSSO:** federation extends DSSO from per-deployment to per-federation scope
+- **Cross-shard DApp calls (§10):** within a single federation member, cross-shard DApp routing works as documented; federation-coordinator DApp can span shards via existing mechanisms
+
+These compositions are off-the-shelf — no special protocol awareness required.
+
+### 14.8 Cross-references
+
+- `V2-DESIGN.md` "Recommended sequencing → What is explicitly NOT in this sequencing" — explicit deferral statement: federation is DApp-layer, not protocol
+- `V2-DESIGN.md` v2.18 / v2.19 / v2.23 / v2.25 / v2.26 — substrate primitives the Federation Coordinator builds on
+- `plan.md` — federation is not on the protocol roadmap; it's tracked here as an ecosystem-product pattern
 
 ---
 
