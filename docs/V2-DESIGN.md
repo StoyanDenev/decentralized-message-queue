@@ -191,20 +191,142 @@ Wire-format change to `ContribMsg` (3 new hashes + 3 new lists). Validator re-de
 
 ### v2.8 — Post-quantum signature migration
 
-**Motivation.** Ed25519's quantum-vulnerability is well-understood: Shor's algorithm breaks discrete-log signatures in polynomial time on a sufficiently large quantum computer. Current consensus is that production-relevant quantum computers are 10-20 years away; v2 should be ready before then rather than emergency-patching after.
+**Problem statement.** Determ's entire signature surface — `Transaction::sig`, `ContribMsg`, `BlockSigMsg`, `DKGCommitMsg/DKGShareMsg` (v2.10), `HELLO` peer authentication, the upcoming v2.25 DSSO assertion signatures, all wallet domain-key signatures — is Ed25519. Ed25519 reduces to discrete-log on curve25519, which Shor's algorithm breaks in polynomial time on a sufficiently large fault-tolerant quantum computer. Three concrete consequences for a chain claiming "production-ready for permissioned/consortium":
+1. **Retroactive forgery.** Once a quantum adversary materialises, every historical signature in the chain becomes forgeable. The chain's tamper-evidence story for archived state (snapshots, FA1 inclusion proofs against historical blocks) collapses to "trust the operator who held the snapshot."
+2. **Live consensus break.** Any committee with an exposed Ed25519 pubkey (i.e. every committee, since pubkeys are public in the registry) can be impersonated by recovering the secret from the pubkey. K-of-K mutual distrust degrades to "whoever has the quantum computer is the committee."
+3. **Identity layer break.** v2.18 domain registrations, v2.25 SIWE-class assertions, and wallet recovery (A2) all rely on Ed25519 as the identity binding. A quantum break is not a soft-failure mode — it's "every Determ identity is impersonable."
 
-**Mechanism.** Replace Ed25519 with a NIST-PQ-finalist signature: **Dilithium** (preferred — lattice-based, NIST PQC standardization track) or **Falcon** (smaller signatures, more complex implementation). Both have stable C reference implementations.
+Current consensus (NIST PQC competition, ongoing) is that a cryptographically-relevant quantum computer is 10-20 years out. v2 should ship the migration path before the threat materialises, not as an emergency hard fork after.
 
-Transition path:
-1. **Dual-key registration.** Validators register both Ed25519 and Dilithium pubkeys. Phase 1 publishes commitments for both. Phase 2 reveals + signs with both.
-2. **Tag per-block which signature scheme is canonical.** Pre-flag-day: Ed25519. Post-flag-day: Dilithium. Block format carries `consensus_signature_scheme: u8`.
-3. **At flag-day height H**, the canonical scheme switches. All committee signatures use Dilithium from height H onward.
+**Scheme selection.** Three NIST-PQ-finalist signature families are credible candidates. The relevant decision matrix:
 
-Wallet recovery (A2) similarly: dual-derived seed (Ed25519 + Dilithium private keys both derived from the same 32-byte master seed via HKDF labels).
+| Scheme | Family | Pubkey size | Sig size | Verify cost | Status | Determ fit |
+|---|---|---|---|---|---|---|
+| **Dilithium** (ML-DSA, FIPS 204) | Lattice (Module-LWE) | 1312–2592 B | 2420–4595 B | ~0.2 ms (Dilithium-2) | NIST-standardised Aug 2024 (FIPS 204) | **Primary choice** — well-analysed, balanced sizes/speed, mature reference impl (pqclean, liboqs) |
+| **Falcon** (FN-DSA, FIPS 206 draft) | Lattice (NTRU) | 897–1793 B | 666–1280 B | ~0.05 ms | FIPS 206 draft (final ~2026) | Smaller sigs but requires constant-time FFT over floats — implementation risk; defer until FIPS 206 final |
+| **SPHINCS+** (SLH-DSA, FIPS 205) | Hash-based (stateless) | 32–64 B | 7856–49856 B | ~5–50 ms | NIST-standardised Aug 2024 (FIPS 205) | Hash-only (no lattice assumption) but signature size + verify cost dominate; reserve for wallet recovery / cold-storage signatures where size doesn't matter |
 
-**Cost.** 1-2 weeks. Dilithium reference impl integration (libdilithium or pqclean). Block format change. Genesis schema update. Migration path documentation. Bandwidth impact: Dilithium signatures are ~2.5 KB vs Ed25519's 64 bytes — block size grows substantially. Worth it for chain longevity.
+**Resolved choice: Dilithium-3 as the primary consensus signature, SPHINCS+-128s as a backup wallet-root identity signature.** Dilithium-3 is the NIST-recommended security level (matching AES-192 / pre-quantum 128-bit classical). The dual-track (Dilithium primary + SPHINCS+ hash-only fallback for cold-storage roots) hedges against future lattice-attack discoveries by keeping a hash-only signature path available for catastrophic-recovery scenarios.
 
-**Closes:** None of today's open findings (Ed25519 is fine today). Closes the future-attack vector that would otherwise require an emergency hard fork.
+**Wire-format changes.** Eight surfaces touch the signature primitive; each needs schema rework:
+
+| Field | Today (Ed25519) | After v2.8 (Dilithium-3) | Notes |
+|---|---|---|---|
+| `Transaction::sig` | 64 B | 3293 B | Largest sig; tx body grows substantially |
+| `Transaction::from_pubkey` | 32 B | 1952 B | Per-tx pubkey overhead — see below |
+| `ContribMsg.sig` | 64 B | 3293 B | Phase-1 commit signature |
+| `BlockSigMsg.sig` | 64 B | 3293 B | Phase-2 reveal signature; K of these per block |
+| `Block.creator_partial_sigs[i]` | N/A pre-v2.10; 64 B post-v2.10 | 3293 B post-v2.8 | Composes with v2.10 threshold path — see "Composition with v2.10" below |
+| HELLO peer auth sig | 64 B | 3293 B | Per-connection one-shot |
+| `RegisterTx.dh_pubkey` | 32 B Ed25519-DH | 32 B X25519 (unchanged) | DH stays curve25519 — see "Hybrid mode" |
+| DApp service sig | 64 B | 3293 B | v2.18 / v2.19 |
+
+A canonical Determ block today carries: 1 producer sig (64 B) + K BlockSigMsg sigs (K × 64 B, typically K=5-9) + per-tx sigs (typically 100-1000 txs × 64 B = 6-64 KB). Under v2.8 the same block carries: (1+K) × 3293 B for consensus sigs (10–13 KB at K=3-5; 33 KB at K=9) + N × 3293 B for tx sigs (typically 100-1000 × 3293 B = 330 KB – 3.3 MB).
+
+**Bandwidth impact.** Block size grows roughly 30-50× for the signature surface alone. This is unavoidable for any current PQ signature; the only way around it is `ROTATE_KEY` indirection (v2.26) — txs carry a short address that resolves to a Dilithium pubkey in the registry, so transactions don't carry per-tx pubkeys. With v2.26 in place, only `Transaction::sig` (not `from_pubkey`) bloats per-tx, recovering ~37% of the worst-case overhead. **Hard prerequisite: v2.26 ships before v2.8.**
+
+**Hybrid mode (transition window).** A naïve flag-day cutover risks bricking the network if Dilithium reference-impl bugs surface late. The transition runs in three phases:
+
+| Phase | Duration | Wire format | Validator behaviour |
+|---|---|---|---|
+| **Hybrid commit** | Heights H₀–H₁ (~1 epoch) | Both Ed25519 + Dilithium sigs ride alongside; either alone is acceptable on apply, both required on emission | Validators emit dual signatures; receivers verify whichever they prefer |
+| **Hybrid verify** | Heights H₁–H₂ (~1 epoch) | Both ride alongside; both required on apply | Forces all validators to be PQ-ready; legacy-only nodes fork off |
+| **PQ-only** | Heights ≥ H₂ | Dilithium only; Ed25519 fields removed | Legacy nodes that didn't migrate are wedged on apply |
+
+Each phase boundary requires committee consensus (signaled via existing flag-day governance). Operators MUST upgrade between H₀ and H₁; staying on Ed25519-only after H₁ is a self-inflicted fork.
+
+**Apply-path integration.** `Chain::apply_block` gains a `consensus_signature_scheme: u8` field check; phase-1/phase-2 verifiers route to `crypto::dilithium::verify` or `crypto::ed25519::verify` based on the block field. The phase-transition logic lives in `Chain::validate_block_at_height(h)`:
+
+```
+sig_scheme = h >= H₂ ? Dilithium :
+             h >= H₁ ? Hybrid_Both :
+             h >= H₀ ? Hybrid_Either : Ed25519
+```
+
+Genesis schema gains three new fields: `pq_flag_day_h0: u64`, `pq_flag_day_h1: u64`, `pq_flag_day_h2: u64`. Defaulted to `u64::MAX` for chains that haven't scheduled migration.
+
+`Block.signing_bytes()` gains a tail field `pq_scheme: u8` bound when non-zero (backward-compat: zero = legacy Ed25519-only chain). The hash of the block (`compute_block_digest`) reflects the scheme choice, so the H₀/H₁/H₂ transition is end-to-end-verifiable.
+
+**Wallet integration (composition with v2.15 + v2.26).** A2 wallet recovery already binds a 32-byte master seed to per-domain Ed25519 keys via HKDF-Expand. Under v2.8 the same master seed derives BOTH an Ed25519 keypair AND a Dilithium-3 keypair per domain, via two HKDF labels:
+
+```
+ed25519_seed = HKDF-Expand(master_seed, "DETERM-DOMAIN-ED25519-v1" ‖ domain, 32 B)
+dilithium_seed = HKDF-Expand(master_seed, "DETERM-DOMAIN-DILITHIUM3-v1" ‖ domain, 32 B)
+```
+
+The 32-byte Dilithium seed feeds into Dilithium's deterministic keygen (per FIPS 204 §5.1). Wallets pre-v2.8-flag-day carry both keys but use only Ed25519; post-flag-day they switch to Dilithium. v2.26 `ROTATE_KEY` is reused to publish each account's Dilithium pubkey on-chain before H₀.
+
+**Threat model.**
+
+| Threat | Pre-v2.8 (Ed25519) | Post-v2.8 (Dilithium-3) | Notes |
+|---|---|---|---|
+| **T-PQ-1: Retroactive forgery.** Adversary archives the chain today; runs Shor against historical Ed25519 sigs once a quantum computer materialises. Forges blocks/txs that look canonical to anyone replaying history. | **Open** — any future quantum adversary can rewrite Determ's entire historical state. | Mitigated for `h ≥ H₂` (PQ-only sigs are quantum-secure). `h < H₂` history remains vulnerable; mitigation requires re-anchoring (see Open Q1). |
+| **T-PQ-2: Live consensus break.** Adversary with quantum capability impersonates committee members by recovering Ed25519 secrets from on-chain pubkeys. Forges arbitrary blocks. | **Open** — once quantum break exists, an adversary controls the chain. | Closed for `h ≥ H₁`: even if the adversary breaks Ed25519, they cannot forge Dilithium sigs. Dilithium reduces to Module-LWE which has no known quantum polynomial-time algorithm. |
+| **T-PQ-3: Identity-layer break.** Adversary recovers wallet private keys from registry pubkeys; impersonates arbitrary domains; signs arbitrary v2.25 DSSO assertions. | **Open** — Determ identities become impersonable post-quantum. | Closed when wallets migrate per v2.8 schedule. v2.26 `ROTATE_KEY` publishes the post-quantum pubkey; old Ed25519 pubkey is retired. |
+| **T-PQ-4: Implementation-bug downgrade.** Adversary exploits a Dilithium reference-impl bug to force fallback to Ed25519. | N/A pre-v2.8. | Mitigated by Hybrid-verify phase (H₁–H₂) requiring BOTH sigs valid on apply. Adversary needs to break Dilithium AND forge Ed25519 simultaneously. |
+| **T-PQ-5: Lattice-cryptanalysis advance.** Future cryptanalysis weakens Module-LWE assumption faster than expected. | N/A pre-v2.8. | Mitigated by SPHINCS+ wallet-root backup (hash-only, no lattice assumption). Emergency-recovery path: rotate to SPHINCS+ via v2.26 if Dilithium is broken before SLH-DSA hash family is. |
+| **T-PQ-6: Side-channel leakage.** Dilithium reference impls have known timing-leak surface (rejection sampling in signing); constant-time impl requires care. | N/A pre-v2.8. | Mitigated by using NIST-reviewed constant-time impl (pqclean or PQClean-ported liboqs). Audit pass required on the vendored impl before flag-day. |
+
+**Effort table.**
+
+| Sub-component | Effort |
+|---|---|
+| pqclean / liboqs vendoring + MSVC build patches | 4-5 days |
+| `crypto::dilithium` wrapper API (parallel to `crypto::ed25519`) | 2-3 days |
+| Hybrid `Block.signing_bytes()` schema + tail-field plumbing | 2-3 days |
+| `Chain::apply_block` phase-aware signature verification | 3-4 days |
+| Genesis-schema PQ-flag-day fields + JSON parser | 1-2 days |
+| Wire-format updates (ContribMsg/BlockSigMsg/HELLO bytes layouts) | 3-4 days |
+| Wallet dual-key derivation + `wallet keyfile dilithium-pubkey` CLI | 2-3 days |
+| v2.26 `ROTATE_KEY` integration for Dilithium key publication | 2-3 days |
+| Hybrid-phase regression tests (test_pq_hybrid_commit.sh, test_pq_hybrid_verify.sh, test_pq_only.sh, test_pq_downgrade_attack.sh) | 3-5 days |
+| SPHINCS+ backup-path wallet integration | 3-5 days |
+| Documentation refresh (PROTOCOL.md §4 + §6.1, SECURITY.md PQ threat-model section, README §3, CLI-REFERENCE.md) | 2-3 days |
+| Audit pass on constant-time Dilithium impl (3rd-party) | 5-10 days |
+| **Total** | **4-6 weeks focused** |
+
+**Composition with v2.10 (threshold signatures).** v2.10's threshold partial sigs are FROST-Ed25519 on curve25519 (matching libsodium's vendored primitives). FROST has no published Dilithium variant as of 2026. Two resolutions:
+
+| Option | Approach | Trade-off |
+|---|---|---|
+| **A: Defer to Dilithium-FROST research** | Wait for Dilithium-FROST or equivalent threshold-Dilithium scheme to mature (active research area; estimated 2027-2028 production-ready). | Cleanest design; preserves threshold-randomness property under PQ. Delays v2.8 by 1-2 years. |
+| **B: PQ for individual sigs, Ed25519-FROST persists for randomness aggregation** (interim) | v2.10 threshold randomness stays on FROST-Ed25519; only block-level + tx-level sigs migrate to Dilithium. The randomness output `R = combine(partial_sig_i)` becomes quantum-forgeable but is consumed only as a hash input — collision-resistance not unforgeability is what matters. | Pragmatic; ships v2.8 on the immediate horizon. Caveat: a quantum adversary could forge `R` for past blocks, which doesn't break canonical-history determinism but does mean replay-derived randomness is no longer information-theoretically unbiased. |
+
+**Resolved choice: Option B with a v3-roadmap commitment to Dilithium-FROST when available.** The reasoning: Determ's randomness is used for committee selection, not for high-value cryptographic-secret derivation. A quantum-forged `R` for past blocks does not enable any current attack; canonical history is fixed by signed blocks, not by their randomness output.
+
+**Dependencies.**
+
+| Depends on | Why |
+|---|---|
+| **v2.26 ROTATE_KEY** | Required for the Dilithium-pubkey-publication path; without it every tx grows by ~1900 B from carrying inline Dilithium pubkeys. |
+| **v2.16 RPC authentication** (shipped) | Internal RPC sigs migrate to Dilithium under the same v2.8 schedule; reuses S-001 plumbing. |
+| **v2.10 threshold randomness** | Composition resolved (Option B) — v2.10 stays on FROST-Ed25519; v2.8 covers all non-threshold sigs. v2.10 should ship before v2.8 to lock in the boundary cleanly. |
+| **v2.15 HD wallet** | Wallet dual-key derivation (Ed25519 + Dilithium HKDF labels) integrates with v2.15's master-seed plumbing. |
+
+**Cross-references.**
+
+| Where | What |
+|---|---|
+| `docs/SECURITY.md` §3 — new SECTION post-quantum threat model | T-PQ-1..6 written up against the migration schedule. |
+| `docs/PROTOCOL.md` §4.1 (`Block.signing_bytes`) | Tail field `pq_scheme` bound when non-zero. |
+| `docs/PROTOCOL.md` §6.1 (committee signatures) | Phase-aware verification + Hybrid mode table. |
+| `docs/proofs/PQReadiness.md` (new) | Formal write-up of T-PQ-1..6 + Option B threshold-randomness analysis. |
+| `docs/V2-DAPP-DESIGN.md` §v2.25 | DSSO assertion sig format gains a `sig_scheme: u8` field. |
+| `roadmap.md` NH4 | v2.8 ships as NH4 prerequisite (military certification path requires NSA CNSA-2 compliance, which is Dilithium-based). |
+
+**Open questions.**
+
+1. **Historical-state re-anchoring.** Once `h ≥ H₂` is PQ-only, snapshots taken at PQ heights are PQ-anchored. But existing `h < H₀` blocks remain Ed25519-signed. Should v2.8 ship a "re-anchor checkpoint" mechanism — committee co-signs a Dilithium attestation that "at height H₂, the canonical state for `h ≤ H₂-1` is `state_root_X`" — so that bootstrapping from a snapshot taken at `h > H₂` doesn't require trusting historical Ed25519 sigs? **Proposed:** ship a `PQ_REANCHOR` tx at height H₂ that records the Dilithium-signed claim. Receivers verifying snapshots from `h > H₂` only need to trust the PQ-signed re-anchor + current PQ sigs.
+
+2. **Hybrid-phase bandwidth amplification.** Hybrid-commit (H₀–H₁) doubles signature surface (both Ed25519 AND Dilithium present). For high-throughput chains this is a substantial network-bandwidth hit during the transition window. **Proposed:** Hybrid window kept short (≤1 epoch = a few hours at production cadence). Document operator expectation to plan upgrade in a tight window rather than running hybrid permanently.
+
+3. **Falcon as an alternative to Dilithium-3?** Falcon's smaller signature size (666–1280 B) is attractive for bandwidth-constrained deployments. But Falcon implementation requires constant-time FFT over floating-point, which is implementation-risk-heavy; the reference impl is fragile to compiler optimisation. **Proposed:** revisit Falcon for a "v2.8a" follow-up once FIPS 206 finalises and a battle-tested constant-time impl exists. Initial v2.8 ships Dilithium only.
+
+4. **SPHINCS+ recovery-path UX.** Wallet users would carry a SPHINCS+ recovery seed alongside the master seed. The recovery path is "rotate to SPHINCS+ via v2.26 if Dilithium is ever broken." But users won't remember a backup seed by then. **Proposed:** SPHINCS+ recovery seed lives in the encrypted wallet keyfile alongside the master seed; v2.17 passphrase-encryption protects both equally. Operators publish a "rotate to SPHINCS+" runbook that users execute if v2.8a flag-day for emergency rotation is ever announced.
+
+5. **Constant-time audit scope.** Vendoring pqclean's Dilithium is a meaningful audit surface — the rejection-sampling loop in Dilithium-sign has historically been timing-leak-prone. **Proposed:** budget a 5-10d 3rd-party audit pass on the vendored impl before flag-day H₀. If audit reveals timing leaks, regenerate the impl from a clean reference; defer flag-day until audit clean.
+
+**Closes:** No open finding today (Ed25519 is fine in 2026). Closes the future-attack class that would otherwise require an emergency hard fork once a cryptographically-relevant quantum computer materialises. **NH4 prerequisite** — CNSA-2 / NSA Suite B Quantum compliance requires Dilithium across all signature surfaces, so v2.8 is on the military-certification critical path. **Estimated timing:** preferably ship before 2030 (NIST PQC migration timeline) and definitely before any credible large-scale quantum hardware announcement.
 
 ---
 
