@@ -316,6 +316,131 @@ std::vector<Hash> reconcile_intersection(
     }
     return std::vector<Hash>(isect.begin(), isect.end());
 }
+
+// ─── Validator-side F2 checks (V21..V26) ──────────────────────────────────
+//
+// These mirror the producer-side primitives but apply them in reverse:
+// the validator receives K contribs + a proposed block, and must verify
+// (a) each contrib's view-roots match its committed view-lists, and
+// (b) the block body's canonical lists match the F2 reconciliation of
+// the contribs' views. Same primitives — compute_view_root /
+// reconcile_union / reconcile_intersection — wired into a single
+// validator-friendly check.
+
+namespace {
+bool is_zero_hash_(const Hash& h) {
+    for (auto byte : h) if (byte != 0) return false;
+    return true;
+}
+} // namespace
+
+bool validate_contrib_view_roots(const ContribMsg& msg, std::string* reason) {
+    auto set_reason = [&](const char* m) { if (reason) *reason = m; };
+
+    // v1-compat short-circuit: all roots zero AND all lists empty is a
+    // valid pre-F2 contrib (no view binding). The caller (validator
+    // height-gate logic) decides whether to ACCEPT this at the current
+    // height; this helper just confirms it's well-formed.
+    bool all_roots_zero = is_zero_hash_(msg.view_eq_root)
+                       && is_zero_hash_(msg.view_abort_root)
+                       && is_zero_hash_(msg.view_inbound_root);
+    bool all_lists_empty = msg.view_eq_list.empty()
+                        && msg.view_abort_list.empty()
+                        && msg.view_inbound_list.empty();
+    if (all_roots_zero && all_lists_empty) return true;
+
+    // V21: bandwidth cap on each list per F2-SPEC.md §Q3.
+    if (msg.view_eq_list.size()      > F2_VIEW_LIST_CAP) {
+        set_reason("V21: view_eq_list exceeds F2_VIEW_LIST_CAP");
+        return false;
+    }
+    if (msg.view_abort_list.size()   > F2_VIEW_LIST_CAP) {
+        set_reason("V21: view_abort_list exceeds F2_VIEW_LIST_CAP");
+        return false;
+    }
+    if (msg.view_inbound_list.size() > F2_VIEW_LIST_CAP) {
+        set_reason("V21: view_inbound_list exceeds F2_VIEW_LIST_CAP");
+        return false;
+    }
+
+    // V22..V24: each root must equal compute_view_root over its list.
+    // Member can't equivocate between Phase-1 commit and Phase-2 reveal:
+    // the root was bound into make_contrib_commitment + signed.
+    if (compute_view_root(msg.view_eq_list)      != msg.view_eq_root) {
+        set_reason("V22: view_eq_root does not match list");
+        return false;
+    }
+    if (compute_view_root(msg.view_abort_list)   != msg.view_abort_root) {
+        set_reason("V23: view_abort_root does not match list");
+        return false;
+    }
+    if (compute_view_root(msg.view_inbound_list) != msg.view_inbound_root) {
+        set_reason("V24: view_inbound_root does not match list");
+        return false;
+    }
+    return true;
+}
+
+F2CanonicalViews derive_canonical_view_lists(
+        const std::vector<ContribMsg>& contribs) {
+    F2CanonicalViews out;
+    std::vector<std::vector<Hash>> eq_views;
+    std::vector<std::vector<Hash>> abort_views;
+    std::vector<std::vector<Hash>> inbound_views;
+    eq_views.reserve(contribs.size());
+    abort_views.reserve(contribs.size());
+    inbound_views.reserve(contribs.size());
+    for (auto& c : contribs) {
+        eq_views.push_back(c.view_eq_list);
+        abort_views.push_back(c.view_abort_list);
+        inbound_views.push_back(c.view_inbound_list);
+    }
+    out.equivocation_events = reconcile_union(eq_views);
+    out.abort_events         = reconcile_union(abort_views);
+    out.inbound_receipts     = reconcile_intersection(inbound_views);
+    return out;
+}
+
+bool validate_view_reconciliation(
+        const std::vector<ContribMsg>& contribs,
+        const std::vector<Hash>& block_eq,
+        const std::vector<Hash>& block_abort,
+        const std::vector<Hash>& block_inbound,
+        std::string* reason) {
+    auto set_reason = [&](const char* m) { if (reason) *reason = m; };
+
+    // V21..V24 per-contrib pass.
+    for (size_t i = 0; i < contribs.size(); ++i) {
+        std::string sub;
+        if (!validate_contrib_view_roots(contribs[i], &sub)) {
+            if (reason) {
+                *reason = "contrib[" + std::to_string(i) + "]: " + sub;
+            }
+            return false;
+        }
+    }
+
+    // V25..V26: canonical reconciliation.
+    auto canonical = derive_canonical_view_lists(contribs);
+
+    // The block's canonical lists are also expected to be in canonical
+    // sorted order (they were produced by the same primitives). A direct
+    // vector comparison suffices.
+    if (block_eq != canonical.equivocation_events) {
+        set_reason("V25: block equivocation_events != reconcile_union");
+        return false;
+    }
+    if (block_abort != canonical.abort_events) {
+        set_reason("V25: block abort_events != reconcile_union");
+        return false;
+    }
+    if (block_inbound != canonical.inbound_receipts) {
+        set_reason("V26: block inbound_receipts != reconcile_intersection");
+        return false;
+    }
+    return true;
+}
+
 // ─── end v2.7 F2 helpers ───────────────────────────────────────────────────
 
 // S-025 closure: compute_tx_root_intersection deleted as unused. The

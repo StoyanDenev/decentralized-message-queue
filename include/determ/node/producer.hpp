@@ -174,6 +174,72 @@ std::vector<Hash> reconcile_union(
 std::vector<Hash> reconcile_intersection(
     const std::vector<std::vector<Hash>>& member_lists);
 
+// === Validator-side F2 checks (V21..V26 per F2-SPEC.md) ===
+//
+// These helpers are pure functions: no consensus-state dependency, so
+// they unit-test in isolation. The eventual validator integration (sub-
+// step 3 wire-in) calls them from the existing per-contrib + per-block
+// V-check pass and emits the appropriate reject reason.
+
+// Per-contrib bandwidth cap on view lists (F2-SPEC.md §Q3). The validator
+// rejects any contrib whose claimed view_X_list exceeds this; bounded
+// gossip cost is part of F2's safety story.
+inline constexpr size_t F2_VIEW_LIST_CAP = 64;
+
+// V21..V24: per-contrib well-formedness + Merkle binding.
+//
+//   V21: each view_X_list.size() <= F2_VIEW_LIST_CAP (bandwidth budget)
+//   V22: view_eq_root      == compute_view_root(view_eq_list)
+//   V23: view_abort_root   == compute_view_root(view_abort_list)
+//   V24: view_inbound_root == compute_view_root(view_inbound_list)
+//
+// Returns true if all four checks pass; sets `*reason` (when non-null)
+// to a short human-readable reject reason on failure. Treats the v1-
+// compat case (all roots zero AND all lists empty) as valid no-op so
+// pre-F2 contribs received at heights below the genesis activation gate
+// trivially pass this check.
+bool validate_contrib_view_roots(const ContribMsg& msg,
+                                  std::string* reason = nullptr);
+
+// Derive the canonical view lists from K contributors' per-field views,
+// per F2-SPEC.md §Q1 reconciliation rules:
+//
+//   equivocation_events : union (one observer suffices)
+//   abort_events        : union (one observer suffices)
+//   inbound_receipts    : intersection (every member must witness)
+//
+// Returns the three reconciled lists in canonical sorted order. The
+// validator compares these to the block body's eq/abort/inbound fields
+// in V25..V26.
+struct F2CanonicalViews {
+    std::vector<Hash> equivocation_events;  // union over contribs
+    std::vector<Hash> abort_events;          // union over contribs
+    std::vector<Hash> inbound_receipts;      // intersection over contribs
+};
+F2CanonicalViews derive_canonical_view_lists(
+    const std::vector<ContribMsg>& contribs);
+
+// V25..V26: composite per-block check — every contrib passes V21..V24
+// AND the canonical lists in the block body match the F2 reconciliation
+// of the contribs' views.
+//
+//   V25: block.equivocation_events == reconcile_union  (across views)
+//   V26: block.abort_events        == reconcile_union  (across views)
+//        block.inbound_receipts    == reconcile_intersection
+//
+// `block_eq` / `block_abort` / `block_inbound` are the canonical lists
+// as proposed by the block assembler. The validator extracts these from
+// the block body (block.equivocation_events.hash_each() etc.) before
+// calling this helper — the helper itself stays Hash-list-shaped so
+// it's wire-format agnostic. Returns true iff all checks pass; sets
+// `*reason` to a diagnostic on failure.
+bool validate_view_reconciliation(
+    const std::vector<ContribMsg>& contribs,
+    const std::vector<Hash>& block_eq,
+    const std::vector<Hash>& block_abort,
+    const std::vector<Hash>& block_inbound,
+    std::string* reason = nullptr);
+
 // ─── end v2.7 F2 helpers ───────────────────────────────────────────────────
 
 // S-025 (deleted in-session): compute_tx_root_intersection was a relic

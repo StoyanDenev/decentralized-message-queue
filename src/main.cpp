@@ -360,17 +360,19 @@ In-process tests (deterministic, no network):
                                               make_abort_claim_message);
                                               domain-separation + sign/verify
   determ test-tx-root                         compute_tx_root union semantics
-)" << R"(  determ test-view-root                       v2.7 F2 foundation: compute_view_root
-                                              + reconcile_union + reconcile_intersection
-                                              (the Phase-1 commit-binding + per-field
-                                              reconciliation primitives per F2-SPEC.md
-                                              §Q1; one observer suffices for union,
-                                              one missing suffices to suppress
-                                              intersection)
-                                              (FA2 censorship resistance:
-                                              {A,B} ∪ {B,C} == {A,B,C}, NOT
-                                              intersection); dedup + order
-                                              invariance
+)" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
+                                              reconciliation primitives + FROST
+                                              verify. compute_view_root +
+                                              reconcile_union +
+                                              reconcile_intersection +
+                                              make_contrib_commitment v1-compat
+                                              short-circuit + DTM-F2-v1 domain
+                                              separator + S-018 wrong-type
+                                              rejection on view lists +
+                                              frost_verify round-trip /
+                                              tamper / wrong-key rejection
+                                              (per F2-SPEC.md §Q1 and
+                                              RFC 9591 §3)
   determ test-genesis                         compute_genesis_hash +
                                               make_genesis_block — chain
                                               identity origin + S-039
@@ -9368,13 +9370,23 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
-    // v2.7 F2 foundation: compute_view_root + reconcile_union +
-    // reconcile_intersection. The three primitives the consensus-layer
-    // view-reconciliation closure needs. compute_view_root pins members
-    // to their view at Phase-1 commit (commit binding); reconcile_union
-    // is the canonical-list builder for equivocation_events + abort_events;
-    // reconcile_intersection is the canonical-list builder for
-    // inbound_receipts. See docs/proofs/F2-SPEC.md Q1.
+    // v2.7 F2 + v2.10 Phase A combined regression: view-reconciliation
+    // primitives plus the first-shipped FROST primitive (frost_verify).
+    //
+    // F2 (compute_view_root + reconcile_union + reconcile_intersection):
+    // the three primitives the consensus-layer view-reconciliation
+    // closure needs. compute_view_root pins members to their view at
+    // Phase-1 commit (commit binding); reconcile_union is the canonical-
+    // list builder for equivocation_events + abort_events; reconcile_-
+    // intersection is the canonical-list builder for inbound_receipts.
+    // See docs/proofs/F2-SPEC.md Q1.
+    //
+    // v2.10 Phase A: frost_verify ships as a thin wrapper over the
+    // existing Ed25519 `verify` from src/crypto/keys.cpp (FROST aggregated
+    // sigs are structurally standard Ed25519 (R||z) sigs per RFC 9591
+    // §3). Round-trip + tamper + wrong-key assertions exercise the real
+    // path; the still-stubbed keygen/sign/aggregate primitives are
+    // PIN-tested to throw their Phase-A diagnostic.
     if (cmd == "test-view-root") {
         using namespace determ;
         using namespace determ::node;
@@ -9715,19 +9727,33 @@ int main(int argc, char** argv) {
                   "ContribMsg from_json: wrong-type view_eq_list throws S-018");
         }
 
-        // === v2.10 Phase A scaffolding: FROST primitives throw cleanly ===
+        // === v2.10 Phase A: FROST primitives ===
         //
-        // All FROST primitives are declared (header `determ/crypto/frost.hpp`)
-        // and stubbed (src/crypto/frost.cpp) to throw `std::logic_error` with
-        // a clear "Phase A not yet implemented" diagnostic. This lets dependent
-        // Phase B (DKG ceremony) + Phase D (threshold-sig integration) code
-        // be drafted against a stable API contract.
+        // FROST primitives are declared in `include/determ/crypto/frost.hpp`
+        // and live in `src/crypto/frost.cpp`. Phase A status as of this
+        // commit:
         //
-        // These assertions PIN the API contract: signatures match the header
-        // declarations; the runtime behavior is "throws not crashes". When
-        // Phase A actually ships (RFC 9591 logic on libsodium), only the
-        // `unimplemented()` calls in frost.cpp are replaced — the test below
-        // gets re-written to exercise real round-trips at that time.
+        //   frost_verify           — SHIPPED: real implementation, delegates
+        //                            to the existing Ed25519 `verify` from
+        //                            src/crypto/keys.cpp (FROST aggregated
+        //                            sigs verify as standard Ed25519 sigs
+        //                            against the group pubkey per RFC 9591
+        //                            §3). Round-trip + tamper + wrong-key
+        //                            assertions land below.
+        //
+        //   frost_keygen_round1    — SCAFFOLDED: throws std::logic_error
+        //   frost_keygen_round2      with "Phase A not yet implemented"
+        //   frost_keygen_finalize    diagnostic until the RFC 9591 H1..H5
+        //   frost_sign_round1        sub-hash + polynomial-eval + Lagrange
+        //   frost_sign_round2        interpolation work lands.
+        //   frost_aggregate
+        //
+        // Shipping frost_verify first lets downstream consumers of v2.10
+        // (block-validation path; FA3 proof regression; threshold-rand
+        // integration in Phase D) be drafted against a working verify
+        // endpoint while the more complex primitives wait for their proper
+        // Phase A implementation. The throw-clean assertions below PIN the
+        // API contract for the still-stubbed primitives.
 
         // 24. frost_keygen_round1 throws with diagnostic.
         {
@@ -9763,17 +9789,58 @@ int main(int argc, char** argv) {
                   "frost_aggregate: scaffolded, throws Phase-A logic_error");
         }
 
-        // 27. frost_verify throws with diagnostic (placeholder; will be
-        //     replaced with crypto_sign_verify_detached delegation in Phase A).
+        // 27. frost_verify: real round-trip. Sign a known message with the
+        //     existing Ed25519 `sign` (this is what `frost_aggregate` will
+        //     produce in Phase A proper — an Ed25519 (R||z) sig over the
+        //     beacon-seed message under the group pubkey). frost_verify
+        //     adapts array types and delegates to `determ::crypto::verify`
+        //     per RFC 9591 §3.
         {
-            bool threw = false;
-            determ::crypto::frost::FrostSig sig{};
+            auto key = determ::crypto::generate_node_key();
+            std::vector<uint8_t> msg = {'h','e','l','l','o',' ','v','2','.','1','0'};
+            auto ed_sig = determ::crypto::sign(key, msg.data(), msg.size());
+
+            // Adapt Signature → FrostSig (same 64 bytes; just type tags).
+            determ::crypto::frost::FrostSig fsig{};
+            for (size_t i = 0; i < ed_sig.size(); ++i) fsig[i] = ed_sig[i];
+
+            // Adapt PubKey → Point (same 32 bytes; same Ed25519 compression).
             determ::crypto::frost::Point gpk{};
-            std::vector<uint8_t> msg;
-            try { (void)determ::crypto::frost::frost_verify(sig, gpk, msg); }
-            catch (const std::logic_error&) { threw = true; }
-            check(threw,
-                  "frost_verify: scaffolded, throws Phase-A logic_error");
+            for (size_t i = 0; i < key.pub.size(); ++i) gpk[i] = key.pub[i];
+
+            // Round-trip: real sig + real pubkey + real msg → must verify.
+            check(determ::crypto::frost::frost_verify(fsig, gpk, msg),
+                  "frost_verify: round-trip with real Ed25519 sig PASSES");
+
+            // Tamper detection: flip one byte in the R portion.
+            auto tampered = fsig;
+            tampered[0] ^= 0x01;
+            check(!determ::crypto::frost::frost_verify(tampered, gpk, msg),
+                  "frost_verify: tampered signature byte REJECTED");
+
+            // Wrong-key detection: a different keypair must reject this sig.
+            auto other_key = determ::crypto::generate_node_key();
+            determ::crypto::frost::Point wrong_gpk{};
+            for (size_t i = 0; i < other_key.pub.size(); ++i)
+                wrong_gpk[i] = other_key.pub[i];
+            check(!determ::crypto::frost::frost_verify(fsig, wrong_gpk, msg),
+                  "frost_verify: wrong group pubkey REJECTED");
+
+            // Tampered message: extending the signed message must reject.
+            auto wrong_msg = msg;
+            wrong_msg.push_back('!');
+            check(!determ::crypto::frost::frost_verify(fsig, gpk, wrong_msg),
+                  "frost_verify: tampered message REJECTED");
+
+            // Empty-message edge case: sign over zero bytes is well-defined
+            // for Ed25519 and must verify under the same key.
+            std::vector<uint8_t> empty;
+            auto empty_sig = determ::crypto::sign(key, empty.data(), empty.size());
+            determ::crypto::frost::FrostSig fsig_empty{};
+            for (size_t i = 0; i < empty_sig.size(); ++i)
+                fsig_empty[i] = empty_sig[i];
+            check(determ::crypto::frost::frost_verify(fsig_empty, gpk, empty),
+                  "frost_verify: empty-message round-trip PASSES");
         }
 
         // 28. Type sizes match RFC 9591 expectations (Ed25519 scalar/point/sig).
@@ -9784,6 +9851,226 @@ int main(int argc, char** argv) {
                   "FROST Point size = 32 bytes (Ed25519 compressed point)");
             check(sizeof(determ::crypto::frost::FrostSig) == 64,
                   "FROST signature size = 64 bytes (Ed25519 R || z)");
+        }
+
+        // === F2 sub-step 3: validator-side V21..V26 helpers ===
+        //
+        // Pure-function helpers the validator integration will call. The
+        // tests below pin contract: well-formed contribs pass, malformed
+        // contribs fail with the expected V-code in the reject reason,
+        // and the composite validate_view_reconciliation correctly fires
+        // V25/V26 on mismatches between contribs' reconciled views and
+        // the block body's canonical lists.
+
+        // Helper to build a contrib with the given lists + properly-
+        // computed view roots so it always passes V22..V24.
+        auto make_bound_contrib = [&](const std::vector<Hash>& eq,
+                                       const std::vector<Hash>& ab,
+                                       const std::vector<Hash>& ib) {
+            ContribMsg m;
+            m.block_index = 7;
+            m.signer      = "test.tld";
+            m.prev_hash   = patterned_hash(0xCC);
+            m.dh_input    = patterned_hash(0x05);
+            m.ed_sig.fill(0x00);
+            m.view_eq_list      = eq;
+            m.view_abort_list   = ab;
+            m.view_inbound_list = ib;
+            m.view_eq_root      = compute_view_root(eq);
+            m.view_abort_root   = compute_view_root(ab);
+            m.view_inbound_root = compute_view_root(ib);
+            return m;
+        };
+
+        // 29. validate_contrib_view_roots: v1-compat empty contrib passes
+        //     (no view fields set → equivalent to pre-F2 contrib).
+        {
+            ContribMsg m;
+            m.block_index = 1;
+            m.signer      = "alice.tld";
+            std::string reason;
+            check(validate_contrib_view_roots(m, &reason),
+                  "validate_contrib_view_roots: empty (v1-compat) PASSES");
+            check(reason.empty(),
+                  "validate_contrib_view_roots: empty reason on PASS");
+        }
+
+        // 30. validate_contrib_view_roots: properly-bound contrib passes V21..V24.
+        {
+            auto m = make_bound_contrib(
+                {patterned_hash(0x01), patterned_hash(0x02)},
+                {patterned_hash(0x10)},
+                {patterned_hash(0x20), patterned_hash(0x21)});
+            check(validate_contrib_view_roots(m),
+                  "validate_contrib_view_roots: bound contrib PASSES V21..V24");
+        }
+
+        // 31. validate_contrib_view_roots: V21 fires on oversized list.
+        {
+            auto m = make_bound_contrib({patterned_hash(0x01)}, {}, {});
+            // Hand-rebuild with > F2_VIEW_LIST_CAP entries.
+            m.view_eq_list.clear();
+            for (size_t i = 0; i < F2_VIEW_LIST_CAP + 1; ++i)
+                m.view_eq_list.push_back(patterned_hash(uint8_t(0x30 + i)));
+            m.view_eq_root = compute_view_root(m.view_eq_list);
+            std::string reason;
+            check(!validate_contrib_view_roots(m, &reason),
+                  "validate_contrib_view_roots: oversized list REJECTED");
+            check(reason.find("V21") != std::string::npos,
+                  "validate_contrib_view_roots: V21 in reject reason");
+        }
+
+        // 32. validate_contrib_view_roots: V22 fires when eq root != list.
+        {
+            auto m = make_bound_contrib(
+                {patterned_hash(0x01)}, {}, {});
+            m.view_eq_root[0] ^= 0xFF;  // corrupt the root
+            std::string reason;
+            check(!validate_contrib_view_roots(m, &reason),
+                  "validate_contrib_view_roots: V22 corrupted eq_root REJECTED");
+            check(reason.find("V22") != std::string::npos,
+                  "validate_contrib_view_roots: V22 in reject reason");
+        }
+
+        // 33. validate_contrib_view_roots: V23 fires when abort root != list.
+        {
+            auto m = make_bound_contrib({}, {patterned_hash(0x10)}, {});
+            m.view_abort_root[5] ^= 0x01;
+            std::string reason;
+            check(!validate_contrib_view_roots(m, &reason),
+                  "validate_contrib_view_roots: V23 corrupted abort_root REJECTED");
+            check(reason.find("V23") != std::string::npos,
+                  "validate_contrib_view_roots: V23 in reject reason");
+        }
+
+        // 34. validate_contrib_view_roots: V24 fires when inbound root != list.
+        {
+            auto m = make_bound_contrib({}, {}, {patterned_hash(0x20)});
+            m.view_inbound_root[31] ^= 0x80;
+            std::string reason;
+            check(!validate_contrib_view_roots(m, &reason),
+                  "validate_contrib_view_roots: V24 corrupted inbound_root REJECTED");
+            check(reason.find("V24") != std::string::npos,
+                  "validate_contrib_view_roots: V24 in reject reason");
+        }
+
+        // 35. derive_canonical_view_lists: empty input → all empty.
+        {
+            auto out = derive_canonical_view_lists({});
+            check(out.equivocation_events.empty()
+                  && out.abort_events.empty()
+                  && out.inbound_receipts.empty(),
+                  "derive_canonical_view_lists: empty input → all empty");
+        }
+
+        // 36. derive_canonical_view_lists: eq + abort use UNION; inbound
+        //     uses INTERSECTION (per F2-SPEC.md §Q1).
+        {
+            auto c1 = make_bound_contrib(
+                {patterned_hash(0xA1)},                       // eq view
+                {patterned_hash(0xB1)},                       // abort view
+                {patterned_hash(0xC1), patterned_hash(0xC2)}); // inbound view
+            auto c2 = make_bound_contrib(
+                {patterned_hash(0xA2)},
+                {patterned_hash(0xB1), patterned_hash(0xB2)}, // overlaps with c1
+                {patterned_hash(0xC2), patterned_hash(0xC3)}); // overlaps in C2 only
+            auto c3 = make_bound_contrib(
+                {patterned_hash(0xA1), patterned_hash(0xA3)},
+                {patterned_hash(0xB2)},
+                {patterned_hash(0xC2)});                       // only C2 in all 3
+
+            auto out = derive_canonical_view_lists({c1, c2, c3});
+
+            // Union of eq: {A1, A2, A3}
+            check(out.equivocation_events.size() == 3,
+                  "derive_canonical: eq union size = 3");
+            // Union of abort: {B1, B2}
+            check(out.abort_events.size() == 2,
+                  "derive_canonical: abort union size = 2");
+            // Intersection of inbound: only C2 appears in all 3 lists.
+            check(out.inbound_receipts.size() == 1
+                  && out.inbound_receipts[0] == patterned_hash(0xC2),
+                  "derive_canonical: inbound intersection = {C2}");
+        }
+
+        // 37. validate_view_reconciliation: matching contribs + matching
+        //     block → passes V25/V26.
+        {
+            auto c1 = make_bound_contrib(
+                {patterned_hash(0xA1)}, {patterned_hash(0xB1)},
+                {patterned_hash(0xC1)});
+            auto c2 = make_bound_contrib(
+                {patterned_hash(0xA2)}, {patterned_hash(0xB1)},
+                {patterned_hash(0xC1)});
+            auto canonical = derive_canonical_view_lists({c1, c2});
+            std::string reason;
+            check(validate_view_reconciliation({c1, c2},
+                      canonical.equivocation_events,
+                      canonical.abort_events,
+                      canonical.inbound_receipts, &reason),
+                  "validate_view_reconciliation: matching block PASSES");
+            check(reason.empty(),
+                  "validate_view_reconciliation: empty reason on PASS");
+        }
+
+        // 38. validate_view_reconciliation: V25 fires when block omits a
+        //     contrib's eq event (one observer suffices — censorship
+        //     resistance per F2-SPEC.md §Q1).
+        {
+            auto c1 = make_bound_contrib(
+                {patterned_hash(0xA1)}, {}, {});
+            auto c2 = make_bound_contrib(
+                {patterned_hash(0xA2)}, {}, {});
+            // Block omits c2's eq view → must fail.
+            std::string reason;
+            check(!validate_view_reconciliation({c1, c2},
+                      /*block_eq=*/   {patterned_hash(0xA1)},  // missing A2
+                      /*block_abort=*/{},
+                      /*block_inbound=*/{}, &reason),
+                  "validate_view_reconciliation: V25 missing eq REJECTED");
+            check(reason.find("V25") != std::string::npos,
+                  "validate_view_reconciliation: V25 in reject reason");
+        }
+
+        // 39. validate_view_reconciliation: V26 fires when block includes a
+        //     receipt only some contribs witnessed (intersection rule —
+        //     one missing suffices to suppress per F2-SPEC.md §Q1).
+        {
+            auto c1 = make_bound_contrib(
+                {}, {},
+                {patterned_hash(0xC1), patterned_hash(0xC2)});
+            auto c2 = make_bound_contrib(
+                {}, {},
+                {patterned_hash(0xC1)});  // c2 missing C2
+            // Intersection = {C1}; block must NOT include C2.
+            std::string reason;
+            check(!validate_view_reconciliation({c1, c2},
+                      /*block_eq=*/   {},
+                      /*block_abort=*/{},
+                      /*block_inbound=*/{patterned_hash(0xC1),
+                                          patterned_hash(0xC2)}, &reason),
+                  "validate_view_reconciliation: V26 extra inbound REJECTED");
+            check(reason.find("V26") != std::string::npos,
+                  "validate_view_reconciliation: V26 in reject reason");
+        }
+
+        // 40. validate_view_reconciliation: per-contrib pass runs FIRST —
+        //     a corrupted contrib root fails before V25/V26 check fires.
+        {
+            auto c1 = make_bound_contrib(
+                {patterned_hash(0xA1)}, {}, {});
+            auto c2 = make_bound_contrib(
+                {patterned_hash(0xA2)}, {}, {});
+            c2.view_eq_root[0] ^= 0xFF;  // corrupt
+            std::string reason;
+            check(!validate_view_reconciliation({c1, c2},
+                      /*block_eq=*/   {patterned_hash(0xA1), patterned_hash(0xA2)},
+                      /*block_abort=*/{},
+                      /*block_inbound=*/{}, &reason),
+                  "validate_view_reconciliation: corrupted contrib REJECTED first");
+            check(reason.find("V22") != std::string::npos
+                  && reason.find("contrib[1]") != std::string::npos,
+                  "validate_view_reconciliation: per-contrib V22 in reason");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

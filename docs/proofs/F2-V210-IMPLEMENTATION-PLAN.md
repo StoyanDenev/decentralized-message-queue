@@ -1,6 +1,6 @@
 # v2.7 F2 + v2.10 implementation plan
 
-**Status:** living plan. Sub-step #0 (F2 reconciliation primitives) shipped in this session; subsequent steps queued.
+**Status:** living plan. Sub-steps 0, 1, 3 (helpers only) shipped — see per-sub-step status tags below. v2.10 Phase A frost_verify also shipped as the first FROST primitive.
 
 **Companion docs:**
 - `F2-SPEC.md` — v2.7 F2 view-reconciliation design (9 open questions resolved)
@@ -34,47 +34,47 @@ Two agents editing any of these in parallel conflict. So the work is serial.
 - Unit test `determ test-view-root` + `tools/test_view_root.sh` (22 assertions across 17 scenarios)
 - File touchpoints: `include/determ/node/producer.hpp` + `src/node/producer.cpp` (additive only; backward-compat preserved)
 
-### Sub-step 1 — Extend ContribMsg (~0.5 day)
+### Sub-step 1 — Extend ContribMsg ✅ shipped
 
-Add three new fields to `ContribMsg`:
+Added three new fields to `ContribMsg`:
 - `Hash view_eq_root` — Merkle root over sender's equivocation_events pool snapshot
 - `Hash view_abort_root` — Merkle root over sender's local abort observations
 - `Hash view_inbound_root` — Merkle root over sender's inbound_receipts pool snapshot
 - Plus the actual lists: `std::vector<Hash> view_eq_list`, `view_abort_list`, `view_inbound_list`
-  - Each capped at 64 entries per F2-SPEC.md Q3 bandwidth budget
+  - Each capped at 64 entries per F2-SPEC.md Q3 bandwidth budget (`F2_VIEW_LIST_CAP`)
 
-JSON serialization: optional fields (defaulted to empty + zero-hash when absent), backward-compat with v1 ContribMsg. Add `json_require<>` for non-optional shape (the three roots are required when at least one list is non-empty).
+JSON serialization shipped: optional fields (defaulted to empty + zero-hash when absent), backward-compat with v1 ContribMsg. S-018 wrong-type rejection on `view_eq_list` etc.
 
-Update `make_contrib_commitment` signature:
-```cpp
-Hash make_contrib_commitment(
-    uint64_t block_index, const Hash& prev_hash,
-    const std::vector<Hash>& sorted_tx_hashes,
-    const Hash& dh_input,
-    const Hash& view_eq_root,        // F2 new
-    const Hash& view_abort_root,     // F2 new
-    const Hash& view_inbound_root);  // F2 new
-```
+`make_contrib_commitment` extended with three optional view-root args (default `Hash{}`). Backward-compat preserved via the **all-zero short-circuit**: when all three view roots are zero, the commit hash is byte-identical to the pre-F2 commit. When any root is non-zero, the `DTM-F2-v1` domain separator is prepended before appending the three roots — prevents v1-sig replay under v2-envelope.
 
-Backward-compat: a separate `make_contrib_commitment_v1` overload preserves the pre-F2 hash for legacy callers; v1 ContribMsg in the mempool/gossip path is rejected at Phase-1 admission once F2 activates (controlled by `v2_7_f2_active_from_height` genesis pin).
-
-### Sub-step 2 — Producer-side population (~0.5 day)
+### Sub-step 2 — Producer-side population (~0.5 day, NOT YET SHIPPED)
 
 In `src/node/producer.cpp`, when assembling Phase-1 contrib:
 - Snapshot the local view of `pending_equivocation_evidence_`, `pending_abort_records_`, `pending_inbound_receipts_` at `tx_commit_ms` timer fire
 - Compute `view_eq_root = compute_view_root(equivocation_event_hashes(snapshot))`, etc.
 - Populate `view_eq_list = sorted(snapshot)` truncated to 64 entries
-- Sign over the extended `make_contrib_commitment`
+- Sign over the extended `make_contrib_commitment` with non-zero roots
 
-### Sub-step 3 — Validator-side V-checks (~1 day)
+Gated by `v2_7_f2_active_from_height` (already plumbed in `GenesisConfig`).
 
-Add new validator checks in `src/node/validator.cpp`:
-- V21: each member's `view_eq_list` matches their `view_eq_root` (Merkle binding)
-- V22: each member's `view_abort_list` matches their `view_abort_root`
-- V23: each member's `view_inbound_list` matches their `view_inbound_root`
-- V24: `block.equivocation_events` equals `reconcile_union(K member view_eq_lists)`
-- V25: `block.abort_events` equals `reconcile_union(K member view_abort_lists)`
-- V26: `block.inbound_receipts` equals `reconcile_intersection(K member view_inbound_lists)`
+### Sub-step 3 — Validator-side V-checks ✅ helpers shipped, wire-in pending
+
+Helpers shipped in `src/node/producer.cpp` as pure unit-testable functions:
+- `validate_contrib_view_roots(msg, *reason)` — per-contrib V21..V24
+- `derive_canonical_view_lists(contribs)` — applies F2-SPEC §Q1 rules (union for eq+abort, intersection for inbound)
+- `validate_view_reconciliation(contribs, block_eq, block_abort, block_inbound, *reason)` — composite V21..V26
+
+V-check assignment as shipped (refined from plan's original):
+- V21: bandwidth cap — each `view_X_list.size() <= F2_VIEW_LIST_CAP` (F2-SPEC §Q3)
+- V22: `view_eq_root == compute_view_root(view_eq_list)` (Merkle binding)
+- V23: `view_abort_root == compute_view_root(view_abort_list)` (Merkle binding)
+- V24: `view_inbound_root == compute_view_root(view_inbound_list)` (Merkle binding)
+- V25: `block.equivocation_events == reconcile_union(K view_eq_lists)` AND `block.abort_events == reconcile_union(K view_abort_lists)`
+- V26: `block.inbound_receipts == reconcile_intersection(K view_inbound_lists)`
+
+v1-compat: if all roots zero AND all lists empty (pre-F2 ContribMsg), the helper returns PASS as a no-op — the validator's height-gate is responsible for deciding whether to accept pre-F2 contribs at the current height.
+
+Wire-in into `src/node/validator.cpp` pending (sub-step 3 completion): call these from the existing V-check pass with `v2_7_f2_active_from_height` gating.
 
 ### Sub-step 4 — Migration gate (~0.5 day)
 
@@ -102,11 +102,16 @@ Genesis-pin `v2_7_f2_active_from_height` (uint64; default 0 = inactive). Once ac
 
 Per `v2.10-DKG-SPEC.md`, the work is decomposed into 6 phases:
 
-### Phase A — FROST-Ed25519 primitives (2-3 days)
+### Phase A — FROST-Ed25519 primitives (2-3 days, **partially shipped**)
 
-Port `frost_keygen_round1` / `frost_keygen_round2` / `frost_sign_round1` / `frost_sign_round2` / `frost_aggregate` from `zcash/frost-ed25519` reference impl onto the already-vendored libsodium primitives.
+Status as of this commit:
+- ✅ `frost_verify` — shipped, real implementation. Delegates to existing Ed25519 `verify` from `src/crypto/keys.cpp` per RFC 9591 §3 (aggregated FROST sigs verify as standard Ed25519 `(R||z)` sigs against the group pubkey). Round-trip + tamper-sig + wrong-key + tamper-msg + empty-msg test assertions in `test-view-root`.
+- ✅ Header `include/determ/crypto/frost.hpp` — full API (types, structs, function signatures) per RFC 9591.
+- 🚧 `frost_keygen_round1` / `frost_keygen_round2` / `frost_keygen_finalize` / `frost_sign_round1` / `frost_sign_round2` / `frost_aggregate` — scaffolded, throw `std::logic_error("v2.10 Phase A not yet implemented")`. PIN-tested.
 
-File touchpoints: new `include/determ/crypto/frost.hpp` + `src/crypto/frost.cpp`.
+Remaining: port the keygen/sign/aggregate primitives from `zcash/frost-ed25519` reference impl onto the already-vendored libsodium primitives (H1..H5 sub-hashes, polynomial eval in F_L, Lagrange interpolation, PoP Schnorr sig). Estimated 2-3 days for an experienced FROST implementer.
+
+File touchpoints: `src/crypto/frost.cpp` only (header API is stable).
 
 ### Phase B — DKG protocol (1-1.5 weeks)
 
