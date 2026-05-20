@@ -1,6 +1,6 @@
-# FB4 — TLA+ model-check transcripts (template)
+# FB6 — TLA+ model-check transcripts (template)
 
-This document records the outcome of running TLC against the three TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
+This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
 
 **Status:** Specifications shipped. Model-check runs **pending TLC installation** in CI. The configurations are small enough that any developer with TLC installed can reproduce results in seconds-to-minutes.
 
@@ -29,6 +29,9 @@ java -jar tla2tools.jar -config Receipts.cfg Receipts.tla
 
 # FB5 — Account-state apply layer
 java -jar tla2tools.jar -config AccountState.cfg AccountState.tla
+
+# FB6 — Snapshot + restore state machine
+java -jar tla2tools.jar -config Snapshot.cfg Snapshot.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -43,6 +46,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | Sharding.tla (2 shards, 2 accts) | ~10³ | < 10s |
 | Receipts.tla (3 IDs, 6 blocks) | ~10² | < 1s |
 | AccountState.tla (3 domains, B=4, N=3, H=4) | ~10⁵ (est.) | < 60s (est., spec written, TLC pending) |
+| Snapshot.tla (3 domains, H=4, B=5) | ~10⁴ (est.) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
@@ -98,6 +102,23 @@ This is the smallest, fastest model — a regression-quality check on the dedup 
 
 Companion prose proof: `docs/proofs/AccountStateInvariants.md` (separately written — that document may not exist in this worktree at the time this spec was committed; the prose track is being assembled in parallel).
 
+### Snapshot.tla → snapshot + restore state machine (S-033 / S-037 / S-038)
+
+| Invariant | Maps to |
+|---|---|
+| `Inv_TypeOK` | shape of `chain` (height, head_hash, balances, nonces, state_root, counters) plus `last_snapshot` / `snapshot_count` |
+| `Inv_SerializeRestoreIdentity` | for every reachable chain c, `RestoreSnapshot(TakeSnapshot(c)) = c` — the round-trip identity that S-037 exposed as a missing namespace bug in the C++ implementation |
+| `Inv_ApplyAfterRestoreEquivalence` | commuting square: `AppendBlock(b)` ≡ `TakeSnapshot ; RestoreSnapshot ; AppendBlock(b)` for any block b appendable to c — guarantees that a snapshot/restore round-trip is transparent to subsequent apply |
+| `Inv_VersionGateSoundness` | restoring a snapshot whose `version` field is not `SnapshotVersion` is a no-op on the chain — matches `Chain::restore_from_snapshot` lines 1706–1709 in `src/chain/chain.cpp` |
+| `Inv_DeterministicSerialization` | `TakeSnapshot(c)` is a pure function of c (no fresh randomness, no time-dependent fields) |
+| `Inv_StateRootBindsApply` | `state_root` field uniquely determines the (balances, counters) tuple — the S-033 (verification gate) + S-038 (producer-side wiring) commitment property |
+| `Prop_EventualSnapshotConsistency` (temporal) | under fairness on `TakeSnapshot`, every reachable chain state is eventually witnessed by a snapshot |
+| `Prop_RestoreIsCorrect` (temporal) | action-level: after any successful `RestoreSnapshot` of a well-formed snapshot, `chain' = last_snapshot.payload` |
+
+**Spec status:** written; TLC verification pending (consistent with the other four specs above). The configuration in `Snapshot.cfg` (3 domains, MaxHeight=4, MaxBalance=5, SnapshotVersion=1) is sized for an interactive TLC run in well under a minute on a single core. Variables modeled: `chain` (a single ChainState record collapsing the 10 state_root namespaces into the safety-critical subset: balances, nonces, accumulated counters), `last_snapshot` (SnapshotRec or sentinel), `snapshot_count` (Nat, drives the temporal liveness property). Actions modeled: `AppendBlock`, `TakeSnapshot`, `RestoreSnapshot`, `RejectMalformedSnapshot` (adversary). The Receipts.tla pattern of pairing the dedup state with an adversary action carries over here — `RejectMalformedSnapshot` is the explicit wrong-version branch that `Inv_VersionGateSoundness` covers structurally.
+
+Companion prose proof: `docs/proofs/SnapshotInvariants.md` (separately tracked; the prose track is being assembled in parallel).
+
 ---
 
 ## Mapping to source code
@@ -120,6 +141,11 @@ Each invariant directly mirrors a structure or check in the C++ implementation:
 | `AccountState.slashed` | `src/chain/chain.cpp` slash apply path (FA6 equivocation slashing) |
 | `AccountState.Transfer` | `src/chain/chain.cpp::apply_transactions` TRANSFER branch (balance debit/credit + nonce increment) |
 | `AccountState.Stake` / `UnstakeStart` / `UnstakeComplete` | STAKE / UNSTAKE branches in `apply_transactions` and the `unlock_height` cascade in `Chain::on_block_applied` |
+| `Snapshot.DoTakeSnapshot` | `src/chain/chain.cpp::Chain::serialize_state` (the version, head_index, head_hash and per-namespace field emitters at lines ~1541–1700) |
+| `Snapshot.DoRestoreSnapshot` | `src/chain/chain.cpp::Chain::restore_from_snapshot` (the version-gate check at lines 1706–1709 + per-namespace field consumers) |
+| `Snapshot.StateRoot` | `chain::Block::compute_state_root` (10 namespaces; the spec collapses them to the safety-critical subset — see Snapshot.tla file header) |
+| `Snapshot.AppendBlock` | `src/chain/chain.cpp::apply_block` + `on_block_applied` (advances height, mutates balances/nonces/counters, recomputes state_root, populates head.state_root via S-038 wiring) |
+| `Snapshot.RejectMalformedSnapshot` | the wrong-version path inside `Chain::restore_from_snapshot` — the `if (v != 1) throw` branch at line 1707 (S-037 / S-018 cousin) |
 
 A reviewer who is suspicious of a particular invariant can:
 
@@ -164,7 +190,7 @@ The natural next step is wiring TLC into CI:
 - name: TLA+ model check
   run: |
     cd docs/proofs/tla
-    for cfg in Consensus Sharding Receipts AccountState; do
+    for cfg in Consensus Sharding Receipts AccountState Snapshot; do
       java -jar tla2tools.jar -config $cfg.cfg $cfg.tla
     done
 ```
@@ -175,7 +201,7 @@ This isn't shipped yet (no Java in the build container). When it lands, this doc
 
 ## Conclusion
 
-The three TLA+ specifications cover the state-machine layer of Determ's safety and atomicity properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
+The five TLA+ specifications cover the state-machine layer of Determ's safety, atomicity, apply-layer, and snapshot/restore properties. Combined with the analytic FA-track proofs (cryptographic layer), they form a two-track verification approach:
 
 - **FA-track**: human-readable, cryptographically tight, unbounded.
 - **FB-track**: machine-checkable, structurally exhaustive over bounded models.
