@@ -12,7 +12,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **149 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **151 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
