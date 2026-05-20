@@ -30,6 +30,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA10 | [Governance.md](Governance.md) | A5 PARAM_CHANGE soundness: no unauthorized mutation, off-whitelist immunity | ✓ |
 | FA11 | [EconomicSoundness.md](EconomicSoundness.md) | A1 unitary supply invariant + E1/E3/E4 preservation | ✓ |
 | FA12 | [WalletRecovery.md](WalletRecovery.md) | A2 wallet recovery: Shamir ITS + AEAD + OPAQUE composition | ✓ |
+| FA-Apply | [AccountStateInvariants.md](AccountStateInvariants.md) | AccountState invariants (I-1..I-6): non-negative balance, nonce monotonicity, balance/stake independence, account auto-creation paths, balance arithmetic channels, A1 contribution | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
@@ -38,7 +39,8 @@ FB-track (TLA+ machine-checkable):
 | FB1 | [tla/Consensus.tla](tla/Consensus.tla) — K-of-K consensus state machine | ✓ spec, model-check pending TLC install |
 | FB2 | [tla/Sharding.tla](tla/Sharding.tla) — multi-shard receipt flow | ✓ spec, model-check pending TLC install |
 | FB3 | [tla/Receipts.tla](tla/Receipts.tla) — receipt dedup state machine | ✓ spec, model-check pending TLC install |
-| FB4 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
+| FB4 | [tla/AccountState.tla](tla/AccountState.tla) — AccountState invariants (companion to FA-Apply) | ✓ spec, model-check pending TLC install |
+| FB5 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
 
 **Closure analyses and specs** (companion documents — not core FA/FB theorems, but cited alongside them):
 
