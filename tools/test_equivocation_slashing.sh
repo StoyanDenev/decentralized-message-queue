@@ -160,11 +160,24 @@ print("  digest_b:",   ev["digest_b"][:16], "...")
 EOF
 
 echo
-echo "=== 7. Submit via RPC against any node (gossips to peers) ==="
+echo "=== 7. Submit via RPC against ALL nodes (avoids gossip-latency race) ==="
+# The chain advances at ~5 blocks/sec under K=M=3 single_test profile (round
+# timers don't fire because K contribs arrive ~instantly on loopback). If
+# evidence is submitted to ONE node and then gossiped to peers, the peers
+# may have already finalized several blocks past the evidence before the
+# gossip arrives — and once a peer's chain_.height() is past the new
+# block's index, the slashing block is dropped as a dup (apply_block_locked
+# L1710 dup-skip). The result: a real consensus fork — submitting node has
+# the slashing block, peers don't. v2.7 F2 closes this at the consensus
+# layer by binding each member's pending-equivocation-evidence view into
+# their Phase-1 commit. Until F2 ships, the test sidesteps the race by
+# submitting evidence to ALL nodes simultaneously, ensuring every node has
+# it in their local pool before the next finalize.
 EV_JSON=$(cat $T/ev.json | python -c "import sys,json; print(json.dumps(json.load(sys.stdin)))")
-RESPONSE=$(python -c "
+for port in 8771 8772 8773; do
+  RESPONSE=$(python -c "
 import socket, json
-s = socket.create_connection(('127.0.0.1', 8772))
+s = socket.create_connection(('127.0.0.1', $port))
 req = json.dumps({'method':'submit_equivocation','params':{'event': $EV_JSON}})
 s.sendall((req + '\n').encode())
 buf = b''
@@ -174,7 +187,8 @@ while b'\n' not in buf:
     buf += chunk
 print(buf.decode().strip())
 ")
-echo "  RPC response: $RESPONSE"
+  echo "  RPC response (port $port): $RESPONSE"
+done
 
 echo
 echo "=== 8. Poll up to 60s for evidence to be baked into a block + applied ==="
