@@ -27,6 +27,8 @@
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
 #include <sodium.h>
 #include <iostream>
 #include <iomanip>
@@ -5417,6 +5419,695 @@ int cmd_derive_shared_secret(int argc, char** argv) {
     return 0;
 }
 
+// ── Helpers shared by encrypt-message / decrypt-message ────────────────────────
+//
+// These build on the X25519 DH machinery already exercised by
+// cmd_derive_shared_secret, then HKDF-SHA-256 the raw DH output into a
+// 32-byte AEAD key. The same code path runs on both sides of the
+// conversation: DH symmetry guarantees A's and B's `shared` bytes match,
+// and the HKDF salt is constructed from BOTH parties' pubkeys in a
+// canonical (byte-lex-min || byte-lex-max) order so the derived AEAD
+// key is identical regardless of which side initiates.
+//
+// Why HKDF + a 32-byte key (rather than feeding the raw X25519 output
+// directly into AES-GCM):
+//   * The raw X25519 output is not uniformly distributed — it's a point
+//     on the curve and small-subgroup attacks can bias certain bits.
+//     RFC 7748 §6.1 explicitly recommends "hashing the secret with
+//     other inputs" before using it as a symmetric key. HKDF-SHA-256
+//     is the canonical NIST SP 800-56C extract-then-expand instance
+//     and what FIPS-mode deployments are expected to use.
+//   * Salt = concat(min(pub_a, pub_b), max(pub_a, pub_b)) binds the
+//     KDF output to BOTH parties' identities. Without salt, an
+//     adversary who somehow recovered the DH secret could replay it
+//     into a different protocol context. With salt, derived keys are
+//     pinned to this exact pair-and-protocol triple.
+//   * Info = "DETERM-CHAT-AEAD-v1" provides explicit domain separation:
+//     even if the same DH secret were reused in a future protocol
+//     (it shouldn't be, but defense-in-depth), the HKDF info tag
+//     ensures derived keys diverge.
+//
+// HKDF-SHA-256 is implemented inline via OpenSSL's HMAC (extract +
+// expand are both HMAC-SHA-256 calls). For a 32-byte output we need
+// exactly ONE expand iteration (HashLen = 32, L <= HashLen), so the
+// implementation collapses to: PRK = HMAC(salt, IKM); OKM = HMAC(PRK,
+// info || 0x01)[:32]. RFC 5869 §2 spells out the construction.
+namespace {
+
+// Run the same X25519 DH dance as cmd_derive_shared_secret but as a
+// reusable function. Inputs are validated by the caller (size, hex
+// shape); this just runs the libsodium calls and returns the 32-byte
+// shared secret. `my_pub_out` echoes back the caller's own Ed25519
+// pubkey (derived from the seed) so the salt computation can compare
+// it against the peer pubkey. On any failure, returns false and
+// scrubs intermediates; the caller emits the appropriate diagnostic.
+bool derive_shared_secret_bytes(
+        const std::vector<uint8_t>&          priv_seed,    // 32B Ed25519 seed
+        const std::vector<uint8_t>&          peer_pub,     // 32B Ed25519 pub
+        std::array<uint8_t, 32>&             shared_out,   // 32B X25519 out
+        std::array<uint8_t, 32>&             my_pub_out,   // 32B Ed25519 pub
+        std::string&                          err_kind_out) {
+    static_assert(crypto_sign_PUBLICKEYBYTES   == 32, "Ed25519 pk size");
+    static_assert(crypto_sign_SECRETKEYBYTES   == 64, "Ed25519 sk size");
+    static_assert(crypto_sign_SEEDBYTES        == 32, "Ed25519 seed size");
+    static_assert(crypto_scalarmult_BYTES      == 32, "X25519 output size");
+    static_assert(crypto_scalarmult_SCALARBYTES== 32, "X25519 scalar size");
+
+    if (priv_seed.size() != 32 || peer_pub.size() != 32) {
+        err_kind_out = "bad-input-size";
+        return false;
+    }
+
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> ed_sk{};
+    if (crypto_sign_ed25519_seed_keypair(my_pub_out.data(), ed_sk.data(),
+                                          priv_seed.data()) != 0) {
+        err_kind_out = "seed-keypair-failed";
+        return false;
+    }
+
+    std::array<uint8_t, crypto_scalarmult_SCALARBYTES> my_x25519_sk{};
+    if (crypto_sign_ed25519_sk_to_curve25519(my_x25519_sk.data(),
+                                              ed_sk.data()) != 0) {
+        sodium_memzero(ed_sk.data(),        ed_sk.size());
+        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        err_kind_out = "sk-to-curve25519-failed";
+        return false;
+    }
+    sodium_memzero(ed_sk.data(), ed_sk.size());
+
+    std::array<uint8_t, crypto_scalarmult_BYTES> peer_x25519_pk{};
+    if (crypto_sign_ed25519_pk_to_curve25519(peer_x25519_pk.data(),
+                                              peer_pub.data()) != 0) {
+        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        err_kind_out = "pk-to-curve25519-failed";
+        return false;
+    }
+
+    if (crypto_scalarmult(shared_out.data(),
+                           my_x25519_sk.data(),
+                           peer_x25519_pk.data()) != 0) {
+        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        sodium_memzero(shared_out.data(),    shared_out.size());
+        err_kind_out = "scalarmult-failed";
+        return false;
+    }
+    sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+    return true;
+}
+
+// HKDF-SHA-256 specialized for L = 32 bytes (= HashLen, so one HMAC
+// expand iteration suffices). RFC 5869 §2 construction:
+//   PRK = HMAC-SHA-256(salt, IKM)
+//   OKM = HMAC-SHA-256(PRK, info || 0x01)
+// Both sides MUST compute the same salt (canonical byte-min || byte-max
+// of the two pubkeys) for the output key to match.
+//
+// Returns true on success; on failure scrubs PRK + key_out and sets
+// err_kind_out for the caller's diagnostic.
+bool hkdf_sha256_32(const std::array<uint8_t, 32>& ikm,
+                      const std::vector<uint8_t>&   salt,
+                      const std::string&             info,
+                      std::array<uint8_t, 32>&       key_out,
+                      std::string&                   err_kind_out) {
+    // Extract: PRK = HMAC-SHA-256(salt, IKM)
+    unsigned char prk[32]{};
+    unsigned int  prk_len = 0;
+    if (!HMAC(EVP_sha256(),
+              salt.data(), static_cast<int>(salt.size()),
+              ikm.data(),  ikm.size(),
+              prk, &prk_len)
+        || prk_len != 32) {
+        sodium_memzero(prk, sizeof(prk));
+        err_kind_out = "hkdf-extract-failed";
+        return false;
+    }
+
+    // Expand: OKM_1 = HMAC-SHA-256(PRK, info || 0x01)
+    //   For L = 32 = HashLen, one block is sufficient.
+    std::vector<uint8_t> expand_msg;
+    expand_msg.reserve(info.size() + 1);
+    for (char c : info) expand_msg.push_back(static_cast<uint8_t>(c));
+    expand_msg.push_back(0x01);
+
+    unsigned char okm[32]{};
+    unsigned int  okm_len = 0;
+    if (!HMAC(EVP_sha256(),
+              prk, prk_len,
+              expand_msg.data(), expand_msg.size(),
+              okm, &okm_len)
+        || okm_len != 32) {
+        sodium_memzero(prk, sizeof(prk));
+        sodium_memzero(okm, sizeof(okm));
+        err_kind_out = "hkdf-expand-failed";
+        return false;
+    }
+    sodium_memzero(prk, sizeof(prk));
+
+    std::memcpy(key_out.data(), okm, 32);
+    sodium_memzero(okm, sizeof(okm));
+    return true;
+}
+
+// Build the canonical HKDF salt: byte-lex-min(pub_a, pub_b) ||
+// byte-lex-max(pub_a, pub_b). Symmetric in the inputs, so A and B
+// derive the same salt regardless of which side initiates.
+std::vector<uint8_t> chat_aead_salt(const std::array<uint8_t, 32>& my_pub,
+                                       const std::vector<uint8_t>&    peer_pub) {
+    std::vector<uint8_t> salt(64);
+    // Compare byte-by-byte (C++ <=> on arrays of unsigned bytes).
+    bool peer_lower = false;
+    for (size_t i = 0; i < 32; ++i) {
+        if (peer_pub[i] < my_pub[i]) { peer_lower = true;  break; }
+        if (peer_pub[i] > my_pub[i]) { peer_lower = false; break; }
+    }
+    const uint8_t* lo = peer_lower ? peer_pub.data() : my_pub.data();
+    const uint8_t* hi = peer_lower ? my_pub.data()   : peer_pub.data();
+    std::memcpy(salt.data(),       lo, 32);
+    std::memcpy(salt.data() + 32,  hi, 32);
+    return salt;
+}
+
+// AES-256-GCM raw encrypt with a caller-supplied 32-byte key and 12-byte
+// nonce. Returns ciphertext_with_tag (plaintext.size() + 16 bytes).
+// On any OpenSSL failure throws std::runtime_error; the caller's
+// outer try/catch surfaces it as exit-1 JSON-error output.
+std::vector<uint8_t> aes256_gcm_encrypt_raw(
+        const std::array<uint8_t, 32>& key,
+        const std::array<uint8_t, 12>& nonce,
+        const std::vector<uint8_t>&     plaintext) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("aead: EVP_CIPHER_CTX_new failed");
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
+                              nullptr, nullptr) != 1
+        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1
+        || EVP_EncryptInit_ex(ctx, nullptr, nullptr,
+                                  key.data(), nonce.data()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: EncryptInit failed");
+    }
+
+    std::vector<uint8_t> out(plaintext.size() + 16);
+    int outlen = 0;
+    if (!plaintext.empty()
+        && EVP_EncryptUpdate(ctx, out.data(), &outlen,
+                                plaintext.data(),
+                                static_cast<int>(plaintext.size())) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: EncryptUpdate failed");
+    }
+    int ct_len = outlen;
+
+    if (EVP_EncryptFinal_ex(ctx, out.data() + ct_len, &outlen) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: EncryptFinal failed");
+    }
+    ct_len += outlen;
+
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16,
+                                out.data() + ct_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: GET_TAG failed");
+    }
+    ct_len += 16;
+    out.resize(static_cast<size_t>(ct_len));
+
+    EVP_CIPHER_CTX_free(ctx);
+    return out;
+}
+
+// AES-256-GCM raw decrypt. Returns std::nullopt on tag-verify failure
+// (tampered ciphertext, wrong key, wrong nonce); throws on hard
+// OpenSSL failure. ciphertext_with_tag must include the trailing
+// 16-byte GCM tag.
+std::optional<std::vector<uint8_t>> aes256_gcm_decrypt_raw(
+        const std::array<uint8_t, 32>&  key,
+        const std::array<uint8_t, 12>&  nonce,
+        const std::vector<uint8_t>&     ciphertext_with_tag) {
+    if (ciphertext_with_tag.size() < 16) return std::nullopt;
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("aead: EVP_CIPHER_CTX_new failed");
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
+                              nullptr, nullptr) != 1
+        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1
+        || EVP_DecryptInit_ex(ctx, nullptr, nullptr,
+                                  key.data(), nonce.data()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: DecryptInit failed");
+    }
+
+    const size_t ct_body_len = ciphertext_with_tag.size() - 16;
+    std::vector<uint8_t> pt(ct_body_len);
+    int outlen = 0;
+    if (ct_body_len > 0
+        && EVP_DecryptUpdate(ctx, pt.data(), &outlen,
+                                ciphertext_with_tag.data(),
+                                static_cast<int>(ct_body_len)) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: DecryptUpdate failed");
+    }
+    int pt_len = outlen;
+
+    // Set expected tag from the trailing 16 bytes of the input buffer.
+    std::vector<uint8_t> tag(ciphertext_with_tag.end() - 16,
+                                ciphertext_with_tag.end());
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, tag.data()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("aead: SET_TAG failed");
+    }
+
+    int rc = EVP_DecryptFinal_ex(ctx, pt.data() + pt_len, &outlen);
+    EVP_CIPHER_CTX_free(ctx);
+    if (rc != 1) return std::nullopt;     // tag verify failed
+    pt_len += outlen;
+    pt.resize(static_cast<size_t>(pt_len));
+    return pt;
+}
+
+// Read an entire file into a byte vector. Returns std::nullopt on
+// open/read failure; the caller emits the appropriate diagnostic.
+// Streaming would matter for large files, but for off-chain message
+// payloads we're firmly in "small enough to fit in RAM" territory.
+std::optional<std::vector<uint8_t>> read_file_bytes(const std::string& path) {
+    std::ifstream in_f(path, std::ios::binary);
+    if (!in_f) return std::nullopt;
+    in_f.seekg(0, std::ios::end);
+    std::streamoff sz = in_f.tellg();
+    if (sz < 0) return std::nullopt;
+    in_f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> out(static_cast<size_t>(sz));
+    if (sz > 0)
+        in_f.read(reinterpret_cast<char*>(out.data()), sz);
+    if (in_f.fail() && !in_f.eof()) return std::nullopt;
+    return out;
+}
+
+// Write a byte vector to a file, truncating any existing content.
+// Returns true on success.
+bool write_file_bytes(const std::string& path,
+                       const std::vector<uint8_t>& data) {
+    std::ofstream out_f(path, std::ios::binary | std::ios::trunc);
+    if (!out_f) return false;
+    if (!data.empty())
+        out_f.write(reinterpret_cast<const char*>(data.data()),
+                    static_cast<std::streamsize>(data.size()));
+    return out_f.good();
+}
+
+// Load the operator's priv_seed + Ed25519 pubkey from a single-account
+// JSON keyfile ({"address":"0x..","privkey_hex":".."}). Used by both
+// encrypt-message and decrypt-message. On any error, prints a
+// diagnostic (prefixed by `cmd_label`) and returns false.
+bool load_priv_keyfile(const std::string& path,
+                         const std::string& cmd_label,
+                         std::vector<uint8_t>& priv_seed_out) {
+    std::ifstream in_f(path);
+    if (!in_f) {
+        std::cerr << cmd_label << ": cannot open --priv-keyfile: "
+                  << path << "\n";
+        return false;
+    }
+    nlohmann::json acc_doc;
+    try { in_f >> acc_doc; }
+    catch (std::exception& e) {
+        std::cerr << cmd_label << ": --priv-keyfile is not valid JSON: "
+                  << e.what() << "\n";
+        return false;
+    }
+    if (!acc_doc.is_object()) {
+        std::cerr << cmd_label << ": --priv-keyfile must be a JSON object "
+                     "{\"address\":..., \"privkey_hex\":...}; got non-object\n";
+        return false;
+    }
+    if (!acc_doc.contains("privkey_hex")
+        || !acc_doc["privkey_hex"].is_string()) {
+        std::cerr << cmd_label << ": --priv-keyfile missing required string "
+                     "field 'privkey_hex'\n";
+        return false;
+    }
+    std::string priv_hex = acc_doc["privkey_hex"].get<std::string>();
+    if (priv_hex.size() != 64) {
+        std::cerr << cmd_label << ": 'privkey_hex' must be 64 hex chars "
+                     "(32-byte Ed25519 priv_seed); got length "
+                  << priv_hex.size() << "\n";
+        return false;
+    }
+    try { priv_seed_out = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << cmd_label << ": 'privkey_hex' is not valid hex: "
+                  << e.what() << "\n";
+        return false;
+    }
+    if (priv_seed_out.size() != 32) {
+        std::cerr << cmd_label << ": 'privkey_hex' decoded length must be 32; "
+                     "got " << priv_seed_out.size() << "\n";
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+// determ-wallet encrypt-message — End-to-end encrypt an off-chain message
+// between two anon-address holders using their X25519-derived shared
+// secret as the AEAD key.
+//
+// Use case:
+//   Alice (priv-keyfile holder) wants to send Bob (--peer-pubkey holder)
+//   an encrypted off-chain message. Each side independently derives the
+//   same 32-byte AEAD key from their own privkey + the other side's
+//   pubkey via X25519 + HKDF-SHA-256 (composition with derive-shared-
+//   secret). The wire format is a tiny binary blob:
+//
+//     [nonce: 12 B] || [ciphertext + 16-byte AES-GCM tag]
+//
+//   Both parties' encrypt/decrypt calls use the SAME AEAD key (HKDF salt
+//   is symmetric in the pubkey pair); the nonce is freshly random per
+//   message so identical plaintexts produce different ciphertexts.
+//
+// CLI:
+//   --priv-keyfile <path>: path to operator's single-account JSON keyfile
+//                          ({"address":"0x..","privkey_hex":".."}, same
+//                          format account-export reads).
+//   --peer-pubkey <hex>:   peer's 32-byte Ed25519 pubkey (64 lowercase
+//                          hex chars; this IS the peer's anon-address
+//                          minus the "0x" prefix).
+//   --in <path>:           plaintext input file (read in binary, byte-
+//                          for-byte).
+//   --out <path>:          ciphertext output file (binary).
+//
+// Output (stdout, one line):
+//   {"status":"ok","out":"<path>","ciphertext_bytes":<N>}
+//
+// Exit codes:
+//   0  success
+//   1  args / IO / parse / hex-decode / shape / OpenSSL failure
+//   2  crypto failure (curve25519 conversion or scalarmult returned
+//      non-zero — peer pubkey malformed or in small subgroup)
+int cmd_encrypt_message(int argc, char** argv) {
+    std::string priv_keyfile, peer_pubkey_hex, in_path, out_path;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv-keyfile" && i + 1 < argc) priv_keyfile    = argv[++i];
+        else if (a == "--peer-pubkey"  && i + 1 < argc) peer_pubkey_hex = argv[++i];
+        else if (a == "--in"           && i + 1 < argc) in_path         = argv[++i];
+        else if (a == "--out"          && i + 1 < argc) out_path        = argv[++i];
+        else {
+            std::cerr << "encrypt-message: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet encrypt-message "
+                         "--priv-keyfile <path> --peer-pubkey <hex> "
+                         "--in <plaintext> --out <ciphertext>\n";
+            return 1;
+        }
+    }
+    if (priv_keyfile.empty() || peer_pubkey_hex.empty()
+        || in_path.empty() || out_path.empty()) {
+        std::cerr << "Usage: determ-wallet encrypt-message "
+                     "--priv-keyfile <path> --peer-pubkey <hex> "
+                     "--in <plaintext> --out <ciphertext>\n"
+                     "\n"
+                     "  Encrypts <plaintext> under a 32-byte AEAD key derived\n"
+                     "  via X25519 + HKDF-SHA-256 from the priv-keyfile holder\n"
+                     "  and the --peer-pubkey peer. Output file format:\n"
+                     "  nonce(12) || ciphertext_with_gcm_tag(N+16).\n";
+        return 1;
+    }
+
+    // ── Load priv keyfile ──────────────────────────────────────────────────
+    std::vector<uint8_t> priv_seed;
+    if (!load_priv_keyfile(priv_keyfile, "encrypt-message", priv_seed))
+        return 1;
+
+    // ── Parse peer pubkey hex ──────────────────────────────────────────────
+    if (peer_pubkey_hex.size() != 64) {
+        std::cerr << "encrypt-message: --peer-pubkey must be 64 hex chars "
+                     "(32-byte Ed25519 pubkey); got length "
+                  << peer_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> peer_pub_bytes;
+    try { peer_pub_bytes = from_hex(peer_pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "encrypt-message: --peer-pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (peer_pub_bytes.size() != 32) {
+        std::cerr << "encrypt-message: --peer-pubkey decoded length must "
+                     "be 32; got " << peer_pub_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── Read plaintext ─────────────────────────────────────────────────────
+    auto pt_opt = read_file_bytes(in_path);
+    if (!pt_opt) {
+        std::cerr << "encrypt-message: cannot read --in: " << in_path << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> plaintext = std::move(*pt_opt);
+
+    // ── Init libsodium + derive X25519 shared secret ──────────────────────
+    if (!primitives::init_libsodium()) {
+        std::cerr << "encrypt-message: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, 32> shared{};
+    std::array<uint8_t, 32> my_pub{};
+    std::string err_kind;
+    if (!derive_shared_secret_bytes(priv_seed, peer_pub_bytes,
+                                      shared, my_pub, err_kind)) {
+        sodium_memzero(shared.data(), shared.size());
+        std::cerr << "encrypt-message: X25519 derivation failed ("
+                  << err_kind << ")\n";
+        return 2;
+    }
+
+    // ── HKDF-SHA-256 -> 32-byte AEAD key ──────────────────────────────────
+    // Salt = byte-min(my_pub, peer_pub) || byte-max(my_pub, peer_pub).
+    // Info = "DETERM-CHAT-AEAD-v1" (domain separation tag).
+    std::vector<uint8_t> salt = chat_aead_salt(my_pub, peer_pub_bytes);
+    std::array<uint8_t, 32> aead_key{};
+    if (!hkdf_sha256_32(shared, salt,
+                         std::string("DETERM-CHAT-AEAD-v1"),
+                         aead_key, err_kind)) {
+        sodium_memzero(shared.data(),    shared.size());
+        sodium_memzero(aead_key.data(),  aead_key.size());
+        std::cerr << "encrypt-message: HKDF derivation failed ("
+                  << err_kind << ")\n";
+        return 1;
+    }
+    sodium_memzero(shared.data(), shared.size());
+
+    // ── Generate fresh random 12-byte nonce ────────────────────────────────
+    // Fresh nonce per message: identical plaintexts produce different
+    // ciphertexts, and nonce-reuse-with-same-key (catastrophic for GCM)
+    // is impossible by construction.
+    std::array<uint8_t, 12> nonce{};
+    if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
+        sodium_memzero(aead_key.data(), aead_key.size());
+        std::cerr << "encrypt-message: RAND_bytes failed for nonce\n";
+        return 1;
+    }
+
+    // ── AES-256-GCM encrypt ───────────────────────────────────────────────
+    std::vector<uint8_t> ciphertext;
+    try {
+        ciphertext = aes256_gcm_encrypt_raw(aead_key, nonce, plaintext);
+    } catch (std::exception& e) {
+        sodium_memzero(aead_key.data(), aead_key.size());
+        std::cerr << "encrypt-message: " << e.what() << "\n";
+        return 1;
+    }
+    sodium_memzero(aead_key.data(), aead_key.size());
+
+    // ── Compose wire format: nonce(12) || ciphertext_with_tag ─────────────
+    std::vector<uint8_t> wire;
+    wire.reserve(nonce.size() + ciphertext.size());
+    wire.insert(wire.end(), nonce.begin(), nonce.end());
+    wire.insert(wire.end(), ciphertext.begin(), ciphertext.end());
+
+    if (!write_file_bytes(out_path, wire)) {
+        std::cerr << "encrypt-message: cannot write --out: " << out_path << "\n";
+        return 1;
+    }
+
+    nlohmann::json out_doc = {
+        {"status",           "ok"},
+        {"out",              out_path},
+        {"ciphertext_bytes", static_cast<int64_t>(wire.size())},
+    };
+    std::cout << out_doc.dump() << "\n";
+    return 0;
+}
+
+// determ-wallet decrypt-message — Inverse of encrypt-message. Reads a
+// nonce(12)||ciphertext_with_tag file produced by encrypt-message,
+// derives the same 32-byte AEAD key via X25519 + HKDF-SHA-256
+// (symmetric in the pubkey pair, so either side decrypts), and writes
+// the plaintext to --out.
+//
+// CLI:
+//   --priv-keyfile <path>: operator's single-account JSON keyfile.
+//   --peer-pubkey <hex>:   peer's 32-byte Ed25519 pubkey.
+//   --in <path>:           ciphertext input file (nonce(12)||CT+tag).
+//   --out <path>:          plaintext output file (binary).
+//
+// Output (stdout, one line):
+//   success: {"status":"ok","out":"<path>","plaintext_bytes":<N>}
+//   tamper:  {"status":"error","reason":"aead_tag_verify_failed"}
+//
+// Exit codes:
+//   0  success
+//   1  args / IO / parse error
+//   2  AEAD tag-verify failed (tampered ciphertext, wrong key, wrong
+//      nonce, or wrong peer pubkey). Also covers X25519 cryptographic
+//      failures (curve25519 conversion / scalarmult).
+int cmd_decrypt_message(int argc, char** argv) {
+    std::string priv_keyfile, peer_pubkey_hex, in_path, out_path;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv-keyfile" && i + 1 < argc) priv_keyfile    = argv[++i];
+        else if (a == "--peer-pubkey"  && i + 1 < argc) peer_pubkey_hex = argv[++i];
+        else if (a == "--in"           && i + 1 < argc) in_path         = argv[++i];
+        else if (a == "--out"          && i + 1 < argc) out_path        = argv[++i];
+        else {
+            std::cerr << "decrypt-message: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet decrypt-message "
+                         "--priv-keyfile <path> --peer-pubkey <hex> "
+                         "--in <ciphertext> --out <plaintext>\n";
+            return 1;
+        }
+    }
+    if (priv_keyfile.empty() || peer_pubkey_hex.empty()
+        || in_path.empty() || out_path.empty()) {
+        std::cerr << "Usage: determ-wallet decrypt-message "
+                     "--priv-keyfile <path> --peer-pubkey <hex> "
+                     "--in <ciphertext> --out <plaintext>\n"
+                     "\n"
+                     "  Decrypts a nonce(12)||CT+tag blob written by\n"
+                     "  encrypt-message. The AEAD key derives via X25519 +\n"
+                     "  HKDF-SHA-256 (symmetric in the pubkey pair). On tag-\n"
+                     "  verify failure (tampering / wrong key / wrong peer)\n"
+                     "  emits {\"status\":\"error\",\"reason\":\n"
+                     "  \"aead_tag_verify_failed\"} and exits 2.\n";
+        return 1;
+    }
+
+    // ── Load priv keyfile ──────────────────────────────────────────────────
+    std::vector<uint8_t> priv_seed;
+    if (!load_priv_keyfile(priv_keyfile, "decrypt-message", priv_seed))
+        return 1;
+
+    // ── Parse peer pubkey hex ──────────────────────────────────────────────
+    if (peer_pubkey_hex.size() != 64) {
+        std::cerr << "decrypt-message: --peer-pubkey must be 64 hex chars "
+                     "(32-byte Ed25519 pubkey); got length "
+                  << peer_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> peer_pub_bytes;
+    try { peer_pub_bytes = from_hex(peer_pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "decrypt-message: --peer-pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (peer_pub_bytes.size() != 32) {
+        std::cerr << "decrypt-message: --peer-pubkey decoded length must "
+                     "be 32; got " << peer_pub_bytes.size() << "\n";
+        return 1;
+    }
+
+    // ── Read ciphertext blob ──────────────────────────────────────────────
+    auto ct_opt = read_file_bytes(in_path);
+    if (!ct_opt) {
+        std::cerr << "decrypt-message: cannot read --in: " << in_path << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> wire = std::move(*ct_opt);
+
+    // Minimum size: 12 (nonce) + 16 (tag) = 28 bytes. Anything smaller
+    // is definitionally malformed.
+    if (wire.size() < 28) {
+        std::cerr << "decrypt-message: ciphertext too short (" << wire.size()
+                  << " bytes); minimum is 28 (12-byte nonce + 16-byte tag)\n";
+        return 1;
+    }
+    std::array<uint8_t, 12> nonce{};
+    std::memcpy(nonce.data(), wire.data(), 12);
+    std::vector<uint8_t> ct_with_tag(wire.begin() + 12, wire.end());
+
+    // ── Init libsodium + derive X25519 shared secret ──────────────────────
+    if (!primitives::init_libsodium()) {
+        std::cerr << "decrypt-message: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, 32> shared{};
+    std::array<uint8_t, 32> my_pub{};
+    std::string err_kind;
+    if (!derive_shared_secret_bytes(priv_seed, peer_pub_bytes,
+                                      shared, my_pub, err_kind)) {
+        sodium_memzero(shared.data(), shared.size());
+        std::cerr << "decrypt-message: X25519 derivation failed ("
+                  << err_kind << ")\n";
+        return 2;
+    }
+
+    // ── HKDF-SHA-256 -> 32-byte AEAD key ──────────────────────────────────
+    std::vector<uint8_t> salt = chat_aead_salt(my_pub, peer_pub_bytes);
+    std::array<uint8_t, 32> aead_key{};
+    if (!hkdf_sha256_32(shared, salt,
+                         std::string("DETERM-CHAT-AEAD-v1"),
+                         aead_key, err_kind)) {
+        sodium_memzero(shared.data(),    shared.size());
+        sodium_memzero(aead_key.data(),  aead_key.size());
+        std::cerr << "decrypt-message: HKDF derivation failed ("
+                  << err_kind << ")\n";
+        return 1;
+    }
+    sodium_memzero(shared.data(), shared.size());
+
+    // ── AES-256-GCM decrypt (tag-verify or fail closed) ───────────────────
+    std::optional<std::vector<uint8_t>> pt_opt;
+    try {
+        pt_opt = aes256_gcm_decrypt_raw(aead_key, nonce, ct_with_tag);
+    } catch (std::exception& e) {
+        sodium_memzero(aead_key.data(), aead_key.size());
+        std::cerr << "decrypt-message: " << e.what() << "\n";
+        return 1;
+    }
+    sodium_memzero(aead_key.data(), aead_key.size());
+
+    if (!pt_opt) {
+        // Tag-verify failure — emit the canonical error JSON and exit 2.
+        // Exit code 2 is the "auth-style alert" convention this codebase
+        // uses for cryptographic-verification failures (see message-
+        // verify and tx-sign-verify). Distinct from exit 1 (operator
+        // error) so callers can branch on it.
+        nlohmann::json err_doc = {
+            {"status", "error"},
+            {"reason", "aead_tag_verify_failed"},
+        };
+        std::cout << err_doc.dump() << "\n";
+        return 2;
+    }
+
+    if (!write_file_bytes(out_path, *pt_opt)) {
+        std::cerr << "decrypt-message: cannot write --out: " << out_path << "\n";
+        return 1;
+    }
+
+    nlohmann::json out_doc = {
+        {"status",          "ok"},
+        {"out",             out_path},
+        {"plaintext_bytes", static_cast<int64_t>(pt_opt->size())},
+    };
+    std::cout << out_doc.dump() << "\n";
+    return 0;
+}
+
 // determ-wallet tx-sign-verify — Verify the Ed25519 signature on a
 // Transaction JSON file using the chain's CANONICAL signing_bytes scheme
 // (NOT the off-chain domain-separated SHA-256 commitment used by
@@ -5903,6 +6594,32 @@ void print_usage() {
         "                                             (sk_A, pk_B) and B using (sk_B, pk_A) yield\n"
         "                                             byte-identical secrets. Output:\n"
         "                                             {\"shared_secret_hex\":\"...\"} one-line JSON.\n"
+        "  encrypt-message --priv-keyfile <path> --peer-pubkey <hex>\n"
+        "                  --in <plaintext> --out <ciphertext>\n"
+        "                                             End-to-end encrypt an off-chain message\n"
+        "                                             between two anon-address holders. Builds\n"
+        "                                             on derive-shared-secret: same X25519 DH\n"
+        "                                             then HKDF-SHA-256 (info=\"DETERM-CHAT-\n"
+        "                                             AEAD-v1\"; salt=byte-min(pubA,pubB)||byte-\n"
+        "                                             max(pubA,pubB)) ⇒ 32-byte AEAD key.\n"
+        "                                             Wire format: nonce(12)||CT+gcm_tag(N+16).\n"
+        "                                             Both sides derive the same key (HKDF salt\n"
+        "                                             is symmetric in the pubkey pair). Fresh\n"
+        "                                             12-byte random nonce per message ⇒ same\n"
+        "                                             plaintext gives different ciphertexts.\n"
+        "                                             Output: {\"status\":\"ok\",\"out\":...,\n"
+        "                                             \"ciphertext_bytes\":N} one-line JSON.\n"
+        "  decrypt-message --priv-keyfile <path> --peer-pubkey <hex>\n"
+        "                  --in <ciphertext> --out <plaintext>\n"
+        "                                             Inverse of encrypt-message. Reads the\n"
+        "                                             nonce(12)||CT+tag blob, re-derives the\n"
+        "                                             same 32-byte AEAD key, AES-256-GCM\n"
+        "                                             verifies + decrypts. On tag-verify failure\n"
+        "                                             (tampering, wrong key, wrong peer pubkey)\n"
+        "                                             emits {\"status\":\"error\",\"reason\":\n"
+        "                                             \"aead_tag_verify_failed\"} and exits 2.\n"
+        "                                             On success: {\"status\":\"ok\",\"out\":...,\n"
+        "                                             \"plaintext_bytes\":N}.\n"
         "  tx-sign-verify --tx <file> --pubkey <hex> [--json]\n"
         "                                             Verify the Ed25519 signature on a Transaction\n"
         "                                             JSON file using the chain's canonical\n"
@@ -5964,6 +6681,8 @@ int main(int argc, char** argv) {
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
     if (cmd == "derive-shared-secret") return cmd_derive_shared_secret(argc - 2, argv + 2);
+    if (cmd == "encrypt-message") return cmd_encrypt_message(argc - 2, argv + 2);
+    if (cmd == "decrypt-message") return cmd_decrypt_message(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
