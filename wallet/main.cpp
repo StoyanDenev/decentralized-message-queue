@@ -26,6 +26,8 @@
 #include "opaque_adapter.hpp"
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <sodium.h>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -1892,6 +1894,370 @@ int cmd_opaque_handshake(int argc, char** argv) {
     return 1;
 }
 
+// Read a `--message <spec>` arg. The spec is either an inline string or
+// "file:<path>" to slurp the file's bytes verbatim (binary-safe — no UTF-8
+// validation, no newline stripping). Returns false on file-open failure.
+//
+// Why support file input: message-signing workflows often deal with
+// content too large for a command-line arg (full attestation JSON, signed
+// release manifest, large SIWE challenge bodies) or that contains shell-
+// hostile bytes (NUL, embedded quotes). The `file:` prefix lets operators
+// keep the message verbatim in a file and pass the path; the file's
+// content is hashed byte-for-byte exactly as it sits on disk.
+//
+// Newline handling: NO trimming. If an operator wrote the message with
+// `echo "foo" > msg.txt`, the trailing '\n' is part of the signed
+// content. This is by design — domain-separation only guarantees no
+// cross-domain replay; within a domain, callers control the canonical
+// byte form.
+bool read_message_spec(const std::string& spec,
+                       std::vector<uint8_t>& out_bytes,
+                       std::string& err) {
+    constexpr const char* kFilePrefix = "file:";
+    if (spec.size() >= 5 && spec.compare(0, 5, kFilePrefix) == 0) {
+        std::string path = spec.substr(5);
+        if (path.empty()) {
+            err = "--message file: prefix supplied without a path";
+            return false;
+        }
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            err = std::string("cannot open --message file: ") + path;
+            return false;
+        }
+        std::vector<uint8_t> buf(
+            (std::istreambuf_iterator<char>(f)),
+             std::istreambuf_iterator<char>());
+        out_bytes = std::move(buf);
+        return true;
+    }
+    // Inline string. Bytes are exactly the literal arg passed by the shell.
+    out_bytes.assign(spec.begin(), spec.end());
+    return true;
+}
+
+// Compute the 32-byte SHA-256 commitment that gets signed.
+//
+// Domain-separation: the hashed pre-image is `domain_tag_bytes || message_bytes`.
+// The domain_tag is UTF-8 bytes of the arg as-is (the operator picks the
+// canonical form; we don't normalize). Concatenation, not HMAC, because:
+//   * the goal is replay-prevention across domains, not authentication of
+//     the tag itself (we already authenticate via the Ed25519 signature
+//     over the entire pre-image);
+//   * SHA-256(tag || msg) is collision-equivalent to (tag, msg) at the
+//     security level of SHA-256 — second-preimage resistance dominates;
+//   * the protocol-wide convention is SHA-256 + concatenation (matches
+//     the `signing_bytes` pattern in PROTOCOL.md).
+//
+// Length-extension is not a concern here: we never expose the SHA-256
+// state, only its final 32-byte digest fed into Ed25519, which is
+// itself a hash-and-sign scheme — no raw SHA-256 output is ever
+// returned to a third party who could then forge a longer pre-image.
+std::array<uint8_t, 32> domain_commit(const std::string& domain_tag,
+                                      const std::vector<uint8_t>& msg) {
+    std::vector<uint8_t> buf;
+    buf.reserve(domain_tag.size() + msg.size());
+    buf.insert(buf.end(), domain_tag.begin(), domain_tag.end());
+    buf.insert(buf.end(), msg.begin(),        msg.end());
+    std::array<uint8_t, 32> out{};
+    SHA256(buf.data(), buf.size(), out.data());
+    return out;
+}
+
+// determ-wallet message-sign — Sign an arbitrary message with an Ed25519
+// private key, using a domain-separated SHA-256 commitment as the
+// signed pre-image.
+//
+// Use cases (all OFF-CHAIN — this CLI does NOT produce a transaction):
+//   * SIWE-style ("Sign-In With Ethereum") auth challenges, where a
+//     web/dapp service issues a nonce and the wallet signs it to prove
+//     control of an account address.
+//   * Off-chain attestations (operator-signed announcements, version
+//     manifests, release artifacts) where a verifier wants to confirm
+//     a specific party endorsed a specific message.
+//   * Pre-image binding for ZK proofs or commit-reveal protocols where
+//     the signed value is later revealed in another protocol step.
+//
+// Domain separation rationale:
+//   A raw Ed25519 signature over `H(message)` would be replay-vulnerable
+//   across context: a signature collected for "I authorize transfer X"
+//   would validate as "I attest to chain state Y" if both contexts share
+//   the same hash. Prepending an unambiguous domain tag before hashing
+//   ensures the same message bytes in different domains produce different
+//   commitments. Operators pick the tag (e.g. "siwe", "attestation",
+//   "op-announcement"); verifiers MUST agree on the tag a priori.
+//
+// Signed pre-image: SHA-256(domain_tag_utf8_bytes || message_bytes)
+// Output: 64-byte Ed25519 signature, hex-encoded (128 chars).
+//
+// CLI:
+//   --priv <hex>:       32-byte Ed25519 seed (64 hex chars). Matches the
+//                       `privkey_hex` field emitted by `account create`
+//                       or `account-create-batch`.
+//   --message <spec>:   inline string OR "file:<path>" to read bytes from
+//                       a file. File mode is binary-safe (no newline strip).
+//   --domain-tag <tag>: arbitrary domain-separation tag (typically a short
+//                       ASCII slug). Required — there's no sensible default.
+//   --json:             emit a JSON document instead of human lines.
+//
+// Output:
+//   Human mode (default):
+//     signature_hex:    <128 hex chars>
+//     pubkey_hex:       <64 hex chars derived from the priv seed>
+//     message_hash_hex: <64 hex chars = SHA-256 commitment>
+//     domain_tag:       <tag verbatim>
+//   --json mode:
+//     {"signature_hex": "...", "pubkey_hex": "...",
+//      "message_hash_hex": "...", "domain_tag": "..."}
+//
+// Exit codes:
+//   0  signature emitted
+//   1  args / parse / libsodium-init error
+int cmd_message_sign(int argc, char** argv) {
+    std::string priv_hex, message_spec, domain_tag;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv"       && i + 1 < argc) priv_hex     = argv[++i];
+        else if (a == "--message"    && i + 1 < argc) message_spec = argv[++i];
+        else if (a == "--domain-tag" && i + 1 < argc) domain_tag   = argv[++i];
+        else if (a == "--json")                       json_out     = true;
+        else {
+            std::cerr << "message-sign: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet message-sign --priv <hex> "
+                         "--message <string|file:path> --domain-tag <tag> [--json]\n";
+            return 1;
+        }
+    }
+    if (priv_hex.empty() || message_spec.empty() || domain_tag.empty()) {
+        std::cerr << "Usage: determ-wallet message-sign --priv <hex> "
+                     "--message <string|file:path> --domain-tag <tag> [--json]\n"
+                     "\n"
+                     "  Signs message with an Ed25519 private key using a\n"
+                     "  domain-separated SHA-256 commitment as the signed\n"
+                     "  pre-image: H = SHA-256(domain_tag || message_bytes).\n"
+                     "  This is OFF-CHAIN signing — does not produce a tx.\n";
+        return 1;
+    }
+
+    // Decode the priv seed (must be exactly 32 bytes = 64 hex chars).
+    if (priv_hex.size() != 64) {
+        std::cerr << "message-sign: --priv must be exactly 64 hex chars "
+                     "(32-byte Ed25519 seed); got " << priv_hex.size() << " chars\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_seed;
+    try { priv_seed = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "message-sign: invalid --priv hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (priv_seed.size() != 32) {
+        std::cerr << "message-sign: --priv decoded to " << priv_seed.size()
+                  << " bytes (expected 32)\n";
+        return 1;
+    }
+
+    // Load the message bytes (inline or file).
+    std::vector<uint8_t> msg;
+    {
+        std::string err;
+        if (!read_message_spec(message_spec, msg, err)) {
+            std::cerr << "message-sign: " << err << "\n";
+            return 1;
+        }
+    }
+    // Empty message is permitted (an attestation might sign just the
+    // domain tag itself — a "I am present in domain X" beacon).
+
+    // Init libsodium (idempotent; safe to call repeatedly).
+    if (!primitives::init_libsodium()) {
+        std::cerr << "message-sign: libsodium init failed\n";
+        return 1;
+    }
+
+    // Derive the Ed25519 keypair from the 32-byte seed. libsodium's
+    // crypto_sign_detached needs the 64-byte secret key (seed || pubkey);
+    // crypto_sign_seed_keypair fills both pubkey and sk from the seed.
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    static_assert(crypto_sign_PUBLICKEYBYTES == 32, "Ed25519 pk size mismatch");
+    static_assert(crypto_sign_SECRETKEYBYTES == 64, "Ed25519 sk size mismatch");
+    static_assert(crypto_sign_SEEDBYTES      == 32, "Ed25519 seed size mismatch");
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
+        std::cerr << "message-sign: crypto_sign_seed_keypair failed\n";
+        return 1;
+    }
+
+    // Compute the domain-separated commitment.
+    auto hash = domain_commit(domain_tag, msg);
+
+    // Sign the commitment with crypto_sign_detached (deterministic per
+    // RFC 8032 — no nonce input, same priv+msg always yields same sig).
+    std::array<uint8_t, crypto_sign_BYTES> sig{};
+    static_assert(crypto_sign_BYTES == 64, "Ed25519 sig size mismatch");
+    unsigned long long sig_len = 0;
+    if (crypto_sign_detached(sig.data(), &sig_len,
+                              hash.data(), hash.size(),
+                              sk.data()) != 0) {
+        std::cerr << "message-sign: crypto_sign_detached failed\n";
+        return 1;
+    }
+    if (sig_len != crypto_sign_BYTES) {
+        std::cerr << "message-sign: unexpected sig length " << sig_len << "\n";
+        return 1;
+    }
+
+    // Zero the secret-key buffer before returning. The seed remains in
+    // priv_seed (operator-supplied), but the libsodium-derived sk
+    // contains the seed concatenated with the pubkey; sodium_memzero
+    // is the libsodium-blessed scrub.
+    sodium_memzero(sk.data(), sk.size());
+
+    if (json_out) {
+        nlohmann::json r;
+        r["signature_hex"]    = to_hex(sig);
+        r["pubkey_hex"]       = to_hex(pub);
+        r["message_hash_hex"] = to_hex(hash);
+        r["domain_tag"]       = domain_tag;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "signature_hex:    " << to_hex(sig)  << "\n";
+        std::cout << "pubkey_hex:       " << to_hex(pub)  << "\n";
+        std::cout << "message_hash_hex: " << to_hex(hash) << "\n";
+        std::cout << "domain_tag:       " << domain_tag   << "\n";
+    }
+    return 0;
+}
+
+// determ-wallet message-verify — Verify an Ed25519 signature over a
+// domain-separated SHA-256 commitment of a message.
+//
+// Inverse of message-sign. Verifier reconstructs the same commitment
+// (SHA-256(domain_tag || message_bytes)) and checks crypto_sign_verify_detached
+// against the supplied pubkey.
+//
+// CLI:
+//   --pubkey <hex>:     32-byte Ed25519 public key (64 hex chars).
+//   --message <spec>:   inline string OR "file:<path>" — same convention as
+//                       message-sign. Must be byte-identical to what was signed.
+//   --domain-tag <tag>: MUST exactly match the tag used at sign time.
+//                       Any deviation produces a different commitment and
+//                       the signature fails to verify (the protective property).
+//   --signature <hex>:  128 hex chars (64-byte Ed25519 sig).
+//   --json:             emit a JSON document instead of human "valid: ..." text.
+//
+// Exit codes:
+//   0  signature valid (PASS)
+//   1  args / parse error (operator error, not auth failure)
+//   2  signature invalid — auth-style alert gate (distinct from arg errors
+//      so monitoring scripts can branch on auth-fail vs. tooling-fail)
+//
+// Why exit 2 for invalid: matches the convention used by envelope decrypt
+// and inspect-envelope when the artifact is structurally fine but
+// authentication fails. Exit-1-for-everything would force every consumer
+// to grep stderr to distinguish "bad args" from "signature rejected."
+int cmd_message_verify(int argc, char** argv) {
+    std::string pubkey_hex, message_spec, domain_tag, signature_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--pubkey"     && i + 1 < argc) pubkey_hex     = argv[++i];
+        else if (a == "--message"    && i + 1 < argc) message_spec   = argv[++i];
+        else if (a == "--domain-tag" && i + 1 < argc) domain_tag     = argv[++i];
+        else if (a == "--signature"  && i + 1 < argc) signature_hex  = argv[++i];
+        else if (a == "--json")                       json_out       = true;
+        else {
+            std::cerr << "message-verify: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet message-verify --pubkey <hex> "
+                         "--message <string|file:path> --domain-tag <tag> "
+                         "--signature <hex> [--json]\n";
+            return 1;
+        }
+    }
+    if (pubkey_hex.empty() || message_spec.empty()
+        || domain_tag.empty() || signature_hex.empty()) {
+        std::cerr << "Usage: determ-wallet message-verify --pubkey <hex> "
+                     "--message <string|file:path> --domain-tag <tag> "
+                     "--signature <hex> [--json]\n"
+                     "\n"
+                     "  Verifies an Ed25519 signature was produced over\n"
+                     "  H = SHA-256(domain_tag || message_bytes). Inverse of\n"
+                     "  message-sign. Exit 0 = valid, 2 = invalid (auth-style\n"
+                     "  alert), 1 = args/parse error.\n";
+        return 1;
+    }
+
+    if (pubkey_hex.size() != 64) {
+        std::cerr << "message-verify: --pubkey must be exactly 64 hex chars "
+                     "(32-byte Ed25519 pubkey); got " << pubkey_hex.size() << "\n";
+        return 1;
+    }
+    if (signature_hex.size() != 128) {
+        std::cerr << "message-verify: --signature must be exactly 128 hex chars "
+                     "(64-byte Ed25519 signature); got "
+                  << signature_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> pub_bytes, sig_bytes;
+    try { pub_bytes = from_hex(pubkey_hex);    }
+    catch (std::exception& e) {
+        std::cerr << "message-verify: invalid --pubkey hex: " << e.what() << "\n";
+        return 1;
+    }
+    try { sig_bytes = from_hex(signature_hex); }
+    catch (std::exception& e) {
+        std::cerr << "message-verify: invalid --signature hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (pub_bytes.size() != 32) {
+        std::cerr << "message-verify: pubkey decoded to " << pub_bytes.size()
+                  << " bytes (expected 32)\n";
+        return 1;
+    }
+    if (sig_bytes.size() != 64) {
+        std::cerr << "message-verify: signature decoded to " << sig_bytes.size()
+                  << " bytes (expected 64)\n";
+        return 1;
+    }
+
+    std::vector<uint8_t> msg;
+    {
+        std::string err;
+        if (!read_message_spec(message_spec, msg, err)) {
+            std::cerr << "message-verify: " << err << "\n";
+            return 1;
+        }
+    }
+
+    if (!primitives::init_libsodium()) {
+        std::cerr << "message-verify: libsodium init failed\n";
+        return 1;
+    }
+
+    auto hash = domain_commit(domain_tag, msg);
+
+    // crypto_sign_verify_detached returns 0 on valid, -1 on invalid.
+    // It is the constant-time verifier that should be used here.
+    int rc = crypto_sign_verify_detached(sig_bytes.data(),
+                                          hash.data(), hash.size(),
+                                          pub_bytes.data());
+    const bool valid = (rc == 0);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["valid"]            = valid;
+        r["message_hash_hex"] = to_hex(hash);
+        r["domain_tag"]       = domain_tag;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "valid:            " << (valid ? "true" : "false") << "\n";
+        std::cout << "message_hash_hex: " << to_hex(hash) << "\n";
+        std::cout << "domain_tag:       " << domain_tag   << "\n";
+    }
+    return valid ? 0 : 2;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -1939,6 +2305,22 @@ void print_usage() {
         "                                             length(keyholders); 1<=T<=N<=255.\n"
         "                                             Refuses to overwrite existing output files\n"
         "                                             without --force.\n"
+        "  message-sign --priv <hex> --message <string|file:path>\n"
+        "               --domain-tag <tag> [--json]\n"
+        "                                             Sign a message with an Ed25519 priv key.\n"
+        "                                             OFF-CHAIN (not a transaction). Uses a\n"
+        "                                             domain-separated SHA-256 commitment:\n"
+        "                                             H = SHA-256(domain_tag || message_bytes).\n"
+        "                                             Useful for SIWE-style auth challenges,\n"
+        "                                             off-chain attestations, operator-signed\n"
+        "                                             announcements. --message file:<path> reads\n"
+        "                                             bytes verbatim from a file (binary-safe).\n"
+        "  message-verify --pubkey <hex> --message <string|file:path>\n"
+        "                 --domain-tag <tag> --signature <hex> [--json]\n"
+        "                                             Verify an Ed25519 signature produced by\n"
+        "                                             message-sign. Exit 0 valid, 2 invalid\n"
+        "                                             (auth-style alert), 1 args/parse error.\n"
+        "                                             --domain-tag MUST match the sign-time tag.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -1969,6 +2351,8 @@ int main(int argc, char** argv) {
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
+    if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
+    if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
