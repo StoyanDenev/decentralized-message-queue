@@ -18,7 +18,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.6 Gossip broadcast out of lock | ✅ shipped | All 5 broadcast sites release unique_lock before broadcast |
 | v2.7 F2 view reconciliation | ⏳ spec resolved, implementation pending | S-030 D2 closure. F2-SPEC.md per-field rules formalized: union (+V11) for evidence, union (+V10) for aborts, intersection for inbound_receipts, deterministic for the rest. ~3-4d to ship from spec-review acceptance |
 | v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
-| v2.9 Distributed VRF for committee selection | ⏳ not started | |
+| v2.9 Distributed VRF for committee selection | 🔒 deferred (post-v2.10) | Deep design sketch in §v2.9: Option A (per-validator ECVRF on curve25519 family via RFC 9381) recommended over Option B (threshold ECVRF on BLS12-381) to preserve curve-family minimalism. ~2-3 weeks Option A from spec-acceptance. Closes residual per-output independence in randomness; layers FA3-c on top of v2.10's FA3-b |
 | v2.10 Threshold randomness aggregation | 🔥 **active** | Promoted to defeat residual selective-abort attack. DKG spec resolved per Option C (epoch-boundary trustless DKG + PSS refresh + FROST-Ed25519 on curve25519 family) in `docs/proofs/v2.10-DKG-SPEC.md`; cost revised to ~3 weeks. See plan.md A11 for active task brief |
 | v2.11 Auto-detection beacon-side trigger (R4 v1.1) | ⏳ not started | |
 | v2.12 Cross-shard atomic primitives | ⏳ not started | |
@@ -37,7 +37,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
 | v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
-**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 12. Deferred: 2 (v2.13, v2.21+).**
+**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 11. Deferred: 3 (v2.9, v2.13, v2.21+).**
 
 For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
@@ -334,15 +334,149 @@ The 32-byte Dilithium seed feeds into Dilithium's deterministic keygen (per FIPS
 
 ### v2.9 — Distributed VRF for committee selection
 
-**Motivation.** Today, committee selection is deterministic from `cumulative_rand` (which is itself the K-of-K commit-reveal output). This is unbiased in steady state but offers no liveness benefit when a committee member silently aborts — the K-of-K MD path stalls until BFT escalation kicks in.
+**Status.** Deferred research item; not on the Phase A/B/C/D critical path. Listed for completeness with a deep design sketch so the option remains live if (i) v2.10 ships and the DKG infrastructure is reused, (ii) a deployment surfaces a load-bearing use case (most likely: per-block per-recipient sortition for receiver-anonymity in v2.22, or per-epoch committee shuffling at horizontal scales where v2.10's selective-abort closure isn't sufficient on its own).
 
-A threshold VRF (e.g., BLS-DKG with t-of-K signers) provides randomness with `t < K` participants. Even if `K - t` members are silent, the t honest members can complete the randomness round.
+**Problem statement.** Determ's committee selection runs three layers of randomness today:
 
-**Trade-off:** introduces BLS (pairing-friendly curves) into Determ's cryptographic stack — currently SHA-256 + Ed25519 only. The "two primitives only" minimalism is a design value; BLS doubles the audit surface.
+1. **`cumulative_rand`** — accumulated SHA-256 chain of every block's `delay_output`, seeded at genesis. Used as the master beacon for sortition every K-th block.
+2. **`Chain::select_creators_for_height(h, K)`** (src/chain/chain.cpp) — Fisher-Yates shuffle of the eligible registrants list, seeded by `cumulative_rand[h]`. This is the K-of-K committee that produces block `h`.
+3. **`compute_delay_seed` / `compute_block_rand`** — per-block commit-reveal among the K committee members, producing the `delay_output` that feeds the next epoch's `cumulative_rand` extension. Phase 1 commits Ed25519 secrets; Phase 2 reveals them.
 
-**Recommendation:** defer to v2.x or v3. The K-of-K commit-reveal + BFT escalation tandem is working; the marginal liveness gain isn't worth the cryptographic-stack expansion.
+The K-of-K commit-reveal is the load-bearing primitive. v2.10's t-of-K threshold-signature redesign closes the **bias** vector (selective abort no longer changes `R`), but does not close two residual surfaces:
 
-**Status.** Considered, deprioritized. Listed for completeness; not on the v2 roadmap.
+- **Liveness gap at the round level.** Even after v2.10, if `K - t + 1` committee members are simultaneously absent (network partition, coordinated outage, geographic catastrophe), the threshold signature itself cannot be assembled. v2.10's t-of-K closes single-actor abort; it does not handle correlated-failure abort. BFT escalation eventually catches up but at the cost of a round.
+- **Per-block randomness independence.** `cumulative_rand[h+1]` is a function of `cumulative_rand[h] || delay_output[h]`. If a single producer wants to bias the committee at `h+K+1` (the next sortition boundary), they can influence `delay_output[h]` by their own contribution choice (v2.10 closes this for the *aggregate*, but in MD-mode the producer chooses which combinations of (commits, reveals) to emit). The bias is small in practice — bounded by `2^-Ω(K)` per round — but not zero. A VRF eliminates the bias to information-theoretic zero.
+
+**v2.9's role.** A VRF provides two properties simultaneously that v2.10 alone does not:
+
+- **Unique output per (key, input).** For a given (key, input) pair the VRF output is uniquely determined and unforgeable. Unlike commit-reveal where a participant can decline to reveal, a VRF participant cannot "choose" a different output without holding a different key — and the key is committed at registration time.
+- **Public verifiability of the output's correctness.** Any verifier with the public key can check `verify(pk, input, output, proof) → bool`. This is structurally stronger than commit-reveal where the output's correctness is "the K participants didn't all lie" — verifiable only via aggregation, not per-participant.
+
+In combination with v2.10's threshold-aggregation (which closes bias against any sub-quorum coalition), v2.9 closes the residual **per-actor independence** gap: an honest VRF output cannot be selectively withheld because withholding is observable (the participant who has the key but didn't provide the VRF evaluation is identifiable from chain history).
+
+**Mechanism — Option A (ECVRF-EDWARDS25519-SHA512-TAI, RFC 9381).** The IETF-standardized VRF over the same curve family Determ already vendors. Each registrant's REGISTER tx includes a `vrf_pk: PubKey32` field alongside the existing Ed25519 signing pubkey (or the existing pubkey is reused — see §open-questions). Per-block flow:
+
+1. **Phase 1 (commit).** Each committee member `i` computes `(beta_i, proof_i) = ECVRF_PROVE(vrf_sk_i, beacon_input)` where `beacon_input = SHA-256(chain_id || height || epoch_master_key || prev_state_root)`. The `beta_i` is the VRF output (32 bytes); the `proof_i` is the unforgeable proof (~80 bytes for ECVRF-EDWARDS25519-SHA512-TAI). Committee member emits `(beta_i, proof_i)` in `ContribMsg`.
+2. **Phase 2 (verify and aggregate).** Each verifier checks `ECVRF_VERIFY(vrf_pk_i, beacon_input, beta_i, proof_i)` for every received contribution. The aggregated round randomness is `R = SHA-256(sort(beta_i for i in K_h))` over the verified contributions.
+3. **Aggregation rule with v2.10 composition.** If v2.10 is also active, the VRF outputs feed the threshold-signature combine: the FROST partial signatures sign over `(beacon_input || sort(beta_i))` rather than `(beacon_input || height)` alone. The result is a single round that is simultaneously t-of-K threshold-aggregated AND per-output VRF-unique. Both properties hold; neither dominates.
+
+**Mechanism — Option B (Threshold ECVRF, BLS-DKG over BLS12-381).** The more powerful but more invasive alternative. A single threshold VRF private key is jointly held by the committee via the same DKG infrastructure v2.10 ships. Any t-of-K members can compute the VRF output (via threshold-signature-style combine); the output is uniquely determined per (committee, input) pair, regardless of which subset of t members contributed. This requires BLS12-381 — a pairing-friendly curve not currently in Determ's stack.
+
+| Option | Curve added | DKG required | Composes with v2.10 | Strength |
+|---|---|---|---|---|
+| A — Per-validator ECVRF on Ed25519 | None (reuses curve25519 family) | No | Yes (VRF outputs feed FROST input) | Closes per-output independence; not t-of-K on the VRF itself |
+| B — Threshold ECVRF on BLS12-381 | BLS12-381 (new pairing curve) | Yes (separate from v2.10's FROST DKG, or co-located) | Yes (alternative to FROST, or layered) | Closes per-output independence AND t-of-K on the VRF itself; subsumes v2.10's bias closure |
+
+**Recommendation:** Option A. The curve-family minimalism is a load-bearing design value (every additional curve doubles the audit surface for the cryptographic backend and the upgrade story for FIPS-profile deployments — see CRYPTO-C99-SPEC.md §2.Q1). Option B's strictly stronger property is only marginally better than Option A composed with v2.10's threshold signatures, and the marginal gain does not justify a new pairing curve.
+
+**Wire-format changes (Option A).**
+
+| Slot | Use | Notes |
+|---|---|---|
+| `RegistryEntry::vrf_pk: PubKey32` | Per-registrant VRF public key | New field; backward-compat zero allowed in genesis or pre-v2.9 entries. Pre-v2.9 entries skip VRF aggregation (fallback to legacy `delay_seed` path). |
+| `ContribMsg::vrf_output: VrfOutput64` | Per-block VRF output + proof | Wire format: `beta(32) || proof(80) || version(1) || reserved(7)` = 120 bytes per contribution. Adds ~K · 120 bytes per round (K=5 → 600 bytes; K=11 → 1320 bytes). |
+| `Block::vrf_aggregate: Hash32` | Aggregated VRF root | New field on the block; equals `SHA-256(sort(beta_i))` over verified contributions. Feeds `cumulative_rand` extension in place of (or alongside) `delay_output`. |
+| `compute_block_rand` algorithm | Updated to mix `vrf_aggregate` | New: `cumulative_rand[h+1] = SHA-256(cumulative_rand[h] || delay_output[h] || vrf_aggregate[h])`. Backward-compat: pre-v2.9 blocks contribute zero in the third slot. |
+
+**Apply-path integration (Option A).**
+
+- `BlockValidator::validate_block` — for every contribution in `ContribMsg`, verify the embedded VRF proof via `ECVRF_VERIFY(vrf_pk_i, beacon_input, beta_i, proof_i)`. Invalid VRF proofs reject the contribution (same severity as invalid signature). At least `t` valid VRF contributions required for block acceptance (matches the v2.10 threshold).
+- `Chain::apply_block` — recompute `vrf_aggregate` from accepted contributions; verify it equals `Block::vrf_aggregate` field; otherwise reject (state-root mismatch path).
+- `Chain::select_creators_for_height` — when block at height `h - K` is post-v2.9, seed Fisher-Yates from `cumulative_rand[h] = SHA-256(... || vrf_aggregate[h])` rather than the pre-v2.9 formula. Migration safety: the chain stores a `vrf_active_from_height` field in genesis or set via governance tx; sortition reads which formula to use based on the apply height.
+
+**Threat model — what v2.9 closes.**
+
+- **Per-output bias by single actor.** A v2.10-only deployment can have a committee member who knows their own partial signature would push `R` in an unfavorable direction abort their contribution; the t-of-K combine still produces a result, but the distribution of `R` over many rounds is provably biased by the adversary's per-round abort choice. v2.9 closes this: the VRF output `beta_i` is uniquely determined by `(vrf_sk_i, beacon_input)`. The adversary cannot choose between two outputs by aborting; they either contribute the unique `beta_i` or they don't.
+- **Grinding on `beacon_input`.** A v2.10 + v2.9 deployment has `beacon_input = SHA-256(chain_id || height || epoch_master_key || prev_state_root)`. The adversary cannot grind on this — `chain_id` is fixed, `height` is monotone, `epoch_master_key` is the result of the previous epoch's DKG (v2.10 close), `prev_state_root` is fixed once the previous block applies. The producer of block `h-1` chose the previous block's contents, but the previous block's state_root is already committed; the producer cannot choose a "different prev_state_root" to alter `beacon_input` for block `h`.
+- **Last-actor advantage.** In commit-reveal the last revealer learns the partial aggregate before deciding whether to reveal. v2.10 closes this for the aggregate (any t suffice). v2.9 closes it per-participant (the last reveal of `beta_i` does not give that actor any choice — they have only one `beta_i` for the (key, input) pair).
+
+**What v2.9 does not close.**
+
+- **Coordinated VRF-key generation collusion at registration.** If `K - t + 1` actors register with VRF keys they all jointly control, they can coordinate which subset of `t` actors contribute and recompute the committee selection in advance. This is the standard Byzantine-coalition bound (`f < K/3`); v2.9 does not move it. Closed via Sybil-cost economics (S-010 / S-011) the same way v2.10 closes its Byzantine bound.
+- **Committee membership manipulation.** v2.9 randomness drives `select_creators_for_height`; if the eligible registrants set is itself manipulable (Sybil registration, REGISTER timing attacks), the VRF randomness is correctly applied but to an attacker-shaped pool. Closed via FA1 + S-010 + Sybil-cost floor; v2.9 does not move it.
+- **Network-layer DoS.** A node that wants to suppress a specific committee member's VRF output from reaching the producer can DoS that peer; the producer will see `t - 1 valid` contributions and stall. Closed via gossip topology (FA4 + v2.6 broadcast out of lock); v2.9 does not move it.
+
+**Cost (Option A).** ~2-3 weeks focused work. Breakdown:
+
+| Sub-component | Effort |
+|---|---|
+| ECVRF-EDWARDS25519-SHA512-TAI implementation (or vendor `libecvrf-c` / port from RFC 9381 reference vectors) | 4-5 days |
+| RFC 9381 test-vector regression suite (compliance suite included with the spec) | 1-2 days |
+| `RegistryEntry::vrf_pk` field + REGISTER tx wire-format extension + binary codec | 1-2 days |
+| `ContribMsg::vrf_output` field + wire-format extension | 1-2 days |
+| `Block::vrf_aggregate` field + apply-path integration | 2-3 days |
+| `compute_block_rand` / `cumulative_rand` formula update + migration flag | 2 days |
+| `select_creators_for_height` migration-aware seeding | 1 day |
+| `vrf_active_from_height` governance tx (or genesis flag) | 1 day |
+| Regression tests (VRF determinism, proof verification, migration boundary) | 2-3 days |
+| Documentation refresh (PROTOCOL.md randomness §, WHITEPAPER §3.1, FA3 information-theoretic argument refresh) | 1-2 days |
+
+**Cost (Option B).** ~3-4 months — BLS12-381 vendoring + audit + threshold DKG over the new curve. Out of scope for v2.
+
+**Dependencies.**
+
+- **v2.10 — recommended precondition.** v2.10's DKG infrastructure handles per-epoch share refresh and DKG-failure handling. While v2.9 Option A does not require DKG (each validator has their own VRF keypair), shipping v2.9 after v2.10 means the DKG-failure pattern is already proven on the curve family.
+- **v2.1 (state Merkle root)** — ✅ shipped. `prev_state_root` feeds `beacon_input`, which would be unforgeable-by-prior-producer only with v2.1 in place.
+- **No dependency on v2.7 F2.** v2.9 is orthogonal; the F2 view-reconciliation closes a different surface (Phase-1 partial-knowledge attacks). The two can ship in either order.
+- **Anti-precondition for v3 hierarchical sharding.** If v3 ever introduces hierarchical sharding (which is currently NOT on the roadmap), randomness across the hierarchy needs to be linked — a hierarchical VRF or randomness beacon is the natural primitive. v2.9 is a building block for that future direction; shipping v2.9 now reduces v3's risk if hierarchical sharding is ever needed.
+
+**Cross-references.**
+
+- v2.10 active threshold signatures (this document) — primary composition partner; v2.9 feeds v2.10's signed inputs.
+- `include/determ/chain/block.hpp` `RegistryEntry` struct — would gain `vrf_pk` field under v2.9.
+- `src/chain/chain.cpp` `select_creators_for_height` — would gain `vrf_active_from_height` branch under v2.9.
+- `src/node/node.cpp` `on_contrib` — would gain VRF-output validation under v2.9.
+- FA3 information-theoretic argument (proofs/FA3-Randomness.md if added) — strengthens from "K-of-K commit-reveal" to "K-of-K commit-reveal + per-validator VRF unique-output property."
+- RFC 9381 (ECVRF spec): https://datatracker.ietf.org/doc/rfc9381/
+- ECVRF reference implementation (Filecoin's): https://github.com/algorand/libsodium-vrf
+
+**Open questions.**
+
+1. **Reuse signing pubkey or separate VRF pubkey?** Option A as written assumes a separate `vrf_pk`. RFC 9381 explicitly recommends NOT reusing signing keys for VRF because the security proofs are not joint (a forgery attack on one primitive could leak material useful for the other). Decision: separate key. This costs an additional 32-byte field on REGISTER and the corresponding storage in `RegistryEntry`. The cost is bounded; the security gain is straightforward.
+2. **Migration tactic — flag-day or governance.** v2.9 changes the `cumulative_rand` formula. A flag-day at a known block height (`vrf_active_from_height` baked into genesis) is the simplest path; a governance tx that activates v2.9 retrospectively at a future height is more flexible. Recommended: flag-day with a `vrf_active_from_height = UINT64_MAX` default (off), set by governance tx with N-block confirmation delay. Avoids a window where some validators have v2.9 active and others don't.
+3. **FIPS-profile compatibility.** ECVRF-EDWARDS25519-SHA512-TAI uses Ed25519 which is in FIPS 186-5 Draft (2023). For FIPS-profile deployments, v2.9 ships only after the Draft becomes Final. Alternative: ECVRF-P256-SHA256-TAI is a P-256 variant that is FIPS-current today; could be a profile-dependent choice. Decision deferred to v2.9 implementation start.
+4. **VRF aggregation cost.** ECVRF proof verification is ~120 µs per proof on modern x86. K=11 committee → ~1.3 ms per block to verify all proofs. Negligible vs. the ~50 ms block budget at cluster profile. No optimization needed; ship the straight reference implementation.
+5. **Composition with future v2.22 confidential transactions.** v2.22 uses ephemeral X25519 DH against `view_master_pk`. A per-block VRF output could optionally seed the per-tx ephemeral DH, providing a public-randomness-linked-per-tx ephemeral that defeats sender-side grinding on the ephemeral (an attacker who has compromised the sender wallet but not the chain cannot pre-compute the per-tx ephemeral). Filed as a v2.22 / v2.9 composition note; not a blocker.
+
+**Formal argument refresh (FA3 layered).** Today FA3 (information-theoretic randomness unbiasability) rests on the K-of-K commit-reveal: under H1 (`f_h ≤ ⌊(K-1)/3⌋`) and H2 (Ed25519 unforgeability) the aggregate `delay_output` is statistically uniform conditional on every honest member's individual commit being uniform. The argument is sound but has a brittle premise — it assumes every honest member's commit is itself uniformly distributed. In practice a chained-PRNG with a low-entropy seed (operator mis-configuration, OS-RNG starvation on embedded deployments) violates the premise. v2.10's threshold-signature aggregation strengthens the conditional probability bound — any t honest members suffice — but inherits the uniformity premise. v2.9 layers a third independent argument: ECVRF outputs are *cryptographically* uniform on the curve subgroup under the discrete-log assumption, regardless of the underlying secret-key distribution. Three independent arguments now stack:
+
+1. **FA3-a (commit-reveal layer).** Aggregate is uniform if at least one honest member commits a uniform secret. Today's argument.
+2. **FA3-b (threshold layer).** Aggregate is uniform under any t-of-K subset that includes at least one honest secret-share. v2.10's argument.
+3. **FA3-c (VRF layer).** Per-validator output is uniform on the curve subgroup under discrete-log hardness, regardless of the validator's key-generation entropy quality. v2.9's argument.
+
+The composed argument is dominated by the weakest layer; the strength gain is robustness against single-layer failure rather than a tighter bound. If a future cryptographic break weakens one layer (a discrete-log advance, a flaw in commit-reveal aggregation, a flaw in the threshold combine), the other two layers are independent and still hold. This defense-in-depth posture is standard for high-assurance cryptographic systems and motivates v2.9 as a robustness investment rather than a marginal improvement on v2.10's already-strong argument.
+
+**Migration sequencing (post-v2.10 deployment).** v2.9 ships as a tightly-scoped follow-on under the assumed sequence:
+
+| Sub-step | Action | Block window |
+|---|---|---|
+| 1 | Operators deploy node binary with v2.9 code path; `vrf_active_from_height = UINT64_MAX` (off) | Day 0 |
+| 2 | Operators submit REGISTER or supplementary tx adding `vrf_pk` to their RegistryEntry; old field stays empty until everyone catches up | Day 0 to Day ~7 (one epoch) |
+| 3 | Governance tx (or genesis-bake for new deployments) sets `vrf_active_from_height = current_height + N`, where N ≥ 2 × REGISTRATION_DELAY_WINDOW to ensure no registrant is mid-onboard at the activation boundary | Day ~7 |
+| 4 | At `vrf_active_from_height`, all committee members start emitting `vrf_output` in ContribMsg; the apply path enforces presence; validators without `vrf_pk` (laggards) auto-deregister with operator-friendly diagnostic | Activation block |
+| 5 | Steady state: every block carries `vrf_aggregate`; `cumulative_rand` extension uses the new formula; legacy `delay_output` continues to be emitted alongside for backward-compat verifiability of historical chain | Post-activation |
+
+The migration is intentionally symmetric to the v2.10 DKG epoch-boundary migration — operators learn one pattern and reuse it.
+
+**Test plan (regression suite addition).**
+
+1. **RFC 9381 test vectors.** Every appendix test vector from RFC 9381 §A.1 (ECVRF-EDWARDS25519-SHA512-TAI) and §A.2 (ECVRF-P256-SHA256-TAI, if FIPS-profile variant ships). 5-7 vectors per cipher suite; ~14 total assertions on the standalone primitive.
+2. **VRF determinism end-to-end.** Replay a recorded chain that has v2.9 active; verify that re-execution produces bit-identical `vrf_aggregate` for every block. ~5 blocks per regression.
+3. **Migration-boundary tests.** Construct a chain that crosses `vrf_active_from_height` with mixed-pre/post-v2.9 validators; verify the migration cascade (laggard deregistration, formula switch, cumulative_rand continuity). ~3 assertions.
+4. **Invalid-VRF-output rejection.** Submit a contribution with `vrf_output` that fails `ECVRF_VERIFY`; verify validator rejects the contribution but the block continues if at least t valid contributions remain. ~2 assertions.
+5. **Per-validator collusion failure.** Construct a scenario where (K - t + 1) validators register VRF keys derived from a shared low-entropy seed; verify the v2.9 layer's information-theoretic argument still holds (the `beta_i` outputs are computationally indistinguishable from uniform under discrete-log assumption, even with shared seed). Test-vector assertion only; no chain-execution path needed for this proof.
+
+**Specific deployment classes where v2.9 might matter most.**
+
+- **Lottery / sortition DApps on v2.18-v2.19 substrate.** Per-block randomness drives the lottery outcome; per-output independence eliminates a class of grind attacks where an operator who knows their own validator key tries to bias their own win probability. Today's commit-reveal + v2.10's threshold suffice for low-stake lotteries; v2.9 hardens for high-stake.
+- **NFT mint randomness.** Same as above but for one-shot allocations rather than recurring lotteries.
+- **DEX clearing-batch ordering.** In v2.13-style fair-ordering (deferred research), the per-block randomness seeds the canonical ordering rule. v2.9 strengthens the input.
+- **Confidential-tx amount-encryption nonce seeding (v2.22 composition).** Per-block VRF could feed the per-tx ephemeral DH (open question §5 above).
+- **Cross-shard receipt sortition (Beaconless v2).** Per-epoch randomness drives which shards observe which others' SHARD_TIPs. v2.9 hardens this against single-actor manipulation.
+
+**Recommendation summary.** Defer v2.9 to post-v2.10. If after v2.10 ships any of (i) a deployment surfaces a use case where per-output independence matters more than the aggregate (DEXes, lotteries, NFT mints), (ii) the threat-model review identifies a residual bias exceeding the deployment's risk tolerance, or (iii) v3 hierarchical-sharding becomes a serious candidate, v2.9 ships in ~2-3 weeks (Option A) as a tightly-scoped follow-on. Otherwise, v2.10 + the existing Sybil-cost floor + the FA3 information-theoretic argument is sufficient for Determ's payment + identity scope.
+
+**Closes:** residual per-output independence in randomness (the only remaining randomness-bias vector after v2.10 closes aggregate bias). Hardens FA3 from "K-of-K commit-reveal" + "t-of-K threshold-aggregation" to the strongest possible per-output guarantee on the v2 substrate.
 
 ### v2.10 — Threshold randomness aggregation 🔥 active
 
