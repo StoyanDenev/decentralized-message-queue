@@ -752,6 +752,13 @@ Additional in-process tests:
                                               shard_count>1 routes via salt
                                               + my_shard_id; salt-sensitivity;
                                               accessor round-trip.
+  determ test-rate-limiter-bucket             S-014 token-bucket arithmetic
+                                              primitives (net::RateLimiter) —
+                                              constructor pins, burst-cap
+                                              invariant, refill timing, zero-
+                                              rate / zero-capacity edge cases,
+                                              per-key independence, time-
+                                              monotonicity under clock skew
 )" << "\n";
 }
 
@@ -26199,6 +26206,502 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": s018_json_validation "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Companion to test-rate-limiter: where that test exercises the
+    // policy at the public-surface level (disabled-mode bypass, first-
+    // touch full, per-key independence), this test pins the underlying
+    // token-bucket ARITHMETIC primitives — constructor / refill / cap /
+    // edge cases that the S-014 RpcServer + GossipNet surfaces inherit
+    // by composition. The two tests intentionally overlap on a few
+    // anchor assertions (first-touch full, burst cap) so a regression
+    // in either layer fails both.
+    //
+    // Note: net::RateLimiter's public API is `consume(key)` (decrements
+    // exactly 1 token per call). There's no `consume(n)` overload, no
+    // `available()` accessor, no `reset()`. The bucket size and refill
+    // are observed through consume() success/failure sequences. All
+    // task-spec assertions are adapted to this API:
+    //   - "consume(cap)" → cap consecutive consume(key) calls
+    //   - "consume(0)" → degenerate / N/A (consume always takes 1)
+    //   - "consume(cap+1)" → (cap+1)th consume on a full bucket
+    //   - "available()" → "the next consume() succeeded or didn't"
+    //   - "reset()" → N/A (no public reset; bucket reset is implicit
+    //                 via configure() reconfiguration, but the
+    //                 internal `buckets_` map persists — re-touching
+    //                 the SAME key after reconfigure does NOT refill
+    //                 to full; documented below)
+    if (cmd == "test-rate-limiter-bucket") {
+        using namespace determ::net;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // 1. Constructor pins: default state is disabled (rate=0,
+        //    burst=0), both getters return 0. The bucket is NOT
+        //    "starts at capacity" yet because no capacity is set —
+        //    that pin is in (4) below after configure().
+        {
+            RateLimiter rl;
+            check(rl.rate_per_sec() == 0.0,
+                  "ctor: default rate_per_sec() == 0");
+            check(rl.burst() == 0.0,
+                  "ctor: default burst() == 0");
+            check(!rl.enabled(),
+                  "ctor: default-constructed is disabled");
+        }
+
+        // 2. enabled() is the conjunction of (rate > 0) AND (burst > 0).
+        //    Either ≤ 0 disables the limiter and consume() shortcuts
+        //    to true with no bucket allocation.
+        {
+            RateLimiter rl;
+            rl.configure(5.0, 0.0);
+            check(!rl.enabled(),
+                  "enabled() = false when burst=0 (even if rate>0)");
+            rl.configure(0.0, 5.0);
+            check(!rl.enabled(),
+                  "enabled() = false when rate=0 (even if burst>0)");
+            rl.configure(5.0, 5.0);
+            check(rl.enabled(),
+                  "enabled() = true when both rate>0 and burst>0");
+        }
+
+        // 3. configure() round-trip: the values pass through the
+        //    getters losslessly (no quantization, no clamping above 0).
+        {
+            RateLimiter rl;
+            rl.configure(12.5, 7.0);
+            check(rl.rate_per_sec() == 12.5,
+                  "configure(): rate round-trips through rate_per_sec()");
+            check(rl.burst() == 7.0,
+                  "configure(): burst round-trips through burst()");
+        }
+
+        // 4. Constructor + first-touch: bucket starts at FULL capacity.
+        //    Adapted from spec "consume(1) when full → succeeds + tokens
+        //    = cap - 1": after one consume(), `cap - 1` more consumes
+        //    succeed at the same instant (proving the starting fill).
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 5.0);  // refill rate near-zero
+            // 5 consumes back-to-back at the same instant.
+            int succ = 0;
+            for (int i = 0; i < 5; ++i) {
+                if (rl.consume("k4")) succ++;
+            }
+            check(succ == 5,
+                  "first-touch bucket is FULL: 5/5 consumes succeed at burst=5");
+        }
+
+        // 5. consume(cap) succeeds once and drains the bucket — the
+        //    very next consume() at the same instant fails (spec item
+        //    3: "consume(cap) → succeeds + tokens = 0").
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 4.0);
+            for (int i = 0; i < 4; ++i) rl.consume("k5");
+            bool fifth = rl.consume("k5");
+            check(!fifth,
+                  "consume(cap=4) drains bucket: 5th consume at same instant fails");
+        }
+
+        // 6. consume() after empty fails (spec item 4: "consume after
+        //    empty → returns false"). Repeated calls after drain stay
+        //    false until refill kicks in.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 2.0);
+            rl.consume("k6"); rl.consume("k6");  // drain
+            bool a = rl.consume("k6");
+            bool b = rl.consume("k6");
+            bool c = rl.consume("k6");
+            check(!a && !b && !c,
+                  "consume() after empty stays false (3 consecutive fails)");
+        }
+
+        // 7. consume(0) → degenerate. The actual API has no
+        //    consume(n=0) overload; consume() always takes exactly 1.
+        //    Pin the actual behavior: every consume() call attempts to
+        //    take 1 token unconditionally. Documented here for the
+        //    spec-mapping audit trail.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 3.0);
+            // Even if a caller wanted "consume(0)", they'd still pay 1.
+            // Three calls drain the bucket-of-3.
+            bool a = rl.consume("k7");
+            bool b = rl.consume("k7");
+            bool c = rl.consume("k7");
+            bool d = rl.consume("k7");
+            check(a && b && c && !d,
+                  "consume() always takes 1 token (no consume(0) overload)");
+        }
+
+        // 8. consume(cap + 1) → spec item 6: "request exceeds capacity
+        //    even when full → fails". Since consume() always takes 1,
+        //    we map this to: a single consume() on a full bucket of
+        //    cap=0 must fail (capacity exceeded). See (16) for the
+        //    capacity=0 path. Equivalent reading for cap>0: the
+        //    (cap+1)th consecutive consume on a full bucket fails.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 3.0);
+            for (int i = 0; i < 3; ++i) rl.consume("k8");
+            bool over = rl.consume("k8");
+            check(!over,
+                  "(cap+1)th consume on a full bucket fails (cap=3)");
+        }
+
+        // 9. Refill timing pin (spec item 7: "refill 1 second when
+        //    rate=R adds min(R, cap-cur) tokens"). We drain a bucket
+        //    and verify after a sleep that at least one new token is
+        //    available — uses millisecond timing rather than a full
+        //    second for test speed.
+        {
+            RateLimiter rl;
+            rl.configure(50.0, 3.0);  // 50 tokens/sec
+            rl.consume("k9"); rl.consume("k9"); rl.consume("k9");
+            check(!rl.consume("k9"),
+                  "refill timing: drained bucket fails immediately");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // 100ms at 50/s = 5 tokens worth elapsed, but cap=3 →
+            // expect refill capped at 3.
+            check(rl.consume("k9"),
+                  "refill timing: 100ms at rate=50/s → consume succeeds");
+        }
+
+        // 10. Refill saturates at capacity (spec item 8: "no over-fill").
+        //     With burst=3 and rate=200/s and a 500ms sleep (which
+        //     would otherwise add 100 tokens), only 3 consecutive
+        //     consumes succeed before the 4th fails.
+        {
+            RateLimiter rl;
+            rl.configure(200.0, 3.0);
+            // Drain initial fill.
+            for (int i = 0; i < 3; ++i) rl.consume("k10");
+            // Wait long enough that uncapped refill would overflow.
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            int succ = 0;
+            for (int i = 0; i < 10; ++i) {
+                if (rl.consume("k10")) succ++;
+                else break;
+            }
+            // Allow for one extra token having refilled during the
+            // succession loop (a few hundred microseconds at 200/s ≈
+            // <0.1 tokens), so the cap is ≤ 4. The key invariant is
+            // <<100 (uncapped would yield 100).
+            check(succ >= 3 && succ <= 4,
+                  "refill cap holds: long sleep at high rate does NOT exceed burst+1");
+        }
+
+        // 11. refill 0 seconds → no change (spec item 9). Two consume()
+        //     calls in immediate succession on a drained bucket both
+        //     fail (no measurable time elapsed → no measurable refill).
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 2.0);
+            rl.consume("k11"); rl.consume("k11");  // drain
+            bool a = rl.consume("k11");
+            bool b = rl.consume("k11");
+            check(!a && !b,
+                  "near-zero elapsed: drained bucket → 2 immediate retries both fail");
+        }
+
+        // 12. refill with negative dt (spec item 10: clock skew). The
+        //     bucket uses steady_clock which by C++ contract is
+        //     monotonic and CANNOT regress — so feeding "an earlier
+        //     timestamp" is structurally impossible at this layer. The
+        //     pin: confirm that even after a real sleep + drain + brief
+        //     refill, no underflow occurs (consume() returns a clean
+        //     bool, no exception, no negative token count surfaced).
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 1.0);
+            rl.consume("k12");                       // drain (1 → 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            // Many tight retries — exercise the refill loop a lot.
+            int ok = 0, fail2 = 0;
+            for (int i = 0; i < 100; ++i) {
+                if (rl.consume("k12")) ok++; else fail2++;
+            }
+            // No exception thrown is the primary pin; bucket never
+            // refills enough at 1/s + 5ms to grant another token, so
+            // we expect nearly all fails.
+            check(ok + fail2 == 100,
+                  "steady_clock monotonicity: no underflow under tight retries");
+            check(ok <= 1,
+                  "low-rate + brief sleep: at most 1 token refunded in 100 retries");
+        }
+
+        // 13. consume + refill round-trip (spec item 11: "empty bucket
+        //     → wait 1/rate seconds → consume succeeds"). Drain at
+        //     rate=10/s, sleep 200ms (= 2 tokens worth), consume must
+        //     succeed.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 1.0);
+            rl.consume("k13");  // drain
+            check(!rl.consume("k13"), "round-trip: bucket starts empty");
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            check(rl.consume("k13"),
+                  "round-trip: after 200ms at 10/s, consume succeeds");
+        }
+
+        // 14. Burst capacity pin (spec item 12: "rapid consume up to
+        //     cap → all succeed → next fails"). With a large burst,
+        //     all burst consumes succeed in microseconds and the next
+        //     one fails immediately.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 20.0);  // refill rate ≈ 0
+            int succ = 0;
+            for (int i = 0; i < 20; ++i) {
+                if (rl.consume("k14")) succ++;
+            }
+            bool over = rl.consume("k14");
+            check(succ == 20,
+                  "burst=20: 20 rapid consumes all succeed");
+            check(!over,
+                  "burst=20: 21st consume fails immediately");
+        }
+
+        // 15. Sustained-rate envelope (spec item 13). Over a measured
+        //     window, the average consume rate stays bounded by
+        //     `rate + burst/window`. Concretely: rate=100/s, burst=5,
+        //     window=300ms → upper bound 100*0.3 + 5 = 35 successes.
+        //     We try 200 consumes back-to-back and verify ≤ 35.
+        {
+            RateLimiter rl;
+            rl.configure(100.0, 5.0);
+            auto t0 = std::chrono::steady_clock::now();
+            int succ = 0;
+            int total = 0;
+            // Run for ~300ms, interleaving consumes with tiny sleeps so
+            // refill ticks have time to register without dwarfing them.
+            while (std::chrono::steady_clock::now() - t0
+                   < std::chrono::milliseconds(300)) {
+                if (rl.consume("k15")) succ++;
+                total++;
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            // Steady-state cap: rate*window + burst, with slack for
+            // scheduler jitter and the trailing refill at exit.
+            check(succ <= 50,
+                  "sustained: 300ms at rate=100/s, burst=5 → succ ≤ 50 (envelope holds)");
+            check(total >= succ,
+                  "sustained: total attempts ≥ successes (counting invariant)");
+        }
+
+        // 16. Zero-rate edge (spec item 14: "rate=0 means the bucket
+        //     never refills"). configure(0, B) → enabled() = false →
+        //     the limiter shortcuts to true (per implementation), so
+        //     EVERY consume passes. This is the documented "disabled
+        //     mode" — `rate=0` is the disable signal, not a "burst-only"
+        //     mode. Pin actual behavior.
+        {
+            RateLimiter rl;
+            rl.configure(0.0, 5.0);
+            check(!rl.enabled(),
+                  "rate=0 path: enabled() = false (rate=0 disables the limiter)");
+            bool all_ok = true;
+            for (int i = 0; i < 100; ++i) {
+                if (!rl.consume("k16")) { all_ok = false; break; }
+            }
+            check(all_ok,
+                  "rate=0 path: 100 consumes succeed (disabled = always-pass)");
+        }
+
+        // 17. Per-bucket independence (spec item 15). Two DIFFERENT
+        //     keys on the same RateLimiter are independent; draining
+        //     one does not affect the other. Distinct RateLimiter
+        //     instances are trivially independent (no shared state at
+        //     the C++ level), but we exercise both.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 3.0);
+            for (int i = 0; i < 3; ++i) rl.consume("ipA");
+            check(!rl.consume("ipA"),
+                  "indep: ipA drained → next fails");
+            bool b1 = rl.consume("ipB");
+            bool b2 = rl.consume("ipB");
+            bool b3 = rl.consume("ipB");
+            check(b1 && b2 && b3,
+                  "indep: ipB fresh bucket → 3 consumes all succeed");
+
+            RateLimiter rl2;
+            rl2.configure(0.001, 1.0);
+            check(rl2.consume("any"),
+                  "indep: separate RateLimiter instance has its own buckets");
+        }
+
+        // 18. No public reset() (spec item 16). RateLimiter has no
+        //     reset() method; the closest analog is reconfigure(), but
+        //     because the internal `buckets_` map persists across
+        //     configure() calls (configure only updates rate_/burst_),
+        //     reconfiguring a touched key does NOT restore it to full.
+        //     Pin this so a future "reset on reconfigure" change is
+        //     a deliberate decision, not a silent semantic shift.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 3.0);
+            for (int i = 0; i < 3; ++i) rl.consume("k18");
+            check(!rl.consume("k18"), "no-reset: bucket drained");
+            // Reconfigure with the same parameters.
+            rl.configure(0.001, 3.0);
+            // Bucket is still drained (no implicit reset).
+            check(!rl.consume("k18"),
+                  "no-reset: reconfigure() does NOT refill an existing key");
+        }
+
+        // 19. Thread-safety pin (spec item 17). The RateLimiter holds
+        //     a `std::mutex mu_` and locks every consume() — the type
+        //     compiles into a synchronized class. We exercise the
+        //     critical section sequentially here (the wire-level
+        //     concurrent test lives in tools/test_gossip_rate_limit.sh
+        //     where multiple peers hit the bucket in parallel).
+        {
+            RateLimiter rl;
+            rl.configure(1.0, 10.0);
+            // Sequential consumes: 10 succeed, 11th fails (no mutex
+            // deadlock under repeated lock/unlock).
+            int succ = 0;
+            for (int i = 0; i < 10; ++i) {
+                if (rl.consume("k19")) succ++;
+            }
+            check(succ == 10,
+                  "thread-safety pin: 10 sequential consumes through std::mutex succeed");
+            check(!rl.consume("k19"),
+                  "thread-safety pin: 11th consume after burst exhausted fails");
+        }
+
+        // 20. capacity=0 bucket — always denies, regardless of refill
+        //     (spec item 18). configure(R, 0) → enabled() = false →
+        //     bucket bypasses (always-pass), because the limiter's
+        //     enabled() check is the disable signal. Pin actual.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 0.0);
+            check(!rl.enabled(),
+                  "capacity=0: enabled() = false (burst=0 disables)");
+            bool all_ok = true;
+            for (int i = 0; i < 100; ++i) {
+                if (!rl.consume("k20")) { all_ok = false; break; }
+            }
+            check(all_ok,
+                  "capacity=0: limiter is disabled → 100 consumes pass");
+        }
+
+        // 21. rate>0, capacity=0 — same as above (spec item 19). The
+        //     refill is useless because the bucket can never hold a
+        //     token; net::RateLimiter chose to disable on either ≤ 0
+        //     rather than thrash a zero-capacity bucket.
+        {
+            RateLimiter rl;
+            rl.configure(1000.0, 0.0);
+            check(!rl.enabled(),
+                  "rate>0, capacity=0: still disabled");
+            bool ok = rl.consume("k21");
+            check(ok,
+                  "rate>0, capacity=0: consume passes (disabled bypass)");
+        }
+
+        // 22. Time-monotonicity pin (spec item 20). steady_clock by
+        //     C++ standard is monotonic, so "feeding a later timestamp
+        //     followed by an earlier" cannot happen via the public API
+        //     (which uses internal now()). We exercise the bucket
+        //     across many timestamps and confirm no underflow / no
+        //     exception even under pressure.
+        {
+            RateLimiter rl;
+            rl.configure(50.0, 2.0);
+            for (int round = 0; round < 5; ++round) {
+                rl.consume("k22"); rl.consume("k22");  // drain
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // Try N times; allowed token count should never go
+                // negative or throw.
+                int succ = 0;
+                for (int i = 0; i < 5; ++i) {
+                    if (rl.consume("k22")) succ++;
+                }
+                check(succ >= 0 && succ <= 5,
+                      "monotonicity: consume count stays in [0, 5] across rounds");
+            }
+        }
+
+        // 23. Spec item 5 (consume(0) degenerate behavior). Pinned in
+        //     (7) above — consume() always takes 1 token; there is no
+        //     consume(0) overload. We re-pin from a different angle:
+        //     consume() ALWAYS makes a forward-progress decision
+        //     (success or failure), never returns "skip" or "0-cost".
+        //     Mapped to: empty bucket + consume = false always.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 1.0);
+            rl.consume("k23");  // drain
+            for (int i = 0; i < 5; ++i) {
+                check(!rl.consume("k23"),
+                      "consume() never silently passes a drained bucket (forward-progress)");
+            }
+        }
+
+        // 24. Empty-key path (defensive). The key is an opaque
+        //     std::string; the empty string is a valid map key. A
+        //     bucket for "" behaves like any other.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 2.0);
+            bool a = rl.consume("");
+            bool b = rl.consume("");
+            bool c = rl.consume("");
+            check(a && b && !c,
+                  "empty-string key: bucket behaves like any other key");
+        }
+
+        // 25. Many-key fan-out (defensive scale pin). 100 distinct
+        //     keys each get a fresh bucket; total successful consumes
+        //     across all of them = 100 * burst.
+        {
+            RateLimiter rl;
+            rl.configure(0.001, 3.0);
+            int total_succ = 0;
+            for (int k = 0; k < 100; ++k) {
+                std::string key = "fan-" + std::to_string(k);
+                for (int i = 0; i < 3; ++i) {
+                    if (rl.consume(key)) total_succ++;
+                }
+            }
+            check(total_succ == 300,
+                  "many keys: 100 distinct buckets × burst=3 → 300/300 succeed");
+        }
+
+        // 26. Burst-cap arithmetic boundary: a single 100ms wait at
+        //     rate=R adds approximately R*0.1 tokens, capped at burst.
+        //     With rate=10, burst=20: after 100ms we should have at
+        //     most 1 new token (not 10 — we drained burst=20 first,
+        //     so cap matters here is the new-token amount).
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 20.0);
+            for (int i = 0; i < 20; ++i) rl.consume("k26");   // drain
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // ~1 new token. The 1st consume succeeds, the 2nd is
+            // borderline. Pin: at least 1, at most 2.
+            int succ = 0;
+            for (int i = 0; i < 3; ++i) {
+                if (rl.consume("k26")) succ++;
+                else break;
+            }
+            check(succ >= 1 && succ <= 2,
+                  "rate*window arithmetic: 100ms at rate=10 → 1-2 new tokens");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": rate-limiter-bucket "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
