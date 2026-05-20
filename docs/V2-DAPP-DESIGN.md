@@ -524,8 +524,196 @@ Out of scope for the chain. Reference DApp written as a small process that:
 
 - `DAPP_REPLY` distinct tx type
 - DApp slashing (proof-of-misbehavior tx types)
-- DApp upgrade flows (versioned service_pubkey rotation with grace period)
+- **DApp upgrade flows** (versioned `service_pubkey` rotation with grace period) — fleshed out in §11.7.1 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
+
+---
+
+### 11.7.1 — DApp upgrade flows: versioned `service_pubkey` rotation with grace period
+
+**Tracking slot:** v2.24 (Theme 7 — DApp upgrade). Effort: ~5-7 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped); v2.25/v2.26 ROTATE_KEY adjacent but independent (DApps use a separate tx).
+
+#### Problem statement
+
+A registered DApp publishes a single `service_pubkey` in its `DAppEntry`. This key is the AEAD recipient for `crypto_box_seal` payloads (§10). The current v1.x substrate offers two unsatisfying paths when the operator must change keys:
+
+1. **Re-issue `DAPP_REGISTER` with `op=0`** on the same domain. This rotates the key in-place but creates an undefended overlap: senders who looked up `service_pubkey` at height H but submit `DAPP_CALL` at height H+1 (after the update applied) will have encrypted to a key the DApp may have already retired. In-flight messages become undecryptable; mempool-pending `DAPP_CALL`s are silently bricked.
+2. **Deactivate the domain (`op=1`) and re-register under a new domain.** This severs identity continuity. End users must re-discover the DApp; existing client bindings break; the chain's persistent on-chain reputation (history of `DAPP_CALL` activity, age of registration, accumulated stake) is forfeited.
+
+Neither path admits a clean key-rotation: identity continuity (same domain → same DApp) and key freshness (rotate `service_pubkey` periodically; immediate response to suspected compromise) are in tension.
+
+The v2.24 DApp-upgrade flow resolves this by versioning `service_pubkey` and overlapping old + new keys during a defined grace window. Senders read the registry, encrypt to the **current** key by default, and may pin a specific version when replaying. The DApp keeps the prior key decryptable through the overlap and discards it after the grace window expires.
+
+This problem matters because: (a) §10 explicitly warns about historical-message readability under post-quantum advances on the service key, but offers no rotation path; (b) §9 lists "service-key compromise" as a slashable event, but a slashable rotation flow is required for the operator to safely respond; (c) any nontrivial DApp ecosystem will need scheduled rotation cadence (90 / 180 days) as basic hygiene, the same way TLS-cert rotation is operationally routine.
+
+#### Mechanism sketch
+
+Extend `DAppEntry` with a key-history vector and a current-version pointer. Introduce a new tx slot `DAPP_KEY_ROTATE = 11` that the DApp's owning domain (or a delegated rotation key) signs. Apply-path mutates the entry's key list, sets a grace-window expiry on the prior key, and updates the state_root via the `d:` namespace.
+
+Data structures:
+
+```cpp
+struct DAppKeyVersion {
+    uint32_t version;          // monotonic; v0 is the initial DAPP_REGISTER key
+    PubKey   service_pubkey;
+    uint64_t active_from;      // block height when this key became current
+    uint64_t retire_at;        // UINT64_MAX while current; <future height> when superseded
+};
+
+struct DAppEntry {
+    // ...existing fields (endpoint_url, topics, retention, metadata,
+    //    registered_at, active_from, inactive_from)...
+    std::vector<DAppKeyVersion> key_history;  // ordered oldest → newest
+    uint32_t                    current_version;  // index into key_history
+    PubKey                      rotation_pubkey;  // optional: separate key authorized to rotate (else == owner)
+};
+```
+
+Lifecycle of `key_history`:
+
+- `DAPP_REGISTER` `op=0` (create): inserts `key_history = [{version=0, service_pubkey=X, active_from=h, retire_at=UINT64_MAX}]`, `current_version=0`. Backward-compatible with v2.18 entries — a v2.18 entry materializes as a single-element history at version 0.
+- `DAPP_KEY_ROTATE`: appends `{version=cur+1, service_pubkey=Y, active_from=h, retire_at=UINT64_MAX}`, sets the prior current's `retire_at = h + DAPP_KEY_GRACE_BLOCKS`, advances `current_version`. The prior key remains decryptable-by-DApp through the grace window; the chain considers a `DAPP_CALL` valid against any key version with `active_from ≤ tx.block_height ≤ retire_at`.
+- `DAPP_REGISTER` `op=0` (update on existing domain): preserves `key_history` and `current_version` UNCHANGED. Updating endpoint_url / topics / metadata MUST NOT rotate keys — keep the two concerns separate. (This is a behavior tightening relative to v2.18; see Backward-compat below.)
+- `DAPP_REGISTER` `op=1` (deactivate): unchanged; `inactive_from` is set, `key_history` frozen for history.
+
+Validator rules for a `DAPP_CALL` at height h targeting DApp D:
+
+1. Resolve D in `dapp_registry_`; if missing or `inactive_from ≤ h`, reject (existing rule).
+2. Senders SHOULD encrypt to `D.key_history[D.current_version].service_pubkey` (the current key).
+3. The chain does NOT verify the payload's encryption target (payload is opaque). However, a sender MAY include an optional 4-byte `key_version` prefix in the `DAPP_CALL` payload preamble (informational; chain does not validate) so the DApp routes to the matching decryption key without trial-decrypt.
+4. Grace window honored: a key version is "live for decrypt" iff `active_from ≤ h ≤ retire_at`. DApps with multiple live versions try each in order of `version` descending.
+
+#### Wire-format changes
+
+**New tx-type slot** (extends §3 enum):
+
+```cpp
+enum class TxType : uint8_t {
+    ...existing 0..10...,
+    DAPP_KEY_ROTATE = 11,
+};
+```
+
+**`DAPP_KEY_ROTATE` payload** (canonical, LE where noted; consistent with v2.18 DAPP_REGISTER byte conventions in §3.1):
+
+```
+[op: u8]                    # 0 = rotate, 1 = set rotation_pubkey, 2 = revoke (emergency)
+[new_service_pubkey: 32B]   # the new key (zero-key for op=2)
+[grace_blocks_override: u32 LE]  # 0 = use chain-default DAPP_KEY_GRACE_BLOCKS; else clamped to [MIN, MAX]
+[rotation_pubkey: 32B]      # if op=1: the new authorized rotator; else 32B zero
+[reason_len: u8]
+[reason: utf8]              # operator-supplied freeform reason (≤ 64 B; e.g. "scheduled-rotation", "compromise-suspected")
+```
+
+Constraints:
+
+- `tx.from` must equal either the DApp's owning domain or the entry's current `rotation_pubkey`. If `rotation_pubkey` is zero (default), only the owning domain may rotate.
+- `op=2` (emergency revoke) requires the owning-domain signature; rotation_pubkey alone cannot trigger emergency revoke. Effect: the current key's `retire_at` is set to `h` immediately (no grace window). A subsequent rotate must occur in the same or a later block to install a new current key, else `DAPP_CALL` to D is rejected until that lands. Recommended UX: bundle `op=2` and `op=0` in a v2.4 `COMPOSABLE_BATCH`.
+- `grace_blocks_override` clamped: `[DAPP_KEY_GRACE_MIN_BLOCKS, DAPP_KEY_GRACE_MAX_BLOCKS]` (suggested 50 / 10000). Genesis-pinned with v2.X.2 governance-mutability per Q2.
+- `key_history.size()` capped at `DAPP_KEY_HISTORY_MAX = 64` to bound state growth. On overflow, the oldest fully-retired (`retire_at < h`) entry is evicted from the live tip of state (still committed in historical block bodies, just not in `dapp_registry_`).
+
+**State-commitment encoding** (extends §4 `d:` namespace canonical serialization):
+
+The `canonical_serialize(DAppEntry)` is extended to append, AFTER the existing `metadata` field:
+
+```
+... existing metadata field ...
+|| u64_be(rotation_pubkey)               # 32 bytes; zero if unset
+|| u64_be(current_version)
+|| u64_be(key_history.size())
+|| (each version: u32_be(version) || service_pubkey
+                  || u64_be(active_from) || u64_be(retire_at))
+```
+
+This appended suffix is **conditionally serialized**: a v2.18-style entry (single key, no rotation history) MAY omit the suffix entirely if `key_history.size() == 1 && current_version == 0 && rotation_pubkey == zero && key_history[0].retire_at == UINT64_MAX`. This preserves the v2.18 byte stream (and hence the state_root) for chains that never exercise key rotation, mirroring the v2.18 `state_root` field's "bound only when non-zero" convention. The state_root migration is therefore zero-impact on existing chains; the first `DAPP_KEY_ROTATE` on a domain promotes its entry to the extended form.
+
+#### Apply-path changes
+
+Touch list (files in `src/chain/` and `src/node/`):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/transaction.hpp` | `TxType` enum | Add `DAPP_KEY_ROTATE = 11` |
+| `include/determ/chain/dapp.hpp` (extension of v2.18 header) | `DAppEntry`, new `DAppKeyVersion` struct | Add `key_history`, `current_version`, `rotation_pubkey` |
+| `src/chain/transaction.cpp` | `binary_codec::encode/decode_tx` | Add `DAPP_KEY_ROTATE` payload case (consistent with §3.1 conventions) |
+| `src/chain/chain.cpp` | `apply_transactions` switch | New case for `DAPP_KEY_ROTATE`: charge fee, decode payload, validate authorization (owning-domain or rotation_pubkey), update `dapp_registry_[tx.from]` |
+| `src/chain/chain.cpp` | `build_state_leaves` `d:` branch | Extend `canonical_serialize(DAppEntry)` to append the conditional suffix per §11.7.1 wire format |
+| `src/chain/chain.cpp` | `serialize_state` / `restore_from_snapshot` | Round-trip the extended fields (closes the v2.18 S-037 gap forward — the same code path needs to learn `key_history`) |
+| `src/node/node.cpp` | `validate_tx_shape` for `DAPP_CALL` | No change; the chain doesn't validate payload encryption target. Optional informational `key_version` preamble is opaque to validators |
+| `src/node/node.cpp` | `rpc_dapp_info` | Return the full `key_history` + `current_version` + `rotation_pubkey` in the JSON response (light clients need this for trial-decrypt) |
+| `src/node/node.cpp` | new `rpc_dapp_rotate` (optional thin wrapper) | CLI ergonomic; not strictly required |
+| `tools/test_dapp_key_rotate.sh` | new | Regression: scheduled rotation, grace-window decrypt, emergency revoke, history cap eviction |
+
+The new switch case mirrors `DAPP_REGISTER`'s shape (charge_fee → ensure_dapp_registry → mutate → advance nonce). The lazy-snapshot integration is inherited from §5's Phase 2A/2B pattern.
+
+#### Backward-compat story
+
+This is a **soft-fork** addition under the v2.18 substrate: no existing tx becomes invalid, no existing state_root computation changes for entries that never rotate. Coexistence:
+
+- v2.18 nodes (which do not understand `TxType::DAPP_KEY_ROTATE = 11`) treat the new tx-type as unknown and reject the containing block. This is a **breaking** consensus change; v2.24 must roll out as a coordinated migration with a `genesis_params.dapp_key_rotate_active_from` height pin.
+- Until that height, the chain MUST reject `DAPP_KEY_ROTATE` txs (validator-level pre-check). After that height, the chain MUST accept them.
+- v2.18 entries (single-key, no history) materialize transparently as `key_history.size() == 1`. Their `state_root` contribution is unchanged by §11.7.1's conditional-suffix rule.
+- The behavior tightening "DAPP_REGISTER `op=0` no longer rotates keys" is enforced from the activation height onward. Pre-activation rotations via DAPP_REGISTER are permitted but generate no `key_history`. Post-activation, a sender attempting key rotation via DAPP_REGISTER (i.e., supplying a `service_pubkey` different from the current one) is REJECTED with diagnostic `"use DAPP_KEY_ROTATE for key changes"`.
+
+The coordinated migration follows the same pattern as A11 threshold-randomness activation and S-033 state_root activation (height-pinned, validators upgrade in advance, light clients note the schema version transition).
+
+#### Threat model
+
+| Attack | v2.24 defense | New surface introduced |
+|---|---|---|
+| **Service-key compromise; operator must respond** | `op=2` emergency revoke + same-block re-rotate via `COMPOSABLE_BATCH`. Window of vulnerability bounded by block latency (typically ≤ 1 block ≈ regional/global per §13.1 of PROTOCOL.md). Slashing event from §9 can now reference a specific compromised version. | None — strictly improves on v2.18's "operator has no recourse but re-REGISTER under a new domain" |
+| **Adversarial rotation by stolen owning-domain key** | Attacker with the owning-domain Ed25519 key can already do anything (TRANSFER funds, deactivate the DApp, etc.); rotation is no worse. Mitigation: operator MAY pre-configure `rotation_pubkey` to a hot key while keeping the owning-domain key cold, narrowing the attack surface | Yes: the `rotation_pubkey` delegate is a new authority. Compromise of just `rotation_pubkey` lets an attacker rotate `service_pubkey` but NOT exfiltrate stake or deactivate the DApp. The operator can then issue an `op=1` (set rotation_pubkey to zero) and an `op=0` (install new rotation_pubkey) from the owning-domain key to recover. |
+| **Replay during grace window** | The chain's existing nonce + replay-protection rules apply to `DAPP_KEY_ROTATE` itself. For `DAPP_CALL` payloads: a sender who encrypted to the old key during the grace window still has their message decryptable by the DApp; an adversary cannot replay an OLD ciphertext as a NEW message because libsodium sealed-box is non-deterministic (ephemeral key per encryption) and the on-chain `tx.nonce` rejects duplicates. | None |
+| **Grace-window abuse to keep a compromised key live** | `op=2` emergency revoke bypasses the grace window. Slashing per §9 disincentivizes operators from leaving a known-compromised key in grace | Operator can choose a `grace_blocks_override` near `DAPP_KEY_GRACE_MAX_BLOCKS`; this is operator-side policy. Compensating control: the on-chain `reason` field is public, audit-trail-visible |
+| **State-growth via key-history bloat** | `DAPP_KEY_HISTORY_MAX = 64` cap. Per-DApp size ceiling: 64 × (4 + 32 + 8 + 8) = 3328 bytes per entry's history. Across `DAPP_MAX_REGISTRY_SIZE` DApps (genesis-pinned), worst-case state bloat from rotation history is bounded | Compaction edge case: an attacker who controls many DApp operators could try to maximize history per DApp. The cap + the `DAPP_REGISTER` stake floor in §9 jointly bound the cost (Sybil-equivalent to the v2.18 namespace squatting threat already addressed in §9). |
+| **Cross-shard rotation propagation lag** | The `d:` namespace state-root commitment ensures the destination shard sees the new key via the standard beacon-anchored state-proof path. A sender on shard B who reads a stale `dapp_info` may encrypt to a retired key; the grace window provides the recovery margin. | A `DAPP_KEY_GRACE_MIN_BLOCKS` floor MUST exceed the worst-case cross-shard receipt latency (`CROSS_SHARD_RECEIPT_LATENCY = 3` blocks at minimum; see S-016). Suggested floor: 50 blocks. |
+| **Equivocating rotation** (two `DAPP_KEY_ROTATE` txs at the same height with different new keys) | Each tx is independently nonce-protected; the chain orders them via the standard intra-block tx index. The second of the two effectively re-rotates the first; the chain-state outcome is deterministic. | None — falls out of normal tx-ordering semantics |
+| **Light-client trust** | Light clients verify `key_history` via the extended `d:` namespace state-proof (v2.2 RPC). The DApp operator cannot lie about prior key versions to a light client because the historical state-roots commit to the entire `key_history` vector at each block | Light clients now MUST fetch the full `key_history` per DApp they interact with (up to 64 × 52 bytes = ~3.3 KB). Tolerable for any practical light-client use case |
+
+The relevant cross-references in the existing threat-model docs: `proofs/CrossShardReceipts.md` T-7 (rotation propagation), `proofs/Safety.md` L-1.3 (state-root inclusion of `key_history`), `proofs/EquivocationSlashing.md` H2 (same-generation rotation does not equivocate; ordering is well-defined).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `TxType::DAPP_KEY_ROTATE` enum + struct extensions | 0.5 day | Mechanical |
+| Encoder/decoder + payload validation | 1 day | Mirrors `DAPP_REGISTER` shape |
+| `apply_transactions` switch case + authorization check | 1 day | Owning-domain + rotation_pubkey authorization paths |
+| `build_state_leaves` `d:` branch extension (conditional suffix) | 0.5 day | Preserves v2.18 state_root byte-for-byte for non-rotated entries |
+| `serialize_state` / `restore_from_snapshot` round-trip | 0.5 day | Forward-closes S-037 for the extended schema |
+| `rpc_dapp_info` extension to return `key_history` | 0.5 day | JSON additions; mechanical |
+| CLI: `determ dapp-key-rotate --domain D [--new-key K] [--rotation-key R] [--grace G] [--reason S]` | 0.5 day | Wallet ergonomic |
+| Regression: `tools/test_dapp_key_rotate.sh` (rotate, grace, emergency, history cap, cross-shard) | 1.5 days | Five scenarios; matches the v2.18 / v2.19 test-coverage depth |
+| Migration coordination: genesis_params field + activation-height gate + documentation | 0.5 day | Same shape as the A11 / S-033 activation pin |
+| **Total** | **~5-7 engineering days** | Single-developer estimate; +1-2 days if cross-shard rotation propagation needs a dedicated test |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required for the `dapp_registry_` substrate.
+- **v2.19 DAPP_CALL** — shipped. Required for the payload-encryption surface that key rotation protects.
+- **v2.4 COMPOSABLE_BATCH** — shipped. Recommended for the emergency-revoke + re-rotate same-block atomic pattern.
+- **v2.2 state_proof RPC** — shipped. Required for light-client verification of the extended `d:` namespace encoding (the `36b759d` extension already covers the namespace; the schema extension is conditional-suffix-compatible).
+- **v2.25 ROTATE_KEY (user identity)** — **adjacent, independent.** The v2.25/v2.26 work specifies key rotation for end-user identities (Theme 9 DSSO). v2.24's `DAPP_KEY_ROTATE` is the analog for DApp service identities. The two share design DNA (versioned history, grace window, authorization delegation) but are separate tx types and separate registry maps. Shipping order: either can ship first; if v2.25 ships first, v2.24 should mirror its grace-window constants and authorization patterns for consistency.
+- **v2.10 threshold randomness** — not required (rotation is operator-initiated, not consensus-randomized).
+- **v2.14 OPAQUE / single-server PAKE** — not required (DApp service keys are operator-controlled, not user-passphrase-derived).
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives.
+
+#### Cross-references
+
+- §3.1 `DAPP_REGISTER` byte layout — `DAPP_KEY_ROTATE` payload conventions match
+- §4 `dapp_registry_` state-commitment via `d:` namespace — extended here with conditional suffix
+- §9 Slashable conditions — "service-key compromise" gains a concrete operator-response flow (rotate + slash-the-compromise-event)
+- §10 Privacy & off-chain channels — historical-message readability under PQ advances mitigated by periodic rotation
+- §11 Phase 7.4 streaming subscription — orthogonal; key rotation is a control-plane event, streaming is data-plane
+- `V2-DESIGN.md` Theme 9 (v2.25 ROTATE_KEY, v2.26 identity continuity) — sibling design for user-identity rotation; share design DNA
+- `proofs/Safety.md` L-1.3 — state-root inclusion semantics
+- `proofs/CrossShardReceipts.md` T-7 — cross-shard rotation visibility
+- `SECURITY.md` §S-037 — forward-closes the snapshot-serialize/restore gap for the extended `DAppEntry` schema (the v2.24 implementation MUST round-trip `key_history` or it inherits S-037's symptom)
+- `PROTOCOL.md` §4.1.1 — `d:` namespace canonical serialization; extended here
+- `src/chain/chain.cpp` `build_state_leaves` — touch site for the conditional suffix
+- `tools/test_dapp_register.sh` + `tools/test_dapp_call.sh` — sibling regression patterns; `tools/test_dapp_key_rotate.sh` mirrors their shape
+- v2.18 / v2.19 in-process determ subcommands (`test-dapp-register`, `test-dapp-call`) — pattern for `test-dapp-key-rotate`
 
 ---
 
