@@ -10210,6 +10210,187 @@ int main(int argc, char** argv) {
                   "receive-path commit: different views produce different sigs");
         }
 
+        // === F2 per-record canonical hash helpers ===
+        //
+        // Producers materialize view-lists by hashing each pending
+        // EquivocationEvent / AbortEvent / CrossShardReceipt via these
+        // helpers. Determinism (two peers hash → same result) +
+        // domain separation (no cross-struct collision) are the contract.
+
+        // 45. hash_equivocation_event: same struct → same hash (determinism).
+        {
+            determ::chain::EquivocationEvent e;
+            e.equivocator = "alice.tld";
+            e.block_index = 100;
+            e.digest_a    = patterned_hash(0xA1);
+            e.sig_a.fill(0xAA);
+            e.digest_b    = patterned_hash(0xB1);
+            e.sig_b.fill(0xBB);
+            e.shard_id              = 7;
+            e.beacon_anchor_height  = 42;
+            Hash h1 = hash_equivocation_event(e);
+            Hash h2 = hash_equivocation_event(e);
+            check(h1 == h2, "hash_equivocation_event: deterministic");
+            // Non-zero output (the all-zero output would be suspicious).
+            bool any_nonzero = false;
+            for (auto b : h1) if (b != 0) { any_nonzero = true; break; }
+            check(any_nonzero, "hash_equivocation_event: non-zero output");
+        }
+
+        // 46. hash_equivocation_event: any field change → different hash.
+        {
+            determ::chain::EquivocationEvent base;
+            base.equivocator = "alice.tld";
+            base.block_index = 100;
+            base.digest_a    = patterned_hash(0xA1);
+            base.digest_b    = patterned_hash(0xB1);
+            Hash base_hash = hash_equivocation_event(base);
+
+            auto e2 = base; e2.equivocator = "bob.tld";
+            check(hash_equivocation_event(e2) != base_hash,
+                  "hash_equivocation_event: equivocator field binds");
+
+            auto e3 = base; e3.block_index = 101;
+            check(hash_equivocation_event(e3) != base_hash,
+                  "hash_equivocation_event: block_index field binds");
+
+            auto e4 = base; e4.digest_a[0] ^= 0xFF;
+            check(hash_equivocation_event(e4) != base_hash,
+                  "hash_equivocation_event: digest_a field binds");
+
+            auto e5 = base; e5.sig_a[0] ^= 0xFF;
+            check(hash_equivocation_event(e5) != base_hash,
+                  "hash_equivocation_event: sig_a field binds");
+
+            auto e6 = base; e6.shard_id = 99;
+            check(hash_equivocation_event(e6) != base_hash,
+                  "hash_equivocation_event: shard_id field binds");
+
+            auto e7 = base; e7.beacon_anchor_height = 999;
+            check(hash_equivocation_event(e7) != base_hash,
+                  "hash_equivocation_event: beacon_anchor_height field binds");
+        }
+
+        // 47. hash_abort_event: deterministic + field-binding.
+        {
+            determ::chain::AbortEvent a;
+            a.round         = 1;
+            a.aborting_node = "alice.tld";
+            a.timestamp     = 1700000000;
+            a.event_hash    = patterned_hash(0x55);
+            a.claims_json   = nlohmann::json::array();
+            Hash h1 = hash_abort_event(a);
+            Hash h2 = hash_abort_event(a);
+            check(h1 == h2, "hash_abort_event: deterministic");
+
+            auto a2 = a; a2.round = 2;
+            check(hash_abort_event(a2) != h1,
+                  "hash_abort_event: round field binds");
+
+            auto a3 = a; a3.aborting_node = "bob.tld";
+            check(hash_abort_event(a3) != h1,
+                  "hash_abort_event: aborting_node field binds");
+
+            auto a4 = a; a4.event_hash[31] ^= 0xFF;
+            check(hash_abort_event(a4) != h1,
+                  "hash_abort_event: event_hash field binds");
+        }
+
+        // 48. hash_cross_shard_receipt: deterministic + field-binding.
+        {
+            determ::chain::CrossShardReceipt r;
+            r.src_shard       = 1;
+            r.dst_shard       = 2;
+            r.src_block_index = 42;
+            r.src_block_hash  = patterned_hash(0x77);
+            r.tx_hash         = patterned_hash(0x88);
+            r.from            = "alice.tld";
+            r.to              = "bob.tld";
+            r.amount          = 1000;
+            r.fee             = 10;
+            r.nonce           = 5;
+            Hash h1 = hash_cross_shard_receipt(r);
+            Hash h2 = hash_cross_shard_receipt(r);
+            check(h1 == h2, "hash_cross_shard_receipt: deterministic");
+
+            auto r2 = r; r2.amount = 2000;
+            check(hash_cross_shard_receipt(r2) != h1,
+                  "hash_cross_shard_receipt: amount field binds");
+
+            auto r3 = r; r3.nonce = 99;
+            check(hash_cross_shard_receipt(r3) != h1,
+                  "hash_cross_shard_receipt: nonce field binds");
+        }
+
+        // 49. Cross-struct domain separation: an EquivocationEvent and an
+        //     AbortEvent with the same `equivocator/aborting_node` and
+        //     `block_index/timestamp` MUST hash to different Hashes (the
+        //     DTM-F2-<TYPE>-v1 domain tag prevents an attacker from
+        //     crafting a view list that confuses the three types).
+        {
+            determ::chain::EquivocationEvent e;
+            e.equivocator = "x.tld";
+            e.block_index = 1;
+
+            determ::chain::AbortEvent a;
+            a.round         = 1;
+            a.aborting_node = "x.tld";
+            a.timestamp     = 1;
+
+            determ::chain::CrossShardReceipt r;
+            r.src_shard       = 1;
+            r.from            = "x.tld";
+            r.src_block_index = 1;
+
+            Hash he = hash_equivocation_event(e);
+            Hash ha = hash_abort_event(a);
+            Hash hr = hash_cross_shard_receipt(r);
+
+            check(he != ha,
+                  "hash_*: EquivocationEvent vs AbortEvent domain-separated");
+            check(he != hr,
+                  "hash_*: EquivocationEvent vs CrossShardReceipt domain-separated");
+            check(ha != hr,
+                  "hash_*: AbortEvent vs CrossShardReceipt domain-separated");
+        }
+
+        // 50. End-to-end view-root flow: a producer hashes 3 receipts,
+        //     stuffs them into view_inbound_list of make_contrib, the
+        //     receiver re-derives the commit + verifies. This mirrors
+        //     what the eventual Phase-1 trigger code in node.cpp will do.
+        {
+            auto key = determ::crypto::generate_node_key();
+
+            determ::chain::CrossShardReceipt r1, r2, r3;
+            r1.src_shard = 1; r1.dst_shard = 2; r1.amount = 100;
+            r2.src_shard = 1; r2.dst_shard = 2; r2.amount = 200;
+            r3.src_shard = 3; r3.dst_shard = 2; r3.amount = 300;
+
+            std::vector<Hash> inbound_view = {
+                hash_cross_shard_receipt(r1),
+                hash_cross_shard_receipt(r2),
+                hash_cross_shard_receipt(r3),
+            };
+            std::vector<Hash> tx = {patterned_hash(0xF0)};
+            Hash dh   = patterned_hash(0xF1);
+            Hash prev = patterned_hash(0xF2);
+            auto m = make_contrib(key, "producer.tld", 200, prev, 0, tx, dh,
+                                   /*eq=*/{}, /*abort=*/{},
+                                   /*inbound=*/inbound_view);
+
+            check(m.view_inbound_list.size() == 3,
+                  "end-to-end: 3 inbound receipts in view_inbound_list");
+            check(m.view_inbound_root == compute_view_root(m.view_inbound_list),
+                  "end-to-end: view_inbound_root matches list");
+
+            Hash recv_commit = make_contrib_commitment(
+                m.block_index, m.prev_hash, m.tx_hashes, m.dh_input,
+                m.view_eq_root, m.view_abort_root, m.view_inbound_root);
+            check(determ::crypto::verify(key.pub, recv_commit.data(),
+                                          recv_commit.size(), m.ed_sig),
+                  "end-to-end: receiver verifies F2 commit with inbound view");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": view-root " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";

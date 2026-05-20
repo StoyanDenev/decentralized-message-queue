@@ -174,6 +174,31 @@ std::vector<Hash> reconcile_union(
 std::vector<Hash> reconcile_intersection(
     const std::vector<std::vector<Hash>>& member_lists);
 
+// === F2 per-record canonical hashes (sub-step 2 prep) ===
+//
+// The view-lists in ContribMsg are `std::vector<Hash>`, where each Hash
+// is the canonical hash of one EquivocationEvent / AbortEvent /
+// CrossShardReceipt. These helpers materialize those hashes from the
+// in-memory structs so the producer can snapshot pending_* pools at
+// Phase-1 and hash each entry into the view list.
+//
+// Domain-separated to defeat cross-struct collision (an EquivocationEvent
+// hashing to the same Hash as an AbortEvent would let an attacker craft
+// a contrib whose view_eq_root incorrectly matches a list of mixed
+// types). Each helper prefixes its SHA256Builder with a unique
+// `DTM-F2-<TYPE>-v1` domain tag.
+//
+// Field selection: all consensus-bound fields of each struct, in
+// declared order. Optional / forensic-only fields (e.g.,
+// EquivocationEvent's beacon_anchor_height which is "not consumed by
+// validator correctness checks" per the block.hpp comment) are still
+// included — F2 hashes a member's COMPLETE observation, and any peer
+// observing the same struct should produce the same Hash.
+
+Hash hash_equivocation_event(const chain::EquivocationEvent& e);
+Hash hash_abort_event(const chain::AbortEvent& e);
+Hash hash_cross_shard_receipt(const chain::CrossShardReceipt& r);
+
 // === Validator-side F2 checks (V21..V26 per F2-SPEC.md) ===
 //
 // These helpers are pure functions: no consensus-state dependency, so

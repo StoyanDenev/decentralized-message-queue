@@ -271,6 +271,60 @@ Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists) {
 
 // ─── v2.7 F2 view reconciliation helpers ───────────────────────────────────
 //
+// Per-record canonical hashes for view-list materialization. Each helper
+// hashes ALL consensus-bound fields of its struct in declared order under
+// a unique DTM-F2-<TYPE>-v1 domain separator. Two peers observing the
+// same struct content compute the same Hash; mixing struct types into a
+// single view list is impossible because of the cross-domain separator.
+
+Hash hash_equivocation_event(const chain::EquivocationEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-EQ-v1"));
+    b.append(e.equivocator);
+    b.append(e.block_index);
+    b.append(e.digest_a);
+    b.append(e.sig_a.data(), e.sig_a.size());
+    b.append(e.digest_b);
+    b.append(e.sig_b.data(), e.sig_b.size());
+    // Forensic-trace fields (shard_id, beacon_anchor_height): included
+    // so peers' Hash matches across observers with identical struct
+    // content. Each observation point will fill these consistently.
+    b.append(static_cast<uint64_t>(e.shard_id));
+    b.append(e.beacon_anchor_height);
+    return b.finalize();
+}
+
+Hash hash_abort_event(const chain::AbortEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(e.round);
+    b.append(e.aborting_node);
+    b.append(static_cast<uint64_t>(e.timestamp));
+    b.append(e.event_hash);
+    // claims_json: serialize to canonical string form via nlohmann's
+    // dump(). All peers using nlohmann::json see the same dump() output
+    // for the same parsed input (nlohmann sorts object keys), so this
+    // is deterministic across observers.
+    b.append(e.claims_json.dump());
+    return b.finalize();
+}
+
+Hash hash_cross_shard_receipt(const chain::CrossShardReceipt& r) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-RCPT-v1"));
+    b.append(static_cast<uint64_t>(r.src_shard));
+    b.append(static_cast<uint64_t>(r.dst_shard));
+    b.append(r.src_block_index);
+    b.append(r.src_block_hash);
+    b.append(r.tx_hash);
+    b.append(r.from);
+    b.append(r.to);
+    b.append(r.amount);
+    b.append(r.fee);
+    b.append(r.nonce);
+    return b.finalize();
+}
+
 // `compute_view_root` produces the canonical Merkle root over a sorted SET
 // of hash items. Same shape as `compute_tx_root` (which also dedupes via
 // std::set + appends in canonical order) so a view-root over the same
