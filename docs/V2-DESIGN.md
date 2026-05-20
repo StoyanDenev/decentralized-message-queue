@@ -584,13 +584,109 @@ New attack surface introduced:
 
 ### v2.15 — Wallet HD derivation + multi-sig
 
-**Motivation.** A single Ed25519 seed per wallet is BIP-32 stone-age. Real wallets use hierarchical derivation (BIP-32/BIP-44) so one master seed manages many addresses with deterministic recovery. Multi-sig (M-of-N approval per tx) is table-stakes for any meaningful business deployment.
+**Problem statement.** Today every account in Determ is a single Ed25519 keypair stored in a single keyfile under `{data_dir}/wallet/<domain>.key` (or anon-address equivalent). Two structural gaps follow:
 
-**Mechanism.** HD derivation via HKDF-SHA-256 over the seed (Ed25519 doesn't have a standardized HD scheme like secp256k1's BIP-32; SLIP-0010 covers Ed25519 specifically). Multi-sig as a wallet-side construct: a tx is the aggregation of M Ed25519 signatures over the same payload; the chain treats it as a single tx with M sigs in a witness list.
+1. **Single-seed account sprawl.** A user who wants ten distinct identities — one per RP, one per role, one per persona — needs ten independently-generated keyfiles, each with its own passphrase, backup story, and recovery surface. The wallet does not derive child keys from a master seed; there is no BIP-32-class hierarchy. Every key is its own root.
+2. **Single-signature transaction model.** `Transaction::sig` is one Ed25519 signature over `signing_bytes()`. There is no per-tx multi-signature primitive — every tx is authorized by exactly one signer. Business deployments that require M-of-N approval (treasury operations, custodial sweeps, joint-account control) must wrap that policy off-chain, which reintroduces a trust singleton (whoever holds the post-policy signing key). The `COMPOSABLE_BATCH` (TxType=8) pattern at `include/determ/chain/block.hpp:108` mentions "Multi-sig parallel approval (M signers act independently, commit iff all M land in the batch)" as a workaround, but it has three structural defects for first-class multi-sig:
+   - Each inner tx still has a single signer and a single nonce — the M-of-N is encoded at the batch envelope, not at the account level.
+   - The submitter relayer becomes the policy enforcer; the chain has no native concept of "this account requires M signatures."
+   - There is no on-chain expression of the policy itself — observers cannot tell that a given account is multi-sig-controlled until they see a representative batch in flight.
 
-**Cost.** 1 week wallet-side. Chain-side: optional witness-list extension to `Transaction` (backward-compat by default size 0). Hardware-wallet integration follows naturally.
+v2.15 closes both gaps as one coherent extension to the wallet substrate + a narrow, additive change to `Transaction`.
 
-**Closes:** UX gap for enterprise / consortium deployments.
+**Mechanism — Part 1: HD derivation (SLIP-0010-Ed25519).** Ed25519 has no standardized BIP-32 because the underlying scheme requires hashing to scalar with a specific reduction modulo `l` (the curve order). The de-facto standard for HD-Ed25519 is **SLIP-0010** (used by Ledger, Trezor, modern hardware wallets) — HKDF-SHA-512 over a master seed yields a 32-byte child key + 32-byte chain code at each derivation step. Derivation is **hardened-only** for Ed25519 (the soft-derivation path is not safe on Ed25519 because the curve's small subgroup attacks make non-hardened paths leak parent secrets given enough child observations). The derivation path follows BIP-44's structure: `m / purpose' / coin_type' / account' / change' / index'` where Determ would request a `coin_type` registration with SLIP-0044 (proposed slot: 0x80000ded for "Determ"; pending registry application).
+
+Wallet-side layout under `{data_dir}/wallet/`:
+- `master.seed.enc` — 32-byte master seed, AES-256-GCM-encrypted under the wallet passphrase (same envelope as v2.17 keyfile encryption).
+- `accounts.json` — manifest of derived accounts: `[{path: "m/44'/Determ/0'/0'/0'", domain: "alice.determ", anon_addr: null, ...}, ...]`. Authenticated by `master.seed.enc`'s passphrase-derived MAC tag (so the manifest cannot be silently swapped under the user).
+- `<domain>.key` keyfiles become **derived state**, not authoritative. `determ wallet show-key <domain>` re-derives on demand; the keyfile is a cache. Loss of `accounts.json` is recoverable as long as the user remembers their derivation paths or accepts a bounded path-space scan.
+
+**Mechanism — Part 2: On-chain multi-sig.** The chain-side addition is a single optional field on `Transaction` and one new tx type to declare the policy:
+
+- **`Transaction::aux_sigs: std::vector<AuxSig>`** — backward-compat empty by default. When non-empty, the tx is a multi-sig authorization: `sig` is the primary signer's Ed25519 signature; each `AuxSig = { signer_pubkey: PubKey32, ed_sig: Signature64 }` is a co-signer's signature over the same `signing_bytes()`. Validator collects pubkeys, checks against the on-chain policy.
+- **`TxType::MULTISIG_POLICY = 14`** — declares "this account requires M-of-N signatures from this pubkey set." Payload: `[op: u8][threshold_m: u8][signer_count_n: u8][n × PubKey32]`. `op` is `0=set, 1=remove`. The account's primary Ed25519 key (the original REGISTER key) signs the policy declaration in the outer envelope. Once set, the account `multisig_policy_` map entry on `Chain` keys the validator into multi-sig-required mode for all subsequent outgoing txs from that account.
+
+**Wire-format changes.**
+
+| Slot | Use | Notes |
+|---|---|---|
+| `TxType::MULTISIG_POLICY = 14` | Policy set/remove | Outer sig is the account's primary REGISTER key. Policy takes effect at `apply_height + MULTISIG_POLICY_DELAY` (proposed 10 blocks — provides time to revert if the policy itself is hostile/erroneous). |
+| `Transaction::aux_sigs` (new optional field) | M-of-N co-signatures | Backward-compat: serialized only when non-empty; absent in binary codec means single-sig (old behavior). |
+| `struct AuxSig { PubKey32 signer; Signature64 sig; }` | Wire shape | 96 bytes per co-signer. Cap: `MAX_MULTISIG_SIGNERS = 16` (matches enterprise treasury norms; bounds block-size growth). |
+| `struct MultiSigPolicy { threshold_m: u8; signers: vector<PubKey32>; effective_height: u64; }` | Chain-state shape | Stored in `multisig_policies_` keyed by account address. Contributes to state_root via new namespace `s:` for "signing policy" (note `s:` is currently `r:` for registrants? — verify against §4.1.1; new namespace letter to be assigned at integration time). |
+
+The HD layer is **purely wallet-side** — no wire-format change. The chain sees only the resulting derived public keys when each child account does its own REGISTER (or appears as a TRANSFER subject).
+
+**Apply-path integration.**
+
+- `BlockValidator::validate_tx` (src/node/validator.cpp): for any tx with non-empty `aux_sigs`, look up `multisig_policies_[tx.from]`. If absent → reject (the policy slot must exist before aux_sigs are accepted; prevents stray multi-sig spam against non-multisig accounts). If present, verify each `AuxSig`'s `ed_sig` against `signing_bytes()` under the corresponding `signer_pubkey`. Require ≥ `policy.threshold_m` distinct valid pubkeys (each pubkey counted once; duplicates rejected). The primary `sig` field still must verify — it carries the same role as today but counts toward the threshold only if `tx.from`'s primary pubkey is itself in `policy.signers`.
+- `Chain::apply_transactions` (src/chain/chain.cpp): for `TxType::MULTISIG_POLICY`, after shape/threshold sanity (`1 ≤ threshold_m ≤ signer_count_n ≤ MAX_MULTISIG_SIGNERS`, no duplicate signers, primary REGISTER key signed the outer envelope), insert into `multisig_policies_[tx.from]` with `effective_height = current_height + MULTISIG_POLICY_DELAY`. Pre-effective-height txs continue to validate under single-sig rules (the policy is **queued, not retroactive**). For `op=1` (remove), the same delay applies — prevents an attacker who briefly compromises one signer from instantly disabling the policy.
+- `Chain::serialize_state` / `restore_from_snapshot`: `multisig_policies_` added to the snapshot tail and state_root leaf set under the new namespace.
+- `Chain::atomic_scope` (v2.4 A9 substrate): the policy installation runs inside `atomic_scope`; if any sibling tx in the same block rolls back, the policy installation rolls back too.
+
+**Interaction with v2.26 ROTATE_KEY.** Multi-sig accounts cannot use the single-key `ROTATE_KEY` path verbatim — that would let any one signer rotate the policy's primary key and effectively unilaterally take over the account. Resolution: when `multisig_policies_[tx.from]` exists, the `ROTATE_KEY` tx itself must carry `aux_sigs` satisfying the same M-of-N threshold (i.e., the policy gates its own rotation, not just normal txs). v2.26's apply path checks `multisig_policies_` and dispatches accordingly. Documented in `docs/V2-DESIGN.md` §v2.26 cross-reference; spec lives here.
+
+**Threat model.** What the primitive defeats:
+
+- **Single-signer compromise.** With an M-of-N policy and M ≥ 2, compromise of any single signer's key does not authorize any outgoing tx. The attacker must compromise ≥ M signers (or M-1 and own the primary). Standard multi-sig security argument.
+- **Custodian unilateral action.** A multi-account treasury where M=3 of N=5 includes signers from three independent operational silos cannot be drained by any single silo. The chain enforces the threshold; no off-chain trust.
+- **Account-derivation collision.** HD derivation is hardened-only on Ed25519, so a child key compromise does not leak the master seed or sibling keys. Each derived account is cryptographically independent of every sibling.
+- **Wallet backup brittleness.** Today, losing any keyfile loses that account permanently. With HD, losing the wallet's keyfile cache is recoverable from the master seed + derivation path; only loss of the master seed itself is terminal.
+
+New attack surface introduced:
+
+- **Policy install griefing.** An attacker who briefly compromises a primary REGISTER key can install a hostile multi-sig policy, then the policy itself locks out the legitimate owner. Defense: the `MULTISIG_POLICY_DELAY = 10` block window provides a revert period — the legitimate owner, on detecting the install, can submit a competing `MULTISIG_POLICY` with `op=1` (remove) under the same single-sig authority before the policy activates. Once active, removal also requires meeting the threshold (intentional — symmetric to install).
+- **Threshold-signer collusion.** If M signers collude, they can drain the account. This is inherent to M-of-N; the cure is choosing N from independent trust silos and choosing M large enough that collusion is operationally difficult. Chain enforces the math; operational selection is off-chain.
+- **AuxSig replay across forks.** `signing_bytes()` already binds `chain_id` + nonce + tx_hash precursor fields; co-signer signatures are bound to the same envelope. Cross-fork replay is bounded by `chain_id` exactly as for single-sig.
+- **Block-size amplification.** A maximally-multisig tx (M=N=16 signers) adds `16 × 96 = 1536 bytes` of co-signatures. With `MAX_BLOCK_TXS` capped at the existing constant, worst-case block growth is bounded; size cap stays within the existing block-body budget. Quantified in the effort table — no change to existing block-size limits needed.
+- **HD-master-seed compromise.** Compromise of `master.seed.enc` plus passphrase leaks every derived account simultaneously. This is strictly *equivalent* to today's threat (compromise of all keyfiles + their passphrases) — the master seed concentrates the key material, but the user's existing passphrase already protects an analogous concentration. The master.seed is encrypted with the same AES-256-GCM envelope shipped under v2.17 (S-004 closure), so the cryptographic envelope is identical.
+- **Derivation-path-only enumeration.** An attacker who steals only `accounts.json` (no master seed) sees the derivation paths but not the keys — they can confirm which paths the user has derived but cannot impersonate. Equivalent threat to learning a user's account namespace today; no new exposure.
+
+**Effort estimate.** ~2 weeks focused work:
+
+| Sub-component | Effort |
+|---|---|
+| SLIP-0010-Ed25519 derivation in wallet (`wallet/hd.cpp` new) | 2 days |
+| Wallet HD account manifest + CLI verbs (`hd-init`, `hd-derive`, `hd-show`) | 2 days |
+| `Transaction::aux_sigs` field + binary codec + JSON | 1 day |
+| `TxType::MULTISIG_POLICY` apply path + validator gates | 2 days |
+| `multisig_policies_` state + state_root namespace + snapshot integration | 1 day |
+| Wallet-side multi-sig CLI (`policy-set`, `policy-remove`, `cosign`) | 2 days |
+| v2.26 `ROTATE_KEY` interaction (multi-sig-gated rotation) | 1 day |
+| Hardware-wallet integration outline (Ledger/Trezor SLIP-0010 wire) | 1 day |
+| Regression tests (HD derive, M-of-N happy + threshold-fail + duplicate-signer + replay) | 2-3 days |
+| Documentation refresh (PROTOCOL.md tx-type table + wallet docs) | 1 day |
+
+**Dependencies.**
+
+- **v2.17 (passphrase-encrypted keyfiles)** — ✅ shipped. The HD master seed reuses the AES-256-GCM envelope.
+- **v2.4 (A9 atomic_scope)** — ✅ shipped. Policy install rides inside `atomic_scope` so block-level rollback is clean.
+- **v2.1 (state Merkle root)** — ✅ shipped. The new `multisig_policies_` namespace integrates via the existing leaf-builder pattern.
+- **v2.26 (ROTATE_KEY)** — coupled. The multi-sig policy must gate `ROTATE_KEY` for multi-sig accounts; the two should ship in adjacent releases, or v2.15 ships with a documented gap that v2.26 closes. Recommended: v2.15 ships the policy + aux_sigs; v2.26 ships ROTATE_KEY with the multi-sig gate already wired in. Avoids a window where a multi-sig account exists but key rotation has not absorbed the policy check.
+- **No dependency on v2.10 (threshold randomness)** — multi-sig at the application layer is independent of consensus-layer randomness.
+- **No dependency on v2.22 (confidential tx)** — orthogonal; future composition (a confidential multi-sig tx) is natural but not a v2.15 requirement.
+
+**Cross-references.**
+
+- `include/determ/chain/block.hpp:60` — current "no per-tx multisig" comment becomes stale; v2.15 ships the primitive.
+- `include/determ/chain/block.hpp:77` — COMPOSABLE_BATCH "Multi-sig parallel approval" workaround is superseded; v2.15 provides the native primitive. COMPOSABLE_BATCH remains useful for other patterns (atomic swaps, bundled transfers).
+- `include/determ/chain/block.hpp:205` — `struct Transaction` extended with `aux_sigs` field.
+- v2.4 atomic_scope (this document) — host for the policy-install rollback path.
+- v2.17 keyfile encryption envelope (this document) — reused for `master.seed.enc`.
+- v2.26 ROTATE_KEY (this document) — must absorb the multi-sig gate when both ship.
+- SLIP-0010 spec: https://github.com/satoshilabs/slips/blob/master/slip-0010.md (Ed25519 derivation).
+- SLIP-0044 coin-type registry: https://github.com/satoshilabs/slips/blob/master/slip-0044.md (Determ coin-type assignment pending).
+- BIP-32 / BIP-44 path conventions: https://en.bitcoin.it/wiki/BIP_0032, https://en.bitcoin.it/wiki/BIP_0044.
+
+**Open questions.**
+
+1. **SLIP-0044 coin-type slot.** Determ should request a coin-type registration before v2.15 ships to avoid path-collision with other chains' wallets. Application is mechanical (PR against the SLIP-0044 registry); the slot value affects every Determ HD wallet's derivation paths permanently.
+2. **Anon-address support in HD.** Anon addresses are SHA-256 hashes of pubkeys (not the pubkeys themselves). HD derivation works on the pubkey layer; anon-address derivation is a 1-step downstream operation. Confirmed compatible, but the wallet UX needs to be explicit ("derive new anon address" vs "derive new registered domain").
+3. **Hardware-wallet integration scope.** Ledger and Trezor both already implement SLIP-0010-Ed25519 for other chains (Solana, Cardano, Algorand). Determ-specific app would reuse the existing primitives — engineering, not protocol design. Scope: ~2 weeks per device, out of v2.15's critical path.
+4. **Policy-update threshold escalation.** Should a policy `op=set` that *changes* an existing policy (vs. creating one fresh) require the existing policy's threshold rather than the primary key alone? Recommended: yes, symmetric to ROTATE_KEY's multi-sig gate. Filed as a sub-decision; resolved at integration time.
+5. **Recovery story for lost master seed.** v2.14 OPAQUE wallet recovery is per-account today; extending to recover the master seed requires either (a) the seed itself participates in the OPAQUE recovery flow, or (b) accept that lost master seed is terminal (users keep an offline backup, same as Bitcoin BIP-39 seed phrases). Recommended (b); standard practice; out of v2.15's scope but worth noting.
+
+**Closes:** UX gap for enterprise / consortium deployments. The single-keyfile-per-account model becomes the wallet's degenerate case (HD wallet with a single derived account); the multi-sig model becomes available natively without the COMPOSABLE_BATCH workaround. Strictly additive — no v1.x finding closure depends on v2.15. Enables business-grade treasury operations, joint accounts, and inheritance/recovery flows that today require off-chain trust singletons.
 
 ### v2.16 — Internal RPC authentication (S-001 internal)
 
