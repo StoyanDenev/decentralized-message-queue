@@ -526,6 +526,7 @@ The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients 
 - DApp slashing (proof-of-misbehavior tx types)
 - **DApp upgrade flows** (versioned `service_pubkey` rotation with grace period) — fleshed out in §11.7.1 below
 - **Cross-shard DApp routing** (DAPP_CALL crossing shard boundaries) — fleshed out in §11.7.2 below
+- **Per-DApp rate limiting / quota** (operator-declared call-rate ceiling enforced at validator admission) — fleshed out in §11.7.3 below
 - DApp permission groups (on-chain ACL list separate from DApp registry)
 
 ---
@@ -901,6 +902,240 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 - **Q3: Bundled cross-shard COMPOSABLE_BATCH.** A composable batch containing both same-shard and cross-shard DAPP_CALLs would atomically commit both legs only on the source shard; the cross-shard leg's destination application is asynchronous per the receipt-latency soak. This atomicity asymmetry should be documented but not blocked; the v2.27 spec accepts it as part of the cross-shard latency model. Deferred to a v2.X follow-up if a use case emerges where same-block destination apply is required (would require the v2.12 atomic-cross-shard-swap machinery; see V2-DESIGN.md v2.12).
 - **Q4: Cross-shard DApp deactivation race.** If shard A admits a cross-shard DAPP_CALL at height H_A targeting D, and D is deactivated on shard B at height H_B (with H_B < H_apply_on_B), the receipt drops silently per Option B2. An alternative is to refund `r.amount` to the sender via a reverse cross-shard receipt. Refund is symmetric and arguably more user-friendly, but introduces a recursive cross-shard receipt pattern (refund-of-refund-of-refund). The v2.27 spec ships the simpler drop-and-credit-DApp pattern; refund is a v2.X.1 follow-up if user-experience research shows the drop pattern is too confusing in practice.
 - **Q5: dapp_subscribe synthetic-event filtering.** The pending streaming `dapp_subscribe` RPC (v2.20 / Phase 7.4) needs to interleave synthetic cross-shard DAPP_CALLs with same-shard DAPP_CALLs. Recommended: subscribers see the same event shape with an additional `source_shard` JSON field. Backpressure semantics unchanged; bounded per-subscriber queue applies symmetrically. This is a v2.20 concern more than a v2.27 concern, but the spec is noted here so the v2.20 implementation has a clean target shape.
+
+---
+
+### 11.7.3 — Per-DApp rate limiting / quota: operator-declared call-rate ceiling enforced at validator admission
+
+**Tracking slot:** v2.28 (Theme 7 — DApp rate limiting). Effort: ~4-6 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped); v2.24 DAPP_KEY_ROTATE (§11.7.1) adjacent but independent. No new cryptographic, consensus, or gossip primitives — strictly extends the validator admission + apply paths with a per-DApp token-bucket state machine seeded from the registry.
+
+#### Problem statement
+
+§9's economic model bounds DApp-spam via a chain-wide fee floor (`block_subsidy / 64` per `DAPP_CALL`) and §8's Mode A/B/C node operators rely on off-chain rate limits per identity. Neither addresses the **per-DApp** dimension: a DApp serving payment-receipt notifications at sub-second cadence is operationally indistinguishable, at the chain layer, from an adversary flooding a victim DApp at sub-second cadence. The §9 fee floor scales attacker cost linearly with traffic but does not give the DApp operator a way to **declare its expected throughput on-chain** so validators can enforce a per-DApp call-rate ceiling at admission time.
+
+This matters because:
+
+1. **Asymmetric attack economics.** A DApp accepting `DAPP_CALL` from anon senders has no on-chain mechanism to assert "I expect ≤ R calls/block." An adversary willing to pay R × `block_subsidy / 64` per block can flood the DApp with garbage payloads. The DApp's off-chain ACL (§9 closing paragraph) can drop them at endpoint level, but the chain has already paid for storage + gossip + state-root contribution for every call — the cost falls on every validator + every full node, not just the targeted DApp.
+2. **Honest-DApp resource planning is impossible.** Without a declared per-DApp cap, a DApp operator running Mode B/C cannot guarantee their node has enough capacity to handle their own DAPP_CALL stream — they must size for unbounded volume. The Mode-D (sharded DApp) workaround per §8 helps amortize but does not bound per-shard worst case.
+3. **Fair-share across DApps is implicit, not enforced.** The chain serializes `DAPP_CALL` txs by block + intra-block index; a popular DApp's calls naturally crowd out a less-popular DApp's calls under mempool pressure (S-008 admission). The fee market provides a partial answer (popular DApps can be served by users paying higher fees), but the fee market does not give a DApp operator a way to **bound** its own ingress.
+4. **L2 / oracle / DSSO patterns need predictability.** The L2 zk-VM and DSSO RP patterns documented in §1 publish authenticated batch commitments at known cadences (every N blocks, or every M seconds). A per-DApp declared throughput on-chain lets light clients and other DApps reason about expected emit rates without out-of-band coordination.
+
+The v2.28 per-DApp rate limiting flow resolves this by extending `DAPP_REGISTER` with an optional rate-limit declaration block (max calls per window + window size + burst capacity + over-cap policy), seeding a per-DApp token-bucket state machine on `apply_transactions`, and enforcing the bucket at validator admission and apply time. The state machine is a deterministic function of the chain's block height and the DApp's declared parameters; no new gossip required; the bucket state itself is reconstructible from block history (so it does not need separate state-root commitment beyond the registry entry itself).
+
+#### Mechanism sketch
+
+Extend `DAppEntry` with a rate-limit policy block. Senders submitting a `DAPP_CALL` to a rate-limited DApp must pass a per-DApp admission check: the validator computes the DApp's available tokens at the target block's height, and admits the call iff at least 1 token is available. Excess calls are subject to the policy: reject-at-validator (default), reject-at-apply-with-fee-retained, or defer-to-next-window. The token bucket refills deterministically every N blocks per the DApp's declared rate.
+
+Data structures:
+
+```cpp
+struct DAppRateLimit {
+    uint8_t  policy;             // 0 = unlimited (default; v2.18 entries materialize as this)
+                                 // 1 = reject_at_validator (best UX; senders see "rate-exceeded" at submit)
+                                 // 2 = reject_at_apply (fee retained; spam-burns the attacker)
+                                 // 3 = defer (call queued logically; apply at first refill block)
+    uint32_t calls_per_window;   // capacity (e.g., 64 calls per window)
+    uint32_t window_blocks;      // window size in blocks (e.g., 16 blocks ≈ ~8s on regional profile)
+    uint32_t burst_capacity;     // max tokens accumulated above steady-state (e.g., 256)
+    uint8_t  scope;              // 0 = per-DApp aggregate (all senders share bucket)
+                                 // 1 = per-(DApp, sender) (each sender has their own bucket)
+                                 // 2 = per-(DApp, topic) (each topic has its own bucket)
+};
+
+struct DAppEntry {
+    // ...existing fields (service_pubkey, endpoint_url, topics, retention, metadata,
+    //    registered_at, active_from, inactive_from)...
+    // ...v2.24 fields (key_history, current_version, rotation_pubkey)...
+    DAppRateLimit rate_limit;    // optional; policy=0 means unlimited (default)
+};
+```
+
+The token bucket itself is **not** persisted in `dapp_registry_`. Instead, the validator + apply path compute the available-tokens-at-height-h via a pure function:
+
+```cpp
+uint64_t available_tokens(DAppRateLimit policy, uint64_t calls_consumed, uint64_t h) {
+    if (policy.policy == 0) return UINT64_MAX;  // unlimited
+    uint64_t windows_elapsed = (h - dapp.registered_at) / policy.window_blocks;
+    uint64_t total_capacity = windows_elapsed * policy.calls_per_window;
+    if (total_capacity > policy.burst_capacity)
+        total_capacity = ((windows_elapsed - 1) * policy.calls_per_window) + policy.burst_capacity;
+    return total_capacity > calls_consumed ? total_capacity - calls_consumed : 0;
+}
+```
+
+Where `calls_consumed` is the count of admitted `DAPP_CALL` txs targeting this DApp (or this DApp + sender, or this DApp + topic, per scope) since `dapp.registered_at`, derived deterministically from the block stream. Validators maintain a small per-DApp counter map (the `c:` namespace already exists in state-root for chain counters; extend with `c:dapp_calls:` for per-DApp counts) so the available-tokens function is O(1) per check.
+
+This formulation is **leaky-bucket-equivalent** with explicit window granularity: a DApp with policy `(64 calls / 16 blocks, burst 256)` admits up to 64 calls in any single block (the full window allocation), up to 256 calls within any 4 consecutive windows (the burst cap), and steady-state 4 calls/block average over many windows. Operators tuning their DApp pick parameters matching their expected legitimate load + safety margin.
+
+#### Wire-format changes
+
+**Extension to `DAPP_REGISTER` payload** (extends §3.1):
+
+After the existing `metadata` field, append an optional rate-limit declaration block:
+
+```
+... existing payload through metadata ...
+[has_rate_limit: u8]         # 0 = absent (policy = unlimited); 1 = present
+if has_rate_limit == 1 {
+    [policy: u8]             # 0/1/2/3 per DAppRateLimit::policy
+    [calls_per_window: u32 LE]
+    [window_blocks: u32 LE]
+    [burst_capacity: u32 LE]
+    [scope: u8]              # 0/1/2 per DAppRateLimit::scope
+}
+```
+
+Constraints:
+
+- `policy != 0` requires `calls_per_window ≥ 1`, `window_blocks ≥ DAPP_RATE_MIN_WINDOW_BLOCKS` (suggested 4), `burst_capacity ≥ calls_per_window`, `burst_capacity ≤ DAPP_RATE_BURST_MAX` (suggested 65536).
+- A v2.18-style DAPP_REGISTER payload (no rate-limit block) decodes to `has_rate_limit = 0` → `policy = 0` (unlimited). Backward-compat: byte-identical encoding for entries that never opt in.
+- A subsequent DAPP_REGISTER on the same domain can update the rate-limit block; the new policy takes effect from the apply height. Tightening (lower capacity / shorter window) is permitted; loosening (higher capacity) is also permitted. The chain does not require monotonicity — operators have full operational flexibility.
+- `policy=3` (defer) requires `window_blocks ≤ DAPP_RATE_DEFER_MAX_WINDOW_BLOCKS` (suggested 64) to bound mempool retention of deferred calls.
+
+**State-commitment encoding** (extends §4 `d:` namespace canonical serialization):
+
+Append, AFTER the v2.24 extended suffix (if present):
+
+```
+... existing fields through v2.24 key_history ...
+|| u8(has_rate_limit)
+|| (if has_rate_limit: u8(policy) || u32_be(calls_per_window) || u32_be(window_blocks)
+                       || u32_be(burst_capacity) || u8(scope))
+```
+
+Conditionally serialized like the v2.24 suffix: a v2.18/v2.24 entry with no rate-limit MAY omit the suffix entirely (`has_rate_limit = 0` and no policy bytes). This preserves byte-identical state-root for non-rate-limited DApps, mirroring the v2.24 conditional-suffix convention.
+
+**New `c:` namespace key for call counters** (`include/determ/chain/chain.hpp` chain counters map):
+
+```
+"c:dapp_calls:" + domain                        → u64_be(calls_consumed_since_registered_at)        # scope=0
+"c:dapp_calls:" + domain + ":sender:" + addr    → u64_be(calls_consumed_by_sender)                  # scope=1
+"c:dapp_calls:" + domain + ":topic:"  + topic   → u64_be(calls_consumed_for_topic)                  # scope=2
+```
+
+These counters are derived state — every `DAPP_CALL` apply increments the appropriate counter, every `DAPP_REGISTER` create initializes them to zero, every `DAPP_REGISTER` deactivate freezes them. The `c:` namespace is already part of the state-root (per PROTOCOL.md §4.1.1), so light clients verify counters via the existing `state_proof("c", "dapp_calls:" + domain)` path with no new RPC required.
+
+**RPC extension `dapp_info(domain)`** returns the rate-limit policy + `available_tokens_at_current_height` + `tokens_consumed_in_current_window` so wallet UX can surface "this DApp is at 80% capacity for the current window" warnings.
+
+**RPC new `dapp_rate_status(domain[, sender, topic])`** returns just the counter + availability snapshot — lighter than `dapp_info` for high-frequency UI polling.
+
+#### Apply-path changes
+
+Touch list (files in `src/chain/`, `src/node/`, `include/determ/`):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/dapp.hpp` | `DAppEntry`, new `DAppRateLimit` struct | Add `rate_limit` field |
+| `src/chain/transaction.cpp` | `binary_codec::encode/decode_tx` (DAPP_REGISTER payload) | Round-trip the conditional rate-limit suffix; preserve v2.18 byte-identical default |
+| `src/chain/chain.cpp` | `apply_transactions` switch case for `DAPP_REGISTER` | Decode + store rate-limit; initialize `c:dapp_calls:` counter to 0 on create |
+| `src/chain/chain.cpp` | `apply_transactions` switch case for `DAPP_CALL` (chain.cpp:1133-1224) | Before debit/credit: compute `available_tokens(...)`; if 0, dispatch per policy (policy=2 retains fee + drops call; policy=3 defers to mempool re-attempt; policy=1 should have been rejected at validator already, but apply double-checks); if ≥ 1, increment counter and proceed |
+| `src/chain/chain.cpp` | `build_state_leaves` `d:` branch | Extend `canonical_serialize(DAppEntry)` to append conditional rate-limit suffix per §11.7.3 wire format |
+| `src/chain/chain.cpp` | `build_state_leaves` `c:` branch | Include the new `c:dapp_calls:` keys when emitting chain-counter leaves |
+| `src/chain/chain.cpp` | `serialize_state` / `restore_from_snapshot` | Round-trip the extended `DAppEntry` rate-limit field + the new `c:dapp_calls:` counters (closes S-037 forward for the extended schema) |
+| `src/node/validator.cpp` | `validate_tx` switch case for `DAPP_CALL` | Add per-DApp admission check: compute `available_tokens(...)` against the validator's local view of `c:dapp_calls:`; if 0 and policy=1, reject with diagnostic `"DApp rate-limit exceeded; retry after window refill at height H_next"` |
+| `src/node/node.cpp` | `rpc_dapp_info` | Return rate-limit policy + current available tokens + window position |
+| `src/node/node.cpp` | new `rpc_dapp_rate_status` | Light-weight counter + availability snapshot |
+| `tools/test_dapp_rate_limit.sh` | new | Regression: unlimited (policy=0); reject-at-validator (policy=1); reject-at-apply (policy=2); defer (policy=3); per-DApp scope; per-sender scope; per-topic scope; burst capacity; window refill; policy update mid-stream |
+
+The validator-side admission check is the critical safety gate: a malicious sender could try to overrun the chain by submitting a burst of `DAPP_CALL`s within the mempool window before any apply takes effect. Validators maintain a transient "pending mempool admit count" per DApp (mirroring the existing S-008 mempool admission pattern) so the bucket is checked against admitted-mempool + applied-on-chain, not just applied-on-chain. This prevents a mempool-amplification attack where the validator admits 64 calls but only 1 actually applies after the bucket is full.
+
+Producer-side: when assembling a block, the producer applies the same admission check at block-pack time (before adding a tx to `b.transactions`). This ensures all admitted txs at apply time pass the bucket check; no "tx fell out of mempool but landed in block" race.
+
+The apply-path counter update is in the standard chain.cpp:1133-1224 DAPP_CALL apply branch; the increment is committed atomically with the debit/credit/nonce-advance, so the state-root reflects the post-apply counter.
+
+#### Backward-compat story
+
+This is a **soft-fork** addition under the v2.18/v2.19 substrate: no existing tx becomes invalid, no existing state_root computation changes for entries that never opt into rate-limiting. Coexistence:
+
+- v2.19 / v2.24 nodes (which do not understand the rate-limit payload extension) decode a v2.28 DAPP_REGISTER with rate-limit declaration and treat the extra trailing bytes as unknown — depending on `binary_codec` strictness, either rejected (good, falls under the activation-height pin) or silently ignored (bad, causes state-root divergence). v2.28 must therefore roll out as a coordinated migration with a `genesis_params.dapp_rate_limit_active_from` height pin; pre-activation, the chain MUST reject any DAPP_REGISTER payload with a non-empty rate-limit suffix at validator admission.
+- v2.18/v2.19/v2.24 entries (no rate-limit) materialize transparently as `rate_limit.policy = 0` (unlimited). Their state-root contribution is unchanged.
+- The `c:dapp_calls:` counter additions are new keys; chains with no DApps in rate-limit policies generate zero such keys and produce byte-identical state-root contributions from the `c:` namespace.
+- The behavior tightening "v2.18 implicit unlimited becomes v2.28 explicit policy-0" is purely a default; no operator action required for existing DApps.
+
+The activation pattern parallels v2.24 DAPP_KEY_ROTATE (`genesis_params.dapp_key_rotate_active_from`), v2.27 cross-shard DAPP_CALL (`genesis_params.cross_shard_dapp_call_active_from`), A11 threshold randomness, and S-033 state_root activation.
+
+#### Threat model
+
+| Attack | v2.28 defense | New surface introduced |
+|---|---|---|
+| **Spam: attacker floods a single DApp with DAPP_CALLs to exhaust its off-chain processing capacity** | Per-DApp token bucket caps admissions at the validator + producer layer. Excess calls dropped at admission (policy=1) or apply (policy=2). Even an attacker willing to pay the §9 fee floor cannot get more than `burst_capacity` calls applied within `burst_capacity / calls_per_window` windows. The DApp's off-chain processor sees a bounded ingress rate matching its declared capacity. | None new — the §9 fee model still applies on top. The combined effect is "per-byte spam cost AND per-call capacity ceiling," tighter than either alone. |
+| **Mempool amplification: attacker submits 10× the bucket capacity, banking on the validator admitting all and only the bucket-sized subset applying** | Validator tracks pending-mempool + applied-on-chain per DApp; mempool admission consumes a token. Bucket-full mempool admission rejects. The S-008 mempool bound and the v2.28 rate bucket compose: an attacker cannot inflate mempool with rejected-at-apply calls because validator drops them at admission. | The validator-side per-DApp pending count is new state. Bounded at O(num_dapps × max_pending_per_dapp); under the §9 stake floor, num_dapps is itself bounded (Sybil-equivalent threat). |
+| **Cross-shard rate-limit bypass** | A cross-shard DAPP_CALL (per §11.7.2) is admitted on the source shard but applied on the destination. The destination's apply-path computes the bucket against the destination's local `c:dapp_calls:` counter. Cross-shard DAPP_CALLs increment the destination's counter on apply, identically to same-shard DAPP_CALLs. Attacker cannot bypass by routing through another shard. | The source-shard validator does NOT enforce the destination-shard rate limit (it cannot — the source's view of the destination's counter is lagged by S-016 receipt-soak latency). This means an attacker on shard A can submit `burst_capacity + N` cross-shard DAPP_CALLs targeting a DApp on shard B; the destination apply drops the excess. The source-shard fee is retained either way, so attacker still pays §9 floor. Acceptable per §11.7.2 Option B2 (trust-on-emit, validate-on-arrival). |
+| **Honest DApp temporarily over-capacity (legitimate burst)** | `burst_capacity` parameter explicitly allows N-window-equivalent bursts. Operators size `burst_capacity` for realistic peak load. Policy=3 (defer) allows the chain to queue excess calls until the next refill, smoothing genuine burst patterns without forcing the operator to over-provision. | Policy=3 adds a "deferred calls" mempool retention surface; bounded by `window_blocks ≤ DAPP_RATE_DEFER_MAX_WINDOW_BLOCKS` per the validator constraint. Mempool eviction respects this — deferred calls compete for the bounded mempool space alongside regular txs. |
+| **Operator misconfiguration: caps set too tight, locking out honest users** | Operator can re-issue DAPP_REGISTER with relaxed parameters at any time. Single-block remediation (next block applies new policy). UX: `dapp_rate_status` RPC + wallet warnings surface the throttling before users blame the chain. | None — this is operator-side ergonomics, not a protocol vulnerability. |
+| **Counter-state bloat under scope=1 (per-sender)** | Per-(DApp, sender) buckets create one counter entry per (DApp, sender) pair. Worst case under sustained traffic: O(num_dapps × num_active_senders). The `c:dapp_calls:` namespace is part of state-root; bloat impacts every node. Mitigation: scope=1 is opt-in (default is scope=0); operators choosing scope=1 internalize the storage cost via the §9 DAPP_MIN_STAKE bond. | Yes: scope=1 raises state-storage cost per DApp roughly linearly with active sender count. Bounded in practice by chain-wide identity registration cost (S-010 / S-011 economic floor). Genesis-pinned `DAPP_RATE_PER_SENDER_MAX_BUCKETS` (suggested 65536 per DApp) limits worst case; on overflow, oldest-touched buckets evict. |
+| **Scope=2 (per-topic) abuse: DApp registers many topics to give each its own bucket** | `topic_count ≤ 32` per §3.1 already caps topics per DApp. Combined with the DAPP_MIN_STAKE floor, the worst-case per-DApp scope=2 storage is 32 × counter_size = 1 KB — negligible. | None |
+| **Light-client trust** | Counters live in the `c:` namespace already covered by state-root + state_proof RPC. Light clients verify rate-limit state via the same mechanism as any other counter. Operators cannot lie about historical call counts because the historical state-roots commit to the counter at each block. | None new |
+| **Rate-limit declaration as a side-channel** | An operator could declare unusual rate-limit parameters as a signal (e.g., setting `calls_per_window = 0xDEADBEEF` as a sentinel). The chain validates ranges + clamps but does not interpret. Side-channel risk is operator-self-imposed; no protocol surface. | None |
+
+The relevant cross-references in the existing threat-model docs: `proofs/Safety.md` L-1.3 (state-root inclusion of the new counter keys), `proofs/Liveness.md` L-4 (DAPP_CALLs cannot be censored arbitrarily — the rate bucket caps the operator's own self-throttling but does not give third parties a censorship handle), `SECURITY.md` §S-008 (mempool admission interaction).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `DAppRateLimit` struct + `DAppEntry` extension | 0.5 day | Mechanical |
+| Encoder/decoder + payload conditional-suffix | 0.5 day | Mirrors v2.24 conditional-suffix pattern |
+| `apply_transactions` DAPP_REGISTER extension (decode + store + init counters) | 0.5 day | New decode branch + counter initialization |
+| `apply_transactions` DAPP_CALL extension (bucket check + counter increment) | 1 day | The available_tokens computation + four policy branches |
+| `validate_tx` per-DApp admission check + producer-side block-pack check | 1 day | Pending-mempool count tracking; matches S-008 pattern |
+| `build_state_leaves` `d:` branch extension (rate-limit conditional suffix) | 0.5 day | Preserves byte-identical state-root for non-opt-in entries |
+| `build_state_leaves` `c:` branch extension (per-DApp counter keys) | 0.5 day | New key prefix in the existing chain-counter namespace |
+| `serialize_state` / `restore_from_snapshot` round-trip | 0.5 day | Forward-closes S-037 for the extended schema |
+| `rpc_dapp_info` extension + new `rpc_dapp_rate_status` | 0.5 day | JSON additions; mechanical |
+| CLI: `determ dapp-register --rate-limit "policy=1,calls=64,window=16,burst=256,scope=0"` | 0.5 day | Wallet ergonomic |
+| Regression: `tools/test_dapp_rate_limit.sh` (4 policies × 3 scopes × burst/refill scenarios) | 1.5 days | Twelve scenarios; matches v2.18 / v2.19 / v2.24 test-coverage depth |
+| Migration coordination: genesis_params field + activation-height gate + documentation | 0.5 day | Same shape as v2.24 / v2.27 / A11 / S-033 activation pins |
+| **Total** | **~4-6 engineering days** | Single-developer estimate; +1 day if `dapp_subscribe` (Phase 7.4 streaming) needs interop testing with deferred-policy events |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required for the registry substrate that carries the rate-limit declaration.
+- **v2.19 DAPP_CALL** — shipped. Required for the call-counter increment site.
+- **v2.2 state_proof RPC** — shipped. Required for light-client verification of rate-limit policy + counters via the `d:` and `c:` namespaces.
+- **S-033 state_root** — shipped. Required for cross-validator agreement on counter state.
+- **S-037 snapshot serialize/restore gap** — open. v2.28 should close S-037 forward for the extended `DAppEntry` schema as part of its own implementation; ideally S-037 closes first as an independent patch.
+- **v2.24 DAPP_KEY_ROTATE (§11.7.1)** — adjacent, independent. v2.24 and v2.28 both extend `DAppEntry` with conditional suffixes; ordering: either can ship first, but the second ships its conditional suffix AFTER the first's in the canonical serialization to preserve compositional byte-identity.
+- **v2.27 cross-shard DAPP_CALL (§11.7.2)** — adjacent, independent. v2.28's destination-shard bucket enforcement applies to v2.27 cross-shard arrivals without coordination; the source shard does not need to know the destination's bucket state.
+- **v2.10 threshold randomness** — not required (bucket refill is deterministic from block height).
+- **v2.14 OPAQUE** — not required.
+- **v2.20 streaming `dapp_subscribe`** — not required for v2.28 itself, but policy=3 (defer) interacts with streaming subscribers: deferred calls emit to subscribers only at their actual apply height. Subscribers see a delay between submit and emit equal to the defer window; v2.20 should surface this in the subscription event metadata.
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives.
+
+#### Cross-references
+
+- §3.1 `DAPP_REGISTER` byte layout — extended here with conditional rate-limit suffix
+- §3.2 `DAPP_CALL` — admission path extended with bucket check before debit/credit
+- §4 `dapp_registry_` state-commitment via `d:` namespace — extended here with conditional suffix matching v2.24 convention
+- §6 RPC surface — `dapp_info` extended; new `dapp_rate_status` RPC
+- §7 client wallet integration — `dapp-call` CLI surfaces rate-limit-exceeded diagnostics
+- §8 DApp node operation modes — Mode B/C operators can size hardware against declared rate
+- §9 economic model — fee floor and per-DApp rate cap compose multiplicatively (cost × capacity = total attacker spend ceiling)
+- §10 privacy + off-chain channels — rate-limited DApps can declare conservative on-chain caps and route bulk traffic through §10's direct-to-DApp pattern
+- §11.7.1 DAPP_KEY_ROTATE — adjacent design; both extend `DAppEntry` with conditional suffixes
+- §11.7.2 cross-shard DAPP_CALL — destination-shard buckets enforce against arriving cross-shard receipts
+- §12 Q8 "Determ node bandwidth cost of carrying DApp messages" — v2.28 is the formal answer to the deferred-monitoring recommendation in Q8
+- `V2-DESIGN.md` Theme 7 — formal spec for the deferred per-DApp rate-limit item
+- `proofs/Safety.md` L-1.3 — state-root inclusion of the new counter keys
+- `proofs/Liveness.md` L-4 — rate-limit caps operator self-throttling but is not a third-party censorship surface
+- `PROTOCOL.md` §4.1.1 — `d:` and `c:` namespace canonical serialization; both extended here
+- `SECURITY.md` §S-008 — mempool admission interaction (per-DApp pending-mempool tracking mirrors S-008 pattern)
+- `SECURITY.md` §S-037 — forward-closes for the extended `DAppEntry` + new `c:dapp_calls:` keys
+- `src/chain/chain.cpp` `apply_transactions`, `build_state_leaves` — touch sites for DAPP_REGISTER decode, DAPP_CALL bucket check, `d:` and `c:` namespace leaf emission
+- `src/node/validator.cpp` `validate_tx` — touch site for per-DApp admission check
+- `src/node/producer.cpp` `produce` — touch site for block-pack admission re-check
+- `tools/test_dapp_rate_limit.sh` — new regression mirroring `test_dapp_register.sh` + `test_dapp_call.sh` patterns
+- v2.18 / v2.19 in-process determ subcommands — pattern for `test-dapp-rate-limit`
+
+#### Open questions deferred to implementation
+
+- **Q1: Per-sender bucket eviction order.** With scope=1, the per-(DApp, sender) buckets can accumulate up to `DAPP_RATE_PER_SENDER_MAX_BUCKETS` entries. On overflow, what eviction policy? Options: (a) LRU by last-call-height (deterministic but requires extra state); (b) oldest-first by sender-registration order (simpler, may evict active senders); (c) hash-based pseudo-random (simplest, may evict active senders). Recommended: option (a), LRU; pays for the extra state with the most useful eviction semantics. Deferred to implementation.
+- **Q2: Defer policy mempool retention.** Policy=3 (defer) requires the validator to retain rate-limited DAPP_CALLs in the mempool until the next refill window. How does this interact with the general S-008 mempool eviction? Options: (a) deferred calls live in a separate per-DApp queue, not subject to S-008 eviction; (b) deferred calls compete for S-008 mempool budget normally, may be evicted under pressure; (c) hybrid — deferred calls have a "reserved" slice of mempool capacity. Recommended: option (b), simplest and aligned with §12 Q8's "treat DAPP_CALL as regular tx". Deferred to implementation.
+- **Q3: Rate limit changes mid-stream.** When a DApp updates its rate-limit policy via DAPP_REGISTER, do the existing counters reset? Options: (a) counters persist unchanged (operator-friendly: tightening cannot be retroactively gamed by submitting calls before the update); (b) counters reset to 0 on policy change (sender-friendly: a tightening operator can re-baseline). Recommended: option (a), persist. A tightening operator's intent is to reduce capacity going forward; resetting would let them effectively "re-grant" capacity by alternating tighten/loosen. Deferred to implementation.
+- **Q4: Cross-shard arrival counter attribution.** A v2.27 cross-shard DAPP_CALL arriving at the destination shard at height H_dst counts against the destination's bucket. Should the counter timestamp be the source-shard's H_src (when the call was emitted) or H_dst (when it was applied)? Options: (a) H_dst — simpler, matches local apply semantics; (b) H_src — preserves the call's "logical time" but breaks the simple `(h - registered_at) / window_blocks` formula. Recommended: option (a). The CROSS_SHARD_RECEIPT_LATENCY soak window means H_dst is typically H_src + 3-5 blocks, a bounded skew. Deferred to implementation.
+- **Q5: Policy=2 (reject-at-apply-with-fee-retained) UX.** Is policy=2 useful in practice, or does it amount to "fee burn for spam absorption"? The spam-absorption interpretation suggests policy=2 is the right choice for high-value DApps that want to charge attackers max-rate even when dropping their calls. The fee-burn interpretation suggests policy=1 (reject-at-validator) gives better UX without losing security. Recommended: ship both; let operators choose. Monitor real-world usage at v2.28+1 to see if one dominates.
+- **Q6: Genesis preset for `DAPP_RATE_*` constants.** What are sensible defaults for `DAPP_RATE_MIN_WINDOW_BLOCKS`, `DAPP_RATE_BURST_MAX`, `DAPP_RATE_DEFER_MAX_WINDOW_BLOCKS`, `DAPP_RATE_PER_SENDER_MAX_BUCKETS`? The §11.7.3 text suggests 4 / 65536 / 64 / 65536 respectively. These should be tuned with the regional/global/cluster profile presets per `params.hpp` so the rate-limit semantics scale with the chain's block cadence. Deferred to genesis-config review during v2.28 implementation.
 
 ---
 
