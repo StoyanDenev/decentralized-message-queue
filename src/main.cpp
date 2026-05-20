@@ -373,6 +373,19 @@ In-process tests (deterministic, no network):
                                               tamper / wrong-key rejection
                                               (per F2-SPEC.md §Q1 and
                                               RFC 9591 §3)
+  determ test-make-contrib-commitment-distinct  Exhaustive pin on
+                                              make_contrib_commitment hash
+                                              distinctness across every input
+                                              perturbation — block_index, prev_hash,
+                                              tx_hashes (size/content/permutation),
+                                              dh_input, view_eq_root,
+                                              view_abort_root, view_inbound_root
+                                              + v1-vs-F2-zero-roots byte-parity
+                                              positive assertion + per-root
+                                              domain-separation + idx/prev still
+                                              bind in F2 path + edge cases
+                                              (empty tx, idx=0, idx near uint64
+                                              max, zero prev/dh, cross-perturbation)
   determ test-frost-types                     v2.10 Phase A: pin RFC 9591
                                               type-layout assumptions for FROST
                                               primitives — Identifier (uint16_t),
@@ -10404,6 +10417,345 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": view-root " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Exhaustive pin on make_contrib_commitment's distinctness across
+    // every input perturbation. Complements test-view-root (which covers
+    // the v1-compat short-circuit + DTM-F2-v1 domain-separator at a high
+    // level) by walking every commit-input dimension and asserting the
+    // output hash changes (or, where the protocol expects collision —
+    // the all-zero-roots F2 form vs. the v1 form — that it's byte-
+    // identical). Any drift in the commit pre-image construction would
+    // change the Phase-1 commitment hash and break signature replay
+    // resistance / equivocation detection / cross-version compatibility.
+    if (cmd == "test-make-contrib-commitment-distinct") {
+        using namespace determ;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+
+        // Baseline commit. All v1 fields populated, view roots default
+        // (= zero ⇒ v1 short-circuit path).
+        const uint64_t baseline_idx       = 42;
+        const Hash     baseline_prev      = patterned_hash(0x10);
+        const Hash     baseline_h0        = patterned_hash(0x40);
+        const Hash     baseline_h1        = patterned_hash(0x50);
+        const std::vector<Hash> baseline_tx = {baseline_h0, baseline_h1};
+        const Hash     baseline_dh        = patterned_hash(0x20);
+        const Hash commit_0 = make_contrib_commitment(
+            baseline_idx, baseline_prev, baseline_tx, baseline_dh);
+
+        // 1. Determinism: same inputs → same commit (recomputed).
+        {
+            Hash repeat = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh);
+            check(repeat == commit_0,
+                  "v1 commit deterministic (same inputs → same hash)");
+        }
+
+        // 2. Different block_index → different commit.
+        {
+            Hash c = make_contrib_commitment(
+                baseline_idx + 1, baseline_prev, baseline_tx, baseline_dh);
+            check(c != commit_0,
+                  "block_index 42→43 changes commit");
+        }
+
+        // 3. Different prev_hash (single byte flip) → different commit.
+        {
+            Hash flipped = baseline_prev;
+            flipped[0] ^= 0x01;  // single-bit flip on byte 0
+            Hash c = make_contrib_commitment(
+                baseline_idx, flipped, baseline_tx, baseline_dh);
+            check(c != commit_0,
+                  "prev_hash single-byte flip changes commit");
+        }
+
+        // 4a. tx_hashes: appending a third hash → different commit.
+        {
+            std::vector<Hash> tx3 = baseline_tx;
+            tx3.push_back(patterned_hash(0x60));
+            Hash c = make_contrib_commitment(
+                baseline_idx, baseline_prev, tx3, baseline_dh);
+            check(c != commit_0,
+                  "tx_hashes: append third hash changes commit");
+        }
+
+        // 4b. tx_hashes: removing a hash → different commit.
+        {
+            std::vector<Hash> tx1 = {baseline_h0};
+            Hash c = make_contrib_commitment(
+                baseline_idx, baseline_prev, tx1, baseline_dh);
+            check(c != commit_0,
+                  "tx_hashes: remove a hash changes commit");
+        }
+
+        // 4c. tx_hashes: when caller honors the sorted-input contract,
+        //     constructing the vector in reverse and re-sorting yields the
+        //     SAME canonical input → SAME commit. This pins the
+        //     caller-side contract that callers (make_contrib in
+        //     producer.cpp) feed canonically-sorted tx hashes.
+        {
+            // baseline_h0 = patterned(0x40), baseline_h1 = patterned(0x50);
+            // h0 < h1 lexicographically, so sorted order is {h0, h1}.
+            std::vector<Hash> reversed = {baseline_h1, baseline_h0};
+            std::sort(reversed.begin(), reversed.end());
+            Hash c = make_contrib_commitment(
+                baseline_idx, baseline_prev, reversed, baseline_dh);
+            check(c == commit_0,
+                  "tx_hashes: canonically-sorted reversed input == baseline");
+        }
+
+        // 4d. tx_hashes: passing UNSORTED permutation directly (caller
+        //     contract violation) DOES change the commit — pins that
+        //     make_contrib_commitment is order-sensitive on its input
+        //     (which is why the caller-side sort contract matters).
+        {
+            std::vector<Hash> permuted = {baseline_h1, baseline_h0};
+            Hash c = make_contrib_commitment(
+                baseline_idx, baseline_prev, permuted, baseline_dh);
+            check(c != commit_0,
+                  "tx_hashes: unsorted permutation changes commit "
+                  "(make_contrib_commitment is order-sensitive)");
+        }
+
+        // 5. Different dh_input (single byte flip) → different commit.
+        {
+            Hash flipped = baseline_dh;
+            flipped[31] ^= 0x80;  // single-bit flip on the LAST byte
+            Hash c = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, flipped);
+            check(c != commit_0,
+                  "dh_input single-byte flip changes commit");
+        }
+
+        // 6. Non-zero view_eq_root → enters DTM-F2-v1 path → different
+        //    from baseline v1 commit.
+        const Hash commit_eq_only = make_contrib_commitment(
+            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            patterned_hash(0xE0), Hash{}, Hash{});
+        check(commit_eq_only != commit_0,
+              "view_eq_root only: F2 path != v1 baseline");
+
+        // 7. Non-zero view_abort_root only → different from v1 and from (6).
+        const Hash commit_abort_only = make_contrib_commitment(
+            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            Hash{}, patterned_hash(0xA0), Hash{});
+        check(commit_abort_only != commit_0,
+              "view_abort_root only: F2 path != v1 baseline");
+        check(commit_abort_only != commit_eq_only,
+              "view_abort_root only != view_eq_root only "
+              "(per-root domain separation)");
+
+        // 8. Non-zero view_inbound_root only → different from v1 and from
+        //    (6) and (7).
+        const Hash commit_inbound_only = make_contrib_commitment(
+            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            Hash{}, Hash{}, patterned_hash(0xC0));
+        check(commit_inbound_only != commit_0,
+              "view_inbound_root only: F2 path != v1 baseline");
+        check(commit_inbound_only != commit_eq_only,
+              "view_inbound_root only != view_eq_root only");
+        check(commit_inbound_only != commit_abort_only,
+              "view_inbound_root only != view_abort_root only");
+
+        // 9. All three view roots non-zero → different from each of the
+        //    single-root forms (each root contributes independently to
+        //    the final hash).
+        const Hash commit_all_three = make_contrib_commitment(
+            baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+            patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
+        check(commit_all_three != commit_eq_only,
+              "all-three roots != eq_only (abort+inbound contribute)");
+        check(commit_all_three != commit_abort_only,
+              "all-three roots != abort_only (eq+inbound contribute)");
+        check(commit_all_three != commit_inbound_only,
+              "all-three roots != inbound_only (eq+abort contribute)");
+
+        // 10. F2-active with same view roots but different prev_hash →
+        //     prev still binds (F2 doesn't replace v1 fields, it appends).
+        {
+            Hash flipped_prev = baseline_prev;
+            flipped_prev[15] ^= 0x10;
+            Hash c = make_contrib_commitment(
+                baseline_idx, flipped_prev, baseline_tx, baseline_dh,
+                patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
+            check(c != commit_all_three,
+                  "F2-active: changing prev_hash still changes commit");
+        }
+
+        // 11. F2-active with same view roots but different block_index →
+        //     idx still binds.
+        {
+            Hash c = make_contrib_commitment(
+                baseline_idx + 1, baseline_prev, baseline_tx, baseline_dh,
+                patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
+            check(c != commit_all_three,
+                  "F2-active: changing block_index still changes commit");
+        }
+
+        // 12. Toggling argument-slot of the same nonzero value (eq=X vs
+        //     abort=X vs inbound=X with others zero) → per-root domain
+        //     separation. Same hex value X in different slots yields
+        //     different commits.
+        {
+            Hash X = patterned_hash(0x77);
+            Hash c_eq = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                X, Hash{}, Hash{});
+            Hash c_ab = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                Hash{}, X, Hash{});
+            Hash c_in = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                Hash{}, Hash{}, X);
+            check(c_eq != c_ab,
+                  "same-value X: eq-slot != abort-slot");
+            check(c_eq != c_in,
+                  "same-value X: eq-slot != inbound-slot");
+            check(c_ab != c_in,
+                  "same-value X: abort-slot != inbound-slot");
+        }
+
+        // 13. F2-active commits with identical inputs are byte-identical
+        //     when re-computed. Determinism on the F2 path.
+        {
+            Hash a = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
+            Hash b = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                patterned_hash(0xE0), patterned_hash(0xA0), patterned_hash(0xC0));
+            check(a == b,
+                  "F2-active path deterministic (re-compute byte-identical)");
+            check(a == commit_all_three,
+                  "F2-active path deterministic across separate constructions");
+        }
+
+        // 14. v1-only (all zero roots) is byte-identical when re-computed.
+        //     Determinism on the v1 short-circuit path.
+        {
+            Hash repeat = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh);
+            check(repeat == commit_0,
+                  "v1 path deterministic (re-compute byte-identical)");
+        }
+
+        // 15. v1 commit == F2-with-explicit-zero-roots (the short-circuit
+        //     guarantees byte parity for backward compatibility with
+        //     pre-F2 peers). This is a POSITIVE assertion of collision.
+        {
+            Hash f2_zero = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, baseline_dh,
+                Hash{}, Hash{}, Hash{});
+            check(f2_zero == commit_0,
+                  "v1 commit == F2-with-all-zero-roots (v1 short-circuit "
+                  "preserves byte-parity with pre-F2 peers)");
+        }
+
+        // 16. Empty tx_hashes vector produces a valid, deterministic
+        //     commit. The inner_root is the SHA-256 finalization of zero
+        //     bytes input; all subsequent fields (idx, prev, dh) still
+        //     bind. Pins that the function handles the empty-tx edge
+        //     case without UB.
+        {
+            std::vector<Hash> empty_tx;
+            Hash c1 = make_contrib_commitment(
+                baseline_idx, baseline_prev, empty_tx, baseline_dh);
+            Hash c2 = make_contrib_commitment(
+                baseline_idx, baseline_prev, empty_tx, baseline_dh);
+            check(c1 == c2,
+                  "empty tx_hashes: deterministic commit");
+            check(c1 != commit_0,
+                  "empty tx_hashes != baseline (inner_root differs)");
+        }
+
+        // 17. block_index = 0 (genesis-shaped commit) is distinct from
+        //     non-zero indexes and is deterministic. Pins edge of idx
+        //     domain.
+        {
+            Hash c1 = make_contrib_commitment(
+                0, baseline_prev, baseline_tx, baseline_dh);
+            Hash c2 = make_contrib_commitment(
+                0, baseline_prev, baseline_tx, baseline_dh);
+            check(c1 == c2,
+                  "block_index=0 deterministic");
+            check(c1 != commit_0,
+                  "block_index=0 != baseline (idx=42)");
+        }
+
+        // 18. block_index near uint64 max — pins the high end of the
+        //     idx domain. Asserts SHA256Builder::append(uint64_t) handles
+        //     full-width values and stays distinct from neighboring
+        //     indexes.
+        {
+            const uint64_t big = 0xFFFFFFFFFFFFFFFEull;
+            Hash c_big   = make_contrib_commitment(
+                big,     baseline_prev, baseline_tx, baseline_dh);
+            Hash c_max   = make_contrib_commitment(
+                big + 1, baseline_prev, baseline_tx, baseline_dh);
+            check(c_big != c_max,
+                  "block_index near-max: adjacent values yield distinct commits");
+            check(c_big != commit_0,
+                  "block_index near-max != baseline");
+        }
+
+        // 19. All-zero prev_hash distinct from patterned prev_hash. Pins
+        //     that the zero hash is a valid input (no special-casing) and
+        //     is distinct from any patterned value.
+        {
+            Hash c_zero_prev = make_contrib_commitment(
+                baseline_idx, Hash{}, baseline_tx, baseline_dh);
+            check(c_zero_prev != commit_0,
+                  "zero prev_hash distinct from patterned prev_hash");
+        }
+
+        // 20. All-zero dh_input distinct from patterned dh_input. Same
+        //     argument: zero dh_input must not collide with patterned
+        //     dh_input.
+        {
+            Hash c_zero_dh = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, Hash{});
+            check(c_zero_dh != commit_0,
+                  "zero dh_input distinct from patterned dh_input");
+        }
+
+        // 21. Cross-perturbation: changing TWO independent inputs at
+        //     once yields a commit distinct from EACH single-input
+        //     perturbation. Pins that input fields don't cancel each
+        //     other out via internal cancellation.
+        {
+            Hash flipped_prev = baseline_prev;
+            flipped_prev[0] ^= 0x01;
+            Hash flipped_dh = baseline_dh;
+            flipped_dh[31] ^= 0x80;
+            Hash c_prev = make_contrib_commitment(
+                baseline_idx, flipped_prev, baseline_tx, baseline_dh);
+            Hash c_dh = make_contrib_commitment(
+                baseline_idx, baseline_prev, baseline_tx, flipped_dh);
+            Hash c_both = make_contrib_commitment(
+                baseline_idx, flipped_prev, baseline_tx, flipped_dh);
+            check(c_both != c_prev,
+                  "two-field perturbation != prev-only perturbation");
+            check(c_both != c_dh,
+                  "two-field perturbation != dh-only perturbation");
+            check(c_both != commit_0,
+                  "two-field perturbation != baseline");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": make-contrib-commitment-distinct "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
