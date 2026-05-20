@@ -29,7 +29,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.17 Passphrase-encrypted keyfiles (S-004) | ✅ shipped | AES-256-GCM envelope |
 | v2.18 DAPP_REGISTER tx + on-chain DApp registry | ✅ shipped | Theme 7 substrate |
 | v2.19 DAPP_CALL tx + payload routing | ✅ shipped | Theme 7 substrate |
-| v2.20 Streaming subscription RPC | ⚠️ partial | Polling shipped; full streaming pending |
+| v2.20 Streaming subscription RPC | ⚠️ partial (spec resolved) | Polling shipped; full streaming pending. Spec resolved in §v2.20 below: `dapp_subscribe(domain, topic?, since?)` newline-JSON streaming with bounded per-subscriber queue, kill-on-backpressure semantics, catch-up replay window, heartbeat cadence, per-IP rate-limit via existing `net::RateLimiter` |
 | v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
 | v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over curve25519 (dalek-cryptography reference impl; shares v2.10's curve family via libsodium), ephemeral-DH amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
@@ -493,13 +493,189 @@ Full design: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). Summary:
 
 **Status.** v2.19 shipped the **polling** subset under the `dapp_messages` RPC (retrospective query with `from_height` / `to_height` / `topic` filters, 256-event pages). The **streaming** subset documented below is the remaining ~3 days of work.
 
-**Motivation.** DApp nodes need a live tail of `DAPP_CALL` events as blocks finalize. Polling `dapp_messages` works for moderate event rates but burns RPC trips at high update frequencies; streaming closes that gap.
+**Problem statement.** Polling `dapp_messages` has three intrinsic costs that scale poorly past moderate event rates:
 
-**Mechanism.** New `dapp_subscribe(domain, topic?)` RPC — newline-JSON streaming over the existing RPC socket. Per-block hook fires after the async-save worker, filters DAPP_CALLs by recipient, emits to matching subscribers. Bounded per-subscriber queue with disconnect-on-overflow.
+1. **Wasted RPC trips.** Each poll is a full request/response round trip (HMAC verify on the request envelope, JSON decode, full read-lock acquisition against the tx index, JSON encode of the empty/sparse result, response framing). For a DApp that processes ~10 events/sec the floor is ~1 Hz polling; for a DApp at ~100 events/sec the polling cadence pushes into ~10 Hz and dominates the node's RPC capacity even when the chain is otherwise idle.
+2. **Time-to-deliver lag bound by poll period.** A DApp that polls every 1s sees, on average, 500 ms of delivery latency over and above the block-finality latency. For tactical-profile deployments (20 ms blocks) the chain-side latency is sub-block-time; the polling layer doubles it.
+3. **Backfill ambiguity at the poll boundary.** Polling clients must reconcile "did I see all events for block H?" via `from_height = last_scanned + 1` and rely on the chain's finalization barrier. Late-arriving txs (in F2 mode, when reconciliation extends the inbound-receipt window) can perturb the per-block tx index. The polling client doesn't see this; the streaming model can emit per-tx events with explicit `block_index` + `tx_index` + `seq` keys that the subscriber can use for idempotent dedup.
 
-**Cost.** ~3 days remaining. Per-block subscriber-broadcast hook + bounded queue management + integration with existing RPC session lifecycle.
+The streaming primitive collapses the round-trip into a single long-lived connection with per-event push, eliminates the polling-period contribution to delivery latency, and exposes explicit ordering keys.
 
-**Closes:** none — operational improvement for DApp node implementers.
+**Mechanism (sketch).** A new `dapp_subscribe(domain, topic?, since?)` RPC opens a persistent TCP connection that the node holds open across block boundaries. The connection multiplexes server-pushed events (block-finality notifications, matching DAPP_CALL events, heartbeats, error frames). Newline-delimited JSON, one frame per line. The subscriber may close at any time; the node disconnects on backpressure violation or shutdown.
+
+The wire flow:
+
+```
+DApp client                     Determ node
+   │                                 │
+   │   dapp_subscribe(domain="ex.io",│
+   │                  topic="bid",   │
+   │                  since=H_start) │
+   ├────────────────────────────────>│
+   │                                 │  validate domain in dapp_registry_;
+   │                                 │  if since < current head - SUBSCRIBE_BACKLOG_MAX_BLOCKS, reject;
+   │                                 │  allocate Subscriber{queue, filter, seq=0};
+   │                                 │
+   │   {"event":"subscribed",        │
+   │    "domain":"ex.io",            │
+   │    "topic":"bid",               │
+   │    "since":H_start,             │
+   │    "head":H_now,                │
+   │    "subscriber_id":"a3...",     │
+   │    "seq":0}                     │
+   │<────────────────────────────────│
+   │                                 │  catch-up phase: iterate dapp_messages index
+   │                                 │  from H_start to H_now, emit matching events
+   │                                 │
+   │   {"event":"dapp_call",         │
+   │    "block_index":H,             │
+   │    "tx_index":I,                │
+   │    "seq":N,                     │
+   │    "from":"...","to":"ex.io",   │
+   │    "amount":0,"payload":"..."}  │
+   │<────────────────────────────────│
+   │                                 │  (repeat for each historical match)
+   │                                 │
+   │   {"event":"live",              │
+   │    "block_index":H_now,         │
+   │    "seq":N}                     │
+   │<────────────────────────────────│  catch-up complete; transition to live tail
+   │                                 │
+   │                                 │  per-block hook fires after enqueue_save
+   │   {"event":"dapp_call",         │
+   │    "block_index":H_now+1,...}   │
+   │<────────────────────────────────│
+   │                                 │
+   │   {"event":"heartbeat",         │
+   │    "block_index":H,             │
+   │    "seq":N,                     │
+   │    "ts":1700000000}             │  every HEARTBEAT_INTERVAL_BLOCKS even if no matches
+   │<────────────────────────────────│
+   │                                 │
+   │  ...                            │
+   │                                 │
+   │   {"event":"error",             │
+   │    "code":"backpressure",       │
+   │    "queued":1024,"limit":1024}  │  emitted just before forced close
+   │<────────────────────────────────│
+   │                                 │  node closes socket; client must redial
+```
+
+**Wire-format additions.** None at the consensus / gossip layer. All changes are within the RPC envelope already defined by §10.x of `PROTOCOL.md`. Three new event-frame schemas:
+
+| Frame | Direction | When emitted | Payload shape |
+|---|---|---|---|
+| `subscribed` | server → client | Once per successful `dapp_subscribe` call | `{domain, topic, since, head, subscriber_id, seq}` |
+| `dapp_call` | server → client | Per matching DAPP_CALL in any finalized block | `{block_index, tx_index, seq, from, to, amount, payload, sig}` |
+| `live` | server → client | Transition marker between catch-up replay and live tail | `{block_index, seq}` |
+| `heartbeat` | server → client | Every `HEARTBEAT_INTERVAL_BLOCKS` (default 50) even with no matches | `{block_index, seq, ts}` |
+| `error` | server → client | Just before forced disconnect | `{code ∈ {backpressure, shutdown, invalid_arg, rate_limited}, ...}` |
+| `close` | client → server (optional) | Voluntary graceful unsubscribe | `{subscriber_id}` — server flushes pending frames then closes |
+
+Per-subscriber state on `Node`: `struct Subscriber { uint64_t id; std::string domain; std::optional<std::string> topic; std::deque<EventFrame> queue; uint64_t seq; uint64_t bytes_buffered; std::chrono::steady_clock::time_point last_send; asio::ip::tcp::socket socket; }`. The `subscribers_` map is keyed by `subscriber_id` and protected by a dedicated `std::mutex subscribers_mutex_` (separate from `state_mutex_` to keep the per-block fan-out off the hot consensus path).
+
+**Apply-path integration.**
+
+Touch list (files in `src/node/`, no `src/chain/` changes — this is purely an RPC-layer feature):
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/node/node.hpp` | `class Node` | Add `subscribers_` map + `subscribers_mutex_`; declare `rpc_dapp_subscribe`, `on_block_finalized_for_subscribers`, `enqueue_subscriber_event`, `kill_subscriber` |
+| `src/node/node.cpp` | RPC dispatch table | Register `dapp_subscribe` handler (singleton — does NOT return after first response; holds the socket) |
+| `src/node/node.cpp` | new `rpc_dapp_subscribe(socket, params)` | Validate domain (must be in `dapp_registry_` and not `inactive_from ≤ head`); validate `topic` shape if present; validate `since` is within `[head - SUBSCRIBE_BACKLOG_MAX_BLOCKS, head]`; allocate Subscriber; emit `subscribed` frame; spawn catch-up replay; on completion emit `live` frame and add to live `subscribers_` set |
+| `src/node/node.cpp` | new `on_block_finalized_for_subscribers(const Block&)` | Called from the existing per-block hook (currently calls `enqueue_save`); iterates `block.transactions`; for each `DAPP_CALL` tx checks subscriber filters; for each match calls `enqueue_subscriber_event` |
+| `src/node/node.cpp` | new `enqueue_subscriber_event(Subscriber&, EventFrame)` | Appends to `Subscriber::queue` under `subscribers_mutex_`; checks `queue.size() < SUBSCRIBER_QUEUE_MAX` and `bytes_buffered < SUBSCRIBER_BYTES_MAX`; on overflow emits `error{code=backpressure}` synchronously, marks for kill, returns. Triggers async-write worker if not already running for this subscriber |
+| `src/node/node.cpp` | new `subscriber_write_worker(Subscriber&)` | Single producer/single consumer pattern; pulls from queue, writes to socket via asio `async_write`; on write error calls `kill_subscriber`; on empty queue parks awaiting next `enqueue_subscriber_event` |
+| `src/node/node.cpp` | new `kill_subscriber(uint64_t id, std::string_view reason)` | Emits final `error` frame (best-effort, single sync write with 50 ms timeout), closes socket, removes from `subscribers_` |
+| `src/node/node.cpp` | new periodic timer `heartbeat_tick` | Every `HEARTBEAT_INTERVAL_BLOCKS` blocks (or `HEARTBEAT_INTERVAL_SECS` for the secs fallback), emits `heartbeat` to every live subscriber |
+| `src/node/node.cpp` | `enqueue_save` block hook (existing) | Add a synchronous call to `on_block_finalized_for_subscribers` after `enqueue_save` enqueues (NOT after the async worker actually persists; the subscriber stream is decoupled from disk persistence on purpose — subscribers see the chain's logical state) |
+| `tools/test_dapp_subscribe.sh` | new | Regression: subscribe, observe heartbeat, submit DAPP_CALL, verify event arrives; backpressure path; reconnect-after-disconnect via `since` |
+
+Constants (proposed defaults; genesis-pinned with v2.X.2 governance-mutability):
+
+| Constant | Default | Purpose |
+|---|---|---|
+| `SUBSCRIBER_QUEUE_MAX` | 1024 | Per-subscriber event-count ceiling before backpressure-kill |
+| `SUBSCRIBER_BYTES_MAX` | 16 MiB | Per-subscriber byte-buffer ceiling (covers very large `DAPP_CALL` payloads — small-event count cap dominates for normal traffic) |
+| `SUBSCRIBER_MAX_PER_NODE` | 256 | Global ceiling on concurrent subscribers; rejects new `dapp_subscribe` calls with `error{code=rate_limited}` past this |
+| `SUBSCRIBE_BACKLOG_MAX_BLOCKS` | 10 000 | How far back `since` can reach; older requires `dapp_messages` polling first |
+| `HEARTBEAT_INTERVAL_BLOCKS` | 50 | Heartbeat cadence in chain-block units (preferred — chain-time aligns to consensus, not wall-clock) |
+| `HEARTBEAT_INTERVAL_SECS` | 30 | Wall-clock fallback for low-block-rate profiles |
+
+Per-IP and per-RPC-token rate-limiting: the existing `net::RateLimiter` (S-014, `include/determ/net/rate_limiter.hpp`) is extended with a "long-lived connection" bucket that counts a subscription as a fixed weight (e.g., 100 token units consumed at subscribe; +1 per event delivered). Prevents a single client from exhausting `SUBSCRIBER_MAX_PER_NODE`.
+
+**Backpressure semantics.** Three escalation tiers:
+
+1. **Soft buffering.** Normal operation; events queued and drained at socket-write speed. Single subscriber can absorb burst spikes up to `SUBSCRIBER_QUEUE_MAX` events or `SUBSCRIBER_BYTES_MAX` bytes.
+2. **Backpressure-kill (hard).** Either ceiling exceeded → emit final `error{code=backpressure, queued, limit}` frame, force-close socket, remove subscriber. Client redials with `since = last_observed_block_index`. The decision is deterministic and per-subscriber; one slow subscriber cannot affect any other.
+3. **Global rate-limit.** Past `SUBSCRIBER_MAX_PER_NODE` concurrent subscriptions, `dapp_subscribe` requests fail with `error{code=rate_limited}`. Operator can raise via config.
+
+Rationale for kill-on-overflow vs. drop-on-overflow: subscribers reading `block_index` + `seq` keys want a contiguous stream. Silently dropping events makes the stream unreliable; subscribers can't tell whether `seq` jumped because the chain was idle (legitimate) or because the node dropped frames (silent corruption). Forcing reconnect-via-`since` keeps the contract clean: the client always knows exactly where they stand.
+
+**Multi-topic dispatch.** `topic` filter is single-string match against the DAPP_CALL payload preamble (v2.19's existing topic-routing convention). A subscriber may open multiple parallel subscriptions to combine filters; the chain does NOT support an inline OR-list because (a) per-subscription accounting stays simple, (b) the cost of a second TCP connection is negligible vs. introducing list-filter validation surface, (c) it preserves the "one subscriber = one filter" invariant that makes the dispatch loop trivial. The dispatch loop is `O(|subscribers|)` per finalized block in the worst case (every subscriber matches); for `SUBSCRIBER_MAX_PER_NODE = 256` this is dominated by the socket-write cost, not the filter check.
+
+**Threat model.**
+
+| Attack | v2.20 defense | New surface introduced |
+|---|---|---|
+| **Slow-subscriber DoS** (open a subscription, then never read; force node to buffer events forever) | `SUBSCRIBER_QUEUE_MAX` + `SUBSCRIBER_BYTES_MAX` per-subscriber ceilings; backpressure-kill on overflow. Single misbehaving subscriber's footprint is bounded; node-wide buffering is `SUBSCRIBER_MAX_PER_NODE × SUBSCRIBER_BYTES_MAX = 4 GiB` worst-case (operator can tune). | None — strictly improves on a naive unbounded-buffer implementation |
+| **Connection-flood DoS** (open `SUBSCRIBER_MAX_PER_NODE` subscriptions from one client to lock out others) | Per-IP and per-RPC-token rate-limit via existing `net::RateLimiter` extended with subscription-weight bucket; operator can also configure a per-token max-concurrent ceiling separately from the global node ceiling | One new rate-limit dimension; well-understood mitigation; reuses the post-S-014 token-bucket infrastructure |
+| **Event-storm amplification** (DApp-side adversary submits many DAPP_CALLs to a popular domain; per-block hook fans out × `|subscribers_for_domain|`) | Anti-spam on the submission side is already covered by v2.19 (chain-wide `DAPP_CALL` min-fee + S-008 mempool quota); the fan-out itself is O(N) and bounded by `SUBSCRIBER_MAX_PER_NODE` — operator can lower this ceiling if their node serves many high-traffic DApps | The fan-out cost lives on the producer/finalizer's hot path; mitigation if observed: move `on_block_finalized_for_subscribers` to a dedicated worker thread, dispatching events asynchronously to subscriber queues (already the design here; reaffirm in implementation) |
+| **Replay across reconnect** (client reconnects with `since = old_height`; node re-emits old events; client must dedup) | The wire contract is explicit: client uses `(block_index, tx_index, seq)` as the idempotent key. Reconnects naturally backfill; the catch-up replay is bounded by `SUBSCRIBE_BACKLOG_MAX_BLOCKS`. Clients reconnecting from too far in the past are told to polling-backfill via `dapp_messages` first | None — explicit semantics |
+| **Confidentiality of DAPP_CALL payloads** | Payload bytes are opaque to the chain; encryption is sender-side (libsodium sealed-box to the DApp's `service_pubkey` per V2-DAPP-DESIGN.md §10). A subscriber reading the stream sees the same bytes as anyone reading the chain — no new disclosure path | None — surface identical to existing tx-index queries |
+| **Spurious "subscribed" by impersonator** (attacker observes subscriber traffic, replays the `subscribed` frame to confuse the client) | Server-pushed frames carry the `subscriber_id` (random 16-byte token) emitted in the original `subscribed` frame; client validates `subscriber_id` matches on every subsequent frame. Also: the underlying RPC channel is HMAC-authenticated (v2.16), so a passive observer cannot inject frames | None |
+| **Information leak via topic-filter probing** (attacker subscribes with various `topic` values to learn what topics a DApp uses) | DAPP_CALL topics are public chain data already (visible via `dapp_messages`); no new information leakage | None |
+| **Heartbeat-as-side-channel** (timing of heartbeats reveals chain-internal block-finality cadence to an unauthenticated observer) | All subscribers are authenticated via the RPC HMAC token (v2.16); no unauthenticated observers exist. Heartbeat cadence is already public via `chain_status` RPC | None |
+
+**Effort estimate.** ~3 engineering days remaining, broken down:
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| `Subscriber` struct + `subscribers_` map + `subscribers_mutex_` | 0.5 day | Mechanical; mirrors existing per-peer struct patterns in `Node` |
+| `rpc_dapp_subscribe` dispatch + frame schemas + catch-up replay | 0.5 day | Catch-up reuses existing `dapp_messages` retrospective query |
+| `on_block_finalized_for_subscribers` block hook + per-subscriber filter + dispatch | 0.5 day | Single new hook point in the post-`enqueue_save` codepath |
+| `subscriber_write_worker` + backpressure check + `kill_subscriber` | 0.5 day | asio async_write; one worker per subscriber socket |
+| Heartbeat timer + `heartbeat_tick` | 0.25 day | Single periodic asio timer |
+| Per-IP rate-limit integration (extend `net::RateLimiter`) | 0.25 day | Reuse token-bucket; add subscription-weight class |
+| Regression: `tools/test_dapp_subscribe.sh` (subscribe, heartbeat, deliver, backpressure, reconnect) | 0.5 day | Five scenarios; mirrors `tools/test_dapp_call.sh` shape; uses two daemons and a subscriber harness |
+| CLI: `determ dapp-subscribe --domain D [--topic T] [--since H]` | 0.25 day | Thin wrapper; mostly stdin/stdout passthrough of newline-JSON |
+| Documentation: PROTOCOL.md §10.2 (RPC list), V2-DAPP-DESIGN.md Phase 7.4 status flip, CLI-REFERENCE.md verb | 0.25 day | Small touch-ups |
+| **Total** | **~3 engineering days** | Single-developer estimate; +0.5 day if the rate-limit extension needs its own test |
+
+**Dependencies.**
+
+- **v2.18 DAPP_REGISTER** — ✅ shipped. Required to resolve the `domain` argument against `dapp_registry_`.
+- **v2.19 DAPP_CALL** — ✅ shipped. Required for the events themselves; v2.20 reuses the per-block tx iteration already present.
+- **v2.16 RPC HMAC auth (S-001)** — ✅ shipped. Required for subscriber authentication; v2.20 reuses the existing token-verify path on the initial `dapp_subscribe` request.
+- **S-014 per-peer-IP token bucket** — ✅ shipped (`net::RateLimiter`). Extended here with a subscription-weight class.
+- **v2.4 A9 atomic apply / `atomic_scope`** — ✅ shipped. The per-block hook fires after the atomic-apply commit; subscribers see logically-finalized state.
+- **v2.20 polling subset (`dapp_messages`)** — ✅ shipped. Reused for the catch-up replay phase (subscriber's initial `since` window).
+- **No dependency on v2.7 (F2)** — but composes cleanly: F2's intersection-rule for inbound receipts does not affect DAPP_CALL inclusion (DAPP_CALLs are pool-fed at submission, not inbound from another shard); subscriber stream is unaffected by F2's wire change.
+- **No dependency on v2.10 (threshold randomness)** — orthogonal.
+
+**Cross-references.**
+
+- `V2-DAPP-DESIGN.md` §11 Phase 7.4 — Companion spec from the DApp-substrate side. This V2-DESIGN entry covers the chain/RPC-layer mechanism; the V2-DAPP entry covers the DApp-developer-facing contract.
+- `PROTOCOL.md` §10.2 — RPC surface; v2.20 adds one entry to the list (`dapp_subscribe`).
+- `V2-DAPP-DESIGN.md` §10 Privacy & off-chain channels — DAPP_CALL payloads are sender-encrypted via libsodium sealed-box; the streaming layer doesn't change payload confidentiality.
+- `SECURITY.md` §S-014 — token-bucket rate-limit infrastructure that v2.20 extends.
+- `SECURITY.md` §S-001 — HMAC RPC auth that v2.20 reuses for subscriber authentication.
+- `include/determ/net/rate_limiter.hpp` — touch site for the subscription-weight class.
+- `src/node/node.cpp` `enqueue_save` block hook — touch site for `on_block_finalized_for_subscribers`.
+- `tools/test_dapp_call.sh` + `tools/test_dapp_messages.sh` — sibling regression patterns that `tools/test_dapp_subscribe.sh` mirrors.
+
+**Open design questions.**
+
+1. **Should `dapp_subscribe` accept multiple `domain` filters in one connection?** Argument for: a DApp gateway operator subscribed to N domains for relay pays N socket establishments and N HMAC verifications. Argument against: complicates per-subscriber accounting (which domain caused the backpressure?) and the dispatch loop must check N filters per event. Default position: single-domain per connection in v2.20.0; revisit in v2.20.1 if real DApp gateways demand it. The cost of N connections is negligible compared to introducing list-filter validation surface.
+2. **Frame format: newline-JSON or length-prefixed binary?** Newline-JSON matches the existing RPC transport and is human-debuggable. Length-prefixed CBOR or protobuf would shave ~30 % bytes-on-wire but introduces a second serializer in the RPC path. Default position: newline-JSON for v2.20; revisit only if real deployments observe payload-size as the bottleneck.
+3. **Should the streaming subset re-emit historical events on operator-initiated reorg?** Determ is fork-free at the chain layer (FA1), so genuine reorgs cannot happen — but in an EXTENDED-mode partition + merge scenario, a shard's local view of `dapp_registry_` could conceivably change after a `MERGE_END`. Default position: out of scope for v2.20; subscriber stream is a thin live-tail over the chain's monotonically-extending tx history. If a merge-induced state change retroactively invalidates an emitted event, the subscriber redials and observes the new state via catch-up. This composes with v2.11's auto-detection beacon-side trigger but does not require it.
+4. **WebSocket transport in v2.20 or v2.20.1?** WebSockets are the obvious browser-facing transport but require an HTTP-upgrade handshake on top of the existing TCP socket. Default position: defer to v2.20.1; v2.20 ships raw-TCP newline-JSON for DApp-server-to-Determ-node subscriptions, which is the primary use case. Browser-side subscribers can use a thin DApp-side WebSocket gateway that itself runs as a subscriber.
+5. **Per-subscriber state and its commitment.** Subscribers are NOT chain-state — they're per-node operator-facing resources. They do NOT contribute to the state_root (v2.1) or appear in snapshots (v2.3). A node restart drops all subscriptions; clients must redial. This is intentional: the streaming layer is RPC-server lifecycle, not consensus state.
+6. **Composition with v2.22 confidential transactions.** If v2.22 ships per-epoch view-key derivation, DAPP_CALL payloads might carry encrypted amount commitments. The subscriber stream would deliver these as-is; subscribers responsible for their own per-epoch view-key handling (out of scope for v2.20).
+
+**Cost.** ~3 days remaining. See effort table above. Net new RPC surface is one verb + five event frames; net new node state is one map; net new threat surface is bounded by the existing rate-limit and HMAC-auth infrastructure.
+
+**Closes:** none directly — operational improvement for DApp node implementers. Enables the V2-DAPP §11.4-§11.7 cohort of DApp use cases (live order books, push notifications, encrypted streaming media) without polling-induced latency / RPC-trip waste.
 
 ### v2.21+ deferred
 
