@@ -1141,6 +1141,208 @@ No new cryptographic primitives. No new consensus primitives. No new gossip prim
 
 ---
 
+### 11.7.5 — DApp economic primitives: staking-bound registration + on-chain fee-share
+
+**Tracking slot:** v2.30 (Theme 7 — DApp economics). Effort: ~6-8 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped); v2.24 (DAPP_KEY_ROTATE, spec'd §11.7.1) provides the slashing event surface this section operationalizes. No new cryptographic primitives. Genesis-pinned activation height required.
+
+#### Problem statement
+
+§9 lays out the v2.18 / v2.19 baseline economics: `DAPP_REGISTER` requires the owning domain to hold `DAPP_MIN_STAKE` (≥ 10× normal MIN_STAKE), `DAPP_CALL` pays a regular `tx.fee` to validators, and DApp operators set their own pricing off-chain. Three substantive gaps remain:
+
+1. **The "stake bond" is currently a passive eligibility check, not a bond.** Today's path: a DApp operator's owning domain has stake ≥ `DAPP_MIN_STAKE` at the time of `DAPP_REGISTER`; nothing locks that stake to the registration. The operator can `UNSTAKE` immediately after registering, drop below the floor, and continue operating until the next call inspects the threshold. §9 acknowledges this gap implicitly ("slashable on misbehavior — see below") but defers actual bond semantics.
+2. **No on-chain fee-share between subscriber-paid DApp calls and the DApp operator.** A common DApp business model: subscribers pre-pay a periodic subscription (e.g., per-month flat fee), in exchange the DApp accepts their `DAPP_CALL`s without per-call billing. v2.19's `tx.amount`-as-payment pattern handles per-call payment cleanly, but the **subscription** pattern requires either off-chain accounting (which forfeits the chain's audit trail) or a chain-of-`COMPOSABLE_BATCH` workaround. A native primitive is missing.
+3. **Refundable graceful deregistration is undocumented.** §9 mentions DApp-side stake as "skin in the game" but never specifies whether deregistering returns the bond. v2.18's `op=1` deactivation merely sets `inactive_from`; the stake remains locked indefinitely (or worse, freed only when the operator runs a separate `UNSTAKE`, with no enforced cooldown).
+
+This problem matters because: (a) any DApp ecosystem with non-trivial economics will see operators wanting to declare their bond commitment explicitly (the same way bond-and-bail is explicit in user-identity REGISTER); (b) subscription DApps are a strict superset of per-call DApps in commercial deployment patterns (CBDC RP, oracle subscriptions, B2B settlement); (c) the §11.7.1 emergency-revoke event has no concrete slashing target without an explicit bond.
+
+The v2.30 design pins all three: bond is locked on `DAPP_REGISTER`, fee-share is declared per-DApp at registration and applied at apply-time, deregistration releases the bond after a cooldown.
+
+#### Mechanism sketch
+
+**Bond locking.** `DAPP_REGISTER` `op=0` (create) gains a `bond_amount` field. On apply, the chain debits `bond_amount` from the owning domain's spendable balance into a per-DApp `dapp_bond_locked_` field. The `Stake` ledger separately holds the `DAPP_MIN_STAKE` eligibility check (unchanged from v2.18); the new `bond_amount` is in **addition to** the stake and is operationally distinct (the bond is **slashable** per §9's slashable conditions and §11.7.1 emergency-revoke; the stake remains a generic identity primitive).
+
+**Fee-share declaration.** `DAPP_REGISTER` gains a `subscription_policy` substructure declaring (a) flat-rate model parameters (per-block period, per-period fee, max subscribers), or (b) per-call model parameters (per-call min/max amount), or (c) hybrid. Subscribers explicitly subscribe via a new `DAPP_SUBSCRIBE` tx that locks `n × period_fee` from the subscriber's balance and credits the DApp operator's account at every period boundary (the chain runs the credit as part of `apply_block_finalization`, the same hook that already runs equivocation-slash payouts).
+
+**Refundable graceful deregister.** `DAPP_REGISTER` `op=1` (deactivate) now sets `inactive_from = current_height + GRACE_PERIOD` AND `bond_unlock_at = inactive_from + DAPP_BOND_UNLOCK_COOLDOWN_BLOCKS`. The bond becomes withdrawable via a separate `DAPP_BOND_WITHDRAW` tx at any height ≥ `bond_unlock_at`. If any open subscriber refund is owed at deactivation, the chain auto-credits subscribers their remaining `subscription_balance` at `inactive_from` from the bond (the bond is the secondary insurance behind the operator's balance for refunds).
+
+#### Wire-format changes
+
+**Extension to `DAPP_REGISTER` payload** (§3.1) — appended after the existing `metadata` field:
+
+```
+... existing fields through metadata ...
+[bond_amount: u64 LE]               # additional bond (≥ DAPP_MIN_BOND); 0 = bond-less (pre-v2.30 compat)
+[subscription_policy_kind: u8]      # 0 = none (per-call only), 1 = flat, 2 = hybrid
+[if kind == 1 or 2:                 # flat-fee parameters
+  [period_blocks: u32 LE]           # period length (e.g., 21600 ~ 1 day at 4s block time)
+  [period_fee: u64 LE]              # fee per period per subscriber
+  [max_subscribers: u32 LE]         # 0 = unlimited
+  [min_periods: u8]                 # minimum subscription commitment (anti-churn; 0 = no min)
+]
+[if kind == 0 or 2:                 # per-call parameters
+  [per_call_min: u64 LE]            # minimum tx.amount accepted on DAPP_CALL (0 = no floor)
+  [per_call_max: u64 LE]            # maximum tx.amount accepted on DAPP_CALL (0 = no cap)
+]
+[fee_share_validator_bp: u16 LE]    # basis-points of DAPP_CALL.fee credited to producer (default 10000 = 100%);
+                                    # remainder credited to dapp_operator_balance as protocol-distributed share.
+                                    # Range: [0, 10000]. NOT a tax — this is the operator's voluntary cut to keep
+                                    # the producer subsidy at par. Capped genesis-side: fee_share_validator_bp ≥ MIN_FEE_BP (suggested 5000)
+```
+
+**New `DAPP_SUBSCRIBE` tx type** (extends §3 enum):
+
+```cpp
+enum class TxType : uint8_t {
+    ...existing 0..11 (incl. DAPP_KEY_ROTATE = 11 from §11.7.1)...,
+    DAPP_SUBSCRIBE   = 12,   // open / extend / cancel a subscription
+    DAPP_BOND_WITHDRAW = 13, // withdraw bond after deregister cooldown
+};
+```
+
+**`DAPP_SUBSCRIBE` payload:**
+
+```
+[op: u8]                  # 0 = subscribe, 1 = extend (top up), 2 = cancel (graceful)
+[dapp_domain_len: u8]
+[dapp_domain: utf8]       # target DApp domain (must be a current DAPP_REGISTER)
+[periods: u32 LE]         # number of periods to subscribe/extend (≥ DApp's min_periods on op=0)
+[subscriber_pubkey: 32B]  # the subscriber identity (== tx.from in v2.30; reserved for delegation in v2.30.1)
+```
+
+**`DAPP_BOND_WITHDRAW` payload:**
+
+```
+[dapp_domain_len: u8]
+[dapp_domain: utf8]       # must equal tx.from (only owning domain may withdraw its bond)
+[amount: u64 LE]          # ≤ remaining unlocked bond balance; 0 = withdraw all
+```
+
+**State-commitment encoding** (extends §4 `d:` namespace canonical serialization, appended after the §11.7.1 `key_history` suffix when present):
+
+```
+... existing canonical_serialize(DAppEntry) including §11.7.1 suffix ...
+|| u64_be(bond_amount)
+|| u64_be(bond_unlock_at)
+|| u64_be(subscription_policy_kind)
+|| u64_be(period_blocks) || u64_be(period_fee) || u64_be(max_subscribers) || u64_be(min_periods)
+|| u64_be(per_call_min) || u64_be(per_call_max) || u64_be(fee_share_validator_bp)
+|| u64_be(active_subscriber_count)
+```
+
+Conditional-serialization rule (mirrors §11.7.1): the extension MAY be omitted if `bond_amount == 0 && subscription_policy_kind == 0 && fee_share_validator_bp == 10000 && active_subscriber_count == 0`. Pre-v2.30 entries default to this state, preserving state_root byte-for-byte across the activation height.
+
+Subscribers are committed via a NEW state-Merkle namespace `"u:"` (subscription map): `"u:" + dapp_domain || subscriber_pubkey → SHA-256(canonical_serialize(SubscriberEntry))` where `SubscriberEntry = {periods_remaining, subscription_started_at, next_credit_at, periods_paid}`. This keeps the per-DApp entry size O(1) regardless of subscriber count; subscribers are individual leaves.
+
+#### Apply-path changes
+
+| File | Function | Change |
+|---|---|---|
+| `include/determ/chain/transaction.hpp` | `TxType` enum | Add `DAPP_SUBSCRIBE = 12`, `DAPP_BOND_WITHDRAW = 13` |
+| `include/determ/chain/dapp.hpp` | `DAppEntry`, new `SubscriberEntry`, new `SubscriptionPolicy` struct | Add `bond_amount`, `bond_unlock_at`, `subscription_policy`, `active_subscriber_count` |
+| `src/chain/transaction.cpp` | `binary_codec::encode/decode_tx` | Add `DAPP_SUBSCRIBE` + `DAPP_BOND_WITHDRAW` payload cases; extend `DAPP_REGISTER` decoder for new tail fields |
+| `src/chain/chain.cpp` | `apply_transactions` switch — `DAPP_REGISTER` case | Debit `bond_amount` from sender's spendable balance, write to `dapp_registry_[from].bond_amount`. Validate `bond_amount ≥ DAPP_MIN_BOND` (genesis-pinned). Validate `fee_share_validator_bp ≥ MIN_FEE_BP` |
+| `src/chain/chain.cpp` | `apply_transactions` switch — `DAPP_REGISTER op=1` case | Set `inactive_from = h + GRACE_PERIOD` and `bond_unlock_at = inactive_from + DAPP_BOND_UNLOCK_COOLDOWN_BLOCKS`. Trigger subscriber refunds if `subscription_policy.kind != 0` (credit each subscriber `periods_remaining × period_fee` from the bond; if bond insufficient, prorate) |
+| `src/chain/chain.cpp` | `apply_transactions` switch — `DAPP_CALL` case | If recipient DApp has `subscription_policy.kind ∈ {1, 2}` AND sender has an active subscription (`subscribers_[dapp][sender].periods_remaining > 0`), accept the call with no `tx.amount` requirement. Else fall through to the existing per-call flow (with `per_call_min`/`per_call_max` enforcement). Validator-fee credit: `floor(fee × fee_share_validator_bp / 10000)` to producer; remainder to `accounts_[dapp].balance` |
+| `src/chain/chain.cpp` | new switch case — `DAPP_SUBSCRIBE` | Validate target DApp, validate `periods ≥ min_periods`, debit `periods × period_fee` from sender, insert/update `subscribers_[dapp][sender]`. Increment `dapp_registry_[dapp].active_subscriber_count`. Reject if `active_subscriber_count + 1 > max_subscribers` |
+| `src/chain/chain.cpp` | new switch case — `DAPP_BOND_WITHDRAW` | Validate `tx.from == dapp_domain`, validate `h ≥ bond_unlock_at`, validate `amount ≤ dapp_registry_[dapp].bond_amount`. Credit sender's balance, debit bond |
+| `src/chain/chain.cpp` | new hook in `apply_block_finalization` | At each block finalize, iterate `subscribers_` map (keyed by `next_credit_at == h`): credit `period_fee` to `accounts_[dapp].balance` for each active subscriber whose `next_credit_at == h`, decrement `periods_remaining`. Bounded O(N_subs_due_this_block); use the same indexing pattern as per-block subsidy distribution |
+| `src/chain/chain.cpp` | `build_state_leaves` | Add `u:` namespace for `subscribers_`; extend `d:` namespace canonical serializer for the conditional bond/policy tail |
+| `src/chain/chain.cpp` | `serialize_state` / `restore_from_snapshot` | Round-trip `subscribers_` and the extended `DAppEntry` fields. Forward-closes S-037 (and pairs with §11.7.1's similar requirement for `key_history`) |
+| `src/node/validator.cpp` | `validate_tx_shape` | Reject `DAPP_REGISTER` where `bond_amount > tx.from.balance` at admission time. Reject `DAPP_SUBSCRIBE` to inactive DApp |
+| `src/node/node.cpp` | `rpc_dapp_info` | Include `bond_amount`, `bond_unlock_at`, `subscription_policy`, `active_subscriber_count`, `fee_share_validator_bp` in JSON response |
+| `src/node/node.cpp` | new `rpc_dapp_subscriptions(domain)` | Return paginated subscriber list with `periods_remaining` per subscriber (RPC for DApp operator monitoring) |
+| `tools/test_dapp_economics.sh` | new | Regression: bond lock on register; bond refund on deregister; subscription credit cadence; per-call min/max enforcement; refund-from-bond on emergency deactivate |
+
+The new hook in `apply_block_finalization` is the most novel piece — it's the first per-block scheduled operation that operates over a map keyed by `next_credit_at`. This is a standard "due-this-block" pattern; the bounded-O(N_due) cost is OK because `N_due ≤ DAPP_MAX_REGISTRY_SIZE × max_subscribers_per_dapp` (genesis-pinned). For an over-pessimistic upper bound: 10K DApps × 10K subscribers each due in a single block = 100M operations. The mitigation is the per-DApp `next_credit_at` cadence being inherently staggered (different DApps register at different heights), so amortized per-block cost is O(N_dapps).
+
+#### Backward-compat story
+
+**Soft-fork under v2.18 substrate** — but with a height-pinned activation per the §11.7.1 / A11 / S-033 pattern. Coexistence:
+
+- v2.18 nodes (do not understand `DAPP_SUBSCRIBE`, `DAPP_BOND_WITHDRAW`, or the extended `DAPP_REGISTER` tail) treat the new tx types as unknown and reject the containing block. **Breaking** consensus change; v2.30 must roll out as a coordinated migration with a `genesis_params.dapp_economics_active_from` height pin.
+- Until that height, the chain MUST reject `DAPP_SUBSCRIBE` / `DAPP_BOND_WITHDRAW` AND MUST treat the `DAPP_REGISTER` extended tail as malformed (decoder bounded to the v2.18 length).
+- After activation: existing v2.18 `DApp` entries materialize transparently as `bond_amount = 0, subscription_policy.kind = 0, fee_share_validator_bp = 10000, active_subscriber_count = 0`. The conditional-serialization rule keeps their state_root contribution unchanged.
+- Existing DApps MAY opt-in to bond + subscription post-activation by issuing a `DAPP_REGISTER` `op=0` update with the new fields populated. The `bond_amount` debit lands at the update height; subscriptions accept new subscribers from that point.
+
+#### Threat model
+
+| Attack | v2.30 defense | New surface introduced |
+|---|---|---|
+| **Economic griefing — operator deregisters mid-subscription period, walks with subscriber funds** | Subscriber refund is auto-credited from the operator's bond at deactivation (apply_transactions §`DAPP_REGISTER op=1` case). Refund amount = `periods_remaining × period_fee` per subscriber. If bond insufficient (operator's bond was already drained), refunds prorate from the available bond; the residual loss is slashable against the operator's separate stake per §9. | Operator MAY set `bond_amount` arbitrarily low (e.g., bond=0 with hybrid `subscription_policy.kind=2`). Mitigation: validator rejects `DAPP_REGISTER` where `subscription_policy.kind != 0 && bond_amount < DAPP_MIN_BOND_PER_SUBSCRIPTION = period_fee × MIN_BOND_COVERAGE_MULTIPLIER × max_subscribers` (recommended `MIN_BOND_COVERAGE_MULTIPLIER = 4`, i.e., enough bond to cover 4× the worst-case all-subscribers-cancel scenario). Genesis-pinned. |
+| **Stake-stealing — adversary observes a DApp's UNSTAKE then races to send DAPP_CALL when the operator falls below the stake floor** | `DAPP_MIN_STAKE` is checked at apply-time of every `DAPP_REGISTER op=0` (existing v2.18 behavior); bond is an ADDITIONAL `bond_amount` that the operator cannot reduce by UNSTAKE (it's debited from spendable, not from stake). So the operator can UNSTAKE freely without affecting the bond. Adversary cannot drain the bond unless they're the owning domain. | Adversary acquires the operator's owning-domain key → can drain bond via `DAPP_BOND_WITHDRAW`. Same threat as drain-via-TRANSFER (already accepted in v2.18). Mitigation: high-stakes operators use the §11.7.1 `rotation_pubkey` model and keep the owning-domain key cold. The `bond_unlock_at` cooldown gives the operator detection time — a withdraw attempt during the cooldown window is rejected; only post-cooldown withdraws succeed, giving a multi-block window for the operator to issue an emergency-revoke `DAPP_KEY_ROTATE` and recover. |
+| **Free-rider — subscriber opens minimum subscription, makes maximum DAPP_CALLs in the period, cancels before the next period** | Subscribers commit `periods × period_fee` upfront on `DAPP_SUBSCRIBE`; cancellation does NOT refund. The DApp operator collected the period_fee at subscription time. The DApp's volume is bounded only by its own DAPP_CALL admission policy. | Cancellation as op=2 is graceful (subscriber stops receiving credit but DApp keeps already-paid fees). An "abusive" subscriber rapidly makes calls in the first block of a period — the DApp must enforce its own per-block per-subscriber call limit (orthogonal to chain rate-limiting per §11.7.3). The chain's only commitment is fee collection, not call-rate enforcement per subscription. |
+| **Bond griefing — flood `DAPP_REGISTER` updates with high bond_amounts to lock operator capital** | `DAPP_REGISTER op=0` updates do NOT change the bond (operator chooses bond at create; updates preserve existing bond). To change bond, operator submits two txs: `DAPP_BOND_WITHDRAW` (partial) THEN `DAPP_REGISTER op=0` with the new bond. So bond-griefing requires two consecutive tx slots and the bond debit is from the operator's own balance — self-griefing. | None — same authorization as any owner-controlled tx. |
+| **Subscription squatting — subscriber subscribes to a DApp they don't intend to use, hoping to deny others (under max_subscribers cap)** | `DAPP_SUBSCRIBE` debits `periods × period_fee` immediately. Squatting costs real funds, and the squatter forfeits those funds (no refund on cancel). For small `max_subscribers` (e.g., 100-subscriber exclusive DApp), squatting attack cost = `period_fee × min_periods × max_subscribers`. Operator can set `min_periods` to make squatting expensive (recommended for exclusive DApps). | Operator could collude with subscribers to squat (artificial scarcity). Same surface as any free-market subscription system; not a protocol concern. |
+| **Subscribers map state bloat** | Per-DApp `max_subscribers` cap (operator-set, validator-enforced). Per-chain global cap `DAPP_GLOBAL_MAX_SUBSCRIBERS = 10M` enforced via `active_subscriber_count` summed across all DApps in `dapp_registry_`. Auto-pruned at subscription-expiry (when `periods_remaining → 0` the `SubscriberEntry` is erased from `subscribers_`). | The `u:` namespace adds a state-Merkle namespace; light-client proofs of subscription status now require `state_proof("u:", dapp || subscriber)`. Acceptable extension; v2.2 light-client RPC already handles arbitrary namespaces. |
+| **Fee-share parameter manipulation** | `fee_share_validator_bp ≥ MIN_FEE_BP` floor (genesis-pinned, suggested 5000 = 50%) prevents operators from setting the validator share too low (which would otherwise undermine producer economics). Operators MAY freely give MORE than the floor to validators; the floor is a minimum. | Operators MAY set `fee_share_validator_bp = MIN_FEE_BP` to keep the maximum DApp share. This is by design — DApps can configure their economic relationship with validators within the bounded floor. |
+| **DApp operator stake misalignment with bond** | The bond and the v2.18 `DAPP_MIN_STAKE` are independent. An operator with bond=0 still meets the stake floor (and can register). The bond is **operator's voluntary commitment** to fee-share / subscription users; it's only mandatory if `subscription_policy.kind != 0` (validator-enforced). | Per-call DApps (no subscriptions) have no bond requirement, matching v2.18 behavior. The bond is opt-in, mandatory only for subscription DApps. |
+
+The cross-references in existing threat-model docs: `proofs/AccountStateInvariants.md` for the bond + balance invariant (bond is a non-spendable balance shard; the operator's `accounts_[dapp].balance + dapp_bond_locked_[dapp] = total operator-controlled funds`), `proofs/EquivocationSlashing.md` for the bond-as-slash-target (analogous to validator stake), `SECURITY.md` §S-007 for overflow checks (`bond_amount + balance + stake` overflow on register).
+
+#### Effort estimate
+
+| Sub-component | Effort | Notes |
+|---|---|---|
+| Enum + payload struct extensions (`DAPP_REGISTER` tail, `DAPP_SUBSCRIBE`, `DAPP_BOND_WITHDRAW`) | 1 day | Mechanical; mirrors §11.7.1 shape |
+| Encoder/decoder + payload validation (including the conditional-tail rule) | 1 day | Bond-related range checks, fee_share floor enforcement, subscription_policy validation |
+| `apply_transactions` switch cases (`DAPP_SUBSCRIBE`, `DAPP_BOND_WITHDRAW`) | 1 day | Bond debit / refund, subscription map insert/erase |
+| `apply_block_finalization` per-block credit hook | 1 day | New per-block scheduled operation; performance-test the staggered cadence under 10K-DApp / 10K-subscriber-each scenarios |
+| `DAPP_REGISTER op=1` refund-on-deactivate logic | 0.5 day | Iterate subscribers for this DApp, credit each refund, debit bond |
+| `build_state_leaves` extension (`u:` namespace + `d:` tail extension) | 1 day | Preserves v2.18 state_root byte-for-byte for non-economic DApps |
+| `serialize_state` / `restore_from_snapshot` round-trip (subscribers + extended `DAppEntry`) | 0.5 day | S-037 forward-closure |
+| `rpc_dapp_info` extension + new `rpc_dapp_subscriptions` | 0.5 day | JSON additions; mechanical |
+| CLI: `determ dapp-subscribe`, `determ dapp-bond-withdraw`, `determ dapp-register` extended flags | 0.5 day | Wallet ergonomic |
+| Regression: `tools/test_dapp_economics.sh` (bond lock, refund, subscription cadence, free-rider, bond griefing, fee-share split) | 1.5 days | Six scenarios |
+| Migration coordination: `genesis_params.dapp_economics_active_from` + activation-height gate + documentation | 0.5 day | Same shape as the §11.7.1 / A11 / S-033 activation pin |
+| **Total** | **~6-8 engineering days** | Single-developer estimate; +1-2 days if performance test reveals the per-block credit-hook cost needs optimization |
+
+#### Dependencies
+
+- **v2.18 DAPP_REGISTER** — shipped. Required.
+- **v2.19 DAPP_CALL** — shipped. Required; per-call fee-share path is the v2.30 extension's primary apply site.
+- **v2.24 DAPP_KEY_ROTATE** (§11.7.1) — spec'd. Optional but **strongly recommended**; the §11.7.1 emergency-revoke event is the natural slashing trigger that v2.30 operationalizes. Shipping order: v2.30 can ship before v2.24 (bond + fee-share works standalone); v2.24's slashing path becomes more meaningful when bond is present.
+- **v2.2 state_proof RPC** — shipped. Required for `u:` namespace light-client proofs.
+- **S-037** — open. v2.30 implementation MUST round-trip `subscribers_` + extended `DAppEntry` in snapshot serialize/restore or it inherits S-037's symptom (state_root mismatch on snapshot restore for any DApp that exercised economic primitives). Recommended: ship S-037 fix BEFORE v2.30 activation, so the new substrate doesn't ship with a known latent bug.
+- **v2.4 COMPOSABLE_BATCH** — shipped. Recommended for the `DAPP_REGISTER op=1` + immediate `DAPP_BOND_WITHDRAW` atomic deregister-and-withdraw flow (legal AFTER bond_unlock_at, atomic ergonomic).
+- **v2.10 threshold randomness** — not required.
+- **v2.14 OPAQUE** — not required.
+
+No new cryptographic primitives. No new consensus primitives. No new gossip primitives. Strictly extends `dapp_registry_` and adds a new `subscribers_` map (both in `Chain`).
+
+#### Cross-references
+
+- §3.1 `DAPP_REGISTER` payload — extended with bond + subscription_policy + fee_share_validator_bp tail
+- §3.2 `DAPP_CALL` apply path — extended with subscription-bypass-of-amount-requirement + producer fee-share split
+- §4 `dapp_registry_` state-commitment via `d:` namespace — extended with conditional tail; new `u:` namespace for subscribers
+- §6 RPC surface — `rpc_dapp_info` extended; new `rpc_dapp_subscriptions(domain)`
+- §9 Economic model — v2.30 supersedes the v2.18 sketch with concrete bond + fee-share + refund primitives. §9's "DApp operators charge their users... per-DAPP_CALL via tx.amount field" remains valid; v2.30 adds the subscription model alongside. §9's "no DApp slashing — just stake-as-bond" is updated: bond IS slashable (via §11.7.1 emergency-revoke + the bond-deficit-on-refund mechanism above)
+- §11.7.1 `DAPP_KEY_ROTATE` — slashing event surface this section operationalizes
+- §11.7.2 cross-shard DAPP_CALL — fee-share split applies to cross-shard receipts the same way (producer share to source-shard producer, DApp share to destination-shard DApp; cross-shard receipt extended one u64 for the split-deferred fee)
+- §11.7.3 per-DApp rate limit — orthogonal; rate-limit caps admission, economic primitives cap pricing
+- §11.7.4 message-bus indexing — orthogonal; indexer indexes whatever subscribers paid for
+- §12 Q4 (anon DApp calls) — anonymous subscribers MAY subscribe via anon `tx.from`; the `subscribers_[dapp][anon_addr]` entry tracks an unknown identity. Economic primitives are agnostic to identity model
+- `V2-DESIGN.md` Theme 7 — formal spec for the deferred "DApp economic primitives" item
+- `proofs/AccountStateInvariants.md` — bond + balance invariant (bond is non-spendable; total operator-controlled funds = balance + stake + bond)
+- `proofs/Safety.md` L-1.3 — state-root inclusion of `subscribers_` map
+- `SECURITY.md` §S-007 — overflow checks on `bond_amount + balance + stake` at register
+- `SECURITY.md` §S-037 — forward-closes the snapshot-serialize/restore gap for the extended schema
+- `PROTOCOL.md` §4.1.1 — `d:` namespace canonical serialization extended; new `u:` namespace added
+- `src/chain/chain.cpp` `build_state_leaves`, `apply_transactions`, `apply_block_finalization` — touch sites
+- `tools/test_dapp_register.sh` + `tools/test_dapp_call.sh` — sibling regression patterns; `tools/test_dapp_economics.sh` mirrors their shape
+
+#### Open questions deferred to implementation
+
+- **Q1: Subscription billing model — period-boundary credit (chosen) vs continuous accrual.** Period-boundary is simpler (credit at `next_credit_at == h`); continuous accrual gives finer-grained refunds at mid-period cancellation but adds per-block per-subscriber computation. Chosen: period-boundary. Refunds at cancellation are zero (per-period commitment); refunds at operator-side deactivation are `periods_remaining × period_fee`. Deferred: revisit if a use case demands mid-period refunds (e.g., regulated payments where consumer refund rights override).
+- **Q2: Fee-share precision — basis points (chosen) vs floating-point.** Basis points (u16 in [0, 10000]) give 0.01% granularity; floating-point invites consensus-divergence risks (different rounding across platforms). Chosen: basis points. The arithmetic `floor(fee × bp / 10000)` is deterministic.
+- **Q3: Bond denomination — native token (chosen) vs separate bond token.** Same native token as TRANSFER / fees keeps the economic substrate uniform; a separate bond token would require new genesis primitives. Chosen: native token. Operators can convert via market mechanisms if they wish.
+- **Q4: Multi-DApp subscriptions per subscriber.** A subscriber MAY subscribe to multiple DApps; each generates a separate `subscribers_[dapp_i][subscriber]` entry. No protocol-level limit on per-subscriber subscription count. Deferred: revisit if state-bloat from subscription-heavy users becomes an issue (current cap is per-DApp `max_subscribers`, not per-subscriber `max_dapps_subscribed`).
+- **Q5: Subscription delegation.** v2.30 reserves `subscriber_pubkey` as a separate field from `tx.from` to allow future delegation (e.g., a corporate domain pays for an employee's individual subscription). v2.30.0 enforces `subscriber_pubkey == tx.from`. v2.30.1 will relax this. Deferred to v2.30.1.
+- **Q6: Activation height vs already-existing DApps.** v2.18 entries default to `bond_amount = 0, subscription_policy.kind = 0`. Per the §11.7.4 Q7 precedent, prospective-only is recommended: existing pre-activation DApps remain bond-less unless they explicitly opt in via a `DAPP_REGISTER op=0` update. Deferred to genesis-config review.
+- **Q7: Bond reduction without full withdraw.** Operator MAY want to reduce bond from B to B' < B without deregistering. Current spec requires `DAPP_BOND_WITHDRAW` (cooldown-gated) + new `DAPP_REGISTER` (re-register with B'). A `DAPP_BOND_ADJUST` tx (op=0 increase, op=1 decrease-with-cooldown) would be cleaner. Deferred: ship without; revisit if operators report friction.
+- **Q8: Auditable subscription cancellation reason.** Like §11.7.1 `reason` field, `DAPP_SUBSCRIBE op=2` (cancel) could carry an optional `reason: utf8` field for off-chain compliance / analytics. Not safety-critical. Deferred to v2.30.1.
+
+---
+
 ## 12. Open design questions
 
 ### Q1: Should DApp domains share namespace with user domains?
