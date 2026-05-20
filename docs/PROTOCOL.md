@@ -1057,11 +1057,7 @@ Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for rea
 ### Cross-references
 
 - [`WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) — standalone academic-style technical paper covering the same material at a higher level.
-<<<<<<< HEAD
-- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2 + FA-Apply-3 + FA-Apply-4 + FA-Apply-5 + FA-Apply-6 + FA-Apply-7 analytic, FB1–FB11 TLA+).
-=======
-- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2 + FA-Apply-3 + FA-Apply-4 + FA-Apply-5 + FA-Apply-8 analytic, FB1–FB9 + FB13 TLA+).
->>>>>>> worktree-agent-aa2dfd56d85c7e40e
+- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-12 analytic, FB1–FB17 TLA+).
 - [`QUICKSTART.md`](QUICKSTART.md) — operator-facing recipes for the wire formats specified here.
 - [`CLI-REFERENCE.md`](CLI-REFERENCE.md) — command-line surface for transactions described in §3.
 
