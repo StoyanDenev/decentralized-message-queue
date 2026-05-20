@@ -373,6 +373,17 @@ In-process tests (deterministic, no network):
                                               tamper / wrong-key rejection
                                               (per F2-SPEC.md §Q1 and
                                               RFC 9591 §3)
+  determ test-frost-types                     v2.10 Phase A: pin RFC 9591
+                                              type-layout assumptions for FROST
+                                              primitives — Identifier (uint16_t),
+                                              Scalar / Point (32 bytes),
+                                              FrostSig (64 bytes) + byte-parity
+                                              with PubKey / Signature + default
+                                              zero-init for Scalar / Point /
+                                              FrostSig / KeygenRound1Output /
+                                              LocalShare / CommitmentMap /
+                                              SignRound1Output (per RFC 9591 §3
+                                              and v2.10-DKG-SPEC.md)
   determ test-genesis                         compute_genesis_hash +
                                               make_genesis_block — chain
                                               identity origin + S-039
@@ -10393,6 +10404,226 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": view-root " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // v2.10 Phase A: pin RFC 9591 type-layout assumptions against the
+    // FROST API in include/determ/crypto/frost.hpp.
+    //
+    // RFC 9591 §3 fixes the on-the-wire sizes for Ed25519 (Scalar 32,
+    // Point 32, Signature 64). Our typedefs (Scalar, Point, FrostSig)
+    // alias std::array of the corresponding widths so they can be
+    // wire-compared / hashed / passed to libsodium primitives byte-for-
+    // byte. Any future change that altered those widths — e.g. adding
+    // a tag byte, switching to a curve with a different scalar field —
+    // would silently break interop with peer nodes. This test fixes
+    // those sizes at compile/run boundary.
+    //
+    // It also pins the byte-parity with the in-house PubKey / Signature
+    // aliases (both std::array of the same shape) — the Phase A
+    // adapters in `src/crypto/frost.cpp::frost_verify` rely on that
+    // parity to do byte-for-byte adaptation without copying field
+    // semantics.
+    //
+    // Finally it checks default-initialization is all-zero, which the
+    // KeygenRound1Output / LocalShare / CommitmentMap / SignRound1Output
+    // structs all rely on for deterministic zero-state construction
+    // before the round1/round2 / sign1/sign2 / aggregate primitives
+    // populate their fields.
+    if (cmd == "test-frost-types") {
+        using namespace determ;
+        using namespace determ::crypto::frost;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === RFC 9591 §3 type sizes ===
+
+        // 1. Identifier is a 1..K share index. RFC 9591 uses uint16_t —
+        //    1..65535 valid, 0 reserved. Two-byte width is intentional:
+        //    bigger committees than uint8_t can index, and field
+        //    arithmetic (Lagrange interpolation) still fits in scalar
+        //    space without overflow on multiplications.
+        check(sizeof(Identifier) == 2,
+              "FROST Identifier size = 2 bytes (uint16_t per RFC 9591 §3)");
+
+        // 2. Scalar is the Ed25519 scalar field (mod L where L =
+        //    2^252 + 27742...). 32 bytes little-endian.
+        check(sizeof(Scalar) == 32,
+              "FROST Scalar size = 32 bytes (Ed25519 scalar mod L)");
+
+        // 3. Point is an Ed25519 compressed point. 32 bytes with sign
+        //    bit in the top byte's high bit.
+        check(sizeof(Point) == 32,
+              "FROST Point size = 32 bytes (Ed25519 compressed point)");
+
+        // 4. FrostSig is the canonical (R || z) Ed25519 signature:
+        //    32-byte point + 32-byte scalar.
+        check(sizeof(FrostSig) == 64,
+              "FROST signature size = 64 bytes (Ed25519 R || z)");
+
+        // === byte-parity with in-house Ed25519 aliases ===
+        //
+        // The Phase-A adapter in frost_verify treats Scalar/Point as
+        // bytewise-equal to PubKey, and FrostSig as bytewise-equal to
+        // Signature. The implementation does an element-by-element
+        // copy with the assumption that the sizes match. Pin that.
+
+        // 5. Scalar parity with PubKey (both 32 bytes — same width).
+        check(sizeof(Scalar) == sizeof(PubKey),
+              "FROST Scalar == PubKey size (32-byte parity)");
+
+        // 6. Point parity with PubKey (both 32 bytes — frost_verify
+        //    relies on this when adapting Ed25519 verify's PubKey
+        //    argument to the FROST Point group_pubkey).
+        check(sizeof(Point) == sizeof(PubKey),
+              "FROST Point == PubKey size (32-byte parity)");
+
+        // 7. FrostSig parity with Signature (both 64 bytes — same
+        //    adapter relies on this).
+        check(sizeof(FrostSig) == sizeof(Signature),
+              "FROST FrostSig == Signature size (64-byte parity)");
+
+        // === default-initialization is all-zero ===
+        //
+        // std::array<uint8_t, N>{} value-initializes every element to
+        // zero. The DKG-output / Sign-output structs rely on this to
+        // be in a defined zero-state until the round primitives
+        // populate their fields. Phase A scaffolding default-
+        // constructs these and later asserts zero-ness via the
+        // network code path.
+
+        // 8. Default-constructed Scalar is all-zero.
+        {
+            Scalar s{};
+            bool all_zero = true;
+            for (auto b : s) if (b != 0) { all_zero = false; break; }
+            check(all_zero, "default Scalar{} is all-zero");
+        }
+
+        // 9. Default-constructed Point is all-zero.
+        {
+            Point p{};
+            bool all_zero = true;
+            for (auto b : p) if (b != 0) { all_zero = false; break; }
+            check(all_zero, "default Point{} is all-zero");
+        }
+
+        // 10. Default-constructed FrostSig is all-zero.
+        {
+            FrostSig f{};
+            bool all_zero = true;
+            for (auto b : f) if (b != 0) { all_zero = false; break; }
+            check(all_zero, "default FrostSig{} is all-zero");
+        }
+
+        // === comparison semantics on FrostSig (std::array provides this) ===
+
+        // 11. Two default FrostSig{} compare equal.
+        {
+            FrostSig a{};
+            FrostSig b{};
+            check(a == b, "FrostSig: two default-constructed values compare equal");
+        }
+
+        // 12. FrostSig with one byte flipped compares unequal.
+        {
+            FrostSig a{};
+            FrostSig b{};
+            b[0] = 1;
+            check(a != b, "FrostSig: flipping one byte breaks equality");
+        }
+
+        // === Identifier MIN/MAX bounds ===
+        //
+        // RFC 9591 §3 reserves 0 (used as "no identifier" sentinel in
+        // some FROST variants) but 1..65535 are all valid shares. Our
+        // typedef is plain uint16_t so we can roundtrip any of those.
+
+        // 13. uint16_t bounds: 1 and 65535 both roundtrip cleanly.
+        {
+            Identifier lo = 1;
+            Identifier hi = 65535;
+            check(lo == 1, "Identifier holds the minimum valid index (1)");
+            check(hi == 65535, "Identifier holds the maximum uint16_t value (65535)");
+        }
+
+        // === Phase B struct: KeygenRound1Output ===
+
+        // 14. KeygenRound1Output default-constructs to empty commitments
+        //     and all-zero pop_sig + private_seed. This is the zero-
+        //     state the Phase B DKG ceremony expects before round1
+        //     populates the polynomial commitments + PoP.
+        {
+            KeygenRound1Output o{};
+            check(o.commitments.empty(),
+                  "KeygenRound1Output: default commitments is empty");
+            bool seed_zero = true;
+            for (auto b : o.private_seed) if (b != 0) { seed_zero = false; break; }
+            check(seed_zero,
+                  "KeygenRound1Output: default private_seed is all-zero");
+            bool pop_zero = true;
+            for (auto b : o.pop_sig) if (b != 0) { pop_zero = false; break; }
+            check(pop_zero,
+                  "KeygenRound1Output: default pop_sig is all-zero");
+        }
+
+        // === Phase B struct: LocalShare ===
+
+        // 15. LocalShare default-constructs to my_id=0, all-zero secret
+        //     + group_pubkey, empty verification_shares. my_id=0 is
+        //     the "uninitialized" sentinel; Phase B finalize sets it
+        //     to the real 1..K value.
+        {
+            LocalShare ls{};
+            check(ls.my_id == 0,
+                  "LocalShare: default my_id == 0 (uninitialized sentinel)");
+            bool ss_zero = true;
+            for (auto b : ls.secret_share) if (b != 0) { ss_zero = false; break; }
+            check(ss_zero,
+                  "LocalShare: default secret_share is all-zero");
+            bool gp_zero = true;
+            for (auto b : ls.group_pubkey) if (b != 0) { gp_zero = false; break; }
+            check(gp_zero,
+                  "LocalShare: default group_pubkey is all-zero");
+            check(ls.verification_shares.empty(),
+                  "LocalShare: default verification_shares is empty");
+        }
+
+        // === Phase D struct: CommitmentMap ===
+
+        // 16. CommitmentMap default-constructs to empty entries. The
+        //     Phase D signing path populates entries with (id, hiding,
+        //     binding) tuples per signer before frost_sign_round2.
+        {
+            CommitmentMap cm{};
+            check(cm.entries.empty(),
+                  "CommitmentMap: default entries is empty");
+        }
+
+        // === Phase D struct: SignRound1Output ===
+
+        // 17. SignRound1Output default-constructs to all-zero
+        //     commitments + nonces. Phase D round1 fills these with
+        //     fresh random nonces + their G-multiples.
+        {
+            SignRound1Output sr{};
+            bool hc_zero = true;
+            for (auto b : sr.hiding_commitment)  if (b != 0) { hc_zero = false; break; }
+            bool bc_zero = true;
+            for (auto b : sr.binding_commitment) if (b != 0) { bc_zero = false; break; }
+            bool hn_zero = true;
+            for (auto b : sr.hiding_nonce)       if (b != 0) { hn_zero = false; break; }
+            bool bn_zero = true;
+            for (auto b : sr.binding_nonce)      if (b != 0) { bn_zero = false; break; }
+            check(hc_zero && bc_zero && hn_zero && bn_zero,
+                  "SignRound1Output: all four fields default to all-zero");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": frost-types " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
