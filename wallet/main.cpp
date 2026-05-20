@@ -5436,6 +5436,466 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// ── sign-arbitrary / verify-arbitrary ────────────────────────────────────────
+//
+// Paired commands for OFF-CHAIN, arbitrary-message Ed25519 signing using a
+// fixed domain separator. Distinct from:
+//   * message-sign / message-verify — uses the LEGACY domain-tagged
+//     SHA-256 commitment scheme (H = SHA-256(operator_tag || msg)); the
+//     operator picks the tag and verifier must agree out-of-band. Useful
+//     for multi-tenant SIWE-style flows where each domain wants its own
+//     replay barrier.
+//   * tx-sign-verify — verifies the chain's CANONICAL transaction-signing
+//     scheme (TxType byte, NUL-terminated from/to, big-endian u64s).
+//
+// sign-arbitrary / verify-arbitrary fill the gap between the two: a SINGLE
+// well-known domain separator ("DETERM-MSG-v1") that's baked into the CLI,
+// so both signer + verifier know exactly what was signed without sharing
+// configuration. The signed bytes are the literal byte string
+// `domain_sep || msg_bytes` — Ed25519 hashes internally per RFC 8032; we
+// do NOT pre-hash with SHA-256 (the message-sign legacy command does
+// pre-hash; this newer command treats the prefixed message as a flat
+// byte stream, matching what most SIWE-class verifiers expect).
+//
+// Use case: an attestation of the form
+//   "I, the holder of anon-address 0xABC, certify the following statement"
+// where the verifier reads only this binary + the public bundle (no chain,
+// no external configuration). Producing a sig with sign-arbitrary and a
+// sig with tx-sign produces TWO different signatures over different byte
+// strings — there is no cross-context replay risk.
+//
+// Domain separator constant — pinned here (not configurable) so a sig
+// produced by determ-wallet sign-arbitrary is byte-equivalent across
+// every operator's invocation.
+constexpr const char* kArbitraryMsgDomainSep = "DETERM-MSG-v1";
+
+// Slurp a file's bytes verbatim into `out`. Binary-safe (no newline strip,
+// no encoding interpretation). Returns false + err on failure.
+bool slurp_file_bytes(const std::string& path,
+                      std::vector<uint8_t>& out,
+                      std::string& err) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        err = std::string("cannot open file: ") + path;
+        return false;
+    }
+    out.assign((std::istreambuf_iterator<char>(f)),
+                std::istreambuf_iterator<char>());
+    return true;
+}
+
+// Build the signed pre-image: domain_sep || msg_bytes. Concatenation, no
+// pre-hash (Ed25519's internal SHA-512 handles the digest step per RFC
+// 8032). Pinning the separator inside the binary means signer + verifier
+// don't need to negotiate it — the protocol IS "the determ-wallet
+// arbitrary-message convention."
+std::vector<uint8_t> build_signing_bytes(const std::vector<uint8_t>& msg) {
+    std::vector<uint8_t> sb;
+    const std::string sep(kArbitraryMsgDomainSep);
+    sb.reserve(sep.size() + msg.size());
+    sb.insert(sb.end(), sep.begin(), sep.end());
+    sb.insert(sb.end(), msg.begin(), msg.end());
+    return sb;
+}
+
+// Base64-encode bytes (URL-safe variant disabled — use standard Base64
+// with '+' '/' '=' so the bundle round-trips through any JSON decoder
+// + any base64 library without configuration). libsodium ships
+// sodium_bin2base64 / sodium_base642bin which we use for FIPS-friendly
+// portable Base64 (avoids dragging in another dependency).
+std::string b64_encode(const std::vector<uint8_t>& bytes) {
+    const size_t enc_len = sodium_base64_ENCODED_LEN(bytes.size(),
+                                                      sodium_base64_VARIANT_ORIGINAL);
+    std::string out(enc_len, '\0');
+    sodium_bin2base64(out.data(), enc_len,
+                       bytes.data(), bytes.size(),
+                       sodium_base64_VARIANT_ORIGINAL);
+    // sodium writes a trailing NUL inside the buffer; std::string size
+    // already accounts for it, strip the trailing '\0' for clean output.
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+
+// Inverse of b64_encode. Returns false on malformed input.
+bool b64_decode(const std::string& s, std::vector<uint8_t>& out,
+                 std::string& err) {
+    out.assign(s.size(), 0);
+    size_t decoded_len = 0;
+    if (sodium_base642bin(out.data(), out.size(),
+                           s.data(), s.size(),
+                           /*ignore=*/nullptr,
+                           &decoded_len,
+                           /*end=*/nullptr,
+                           sodium_base64_VARIANT_ORIGINAL) != 0) {
+        err = "base64 decode failed (malformed input)";
+        return false;
+    }
+    out.resize(decoded_len);
+    return true;
+}
+
+// Read the priv-keyfile JSON ({address, privkey_hex}; the same shape
+// `account-export` emits and `account-import` accepts) and return the
+// 32-byte Ed25519 seed. Returns false + err on any structural failure.
+bool load_priv_keyfile(const std::string& path,
+                        std::vector<uint8_t>& seed_out,
+                        std::string& address_out,
+                        std::string& err) {
+    std::ifstream f(path);
+    if (!f) {
+        err = std::string("cannot open --priv-keyfile: ") + path;
+        return false;
+    }
+    nlohmann::json doc;
+    try { f >> doc; }
+    catch (std::exception& e) {
+        err = std::string("--priv-keyfile is not valid JSON: ") + e.what();
+        return false;
+    }
+    if (!doc.is_object()
+        || !doc.contains("privkey_hex")
+        || !doc["privkey_hex"].is_string()
+        || !doc.contains("address")
+        || !doc["address"].is_string()) {
+        err = "--priv-keyfile must be a JSON object with string fields "
+              "'address' and 'privkey_hex' (account-export shape)";
+        return false;
+    }
+    address_out = doc["address"].get<std::string>();
+    std::string priv_hex = doc["privkey_hex"].get<std::string>();
+    if (priv_hex.size() != 64) {
+        err = "--priv-keyfile 'privkey_hex' must be 64 hex chars (32-byte seed)";
+        return false;
+    }
+    try { seed_out = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        err = std::string("--priv-keyfile 'privkey_hex' invalid: ") + e.what();
+        return false;
+    }
+    if (seed_out.size() != 32) {
+        err = "--priv-keyfile 'privkey_hex' decoded to non-32 bytes";
+        return false;
+    }
+    return true;
+}
+
+// determ-wallet sign-arbitrary — Ed25519 sign an arbitrary text/binary
+// message with a fixed "DETERM-MSG-v1" domain separator. OFF-CHAIN; does
+// not produce a transaction.
+//
+// CLI:
+//   --priv-keyfile <path>: REQUIRED. JSON keyfile with {address, privkey_hex}
+//                          (the shape `account-export` emits).
+//   --msg <inline>:        OR
+//   --msg-file <path>:     exactly one of these (--msg-file is binary-safe).
+//   --out <file>:          optional. With --detached, writes the raw 64-byte
+//                          sig binary; with --bundle, writes the JSON bundle.
+//                          Without --out, output goes to stdout.
+//   --detached:            default. Output = 64-byte sig hex (stdout) or
+//                          raw 64 bytes (file when --out set).
+//   --bundle:              output a self-contained JSON
+//                          {"address","ed_pub_hex","domain","msg_b64","sig_hex"}
+//                          (mutually exclusive with --detached).
+//
+// Exit codes:
+//   0  signature emitted
+//   1  args / parse / IO / libsodium error
+int cmd_sign_arbitrary(int argc, char** argv) {
+    std::string priv_keyfile, msg_inline, msg_file, out_path;
+    bool detached = false, bundle = false;
+    bool msg_inline_set = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv-keyfile" && i + 1 < argc) priv_keyfile = argv[++i];
+        else if (a == "--msg"          && i + 1 < argc) { msg_inline = argv[++i]; msg_inline_set = true; }
+        else if (a == "--msg-file"     && i + 1 < argc) msg_file     = argv[++i];
+        else if (a == "--out"          && i + 1 < argc) out_path     = argv[++i];
+        else if (a == "--detached")                     detached     = true;
+        else if (a == "--bundle")                       bundle       = true;
+        else {
+            std::cerr << "sign-arbitrary: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet sign-arbitrary --priv-keyfile <path> "
+                         "(--msg <str> | --msg-file <path>) [--out <file>] "
+                         "[--detached | --bundle]\n";
+            return 1;
+        }
+    }
+    if (priv_keyfile.empty()) {
+        std::cerr << "sign-arbitrary: --priv-keyfile is required\n";
+        std::cerr << "Usage: determ-wallet sign-arbitrary --priv-keyfile <path> "
+                     "(--msg <str> | --msg-file <path>) [--out <file>] "
+                     "[--detached | --bundle]\n";
+        return 1;
+    }
+    if (msg_inline_set == (!msg_file.empty())) {
+        // Either both set or neither — both are invalid.
+        std::cerr << "sign-arbitrary: exactly one of --msg or --msg-file is required\n";
+        return 1;
+    }
+    if (detached && bundle) {
+        std::cerr << "sign-arbitrary: --detached and --bundle are mutually exclusive\n";
+        return 1;
+    }
+    // Default to --detached if neither flag was set.
+    if (!detached && !bundle) detached = true;
+
+    // ── Load priv-keyfile ───────────────────────────────────────────────────
+    std::vector<uint8_t> seed;
+    std::string address, err;
+    if (!load_priv_keyfile(priv_keyfile, seed, address, err)) {
+        std::cerr << "sign-arbitrary: " << err << "\n";
+        return 1;
+    }
+
+    // ── Read the message bytes ──────────────────────────────────────────────
+    std::vector<uint8_t> msg;
+    if (msg_inline_set) {
+        msg.assign(msg_inline.begin(), msg_inline.end());
+    } else {
+        if (!slurp_file_bytes(msg_file, msg, err)) {
+            std::cerr << "sign-arbitrary: " << err << "\n";
+            return 1;
+        }
+    }
+    // Empty message is permitted (a sig of just the domain separator is
+    // a perfectly well-defined "I am present in this domain" beacon).
+
+    // ── Build signing_bytes = domain_sep || msg ─────────────────────────────
+    std::vector<uint8_t> signing_bytes = build_signing_bytes(msg);
+
+    // ── Ed25519 sign over signing_bytes ─────────────────────────────────────
+    if (!primitives::init_libsodium()) {
+        std::cerr << "sign-arbitrary: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(), seed.data()) != 0) {
+        std::cerr << "sign-arbitrary: crypto_sign_seed_keypair failed\n";
+        return 1;
+    }
+    std::array<uint8_t, crypto_sign_BYTES> sig{};
+    unsigned long long sig_len = 0;
+    if (crypto_sign_detached(sig.data(), &sig_len,
+                              signing_bytes.data(), signing_bytes.size(),
+                              sk.data()) != 0) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "sign-arbitrary: crypto_sign_detached failed\n";
+        return 1;
+    }
+    sodium_memzero(sk.data(), sk.size());
+    if (sig_len != crypto_sign_BYTES) {
+        std::cerr << "sign-arbitrary: unexpected sig length " << sig_len << "\n";
+        return 1;
+    }
+
+    // ── Emit ────────────────────────────────────────────────────────────────
+    if (bundle) {
+        nlohmann::json b;
+        b["address"]    = address;
+        b["ed_pub_hex"] = to_hex(pub);
+        b["domain"]     = kArbitraryMsgDomainSep;
+        b["msg_b64"]    = b64_encode(msg);
+        b["sig_hex"]    = to_hex(sig);
+        std::string text = b.dump();
+        if (!out_path.empty()) {
+            std::ofstream of(out_path, std::ios::binary);
+            if (!of) {
+                std::cerr << "sign-arbitrary: cannot open --out: " << out_path << "\n";
+                return 1;
+            }
+            of << text << "\n";
+            if (!of) {
+                std::cerr << "sign-arbitrary: write failed on --out: " << out_path << "\n";
+                return 1;
+            }
+        } else {
+            std::cout << text << "\n";
+        }
+        return 0;
+    }
+
+    // --detached path
+    if (!out_path.empty()) {
+        // Binary mode: write the raw 64 sig bytes verbatim. Operators who
+        // want the hex form can pass `--out` of an unset path and pipe
+        // stdout, or read the file with their own hex-encoder.
+        std::ofstream of(out_path, std::ios::binary);
+        if (!of) {
+            std::cerr << "sign-arbitrary: cannot open --out: " << out_path << "\n";
+            return 1;
+        }
+        of.write(reinterpret_cast<const char*>(sig.data()),
+                 static_cast<std::streamsize>(sig.size()));
+        if (!of) {
+            std::cerr << "sign-arbitrary: write failed on --out: " << out_path << "\n";
+            return 1;
+        }
+    } else {
+        std::cout << to_hex(sig) << "\n";
+    }
+    return 0;
+}
+
+// determ-wallet verify-arbitrary — Verify a signature produced by
+// sign-arbitrary (Ed25519 over "DETERM-MSG-v1" || msg_bytes). Accepts
+// either a detached sig + pubkey + msg combo OR a bundle file.
+//
+// CLI (detached mode):
+//   --ed-pub <hex32>:      32-byte Ed25519 pubkey (64 hex chars).
+//   --msg <inline> | --msg-file <path>:  exactly one.
+//   --sig-hex <hex64>:     64-byte sig (128 hex chars).
+// CLI (bundle mode):
+//   --bundle <path>:       JSON file with {address,ed_pub_hex,domain,msg_b64,sig_hex}.
+//
+// Output (one-line JSON on stdout):
+//   {"status":"ok","result":"VALID"|"INVALID"}
+// Exit:
+//   0  VALID
+//   2  INVALID
+//   1  args/parse/IO error
+int cmd_verify_arbitrary(int argc, char** argv) {
+    std::string ed_pub_hex, msg_inline, msg_file, sig_hex, bundle_path;
+    bool msg_inline_set = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--ed-pub"   && i + 1 < argc) ed_pub_hex  = argv[++i];
+        else if (a == "--msg"      && i + 1 < argc) { msg_inline = argv[++i]; msg_inline_set = true; }
+        else if (a == "--msg-file" && i + 1 < argc) msg_file    = argv[++i];
+        else if (a == "--sig-hex"  && i + 1 < argc) sig_hex     = argv[++i];
+        else if (a == "--bundle"   && i + 1 < argc) bundle_path = argv[++i];
+        else {
+            std::cerr << "verify-arbitrary: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet verify-arbitrary "
+                         "(--ed-pub <hex32> (--msg <s> | --msg-file <p>) --sig-hex <hex64>) | "
+                         "(--bundle <path>)\n";
+            return 1;
+        }
+    }
+
+    std::vector<uint8_t> pub_bytes, sig_bytes, msg;
+    std::string err;
+
+    if (!bundle_path.empty()) {
+        // Bundle mode — extract every field from the JSON.
+        if (!ed_pub_hex.empty() || msg_inline_set || !msg_file.empty() || !sig_hex.empty()) {
+            std::cerr << "verify-arbitrary: --bundle is mutually exclusive with "
+                         "--ed-pub / --msg* / --sig-hex\n";
+            return 1;
+        }
+        std::ifstream f(bundle_path);
+        if (!f) {
+            std::cerr << "verify-arbitrary: cannot open --bundle: " << bundle_path << "\n";
+            return 1;
+        }
+        nlohmann::json b;
+        try { f >> b; }
+        catch (std::exception& e) {
+            std::cerr << "verify-arbitrary: --bundle is not valid JSON: " << e.what() << "\n";
+            return 1;
+        }
+        if (!b.is_object()
+            || !b.contains("ed_pub_hex") || !b["ed_pub_hex"].is_string()
+            || !b.contains("domain")      || !b["domain"].is_string()
+            || !b.contains("msg_b64")     || !b["msg_b64"].is_string()
+            || !b.contains("sig_hex")     || !b["sig_hex"].is_string()) {
+            std::cerr << "verify-arbitrary: --bundle missing required string "
+                         "fields (ed_pub_hex, domain, msg_b64, sig_hex)\n";
+            return 1;
+        }
+        // Pin the domain separator at verify time — a bundle whose
+        // domain field has been swapped to something other than the
+        // canonical "DETERM-MSG-v1" is rejected as INVALID rather than
+        // recomputed against the bundle's claim. This blocks an
+        // attacker who controls the bundle from substituting their own
+        // domain string to fish for a sig that validates under a
+        // different pre-image.
+        std::string bundle_domain = b["domain"].get<std::string>();
+        if (bundle_domain != kArbitraryMsgDomainSep) {
+            // Treat as INVALID (auth-style alert) rather than args error:
+            // the bundle is well-formed but its domain doesn't match what
+            // this binary signs over, so any sig in it can't validate
+            // against our reconstructed signing_bytes.
+            nlohmann::json r;
+            r["status"] = "ok";
+            r["result"] = "INVALID";
+            std::cout << r.dump() << "\n";
+            return 2;
+        }
+        ed_pub_hex = b["ed_pub_hex"].get<std::string>();
+        sig_hex    = b["sig_hex"].get<std::string>();
+        std::string msg_b64 = b["msg_b64"].get<std::string>();
+        if (!b64_decode(msg_b64, msg, err)) {
+            std::cerr << "verify-arbitrary: --bundle msg_b64: " << err << "\n";
+            return 1;
+        }
+    } else {
+        // Detached mode.
+        if (ed_pub_hex.empty() || sig_hex.empty()) {
+            std::cerr << "verify-arbitrary: --ed-pub and --sig-hex are required "
+                         "(or use --bundle <path>)\n";
+            return 1;
+        }
+        if (msg_inline_set == (!msg_file.empty())) {
+            std::cerr << "verify-arbitrary: exactly one of --msg or --msg-file is required\n";
+            return 1;
+        }
+        if (msg_inline_set) {
+            msg.assign(msg_inline.begin(), msg_inline.end());
+        } else {
+            if (!slurp_file_bytes(msg_file, msg, err)) {
+                std::cerr << "verify-arbitrary: " << err << "\n";
+                return 1;
+            }
+        }
+    }
+
+    // Length checks.
+    if (ed_pub_hex.size() != 64) {
+        std::cerr << "verify-arbitrary: --ed-pub must be 64 hex chars; got "
+                  << ed_pub_hex.size() << "\n";
+        return 1;
+    }
+    if (sig_hex.size() != 128) {
+        std::cerr << "verify-arbitrary: --sig-hex must be 128 hex chars; got "
+                  << sig_hex.size() << "\n";
+        return 1;
+    }
+    try { pub_bytes = from_hex(ed_pub_hex); }
+    catch (std::exception& e) {
+        std::cerr << "verify-arbitrary: --ed-pub hex invalid: " << e.what() << "\n";
+        return 1;
+    }
+    try { sig_bytes = from_hex(sig_hex); }
+    catch (std::exception& e) {
+        std::cerr << "verify-arbitrary: --sig-hex hex invalid: " << e.what() << "\n";
+        return 1;
+    }
+    if (pub_bytes.size() != 32 || sig_bytes.size() != 64) {
+        std::cerr << "verify-arbitrary: decoded pubkey/sig wrong length\n";
+        return 1;
+    }
+
+    // Reconstruct signing_bytes = domain_sep || msg, then verify.
+    std::vector<uint8_t> signing_bytes = build_signing_bytes(msg);
+
+    if (!primitives::init_libsodium()) {
+        std::cerr << "verify-arbitrary: libsodium init failed\n";
+        return 1;
+    }
+    int rc = crypto_sign_verify_detached(sig_bytes.data(),
+                                          signing_bytes.data(),
+                                          signing_bytes.size(),
+                                          pub_bytes.data());
+    const bool valid = (rc == 0);
+
+    nlohmann::json r;
+    r["status"] = "ok";
+    r["result"] = valid ? "VALID" : "INVALID";
+    std::cout << r.dump() << "\n";
+    return valid ? 0 : 2;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -5646,6 +6106,34 @@ void print_usage() {
         "                                             invalid (auth-style alert), 1 args/parse/\n"
         "                                             IO error. Output: {valid, tx_hash_hex,\n"
         "                                             computed_signing_bytes_sha256}.\n"
+        "  sign-arbitrary --priv-keyfile <path>\n"
+        "                 (--msg <str> | --msg-file <path>)\n"
+        "                 [--out <file>] [--detached | --bundle]\n"
+        "                                             Ed25519 sign arbitrary text or binary with a\n"
+        "                                             FIXED domain separator (\"DETERM-MSG-v1\").\n"
+        "                                             OFF-CHAIN — distinct from tx-sign-verify\n"
+        "                                             (canonical tx signing) and from message-\n"
+        "                                             sign (operator-supplied domain tag + SHA-\n"
+        "                                             256 commitment). --priv-keyfile points at\n"
+        "                                             a JSON {address, privkey_hex} (the shape\n"
+        "                                             account-export emits). --detached (default)\n"
+        "                                             prints the 64-byte sig hex on stdout, or\n"
+        "                                             raw 64 bytes to --out. --bundle emits a\n"
+        "                                             self-contained JSON {address, ed_pub_hex,\n"
+        "                                             domain, msg_b64, sig_hex} verifiable\n"
+        "                                             without sharing the message separately.\n"
+        "  verify-arbitrary (--ed-pub <hex32>\n"
+        "                    (--msg <str> | --msg-file <path>)\n"
+        "                    --sig-hex <hex64>)\n"
+        "                   | (--bundle <path>)\n"
+        "                                             Verify a signature produced by sign-\n"
+        "                                             arbitrary. Emits one-line JSON\n"
+        "                                             {\"status\":\"ok\",\"result\":\"VALID\"|\"INVALID\"}\n"
+        "                                             on stdout. Exit 0 VALID, 2 INVALID, 1\n"
+        "                                             args/parse error. --bundle mode reads every\n"
+        "                                             field from the JSON bundle and pins the\n"
+        "                                             domain separator (a bundle with a non-\n"
+        "                                             canonical domain field is reported INVALID).\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -5688,6 +6176,8 @@ int main(int argc, char** argv) {
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
+    if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
+    if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
