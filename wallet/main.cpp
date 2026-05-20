@@ -1346,6 +1346,367 @@ int cmd_backup_verify(int argc, char** argv) {
     return 0;
 }
 
+// Composite-backup CONSTRUCTOR (inverse of backup-verify).
+//
+// `backup-create` produces the two canonical backup artifacts in one call:
+//   1. A Shamir share-set file (shape: {"shares": [{"x": int, "y_hex": "..."}, ...]},
+//      identical to `shamir-split --json` output).
+//   2. A per-share AEAD envelopes file (shape: {"envelopes": [{"share_index": int,
+//      "envelope_blob": "<canonical dot-separated hex>"}, ...]}, identical to
+//      the shape consumed by `backup-verify`).
+//
+// Inputs:
+//   --secret <hex>:        hex-encoded secret (wallet seed, key, etc.)
+//   --threshold <T>:       Shamir threshold (any T-of-N reconstructs)
+//   --keyholders <file>:   JSON file
+//                          {"keyholders": [{"share_index": int, "passphrase": "..."}, ...]}
+//                          where N = length(keyholders).
+//   --shares-out <file>:   destination for the shares file
+//   --envelopes-out <file>:destination for the envelopes file
+//   --force:               overwrite existing output files
+//   --json:                emit a JSON summary instead of the human one-liner
+//
+// Validation:
+//   * --secret hex valid + non-empty
+//   * 1 <= T <= N <= 255
+//   * keyholders.share_index values are distinct, all in [1, N], no gaps
+//     (must be a permutation of {1..N})
+//   * each keyholder.passphrase is non-empty
+//   * output paths' parent directories must exist (no mkdirp); refusing to
+//     overwrite without --force matches account-create-batch convention
+//
+// Process:
+//   1. from_hex(--secret) → raw bytes
+//   2. shamir::split(secret, T, N) → N shares with x = 1..N
+//   3. For each share i: passphrase = keyholders[share_index == share.x].passphrase;
+//      env = envelope::encrypt(plaintext = share.y, passphrase),
+//      blob = envelope::serialize(env)
+//   4. Write the shares file (atomic semantics — write then close before
+//      writing the envelopes file, so a half-baked first file doesn't
+//      mislead an observer about backup completeness)
+//   5. Write the envelopes file
+//   6. Emit summary
+//
+// Notes on share→keyholder pairing:
+//   Each Shamir share's x-coordinate (1..N from shamir::split) is the
+//   `share_index` used to look up the keyholder's passphrase. The
+//   keyholders array doesn't need to be sorted in the input file — we
+//   index by share_index, not by position. This matches the way
+//   backup-verify treats envelope share_index as the bijection key.
+//
+// AAD note:
+//   This CLI does NOT bind any AAD into the envelope (consistent with
+//   `envelope encrypt --plaintext --password` invocations elsewhere in
+//   the test fixtures). The OPAQUE-guarded recovery flow uses AAD
+//   (recovery::create with version+index), but the operator-workflow
+//   composite-backup case stays AAD-free so plain `envelope decrypt`
+//   on the resulting blob round-trips without an --aad arg.
+int cmd_backup_create(int argc, char** argv) {
+    std::string secret_hex, keyholders_path, shares_out, envs_out;
+    int threshold = -1;
+    bool force = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--secret"        && i + 1 < argc) secret_hex      = argv[++i];
+        else if (a == "--threshold"     && i + 1 < argc) {
+            try { threshold = std::stoi(argv[++i]); }
+            catch (std::exception&) {
+                std::cerr << "backup-create: --threshold must be an integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--keyholders"    && i + 1 < argc) keyholders_path = argv[++i];
+        else if (a == "--shares-out"    && i + 1 < argc) shares_out      = argv[++i];
+        else if (a == "--envelopes-out" && i + 1 < argc) envs_out        = argv[++i];
+        else if (a == "--force")                         force           = true;
+        else if (a == "--json")                          json_out        = true;
+        else {
+            std::cerr << "backup-create: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet backup-create --secret <hex> "
+                         "--threshold T --keyholders <file> "
+                         "--shares-out <file> --envelopes-out <file> "
+                         "[--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (secret_hex.empty() || threshold < 0 || keyholders_path.empty()
+        || shares_out.empty() || envs_out.empty()) {
+        std::cerr << "Usage: determ-wallet backup-create --secret <hex> "
+                     "--threshold T --keyholders <file> "
+                     "--shares-out <file> --envelopes-out <file> "
+                     "[--force] [--json]\n"
+                     "\n"
+                     "  Produces a complete wallet backup (Shamir shares + per-share\n"
+                     "  AEAD envelopes) from a secret + per-keyholder passphrases.\n"
+                     "\n"
+                     "  Keyholders file shape:\n"
+                     "    {\"keyholders\": [{\"share_index\": int, \"passphrase\": \"...\"}, ...]}\n"
+                     "  N (share count) is length(keyholders). 1 <= T <= N <= 255.\n";
+        return 1;
+    }
+
+    // ── Decode --secret ─────────────────────────────────────────────────
+    if (secret_hex.size() % 2 != 0) {
+        std::cerr << "backup-create: --secret hex must have even length\n";
+        return 1;
+    }
+    std::vector<uint8_t> secret;
+    try { secret = from_hex(secret_hex); }
+    catch (std::exception& e) {
+        std::cerr << "backup-create: invalid --secret hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (secret.empty()) {
+        std::cerr << "backup-create: --secret must be non-empty\n";
+        return 1;
+    }
+
+    // ── Threshold sanity ─────────────────────────────────────────────────
+    if (threshold < 1) {
+        std::cerr << "backup-create: --threshold must be >= 1 (got "
+                  << threshold << ")\n";
+        return 1;
+    }
+    if (threshold > 255) {
+        std::cerr << "backup-create: --threshold must be <= 255 (got "
+                  << threshold << ")\n";
+        return 1;
+    }
+
+    // ── Load + parse keyholders file ─────────────────────────────────────
+    std::ifstream kf(keyholders_path);
+    if (!kf) {
+        std::cerr << "backup-create: cannot open --keyholders file: "
+                  << keyholders_path << "\n";
+        return 1;
+    }
+    std::string kh_blob((std::istreambuf_iterator<char>(kf)),
+                          std::istreambuf_iterator<char>());
+    nlohmann::json kj;
+    try { kj = nlohmann::json::parse(kh_blob); }
+    catch (std::exception& e) {
+        std::cerr << "backup-create: keyholders JSON parse failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!kj.is_object() || !kj.contains("keyholders") || !kj["keyholders"].is_array()) {
+        std::cerr << "backup-create: keyholders file must be an object with "
+                     "'keyholders' array\n";
+        return 1;
+    }
+    const auto& kh_arr = kj["keyholders"];
+    if (kh_arr.empty()) {
+        std::cerr << "backup-create: 'keyholders' array is empty\n";
+        return 1;
+    }
+    if (kh_arr.size() > 255) {
+        std::cerr << "backup-create: 'keyholders' array has "
+                  << kh_arr.size() << " entries (max 255)\n";
+        return 1;
+    }
+    const int share_count = static_cast<int>(kh_arr.size());
+    if (threshold > share_count) {
+        std::cerr << "backup-create: --threshold (" << threshold
+                  << ") > keyholder count (" << share_count << ")\n";
+        return 1;
+    }
+
+    // Build index → passphrase map. share_index must be a permutation of
+    // {1..N} (no gaps, no duplicates, in [1,N]). This matches the
+    // bijection that `shamir::split` produces (shares get x = 1..N) and
+    // that `backup-verify` enforces post-hoc.
+    std::vector<std::string> pw_by_index(share_count + 1);   // 1-indexed
+    std::set<int> seen_idx;
+    for (size_t i = 0; i < kh_arr.size(); ++i) {
+        const auto& el = kh_arr[i];
+        if (!el.is_object()
+            || !el.contains("share_index")
+            || !el["share_index"].is_number_integer()
+            || !el.contains("passphrase")
+            || !el["passphrase"].is_string()) {
+            std::cerr << "backup-create: keyholders entry #" << i
+                      << " must have integer 'share_index' and string "
+                         "'passphrase'\n";
+            return 1;
+        }
+        int idx = el["share_index"].get<int>();
+        if (idx < 1 || idx > share_count) {
+            std::cerr << "backup-create: keyholders entry #" << i
+                      << ": share_index = " << idx
+                      << " out of range [1, " << share_count << "]\n";
+            return 1;
+        }
+        if (!seen_idx.insert(idx).second) {
+            std::cerr << "backup-create: duplicate share_index = " << idx
+                      << " in keyholders file\n";
+            return 1;
+        }
+        std::string pw = el["passphrase"].get<std::string>();
+        if (pw.empty()) {
+            std::cerr << "backup-create: keyholders entry share_index="
+                      << idx << ": passphrase is empty\n";
+            return 1;
+        }
+        pw_by_index[idx] = std::move(pw);
+    }
+    // Bijection assertion: seen_idx == {1..N}. The duplicate check above
+    // plus the [1,N] range bound + size N guarantees this; double-check
+    // defensively to surface any future regression precisely.
+    if (static_cast<int>(seen_idx.size()) != share_count) {
+        std::cerr << "backup-create: share_index set is not "
+                     "{1.." << share_count << "} "
+                     "(missing or extra indices)\n";
+        return 1;
+    }
+
+    // ── Output path preconditions ────────────────────────────────────────
+    auto check_out_path = [&](const std::string& p,
+                              const char* label) -> int {
+        std::filesystem::path fp(p);
+        auto parent = fp.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "backup-create: " << label
+                      << " parent directory does not exist: "
+                      << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(fp) && !force) {
+            std::cerr << "backup-create: " << label << " file already exists: "
+                      << p
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+        return 0;
+    };
+    if (int rc = check_out_path(shares_out, "--shares-out");      rc != 0) return rc;
+    if (int rc = check_out_path(envs_out,   "--envelopes-out");   rc != 0) return rc;
+
+    // Also reject pointing both outputs at the same file — silent
+    // overwrite of the first by the second would be data loss with
+    // zero diagnostic.
+    if (std::filesystem::weakly_canonical(std::filesystem::path(shares_out))
+        == std::filesystem::weakly_canonical(std::filesystem::path(envs_out))) {
+        std::cerr << "backup-create: --shares-out and --envelopes-out "
+                     "point at the same file\n";
+        return 1;
+    }
+
+    // ── Shamir split ─────────────────────────────────────────────────────
+    std::vector<shamir::Share> shares;
+    try {
+        shares = shamir::split(secret,
+                                  static_cast<uint8_t>(threshold),
+                                  static_cast<uint8_t>(share_count));
+    } catch (std::exception& e) {
+        std::cerr << "backup-create: shamir::split failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    // shamir::split guarantees shares[i].x = i+1 (1..N), but rely only on
+    // the documented invariant that x is in [1,N] and distinct; look up
+    // the passphrase by share.x.
+
+    // ── Per-share AEAD wrap ──────────────────────────────────────────────
+    nlohmann::json envs_arr = nlohmann::json::array();
+    nlohmann::json shares_arr = nlohmann::json::array();
+    for (const auto& s : shares) {
+        int idx = static_cast<int>(s.x);
+        if (idx < 1 || idx > share_count || pw_by_index[idx].empty()) {
+            std::cerr << "backup-create: internal: share x=" << idx
+                      << " has no passphrase in keyholders map\n";
+            return 1;
+        }
+        envelope::Envelope env;
+        try {
+            env = envelope::encrypt(s.y, pw_by_index[idx]);
+        } catch (std::exception& e) {
+            std::cerr << "backup-create: envelope::encrypt failed (x="
+                      << idx << "): " << e.what() << "\n";
+            return 1;
+        }
+        std::string blob = envelope::serialize(env);
+        envs_arr.push_back({
+            {"share_index",   idx},
+            {"envelope_blob", blob},
+        });
+        shares_arr.push_back({
+            {"x",     idx},
+            {"y_hex", to_hex(s.y)},
+        });
+    }
+
+    // ── Write shares file ────────────────────────────────────────────────
+    {
+        std::ofstream f(shares_out);
+        if (!f) {
+            std::cerr << "backup-create: cannot open --shares-out for write: "
+                      << shares_out << "\n";
+            return 1;
+        }
+        nlohmann::json doc;
+        doc["shares"] = std::move(shares_arr);
+        f << doc.dump() << "\n";
+        if (!f) {
+            std::cerr << "backup-create: write failed on --shares-out: "
+                      << shares_out << "\n";
+            return 1;
+        }
+    }
+    // Owner-only perms on POSIX; no-op on Windows (NTFS ACL inherits).
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            shares_out,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    // ── Write envelopes file ─────────────────────────────────────────────
+    {
+        std::ofstream f(envs_out);
+        if (!f) {
+            std::cerr << "backup-create: cannot open --envelopes-out for write: "
+                      << envs_out << "\n";
+            return 1;
+        }
+        nlohmann::json doc;
+        doc["envelopes"] = std::move(envs_arr);
+        f << doc.dump() << "\n";
+        if (!f) {
+            std::cerr << "backup-create: write failed on --envelopes-out: "
+                      << envs_out << "\n";
+            return 1;
+        }
+    }
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            envs_out,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────────
+    if (json_out) {
+        nlohmann::json r;
+        r["share_count"]    = share_count;
+        r["threshold"]      = threshold;
+        r["shares_file"]    = shares_out;
+        r["envelopes_file"] = envs_out;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "wrote " << share_count << " shares + "
+                  << share_count << " envelopes (threshold "
+                  << threshold << ")\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -1566,6 +1927,18 @@ void print_usage() {
         "                                             Envelopes file shape:\n"
         "                                             {\"envelopes\": [{\"share_index\": int,\n"
         "                                             \"envelope_blob\": \"...\"}, ...]}.\n"
+        "  backup-create --secret <hex> --threshold T --keyholders <file>\n"
+        "                --shares-out <file> --envelopes-out <file> [--force] [--json]\n"
+        "                                             Produce a complete wallet backup\n"
+        "                                             (Shamir shares + per-share AEAD envelopes)\n"
+        "                                             from a secret + per-keyholder passphrases.\n"
+        "                                             Inverse of backup-verify (writes the two\n"
+        "                                             files backup-verify reads). Keyholders\n"
+        "                                             file shape: {\"keyholders\": [{\"share_index\":\n"
+        "                                             int, \"passphrase\": \"...\"}, ...]}; N is\n"
+        "                                             length(keyholders); 1<=T<=N<=255.\n"
+        "                                             Refuses to overwrite existing output files\n"
+        "                                             without --force.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -1595,6 +1968,7 @@ int main(int argc, char** argv) {
     if (cmd == "inspect-envelope") return cmd_inspect_envelope(argc - 2, argv + 2);
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
+    if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
