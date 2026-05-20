@@ -359,6 +359,13 @@ In-process tests (deterministic, no network):
                                               make_abort_claim_message);
                                               domain-separation + sign/verify
   determ test-tx-root                         compute_tx_root union semantics
+)" << R"(  determ test-view-root                       v2.7 F2 foundation: compute_view_root
+                                              + reconcile_union + reconcile_intersection
+                                              (the Phase-1 commit-binding + per-field
+                                              reconciliation primitives per F2-SPEC.md
+                                              §Q1; one observer suffices for union,
+                                              one missing suffices to suppress
+                                              intersection)
                                               (FA2 censorship resistance:
                                               {A,B} ∪ {B,C} == {A,B,C}, NOT
                                               intersection); dedup + order
@@ -9357,6 +9364,222 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": tx-root " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // v2.7 F2 foundation: compute_view_root + reconcile_union +
+    // reconcile_intersection. The three primitives the consensus-layer
+    // view-reconciliation closure needs. compute_view_root pins members
+    // to their view at Phase-1 commit (commit binding); reconcile_union
+    // is the canonical-list builder for equivocation_events + abort_events;
+    // reconcile_intersection is the canonical-list builder for
+    // inbound_receipts. See docs/proofs/F2-SPEC.md Q1.
+    if (cmd == "test-view-root") {
+        using namespace determ;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = uint8_t(base + i);
+            return h;
+        };
+
+        // === compute_view_root ===
+
+        // 1. Empty input: deterministic zero-input hash.
+        {
+            std::vector<Hash> empty;
+            Hash r1 = compute_view_root(empty);
+            Hash r2 = compute_view_root(empty);
+            check(r1 == r2, "compute_view_root: empty deterministic");
+        }
+
+        // 2. Single hash: stable output.
+        {
+            std::vector<Hash> v = {patterned_hash(0x10)};
+            Hash r1 = compute_view_root(v);
+            Hash r2 = compute_view_root(v);
+            check(r1 == r2, "compute_view_root: single-element deterministic");
+        }
+
+        // 3. Order-independence (sorted SET semantics).
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            Hash c = patterned_hash(0x30);
+            std::vector<Hash> v1 = {a, b, c};
+            std::vector<Hash> v2 = {c, b, a};
+            std::vector<Hash> v3 = {b, a, c};
+            check(compute_view_root(v1) == compute_view_root(v2),
+                  "compute_view_root: order-independent (1)");
+            check(compute_view_root(v1) == compute_view_root(v3),
+                  "compute_view_root: order-independent (2)");
+        }
+
+        // 4. Dedup semantics: duplicate inputs collapse.
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            std::vector<Hash> v1 = {a, b};
+            std::vector<Hash> v2 = {a, b, a, b};
+            std::vector<Hash> v3 = {a, a, b, b, a};
+            check(compute_view_root(v1) == compute_view_root(v2),
+                  "compute_view_root: dedup (1)");
+            check(compute_view_root(v1) == compute_view_root(v3),
+                  "compute_view_root: dedup (2)");
+        }
+
+        // 5. Sensitivity: different content → different root.
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            std::vector<Hash> v1 = {a};
+            std::vector<Hash> v2 = {b};
+            std::vector<Hash> v3 = {a, b};
+            check(compute_view_root(v1) != compute_view_root(v2),
+                  "compute_view_root: content-sensitive (1)");
+            check(compute_view_root(v1) != compute_view_root(v3),
+                  "compute_view_root: content-sensitive (2)");
+        }
+
+        // === reconcile_union ===
+
+        // 6. Empty K-list collection: empty result.
+        {
+            std::vector<std::vector<Hash>> empty;
+            auto r = reconcile_union(empty);
+            check(r.empty(), "reconcile_union: empty input → empty result");
+        }
+
+        // 7. Single member with single item: returns that item.
+        {
+            Hash a = patterned_hash(0x10);
+            std::vector<std::vector<Hash>> m = {{a}};
+            auto r = reconcile_union(m);
+            check(r.size() == 1 && r[0] == a,
+                  "reconcile_union: K=1 single item passes through");
+        }
+
+        // 8. Disjoint lists: union has all elements.
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            Hash c = patterned_hash(0x30);
+            std::vector<std::vector<Hash>> m = {{a}, {b}, {c}};
+            auto r = reconcile_union(m);
+            check(r.size() == 3,
+                  "reconcile_union: 3 disjoint members yield 3 items");
+        }
+
+        // 9. Overlapping lists: union dedupes.
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            Hash c = patterned_hash(0x30);
+            std::vector<std::vector<Hash>> m = {{a, b}, {b, c}, {a, c}};
+            auto r = reconcile_union(m);
+            check(r.size() == 3,
+                  "reconcile_union: overlapping members dedupe to 3");
+        }
+
+        // 10. Censorship-resistance: single-member view passes through.
+        //     This is the F2 Q1 union-rule property — one honest member
+        //     observing equivocation is enough to land it in the canonical
+        //     list, even if K-1 others missed it.
+        {
+            Hash evidence = patterned_hash(0x42);
+            std::vector<std::vector<Hash>> m = {{evidence}, {}, {}};
+            auto r = reconcile_union(m);
+            check(r.size() == 1 && r[0] == evidence,
+                  "reconcile_union: one observer suffices (F2 Q1)");
+        }
+
+        // === reconcile_intersection ===
+
+        // 11. Empty input: empty result.
+        {
+            std::vector<std::vector<Hash>> empty;
+            auto r = reconcile_intersection(empty);
+            check(r.empty(), "reconcile_intersection: empty → empty");
+        }
+
+        // 12. Single member: passes through.
+        {
+            Hash a = patterned_hash(0x10);
+            std::vector<std::vector<Hash>> m = {{a}};
+            auto r = reconcile_intersection(m);
+            check(r.size() == 1 && r[0] == a,
+                  "reconcile_intersection: K=1 passes through");
+        }
+
+        // 13. Any single empty list: empty intersection.
+        //     This is the F2 Q1 intersection-rule property — one
+        //     unobservant member is enough to suppress a credit.
+        {
+            Hash a = patterned_hash(0x10);
+            std::vector<std::vector<Hash>> m = {{a}, {}, {a}};
+            auto r = reconcile_intersection(m);
+            check(r.empty(),
+                  "reconcile_intersection: any empty list yields empty (F2 Q1)");
+        }
+
+        // 14. All members agree: full intersection.
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            std::vector<std::vector<Hash>> m = {{a, b}, {a, b}, {a, b}};
+            auto r = reconcile_intersection(m);
+            check(r.size() == 2,
+                  "reconcile_intersection: unanimous K members → full set");
+        }
+
+        // 15. Partial agreement: only the agreed subset.
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            Hash c = patterned_hash(0x30);
+            std::vector<std::vector<Hash>> m = {{a, b}, {b, c}, {a, b, c}};
+            auto r = reconcile_intersection(m);
+            check(r.size() == 1 && r[0] == b,
+                  "reconcile_intersection: b in all → result {b}");
+        }
+
+        // === reconciliation determinism ===
+
+        // 16. Same input always produces same output (reconciliation pure).
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            std::vector<std::vector<Hash>> m = {{a, b}, {b, a}};
+            auto r1 = reconcile_union(m);
+            auto r2 = reconcile_union(m);
+            check(r1 == r2, "reconcile_union: deterministic across calls");
+            auto i1 = reconcile_intersection(m);
+            auto i2 = reconcile_intersection(m);
+            check(i1 == i2, "reconcile_intersection: deterministic across calls");
+        }
+
+        // 17. Member-list order independence (member ordering doesn't
+        //     affect the final reconciled list — the reconciliation
+        //     primitive is over the SET of member lists, not their order).
+        {
+            Hash a = patterned_hash(0x10);
+            Hash b = patterned_hash(0x20);
+            std::vector<std::vector<Hash>> m1 = {{a}, {b}};
+            std::vector<std::vector<Hash>> m2 = {{b}, {a}};
+            check(reconcile_union(m1) == reconcile_union(m2),
+                  "reconcile_union: member-order independent");
+            check(reconcile_intersection(m1) == reconcile_intersection(m2),
+                  "reconcile_intersection: member-order independent");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": view-root " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

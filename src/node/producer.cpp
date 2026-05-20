@@ -173,6 +173,55 @@ Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists) {
     return b.finalize();
 }
 
+// ─── v2.7 F2 view reconciliation helpers ───────────────────────────────────
+//
+// `compute_view_root` produces the canonical Merkle root over a sorted SET
+// of hash items. Same shape as `compute_tx_root` (which also dedupes via
+// std::set + appends in canonical order) so a view-root over the same
+// items as a tx_root produces an identical hash. This shared structure is
+// intentional — both are deterministic commitments over a member's
+// observed pool, and using the same primitive simplifies the validator's
+// re-derivation check.
+Hash compute_view_root(const std::vector<Hash>& items) {
+    std::set<Hash> u(items.begin(), items.end());
+    SHA256Builder b;
+    for (auto& h : u) b.append(h);
+    return b.finalize();
+}
+
+// Union reconciliation across K committee members' lists. Used for
+// equivocation_events + abort_events per F2-SPEC.md Q1. Censorship-
+// resistance applies: any single honest member's observation suffices.
+std::vector<Hash> reconcile_union(
+        const std::vector<std::vector<Hash>>& member_lists) {
+    std::set<Hash> u;
+    for (auto& list : member_lists)
+        for (auto& h : list) u.insert(h);
+    return std::vector<Hash>(u.begin(), u.end());
+}
+
+// Intersection reconciliation across K committee members' lists. Used
+// for inbound_receipts per F2-SPEC.md Q1 — credit only on unanimous
+// observation (one bad relayer cannot unilaterally cause credit). Empty
+// result if `member_lists` is empty or any member's list is empty.
+std::vector<Hash> reconcile_intersection(
+        const std::vector<std::vector<Hash>>& member_lists) {
+    if (member_lists.empty()) return {};
+    // Start with the first list's set; iteratively intersect with the rest.
+    std::set<Hash> isect(member_lists[0].begin(), member_lists[0].end());
+    for (size_t i = 1; i < member_lists.size(); ++i) {
+        std::set<Hash> other(member_lists[i].begin(), member_lists[i].end());
+        std::set<Hash> tmp;
+        std::set_intersection(isect.begin(), isect.end(),
+                               other.begin(), other.end(),
+                               std::inserter(tmp, tmp.begin()));
+        isect = std::move(tmp);
+        if (isect.empty()) break;  // early exit
+    }
+    return std::vector<Hash>(isect.begin(), isect.end());
+}
+// ─── end v2.7 F2 helpers ───────────────────────────────────────────────────
+
 // S-025 closure: compute_tx_root_intersection deleted as unused. The
 // function was a relic of a pre-v1 design where the canonical tx set
 // was the intersection of committee members' lists (every member must

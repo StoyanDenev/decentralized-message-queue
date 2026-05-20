@@ -99,6 +99,39 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
 // creator to omit a tx.
 Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists);
 
+// ─── v2.7 F2 view reconciliation helpers ───────────────────────────────────
+//
+// Per `docs/proofs/F2-SPEC.md`, F2 closes the consensus-layer view of
+// S-030 D2. Each committee member commits to their view of three pool-fed
+// fields at Phase-1 commit time via Merkle roots over sorted contents;
+// the validator re-derives the canonical list via per-field reconciliation
+// rules (Q1: union for equivocation_events + abort_events, intersection
+// for inbound_receipts). These helpers are the deterministic primitives.
+//
+// `compute_view_root(items)` is the canonical Merkle root over a sorted
+// SET of hash-typed items. Sorting is via the existing `Hash` `operator<`
+// (lexicographic on the 32 bytes). The result is bound into the
+// extended `make_contrib_commitment` so members can't equivocate on
+// their committed view between Phase-1 commit and Phase-2 reveal.
+
+// View root over a sorted SET of hashes (canonical, dedup'd).
+Hash compute_view_root(const std::vector<Hash>& items);
+
+// Union reconciliation across K committee members' lists (used for
+// equivocation_events + abort_events per Q1). Returns the deduplicated
+// union in canonical sorted order.
+std::vector<Hash> reconcile_union(
+    const std::vector<std::vector<Hash>>& member_lists);
+
+// Intersection reconciliation across K committee members' lists (used
+// for inbound_receipts per Q1). Returns hashes present in ALL K lists,
+// in canonical sorted order. Empty result when K < 1 or when any list
+// is empty (every credit must be witnessed by every member).
+std::vector<Hash> reconcile_intersection(
+    const std::vector<std::vector<Hash>>& member_lists);
+
+// ─── end v2.7 F2 helpers ───────────────────────────────────────────────────
+
 // S-025 (deleted in-session): compute_tx_root_intersection was a relic
 // of the pre-v1 design where canonical tx set was the intersection of
 // K committee members' lists. v1 settled on union semantics (censorship
