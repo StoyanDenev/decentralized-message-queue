@@ -800,28 +800,53 @@ Test surface: `tools/test_make_genesis_block.sh` exercises every invariant above
 
 ### 12.4 Profile presets
 
-`determ init --profile <name>` writes a config matching one of these production presets (values from `include/determ/chain/params.hpp::PROFILE_*`):
+`determ init --profile <name>` writes a config matching one of these production presets (values from `include/determ/chain/params.hpp::PROFILE_*`). Each profile is a **complete deployment archetype** that bundles timing, committee size, chain role, sharding mode, AND cryptographic posture together — operators make one decision (the profile name) and get a coherent deployment configuration.
 
-| Profile | `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` | M / K | role / sharding_mode | Use case |
-|---|---|---|---|---|
-| `cluster`  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | LAN, single beacon, ~125 ms blocks |
-| `web` (default) | 200 / 200 / 100 | 3 / 2 (hybrid) | SHARD / EXTENDED | Public-internet, regional shards |
-| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | Regional / continental RTT |
-| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | Inter-continental, hub-and-spoke |
-| `tactical` | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | Sub-30 ms private link, region-pinned units |
+| Profile | Timing (commit/sig/abort) | M / K | role / sharding_mode | Crypto | Confidential tx | Primary use case |
+|---|---|---|---|---|---|---|
+| **`cluster`**  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | **FIPS** | ❌ Unavailable | **In-house enterprise / financial services / banking settlement / regulated single-org / single-org CBDC / HIPAA healthcare. ~125 ms blocks.** |
+| `web` (default) | 200 / 200 / 100 | 3 / 2 (hybrid) | SHARD / EXTENDED | MODERN | ✅ Available | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
+| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | MODERN | ✅ Available | Regional / continental RTT, state lottery, multi-region commercial |
+| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | MODERN | ✅ Available | Inter-continental hub-and-spoke, international CBDC federation |
+| **`tactical`** | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | **FIPS** | ❌ Unavailable | **Military / defense / drone swarm / embedded mobile units / DoD deployments. Sub-30 ms private link, region-pinned units.** |
 
-Plus six CI/dev variants that hold round timers at `5 / 5 / 3` (`TEST_*_MS` in `params.hpp`) and otherwise mirror their production sibling's `M / K / role / sharding_mode`:
+**Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack for deployments where FIPS 140-2/3 compliance is non-negotiable:
 
-| Test profile | M / K | role / sharding_mode |
+- **FIPS profile stack:** AES-256-GCM AEAD (FIPS 197 + SP 800-38D), PBKDF2-HMAC-SHA-256 KDF (SP 800-132), NIST P-256 prime-order operations (FIPS 186-5), Ed25519 signatures (FIPS 186-5 since 2023), X25519 KX (SP 800-186), SHA-256/SHA-512 (FIPS 180-4), HMAC/HKDF (FIPS 198/SP 800-56C).
+- **FIPS feature unavailability:** Confidential transactions (v2.22 Bulletproofs) cannot be used in FIPS profiles because NIST has not standardized zero-knowledge range proof constructions. FIPS deployments use clear-amount TRANSFER with v2.24 audit hooks for regulator access.
+- **FIPS use cases:** military embedded systems (tactical), in-house bank settlement (cluster), single-org CBDC components (cluster), healthcare-HIPAA-strict deployments (cluster), DoD/government contracts.
+
+The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, secp256k1 + Bulletproofs (Bitcoin-grade libsecp256k1-zkp; full v2.22 confidential-transaction support), Ed25519 signatures, X25519 KX. Cryptographically strongest defaults but not FIPS-validated.
+
+**See `docs/proofs/CRYPTO-C99-SPEC.md` §2.Q10** for full profile-to-crypto mapping, feature availability matrix, and rationale for bundling.
+
+Plus six CI/dev variants that hold round timers at `5 / 5 / 3` (`TEST_*_MS` in `params.hpp`) and otherwise mirror their production sibling's `M / K / role / sharding_mode / crypto`:
+
+| Test profile | M / K | role / sharding_mode | Crypto |
+|---|---|---|---|
+| `single_test`   | 3 / 3 | SINGLE / NONE | MODERN |
+| `cluster_test`  | 3 / 3 | BEACON / CURRENT | **FIPS** |
+| `web_test`      | 3 / 2 | SHARD / EXTENDED | MODERN |
+| `regional_test` | 5 / 4 | SHARD / CURRENT | MODERN |
+| `global_test`   | 7 / 5 | BEACON / EXTENDED | MODERN |
+| `tactical_test` | 3 / 3 | SHARD / EXTENDED | **FIPS** |
+
+Profile is a config-layer concept; the fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` / `m_creators` / `k_block_sigs` / `chain_role` / `sharding_mode` / `crypto_profile`. Operators can also write these fields directly in genesis without `--profile`, but the recommended pattern is profile selection — getting timing/role/sharding/crypto bundled coherently prevents misconfiguration.
+
+**Profile-selection guide for common use cases:**
+
+| Deployment context | Recommended profile | Reason |
 |---|---|---|
-| `single_test`   | 3 / 3 | SINGLE / NONE |
-| `cluster_test`  | 3 / 3 | BEACON / CURRENT |
-| `web_test`      | 3 / 2 | SHARD / EXTENDED |
-| `regional_test` | 5 / 4 | SHARD / CURRENT |
-| `global_test`   | 7 / 5 | BEACON / EXTENDED |
-| `tactical_test` | 3 / 3 | SHARD / EXTENDED |
-
-Profile is a config-layer concept; the fields it touches are `tx_commit_ms` / `block_sig_ms` / `abort_claim_ms` / `m_creators` / `k_block_sigs` / `chain_role` / `sharding_mode`. Operators can also write these fields directly in genesis without `--profile`.
+| Military / defense / drone swarm | `tactical` | FIPS mandatory + sub-30ms latency required |
+| Bank in-house settlement | `cluster` | FIPS mandatory + single-org consortium + 50ms latency adequate |
+| Single-org CBDC component | `cluster` | FIPS mandatory + permissioned consortium |
+| Healthcare HIPAA-strict | `cluster` | FIPS mandatory + single-org chain |
+| Regulated gambling | `web` | confidential player bankrolls valuable + FIPS not mandated by gambling regulators (RNG cert matters more) |
+| Commercial B2B payment | `web` | confidential amounts valuable + commercial single-cluster |
+| State / national lottery | `regional` | regional sharding + confidential entry pools |
+| Multi-country CBDC federation | `global` | inter-continental scale + confidential cross-border |
+| Multi-region commercial | `regional` | regional sharding + confidential amounts |
+| Commercial non-FIPS in-house | `web` | sharding is fine for single-cluster commercial; gets confidential transactions |
 
 ## 13. Governance (A5)
 
@@ -1032,7 +1057,11 @@ Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for rea
 ### Cross-references
 
 - [`WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) — standalone academic-style technical paper covering the same material at a higher level.
+<<<<<<< HEAD
 - [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2 + FA-Apply-3 + FA-Apply-4 + FA-Apply-5 + FA-Apply-6 + FA-Apply-7 analytic, FB1–FB11 TLA+).
+=======
+- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2 + FA-Apply-3 + FA-Apply-4 + FA-Apply-5 + FA-Apply-8 analytic, FB1–FB9 + FB13 TLA+).
+>>>>>>> worktree-agent-aa2dfd56d85c7e40e
 - [`QUICKSTART.md`](QUICKSTART.md) — operator-facing recipes for the wire formats specified here.
 - [`CLI-REFERENCE.md`](CLI-REFERENCE.md) — command-line surface for transactions described in §3.
 
