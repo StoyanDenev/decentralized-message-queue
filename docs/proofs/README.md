@@ -32,6 +32,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 | FA12 | [WalletRecovery.md](WalletRecovery.md) | A2 wallet recovery: Shamir ITS + AEAD + OPAQUE composition | ✓ |
 | FA-Apply | [AccountStateInvariants.md](AccountStateInvariants.md) | AccountState invariants (I-1..I-6): non-negative balance, nonce monotonicity, balance/stake independence, account auto-creation paths, balance arithmetic channels, A1 contribution | ✓ |
 | FA-Apply-2 | [SnapshotEquivalence.md](SnapshotEquivalence.md) | Snapshot ↔ replay equivalence (T-S1..T-S6): serialize-restore identity, apply-after-restore equivalence, cross-namespace coverage of the S-033 state_root, idempotent restore, version-gate soundness, determinism — depends critically on S-033 state_root binding + S-038 producer-side state_root population | ✓ |
+| FA-Apply-3 | [NonceMonotonicity.md](NonceMonotonicity.md) | Nonce-gating contract (T-N1..T-N6): stale-nonce rejection, future-nonce rejection, per-account independence, replay defense via monotonic advance, monotonic accumulation across blocks, and genesis `next_nonce = 0` bootstrap — the chain.cpp apply-layer replay-defense invariant; cross-references `tools/test_tx_replay_protection` and `tools/test_chain_apply_block` regressions | ✓ |
 
 FB-track (TLA+ machine-checkable):
 
@@ -42,7 +43,8 @@ FB-track (TLA+ machine-checkable):
 | FB3 | [tla/Receipts.tla](tla/Receipts.tla) — receipt dedup state machine | ✓ spec, model-check pending TLC install |
 | FB4 | [tla/AccountState.tla](tla/AccountState.tla) — AccountState invariants (companion to FA-Apply) | ✓ spec, model-check pending TLC install |
 | FB5 | [tla/Snapshot.tla](tla/Snapshot.tla) — snapshot + restore state machine (companion to FA-Apply-2; 5 invariants SerializeRestoreIdentity / ApplyAfterRestoreEquivalence / VersionGateSoundness / DeterministicSerialization / StateRootBindsApply + 2 temporal props EventualSnapshotConsistency / RestoreIsCorrect) | ✓ spec, model-check pending TLC install |
-| FB6 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
+| FB7 | [tla/Nonce.tla](tla/Nonce.tla) — per-account nonce-gate state machine (companion to FA-Apply-3; 5 invariants StrictNonceGate / NonceMonotonic / ReplayImpossible / PerAccountIndependence / GenesisStart + 2 temporal props EventualNonceAdvance / NoStaleApplied) | ✓ spec, model-check pending TLC install |
+| FB8 | [tla/CHECK-RESULTS.md](tla/CHECK-RESULTS.md) — model-check transcripts | ✓ template, transcripts pending |
 
 **Closure analyses and specs** (companion documents — not core FA/FB theorems, but cited alongside them):
 
