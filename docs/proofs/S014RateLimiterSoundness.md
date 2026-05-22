@@ -445,7 +445,9 @@ The v2.x S-014 scheme is designed against the following adversary families:
 
 ### 6.2 Notable findings
 
-**Finding F-1 (Unbounded `buckets_` growth — no eviction of stale IPs).** The `std::map<std::string, Bucket> buckets_` at `include/determ/net/rate_limiter.hpp:68` grows monotonically: every distinct key ever consumed creates an entry, and there is no path to remove entries. The header comment at lines 22-24 acknowledges this:
+**Finding F-1 (Unbounded `buckets_` growth — no eviction of stale IPs).** ✅ **CLOSED** (time-decay eviction shipped; see "Closure" subsection below). The original finding follows for archival completeness.
+
+The `std::map<std::string, Bucket> buckets_` at `include/determ/net/rate_limiter.hpp:68` grew monotonically: every distinct key ever consumed created an entry, and there was no path to remove entries. The original header comment at lines 22-24 acknowledged this:
 
 > Memory: one `Bucket` (~24 bytes) per distinct key. The map grows with observed sources; v2.X follow-on is a periodic prune of buckets idle for > N minutes (not critical at current scale — 10K entries is < 300 KB).
 
@@ -467,6 +469,26 @@ For a typical Determ deployment, the attacker would need to generate 100M unique
 4. **Per-prefix bucketing.** Hash the IP to a `/N`-prefix-derived key (e.g., `/48` for IPv6, `/24` for IPv4) so the map's key space is bounded by `2^prefix_bits`. Trade-off: attackers from one prefix collide with legitimate users; suboptimal in mixed traffic.
 
 The recommended path is (1): time-decay eviction. Effort: ~30 LOC. Acknowledged by the header comment as the planned v2.X follow-on.
+
+**Closure (shipped):** time-decay eviction implemented via:
+
+1. **API additions** (`include/determ/net/rate_limiter.hpp`):
+   - `void configure_eviction(double threshold_sec, double interval_sec = 60.0)` — operator-tunable; defaults applied when not called.
+   - `size_t bucket_count() const` — diagnostic for tests + operator monitoring.
+   - `size_t sweep_idle()` — explicit immediate sweep; returns number evicted.
+   - `private: size_t sweep_idle_locked(time_point now)` — caller holds mu_; iterates `buckets_` and erases entries where `now - b.last > threshold`.
+
+2. **Hot-path integration** (`bool consume(const std::string& key)`):
+   - On every `consume()`, check `now >= next_sweep_at_`; if so, run `sweep_idle_locked()` + advance `next_sweep_at_` by `sweep_interval_sec_`.
+   - Amortized constant-time per `consume()` (the per-sweep O(N) walk is bounded by interval-frequency).
+
+3. **Defaults**: `eviction_threshold_sec_ = 600.0` (10 min idle), `sweep_interval_sec_ = 60.0` (60s amortized cadence). Operators can tune via `configure_eviction()` or disable entirely with `configure_eviction(0.0)`.
+
+4. **Semantic safety**: an evicted bucket re-creates as full-capacity on the next consume() touch. The original bucket would have refilled to capacity after ≥ `burst_ / rate_per_sec_` seconds; the default threshold (600s) gives at least 60× safety factor over any realistic refill time (e.g., burst=100 + rate=10 → full refill in 10s; default eviction at 600s gives 60× margin). So replay safety: a re-created bucket is observationally indistinguishable from the un-evicted bucket from any caller's perspective.
+
+5. **Test coverage**: `determ test-rate-limiter-bucket` scenarios #27..#34 (8 new scenarios, ~20 new assertions): defaults pin, bucket_count() growth + per-key uniqueness, sweep_idle() no-op on fresh buckets, sweep fires on stale buckets, re-touch after eviction yields full burst, amortized sweep on consume hot path, eviction disable via configure_eviction(0), mixed fresh + stale (only stale evicted).
+
+6. **Memory bound (post-closure)**: `buckets_.size()` is now bounded by the per-bucket worst-case lifetime: a bucket survives at most `eviction_threshold_sec_ + sweep_interval_sec_` seconds without being touched. So the maximum entry count is bounded by the per-IP request rate × (eviction_threshold + sweep_interval). For a default (600 + 60) = 660s window: a single IP can keep at most 1 entry alive; an attacker rotating through N IPs each every R seconds keeps at most N × min(1, 660/R) entries alive. The IPv6 /64 cycling attack with R < 660s creates at most N entries before the first eviction round; subsequent rounds keep `buckets_.size()` bounded by the rotating-window count.
 
 **Finding F-2 (`steady_clock` epoch sentinel — theoretical edge case).** L-5 notes that `b.last.time_since_epoch().count() == 0` is used as a sentinel for "first touch" at `include/determ/net/rate_limiter.hpp:47`. If `steady_clock::now()` ever returned a value with `time_since_epoch().count() == 0`, the next consume on that bucket would re-initialize it to full. On every C++ standard library implementation we are aware of, `steady_clock`'s epoch is implementation-defined (boot time on Linux, process start or system boot on Windows) and `now()` essentially never returns exactly `0` — but the C++ standard does not strictly forbid it.
 

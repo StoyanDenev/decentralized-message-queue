@@ -27283,6 +27283,169 @@ int main(int argc, char** argv) {
                   "rate*window arithmetic: 100ms at rate=10 → 1-2 new tokens");
         }
 
+        // === F-1 closure: idle-bucket eviction (S014RateLimiterSoundness §6.2) ===
+
+        // 27. Defaults: eviction_threshold_sec = 600s, sweep_interval = 60s,
+        //     bucket_count starts at 0.
+        {
+            RateLimiter rl;
+            check(rl.eviction_threshold_sec() == 600.0,
+                  "eviction defaults: threshold_sec = 600 (10 min)");
+            check(rl.sweep_interval_sec() == 60.0,
+                  "eviction defaults: sweep_interval_sec = 60");
+            check(rl.bucket_count() == 0,
+                  "bucket_count(): zero before any consume()");
+        }
+
+        // 28. bucket_count() tracks growth on consume; per-key uniqueness.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            rl.consume("k28a");
+            check(rl.bucket_count() == 1,
+                  "bucket_count(): 1 after first consume");
+            rl.consume("k28a");  // same key
+            check(rl.bucket_count() == 1,
+                  "bucket_count(): repeated same-key consume doesn't allocate");
+            rl.consume("k28b");
+            rl.consume("k28c");
+            check(rl.bucket_count() == 3,
+                  "bucket_count(): 3 distinct keys → 3 buckets");
+        }
+
+        // 29. sweep_idle() with default threshold (600s) is a no-op on a
+        //     fresh limiter (no buckets old enough to evict).
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            for (int i = 0; i < 10; ++i)
+                rl.consume("k29_" + std::to_string(i));
+            check(rl.bucket_count() == 10,
+                  "sweep no-op: 10 buckets allocated");
+            size_t evicted = rl.sweep_idle();
+            check(evicted == 0,
+                  "sweep no-op: fresh buckets (< 600s old) not evicted");
+            check(rl.bucket_count() == 10,
+                  "sweep no-op: bucket_count unchanged after sweep");
+        }
+
+        // 30. sweep_idle() with very-short threshold evicts all stale
+        //     buckets after a brief sleep. This is the eviction-fires
+        //     end-to-end demo.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            rl.configure_eviction(0.05, 0.0);  // 50ms threshold, sweep on every consume
+            for (int i = 0; i < 5; ++i)
+                rl.consume("k30_" + std::to_string(i));
+            check(rl.bucket_count() == 5,
+                  "sweep fires: 5 buckets pre-sweep");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            size_t evicted = rl.sweep_idle();
+            check(evicted == 5,
+                  "sweep fires: all 5 stale buckets evicted");
+            check(rl.bucket_count() == 0,
+                  "sweep fires: bucket_count = 0 after eviction");
+        }
+
+        // 31. Eviction is semantically safe: an evicted bucket re-creates
+        //     as full-capacity on next consume, matching the would-be
+        //     refilled state of the un-evicted bucket.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            rl.configure_eviction(0.05, 0.0);
+            // Drain k31's bucket.
+            for (int i = 0; i < 5; ++i) rl.consume("k31");
+            check(!rl.consume("k31"),
+                  "eviction safety: drained bucket rejects 6th consume");
+            // Wait past threshold + force sweep.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            rl.sweep_idle();
+            check(rl.bucket_count() == 0,
+                  "eviction safety: drained bucket evicted after threshold");
+            // Re-touch the same key — bucket re-creates as full.
+            check(rl.consume("k31"),
+                  "eviction safety: re-touch after eviction succeeds (full bucket)");
+            // The new bucket should have burst-1 tokens remaining.
+            int succ = 1;  // already consumed 1
+            for (int i = 0; i < 10; ++i) {
+                if (rl.consume("k31")) succ++;
+                else break;
+            }
+            check(succ == 5,
+                  "eviction safety: re-created bucket has full burst capacity");
+        }
+
+        // 32. Amortized sweep on consume: with short interval, consume()
+        //     triggers sweeps periodically without explicit sweep_idle()
+        //     calls. Demonstrates the production hot path.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            rl.configure_eviction(0.05, 0.05);  // 50ms threshold, 50ms sweep interval
+            // Allocate 20 distinct keys.
+            for (int i = 0; i < 20; ++i)
+                rl.consume("k32_" + std::to_string(i));
+            check(rl.bucket_count() == 20,
+                  "amortized sweep: 20 buckets pre-cycle");
+            // Wait past both threshold + interval, then trigger one more
+            // consume on a fresh key. The amortized sweep should fire as
+            // part of THAT consume's path.
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            rl.consume("k32_trigger");
+            // After the sweep, the 20 stale buckets are gone; only the
+            // new k32_trigger remains.
+            check(rl.bucket_count() == 1,
+                  "amortized sweep: post-sweep only the triggering key survives");
+        }
+
+        // 33. Disable eviction via configure_eviction(0): legacy unbounded
+        //     growth behavior. Useful for forensic / test scenarios.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            rl.configure_eviction(0.0);  // disabled
+            check(rl.eviction_threshold_sec() == 0.0,
+                  "eviction disabled: threshold_sec = 0");
+            for (int i = 0; i < 50; ++i)
+                rl.consume("k33_" + std::to_string(i));
+            check(rl.bucket_count() == 50,
+                  "eviction disabled: 50 buckets allocated");
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            size_t evicted = rl.sweep_idle();
+            check(evicted == 0,
+                  "eviction disabled: sweep_idle() returns 0 (no-op)");
+            check(rl.bucket_count() == 50,
+                  "eviction disabled: bucket_count unchanged after sweep_idle");
+        }
+
+        // 34. Mixed fresh + stale: only the stale buckets are evicted.
+        //     Use sweep_interval=10s so the amortized sweep doesn't fire
+        //     during the new burst; we call sweep_idle() explicitly to
+        //     deterministically exercise the mixed-eviction path.
+        {
+            RateLimiter rl;
+            rl.configure(10.0, 5.0);
+            rl.configure_eviction(0.05, 10.0);  // threshold=50ms, sweep_interval=10s
+            // Old generation.
+            for (int i = 0; i < 5; ++i)
+                rl.consume("k34_old_" + std::to_string(i));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Fresh generation — these consumes do NOT trigger the
+            // amortized sweep because sweep_interval=10s hasn't elapsed
+            // since the first-touch sweep.
+            for (int i = 0; i < 3; ++i)
+                rl.consume("k34_new_" + std::to_string(i));
+            check(rl.bucket_count() == 8,
+                  "mixed sweep: 5 old + 3 new = 8 buckets pre-sweep");
+            size_t evicted = rl.sweep_idle();
+            check(evicted == 5,
+                  "mixed sweep: only the 5 old buckets evicted");
+            check(rl.bucket_count() == 3,
+                  "mixed sweep: 3 fresh buckets survive");
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": rate-limiter-bucket "
                   << (fail == 0 ? "all assertions" : "had failures")
