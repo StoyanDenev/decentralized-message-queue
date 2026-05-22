@@ -752,6 +752,19 @@ Additional in-process tests:
                                               shard_count>1 routes via salt
                                               + my_shard_id; salt-sensitivity;
                                               accessor round-trip.
+  determ test-binary-codec-roundtrip-exhaustive  Per-MsgType binary envelope
+                                              round-trip — encode_binary +
+                                              decode_binary loss-free over
+                                              every non-HELLO MsgType variant
+                                              with representative payloads;
+                                              magic-header byte vector
+                                              (0xB1 / 0x01 / type / 0x00);
+                                              tamper-rejection (byte flip on
+                                              encoded form either throws or
+                                              changes decoded payload);
+                                              HELLO encode rejected per
+                                              binary-codec contract;
+                                              malformed-header diagnostics.
 )" << "\n";
 }
 
@@ -8271,6 +8284,425 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": binary-codec " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: exhaustive per-MsgType binary envelope round-trip.
+    //
+    // Companion to `test-binary-codec` — that test exercises the codec
+    // surface at a high level (one or two MsgTypes per code path plus
+    // the S-022 cap table). This test walks every non-HELLO MsgType
+    // variant defined in include/determ/net/messages.hpp with a
+    // representative payload and pins three invariants per type:
+    //
+    //   1. encode_binary → decode_binary preserves MsgType + payload.
+    //      For the JSON-fallback path, payload-JSON equality is
+    //      structural (nlohmann::json::operator==), not byte-level —
+    //      that's the same contract the JSON envelope (v0) round-trip
+    //      enforces and is what every receive-side from_json() depends on.
+    //   2. Magic header is present and well-formed: byte[0] == 0xB1,
+    //      byte[1] == 0x01, byte[2] == MsgType, byte[3] == 0x00.
+    //   3. Tamper-rejection: flipping a byte inside the encoded payload
+    //      either makes decode_binary throw OR yields a payload that
+    //      doesn't equal the original. (Cannot guarantee throw for
+    //      every byte position — flipping a JSON whitespace byte would
+    //      decode cleanly but produce a different payload — but the
+    //      defense is loud-fail either way, never silent-accept.)
+    //
+    // Plus the binary-codec contract invariants:
+    //   * HELLO is rejected by encode_binary (always JSON
+    //     pre-negotiation).
+    //   * decode_binary on a malformed header (wrong magic, wrong
+    //     version, truncated) throws with a clean diagnostic.
+    //   * encode_binary itself does NOT enforce the 16 MB framing-
+    //     layer cap; the wire-side `Peer::read_body` does. This
+    //     test pins the actual behavior (encode succeeds; framing
+    //     boundary is the enforcer).
+    //
+    // ~50 assertions across 13 MsgType-by-scenario combinations.
+    if (cmd == "test-binary-codec-roundtrip-exhaustive") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Helper: encode_binary → decode_binary and return the decoded
+        // Message. Asserts both calls execute without throwing.
+        auto roundtrip = [](const Message& m) -> Message {
+            auto bytes = encode_binary(m);
+            return decode_binary(bytes.data(), bytes.size());
+        };
+
+        // Helper: assert the binary envelope header bytes match. The
+        // envelope layout is documented in src/net/binary_codec.cpp:
+        //
+        //   offset  size  field
+        //   0       1     magic    = 0xB1
+        //   1       1     version  = 0x01
+        //   2       1     msg_type = uint8_t cast of MsgType
+        //   3       1     reserved = 0x00
+        auto check_envelope_header = [&](const std::vector<uint8_t>& bytes,
+                                           MsgType t, const char* label) {
+            check(bytes.size() >= 4,
+                  (std::string(label) + ": envelope >= 4 header bytes").c_str());
+            if (bytes.size() >= 4) {
+                check(bytes[0] == 0xB1,
+                      (std::string(label) + ": magic byte = 0xB1").c_str());
+                check(bytes[1] == 0x01,
+                      (std::string(label) + ": version byte = 0x01").c_str());
+                check(bytes[2] == static_cast<uint8_t>(t),
+                      (std::string(label) + ": type byte matches MsgType").c_str());
+                check(bytes[3] == 0x00,
+                      (std::string(label) + ": reserved byte = 0x00").c_str());
+            }
+        };
+
+        // Helper: tamper one byte deep inside the encoded form (past
+        // the 4-byte envelope header) and assert decode is "loud" —
+        // either throws or returns a payload that doesn't equal the
+        // original. Never silent-accept.
+        //
+        // Per-position caveat: the TRANSACTION fixed-frame path leaves
+        // unused bytes in the 32-byte from/to/payload slots when those
+        // strings are shorter than 32 bytes (decoder reads only
+        // payload_len bytes from the payload slot, and from/to are
+        // re-read from the trailer's length-prefixed strings). A
+        // tamper in those padding-zero regions decodes cleanly and
+        // matches the original — that's a structural property of the
+        // fixed-frame codec, NOT a defense gap (the trailer's sig +
+        // hash bind the trustworthy fields). We sweep multiple
+        // positions to find one that actually flips a load-bearing
+        // byte; if ANY produces loud-fail, the codec's overall
+        // tamper-rejection is upheld.
+        auto check_tamper_loud_fail = [&](const Message& m, const char* label) {
+            auto bytes = encode_binary(m);
+            if (bytes.size() < 8) {
+                // Too small to meaningfully tamper past the header.
+                // The JSON-fallback path always has a 4-byte json_len
+                // prefix + at least "{}" body, so this branch only
+                // hits for an unusually empty payload. Skip rather
+                // than flake.
+                return;
+            }
+            // Sweep several positions past the envelope header. Any
+            // single loud-fail proves the codec is not silently
+            // accepting random byte changes across the wire.
+            std::vector<size_t> probes = {
+                bytes.size() / 4,
+                bytes.size() / 2,
+                (bytes.size() * 3) / 4,
+                bytes.size() - 1,
+            };
+            // Force probes to be >= 8 (past envelope header + any
+            // length prefix), bounded by buffer.
+            bool loud_fail = false;
+            for (size_t at : probes) {
+                if (at < 8 || at >= bytes.size()) continue;
+                auto mutated = bytes;
+                mutated[at] ^= 0xFF;
+                try {
+                    Message back = decode_binary(mutated.data(), mutated.size());
+                    if (back.type != m.type || back.payload != m.payload) {
+                        loud_fail = true;
+                        break;
+                    }
+                } catch (const std::exception&) {
+                    loud_fail = true;
+                    break;
+                }
+            }
+            check(loud_fail,
+                  (std::string(label) + ": tamper byte-flip is loud-fail").c_str());
+        };
+
+        // Helper: full battery for one MsgType. Roundtrip + envelope
+        // header + tamper-rejection.
+        auto run_msgtype = [&](const Message& m, const char* label) {
+            auto bytes = encode_binary(m);
+            check(!bytes.empty(),
+                  (std::string(label) + ": encode_binary non-empty").c_str());
+            check_envelope_header(bytes, m.type, label);
+            check(is_binary_envelope(bytes.data(), bytes.size()),
+                  (std::string(label) + ": is_binary_envelope detects").c_str());
+            Message back = roundtrip(m);
+            check(back.type == m.type,
+                  (std::string(label) + ": roundtrip type preserved").c_str());
+            check(back.payload == m.payload,
+                  (std::string(label) + ": roundtrip payload preserved").c_str());
+            check_tamper_loud_fail(m, label);
+        };
+
+        // ─── HELLO is the contract exception ─────────────────────────────────
+        // HELLO is encoded ONLY as JSON (pre-negotiation). encode_binary
+        // throws — this is the documented contract per binary_codec.cpp.
+        {
+            Message m = make_hello("alice", 1234, ChainRole::SINGLE, 0, 1);
+            bool threw = false;
+            try { (void)encode_binary(m); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "HELLO: encode_binary rejected (binary-codec contract)");
+        }
+
+        // ─── TRANSACTION (fixed-layout 4×256-bit frame) ─────────────────────
+        // TRANSACTION is the one type with a true fixed-layout binary
+        // encoding (not the JSON-fallback wrapper). Round-trip preserves
+        // the canonical amount/fee/nonce fields through the S-002 fixed-slot
+        // path + the from/to/sig/hash trailer.
+        {
+            Transaction tx;
+            tx.type   = TxType::TRANSFER;
+            tx.from   = "alice";
+            tx.to     = "bob";
+            tx.amount = 100;
+            tx.fee    = 1;
+            tx.nonce  = 7;
+            tx.payload = {0xDE, 0xAD, 0xBE, 0xEF};
+            tx.hash   = tx.compute_hash();
+            Message m = make_transaction(tx);
+            run_msgtype(m, "TRANSACTION (TRANSFER)");
+        }
+
+        // ─── BLOCK (JSON-fallback path) ──────────────────────────────────────
+        // Default-constructed Block produces a valid JSON shape that
+        // round-trips through Block::to_json / from_json + the binary
+        // envelope JSON-fallback path.
+        {
+            Block b;
+            b.index = 0;
+            // Cumulative_rand is required-array; default zero hash is fine.
+            Message m = make_block(b);
+            run_msgtype(m, "BLOCK (default)");
+        }
+
+        // ─── CONTRIB (consensus chatter) ─────────────────────────────────────
+        {
+            node::ContribMsg c;
+            c.block_index = 42;
+            c.signer      = "node-1";
+            c.aborts_gen  = 0;
+            Message m = make_contrib(c);
+            run_msgtype(m, "CONTRIB (default)");
+        }
+
+        // ─── BLOCK_SIG (Phase 2) ────────────────────────────────────────────
+        {
+            node::BlockSigMsg s;
+            s.block_index = 42;
+            s.signer      = "node-2";
+            Message m = make_block_sig(s);
+            run_msgtype(m, "BLOCK_SIG (default)");
+        }
+
+        // ─── ABORT_CLAIM (S7) ────────────────────────────────────────────────
+        // Qualify `net::` explicitly — node::make_abort_claim is the
+        // signing-side overload (takes NodeKey + fields); net::make_abort_claim
+        // is the Message wrapper. Both reach through `using namespace`.
+        {
+            node::AbortClaimMsg a;
+            a.block_index     = 42;
+            a.round           = 1;
+            a.missing_creator = "node-missing";
+            a.claimer         = "node-claimer";
+            Message m = net::make_abort_claim(a);
+            run_msgtype(m, "ABORT_CLAIM (default)");
+        }
+
+        // ─── ABORT_EVENT (consensus abort certificate) ───────────────────────
+        {
+            AbortEvent e;
+            e.round         = 1;
+            e.aborting_node = "node-aborter";
+            e.timestamp     = 12345;
+            Hash prev{};
+            Message m = make_abort_event(e, 42, prev);
+            run_msgtype(m, "ABORT_EVENT");
+        }
+
+        // ─── EQUIVOCATION_EVIDENCE (FA6 slashing evidence) ──────────────────
+        {
+            EquivocationEvent ev;
+            ev.equivocator          = "evil-node";
+            ev.block_index          = 100;
+            // Distinct digests so the event represents real equivocation.
+            for (size_t i = 0; i < ev.digest_a.size(); ++i) ev.digest_a[i] = uint8_t(0xAA);
+            for (size_t i = 0; i < ev.digest_b.size(); ++i) ev.digest_b[i] = uint8_t(0xBB);
+            Message m = make_equivocation_evidence(ev);
+            run_msgtype(m, "EQUIVOCATION_EVIDENCE");
+        }
+
+        // ─── BEACON_HEADER (rev.9 B2c.1) ─────────────────────────────────────
+        {
+            Block b;
+            b.index     = 7;
+            b.timestamp = 99999;
+            Message m = make_beacon_header(b);
+            run_msgtype(m, "BEACON_HEADER");
+        }
+
+        // ─── SHARD_TIP (rev.9 B2c.3) ─────────────────────────────────────────
+        {
+            Block b;
+            b.index = 13;
+            Message m = make_shard_tip(/*shard_id=*/2, b);
+            run_msgtype(m, "SHARD_TIP");
+        }
+
+        // ─── CROSS_SHARD_RECEIPT_BUNDLE (rev.9 B3.3) ────────────────────────
+        {
+            Block b;
+            b.index = 21;
+            // Empty receipts vector still produces a valid envelope —
+            // the JSON-fallback path doesn't care that the inner array
+            // is empty.
+            Message m = make_cross_shard_receipt_bundle(/*src_shard=*/3, b);
+            run_msgtype(m, "CROSS_SHARD_RECEIPT_BUNDLE");
+        }
+
+        // ─── GET_CHAIN (chain-sync request) ──────────────────────────────────
+        {
+            Message m = make_get_chain(/*from_index=*/0, /*count=*/64);
+            run_msgtype(m, "GET_CHAIN");
+        }
+
+        // ─── CHAIN_RESPONSE (chain-sync response) ───────────────────────────
+        // The free-function builders only cover GET_CHAIN; CHAIN_RESPONSE
+        // is assembled directly. Use a minimal valid shape ({"blocks":
+        // [], "from": 0}) — same JSON-fallback path.
+        {
+            Message m{MsgType::CHAIN_RESPONSE,
+                      {{"blocks", json::array()}, {"from", 0}}};
+            run_msgtype(m, "CHAIN_RESPONSE");
+        }
+
+        // ─── STATUS_REQUEST / STATUS_RESPONSE ───────────────────────────────
+        {
+            Message m = make_status_request();
+            run_msgtype(m, "STATUS_REQUEST");
+        }
+        {
+            Message m = make_status_response(/*height=*/100, "deadbeef");
+            run_msgtype(m, "STATUS_RESPONSE");
+        }
+
+        // ─── SNAPSHOT_REQUEST / SNAPSHOT_RESPONSE ───────────────────────────
+        {
+            Message m = make_snapshot_request(/*header_count=*/16);
+            run_msgtype(m, "SNAPSHOT_REQUEST");
+        }
+        {
+            // Minimal snapshot shape — empty object is a valid JSON
+            // payload; deeper schema-validity is the snapshot-restore
+            // surface, not the codec surface.
+            Message m = make_snapshot_response(json::object());
+            run_msgtype(m, "SNAPSHOT_RESPONSE");
+        }
+
+        // ─── HEADERS_REQUEST / HEADERS_RESPONSE (v2.2 light-client) ─────────
+        {
+            Message m = make_headers_request(/*from_index=*/0, /*count=*/16);
+            run_msgtype(m, "HEADERS_REQUEST");
+        }
+        {
+            Message m = make_headers_response(
+                {{"headers", json::array()}, {"from", 0}, {"count", 0}, {"height", 0}});
+            run_msgtype(m, "HEADERS_RESPONSE");
+        }
+
+        // ─── Malformed header diagnostics ────────────────────────────────────
+        // decode_binary on body that doesn't carry the binary envelope
+        // throws with a clean diagnostic. Three cases:
+        //   (a) wrong magic byte
+        //   (b) wrong version byte (magic OK, version != 0x01)
+        //   (c) truncated header (< 4 bytes)
+        {
+            std::vector<uint8_t> wrong_magic = {0xFF, 0x01, 0x00, 0x00, 0x00};
+            bool threw = false;
+            try { (void)decode_binary(wrong_magic.data(), wrong_magic.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "decode_binary throws on wrong magic byte");
+        }
+        {
+            std::vector<uint8_t> wrong_version = {0xB1, 0x99, 0x00, 0x00, 0x00};
+            bool threw = false;
+            try { (void)decode_binary(wrong_version.data(), wrong_version.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "decode_binary throws on unsupported binary version");
+        }
+        {
+            std::vector<uint8_t> too_short = {0xB1, 0x01};
+            bool threw = false;
+            try { (void)decode_binary(too_short.data(), too_short.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "decode_binary throws on truncated header (< 4 bytes)");
+        }
+
+        // ─── Truncated payload diagnostics (JSON-fallback path) ─────────────
+        // Build a valid envelope but truncate inside the JSON payload
+        // body. decode_binary should reject (either the length-prefix
+        // bounds check or the inner JSON parser).
+        {
+            Message m{MsgType::STATUS_RESPONSE, {{"height", 100}}};
+            auto bytes = encode_binary(m);
+            // Truncate to header + 6 bytes (less than the JSON payload).
+            std::vector<uint8_t> truncated(bytes.begin(),
+                                           bytes.begin() + std::min<size_t>(bytes.size(), 10));
+            // Stomp the length prefix so it claims more bytes than the
+            // truncated buffer actually carries — forces the bounds check.
+            if (truncated.size() >= 8) {
+                truncated[4] = 0xFF;
+                truncated[5] = 0xFF;
+                truncated[6] = 0xFF;
+                truncated[7] = 0x7F;
+            }
+            bool threw = false;
+            try { (void)decode_binary(truncated.data(), truncated.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw, "decode_binary throws on truncated payload body");
+        }
+
+        // ─── encode_binary does NOT enforce 16 MB framing cap ───────────────
+        // The framing-layer 16 MB ceiling is enforced by Peer::read_body
+        // before deserialize, not by encode_binary itself. Pin this:
+        // encode_binary on a Message whose payload is multiple MB
+        // produces output of corresponding size without error. The
+        // framing-layer cap is a wire-side defense, not a codec-side one.
+        {
+            // Build a payload that encodes to > 4 MB by stuffing a long
+            // string into a JSON envelope. Use 5 MB string so encoded
+            // form sits between BLOCK's 4 MB type cap and the framing
+            // ceiling — the framing layer would reject; the codec doesn't.
+            std::string fat(5 * 1024 * 1024, 'x');
+            Message m{MsgType::SNAPSHOT_RESPONSE, {{"data", fat}}};
+            std::vector<uint8_t> bytes;
+            bool encoded = false;
+            try {
+                bytes = encode_binary(m);
+                encoded = true;
+            } catch (...) {
+                // encode_binary may fail if payload exceeds the u32
+                // length-prefix range (4 GB) — that's a different
+                // limit. 5 MB is well under that, so we expect success.
+            }
+            check(encoded,
+                  "encode_binary does not enforce 16 MB framing cap (codec is unbounded)");
+            check(bytes.size() > 4 * 1024 * 1024,
+                  "encode_binary on 5 MB payload produces > 4 MB encoded bytes");
+            // Round-trip still works: the codec itself has no size cap.
+            if (encoded) {
+                Message back = decode_binary(bytes.data(), bytes.size());
+                check(back.type == m.type,
+                      "5 MB encoded SNAPSHOT_RESPONSE round-trips through codec");
+            }
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": binary-codec-roundtrip-exhaustive "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
