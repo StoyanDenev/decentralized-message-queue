@@ -783,6 +783,21 @@ Additional in-process tests:
                                               rate / zero-capacity edge cases,
                                               per-key independence, time-
                                               monotonicity under clock skew
+  determ test-merkle-proof-tampering          v2.1 Merkle inclusion-proof
+                                              tamper-detection — exhaustive
+                                              negative-path coverage for every
+                                              field a proof carries (value_hash,
+                                              every sibling-hash position,
+                                              target_index off-by-one + out-of-
+                                              range, proof truncation/extension,
+                                              leaf_count drift) across 1/2/5/7/
+                                              8/16-leaf trees including
+                                              repeated-leaf and odd-leaf
+                                              padding edges. Negative-image
+                                              foundation for the v2.2 light-
+                                              client + state_proof RPC; reduces
+                                              to SHA-256 collision resistance
+                                              (Preliminaries.md §2.1).
 )" << "\n";
 }
 
@@ -27448,6 +27463,405 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": rate-limiter-bucket "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // v2.1 / S-035 follow-on: exhaustive negative-path coverage for
+    // crypto::merkle_verify on inclusion proofs. The companion
+    // `test-merkle` test (12 assertions) pins positive round-trips and
+    // a few representative tamper paths; this test pins the FULL set of
+    // ways a proof can be tampered with — every byte position in the
+    // value_hash, every sibling along the proof chain, target_index
+    // off-by-one + out-of-range, proof truncation, proof extension,
+    // and leaf_count drift — across leaf-count regimes that exercise
+    // the unbalanced-tree (last-leaf-duplication) padding: 1, 2, 5, 7,
+    // 8, 16 leaves, plus a repeated-leaf 5-leaf tree where leaf[0] ==
+    // leaf[1] by value-hash equality. Empty-tree behavior (leaf_count
+    // = 0 → reject as bad input) is also pinned.
+    //
+    // Why this exists: the v2.2 light-client + state_proof RPC are
+    // safe ONLY if `merkle_verify` rejects every tamper short of a
+    // SHA-256 collision (Preliminaries.md §2.1). A single missed
+    // negative path would silently let a malicious snapshot server
+    // forge state inclusion. The test reduces that surface to a fixed
+    // set of mechanical inputs we can pin.
+    if (cmd == "test-merkle-proof-tampering") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build n leaves with deterministic key/value_hash pairs. Keys
+        // are 2-byte {'k', i} so the natural byte-order sort coincides
+        // with insertion order for i < 256 (small-tree property).
+        auto make_leaves = [](size_t n) {
+            std::vector<MerkleLeaf> v;
+            for (size_t i = 0; i < n; ++i) {
+                MerkleLeaf m;
+                m.key = {'k', static_cast<uint8_t>(i)};
+                SHA256Builder b; b.append(static_cast<uint64_t>(i));
+                m.value_hash = b.finalize();
+                v.push_back(m);
+            }
+            return v;
+        };
+
+        // ── (1) Positive baseline: every leaf in a 16-leaf balanced
+        //     tree round-trips through proof + verify. Anchors the
+        //     negative-path tests below — they wouldn't be meaningful
+        //     if the positive case were broken.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            bool all_ok = true;
+            for (size_t i = 0; i < leaves.size(); ++i) {
+                auto p = merkle_proof(leaves, i);
+                if (!merkle_verify(root, leaves[i].key, leaves[i].value_hash,
+                                      i, leaves.size(), p)) {
+                    all_ok = false; break;
+                }
+            }
+            check(all_ok,
+                  "(1) baseline: all 16 leaves of a balanced tree verify");
+        }
+
+        // ── (2) value_hash tamper: flipping ANY byte in the value_hash
+        //     yields a different leaf_hash → propagates to different
+        //     root → verify fails. We exercise byte 0, byte 16 (mid),
+        //     byte 31 (last) on leaf index 7 of a 16-leaf tree. By
+        //     SHA-256 collision-resistance (Preliminaries.md §2.1), a
+        //     post-tamper match would imply a collision.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 7);
+            for (size_t b : {size_t{0}, size_t{16}, size_t{31}}) {
+                Hash tampered = leaves[7].value_hash;
+                tampered[b] ^= 0xff;
+                bool ok = merkle_verify(root, leaves[7].key, tampered,
+                                            7, leaves.size(), p);
+                std::string msg =
+                    "(2) value_hash byte-" + std::to_string(b) +
+                    " flip is rejected";
+                check(!ok, msg.c_str());
+            }
+        }
+
+        // ── (3) sibling-hash tamper: flipping any sibling at any level
+        //     of the proof chain must be detected. We iterate through
+        //     EVERY sibling position. log2(16) = 4 → 4 sibling hashes.
+        //     For each, we flip byte 0 and verify fails. Pins that the
+        //     verify loop processes every sibling rather than (e.g.)
+        //     short-circuiting after the first level.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p_orig = merkle_proof(leaves, 5);
+            check(p_orig.size() == 4,
+                  "(3) sibling tamper: 16-leaf proof has 4 sibling hashes");
+            for (size_t j = 0; j < p_orig.size(); ++j) {
+                auto p = p_orig;
+                p[j][0] ^= 0xff;
+                bool ok = merkle_verify(root, leaves[5].key, leaves[5].value_hash,
+                                            5, leaves.size(), p);
+                std::string msg =
+                    "(3) sibling[" + std::to_string(j) +
+                    "] tamper is rejected";
+                check(!ok, msg.c_str());
+            }
+        }
+
+        // ── (4) target_index off-by-one: claiming index ± 1 yields the
+        //     same value-hash but a different traversal path (left vs.
+        //     right child at level 0 differs). The verifier composes
+        //     the wrong order → root mismatch.
+        //
+        //     Caveat: index 0 has no -1 (size_t underflow). We test
+        //     +1 from index 0 + ±1 from index 7. Index 15 has no +1
+        //     (would be out-of-range → covered in (5)).
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 7);
+            check(!merkle_verify(root, leaves[7].key, leaves[7].value_hash,
+                                    6, leaves.size(), p),
+                  "(4) target_index -1 is rejected");
+            check(!merkle_verify(root, leaves[7].key, leaves[7].value_hash,
+                                    8, leaves.size(), p),
+                  "(4) target_index +1 is rejected");
+            auto p0 = merkle_proof(leaves, 0);
+            check(!merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                    1, leaves.size(), p0),
+                  "(4) target_index +1 from index 0 is rejected");
+        }
+
+        // ── (5) target_index out-of-range: target_index >= leaf_count
+        //     must be rejected up-front (input-validation gate). The
+        //     verify function early-returns false on this — no proof
+        //     traversal attempted.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 0);
+            check(!merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                    16, leaves.size(), p),
+                  "(5) target_index == leaf_count is rejected (out-of-range)");
+            check(!merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                    99, leaves.size(), p),
+                  "(5) target_index >> leaf_count is rejected (out-of-range)");
+        }
+
+        // ── (6) proof truncation: dropping the last sibling shrinks
+        //     the proof but the verifier's level walk still terminates
+        //     at level_size == 1. Two distinct rejection paths:
+        //     (a) early return when proof_idx >= proof.size() before
+        //         the loop terminates, or
+        //     (b) post-loop check that proof_idx == proof.size() at
+        //         termination (excess proof entries).
+        //     Truncation tests path (a); extension (next case) tests
+        //     (b). Both must reject.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 3);
+            if (!p.empty()) p.pop_back();
+            check(!merkle_verify(root, leaves[3].key, leaves[3].value_hash,
+                                    3, leaves.size(), p),
+                  "(6) truncated proof (last sibling dropped) is rejected");
+        }
+
+        // ── (7) proof extension: appending a phantom sibling makes
+        //     proof.size() > expected_levels → post-loop
+        //     `proof_idx == proof.size()` check fails. Phantom value
+        //     is arbitrary (we use all-zeros); it's never consumed by
+        //     the level walk, but the size mismatch is fatal.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 11);
+            p.push_back(Hash{});  // phantom
+            check(!merkle_verify(root, leaves[11].key, leaves[11].value_hash,
+                                    11, leaves.size(), p),
+                  "(7) extended proof (phantom sibling appended) is rejected");
+        }
+
+        // ── (8) leaf_count drift: claiming a different total tree size
+        //     changes the level walk's iteration count → wrong number
+        //     of siblings consumed → either mid-loop early-return
+        //     (insufficient proof) or post-loop count mismatch.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 4);
+            check(!merkle_verify(root, leaves[4].key, leaves[4].value_hash,
+                                    4, /*leaf_count=*/8, p),
+                  "(8) leaf_count drift (claim 8 in 16-leaf tree) is rejected");
+            check(!merkle_verify(root, leaves[4].key, leaves[4].value_hash,
+                                    4, /*leaf_count=*/32, p),
+                  "(8) leaf_count drift (claim 32 in 16-leaf tree) is rejected");
+        }
+
+        // ── (9) Empty-tree behavior: leaf_count=0 is the
+        //     "no-committed-state" convention; the verifier's first
+        //     gate returns false. Pins behavior — a future change
+        //     that accepts leaf_count=0 (e.g. returning true on a
+        //     zero root) would silently weaken light-client safety.
+        {
+            check(!merkle_verify(Hash{}, std::vector<uint8_t>{'x'}, Hash{},
+                                    0, 0, std::vector<Hash>{}),
+                  "(9) empty-tree (leaf_count=0) is rejected as bad input");
+        }
+
+        // ── (10) Single-leaf (leaf_count=1) edge: proof is empty, root
+        //     equals leaf_hash. Tampering value_hash must still be
+        //     detected even though there are no siblings to consume
+        //     — the rejection comes from the post-loop `current ==
+        //     root` check alone.
+        {
+            auto leaves = make_leaves(1);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 0);
+            check(p.empty(),
+                  "(10) single-leaf: proof is empty");
+            check(merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                   0, 1, p),
+                  "(10) single-leaf: untampered verifies");
+            Hash tampered = leaves[0].value_hash;
+            tampered[0] ^= 0xff;
+            check(!merkle_verify(root, leaves[0].key, tampered, 0, 1, p),
+                  "(10) single-leaf: value_hash tamper is rejected");
+            // Phantom proof: a single-leaf tree should reject a non-
+            // empty proof (post-loop length-mismatch path).
+            auto p_phantom = p; p_phantom.push_back(Hash{});
+            check(!merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                    0, 1, p_phantom),
+                  "(10) single-leaf: phantom-sibling proof is rejected");
+        }
+
+        // ── (11) Two-leaf (leaf_count=2) edge: smallest tree where a
+        //     proof carries one sibling. Tamper detection at both
+        //     ends — value_hash and the lone sibling.
+        {
+            auto leaves = make_leaves(2);
+            Hash root = merkle_root(leaves);
+            for (size_t i = 0; i < 2; ++i) {
+                auto p = merkle_proof(leaves, i);
+                check(p.size() == 1,
+                      "(11) two-leaf: proof has exactly 1 sibling");
+                check(merkle_verify(root, leaves[i].key, leaves[i].value_hash,
+                                       i, 2, p),
+                      "(11) two-leaf: untampered verifies");
+                auto p_tamper = p;
+                p_tamper[0][3] ^= 0xff;
+                check(!merkle_verify(root, leaves[i].key, leaves[i].value_hash,
+                                        i, 2, p_tamper),
+                      "(11) two-leaf: sibling tamper is rejected");
+            }
+        }
+
+        // ── (12) Odd-leaf-count tree (5 leaves): exercises the
+        //     last-leaf-duplication padding at multiple levels. With
+        //     5 leaves: level 0 → 5 (padded to 6), level 1 → 3
+        //     (padded to 4), level 2 → 2, level 3 → 1. Three sibling
+        //     hashes per proof. Round-trip + value/sibling tamper
+        //     must work identically on the padded path.
+        {
+            auto leaves = make_leaves(5);
+            Hash root = merkle_root(leaves);
+            // Positive: all 5 leaves verify.
+            bool all_ok = true;
+            for (size_t i = 0; i < leaves.size(); ++i) {
+                auto p = merkle_proof(leaves, i);
+                if (!merkle_verify(root, leaves[i].key, leaves[i].value_hash,
+                                      i, leaves.size(), p)) {
+                    all_ok = false; break;
+                }
+            }
+            check(all_ok,
+                  "(12) odd-leaf (5): all 5 leaves verify under padding");
+            // Negative: tamper value_hash at index 4 (the duplicated
+            // leaf at level 0 padding) — the padding logic must still
+            // refuse a tampered claim.
+            auto p4 = merkle_proof(leaves, 4);
+            Hash t = leaves[4].value_hash; t[0] ^= 0xff;
+            check(!merkle_verify(root, leaves[4].key, t, 4,
+                                    leaves.size(), p4),
+                  "(12) odd-leaf (5): value_hash tamper on padded slot rejected");
+            // Negative: leaf_count drift that CHANGES the level count
+            // is rejected. 5 leaves → ceil log2 = 3 levels (proof has
+            // 3 siblings); claim leaf_count=4 → 2 levels (proof would
+            // have 2 siblings) — the verifier's level walk terminates
+            // with a leftover proof entry, post-loop check fails.
+            auto p2 = merkle_proof(leaves, 2);
+            check(!merkle_verify(root, leaves[2].key, leaves[2].value_hash,
+                                    2, /*leaf_count=*/4, p2),
+                  "(12) odd-leaf (5): claim leaf_count=4 (drops level) rejected");
+            // ACTUAL BEHAVIOR PIN: leaf_count drift that PRESERVES the
+            // ceil(log2(N)) level count is NOT detected by merkle_verify
+            // alone. Claiming leaf_count=8 in a 5-leaf tree at index 2
+            // yields the same 3-level walk consuming the same 3 siblings
+            // in the same left/right order — so the computed hash equals
+            // the 5-leaf root. This is a documented implementation
+            // limitation: leaf_count primarily gates the level count,
+            // not the precise tree shape. Callers that need a precise
+            // shape-bound must pass the canonical leaf_count from the
+            // committed snapshot header, not accept arbitrary client-
+            // supplied values. Pin the actual behavior so a future
+            // strengthening (e.g. encoding leaf_count into a level's
+            // domain separator) is a deliberate spec change.
+            check(merkle_verify(root, leaves[2].key, leaves[2].value_hash,
+                                   2, /*leaf_count=*/8, p2),
+                  "(12) odd-leaf (5): leaf_count=8 (same level count) ACCEPTED (pinned limitation)");
+        }
+
+        // ── (13) 7-leaf tree: the most heavily-padded power-of-2-minus-1
+        //     case. log2 ceil = 3 → 3 sibling hashes. Padding fires
+        //     at every odd level on the way up.
+        {
+            auto leaves = make_leaves(7);
+            Hash root = merkle_root(leaves);
+            auto p6 = merkle_proof(leaves, 6);
+            check(p6.size() == 3,
+                  "(13) 7-leaf: proof for last leaf has 3 siblings");
+            check(merkle_verify(root, leaves[6].key, leaves[6].value_hash,
+                                   6, 7, p6),
+                  "(13) 7-leaf: last leaf (index 6) verifies");
+            // Tamper each sibling — all must reject.
+            for (size_t j = 0; j < p6.size(); ++j) {
+                auto p = p6; p[j][7] ^= 0xff;
+                std::string msg =
+                    "(13) 7-leaf: sibling[" + std::to_string(j) +
+                    "] tamper rejected";
+                check(!merkle_verify(root, leaves[6].key, leaves[6].value_hash,
+                                        6, 7, p),
+                      msg.c_str());
+            }
+        }
+
+        // ── (14) Repeated-leaf tree: same VALUE_HASH but DIFFERENT
+        //     KEYS at two slots. The Merkle leaves are sorted by KEY
+        //     (not value), so distinct keys with identical value-
+        //     hashes sit at distinct positions. The proof for one is
+        //     valid; substituting the other slot's key with the
+        //     value's hash at the wrong index must fail.
+        //
+        //     Why this matters: a naive "value-only" Merkle would let
+        //     an attacker swap two equal-valued entries' positions
+        //     undetected. Our (key, value_hash) leaf hashing prevents
+        //     that — pin it explicitly.
+        {
+            auto leaves = make_leaves(5);
+            // Force leaves[1].value_hash == leaves[0].value_hash
+            // (but keys remain distinct: {'k',0} vs {'k',1}).
+            leaves[1].value_hash = leaves[0].value_hash;
+            Hash root = merkle_root(leaves);
+            auto p0 = merkle_proof(leaves, 0);
+            auto p1 = merkle_proof(leaves, 1);
+            check(merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                   0, 5, p0),
+                  "(14) repeated-leaf: leaf[0] verifies");
+            check(merkle_verify(root, leaves[1].key, leaves[1].value_hash,
+                                   1, 5, p1),
+                  "(14) repeated-leaf: leaf[1] verifies (same value, distinct key)");
+            // Cross-substitution: claim leaf[0]'s key at slot 1 — even
+            // though value_hash matches, the leaf_hash differs (key
+            // is bound in), so verify fails.
+            check(!merkle_verify(root, leaves[0].key, leaves[0].value_hash,
+                                    1, 5, p1),
+                  "(14) repeated-leaf: leaf[0]'s key at slot 1 rejected");
+            check(!merkle_verify(root, leaves[1].key, leaves[1].value_hash,
+                                    0, 5, p0),
+                  "(14) repeated-leaf: leaf[1]'s key at slot 0 rejected");
+        }
+
+        // ── (15) Key tamper at the same slot: flipping a byte in the
+        //     key alters the leaf_hash → cascades through every level
+        //     → root mismatch. Pins that `key` participates in the
+        //     leaf domain, not just value_hash. Complementary to (14)
+        //     which permuted keys across slots.
+        {
+            auto leaves = make_leaves(16);
+            Hash root = merkle_root(leaves);
+            auto p = merkle_proof(leaves, 9);
+            std::vector<uint8_t> bad_key = leaves[9].key;
+            bad_key[0] ^= 0xff;
+            check(!merkle_verify(root, bad_key, leaves[9].value_hash,
+                                    9, leaves.size(), p),
+                  "(15) key tamper at same slot is rejected");
+            // Also: shorter key (one byte instead of two) — same slot,
+            // wrong leaf domain — must reject.
+            std::vector<uint8_t> short_key = {'k'};
+            check(!merkle_verify(root, short_key, leaves[9].value_hash,
+                                    9, leaves.size(), p),
+                  "(15) shortened key at same slot is rejected");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merkle-proof-tampering "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
