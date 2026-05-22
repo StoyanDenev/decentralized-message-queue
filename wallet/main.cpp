@@ -6401,6 +6401,454 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// determ-wallet cold-sign — Offline transaction signing for the
+// air-gapped cold-wallet workflow.
+//
+// Workflow (3 machines / 2 transfers):
+//   1. HOT machine prepares an unsigned tx JSON (hand-crafted, or via an
+//      RPC helper that emits {type, from, to, amount, fee, nonce,
+//      payload, sig:""} — every field bound into signing_bytes is
+//      already populated; the `sig` slot is intentionally empty).
+//   2. Operator transfers that JSON to an AIR-GAPPED cold machine (USB,
+//      QR code, sneakernet — never over a network).
+//   3. Cold machine runs:
+//        determ-wallet cold-sign --tx-json <unsigned.json>
+//                                --priv-keyfile <keyfile.json>
+//                                --out <signed.json>
+//      The private key never leaves the cold machine; the signed JSON
+//      goes back to the hot machine.
+//   4. Hot machine submits via `determ submit-tx --in signed.json` or
+//      the submit_tx RPC.
+//
+// Distinction from tx-sign-verify (Round 17):
+//   * tx-sign-verify VERIFIES a sig — read-only diagnostic, no signing,
+//     no private material on the box running it.
+//   * cold-sign SIGNS — produces a brand-new `sig` field. Refuses to
+//     overwrite an existing signature, refuses to sign on behalf of a
+//     keyfile whose address doesn't match tx.from (defense against
+//     accidentally signing someone else's tx). No RPC, no daemon, no
+//     network — strictly file-in / file-out.
+//
+// Why a dedicated CLI rather than reusing tx-sign-verify in reverse:
+//   * Operational guard rails — sign-and-verify-in-one-shot makes sense
+//     on a hot test machine; cold-wallet flows demand a refusal-heavy
+//     CLI that errors loudly before touching the keyfile.
+//   * Output discipline — the signed envelope must be byte-stable so
+//     the hot machine's submit_tx serializer doesn't re-canonicalize
+//     it; we preserve every input field verbatim and only ADD `sig`
+//     (and `hash` if missing — the chain recomputes anyway, but
+//     emitting it for round-trip parity is the standard shape).
+//   * Stdout refusal by default — a signed tx written to a terminal
+//     scrollback / pipe / log buffer is an exfil hazard. We force
+//     --out by default; --allow-stdout is an explicit operator
+//     opt-in.
+//
+// CLI:
+//   --tx-json <file>:      REQUIRED. Path to the unsigned tx JSON. Same
+//                          shape `Transaction::to_json` emits, with
+//                          `sig` absent OR empty string OR a 128-char
+//                          all-zero hex string. Any other non-empty
+//                          `sig` triggers tx_already_signed refusal.
+//                          `hash` is optional on input (we ignore it
+//                          and recompute).
+//   --priv-keyfile <file>: REQUIRED. Single-account JSON {address,
+//                          privkey_hex} (the shape `account-export`
+//                          emits, same as every other wallet command's
+//                          --priv-keyfile).
+//   --out <file>:          REQUIRED unless --allow-stdout. Output path
+//                          for the signed JSON. Refuses to overwrite
+//                          unless --force is set; written with 0600
+//                          permissions (POSIX chmod; on Windows the
+//                          read/write bits are a no-op — ACL inherits
+//                          from parent).
+//   --allow-stdout:        Permit emitting the signed JSON to stdout
+//                          instead of a file. Default off as an
+//                          exfiltration guard rail.
+//   --force:               Overwrite an existing --out file.
+//   --json:                Accepted for parity with sibling commands;
+//                          the status line is always one-line JSON
+//                          regardless.
+//
+// Refusals (exit 1 with a structured one-line JSON error doc on stdout
+// AND a human diagnostic on stderr):
+//   tx_already_signed         — input tx already carries a non-empty,
+//                               non-all-zero `sig`. We never overwrite
+//                               an existing sig: the operator could be
+//                               trying to double-sign, replay-sign, or
+//                               mistakenly sign the wrong tx version.
+//   keyfile_address_mismatch  — keyfile.address != tx.from. Prevents
+//                               accidentally signing on the wrong
+//                               account; the keyfile is correct but
+//                               it's the wrong keyfile for THIS tx.
+//   output_exists             — --out file exists and --force was not
+//                               supplied. Refuses to overwrite.
+//
+// Success output (stdout, one-line JSON):
+//   {"status":"ok","tx_hash_hex":"<64 hex>","out":"<path>"}
+// (When --allow-stdout is supplied without --out, the signed JSON is
+// emitted to stdout as a single line, followed by the status line on
+// stderr so the two streams are unambiguous.)
+//
+// Exit codes:
+//   0  signed envelope emitted
+//   1  args / parse / IO / refusal / libsodium error
+int cmd_cold_sign(int argc, char** argv) {
+    std::string tx_path, priv_keyfile, out_path;
+    bool allow_stdout = false;
+    bool force        = false;
+    bool json_out     = false;  // accepted but currently always-on
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--tx-json"      && i + 1 < argc) tx_path      = argv[++i];
+        else if (a == "--priv-keyfile" && i + 1 < argc) priv_keyfile = argv[++i];
+        else if (a == "--out"          && i + 1 < argc) out_path     = argv[++i];
+        else if (a == "--allow-stdout")                 allow_stdout = true;
+        else if (a == "--force")                        force        = true;
+        else if (a == "--json")                         json_out     = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet cold-sign --tx-json <file> "
+                "--priv-keyfile <file> (--out <file> | --allow-stdout) "
+                "[--force] [--json]\n"
+                "\n"
+                "  Offline transaction signing for the air-gapped cold-\n"
+                "  wallet workflow. Reads an unsigned tx JSON, signs it\n"
+                "  with the keyfile's Ed25519 priv_seed using the chain's\n"
+                "  canonical signing_bytes scheme, and writes the signed\n"
+                "  envelope to --out (or stdout with --allow-stdout).\n"
+                "  No network, no RPC, no daemon — strictly file-in /\n"
+                "  file-out for use on an air-gapped machine.\n"
+                "\n"
+                "  Refusals (exit 1, one-line JSON error doc):\n"
+                "    tx_already_signed         — input tx has a non-empty sig\n"
+                "    keyfile_address_mismatch  — keyfile.address != tx.from\n"
+                "    output_exists             — --out file exists; pass --force\n";
+            return 0;
+        }
+        else {
+            std::cerr << "cold-sign: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet cold-sign --tx-json <file> "
+                         "--priv-keyfile <file> (--out <file> | --allow-stdout) "
+                         "[--force] [--json]\n";
+            return 1;
+        }
+    }
+    (void)json_out;
+    if (tx_path.empty() || priv_keyfile.empty()) {
+        std::cerr << "Usage: determ-wallet cold-sign --tx-json <file> "
+                     "--priv-keyfile <file> (--out <file> | --allow-stdout) "
+                     "[--force] [--json]\n";
+        return 1;
+    }
+    if (out_path.empty() && !allow_stdout) {
+        std::cerr << "cold-sign: --out is required unless --allow-stdout is "
+                     "supplied (refusing to write secret-derived material to "
+                     "stdout by default; pass --allow-stdout to override)\n";
+        return 1;
+    }
+
+    // ── --out preconditions (check BEFORE loading the priv keyfile so a
+    //     misconfigured operator doesn't read secret material before
+    //     hitting the refusal) ────────────────────────────────────────
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "cold-sign: --out parent directory does not exist: "
+                      << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            nlohmann::json err_doc = {
+                {"status", "error"},
+                {"reason", "output_exists"},
+                {"out",    out_path},
+            };
+            std::cout << err_doc.dump() << "\n";
+            std::cerr << "cold-sign: --out file already exists: " << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Load + parse the unsigned tx JSON ─────────────────────────────
+    // Same JSON shape Transaction::to_json emits, but the `sig` slot is
+    // intentionally absent / empty / all-zero. `hash` is optional —
+    // if present we ignore it and recompute (the chain recomputes from
+    // signing_bytes on submit anyway; including it in the output is for
+    // round-trip parity).
+    std::ifstream tx_f(tx_path);
+    if (!tx_f) {
+        std::cerr << "cold-sign: cannot open --tx-json file: " << tx_path << "\n";
+        return 1;
+    }
+    nlohmann::json j;
+    try { tx_f >> j; }
+    catch (std::exception& e) {
+        std::cerr << "cold-sign: --tx-json file is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!j.is_object()) {
+        std::cerr << "cold-sign: --tx-json must be a JSON object\n";
+        return 1;
+    }
+
+    // Required fields. Mirrors src/chain/block.cpp Transaction::from_json
+    // schema — type/from/to/amount/nonce/payload required, fee optional
+    // (default 0), sig optional (must be absent or empty).
+    int      tx_type;
+    std::string from_str, to_str, payload_hex;
+    uint64_t amount, fee, nonce;
+    try {
+        if (!j.contains("type")    || !j["type"].is_number())    throw std::runtime_error("missing/wrong-typed 'type' (expected integer)");
+        if (!j.contains("from")    || !j["from"].is_string())    throw std::runtime_error("missing/wrong-typed 'from' (expected string)");
+        if (!j.contains("to")      || !j["to"].is_string())      throw std::runtime_error("missing/wrong-typed 'to' (expected string)");
+        if (!j.contains("amount")  || !j["amount"].is_number())  throw std::runtime_error("missing/wrong-typed 'amount' (expected integer)");
+        if (!j.contains("nonce")   || !j["nonce"].is_number())   throw std::runtime_error("missing/wrong-typed 'nonce' (expected integer)");
+        if (!j.contains("payload") || !j["payload"].is_string()) throw std::runtime_error("missing/wrong-typed 'payload' (expected hex string)");
+        tx_type     = j["type"].get<int>();
+        from_str    = j["from"].get<std::string>();
+        to_str      = j["to"].get<std::string>();
+        amount      = j["amount"].get<uint64_t>();
+        fee         = j.value("fee", uint64_t{0});
+        nonce       = j["nonce"].get<uint64_t>();
+        payload_hex = j["payload"].get<std::string>();
+    } catch (std::exception& e) {
+        std::cerr << "cold-sign: --tx-json shape error: " << e.what() << "\n";
+        return 1;
+    }
+    if (tx_type < 0 || tx_type > 255) {
+        std::cerr << "cold-sign: 'type' value " << tx_type
+                  << " out of range (expected 0..255 for u8 wire encoding)\n";
+        return 1;
+    }
+
+    // ── Refusal: tx_already_signed ──────────────────────────────────────
+    // A non-empty, non-all-zero `sig` field means the tx is already
+    // signed. We never overwrite — could be a double-sign mistake, a
+    // replay against a different tx body, or signing the wrong version.
+    // Treat empty string and all-zero 128-hex as "unsigned slot" (some
+    // emitters preserve the field shape with a placeholder).
+    if (j.contains("sig") && j["sig"].is_string()) {
+        std::string existing_sig = j["sig"].get<std::string>();
+        bool all_zero_or_empty = existing_sig.empty();
+        if (!all_zero_or_empty && existing_sig.size() == 128) {
+            all_zero_or_empty = true;
+            for (char c : existing_sig) {
+                if (c != '0') { all_zero_or_empty = false; break; }
+            }
+        }
+        if (!all_zero_or_empty) {
+            nlohmann::json err_doc = {
+                {"status", "error"},
+                {"reason", "tx_already_signed"},
+            };
+            std::cout << err_doc.dump() << "\n";
+            std::cerr << "cold-sign: input tx already carries a non-empty "
+                         "'sig' field — refusing to overwrite\n";
+            return 1;
+        }
+    }
+
+    // Decode payload hex now (so a malformed hex string fails before we
+    // touch the keyfile).
+    std::vector<uint8_t> payload_bytes;
+    try { payload_bytes = from_hex(payload_hex); }
+    catch (std::exception& e) {
+        std::cerr << "cold-sign: invalid 'payload' hex: " << e.what() << "\n";
+        return 1;
+    }
+
+    // ── Load the priv keyfile ──────────────────────────────────────────
+    // Same single-account JSON shape account-export emits.
+    std::ifstream kf(priv_keyfile);
+    if (!kf) {
+        std::cerr << "cold-sign: cannot open --priv-keyfile: "
+                  << priv_keyfile << "\n";
+        return 1;
+    }
+    nlohmann::json acc_doc;
+    try { kf >> acc_doc; }
+    catch (std::exception& e) {
+        std::cerr << "cold-sign: --priv-keyfile is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!acc_doc.is_object()
+        || !acc_doc.contains("address")
+        || !acc_doc["address"].is_string()
+        || !acc_doc.contains("privkey_hex")
+        || !acc_doc["privkey_hex"].is_string()) {
+        std::cerr << "cold-sign: --priv-keyfile must be a JSON object with "
+                     "string fields 'address' and 'privkey_hex' "
+                     "(account-export shape)\n";
+        return 1;
+    }
+    std::string keyfile_address = acc_doc["address"].get<std::string>();
+    std::string priv_hex        = acc_doc["privkey_hex"].get<std::string>();
+    if (priv_hex.size() != 64) {
+        std::cerr << "cold-sign: 'privkey_hex' must be 64 hex chars "
+                     "(32-byte Ed25519 priv_seed); got length "
+                  << priv_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_seed;
+    try { priv_seed = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "cold-sign: 'privkey_hex' is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (priv_seed.size() != 32) {
+        std::cerr << "cold-sign: 'privkey_hex' decoded length must be 32; got "
+                  << priv_seed.size() << "\n";
+        return 1;
+    }
+
+    // ── Refusal: keyfile_address_mismatch ──────────────────────────────
+    // tx.from must equal keyfile.address. Defense against accidentally
+    // signing a tx that belongs to a different account — the cold
+    // machine often holds multiple keyfiles and the operator must point
+    // at the right one. We compare verbatim (no case normalization)
+    // because the chain's anon-address canonical form is lowercase per
+    // S-028; either side mis-casing it is a real bug the operator
+    // should fix at the source.
+    if (from_str != keyfile_address) {
+        nlohmann::json err_doc = {
+            {"status",          "error"},
+            {"reason",          "keyfile_address_mismatch"},
+            {"tx_from",         from_str},
+            {"keyfile_address", keyfile_address},
+        };
+        std::cout << err_doc.dump() << "\n";
+        std::cerr << "cold-sign: keyfile.address does not match tx.from "
+                     "(keyfile=" << keyfile_address
+                  << " tx.from=" << from_str << ")\n";
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        return 1;
+    }
+
+    // ── Reconstruct signing_bytes — byte-identical to chain's
+    //    Transaction::signing_bytes ────────────────────────────────────
+    // Same layout `cmd_tx_sign_verify` reconstructs above; keep this
+    // copy in sync with that one rather than DRY'ing into a helper —
+    // a one-line drift here would silently produce sigs that the chain
+    // rejects, and an inline encoding is easier to review than a
+    // helper call.
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload_bytes.size());
+    sb.push_back(static_cast<uint8_t>(tx_type));
+    sb.insert(sb.end(), from_str.begin(), from_str.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+    sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
+
+    // SHA-256(signing_bytes) — both the chain's Transaction::compute_hash
+    // result AND what we emit in the success status line as tx_hash_hex.
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+
+    // ── Ed25519 sign over signing_bytes ─────────────────────────────────
+    if (!primitives::init_libsodium()) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        std::cerr << "cold-sign: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "cold-sign: crypto_sign_seed_keypair failed\n";
+        return 1;
+    }
+    // priv_seed not needed past keypair derivation; scrub.
+    sodium_memzero(priv_seed.data(), priv_seed.size());
+
+    std::array<uint8_t, crypto_sign_BYTES> sig{};
+    unsigned long long sig_len = 0;
+    if (crypto_sign_detached(sig.data(), &sig_len,
+                              sb.data(), sb.size(),
+                              sk.data()) != 0) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "cold-sign: crypto_sign_detached failed\n";
+        return 1;
+    }
+    sodium_memzero(sk.data(), sk.size());
+    if (sig_len != crypto_sign_BYTES) {
+        std::cerr << "cold-sign: unexpected sig length " << sig_len << "\n";
+        return 1;
+    }
+
+    // ── Build signed envelope JSON ─────────────────────────────────────
+    // Preserve every input field verbatim (so the hot machine sees the
+    // exact body it built, minus the empty-sig slot) and ADD `sig` +
+    // `hash`. We deliberately do NOT add a fee field if the input
+    // omitted it — `from_json` defaults to 0 and emitting only what
+    // the operator put in keeps round-trip diffs clean.
+    nlohmann::json signed_doc = j;  // start from input; preserves unknown fields
+    signed_doc["sig"]  = to_hex(sig);
+    signed_doc["hash"] = to_hex(sb_sha);
+
+    std::string signed_text = signed_doc.dump();
+
+    if (out_path.empty()) {
+        // --allow-stdout path. Emit the signed JSON on stdout, then
+        // emit the status line on stderr so the two streams are
+        // unambiguous (a downstream pipe captures the envelope; the
+        // status line is for the human / wrapper script).
+        std::cout << signed_text << "\n";
+        nlohmann::json status = {
+            {"status",      "ok"},
+            {"tx_hash_hex", to_hex(sb_sha)},
+            {"out",         "<stdout>"},
+        };
+        std::cerr << status.dump() << "\n";
+        return 0;
+    }
+
+    // --out path. Write the signed JSON file, then set 0600 perms.
+    {
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "cold-sign: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << signed_text << "\n";
+        if (!of) {
+            std::cerr << "cold-sign: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+    // 0600 — owner-only read/write. POSIX semantic; on Windows the
+    // read/write bits are a no-op (NTFS ACL inherits from parent), same
+    // convention every other wallet command that writes secret-derived
+    // output follows (account-export, keyfile-create, etc.).
+    std::error_code perm_ec;
+    std::filesystem::permissions(
+        out_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        perm_ec);
+    (void)perm_ec;
+
+    nlohmann::json status = {
+        {"status",      "ok"},
+        {"tx_hash_hex", to_hex(sb_sha)},
+        {"out",         out_path},
+    };
+    std::cout << status.dump() << "\n";
+    return 0;
+}
+
 // ── sign-arbitrary / verify-arbitrary ────────────────────────────────────────
 //
 // Paired commands for OFF-CHAIN, arbitrary-message Ed25519 signing using a
@@ -7516,6 +7964,25 @@ void print_usage() {
         "                                             invalid (auth-style alert), 1 args/parse/\n"
         "                                             IO error. Output: {valid, tx_hash_hex,\n"
         "                                             computed_signing_bytes_sha256}.\n"
+        "  cold-sign --tx-json <file> --priv-keyfile <file>\n"
+        "            (--out <file> | --allow-stdout)\n"
+        "            [--force] [--json]\n"
+        "                                             OFFLINE transaction signing for the air-\n"
+        "                                             gapped cold-wallet workflow. Reads an\n"
+        "                                             unsigned tx JSON (Transaction::to_json\n"
+        "                                             shape with sig absent/empty/all-zero),\n"
+        "                                             signs with the keyfile's Ed25519 priv_seed\n"
+        "                                             using the chain's canonical signing_bytes,\n"
+        "                                             writes the signed envelope to --out (0600\n"
+        "                                             on POSIX). No network, no RPC, no daemon —\n"
+        "                                             pure file-in / file-out. Refuses to (a)\n"
+        "                                             overwrite an existing 'sig' field, (b) sign\n"
+        "                                             when keyfile.address != tx.from, (c)\n"
+        "                                             overwrite --out without --force. --allow-\n"
+        "                                             stdout emits to stdout (off by default —\n"
+        "                                             exfil guard). Output (stdout): {status:ok,\n"
+        "                                             tx_hash_hex, out}. Refusal exits emit a\n"
+        "                                             {status:error,reason:...} JSON on stdout.\n"
         "  sign-arbitrary --priv-keyfile <path>\n"
         "                 (--msg <str> | --msg-file <path>)\n"
         "                 [--out <file>] [--detached | --bundle]\n"
@@ -7608,6 +8075,7 @@ int main(int argc, char** argv) {
     if (cmd == "encrypt-message") return cmd_encrypt_message(argc - 2, argv + 2);
     if (cmd == "decrypt-message") return cmd_decrypt_message(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
+    if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
