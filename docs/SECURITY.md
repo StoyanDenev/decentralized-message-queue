@@ -1198,6 +1198,24 @@ D2 is still "partial" because the gate is apply-layer (rejection after some peer
 
 ---
 
+### S-040 — `merkle_verify` does not bind leaf_count — 🟠 Caller-trust invariant (Low/Op)
+
+**Severity:** Operational (Low-Medium) • **Status:** 🟠 Registered, lock-in test shipped (scenario #8 of `determ test-merkle-proof-tampering`), structural fix deferred (wire-compat-break) • **Source:** R21A5 audit while writing `test-merkle-proof-tampering`
+
+**Pre-fix description.** `crypto::merkle_verify` accepts `leaf_count` as an input parameter but does NOT bind it into the leaf or inner hash. Two distinct `(target_index, leaf_count)` pairs that produce the same walk-shape (same `ceil(log2(N))` level count + same per-level parity given target_index) share an identical proof structure. Concrete failure case pinned by `test-merkle-proof-tampering` scenario #8: claiming `leaf_count=8` for a 5-leaf tree at index 2 verifies as TRUE because both yield identical 3-level walks consuming the same 3 siblings in the same left/right order.
+
+**Why this is structurally a caller-trust invariant, not a hash-binding flaw.** The Merkle scheme commits to leaves + tree shape via `merkle_root`; the same shape with different leaves produces different roots. The gap is that `leaf_count` is metadata passed to verify, not data bound into the hash chain. A verifier-with-trusted-leaf_count is sound (the on-chain `state_proof` RPC returns leaf_count from canonical state — so a light-client verifying against a single trusted daemon is safe). A verifier with leaf_count from an untrusted source AND proof from another untrusted source can be tricked into accepting a proof against a different tree shape.
+
+**Adversary model.** A v2.2 light-client fetches: (1) a state_root from a trusted committee-signed header; (2) a state-proof from an untrusted CDN / cache / relay; (3) a leaf_count from the same untrusted source. The attacker craft a proof + leaf_count pair that share walk-shape with the canonical (leaf_count, target_index) but claim a different (key, value_hash). T-040 holds against the proof-only attack (the canonical leaves are fixed; tamper detected at the leaf hash), but the attacker can pick leaf_count to make THEIR fake leaves walk-shape match.
+
+**Mitigation paths (all wire-compat-break).** (1) Domain-separate leaf_count into the leaf hash: `leaf_hash = SHA256("DETERM/MERKLE-LEAF-v2" || leaf_count_LE || key || value_hash)`. (2) Domain-separate into the inner hash: every level binds leaf_count. (3) Carry explicit per-level "is_pad" bits in the proof so the verifier can derive leaf_count + cross-check. Paths (1) + (2) alter every existing chain's state_root — coordinated migration with flag-day height required. Path (3) preserves root values but expands proof wire format — requires v2.2 light-client protocol bump.
+
+**Mitigation in place (operator-side).** `include/determ/crypto/merkle.hpp` documents the S-040 caller-trust invariant directly above the `merkle_verify` declaration. `determ test-merkle-proof-tampering` scenario #8 pins the current behavior as a passing assertion + multi-paragraph explanatory comment. Light-client integrators are documented to source `leaf_count` from the same committee-signed envelope that pins `state_root`.
+
+**Tracking.** Forward-dev candidate: path (1) or (3) shipped under a v2.x feature gate; estimated 2-3 days (~30 LOC impl + protocol-version bump + docs).
+
+---
+
 ### S-021 through S-029 (quick-fix summary)
 
 | ID | Title | Quick fix |

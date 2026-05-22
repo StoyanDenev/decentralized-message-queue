@@ -60,6 +60,27 @@ std::vector<Hash> merkle_proof(const std::vector<MerkleLeaf>& leaves,
 // the (key, value_hash) at target_index in a tree of `leaf_count`
 // total leaves produces `root` when combined with the proof's sibling
 // hashes.
+//
+// S-040 caller-trust invariant: `leaf_count` is NOT bound into the leaf
+// or inner hash. Two distinct (target_index, leaf_count) pairs that
+// produce the same walk-shape (same `ceil(log2(N))` level count + same
+// per-level parity) will share the same proof structure. A caller that
+// fetches `leaf_count` from an untrusted source and the proof from
+// another untrusted source can be fooled. Concrete failure case pinned
+// by `determ test-merkle-proof-tampering` scenario #8: claiming
+// `leaf_count=8` for a 5-leaf tree at index 2 verifies as TRUE because
+// both yield identical 3-level walks consuming the same 3 siblings.
+//
+// MITIGATION (operator-side): always source `leaf_count` from the
+// committed snapshot header (state-proof RPC returns it from the
+// daemon's canonical state — so callers verifying against a single
+// trusted daemon are safe). A light-client fetching the proof from
+// one untrusted source and the leaf_count from another MUST cross-
+// verify both against an anchor (e.g., a committee-signed state_root
+// + an attestation that includes leaf_count). See SECURITY.md §S-040
+// for the threat model + structural fix path (domain-separate
+// `leaf_count` into the leaf hash; breaks v1 wire compat — tracked
+// for v2.x).
 bool merkle_verify(const Hash& root,
                      const std::vector<uint8_t>& key,
                      const Hash& value_hash,
