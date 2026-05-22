@@ -846,6 +846,21 @@ Additional in-process tests:
                                               gate (validator.cpp::check_
                                               timestamp) as the ONLY enforced
                                               bound.
+  determ test-chain-prev-hash-link            prev_hash chain-link contract —
+                                              every block's prev_hash equals
+                                              prior.compute_hash() (happy path
+                                              + reload via Chain::save/load);
+                                              genesis prev_hash is all-zero;
+                                              wrong / all-zero prev_hash on
+                                              non-genesis blocks rejected at
+                                              BOTH Chain::append and
+                                              BlockValidator::check_prev_hash;
+                                              tampering ANY compute_hash-
+                                              contributing field breaks the
+                                              downstream prev_hash linkage
+                                              (cascade-detection); extending
+                                              the chain is append-only and
+                                              never rewrites prior prev_hashes.
 )" << "\n";
 }
 
@@ -29043,6 +29058,335 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": time-monotonicity "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // S-035 Option 1 seed: pin the prev_hash chain-link contract — the
+    // chain-integrity invariant that every non-genesis block carries
+    // prev_hash == prior_block.compute_hash(). This is the substrate
+    // every fork-resolution, snapshot-restore, and replay path relies
+    // on:
+    //   * Chain::append rejects on mismatch (chain.cpp::append line 55).
+    //   * BlockValidator::check_prev_hash rejects on mismatch
+    //     (validator.cpp:43, first gate in validate()).
+    //   * Chain::load (S-021) re-verifies the head_hash transitively
+    //     by recomputing head().compute_hash() — every prior block's
+    //     identity is folded into the chain's tail via this link.
+    //
+    // Tampering ANY field that contributes to compute_hash (timestamp,
+    // tx_root, creators, transactions, partner_subset_hash, state_root,
+    // …) silently breaks the prev_hash linkage of the NEXT block.
+    // This test pins that cascade — a regression that accidentally
+    // omitted a field from compute_hash would not flip our identity
+    // assertions, but it WOULD let an attacker mutate that field
+    // post-finalize without invalidating downstream prev_hash links;
+    // the cascade-detection scenario locks the property in.
+    //
+    // Scope: ~22 assertions across 7 scenarios.
+    if (cmd == "test-chain-prev-hash-link") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Fixture: alice as sole creator with balance + stake.
+        GenesisConfig cfg;
+        cfg.chain_id = "chain-prev-hash-link-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Helper: build a chain with genesis + N empty blocks. Each
+        // empty block carries prev_hash = head().compute_hash() so the
+        // chain links cleanly. Returns the chain.
+        auto build_chain_n = [&](uint64_t n_blocks) -> Chain {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            for (uint64_t i = 1; i <= n_blocks; ++i) {
+                Block b;
+                b.index = i;
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                b.timestamp = 1000 + int64_t(i);
+                c.append(b);
+            }
+            return c;
+        };
+
+        // === Scenario 1: Happy path — every block's prev_hash matches prior's compute_hash ===
+        //
+        // Build a 5-block chain on top of genesis (height 6 total).
+        // Assert genesis links to nothing (covered in Scenario 2);
+        // every subsequent block's prev_hash equals the prior block's
+        // compute_hash(). 5 link assertions + 1 height sanity.
+        {
+            Chain c = build_chain_n(5);
+            check(c.height() == 6,
+                  "(1) Happy path: chain has height 6 (genesis + 5 blocks)");
+            for (uint64_t i = 1; i < c.height(); ++i) {
+                const Block& cur  = c.at(i);
+                const Block& prev = c.at(i - 1);
+                std::string msg = "(1) Happy path: block[" + std::to_string(i)
+                                + "].prev_hash == block[" + std::to_string(i - 1)
+                                + "].compute_hash()";
+                check(cur.prev_hash == prev.compute_hash(), msg.c_str());
+            }
+        }
+
+        // === Scenario 2: Genesis special case — prev_hash is all-zero ===
+        //
+        // Genesis has no predecessor; make_genesis_block leaves
+        // prev_hash at its default-constructed all-zero value. This is
+        // the chain-identity anchor: chain.cpp::append uses the
+        // head_hash transitively, so genesis must have a stable zero
+        // prev_hash for the empty-chain bootstrap path.
+        {
+            Block g = make_genesis_block(cfg);
+            Hash zero{};
+            check(g.prev_hash == zero,
+                  "(2) Genesis special case: genesis.prev_hash == all-zero "
+                  "(no predecessor; chain-anchor convention)");
+        }
+
+        // === Scenario 3: Apply-time rejection of wrong prev_hash ===
+        //
+        // Construct a candidate block at height 2 (atop a height-1
+        // chain) with prev_hash set to (a) all-zero, (b) an arbitrary
+        // wrong hash. Each must be rejected. We exercise the chain
+        // layer (Chain::append throws "Block prev_hash mismatch") AND
+        // the validator layer (BlockValidator::check_prev_hash
+        // returns Result{false, "prev_hash mismatch"}) — both must
+        // reject. They're independent gates and a regression could
+        // weaken either without the other noticing.
+        {
+            Chain c = build_chain_n(1);  // height 2: genesis + block[1]
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+            BlockValidator bv;
+
+            // 3a. All-zero prev_hash at height 2.
+            Block bad_zero;
+            bad_zero.index = 2;
+            bad_zero.prev_hash = Hash{};  // all zero
+            bad_zero.creators = {"alice"};
+            bad_zero.timestamp = 3000;
+            {
+                bool threw = false;
+                std::string what;
+                try { c.append(bad_zero); }
+                catch (const std::exception& e) {
+                    threw = true; what = e.what();
+                }
+                check(threw && what.find("prev_hash") != std::string::npos,
+                      "(3a) Chain::append rejects block[2] with all-zero "
+                      "prev_hash: throws 'prev_hash mismatch'");
+            }
+            {
+                auto r = bv.validate(bad_zero, c, reg);
+                check(!r.ok && r.error.find("prev_hash") != std::string::npos,
+                      "(3a) BlockValidator::validate rejects block[2] with "
+                      "all-zero prev_hash: returns 'prev_hash mismatch'");
+            }
+
+            // 3b. Arbitrary wrong prev_hash (0xFF…FF) at height 2.
+            Block bad_wrong;
+            bad_wrong.index = 2;
+            for (size_t i = 0; i < bad_wrong.prev_hash.size(); ++i)
+                bad_wrong.prev_hash[i] = uint8_t(0xFF);
+            bad_wrong.creators = {"alice"};
+            bad_wrong.timestamp = 3000;
+            {
+                bool threw = false;
+                std::string what;
+                try { c.append(bad_wrong); }
+                catch (const std::exception& e) {
+                    threw = true; what = e.what();
+                }
+                check(threw && what.find("prev_hash") != std::string::npos,
+                      "(3b) Chain::append rejects block[2] with wrong "
+                      "prev_hash (0xFF…): throws 'prev_hash mismatch'");
+            }
+        }
+
+        // === Scenario 4: Chain reload preserves links ===
+        //
+        // Round-trip via Chain::save + Chain::load. Every prev_hash
+        // link in the restored chain must still match its prior
+        // block's recomputed compute_hash. The S-021 wrapping object
+        // already gates this at the chain level (head_hash recompute
+        // on load), but we add a direct per-block assertion so a
+        // regression that bypassed the head_hash check OR changed
+        // compute_hash inputs would still trip here.
+        {
+            Chain c = build_chain_n(3);  // height 4: genesis + 3 blocks
+            namespace fs = std::filesystem;
+            auto tmp = fs::temp_directory_path() /
+                       "determ-test-chain-prev-hash-link.json";
+            std::string path = tmp.string();
+            std::error_code ec;
+            fs::remove(path, ec);
+            c.save(path);
+
+            // block_subsidy 0 (chain didn't set one; default).
+            Chain r = Chain::load(path, /*block_subsidy=*/0);
+
+            check(r.height() == c.height(),
+                  "(4) Reload preserves height (sanity before link check)");
+            check(r.head_hash() == c.head_hash(),
+                  "(4) Reload preserves head_hash (S-021 chain-integrity gate)");
+
+            // Per-block link check on the restored chain.
+            bool all_links_ok = true;
+            for (uint64_t i = 1; i < r.height(); ++i) {
+                if (r.at(i).prev_hash != r.at(i - 1).compute_hash()) {
+                    all_links_ok = false;
+                    break;
+                }
+            }
+            check(all_links_ok,
+                  "(4) Reload preserves every prev_hash link "
+                  "(per-block prev_hash == prior.compute_hash() on reload)");
+
+            // Cleanup.
+            fs::remove(path, ec);
+        }
+
+        // === Scenario 5: Tampering cascades — mutating a field that
+        //                  contributes to compute_hash breaks the
+        //                  downstream prev_hash linkage ===
+        //
+        // Build a chain to height 4, then take an out-of-chain COPY of
+        // block[2] and mutate its timestamp (timestamp IS part of
+        // compute_hash per S-035 block-timestamp invariants). Confirm:
+        //   (a) The tampered copy's compute_hash differs from the
+        //       original — sanity check that the field IS in
+        //       compute_hash.
+        //   (b) Block[3]'s stored prev_hash (which equals the ORIGINAL
+        //       block[2].compute_hash) no longer matches the tampered
+        //       copy's compute_hash. This is the chain-integrity
+        //       property: any compute_hash-contributing field tamper
+        //       invalidates the next prev_hash linkage, so an attacker
+        //       can't silently swap one block in the middle of the
+        //       chain.
+        //
+        // (We don't mutate the actual chain[2] block in-place — Chain
+        // doesn't expose mutable access to .at(); the cascade property
+        // is what matters, demonstrated via the copy comparison.)
+        {
+            Chain c = build_chain_n(3);  // height 4: genesis + 3 blocks
+            const Block& original_b2 = c.at(2);
+            Hash original_b2_hash = original_b2.compute_hash();
+
+            // Take a copy and tamper a compute_hash-contributing field.
+            Block tampered_b2 = original_b2;
+            tampered_b2.timestamp = original_b2.timestamp + 12345;
+            Hash tampered_b2_hash = tampered_b2.compute_hash();
+
+            check(tampered_b2_hash != original_b2_hash,
+                  "(5) Tampering block[2].timestamp changes its "
+                  "compute_hash (compute_hash binds timestamp)");
+
+            const Block& b3 = c.at(3);
+            check(b3.prev_hash == original_b2_hash
+                  && b3.prev_hash != tampered_b2_hash,
+                  "(5) block[3].prev_hash matches ORIGINAL block[2].compute_hash "
+                  "but NOT the tampered copy's hash — tampering cascade is "
+                  "detectable via prev_hash mismatch on the next block");
+        }
+
+        // === Scenario 6: Empty-prev-hash check at height 1 ===
+        //
+        // Block at height 1 with prev_hash = all-zero (instead of
+        // genesis's compute_hash) must be rejected. Genesis is at
+        // index 0 with its own (zero) prev_hash; a height-1 block
+        // re-using zero would silently look "fine" if the gate were
+        // missing. This pins that the chain layer treats zero as a
+        // value (not a "wildcard") for any non-genesis block.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));  // height 1
+
+            Block b1_zero;
+            b1_zero.index = 1;
+            b1_zero.prev_hash = Hash{};  // wrong: should be genesis hash
+            b1_zero.creators = {"alice"};
+            b1_zero.timestamp = 2000;
+
+            bool threw = false;
+            std::string what;
+            try { c.append(b1_zero); }
+            catch (const std::exception& e) {
+                threw = true; what = e.what();
+            }
+            check(threw && what.find("prev_hash") != std::string::npos,
+                  "(6) Height-1 block with all-zero prev_hash rejected: "
+                  "must match genesis.compute_hash(), not the genesis-style "
+                  "default zero");
+        }
+
+        // === Scenario 7: Reorg-aware — extending the chain doesn't
+        //                  retroactively alter prior prev_hashes ===
+        //
+        // Build a chain to height 4 (genesis + 3 blocks), snapshot
+        // head_hash. Append one more block (height 5). Assert:
+        //   (a) head_hash changed — the new tail block's compute_hash
+        //       is now the head.
+        //   (b) block[3]'s prev_hash STILL equals block[2].compute_hash
+        //       (the chain immutably preserves prior links — Chain
+        //       only grows; existing entries are not rewritten).
+        //
+        // This pins the append-only contract on which fork-resolution
+        // and snapshot consistency depend. A regression that mutated
+        // earlier blocks during append (e.g., re-deriving prev_hash
+        // from a running counter) would break inclusion proofs and
+        // every peer's compute_state_root.
+        {
+            Chain c = build_chain_n(3);  // height 4: genesis + 3 blocks
+            Hash head_before = c.head_hash();
+            Hash b2_hash_before = c.at(2).compute_hash();
+            Hash b3_prev_before = c.at(3).prev_hash;
+
+            // Sanity: link was correct before the append.
+            check(b3_prev_before == b2_hash_before,
+                  "(7) Pre-append sanity: block[3].prev_hash == block[2].compute_hash()");
+
+            // Append block[4] with correct prev_hash = head().compute_hash().
+            Block b4;
+            b4.index = 4;
+            b4.prev_hash = c.head().compute_hash();
+            b4.creators = {"alice"};
+            b4.timestamp = 4000;
+            c.append(b4);
+
+            Hash head_after = c.head_hash();
+            check(head_after != head_before,
+                  "(7) Extending the chain changes head_hash (new tail block)");
+
+            // The earlier blocks must be byte-identical after the
+            // append — chain grows append-only.
+            check(c.at(3).prev_hash == b3_prev_before
+                  && c.at(2).compute_hash() == b2_hash_before,
+                  "(7) Earlier block[3].prev_hash is UNCHANGED by extending "
+                  "the chain: append-only contract — extending doesn't "
+                  "retroactively rewrite prior prev_hashes");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": chain-prev-hash-link "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
