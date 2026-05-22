@@ -6877,6 +6877,381 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// determ-wallet committee-signature-verify — Offline verification of the
+// K-of-K committee Ed25519 signatures on a block, against an operator-
+// supplied block_digest.
+//
+// CONTEXT
+// -------
+// The chain daemon's `determ verify-block-sigs` already does this end-to-
+// end (it knows compute_block_digest internally because it links the
+// chain library). This wallet binary is intentionally NOT linked against
+// the chain library — wallet processes must stay lean and never share
+// address space with networked daemon code that handles secret material.
+//
+// So the offline-workflow split is:
+//   1. Operator runs `determ verify-block-sigs --header <h> --committee
+//      <c>` ONCE on a trusted box to obtain (and audit) the canonical
+//      block_digest the committee signed.
+//   2. Operator copies the (block, committee, block_digest_hex) triple
+//      to an air-gapped wallet machine.
+//   3. Wallet runs `determ-wallet committee-signature-verify --block
+//      ... --committee ... --block-digest ...` to re-verify each
+//      committee member's Ed25519 signature against the pinned digest
+//      WITHOUT any network or chain-library link.
+//
+// The wallet trusts the operator-supplied --block-digest as a pin (the
+// caller is responsible for ensuring that pin came from a trusted source
+// — either the chain daemon's verify-block-sigs, or recomputed by an
+// independent implementation). The wallet's job is purely Ed25519
+// signature verification under the supplied digest + committee pubkeys.
+//
+// CLI
+// ---
+//   --block <file>:        JSON block (Block::to_json shape, or wrapped
+//                          in {"block": {...}}). Must have `creators` and
+//                          `creator_block_sigs` arrays.
+//   --committee <file>:    JSON committee map. Accepts either a bare
+//                          array, `{members: [...]}` (verify-block-sigs
+//                          shape), or `{validators: [...]}` (determ
+//                          validators --json shape). Each entry must
+//                          have a `domain` and a 64-hex pubkey field
+//                          (`ed_pub` OR `ed_pub_hex` accepted).
+//   --block-digest <hex>:  64-char hex of the canonical block_digest the
+//                          committee signed (obtain from `determ verify-
+//                          block-sigs`'s output line `digest: <hex>`).
+//                          REQUIRED.
+//   [--json]:              Emit a single-line JSON result document.
+//                          Default: human-readable summary on stdout.
+//
+// OUTPUT
+// ------
+// Human-readable summary per signer (domain, sig_present, valid) plus
+// aggregate counts. JSON shape:
+//   {
+//     "block_digest_hex": "<64hex>",
+//     "committee_size":   <int>,
+//     "present_count":    <int>,   // sigs that aren't the all-zero sentinel
+//     "valid_count":      <int>,   // sigs that verified under their pubkey
+//     "missing_count":    <int>,   // committee_size - present_count
+//     "abstention_count": <int>,   // same as missing_count (alias)
+//     "required":         <int>,   // ceil(2 * present_count / 3)
+//     "pass":             <bool>,  // valid_count >= required
+//     "signers": [
+//       {"domain": "<d>", "sig_present": <bool>, "valid": <bool>},
+//       ...
+//     ]
+//   }
+//
+// Threshold rule (matches BFT-mode quorum used by the chain): pass when
+// `valid_count >= ceil(2 * present_count / 3)`. An all-zero (sentinel)
+// signature counts as abstention (NOT a failure), but reduces the
+// denominator the quorum is computed against.
+//
+// EXIT CODES
+// ----------
+//   0  pass (quorum of valid signatures met)
+//   1  args / parse / IO error (operator error, not auth failure)
+//   2  quorum not met — auth-style alert gate (matches message-verify /
+//      tx-sign-verify conventions)
+int cmd_committee_signature_verify(int argc, char** argv) {
+    std::string block_path, committee_path, digest_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--block"        && i + 1 < argc) block_path     = argv[++i];
+        else if (a == "--committee"    && i + 1 < argc) committee_path = argv[++i];
+        else if (a == "--block-digest" && i + 1 < argc) digest_hex     = argv[++i];
+        else if (a == "--json")                         json_out       = true;
+        else {
+            std::cerr << "committee-signature-verify: unknown argument '"
+                      << a << "'\n";
+            std::cerr << "Usage: determ-wallet committee-signature-verify "
+                         "--block <file> --committee <file> "
+                         "--block-digest <hex64> [--json]\n";
+            return 1;
+        }
+    }
+    if (block_path.empty() || committee_path.empty() || digest_hex.empty()) {
+        std::cerr << "Usage: determ-wallet committee-signature-verify "
+                     "--block <file> --committee <file> "
+                     "--block-digest <hex64> [--json]\n"
+                     "\n"
+                     "  Offline Ed25519 verification of the K-of-K\n"
+                     "  committee block signatures against the operator-\n"
+                     "  supplied block_digest (obtain from `determ verify-\n"
+                     "  block-sigs`'s emitted `digest:` line). Wallet stays\n"
+                     "  lean — no chain-library link required. Exit 0 pass,\n"
+                     "  2 quorum not met, 1 args/parse/IO error.\n";
+        return 1;
+    }
+
+    // Validate --block-digest shape.
+    if (digest_hex.size() != 64) {
+        std::cerr << "committee-signature-verify: --block-digest must be "
+                     "exactly 64 hex chars (32-byte SHA-256); got "
+                  << digest_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> digest_bytes;
+    try { digest_bytes = from_hex(digest_hex); }
+    catch (std::exception& e) {
+        std::cerr << "committee-signature-verify: invalid --block-digest "
+                     "hex: " << e.what() << "\n";
+        return 1;
+    }
+    if (digest_bytes.size() != 32) {
+        std::cerr << "committee-signature-verify: digest decoded to "
+                  << digest_bytes.size() << " bytes (expected 32)\n";
+        return 1;
+    }
+
+    // Read + parse block JSON.
+    nlohmann::json bjson;
+    try {
+        std::ifstream bf(block_path);
+        if (!bf) {
+            std::cerr << "committee-signature-verify: cannot open --block "
+                         "file: " << block_path << "\n";
+            return 1;
+        }
+        bjson = nlohmann::json::parse(bf);
+    } catch (std::exception& e) {
+        std::cerr << "committee-signature-verify: --block file is not "
+                     "valid JSON: " << e.what() << "\n";
+        return 1;
+    }
+    // Accept either a bare Block object or `{"block": {...}}` envelope.
+    if (bjson.contains("block") && bjson["block"].is_object()) {
+        bjson = bjson["block"];
+    }
+
+    // Pull creators[] and creator_block_sigs[] out of the block.
+    if (!bjson.contains("creators") || !bjson["creators"].is_array()) {
+        std::cerr << "committee-signature-verify: --block JSON missing "
+                     "'creators' array\n";
+        return 1;
+    }
+    if (!bjson.contains("creator_block_sigs")
+        || !bjson["creator_block_sigs"].is_array()) {
+        std::cerr << "committee-signature-verify: --block JSON missing "
+                     "'creator_block_sigs' array\n";
+        return 1;
+    }
+    std::vector<std::string> creators;
+    for (auto& c : bjson["creators"]) {
+        if (!c.is_string()) {
+            std::cerr << "committee-signature-verify: 'creators' entries "
+                         "must be strings\n";
+            return 1;
+        }
+        creators.push_back(c.get<std::string>());
+    }
+    std::vector<std::string> sigs_hex;
+    for (auto& s : bjson["creator_block_sigs"]) {
+        if (!s.is_string()) {
+            std::cerr << "committee-signature-verify: 'creator_block_sigs' "
+                         "entries must be strings\n";
+            return 1;
+        }
+        sigs_hex.push_back(s.get<std::string>());
+    }
+    if (creators.size() != sigs_hex.size()) {
+        std::cerr << "committee-signature-verify: creators.size ("
+                  << creators.size() << ") != creator_block_sigs.size ("
+                  << sigs_hex.size() << ") — block JSON is malformed\n";
+        return 1;
+    }
+    if (creators.empty()) {
+        std::cerr << "committee-signature-verify: --block has empty "
+                     "'creators' array (nothing to verify)\n";
+        return 1;
+    }
+
+    // Read + parse committee JSON. Accept three shapes:
+    //   (a) bare array      [{"domain":..., "ed_pub":...}, ...]
+    //   (b) members envelope  {"members": [...]}     verify-block-sigs shape
+    //   (c) validators envelope {"validators": [...]}  determ validators --json
+    nlohmann::json cjson;
+    try {
+        std::ifstream cf(committee_path);
+        if (!cf) {
+            std::cerr << "committee-signature-verify: cannot open "
+                         "--committee file: " << committee_path << "\n";
+            return 1;
+        }
+        cjson = nlohmann::json::parse(cf);
+    } catch (std::exception& e) {
+        std::cerr << "committee-signature-verify: --committee file is not "
+                     "valid JSON: " << e.what() << "\n";
+        return 1;
+    }
+    nlohmann::json members;
+    if (cjson.is_array()) {
+        members = cjson;
+    } else if (cjson.contains("members") && cjson["members"].is_array()) {
+        members = cjson["members"];
+    } else if (cjson.contains("validators")
+               && cjson["validators"].is_array()) {
+        members = cjson["validators"];
+    } else {
+        std::cerr << "committee-signature-verify: --committee file must "
+                     "be a JSON array OR an object with a 'members' or "
+                     "'validators' array\n";
+        return 1;
+    }
+
+    // Build domain → pubkey-bytes lookup. Accept either 'ed_pub' or
+    // 'ed_pub_hex' as the field name (both shapes in the wild).
+    std::map<std::string, std::vector<uint8_t>> pubkey_of;
+    for (auto& m : members) {
+        if (!m.is_object()) continue;
+        std::string domain = m.value("domain", std::string{});
+        std::string ed_hex = m.value("ed_pub", std::string{});
+        if (ed_hex.empty()) ed_hex = m.value("ed_pub_hex", std::string{});
+        if (domain.empty() || ed_hex.empty()) continue;
+        if (ed_hex.size() != 64) {
+            std::cerr << "committee-signature-verify: committee member '"
+                      << domain << "' has malformed pubkey (expected 64 "
+                      << "hex chars, got " << ed_hex.size() << ")\n";
+            return 1;
+        }
+        std::vector<uint8_t> pk;
+        try { pk = from_hex(ed_hex); }
+        catch (std::exception& e) {
+            std::cerr << "committee-signature-verify: committee member '"
+                      << domain << "' pubkey hex parse error: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (pk.size() != 32) {
+            std::cerr << "committee-signature-verify: committee member '"
+                      << domain << "' pubkey decoded to " << pk.size()
+                      << " bytes (expected 32)\n";
+            return 1;
+        }
+        pubkey_of[domain] = std::move(pk);
+    }
+    if (pubkey_of.empty()) {
+        std::cerr << "committee-signature-verify: --committee has no "
+                     "valid members (no domain/pubkey pairs found)\n";
+        return 1;
+    }
+
+    // Fail loudly if any block creator isn't in the committee.
+    for (auto& d : creators) {
+        if (pubkey_of.find(d) == pubkey_of.end()) {
+            std::cerr << "committee-signature-verify: creator '" << d
+                      << "' is not in the supplied committee — cannot "
+                         "verify their signature\n";
+            return 1;
+        }
+    }
+
+    if (!primitives::init_libsodium()) {
+        std::cerr << "committee-signature-verify: libsodium init failed\n";
+        return 1;
+    }
+
+    // The sentinel zero signature (all 128 hex zeros) represents an
+    // abstention — counted toward `missing_count` (not a failure).
+    const std::string zero_sig_hex(128, '0');
+
+    // Per-signer verification.
+    size_t present_count = 0;
+    size_t valid_count   = 0;
+    size_t missing_count = 0;
+    nlohmann::json signers_arr = nlohmann::json::array();
+
+    for (size_t i = 0; i < creators.size(); ++i) {
+        const std::string& d = creators[i];
+        const std::string& s_hex = sigs_hex[i];
+        bool sig_present = false;
+        bool sig_valid   = false;
+
+        if (s_hex == zero_sig_hex || s_hex.empty()) {
+            // Sentinel-zero or empty → abstention; NOT a failure.
+            missing_count++;
+        } else if (s_hex.size() != 128) {
+            std::cerr << "committee-signature-verify: creator[" << i
+                      << "] '" << d << "' signature is " << s_hex.size()
+                      << " hex chars (expected 128 or all-zero "
+                         "sentinel)\n";
+            return 1;
+        } else {
+            sig_present = true;
+            present_count++;
+            std::vector<uint8_t> sig_bytes;
+            try { sig_bytes = from_hex(s_hex); }
+            catch (std::exception& e) {
+                std::cerr << "committee-signature-verify: creator[" << i
+                          << "] '" << d << "' signature hex parse error: "
+                          << e.what() << "\n";
+                return 1;
+            }
+            if (sig_bytes.size() != 64) {
+                std::cerr << "committee-signature-verify: creator[" << i
+                          << "] '" << d << "' signature decoded to "
+                          << sig_bytes.size() << " bytes (expected 64)\n";
+                return 1;
+            }
+            const auto& pk = pubkey_of.at(d);
+            int rc = crypto_sign_verify_detached(
+                sig_bytes.data(),
+                digest_bytes.data(), digest_bytes.size(),
+                pk.data());
+            sig_valid = (rc == 0);
+            if (sig_valid) valid_count++;
+        }
+        signers_arr.push_back(nlohmann::json{
+            {"domain",      d},
+            {"sig_present", sig_present},
+            {"valid",       sig_valid}
+        });
+    }
+
+    // BFT-style quorum: pass when valid_count >= ceil(2 * present_count / 3).
+    // If no sigs are present at all, present_count == 0 ⇒ required == 0,
+    // but we explicitly fail in that case (no real verification happened).
+    size_t required = (2 * present_count + 2) / 3;   // ceil(2P/3)
+    bool pass = (present_count > 0) && (valid_count >= required);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["block_digest_hex"] = digest_hex;
+        r["committee_size"]   = creators.size();
+        r["present_count"]    = present_count;
+        r["valid_count"]      = valid_count;
+        r["missing_count"]    = missing_count;
+        r["abstention_count"] = missing_count;  // alias
+        r["required"]         = required;
+        r["pass"]             = pass;
+        r["signers"]          = signers_arr;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << (pass ? "PASS" : "FAIL")
+                  << ": committee-signature verification\n";
+        std::cout << "  block_digest:     " << digest_hex << "\n";
+        std::cout << "  committee_size:   " << creators.size() << "\n";
+        std::cout << "  present_count:    " << present_count << "\n";
+        std::cout << "  valid_count:      " << valid_count << "\n";
+        std::cout << "  missing_count:    " << missing_count
+                  << " (abstentions)\n";
+        std::cout << "  required (2P/3):  " << required << "\n";
+        for (size_t i = 0; i < creators.size(); ++i) {
+            const auto& sj = signers_arr[i];
+            std::cout << "  [" << i << "] "
+                      << sj.value("domain", std::string{})
+                      << "  sig_present=" << (sj.value("sig_present", false)
+                                                  ? "true" : "false")
+                      << "  valid=" << (sj.value("valid", false)
+                                              ? "true" : "false")
+                      << "\n";
+        }
+    }
+    return pass ? 0 : 2;
+}
+
 // determ-wallet cold-sign — Offline transaction signing for the
 // air-gapped cold-wallet workflow.
 //
@@ -9602,6 +9977,34 @@ void print_usage() {
         "                                             invalid (auth-style alert), 1 args/parse/\n"
         "                                             IO error. Output: {valid, tx_hash_hex,\n"
         "                                             computed_signing_bytes_sha256}.\n"
+        "  committee-signature-verify --block <file> --committee <file>\n"
+        "                             --block-digest <hex64> [--json]\n"
+        "                                             OFFLINE Ed25519 verification of the K-of-K\n"
+        "                                             committee block signatures. Reads a block\n"
+        "                                             JSON (Block::to_json shape, or wrapped in\n"
+        "                                             {\"block\":{...}}), a committee file (raw\n"
+        "                                             array OR {members:[...]} verify-block-sigs\n"
+        "                                             shape OR {validators:[...]} `determ\n"
+        "                                             validators --json` shape; each entry needs\n"
+        "                                             domain + ed_pub/ed_pub_hex), and a 64-hex\n"
+        "                                             block_digest pinned from `determ verify-\n"
+        "                                             block-sigs` (its emitted `digest:` line).\n"
+        "                                             For each creators[i], verifies\n"
+        "                                             creator_block_sigs[i] against the digest\n"
+        "                                             using crypto_sign_verify_detached. The all-\n"
+        "                                             zero (128 hex) sentinel is treated as an\n"
+        "                                             abstention (counted toward missing_count,\n"
+        "                                             NOT a failure). Quorum rule: pass when\n"
+        "                                             valid_count >= ceil(2*present_count/3)\n"
+        "                                             (matches the chain's BFT-mode threshold).\n"
+        "                                             No chain-library link required — keeps the\n"
+        "                                             wallet binary lean. Exit 0 PASS, 2 quorum\n"
+        "                                             not met (auth-style alert), 1 args/parse/\n"
+        "                                             IO error. JSON output: {block_digest_hex,\n"
+        "                                             committee_size, present_count, valid_count,\n"
+        "                                             missing_count, abstention_count, required,\n"
+        "                                             pass, signers:[{domain,sig_present,\n"
+        "                                             valid}]}.\n"
         "  cold-sign --tx-json <file> --priv-keyfile <file>\n"
         "            (--out <file> | --allow-stdout)\n"
         "            [--force] [--json]\n"
@@ -9795,6 +10198,7 @@ int main(int argc, char** argv) {
     if (cmd == "encrypt-message") return cmd_encrypt_message(argc - 2, argv + 2);
     if (cmd == "decrypt-message") return cmd_decrypt_message(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
+    if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
