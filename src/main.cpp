@@ -30463,6 +30463,444 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
+
+    if (cmd == "test-tx-signing-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Builder: produce a "canonical" TRANSFER with fixed fields. The
+        // signing_bytes-determinism contract: this exact field set MUST
+        // produce a stable byte sequence across calls, across object
+        // instantiations, across runs, across processes — anything else
+        // is a divergence bug that desynchronizes a node's view of the
+        // chain (signatures don't verify on remote nodes that compute
+        // the pre-image differently).
+        auto make_canonical_transfer = []() {
+            Transaction tx;
+            tx.type   = TxType::TRANSFER;
+            tx.from   = "alice";
+            tx.to     = "bob";
+            tx.amount = 100;
+            tx.fee    = 1;
+            tx.nonce  = 5;
+            tx.payload = {0xDE, 0xAD, 0xBE, 0xEF};
+            return tx;
+        };
+
+        // === Scenario 1: Replay determinism ===
+        //
+        // Build a Transaction with fixed fields. Compute signing_bytes()
+        // 3 times in a row on the SAME object; assert byte-identity. Then
+        // build a fresh Transaction with identical field values in a NEW
+        // object; assert byte-identity vs. the prior runs. This is the
+        // baseline "no hidden process-local state / no internal cache
+        // surprise" contract.
+        //
+        // 3 assertions: byte-identity across 3 consecutive calls; cross-
+        // instance byte-identity; 3-call sequence length is non-zero
+        // (sanity that signing_bytes actually emits something).
+        {
+            Transaction tx_a = make_canonical_transfer();
+            auto sb1 = tx_a.signing_bytes();
+            auto sb2 = tx_a.signing_bytes();
+            auto sb3 = tx_a.signing_bytes();
+            check(sb1.size() > 0
+                  && sb1 == sb2 && sb2 == sb3,
+                  "(1) Replay determinism: 3 consecutive signing_bytes() "
+                  "calls on the same Transaction object produce identical "
+                  "byte sequences (no hidden state)");
+
+            // Build a fresh Transaction with the same field values; bytes
+            // must match the prior runs exactly. Locks "field-pure"
+            // serialization — no dependence on heap address / object
+            // identity / construction order.
+            Transaction tx_b = make_canonical_transfer();
+            auto sb_b = tx_b.signing_bytes();
+            check(sb_b == sb1,
+                  "(1) Replay determinism: fresh Transaction object with "
+                  "identical field values produces byte-identical "
+                  "signing_bytes (no object-identity dependence)");
+
+            // Sanity: 1+5+1+3+1+24+4 = 39 bytes for the canonical
+            // TRANSFER (alice->bob, 4-byte payload).
+            check(sb1.size() == 39,
+                  "(1) Replay determinism: canonical TRANSFER pre-image "
+                  "is 39 bytes (1 type + 5 'alice' + 1 nul + 3 'bob' + "
+                  "1 nul + 24 BE u64s + 4 payload)");
+        }
+
+        // === Scenario 2: Field-binding completeness ===
+        //
+        // Every consensus-bound field that contributes to signing_bytes
+        // MUST bind the signature: mutating that one field changes the
+        // pre-image. Per PROTOCOL.md §4.1 + src/chain/block.cpp:
+        //   type, from, to, amount, fee, nonce, payload
+        // are all bound. The `sig` and `hash` fields are excluded
+        // (sig signs the pre-image, hash is computed FROM the pre-image
+        // — including either would create a circular dependency).
+        //
+        // For each bound field, build a baseline tx, mutate ONE field
+        // by the smallest representable perturbation, assert
+        // signing_bytes CHANGES.
+        //
+        // 8 assertions: type mutation, from mutation, to mutation, amount
+        // +1, fee +1, nonce +1, payload[0] flip, payload size change.
+        {
+            Transaction base = make_canonical_transfer();
+            auto sb_base = base.signing_bytes();
+
+            // type: TRANSFER → STAKE
+            {
+                Transaction t = base;
+                t.type = TxType::STAKE;
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: mutating tx.type "
+                      "(TRANSFER→STAKE) changes signing_bytes");
+            }
+            // from: "alice" → "alicE" (last-byte case flip)
+            {
+                Transaction t = base;
+                t.from = "alicE";
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: mutating tx.from "
+                      "('alice'→'alicE') changes signing_bytes");
+            }
+            // to: "bob" → "boB"
+            {
+                Transaction t = base;
+                t.to = "boB";
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: mutating tx.to "
+                      "('bob'→'boB') changes signing_bytes");
+            }
+            // amount: 100 → 101
+            {
+                Transaction t = base;
+                t.amount = 101;
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: amount 100→101 changes "
+                      "signing_bytes (BE u64 amount slot binds)");
+            }
+            // fee: 1 → 2
+            {
+                Transaction t = base;
+                t.fee = 2;
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: fee 1→2 changes "
+                      "signing_bytes (BE u64 fee slot binds)");
+            }
+            // nonce: 5 → 6
+            {
+                Transaction t = base;
+                t.nonce = 6;
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: nonce 5→6 changes "
+                      "signing_bytes (BE u64 nonce slot binds — "
+                      "replay-protection cornerstone)");
+            }
+            // payload: flip one bit at payload[0]
+            {
+                Transaction t = base;
+                t.payload[0] = uint8_t(t.payload[0] ^ 0x01);
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: payload[0] single-bit flip "
+                      "changes signing_bytes (positional payload binding)");
+            }
+            // payload: append one byte (size change)
+            {
+                Transaction t = base;
+                t.payload.push_back(0x00);
+                check(t.signing_bytes() != sb_base,
+                      "(2) Field binding: payload size change (append "
+                      "trailing zero byte) changes signing_bytes "
+                      "(length implicit via trailing position)");
+            }
+        }
+
+        // === Scenario 3: Different tx_type produces different signing_bytes ===
+        //
+        // Pin the type-discriminator contract: same from/to/amount/fee/
+        // nonce/payload but different tx.type → distinct signing_bytes.
+        // Covers three orthogonal-purpose pairs to make sure the byte-0
+        // discriminator can't accidentally collide on any common pair.
+        //
+        // 3 assertions: TRANSFER vs STAKE, REGISTER vs DEREGISTER,
+        // DAPP_REGISTER vs DAPP_CALL.
+        {
+            auto sb_for_type = [&](TxType ty) {
+                Transaction t;
+                t.type   = ty;
+                t.from   = "alice";
+                t.to     = "bob";
+                t.amount = 42;
+                t.fee    = 1;
+                t.nonce  = 7;
+                t.payload = {0x11, 0x22, 0x33};
+                return t.signing_bytes();
+            };
+            check(sb_for_type(TxType::TRANSFER) != sb_for_type(TxType::STAKE),
+                  "(3) tx_type discriminator: TRANSFER vs STAKE with "
+                  "identical other fields produces distinct signing_bytes");
+            check(sb_for_type(TxType::REGISTER) != sb_for_type(TxType::DEREGISTER),
+                  "(3) tx_type discriminator: REGISTER vs DEREGISTER "
+                  "produces distinct signing_bytes");
+            check(sb_for_type(TxType::DAPP_REGISTER) != sb_for_type(TxType::DAPP_CALL),
+                  "(3) tx_type discriminator: DAPP_REGISTER vs DAPP_CALL "
+                  "produces distinct signing_bytes");
+        }
+
+        // === Scenario 4: Per-tx-type sentinel field binding ===
+        //
+        // Per-tx-type fields are encoded INTO tx.payload (per PROTOCOL.md
+        // §4.1.1 + see TxType enum docs in include/determ/chain/block.hpp):
+        //   PARAM_CHANGE:   [name_len][name][value_len][value][effective_height]
+        //                   [sig_count][sigs...]
+        //   DAPP_REGISTER:  [op][service_pubkey][url_len][url][topic_count]
+        //                   ...[retention][metadata_len][metadata]
+        //   MERGE_EVENT:    [event_type][shard_id][partner_id][effective_height]
+        //                   [evidence_window_start][region_len][region]
+        //
+        // Mutating any sentinel inside payload MUST change signing_bytes —
+        // signing_bytes appends payload in full, so any byte change
+        // anywhere in the payload propagates.
+        //
+        // 4 assertions: PARAM_CHANGE effective_height mutation, DAPP_REGISTER
+        // service_pubkey mutation, MERGE_EVENT shard_id mutation,
+        // MERGE_EVENT region mutation.
+        {
+            // PARAM_CHANGE: encode minimal payload manually.
+            auto make_pc_payload = [](uint64_t target_height) {
+                std::vector<uint8_t> p;
+                const std::string name = "MIN_STAKE";
+                p.push_back(uint8_t(name.size()));
+                p.insert(p.end(), name.begin(), name.end());
+                // value_len: u16 LE = 8
+                p.push_back(0x08); p.push_back(0x00);
+                // value: u64 LE = 42
+                for (int i = 0; i < 8; ++i)
+                    p.push_back(uint8_t((uint64_t(42) >> (8 * i)) & 0xff));
+                // effective_height: u64 LE
+                for (int i = 0; i < 8; ++i)
+                    p.push_back(uint8_t((target_height >> (8 * i)) & 0xff));
+                p.push_back(0); // sig_count = 0 (size-only smoke)
+                return p;
+            };
+            Transaction pc_a, pc_b;
+            pc_a.type = TxType::PARAM_CHANGE; pc_a.from = "alice"; pc_a.nonce = 0;
+            pc_a.fee = 1; pc_a.payload = make_pc_payload(1000);
+            pc_b = pc_a; pc_b.payload = make_pc_payload(2000);
+            check(pc_a.signing_bytes() != pc_b.signing_bytes(),
+                  "(4) Sentinel binding: PARAM_CHANGE target_height "
+                  "(1000 vs 2000) changes signing_bytes (payload-encoded "
+                  "effective_height binds)");
+
+            // DAPP_REGISTER: service_pubkey mutation.
+            auto make_dapp_payload = [](uint8_t svc_byte) {
+                std::vector<uint8_t> p;
+                p.push_back(0); // op = create
+                for (int i = 0; i < 32; ++i) p.push_back(svc_byte);
+                p.push_back(0); // url_len
+                p.push_back(0); // topic_count
+                p.push_back(1); // retention
+                p.push_back(0); p.push_back(0); // metalen
+                return p;
+            };
+            Transaction d_a, d_b;
+            d_a.type = TxType::DAPP_REGISTER; d_a.from = "alice"; d_a.nonce = 0;
+            d_a.fee = 1; d_a.payload = make_dapp_payload(0xA0);
+            d_b = d_a; d_b.payload = make_dapp_payload(0xB0);
+            check(d_a.signing_bytes() != d_b.signing_bytes(),
+                  "(4) Sentinel binding: DAPP_REGISTER service_pubkey "
+                  "(0xA0… vs 0xB0…) changes signing_bytes (payload-encoded "
+                  "encryption pubkey binds)");
+
+            // MERGE_EVENT: shard_id mutation via canonical encoder.
+            auto make_merge = [](uint32_t shard_id, const std::string& region) {
+                MergeEvent ev;
+                ev.event_type = MergeEvent::BEGIN;
+                ev.shard_id = shard_id;
+                ev.partner_id = shard_id + 1;
+                ev.effective_height = 100;
+                ev.evidence_window_start = 50;
+                ev.merging_shard_region = region;
+                Transaction t;
+                t.type = TxType::MERGE_EVENT;
+                t.from = "beacon"; t.fee = 0; t.nonce = 0;
+                t.payload = ev.encode();
+                return t;
+            };
+            Transaction m1 = make_merge(1, "us");
+            Transaction m2 = make_merge(2, "us");
+            check(m1.signing_bytes() != m2.signing_bytes(),
+                  "(4) Sentinel binding: MERGE_EVENT shard_id "
+                  "(1 vs 2) changes signing_bytes (R4 merge wire-format "
+                  "binds to outer tx pre-image)");
+
+            // MERGE_EVENT: region mutation (variable-length tail).
+            Transaction m3 = make_merge(1, "eu");
+            check(m1.signing_bytes() != m3.signing_bytes(),
+                  "(4) Sentinel binding: MERGE_EVENT region "
+                  "('us' vs 'eu') changes signing_bytes (variable-length "
+                  "region_len + bytes both contribute)");
+        }
+
+        // === Scenario 5: Order-bound payload encoding ===
+        //
+        // signing_bytes copies payload bytes by position (per
+        // block.cpp::signing_bytes: `out.insert(out.end(), payload.begin(),
+        // payload.end())`). Reordering payload bytes MUST change the
+        // pre-image — otherwise it would be a multiset encoding (which
+        // would let an attacker swap consensus-bound payload fields like
+        // PARAM_CHANGE name vs value without breaking the signature).
+        //
+        // 2 assertions: byte-swap mid-payload, reverse-order whole
+        // payload.
+        {
+            Transaction base = make_canonical_transfer();
+            // Same multiset {0xDE, 0xAD, 0xBE, 0xEF} but different order.
+            Transaction reordered = base;
+            reordered.payload = {0xAD, 0xDE, 0xBE, 0xEF}; // swap [0]<->[1]
+            check(reordered.signing_bytes() != base.signing_bytes(),
+                  "(5) Order-bound payload: payload byte-swap [0]<->[1] "
+                  "changes signing_bytes (positional encoding, NOT "
+                  "multiset)");
+
+            Transaction reversed = base;
+            reversed.payload = {0xEF, 0xBE, 0xAD, 0xDE}; // full reverse
+            check(reversed.signing_bytes() != base.signing_bytes(),
+                  "(5) Order-bound payload: payload full reversal "
+                  "changes signing_bytes (positional invariant rules "
+                  "out content-equivalence collisions)");
+        }
+
+        // === Scenario 6: Empty / boundary values ===
+        //
+        // Empty / extreme values must still produce well-formed,
+        // non-empty signing_bytes. The fixed-prefix (type + null
+        // terminators + BE u64s) guarantees a minimum 27-byte
+        // pre-image even with empty from/to/payload.
+        //
+        // 3 assertions: empty-payload signing_bytes non-empty (minimum
+        // prefix is 27 bytes); amount=0 produces non-empty signing_bytes
+        // distinct from amount=1; nonce=UINT64_MAX is well-defined and
+        // distinct from nonce=0.
+        {
+            // Empty payload + zero amount + zero fee + zero nonce + empty
+            // from + empty to: minimal 27-byte pre-image.
+            Transaction tx_empty;
+            auto sb_empty = tx_empty.signing_bytes();
+            check(!sb_empty.empty() && sb_empty.size() >= 27,
+                  "(6) Boundary: empty-payload Transaction still produces "
+                  "non-empty signing_bytes (fixed prefix ≥ 27 bytes)");
+
+            // amount=0 (vs canonical baseline amount=100): distinct
+            // pre-image; locks "zero is a valid distinguishable value"
+            // (not a sentinel-skip).
+            Transaction tx_zero_amt = make_canonical_transfer();
+            tx_zero_amt.amount = 0;
+            auto sb_zero = tx_zero_amt.signing_bytes();
+            Transaction tx_one_amt = make_canonical_transfer();
+            tx_one_amt.amount = 1;
+            check(!sb_zero.empty()
+                  && sb_zero != tx_one_amt.signing_bytes(),
+                  "(6) Boundary: amount=0 produces non-empty signing_bytes "
+                  "distinct from amount=1 (zero is not a special-cased "
+                  "sentinel — every value occupies its 8 BE u64 bytes)");
+
+            // nonce=UINT64_MAX is well-defined; distinct from nonce=0
+            // (the BE encoding must populate all 8 bytes with 0xFF, not
+            // wrap or saturate to a shorter representation).
+            Transaction tx_max_nonce = make_canonical_transfer();
+            tx_max_nonce.nonce = uint64_t(~0ULL);
+            Transaction tx_zero_nonce = make_canonical_transfer();
+            tx_zero_nonce.nonce = 0;
+            auto sb_max = tx_max_nonce.signing_bytes();
+            check(sb_max != tx_zero_nonce.signing_bytes()
+                  && sb_max.size() == 39,
+                  "(6) Boundary: nonce=UINT64_MAX produces well-defined "
+                  "39-byte signing_bytes distinct from nonce=0 (BE u64 "
+                  "encoding fills all 8 bytes, no saturation)");
+        }
+
+        // === Scenario 7: Cross-tx-type isolation ===
+        //
+        // The byte-0 discriminator MUST distinguish ALL tx types. Build
+        // a transaction with identical "common" fields (from, to, amount,
+        // fee, nonce, payload) across all current TxType values, collect
+        // the signing_bytes from each, and assert they are pairwise
+        // distinct. The pre-image starts with the type byte, so each
+        // pair MUST differ in byte 0 at minimum — but pinning the
+        // pairwise-distinctness assertion as the contract catches both
+        // "byte-0 discriminator collision" bugs and any future
+        // re-shuffling that might reuse the same type byte for two
+        // disjoint enum entries.
+        //
+        // Coverage: TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE,
+        // PARAM_CHANGE, MERGE_EVENT, COMPOSABLE_BATCH, DAPP_REGISTER,
+        // DAPP_CALL — 10 enum values; pairwise distinct → C(10,2)=45
+        // comparisons, all asserted distinct.
+        //
+        // 2 assertions: all 10 types produce distinct signing_bytes
+        // pairwise; the type byte itself takes 10 distinct values
+        // (the discriminator is in fact at offset 0 + occupies a single
+        // byte — defense-in-depth assertion against re-layout).
+        {
+            std::vector<TxType> all_types = {
+                TxType::TRANSFER, TxType::REGISTER, TxType::DEREGISTER,
+                TxType::STAKE,    TxType::UNSTAKE,  TxType::PARAM_CHANGE,
+                TxType::MERGE_EVENT, TxType::COMPOSABLE_BATCH,
+                TxType::DAPP_REGISTER, TxType::DAPP_CALL
+            };
+            std::vector<std::vector<uint8_t>> sbs;
+            for (TxType ty : all_types) {
+                Transaction t;
+                t.type   = ty;
+                t.from   = "alice";
+                t.to     = "bob";
+                t.amount = 100;
+                t.fee    = 1;
+                t.nonce  = 5;
+                t.payload = {0x01, 0x02, 0x03};
+                sbs.push_back(t.signing_bytes());
+            }
+            bool pairwise_distinct = true;
+            for (size_t i = 0; i < sbs.size(); ++i) {
+                for (size_t j = i + 1; j < sbs.size(); ++j) {
+                    if (sbs[i] == sbs[j]) { pairwise_distinct = false; break; }
+                }
+                if (!pairwise_distinct) break;
+            }
+            check(pairwise_distinct,
+                  "(7) Cross-tx-type isolation: signing_bytes is pairwise "
+                  "distinct across all 10 TxType values (TRANSFER, REGISTER, "
+                  "DEREGISTER, STAKE, UNSTAKE, PARAM_CHANGE, MERGE_EVENT, "
+                  "COMPOSABLE_BATCH, DAPP_REGISTER, DAPP_CALL)");
+
+            // Byte-0 discriminator: 10 distinct values at offset 0.
+            std::set<uint8_t> type_bytes;
+            for (const auto& sb : sbs) type_bytes.insert(sb[0]);
+            check(type_bytes.size() == all_types.size(),
+                  "(7) Cross-tx-type isolation: the type byte at offset 0 "
+                  "takes 10 distinct values (one per TxType — discriminator "
+                  "is a single byte at offset 0)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": tx-signing-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);
