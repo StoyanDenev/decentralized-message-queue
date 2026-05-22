@@ -29389,6 +29389,8 @@ int main(int argc, char** argv) {
                   << ": chain-prev-hash-link "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        std::cout.flush();
+        fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
