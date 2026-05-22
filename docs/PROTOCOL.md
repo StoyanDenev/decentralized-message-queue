@@ -1057,7 +1057,7 @@ Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for rea
 ### Cross-references
 
 - [`WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) — standalone academic-style technical paper covering the same material at a higher level.
-- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-16 analytic + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense, FB1–FB30 TLA+).
+- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-16 analytic + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest, FB1–FB31 TLA+).
 - [`QUICKSTART.md`](QUICKSTART.md) — operator-facing recipes for the wire formats specified here.
 - [`CLI-REFERENCE.md`](CLI-REFERENCE.md) — command-line surface for transactions described in §3.
 
