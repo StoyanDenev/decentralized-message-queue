@@ -30901,6 +30901,542 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
+
+    if (cmd == "test-merge-event-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Builder: canonical MergeEvent with non-default values across
+        // every field. The canonical_event_a fixture is shared across
+        // scenarios so cross-scenario byte-identity is meaningful.
+        auto make_canonical_event = []() {
+            MergeEvent ev;
+            ev.event_type            = MergeEvent::BEGIN;
+            ev.shard_id              = 1;
+            ev.partner_id            = 2;
+            ev.effective_height      = 0x0102030405060708ULL;
+            ev.evidence_window_start = 0x00000000000F0F0FULL;
+            ev.merging_shard_region  = "us-east";
+            return ev;
+        };
+
+        // Shared fixture: alice registered with stake; bob/charlie/dave
+        // get starting balances for transfers/stakes used in scenario 7.
+        auto make_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "merge-event-determinism-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal, bob_bal, charlie_bal, dave_bal;
+            alice_bal.domain   = "alice";   alice_bal.balance   = 1000;
+            bob_bal.domain     = "bob";     bob_bal.balance     = 1000;
+            charlie_bal.domain = "charlie"; charlie_bal.balance = 1000;
+            dave_bal.domain    = "dave";    dave_bal.balance    = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal, charlie_bal, dave_bal};
+            return cfg;
+        };
+
+        // Helper: append a block carrying the given txs at the next
+        // chain height. Mirrors test-state-root-determinism's helper.
+        auto append_block = [](Chain& c,
+                                const std::vector<Transaction>& txs) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions = txs;
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(0x42);
+            c.append(b);
+        };
+
+        // Helper: wrap a MergeEvent in a MERGE_EVENT Transaction. The
+        // event's encode() output is dropped into tx.payload; the apply
+        // path re-decodes via MergeEvent::decode in the MERGE_EVENT case
+        // (chain.cpp). Nonce is parameterized so multiple MERGE_EVENTs
+        // can be chained against alice's monotone nonce sequence.
+        auto wrap_in_tx = [](const MergeEvent& ev, uint64_t nonce) {
+            Transaction tx;
+            tx.type    = TxType::MERGE_EVENT;
+            tx.from    = "alice";
+            tx.fee     = 1;
+            tx.nonce   = nonce;
+            tx.payload = ev.encode();
+            return tx;
+        };
+
+        // === Scenario 1: Replay determinism ===
+        //
+        // Build a chain with a MERGE_EVENT, save + load, assert that
+        // every MergeEvent field round-trips byte-for-byte through the
+        // Chain::save / Chain::load JSON serialization path. This is the
+        // baseline "no encoding drift across the file boundary"
+        // contract. The reload path replays via apply_transactions, so
+        // both the wire-level encoding (Transaction.payload as hex) and
+        // the apply-time decode (MergeEvent::decode) are exercised.
+        //
+        // 4 assertions: pre-save merge_state populated; post-load
+        // merge_state has the same shard entry; partner_id preserved;
+        // refugee_region preserved.
+        {
+            auto build_chain_with_merge = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                Hash salt{};
+                c.set_shard_routing(4, salt, ShardId{0});
+                append_block(c, {wrap_in_tx(make_canonical_event(), 0)});
+                return c;
+            };
+
+            Chain c1 = build_chain_with_merge();
+            check(c1.merge_state().size() == 1
+                  && c1.merge_state().count(ShardId{1}) == 1,
+                  "(1) Replay determinism: pre-save chain has MERGE_BEGIN "
+                  "entry for shard 1 (apply-path baseline)");
+
+            namespace fs = std::filesystem;
+            auto tmp = fs::temp_directory_path() /
+                       "determ-test-merge-event-determinism.json";
+            std::string path = tmp.string();
+            std::error_code ec;
+            fs::remove(path, ec);
+            c1.save(path);
+            // Pass shard_count=4 so cross-shard apply branches replay.
+            Hash salt{};
+            Chain reloaded = Chain::load(path, /*block_subsidy=*/0,
+                                          /*shard_count=*/4,
+                                          /*shard_salt=*/salt,
+                                          /*my_shard_id=*/ShardId{0});
+            check(reloaded.merge_state().size() == 1
+                  && reloaded.merge_state().count(ShardId{1}) == 1,
+                  "(1) Replay determinism: post-load chain preserves the "
+                  "MERGE_BEGIN entry for shard 1 byte-for-byte");
+            check(reloaded.merge_state().at(ShardId{1}).partner_id
+                      == c1.merge_state().at(ShardId{1}).partner_id,
+                  "(1) Replay determinism: partner_id preserved across "
+                  "save/load (apply-path round-trip)");
+            check(reloaded.merge_state().at(ShardId{1}).refugee_region
+                      == c1.merge_state().at(ShardId{1}).refugee_region,
+                  "(1) Replay determinism: refugee_region preserved "
+                  "across save/load (full MergeEvent field set)");
+            fs::remove(path, ec);
+        }
+
+        // === Scenario 2: Canonical encoding (Transaction JSON round-trip) ===
+        //
+        // Wrap a MergeEvent in a MERGE_EVENT Transaction, serialize to
+        // JSON via Transaction::to_json, deserialize via from_json, and
+        // re-decode the MergeEvent payload. The full encode → JSON →
+        // decode pipeline must preserve every byte. This locks the
+        // canonical wire encoding contract end-to-end.
+        //
+        // 3 assertions: payload bytes byte-identical; decoded MergeEvent
+        // field-equal to the input; encode is idempotent (encoding the
+        // decoded form yields the original bytes).
+        {
+            MergeEvent ev_in = make_canonical_event();
+            Transaction tx_in = wrap_in_tx(ev_in, 0);
+            // Fill sig and hash with patterned bytes so the JSON
+            // round-trip exercises every Transaction field, not just
+            // payload.
+            for (size_t i = 0; i < tx_in.sig.size(); ++i)
+                tx_in.sig[i] = uint8_t(0xA0 + i);
+            tx_in.hash = tx_in.compute_hash();
+
+            nlohmann::json j = tx_in.to_json();
+            Transaction tx_out = Transaction::from_json(j);
+            check(tx_out.payload == tx_in.payload,
+                  "(2) Canonical encoding: Transaction JSON round-trip "
+                  "preserves MERGE_EVENT payload byte-for-byte "
+                  "(wire-level canonical form is JSON-stable)");
+            auto ev_out_opt = MergeEvent::decode(tx_out.payload);
+            check(ev_out_opt.has_value()
+                  && ev_out_opt->event_type == ev_in.event_type
+                  && ev_out_opt->shard_id == ev_in.shard_id
+                  && ev_out_opt->partner_id == ev_in.partner_id
+                  && ev_out_opt->effective_height == ev_in.effective_height
+                  && ev_out_opt->evidence_window_start
+                         == ev_in.evidence_window_start
+                  && ev_out_opt->merging_shard_region
+                         == ev_in.merging_shard_region,
+                  "(2) Canonical encoding: decoded MergeEvent matches "
+                  "the input across every field (decoder round-trips "
+                  "the full struct)");
+            check(ev_out_opt->encode() == tx_in.payload,
+                  "(2) Canonical encoding: re-encoding the decoded "
+                  "MergeEvent yields the original payload bytes "
+                  "(encode is idempotent over the canonical form)");
+        }
+
+        // === Scenario 3: Field-binding completeness ===
+        //
+        // Per MergeEvent::encode (block.cpp), every field
+        // (event_type, shard_id, partner_id, effective_height,
+        // evidence_window_start, merging_shard_region) contributes to
+        // the canonical bytes. Mutating any single field must change
+        // BOTH (a) the canonical encode() output AND (b) the enclosing
+        // Transaction::signing_bytes (which inlines tx.payload). This
+        // is the "no field silently dropped from consensus binding"
+        // contract — any drift here would desync nodes and/or allow
+        // forgery via field aliasing.
+        //
+        // 6 assertions: one per MergeEvent field. Each mutation
+        // perturbs by the smallest representable change for that type.
+        {
+            MergeEvent base = make_canonical_event();
+            auto base_bytes = base.encode();
+            Transaction base_tx = wrap_in_tx(base, 0);
+            auto base_sb = base_tx.signing_bytes();
+
+            // event_type: BEGIN → END
+            {
+                MergeEvent v = base;
+                v.event_type = MergeEvent::END;
+                Transaction tx = wrap_in_tx(v, 0);
+                check(v.encode() != base_bytes
+                      && tx.signing_bytes() != base_sb,
+                      "(3) Field binding: event_type (BEGIN→END) "
+                      "changes both MergeEvent::encode and the enclosing "
+                      "Transaction::signing_bytes (1-byte discriminator "
+                      "at offset 0 binds)");
+            }
+            // shard_id: 1 → 2
+            {
+                MergeEvent v = base;
+                v.shard_id = 2;
+                Transaction tx = wrap_in_tx(v, 0);
+                check(v.encode() != base_bytes
+                      && tx.signing_bytes() != base_sb,
+                      "(3) Field binding: shard_id (1→2) changes both "
+                      "canonical bytes and signing_bytes (4-byte LE u32 "
+                      "at offset 1 binds)");
+            }
+            // partner_id: 2 → 3
+            {
+                MergeEvent v = base;
+                v.partner_id = 3;
+                Transaction tx = wrap_in_tx(v, 0);
+                check(v.encode() != base_bytes
+                      && tx.signing_bytes() != base_sb,
+                      "(3) Field binding: partner_id (2→3) changes both "
+                      "canonical bytes and signing_bytes (4-byte LE u32 "
+                      "at offset 5 binds)");
+            }
+            // effective_height: +1
+            {
+                MergeEvent v = base;
+                v.effective_height += 1;
+                Transaction tx = wrap_in_tx(v, 0);
+                check(v.encode() != base_bytes
+                      && tx.signing_bytes() != base_sb,
+                      "(3) Field binding: effective_height +1 changes "
+                      "both canonical bytes and signing_bytes (8-byte LE "
+                      "u64 at offset 9 binds)");
+            }
+            // evidence_window_start: +1
+            {
+                MergeEvent v = base;
+                v.evidence_window_start += 1;
+                Transaction tx = wrap_in_tx(v, 0);
+                check(v.encode() != base_bytes
+                      && tx.signing_bytes() != base_sb,
+                      "(3) Field binding: evidence_window_start +1 "
+                      "changes both canonical bytes and signing_bytes "
+                      "(8-byte LE u64 at offset 17 binds)");
+            }
+            // merging_shard_region: "us-east" → "us-west"
+            {
+                MergeEvent v = base;
+                v.merging_shard_region = "us-west";
+                Transaction tx = wrap_in_tx(v, 0);
+                check(v.encode() != base_bytes
+                      && tx.signing_bytes() != base_sb,
+                      "(3) Field binding: merging_shard_region "
+                      "('us-east'→'us-west') changes both canonical "
+                      "bytes and signing_bytes (utf8 bytes at offset 26+ "
+                      "bind; len at offset 25 unchanged but content "
+                      "differs)");
+            }
+        }
+
+        // === Scenario 4: Apply determinism ===
+        //
+        // Apply the SAME MERGE_EVENT-bearing block to two freshly
+        // constructed Chain instances. The post-apply state_root MUST
+        // be byte-identical — any divergence would mean MERGE_EVENT
+        // apply has implicit dependence on something outside the
+        // block's wire payload (memory address, allocator behavior,
+        // iteration order over an unsorted container, etc).
+        //
+        // 2 assertions: state_root byte-identical; merge_state entries
+        // structurally equal.
+        {
+            auto build = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                Hash salt{};
+                c.set_shard_routing(4, salt, ShardId{0});
+                append_block(c, {wrap_in_tx(make_canonical_event(), 0)});
+                return c;
+            };
+            Chain c1 = build();
+            Chain c2 = build();
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "(4) Apply determinism: two fresh chains applying "
+                  "identical MERGE_EVENT-bearing blocks produce "
+                  "byte-identical state_root (m:-namespace contribution "
+                  "is deterministic)");
+            check(c1.merge_state().size() == c2.merge_state().size()
+                  && c1.merge_state().at(ShardId{1}).partner_id
+                         == c2.merge_state().at(ShardId{1}).partner_id
+                  && c1.merge_state().at(ShardId{1}).refugee_region
+                         == c2.merge_state().at(ShardId{1}).refugee_region,
+                  "(4) Apply determinism: merge_state entries match "
+                  "field-by-field across the two chains (apply-side "
+                  "mutation is byte-stable)");
+        }
+
+        // === Scenario 5: Snapshot round-trip ===
+        //
+        // Serialize a chain with merge_state via Chain::serialize_state
+        // and restore via Chain::restore_from_snapshot. The merge_state
+        // map is part of the m: namespace contribution to state_root
+        // (chain.cpp build_state_leaves), so a missing or corrupt
+        // snapshot field would either silently drop the m:-namespace
+        // leaves or, with S-033 active, fail the state_root gate on
+        // restore. This scenario locks the snapshot side of the m:-
+        // namespace surface explicitly.
+        //
+        // 3 assertions: post-restore merge_state same size + same
+        // partner_id + same refugee_region.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            Hash salt{};
+            c.set_shard_routing(4, salt, ShardId{0});
+            // Two distinct merges so the snapshot exercises a multi-entry
+            // map (single-entry maps can be lucky with iteration order
+            // and mask subtle ordering bugs in serialize_state).
+            MergeEvent ev_a;
+            ev_a.event_type = MergeEvent::BEGIN;
+            ev_a.shard_id   = 1;
+            ev_a.partner_id = 2;
+            ev_a.effective_height = 100;
+            ev_a.evidence_window_start = 0;
+            ev_a.merging_shard_region = "us-east";
+            MergeEvent ev_b;
+            ev_b.event_type = MergeEvent::BEGIN;
+            ev_b.shard_id   = 3;
+            ev_b.partner_id = 0;
+            ev_b.effective_height = 100;
+            ev_b.evidence_window_start = 0;
+            ev_b.merging_shard_region = "eu-west";
+            append_block(c, {wrap_in_tx(ev_a, 0)});
+            append_block(c, {wrap_in_tx(ev_b, 1)});
+
+            nlohmann::json snap = c.serialize_state(16);
+            Chain restored = Chain::restore_from_snapshot(snap);
+            check(restored.merge_state().size() == c.merge_state().size(),
+                  "(5) Snapshot round-trip: post-restore merge_state has "
+                  "the same number of entries as the source chain "
+                  "(serialize_state preserves the m:-namespace cardinality)");
+            check(restored.merge_state().at(ShardId{1}).partner_id
+                      == c.merge_state().at(ShardId{1}).partner_id
+                  && restored.merge_state().at(ShardId{3}).partner_id
+                         == c.merge_state().at(ShardId{3}).partner_id,
+                  "(5) Snapshot round-trip: partner_id preserved for "
+                  "every shard entry (no field drop in snapshot JSON)");
+            check(restored.merge_state().at(ShardId{1}).refugee_region
+                      == c.merge_state().at(ShardId{1}).refugee_region
+                  && restored.merge_state().at(ShardId{3}).refugee_region
+                         == c.merge_state().at(ShardId{3}).refugee_region,
+                  "(5) Snapshot round-trip: refugee_region preserved "
+                  "for every shard entry (utf8 region string survives "
+                  "JSON encoding)");
+        }
+
+        // === Scenario 6: Edge values ===
+        //
+        // Exercise boundary inputs that any non-cleanly-deterministic
+        // encoding would trip over: UINT64_MAX effective_height,
+        // UINT64_MAX evidence_window_start, empty region (END
+        // semantics), and the maximum 32-byte region. Assert encode →
+        // decode round-trip preserves the field, and the encoded size
+        // matches the documented 26 + region_len formula.
+        //
+        // 3 assertions: UINT64_MAX field round-trip; empty-region
+        // round-trip; 32-byte region round-trip.
+        {
+            // UINT64_MAX edge: effective_height + evidence_window_start
+            {
+                MergeEvent v;
+                v.event_type = MergeEvent::BEGIN;
+                v.shard_id = 1; v.partner_id = 2;
+                v.effective_height      = UINT64_MAX;
+                v.evidence_window_start = UINT64_MAX;
+                v.merging_shard_region  = "us";
+                auto bytes = v.encode();
+                auto back = MergeEvent::decode(bytes);
+                check(back.has_value()
+                      && back->effective_height == UINT64_MAX
+                      && back->evidence_window_start == UINT64_MAX
+                      && bytes.size() == 26 + 2,
+                      "(6) Edge values: UINT64_MAX effective_height + "
+                      "evidence_window_start round-trip cleanly (no "
+                      "integer-overflow shortcut in the encoder)");
+            }
+            // Empty region (END semantics): encode size == 26, decode
+            // restores empty string.
+            {
+                MergeEvent v;
+                v.event_type = MergeEvent::END;
+                v.shard_id = 1; v.partner_id = 2;
+                v.effective_height = 100;
+                v.evidence_window_start = 0;
+                v.merging_shard_region  = "";
+                auto bytes = v.encode();
+                auto back = MergeEvent::decode(bytes);
+                check(back.has_value()
+                      && back->merging_shard_region.empty()
+                      && bytes.size() == 26,
+                      "(6) Edge values: empty region (END semantics) "
+                      "encodes to exactly 26 bytes and decodes to an "
+                      "empty string");
+            }
+            // Maximum 32-byte region (largest accepted).
+            {
+                MergeEvent v;
+                v.event_type = MergeEvent::BEGIN;
+                v.shard_id = 1; v.partner_id = 2;
+                v.effective_height = 100;
+                v.evidence_window_start = 50;
+                v.merging_shard_region  = std::string(32, 'z');
+                auto bytes = v.encode();
+                auto back = MergeEvent::decode(bytes);
+                check(back.has_value()
+                      && back->merging_shard_region.size() == 32
+                      && back->merging_shard_region
+                             == std::string(32, 'z')
+                      && bytes.size() == 26 + 32,
+                      "(6) Edge values: max-32-byte region round-trips "
+                      "(boundary of the documented region_len <= 32 "
+                      "decode rule)");
+            }
+        }
+
+        // === Scenario 7: Cross-event composition ===
+        //
+        // A block carrying MERGE_EVENT + TRANSFER + STAKE applies the
+        // three events independently — the MERGE_EVENT mutation to
+        // merge_state is structurally independent of TRANSFER's balance
+        // mutation and STAKE's stakes_table mutation (FA-Apply-15 T-M5
+        // joint-determinism / T-M4 joint-state_root binding). The
+        // resulting state_root must be (a) reproducible across replays
+        // and (b) sensitive to the MERGE_EVENT presence — a baseline
+        // chain without the MERGE_EVENT but with the same TRANSFER +
+        // STAKE pair must produce a DIFFERENT state_root (the m:
+        // namespace contribution differs).
+        //
+        // 2 assertions: post-apply state_root reproducible across
+        // freshly built twin chains; state_root distinct from the
+        // baseline-without-MERGE chain.
+        {
+            // Helper: TRANSFER builder.
+            auto make_transfer = [](const std::string& from,
+                                      const std::string& to,
+                                      uint64_t amount, uint64_t fee,
+                                      uint64_t nonce) {
+                Transaction tx;
+                tx.type = TxType::TRANSFER;
+                tx.from = from; tx.to = to;
+                tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+                return tx;
+            };
+            // Helper: STAKE builder.
+            auto make_stake = [](const std::string& from, uint64_t amount,
+                                   uint64_t fee, uint64_t nonce) {
+                Transaction tx;
+                tx.type = TxType::STAKE;
+                tx.from = from; tx.fee = fee; tx.nonce = nonce;
+                tx.payload.resize(8);
+                for (int i = 0; i < 8; ++i)
+                    tx.payload[i] = uint8_t((amount >> (8 * i)) & 0xff);
+                return tx;
+            };
+
+            // Build the composed-block chain: MERGE_EVENT + TRANSFER +
+            // STAKE all in one block. Use distinct senders (alice for
+            // MERGE_EVENT/STAKE under nonces 0/1, dave for TRANSFER
+            // under nonce 0) so the apply path doesn't have to thread
+            // a single nonce through three event types.
+            auto build_composed = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                Hash salt{};
+                c.set_shard_routing(4, salt, ShardId{0});
+                append_block(c, {
+                    wrap_in_tx(make_canonical_event(), 0),
+                    make_transfer("dave", "bob", 100, 1, 0),
+                    make_stake("alice", 50, 1, 1)
+                });
+                return c;
+            };
+            // Build the baseline-without-MERGE chain: same TRANSFER +
+            // STAKE pair, no MERGE_EVENT. The m: namespace contribution
+            // differs, so state_root must too.
+            auto build_baseline = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                Hash salt{};
+                c.set_shard_routing(4, salt, ShardId{0});
+                append_block(c, {
+                    make_transfer("dave", "bob", 100, 1, 0),
+                    make_stake("alice", 50, 1, 0)
+                });
+                return c;
+            };
+
+            Chain c_a = build_composed();
+            Chain c_b = build_composed();
+            check(c_a.compute_state_root() == c_b.compute_state_root()
+                  && c_a.merge_state().size() == 1
+                  && c_a.merge_state().count(ShardId{1}) == 1,
+                  "(7) Cross-event composition: composed block "
+                  "(MERGE_EVENT + TRANSFER + STAKE) produces "
+                  "byte-identical state_root across two fresh chains, "
+                  "AND merge_state still reflects the MERGE_BEGIN "
+                  "(events apply independently / no interference)");
+
+            Chain c_base = build_baseline();
+            check(c_a.compute_state_root() != c_base.compute_state_root(),
+                  "(7) Cross-event composition: composed chain state_root "
+                  "is distinct from a baseline chain with same "
+                  "TRANSFER + STAKE but no MERGE_EVENT (the m:-namespace "
+                  "contribution is what differs — proves MERGE_EVENT "
+                  "presence binds into state_root, not silently dropped "
+                  "in the multi-event mix)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": merge-event-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);
