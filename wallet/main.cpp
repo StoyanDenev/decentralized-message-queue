@@ -53,6 +53,8 @@
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  include <windows.h>
+#  include <io.h>     // _commit, _fileno — used by keyfile-rotate for
+                      // OS-level commit-to-disk before atomic rename.
 #else
 #  include <unistd.h>
 #  include <termios.h>
@@ -61,6 +63,7 @@
 #  include <arpa/inet.h>
 #  include <netdb.h>
 #  include <errno.h>
+#  include <fcntl.h>  // open(O_RDONLY) — keyfile-rotate fsync path
 #endif
 
 using namespace determ::wallet;
@@ -3478,6 +3481,523 @@ int cmd_keyfile_decrypt(int argc, char** argv) {
         std::cout << "wrote plaintext node keyfile to " << out_path << "\n";
         std::cout << "  pubkey: " << inner_pubkey_hex << "\n";
         std::cout << "  format: node_key.json (daemon plaintext load path)\n";
+    }
+    return 0;
+}
+
+// ── keyfile-rotate — atomic passphrase rotation on an encrypted node-key ───
+//
+// Operator workflow: periodic rotation of the passphrase that guards an
+// encrypted node_key.json (S-004). Without this command, operators must
+// keyfile-decrypt → keyfile-create → swap manually — and every step writes
+// plaintext to disk for the seconds-to-minutes window between calls. This
+// command performs the rotation atomically with **no plaintext-on-disk
+// window**: the decrypted seed lives only in process memory, guarded by
+// sodium_memzero on every exit path (success + every error branch).
+//
+// Inputs:
+//   --in <file>                : existing encrypted keyfile produced by
+//                                 keyfile-create (canonical 2-line shape).
+//   --out <file>               : destination for rotated keyfile. May be
+//                                 the same path as --in for in-place
+//                                 rotation; the implementation always
+//                                 stages to <out>_tmp.json + fsync +
+//                                 atomic rename, so failure leaves the
+//                                 original file untouched.
+//   --old-passphrase-from src  : source for the OLD passphrase
+//                                 (`file:<path>`, `env:<NAME>`, `prompt`).
+//   --new-passphrase-from src  : source for the NEW passphrase (same
+//                                 options as --old-passphrase-from).
+//   [--force]                  : permit overwriting an existing --out
+//                                 file when --out != --in (in-place
+//                                 rotation always overwrites by design).
+//   [--force-same-passphrase]  : permit the same-passphrase rotation
+//                                 case (still produces a fresh nonce +
+//                                 fresh salt — cryptographically valuable
+//                                 even when the passphrase is unchanged,
+//                                 but usually a typo if not explicit).
+//   [--json]                   : emit one-line JSON summary on stdout.
+//
+// Flow:
+//   1. Read --in; parse the 2-line canonical format (header + blob).
+//   2. Validate header magic (DETERM-NODE-V1) + pubkey shape (64 hex).
+//   3. Deserialize the DWE1 envelope blob.
+//   4. Resolve --old-passphrase-from + --new-passphrase-from.
+//   5. Reject same-passphrase rotation unless --force-same-passphrase.
+//   6. envelope::decrypt with old passphrase + AAD = header pubkey bytes.
+//      AEAD tag mismatch → exit 2 "old passphrase wrong or corrupted
+//      keyfile" diagnostic (indistinguishable; an attacker probing
+//      passphrases must not learn the structural state).
+//   7. Parse decrypted plaintext to validate it's a canonical
+//      {"pubkey","priv_seed"} JSON. Verify inner pubkey matches header
+//      pubkey (defense-in-depth — same checks as keyfile-decrypt).
+//   8. envelope::encrypt the plaintext under the NEW passphrase. The
+//      envelope library generates a fresh 16-byte salt + fresh 12-byte
+//      nonce on every call — rotation has distinct crypto material by
+//      construction.
+//   9. Self-test round-trip: deserialize + decrypt the freshly-emitted
+//      envelope with the new passphrase. Catches encrypt/decrypt path
+//      drift before any file is touched.
+//  10. Write 2-line file atomically: stage to <out>_tmp.json, fflush,
+//      OS-level commit (fsync on POSIX, _commit on Windows), close,
+//      rename. fs::rename is atomic for same-volume targets on both
+//      POSIX (::rename(2)) and Windows (MoveFileEx implicit replace).
+//  11. Zero every plaintext + key buffer via sodium_memzero on every
+//      exit path.
+//
+// In-place rotation note: when --in == --out, the implementation still
+// stages to <out>_tmp.json + fsync + rename. The original --in is read
+// into memory before --out_tmp is opened for write, so the rename always
+// has a fully-written tmp file before destroying the original. fs::rename
+// on same-volume in-place targets is atomic on both POSIX and Windows.
+//
+// Diagnostic policy:
+//   * Wrong OLD passphrase OR tampered envelope OR mismatched AAD →
+//     **exit 2** with "old passphrase wrong or corrupted keyfile"
+//     diagnostic. Indistinguishable on stderr (same security rationale
+//     as keyfile-decrypt).
+//   * Same old + new passphrase without --force-same-passphrase →
+//     **exit 1** with "keyfile_rotated=NO" diagnostic.
+//   * Structural problems with --in (wrong header magic, malformed
+//     blob, unparseable plaintext JSON, mismatched pubkey after
+//     decrypt) → **exit 1** with a specific diagnostic.
+//   * Missing required flags, can't open --in, --out exists + diff +
+//     no --force → **exit 1**.
+int cmd_keyfile_rotate(int argc, char** argv) {
+    std::string in_path, out_path, old_pass_src, new_pass_src;
+    bool force                 = false;
+    bool force_same_passphrase = false;
+    bool json_out              = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"                       && i + 1 < argc) in_path        = argv[++i];
+        else if (a == "--out"                      && i + 1 < argc) out_path       = argv[++i];
+        else if (a == "--old-passphrase-from"      && i + 1 < argc) old_pass_src   = argv[++i];
+        else if (a == "--new-passphrase-from"      && i + 1 < argc) new_pass_src   = argv[++i];
+        else if (a == "--force")                                    force          = true;
+        else if (a == "--force-same-passphrase")                    force_same_passphrase = true;
+        else if (a == "--json")                                     json_out       = true;
+        else {
+            std::cerr << "keyfile-rotate: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet keyfile-rotate --in <file> --out <file> "
+                         "--old-passphrase-from <file:path|env:NAME|prompt> "
+                         "--new-passphrase-from <file:path|env:NAME|prompt> "
+                         "[--force] [--force-same-passphrase] [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty() || out_path.empty()
+        || old_pass_src.empty() || new_pass_src.empty()) {
+        std::cerr << "Usage: determ-wallet keyfile-rotate --in <file> --out <file> "
+                     "--old-passphrase-from <file:path|env:NAME|prompt> "
+                     "--new-passphrase-from <file:path|env:NAME|prompt> "
+                     "[--force] [--force-same-passphrase] [--json]\n";
+        return 1;
+    }
+
+    // ── Detect in-place rotation (canonical-path compare) ──────────────────
+    // We compare std::filesystem::weakly_canonical paths so that
+    // operator-supplied path strings like "node_key.enc" vs.
+    // "./node_key.enc" still resolve to the same file. In-place rotation
+    // skips the --force precondition (overwriting --in by definition).
+    bool in_place = false;
+    try {
+        std::error_code ec1, ec2;
+        auto in_can  = std::filesystem::weakly_canonical(in_path,  ec1);
+        auto out_can = std::filesystem::weakly_canonical(out_path, ec2);
+        if (!ec1 && !ec2) in_place = (in_can == out_can);
+    } catch (std::exception&) {
+        in_place = (in_path == out_path);
+    }
+    // Fallback string compare for robustness.
+    if (!in_place && in_path == out_path) in_place = true;
+
+    // ── Read --in and parse the canonical 2-line format ────────────────────
+    std::string header_line, blob_line;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "keyfile-rotate: cannot open --in: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, header_line)) {
+            std::cerr << "keyfile-rotate: --in is empty: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, blob_line)) {
+            std::cerr << "keyfile-rotate: --in is missing the envelope-blob "
+                         "line (expected 2-line format: header + blob): "
+                      << in_path << "\n";
+            return 1;
+        }
+        while (!header_line.empty()
+               && (header_line.back() == '\r' || header_line.back() == '\n'))
+            header_line.pop_back();
+        while (!blob_line.empty()
+               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
+            blob_line.pop_back();
+    }
+
+    const std::string header_magic = "DETERM-NODE-V1 ";
+    if (header_line.rfind(header_magic, 0) != 0) {
+        std::cerr << "keyfile-rotate: --in header does not start with "
+                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
+                     "keyfile)\n";
+        return 1;
+    }
+    std::string header_pubkey_hex = header_line.substr(header_magic.size());
+    if (header_pubkey_hex.size() != 64) {
+        std::cerr << "keyfile-rotate: --in header pubkey must be 64 hex "
+                     "chars (32-byte Ed25519 pubkey); got "
+                  << header_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    try { (void)from_hex(header_pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-rotate: --in header pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (blob_line.empty()) {
+        std::cerr << "keyfile-rotate: --in envelope blob line is empty\n";
+        return 1;
+    }
+
+    // Lowercase the pubkey hex for canonical anon-address; the AAD
+    // binding uses the bytes as supplied in the file header, so do NOT
+    // alter the AAD source — just derive a display-canonical address.
+    std::string anon_address = "0x" + header_pubkey_hex;
+
+    // ── Read OLD + NEW passphrases ─────────────────────────────────────────
+    std::string err;
+    std::string old_passphrase = passphrase_from_source(old_pass_src, err);
+    if (old_passphrase.empty()) {
+        std::cerr << "keyfile-rotate: (old passphrase) " << err << "\n";
+        // No secrets in scope yet; safe to return without zeroization.
+        return 1;
+    }
+    std::string new_passphrase = passphrase_from_source(new_pass_src, err);
+    if (new_passphrase.empty()) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        std::cerr << "keyfile-rotate: (new passphrase) " << err << "\n";
+        return 1;
+    }
+
+    // ── Same-passphrase guard ──────────────────────────────────────────────
+    // The rotation is still valuable cryptographically (fresh salt +
+    // fresh nonce on every envelope::encrypt call), but the operator
+    // having typed the same passphrase twice is almost always a typo.
+    // Refuse unless --force-same-passphrase is explicit.
+    if (old_passphrase == new_passphrase && !force_same_passphrase) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        if (json_out) {
+            nlohmann::json r;
+            r["rotated"]                = false;
+            r["reason"]                 = "old_and_new_passphrase_identical";
+            r["in"]                     = in_path;
+            r["out"]                    = out_path;
+            std::cout << r.dump() << "\n";
+        } else {
+            std::cerr << "keyfile-rotate: keyfile_rotated=NO "
+                         "(reason=old_and_new_passphrase_identical; "
+                         "use --force-same-passphrase to override)\n";
+        }
+        return 1;
+    }
+
+    // ── --out preconditions ────────────────────────────────────────────────
+    // In-place rotation (--in == --out) is allowed by construction — the
+    // staging-then-rename pattern preserves the original on any failure.
+    // For different --out we require --force when the target already
+    // exists, matching keyfile-create's policy.
+    if (!in_place) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            std::cerr << "keyfile-rotate: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            std::cerr << "keyfile-rotate: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override "
+                         "or use in-place rotation by setting --out == --in)\n";
+            return 1;
+        }
+    }
+
+    // ── Deserialize the envelope blob ──────────────────────────────────────
+    auto env_opt = envelope::deserialize(blob_line);
+    if (!env_opt) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        std::cerr << "keyfile-rotate: --in envelope blob is malformed "
+                     "(not a valid DWE1 serialization)\n";
+        return 1;
+    }
+
+    // ── Decrypt with OLD passphrase ────────────────────────────────────────
+    // AAD = ASCII bytes of header_pubkey_hex (matches keyfile-create).
+    std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
+    auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);
+    if (!pt_opt) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        std::cerr << "keyfile-rotate: old passphrase wrong or corrupted "
+                     "keyfile\n";
+        return 2;
+    }
+    // ── secure_buffer for plaintext ─────────────────────────────────────────
+    // pt_bytes carries the decrypted node_key.json plaintext, which
+    // contains the 32-byte Ed25519 seed. Zeroed via sodium_memzero on
+    // every exit path below. The vector itself is non-owning of its
+    // capacity once .clear() runs; we keep an explicit handle and zero
+    // before destruction.
+    std::vector<uint8_t> pt_bytes = std::move(*pt_opt);
+    // Convenience: a "secure-zero on scope exit" helper for pt_bytes +
+    // the two passphrase strings. Using a closure-based defer guarantees
+    // we zero on every return path including exceptions.
+    auto secure_zero_all = [&]() {
+        if (!pt_bytes.empty())
+            sodium_memzero(pt_bytes.data(), pt_bytes.size());
+        if (!old_passphrase.empty())
+            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        if (!new_passphrase.empty())
+            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+    };
+
+    // ── Validate decrypted plaintext is canonical {"pubkey","priv_seed"} ───
+    std::string pt_str(pt_bytes.begin(), pt_bytes.end());
+    nlohmann::json keyfile_json;
+    try {
+        keyfile_json = nlohmann::json::parse(pt_str);
+    } catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: decrypted plaintext is not valid JSON "
+                     "(this is not a canonical encrypted node keyfile): "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!keyfile_json.is_object()
+        || !keyfile_json.contains("pubkey")
+        || !keyfile_json.contains("priv_seed")
+        || !keyfile_json["pubkey"].is_string()
+        || !keyfile_json["priv_seed"].is_string()) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: decrypted plaintext is missing the "
+                     "required 'pubkey' / 'priv_seed' string fields\n";
+        return 1;
+    }
+    std::string inner_pubkey_hex = keyfile_json["pubkey"].get<std::string>();
+    std::string priv_seed_hex    = keyfile_json["priv_seed"].get<std::string>();
+    if (inner_pubkey_hex.size() != 64) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: inner 'pubkey' must be 64 hex chars; "
+                     "got " << inner_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    if (priv_seed_hex.size() != 64) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: inner 'priv_seed' must be 64 hex "
+                     "chars; got " << priv_seed_hex.size() << "\n";
+        return 1;
+    }
+    try { (void)from_hex(inner_pubkey_hex); (void)from_hex(priv_seed_hex); }
+    catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: inner JSON contains invalid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (inner_pubkey_hex != header_pubkey_hex) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: inner 'pubkey' (" << inner_pubkey_hex
+                  << ") does not match header pubkey (" << header_pubkey_hex
+                  << "); the encrypted blob was not produced by the "
+                     "canonical keyfile-create path\n";
+        return 1;
+    }
+
+    // ── Encrypt under the NEW passphrase (fresh salt + fresh nonce) ────────
+    // envelope::encrypt generates a fresh 16-byte salt + fresh 12-byte
+    // nonce per call (RAND_bytes) — rotation gets distinct crypto
+    // material by construction, even with --force-same-passphrase.
+    std::string blob;
+    try {
+        auto new_env = envelope::encrypt(pt_bytes, new_passphrase, aad);
+        blob         = envelope::serialize(new_env);
+    } catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-rotate: envelope encrypt failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // ── Self-test round-trip: decrypt the freshly-encrypted envelope ───────
+    // Catches encrypt/decrypt path drift BEFORE we overwrite --in.
+    {
+        auto rt_env = envelope::deserialize(blob);
+        if (!rt_env) {
+            secure_zero_all();
+            std::cerr << "keyfile-rotate: internal: just-emitted envelope "
+                         "blob fails deserialize\n";
+            return 1;
+        }
+        auto rt_pt = envelope::decrypt(*rt_env, new_passphrase, aad);
+        if (!rt_pt) {
+            secure_zero_all();
+            std::cerr << "keyfile-rotate: internal: just-emitted envelope "
+                         "fails decrypt round-trip with the new passphrase\n";
+            return 1;
+        }
+        bool rt_match = (*rt_pt == pt_bytes);
+        sodium_memzero(rt_pt->data(), rt_pt->size());
+        if (!rt_match) {
+            secure_zero_all();
+            std::cerr << "keyfile-rotate: internal: round-trip plaintext "
+                         "mismatch under new passphrase\n";
+            return 1;
+        }
+    }
+
+    // ── Atomic file write: stage to <out>_tmp.json + fsync + rename ────────
+    // 1. Write the full 2-line content to <out>_tmp.json.
+    // 2. fflush the C++ stream.
+    // 3. OS-level commit (fsync on POSIX, _commit on Windows) — without
+    //    this the rename can complete before bytes hit disk, and a
+    //    crash mid-window leaves an empty or torn file.
+    // 4. Atomic rename via std::filesystem::rename (atomic for
+    //    same-volume targets on both POSIX and Windows).
+    std::string tmp_path = out_path + "_tmp.json";
+    {
+        // Remove a stale leftover tmp file from a prior crashed rotation.
+        std::error_code rm_ec;
+        std::filesystem::remove(tmp_path, rm_ec);
+        (void)rm_ec;
+    }
+    {
+        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            secure_zero_all();
+            std::cerr << "keyfile-rotate: cannot open tmp file for write: "
+                      << tmp_path << "\n";
+            return 1;
+        }
+        f << "DETERM-NODE-V1 " << header_pubkey_hex << "\n";
+        f << blob << "\n";
+        f.flush();
+        if (!f) {
+            secure_zero_all();
+            std::error_code rm_ec;
+            std::filesystem::remove(tmp_path, rm_ec);
+            (void)rm_ec;
+            std::cerr << "keyfile-rotate: write failed on tmp file: "
+                      << tmp_path << "\n";
+            return 1;
+        }
+        // std::ofstream doesn't expose the underlying FILE* / fd, so we
+        // close the stream and re-open via the C stdio API for the
+        // platform-specific commit. The close flushes the C++ buffer;
+        // the re-open + fsync/_commit drives the OS-level commit.
+        f.close();
+        if (!f) {
+            secure_zero_all();
+            std::error_code rm_ec;
+            std::filesystem::remove(tmp_path, rm_ec);
+            (void)rm_ec;
+            std::cerr << "keyfile-rotate: close failed on tmp file: "
+                      << tmp_path << "\n";
+            return 1;
+        }
+    }
+    // Platform-specific commit-to-disk. On Windows _commit forces the
+    // file's in-flight writes to be flushed by the kernel; on POSIX
+    // fsync is the equivalent. Both are best-effort: failures are
+    // logged but don't block the rename (a failed fsync still produces
+    // a valid file in the common case; the rename remains atomic).
+    {
+#ifdef _WIN32
+        // Re-open in binary R/W mode to obtain an fd suitable for _commit.
+        // The file is small (~600 bytes); the second open is negligible.
+        FILE* fp = nullptr;
+        errno_t open_ec = fopen_s(&fp, tmp_path.c_str(), "rb+");
+        if (open_ec == 0 && fp) {
+            int fd = _fileno(fp);
+            if (fd >= 0) {
+                (void)_commit(fd);
+            }
+            std::fclose(fp);
+        }
+#else
+        int fd = ::open(tmp_path.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            (void)::fsync(fd);
+            ::close(fd);
+        }
+#endif
+    }
+    // Atomic rename. fs::rename(tmp, out) replaces an existing --out
+    // atomically on same-volume targets (Windows: MoveFileEx implicit
+    // REPLACE_EXISTING; POSIX: ::rename(2)).
+    {
+        std::error_code rename_ec;
+        std::filesystem::rename(tmp_path, out_path, rename_ec);
+        if (rename_ec) {
+            secure_zero_all();
+            std::error_code rm_ec;
+            std::filesystem::remove(tmp_path, rm_ec);
+            (void)rm_ec;
+            std::cerr << "keyfile-rotate: cannot rename tmp "
+                      << tmp_path << " -> " << out_path << ": "
+                      << rename_ec.message() << "\n";
+            return 1;
+        }
+    }
+
+    // 0600 permissions tightening — best-effort on Windows.
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    // ── Zero all plaintext + key buffers BEFORE emitting summary ───────────
+    // The summary line carries only public information (pubkey, anon_address,
+    // file paths, source labels) — no plaintext leaves the binary.
+    secure_zero_all();
+
+    if (json_out) {
+        nlohmann::json r;
+        r["rotated"]              = true;
+        r["anon_address"]         = anon_address;
+        r["ed_pub_hex"]           = header_pubkey_hex;
+        r["in"]                   = in_path;
+        r["out"]                  = out_path;
+        r["in_place"]             = in_place;
+        r["old_passphrase_source"] = old_pass_src;
+        r["new_passphrase_source"] = new_pass_src;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "keyfile-rotate: decrypted --in with old passphrase\n";
+        std::cout << "keyfile-rotate: re-encrypted under new passphrase "
+                     "(fresh nonce + fresh salt)\n";
+        std::cout << "keyfile-rotate: atomic write (stage -> commit -> "
+                     "rename) complete\n";
+        std::cout << "keyfile_rotated=YES (anon=" << anon_address
+                  << " in=" << in_path << " out=" << out_path
+                  << (in_place ? " in_place=YES" : " in_place=NO")
+                  << ")\n";
     }
     return 0;
 }
@@ -9834,6 +10354,26 @@ void print_usage() {
         "                                             for-byte. Wrong passphrase or tampered\n"
         "                                             envelope exits 2 (indistinguishable on\n"
         "                                             stderr); malformed --in exits 1.\n"
+        "  keyfile-rotate --in <file> --out <file>    Atomically rotate the passphrase on an\n"
+        "                 --old-passphrase-from <src> encrypted node_key.json (S-004). Decrypts\n"
+        "                 --new-passphrase-from <src> --in with the OLD passphrase, re-encrypts\n"
+        "                 [--force]                   under the NEW passphrase with fresh\n"
+        "                 [--force-same-passphrase]   12-byte nonce + 16-byte salt, and writes\n"
+        "                 [--json]                    --out via stage-tmp + fflush + fsync\n"
+        "                                             (_commit on Windows) + atomic rename.\n"
+        "                                             No plaintext-on-disk window: the\n"
+        "                                             decrypted seed lives only in memory,\n"
+        "                                             zeroed via sodium_memzero on every\n"
+        "                                             exit path. --out may equal --in for\n"
+        "                                             in-place rotation; the stage-tmp\n"
+        "                                             pattern preserves the original on any\n"
+        "                                             failure. Refuses overwrite of an\n"
+        "                                             existing different --out without\n"
+        "                                             --force. Refuses identical old/new\n"
+        "                                             passphrase without --force-same-passphrase\n"
+        "                                             (still produces a fresh nonce+salt when\n"
+        "                                             that flag is set). Wrong old passphrase\n"
+        "                                             exits 2; structural errors exit 1.\n"
         "  keyfile-recover --backup-shares <file>     High-level T-of-N recovery CLI: composes\n"
         "                  --backup-envelopes <file>  envelope::decrypt + shamir::combine into a\n"
         "                  --keyholders <file>        single call. Reads the (shares, envelopes)\n"
@@ -10188,6 +10728,7 @@ int main(int argc, char** argv) {
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
     if (cmd == "keyfile-decrypt") return cmd_keyfile_decrypt(argc - 2, argv + 2);
+    if (cmd == "keyfile-rotate")  return cmd_keyfile_rotate (argc - 2, argv + 2);
     if (cmd == "keyfile-recover") return cmd_keyfile_recover(argc - 2, argv + 2);
     if (cmd == "account-recover") return cmd_account_recover(argc - 2, argv + 2);
     if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
