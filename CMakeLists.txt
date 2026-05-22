@@ -103,6 +103,14 @@ target_link_libraries(determ PRIVATE
 
 if(WIN32)
   target_link_libraries(determ PRIVATE ws2_32 wsock32 crypt32)
+  # MSVC defaults to a 1 MB stack; the in-process test handlers
+  # (test-atomic-scope, test-overflow-paths, test-time-monotonicity,
+  # test-chain-prev-hash-link, etc.) accumulate stack frames across many
+  # mutually-exclusive `if (cmd == ...)` branches inside main() and can
+  # hit STATUS_STACK_OVERFLOW (0xC00000FD) at startup. Bump the reserve
+  # to 16 MB to eliminate the failure mode without restructuring the
+  # dispatcher into a separate compilation unit.
+  target_link_options(determ PRIVATE /STACK:16777216)
 endif()
 
 if(UNIX)

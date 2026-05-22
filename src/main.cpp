@@ -5442,9 +5442,15 @@ int main(int argc, char** argv) {
         using namespace determ;
         using namespace determ::chain;
         int fail = 0;
+        // fputs instead of std::cout to bypass MSVC Release stdout-buffering
+        // issue under bash subshell capture — same workaround used by
+        // test-block-from-json-minimal.
         auto check = [&](bool cond, const char* msg) {
-            if (cond) std::cout << "  PASS: " << msg << "\n";
-            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
         };
 
         // Build a minimal genesis block: alice=100, bob=0.
@@ -5564,9 +5570,12 @@ int main(int argc, char** argv) {
         check(chain.balance("bob")   == b5,         "test5: bob unchanged after outer discard");
         check(chain.height()         == h5,         "test5: both blocks rolled back");
 
-        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
-                  << ": atomic_scope " << (fail == 0 ? "all assertions" : "had failures")
-                  << "\n";
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": atomic_scope ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     // v2.4 composable transactions: in-process apply-path test.
@@ -13035,9 +13044,15 @@ int main(int argc, char** argv) {
         using namespace determ::util;
         using nlohmann::json;
         int fail = 0;
+        // fputs instead of std::cout to bypass MSVC Release stdout-buffering
+        // issue under bash subshell capture — same workaround used by
+        // test-block-from-json-minimal.
         auto check = [&](bool cond, const char* msg) {
-            if (cond) std::cout << "  PASS: " << msg << "\n";
-            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
         };
 
         auto expect_throws = [&](auto fn, const char* needle, const char* label) {
@@ -13214,9 +13229,12 @@ int main(int argc, char** argv) {
                 "json_require_array preserves unusual field name in diagnostic");
         }
 
-        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
-                  << ": json-validate " << (fail == 0 ? "all assertions" : "had failures")
-                  << "\n";
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": json-validate ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1 seed: in-process unit test for Block::to_json /
@@ -19711,9 +19729,15 @@ int main(int argc, char** argv) {
         using namespace determ;
         using namespace determ::chain;
         int fail = 0;
+        // fputs instead of std::cout to bypass MSVC Release stdout-buffering
+        // issue under bash subshell capture — same workaround used by
+        // test-block-from-json-minimal.
         auto check = [&](bool cond, const char* msg) {
-            if (cond) std::cout << "  PASS: " << msg << "\n";
-            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
         };
 
         // Helper: build genesis with a recipient near UINT64_MAX.
@@ -19899,9 +19923,12 @@ int main(int argc, char** argv) {
                   "A1: invariant holds after S-007 rollback");
         }
 
-        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
-                  << ": overflow-paths " << (fail == 0 ? "all assertions" : "had failures")
-                  << "\n";
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": overflow-paths ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: exhaustive coverage of every state_root namespace.
@@ -27140,9 +27167,15 @@ int main(int argc, char** argv) {
         using namespace determ::chain;
         using nlohmann::json;
         int fail = 0;
+        // fputs instead of std::cout to bypass MSVC Release stdout-buffering
+        // issue under bash subshell capture — same workaround used by
+        // test-block-from-json-minimal.
         auto check = [&](bool cond, const char* msg) {
-            if (cond) std::cout << "  PASS: " << msg << "\n";
-            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
         };
         // Helper: expect that calling fn() throws and the message
         // contains every needle in `needles`. Defends against the
@@ -27152,8 +27185,10 @@ int main(int argc, char** argv) {
                                        std::vector<std::string> needles) {
             try {
                 fn();
-                std::cout << "  FAIL: " << test_name
-                          << " (expected exception, none thrown)\n";
+                std::fputs("  FAIL: ", stdout);
+                std::fputs(test_name, stdout);
+                std::fputs(" (expected exception, none thrown)\n", stdout);
+                std::fflush(stdout);
                 fail++;
             } catch (const std::exception& e) {
                 std::string msg = e.what();
@@ -27162,10 +27197,17 @@ int main(int argc, char** argv) {
                     if (msg.find(n) == std::string::npos) { all = false; break; }
                 }
                 if (all) {
-                    std::cout << "  PASS: " << test_name << "\n";
+                    std::fputs("  PASS: ", stdout);
+                    std::fputs(test_name, stdout);
+                    std::fputs("\n", stdout);
+                    std::fflush(stdout);
                 } else {
-                    std::cout << "  FAIL: " << test_name
-                              << " (got '" << msg << "')\n";
+                    std::fputs("  FAIL: ", stdout);
+                    std::fputs(test_name, stdout);
+                    std::fputs(" (got '", stdout);
+                    std::fputs(msg.c_str(), stdout);
+                    std::fputs("')\n", stdout);
+                    std::fflush(stdout);
                     fail++;
                 }
             }
@@ -27284,10 +27326,12 @@ int main(int argc, char** argv) {
             Block::from_json(j);
         }, {"S-018", "'transactions'", "expected array"});
 
-        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
-                  << ": s018_json_validation "
-                  << (fail == 0 ? "all assertions" : "had failures")
-                  << "\n";
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": s018_json_validation ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     // Companion to test-rate-limiter: where that test exercises the
