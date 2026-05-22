@@ -38,6 +38,7 @@
 #include <array>
 #include <map>
 #include <set>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
@@ -4606,6 +4607,481 @@ int cmd_keyfile_info(int argc, char** argv) {
     return 0;
 }
 
+// ── account-list — enumerate keyfiles in a directory with metadata ──────────
+//
+// Pure local computation: walks --keyfiles-dir, classifies each regular file
+// as one of {plaintext-single, plaintext-batch, encrypted-DETERM-NODE-V1,
+// unknown}, and emits a per-file metadata record. No daemon RPC, no
+// decryption, no passphrase required.
+//
+// Detection rules (each file is read until a definitive classification or
+// the rules give up):
+//   * Read the first line as text. If it starts with "DETERM-NODE-V1 " AND
+//     the second line is a parseable DWE1 envelope blob, it's encrypted.
+//   * Otherwise try JSON parse on the full content:
+//       - JSON object with string `address` (66 char "0x"+64hex) AND string
+//         `privkey_hex` (64 hex chars): plaintext-single
+//       - JSON object with array `accounts` whose entries match the
+//         single-account shape (or contain {address, privkey_hex}):
+//         plaintext-batch
+//   * Anything else: "unknown" — recorded but skipped from the address
+//     extraction. By default unknown rows are still listed (so the operator
+//     can see what's in the dir); the `--include-encrypted` and
+//     `--include-plaintext` flags only gate the keyfile-typed rows.
+//
+// Encrypted keyfile metadata mirrors `keyfile-info`: header_tag (the
+// "DETERM-NODE-V1" magic), pbkdf2_iters, salt_hex, nonce_hex. No decrypt is
+// performed, so this is safe to run on a directory of production keyfiles
+// without passphrases on hand.
+//
+// File mode reporting:
+//   * On POSIX: rwx triplet rendered as a 4-digit octal ("0600", "0644",
+//     etc.). The "0600" string is the security-critical value for plaintext
+//     keyfiles — anything else triggers a `mode_not_0600` warning.
+//   * On Windows: NTFS doesn't have a Unix-style mode bit; we report "n/a"
+//     and skip the mode_not_0600 warning entirely (operator hygiene there
+//     is enforced via NTFS ACL inheritance, not visible here).
+//
+// Summary warnings:
+//   * mode_not_0600 — any plaintext keyfile on POSIX with mode != 0600.
+//   * mixed_encrypted_and_plaintext_in_same_dir — operator hygiene; a single
+//     directory containing both encrypted node keyfiles and plaintext
+//     account JSON probably represents an accidental cross-contamination.
+//
+// CLI:
+//   --keyfiles-dir <path>     REQUIRED. Directory to enumerate.
+//   --recursive               Walk subdirectories (default off).
+//   --include-encrypted       Include encrypted keyfiles (default on).
+//   --include-plaintext       Include plaintext single + batch (default on).
+//   --json                    JSON output (default on — only the default
+//                             output shape is documented; non-JSON form is
+//                             not provided).
+//   --help                    Print usage and exit 0.
+//
+// Negation forms `--include-encrypted=off` and `--include-plaintext=off`
+// (and equivalently `--no-include-encrypted` / `--no-include-plaintext`)
+// disable the respective inclusion. The flags are independent: turning
+// both off yields a summary-only output with an empty keyfiles array.
+//
+// Exit codes:
+//   0  success
+//   1  bad args, missing directory, unreadable directory
+int cmd_account_list(int argc, char** argv) {
+    std::string keyfiles_dir;
+    bool recursive          = false;
+    bool include_encrypted  = true;
+    bool include_plaintext  = true;
+    bool json_out           = true;  // default on per spec
+
+    auto parse_onoff = [](const std::string& v, bool& out) -> bool {
+        if (v == "on" || v == "1" || v == "true" || v == "yes")  { out = true;  return true; }
+        if (v == "off"|| v == "0" || v == "false"|| v == "no")   { out = false; return true; }
+        return false;
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfiles-dir" && i + 1 < argc) keyfiles_dir = argv[++i];
+        else if (a == "--recursive")                    recursive = true;
+        else if (a == "--include-encrypted")            include_encrypted = true;
+        else if (a == "--no-include-encrypted")         include_encrypted = false;
+        else if (a.rfind("--include-encrypted=", 0) == 0) {
+            if (!parse_onoff(a.substr(20), include_encrypted)) {
+                std::cerr << "account-list: --include-encrypted= must be on|off (got '"
+                          << a.substr(20) << "')\n";
+                return 1;
+            }
+        }
+        else if (a == "--include-plaintext")            include_plaintext = true;
+        else if (a == "--no-include-plaintext")         include_plaintext = false;
+        else if (a.rfind("--include-plaintext=", 0) == 0) {
+            if (!parse_onoff(a.substr(20), include_plaintext)) {
+                std::cerr << "account-list: --include-plaintext= must be on|off (got '"
+                          << a.substr(20) << "')\n";
+                return 1;
+            }
+        }
+        else if (a == "--json")                         json_out = true;
+        else if (a == "--no-json")                      json_out = false;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet account-list --keyfiles-dir <path> "
+                "[--recursive] [--include-encrypted[=on|off]] "
+                "[--include-plaintext[=on|off]] [--json] [--help]\n"
+                "\n"
+                "Enumerate keyfiles in a directory and emit per-file\n"
+                "metadata (type, address(es), file size, mode). Pure local\n"
+                "computation; no daemon RPC; no decryption.\n"
+                "\n"
+                "Detected types:\n"
+                "  plaintext-single             {\"address\":..., \"privkey_hex\":...}\n"
+                "  plaintext-batch              {\"accounts\":[{\"address\":..., ...}, ...]}\n"
+                "  encrypted-DETERM-NODE-V1     2-line: header + DWE1 envelope\n"
+                "  unknown                      neither JSON nor canonical keyfile\n"
+                "\n"
+                "Summary warnings:\n"
+                "  mode_not_0600                       plaintext keyfile with mode != 0600 (POSIX)\n"
+                "  mixed_encrypted_and_plaintext_in_same_dir  hygiene flag\n";
+            return 0;
+        }
+        else {
+            std::cerr << "account-list: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-list --keyfiles-dir <path> "
+                         "[--recursive] [--include-encrypted[=on|off]] "
+                         "[--include-plaintext[=on|off]] [--json] [--help]\n";
+            return 1;
+        }
+    }
+
+    if (keyfiles_dir.empty()) {
+        std::cerr << "account-list: --keyfiles-dir is required\n";
+        std::cerr << "Usage: determ-wallet account-list --keyfiles-dir <path> "
+                     "[--recursive] [--include-encrypted[=on|off]] "
+                     "[--include-plaintext[=on|off]] [--json] [--help]\n";
+        return 1;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(keyfiles_dir, ec) || ec) {
+        std::cerr << "account-list: --keyfiles-dir does not exist: "
+                  << keyfiles_dir << "\n";
+        return 1;
+    }
+    if (!std::filesystem::is_directory(keyfiles_dir, ec) || ec) {
+        std::cerr << "account-list: --keyfiles-dir is not a directory: "
+                  << keyfiles_dir << "\n";
+        return 1;
+    }
+
+    // ── Helper: render file mode as a 4-digit octal string ─────────────────
+    // On POSIX we read st_mode permission bits and emit "0600" et al.
+    // On Windows std::filesystem::permissions returns the read/write/execute
+    // synthesized triplet which does not reflect NTFS ACL; rather than
+    // emitting a misleading "0666", we report "n/a" so the warning logic
+    // skips the mode_not_0600 check there.
+    auto file_mode_str = [](const std::filesystem::path& p) -> std::string {
+#ifdef _WIN32
+        (void)p;
+        return "n/a";
+#else
+        std::error_code mec;
+        auto perms = std::filesystem::status(p, mec).permissions();
+        if (mec) return "n/a";
+        unsigned v = 0;
+        using std::filesystem::perms;
+        if ((perms & perms::owner_read)   != perms::none) v |= 0400;
+        if ((perms & perms::owner_write)  != perms::none) v |= 0200;
+        if ((perms & perms::owner_exec)   != perms::none) v |= 0100;
+        if ((perms & perms::group_read)   != perms::none) v |= 0040;
+        if ((perms & perms::group_write)  != perms::none) v |= 0020;
+        if ((perms & perms::group_exec)   != perms::none) v |= 0010;
+        if ((perms & perms::others_read)  != perms::none) v |= 0004;
+        if ((perms & perms::others_write) != perms::none) v |= 0002;
+        if ((perms & perms::others_exec)  != perms::none) v |= 0001;
+        char buf[8]{};
+        std::snprintf(buf, sizeof(buf), "%04o", v);
+        return std::string(buf);
+#endif
+    };
+
+    // ── Helper: validate "0x" + 64 lowercase hex (anon-address shape) ──────
+    auto is_anon_address = [](const std::string& s) -> bool {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!hex) return false;
+        }
+        return true;
+    };
+
+    // ── Helper: classify a single file ─────────────────────────────────────
+    // Returns a JSON record per the output schema. The "type" field is
+    // always present; type-specific fields follow. Errors during read are
+    // recorded as type="unknown" with a "skip_reason" field; the caller
+    // decides whether to include them in the output array.
+    auto classify = [&](const std::filesystem::path& path) -> nlohmann::json {
+        nlohmann::json rec;
+        // Canonicalize the path for the output. lexically_normal keeps it
+        // readable across platforms; the generic_string() form uses forward
+        // slashes uniformly (matters on Windows for test grep-ability).
+        rec["path"] = path.lexically_normal().generic_string();
+        std::error_code sec;
+        auto sz = std::filesystem::file_size(path, sec);
+        rec["size_bytes"] = sec ? 0 : static_cast<uint64_t>(sz);
+        rec["mode"] = file_mode_str(path);
+
+        // Read up to 16 MB. Anything larger isn't plausibly a wallet
+        // keyfile (largest plaintext-batch caps at 10_000 accounts ~ 1.5 MB;
+        // encrypted envelope is two lines under 2 KB).
+        constexpr std::uintmax_t MAX_READ = 16 * 1024 * 1024;
+        if (rec["size_bytes"].get<uint64_t>() > MAX_READ) {
+            rec["type"] = "unknown";
+            rec["skip_reason"] = "file_too_large";
+            return rec;
+        }
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            rec["type"] = "unknown";
+            rec["skip_reason"] = "open_failed";
+            return rec;
+        }
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+
+        // ── Detection #1: encrypted DETERM-NODE-V1 (2-line text format) ────
+        // The header magic is a tight prefix match; we only treat the file
+        // as encrypted if the header is well-formed AND the second line
+        // deserializes as a DWE1 envelope. Anything else falls through to
+        // the JSON detector.
+        const std::string header_magic = "DETERM-NODE-V1 ";
+        if (content.size() > header_magic.size()
+            && content.compare(0, header_magic.size(), header_magic) == 0) {
+            // Split on first newline.
+            auto nl = content.find('\n');
+            if (nl != std::string::npos) {
+                std::string header_line = content.substr(0, nl);
+                while (!header_line.empty()
+                       && (header_line.back() == '\r' || header_line.back() == '\n'))
+                    header_line.pop_back();
+                // Find the blob line (skip the LF + take until next LF or EOF).
+                std::string blob_line;
+                auto rest_start = nl + 1;
+                auto nl2 = content.find('\n', rest_start);
+                if (nl2 == std::string::npos) blob_line = content.substr(rest_start);
+                else                          blob_line = content.substr(rest_start,
+                                                                          nl2 - rest_start);
+                while (!blob_line.empty()
+                       && (blob_line.back() == '\r' || blob_line.back() == '\n'))
+                    blob_line.pop_back();
+
+                std::string pubkey_hex = header_line.substr(header_magic.size());
+                bool hdr_pub_ok = (pubkey_hex.size() == 64);
+                if (hdr_pub_ok) {
+                    try { (void)from_hex(pubkey_hex); }
+                    catch (...) { hdr_pub_ok = false; }
+                }
+                auto env_opt = envelope::deserialize(blob_line);
+                if (hdr_pub_ok && env_opt) {
+                    rec["type"]         = "encrypted-DETERM-NODE-V1";
+                    rec["header_tag"]   = "DETERM-NODE-V1";
+                    rec["pubkey_hex"]   = pubkey_hex;
+                    rec["address"]      = "0x" + pubkey_hex;
+                    rec["pbkdf2_iters"] = env_opt->pbkdf2_iters;
+                    rec["salt_hex"]     = to_hex(env_opt->salt);
+                    rec["nonce_hex"]    = to_hex(env_opt->nonce);
+                    return rec;
+                }
+                // Header looked like ours but the envelope failed — fall
+                // through to "unknown". An operator-friendly skip_reason
+                // helps debug accidentally-corrupted keyfiles.
+                rec["type"]        = "unknown";
+                rec["skip_reason"] = "encrypted_keyfile_malformed";
+                return rec;
+            }
+        }
+
+        // ── Detection #2: plaintext JSON shapes (single + batch) ───────────
+        nlohmann::json doc;
+        try {
+            doc = nlohmann::json::parse(content);
+        } catch (...) {
+            rec["type"]        = "unknown";
+            rec["skip_reason"] = "not_json";
+            return rec;
+        }
+
+        // Single-account shape: top-level {address, privkey_hex} strings.
+        if (doc.is_object()
+            && doc.contains("address") && doc["address"].is_string()
+            && doc.contains("privkey_hex") && doc["privkey_hex"].is_string()
+            && is_anon_address(doc["address"].get<std::string>())) {
+            rec["type"]    = "plaintext-single";
+            rec["address"] = doc["address"].get<std::string>();
+            return rec;
+        }
+
+        // Batch shape: top-level {accounts: [{address, privkey_hex}, ...]}.
+        // Matches account-create-batch / account-derive-batch output. We
+        // accept either pure single-account entries or the derive-batch
+        // shape that adds an "index" field (so account-derive-batch output
+        // is recognized too).
+        if (doc.is_object() && doc.contains("accounts")
+            && doc["accounts"].is_array()) {
+            nlohmann::json addrs = nlohmann::json::array();
+            bool all_ok = true;
+            for (const auto& a : doc["accounts"]) {
+                if (!a.is_object()
+                    || !a.contains("address") || !a["address"].is_string()) {
+                    all_ok = false; break;
+                }
+                std::string addr = a["address"].get<std::string>();
+                if (!is_anon_address(addr)) { all_ok = false; break; }
+                addrs.push_back(addr);
+            }
+            if (all_ok && !addrs.empty()) {
+                rec["type"]      = "plaintext-batch";
+                rec["addresses"] = std::move(addrs);
+                return rec;
+            }
+        }
+
+        // ── Detection #3: pubkey/priv_seed shape (decrypted node keyfile) ──
+        // This is the plaintext form keyfile-decrypt emits — it matches
+        // src/crypto/keys.cpp::save_node_key. Treat it as plaintext-single
+        // with the derived anon-address ("0x" + pubkey_hex). We DON'T require
+        // priv_seed to validate; the type is determined by the pubkey field.
+        if (doc.is_object()
+            && doc.contains("pubkey") && doc["pubkey"].is_string()
+            && doc.contains("priv_seed") && doc["priv_seed"].is_string()
+            && doc["pubkey"].get<std::string>().size() == 64) {
+            std::string pub = doc["pubkey"].get<std::string>();
+            bool pub_hex_ok = true;
+            try { (void)from_hex(pub); } catch (...) { pub_hex_ok = false; }
+            if (pub_hex_ok) {
+                rec["type"]    = "plaintext-single";
+                rec["address"] = "0x" + pub;
+                return rec;
+            }
+        }
+
+        rec["type"]        = "unknown";
+        rec["skip_reason"] = "json_shape_not_recognized";
+        return rec;
+    };
+
+    // ── Walk the directory ─────────────────────────────────────────────────
+    std::vector<nlohmann::json> entries;
+    entries.reserve(64);
+
+    auto walk = [&](auto&& self, const std::filesystem::path& root, bool rec) -> void {
+        std::error_code wec;
+        std::filesystem::directory_iterator it(root, wec);
+        if (wec) return;
+        for (auto end = std::filesystem::directory_iterator{}; it != end;
+             it.increment(wec)) {
+            if (wec) break;
+            const auto& entry = *it;
+            std::error_code tec;
+            if (entry.is_regular_file(tec) && !tec) {
+                entries.push_back(classify(entry.path()));
+            } else if (rec && entry.is_directory(tec) && !tec) {
+                self(self, entry.path(), rec);
+            }
+        }
+    };
+    walk(walk, std::filesystem::path(keyfiles_dir), recursive);
+
+    // Deterministic order — sort by path so the output is stable across
+    // platforms regardless of the directory iterator's order. Operator
+    // diffs and regression tests depend on this.
+    std::sort(entries.begin(), entries.end(),
+              [](const nlohmann::json& a, const nlohmann::json& b) {
+                  return a.value("path", "") < b.value("path", "");
+              });
+
+    // ── Filter per --include-* flags and tally ─────────────────────────────
+    std::map<std::string, int> by_type;
+    int n_addresses                 = 0;
+    int n_encrypted_kept            = 0;
+    int n_plaintext_kept            = 0;
+    int n_plaintext_mode_violations = 0;
+    bool encrypted_seen_anywhere    = false;
+    bool plaintext_seen_anywhere    = false;
+
+    nlohmann::json kept = nlohmann::json::array();
+    for (const auto& e : entries) {
+        std::string t = e.value("type", "unknown");
+        if (t == "encrypted-DETERM-NODE-V1") {
+            encrypted_seen_anywhere = true;
+            if (!include_encrypted) continue;
+            ++n_encrypted_kept;
+            by_type[t] += 1;
+            ++n_addresses;
+        } else if (t == "plaintext-single") {
+            plaintext_seen_anywhere = true;
+            if (!include_plaintext) continue;
+            ++n_plaintext_kept;
+            by_type[t] += 1;
+            ++n_addresses;
+            // Mode warning: only meaningful on POSIX. "n/a" mode means
+            // Windows; skip the check there (NTFS ACL is the real gate).
+            std::string m = e.value("mode", "n/a");
+            if (m != "n/a" && m != "0600") ++n_plaintext_mode_violations;
+        } else if (t == "plaintext-batch") {
+            plaintext_seen_anywhere = true;
+            if (!include_plaintext) continue;
+            ++n_plaintext_kept;
+            by_type[t] += 1;
+            if (e.contains("addresses") && e["addresses"].is_array())
+                n_addresses += static_cast<int>(e["addresses"].size());
+            std::string m = e.value("mode", "n/a");
+            if (m != "n/a" && m != "0600") ++n_plaintext_mode_violations;
+        } else {
+            // "unknown" — always include (operator wants to see what's there)
+            by_type[t] += 1;
+        }
+        kept.push_back(e);
+    }
+
+    nlohmann::json by_type_obj = nlohmann::json::object();
+    for (const auto& kv : by_type) by_type_obj[kv.first] = kv.second;
+
+    nlohmann::json warnings = nlohmann::json::array();
+    if (n_plaintext_mode_violations > 0) warnings.push_back("mode_not_0600");
+    if (encrypted_seen_anywhere && plaintext_seen_anywhere)
+        warnings.push_back("mixed_encrypted_and_plaintext_in_same_dir");
+
+    nlohmann::json out;
+    out["keyfiles_dir"] = std::filesystem::path(keyfiles_dir)
+                              .lexically_normal().generic_string();
+    out["recursive"]    = recursive;
+    out["keyfiles"]     = std::move(kept);
+    nlohmann::json summary;
+    summary["total_files"]  = static_cast<int>(out["keyfiles"].size());
+    summary["by_type"]      = std::move(by_type_obj);
+    summary["n_addresses"]  = n_addresses;
+    summary["warnings"]     = std::move(warnings);
+    out["summary"]          = std::move(summary);
+
+    if (json_out) {
+        std::cout << out.dump(2) << "\n";
+    } else {
+        // Compact non-JSON fallback for ad-hoc terminal use. The default is
+        // JSON per spec; this branch only fires when --no-json is passed.
+        std::cout << "keyfiles_dir: " << out["keyfiles_dir"].get<std::string>()
+                  << "  (recursive=" << (recursive ? "true" : "false") << ")\n";
+        for (const auto& e : out["keyfiles"]) {
+            std::cout << "  " << e.value("path", "") << "  type="
+                      << e.value("type", "?");
+            if (e.contains("address"))
+                std::cout << "  address=" << e["address"].get<std::string>();
+            if (e.contains("addresses"))
+                std::cout << "  n_addresses="
+                          << e["addresses"].size();
+            std::cout << "  mode=" << e.value("mode", "n/a")
+                      << "  size=" << e.value("size_bytes", uint64_t(0));
+            std::cout << "\n";
+        }
+        std::cout << "summary: total_files="
+                  << out["summary"]["total_files"].get<int>()
+                  << "  n_addresses="
+                  << out["summary"]["n_addresses"].get<int>();
+        if (!out["summary"]["warnings"].empty()) {
+            std::cout << "  warnings=";
+            bool first = true;
+            for (const auto& w : out["summary"]["warnings"]) {
+                if (!first) std::cout << ",";
+                std::cout << w.get<std::string>();
+                first = false;
+            }
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
 int cmd_create_recovery(int argc, char** argv) {
     std::string seed_hex, password, out_path, scheme = "passphrase";
     int threshold = 0, share_count = 0;
@@ -5611,6 +6087,26 @@ void print_usage() {
         "                                             WITHOUT decrypting (no passphrase, no\n"
         "                                             plaintext recovery). Exit 0 valid, 1 file\n"
         "                                             error, 2 malformed.\n"
+        "  account-list --keyfiles-dir <path>         Enumerate keyfiles in a directory with\n"
+        "               [--recursive]                 per-file metadata. Pure local computation\n"
+        "               [--include-encrypted[=on|off]] (no daemon RPC, no decryption). Each\n"
+        "               [--include-plaintext[=on|off]] regular file is classified as one of:\n"
+        "               [--json]                       plaintext-single ({\"address\":..,\n"
+        "                                             \"privkey_hex\":..}),\n"
+        "                                             plaintext-batch ({\"accounts\":[...]}),\n"
+        "                                             encrypted-DETERM-NODE-V1 (2-line header +\n"
+        "                                             DWE1 envelope), or unknown (skipped from\n"
+        "                                             address extraction but still listed). For\n"
+        "                                             encrypted keyfiles the metadata mirrors\n"
+        "                                             keyfile-info (header_tag, pbkdf2_iters,\n"
+        "                                             salt_hex, nonce_hex). File mode is\n"
+        "                                             reported as a 4-digit octal on POSIX,\n"
+        "                                             'n/a' on Windows (no Unix-style mode bit).\n"
+        "                                             Summary warnings: mode_not_0600 (plaintext\n"
+        "                                             keyfile not at 0600 on POSIX) and\n"
+        "                                             mixed_encrypted_and_plaintext_in_same_dir\n"
+        "                                             (operator hygiene). Exit 0 success, 1\n"
+        "                                             args / missing or non-directory path.\n"
         "  message-sign --priv <hex> --message <string|file:path>\n"
         "               --domain-tag <tag> [--json]\n"
         "                                             Sign a message with an Ed25519 priv key.\n"
@@ -5685,6 +6181,7 @@ int main(int argc, char** argv) {
     if (cmd == "keyfile-recover") return cmd_keyfile_recover(argc - 2, argv + 2);
     if (cmd == "account-recover") return cmd_account_recover(argc - 2, argv + 2);
     if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
+    if (cmd == "account-list")    return cmd_account_list   (argc - 2, argv + 2);
     if (cmd == "message-sign")    return cmd_message_sign   (argc - 2, argv + 2);
     if (cmd == "message-verify")  return cmd_message_verify (argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
