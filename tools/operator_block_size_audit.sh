@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# operator_block_size_audit.sh — Audit block-size distribution (tx count
-# + estimated serialized bytes per block) over a window. Walks the chain
-# via `determ block-info <h> --json` and reports mean/median/p95/max of
-# both metrics, plus tx-type distribution, plus an explicit comparison
-# against the S-022 per-MsgType wire cap so operators can see whether
-# block sizes are anywhere near the 4 MB BLOCK ceiling.
+# operator_block_size_audit.sh — Audit per-block size distribution +
+# per-tx-type breakdown over a block window. Walks the chain via
+# `determ block-info <h> --json` and reports avg / p50 / p90 / p99
+# block byte sizes (JSON-envelope length as proxy), per-tx-type counts
+# + percentage shares, and event-payload counts (AbortEvents,
+# EquivocationEvents, CrossShardReceipts). Surfaces capacity-pressure
+# anomalies (cap approach / cap hit) and deployment-health signals
+# (tx-type imbalance, equivocation evidence in window).
 #
 # Read-only RPC composition; safe against a running daemon. The daemon
 # must already be listening on --rpc-port.
@@ -13,49 +15,73 @@
 #
 # There is no "block.serialized_bytes" RPC; the wire format is computed
 # at gossip-encode time only. We approximate it from the JSON envelope
-# by summing the serialized-JSON length of each block (`len(json.dumps(blk))`).
-# This is an upper bound on the binary wire format (JSON encoding adds
-# field names, quoting, hex-vs-bytes 2× expansion on every digest /
-# signature / payload field), but it's the right ballpark for operator
-# capacity planning: if your JSON-envelope block is 800 KB, the binary
-# wire form is comfortably under the 4 MB BLOCK cap.
+# by summing the canonical-JSON length of each block (`len(json.dumps(blk,
+# separators=(',', ':')))`). This is an UPPER BOUND on the binary wire
+# format — JSON adds field names, quoting, and 2× hex expansion on every
+# digest/sig/payload — but it is the right ballpark for operator capacity
+# planning against the S-022 framing-layer cap. If the JSON estimate is
+# well under cap, the binary wire form is too.
 #
-# The per-tx contribution dominates JSON size on non-empty blocks:
-# Transaction::to_json emits `from` (~70 char anon addr) + `to` + 64-char
-# sig hex + 64-char hash hex + variable payload hex (2× payload bytes)
-# + type/amount/fee/nonce integers. The estimate's accuracy improves with
-# tx count (header overhead is amortized).
+# Different tx types have distinct size characteristics:
+#   - TRANSFER varies with from/to address length (anon ≈ 70 chars hex,
+#     named ≈ 16 chars).
+#   - STAKE / UNSTAKE / DEREGISTER are small (no payload, fixed-shape).
+#   - REGISTER carries the new public key + optional name.
+#   - PARAM_CHANGE carries the param-name + value + N×(idx, ed_sig).
+#   - DAPP_REGISTER carries service-pubkey + endpoint URL.
+#   - DAPP_CALL is the largest in practice (payload hex, 2× the binary
+#     payload length).
 #
-# S-022 reference (include/determ/net/messages.hpp::max_message_bytes):
+# Wire-cap reference (per S-022 / include/determ/net/messages.hpp::
+# max_message_bytes):
 #   BLOCK / BEACON_HEADER / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE /
-#   HEADERS_RESPONSE          : 4 MB
-#   SNAPSHOT_RESPONSE / CHAIN_RESPONSE : 16 MB
-#   Default (HELLO, CONTRIB, BLOCK_SIG, TRANSACTION, ABORT_*, ...)   : 1 MB
-# This script uses the BLOCK cap (4 MB = 4194304 bytes) as the reference
-# because that's the channel that carries finalized block bodies.
+#   HEADERS_RESPONSE         : 4 MB
+#   SNAPSHOT_RESPONSE / CHAIN_RESPONSE                    : 16 MB
+#   Default (HELLO, CONTRIB, BLOCK_SIG, TRANSACTION, ...) : 1 MB
+# `--max-block-size-bytes` defaults to 16 MB (the framing-layer ceiling
+# applied at Peer::read_body before MsgType-specific tightening). The
+# script flags any block exceeding 75% of that cap as a capacity signal
+# (`block_size_cap_approach`) and any block within 1 KB of the cap as an
+# operational concern (`block_size_cap_hit`).
 #
 # Usage:
-#   tools/operator_block_size_audit.sh [--rpc-port N] [--json]
-#                                      [--from H] [--to H]
-#                                      [--anomalies-only]
+#   tools/operator_block_size_audit.sh --rpc-port N [--from H] [--to H]
+#                                      [--last N]
+#                                      [--max-block-size-bytes N]
+#                                      [--json] [--anomalies-only]
+#                                      [-h|--help]
 #
 # Options:
-#   --rpc-port N        RPC port to query (default: 7778)
-#   --json              Emit structured JSON envelope instead of human table
-#   --from H            Start of audit window (inclusive; default: max(0, tip-1000))
-#   --to H              End of audit window (inclusive; default: tip)
-#   --anomalies-only    Print only flagged anomalies; exit 2 if any fire
-#   -h, --help          Show this help
+#   --rpc-port N                RPC port to query (REQUIRED)
+#   --from H                    Start of audit window (inclusive)
+#   --to H                      End of audit window (inclusive; default: tip)
+#   --last N                    Audit last N blocks (mutually exclusive with --from)
+#   --max-block-size-bytes N    Reference cap in bytes (default: 16777216 = 16 MB)
+#   --json                      Emit structured JSON envelope instead of human
+#   --anomalies-only            Print only anomalies; exit 2 if any fire
+#   -h, --help                  Show this help
+#
+# Window defaults:
+#   If neither --from, --to, nor --last is supplied, the window is
+#   max(0, tip-1000)..tip (last 1000 blocks).
 #
 # RPC dependencies (all read-only):
 #   - head              (current chain height)
 #   - block             (per-block JSON; via `determ block-info <i> --json`)
 #
 # Anomaly flags (each adds an entry to anomalies[]):
-#   - block_size_warn         any block > 50% of S-022 BLOCK cap (2 MB)
-#   - block_size_critical     any block > 80% of S-022 BLOCK cap (3.2 MB)
-#   - tx_count_spike          any block has tx count > 10× window median
-#   - empty_block_run         > 100 consecutive empty blocks in window
+#   - block_size_cap_approach   any block > 75% of --max-block-size-bytes
+#                               (mempool-overflow / capacity-pressure signal)
+#   - block_size_cap_hit        any block within 1 KB of --max-block-size-bytes
+#                               (operational concern; producer may be on the
+#                               edge of building unrelayable blocks)
+#   - tx_type_imbalance_high    any single tx-type > 80% of total volume
+#                               (deployment-health signal; could indicate a
+#                               stuck workload, a runaway DApp, etc.)
+#   - equivocation_events_in_window
+#                               any block carries ≥1 equivocation_events
+#                               (informational — slashing in progress; not an
+#                               error condition per se but worth surfacing)
 #
 # Exit codes:
 #   0   audit ran successfully, no anomalies (or default informational mode)
@@ -65,29 +91,38 @@ set -u
 
 usage() {
   cat <<'EOF'
-Usage: operator_block_size_audit.sh [--rpc-port N] [--json]
-                                    [--from H] [--to H]
-                                    [--anomalies-only]
+Usage: operator_block_size_audit.sh --rpc-port N [--from H] [--to H]
+                                    [--last N]
+                                    [--max-block-size-bytes N]
+                                    [--json] [--anomalies-only]
+                                    [-h|--help]
 
-Audit block-size distribution (tx count + estimated bytes per block)
-over a window. Walks the window via block-info, sums each block's
-JSON-envelope length as an upper-bound estimate of serialized bytes,
-and aggregates mean/median/p95/max + tx-type distribution. Reports
-capacity headroom against S-022 BLOCK cap (4 MB) and flags anomalies.
+Audit per-block size distribution + per-tx-type breakdown over a window.
+Walks the window via block-info, computes block byte size from the JSON
+envelope (upper bound on the binary wire format), aggregates avg + p50 +
+p90 + p99, tallies per-tx-type counts/shares, and reports event-payload
+counts. Flags capacity-pressure anomalies (cap approach, cap hit) and
+deployment-health signals (tx-type imbalance, equivocation evidence).
 
 Options:
-  --rpc-port N        RPC port to query (default: 7778)
-  --json              Emit structured JSON envelope instead of human table
-  --from H            Start of audit window (default: max(0, tip-1000))
-  --to H              End of audit window (default: tip)
-  --anomalies-only    Print only flagged anomalies; exit 2 if any fire
-  -h, --help          Show this help
+  --rpc-port N                RPC port to query (REQUIRED)
+  --from H                    Start of audit window (inclusive)
+  --to H                      End of audit window (inclusive; default: tip)
+  --last N                    Audit last N blocks (mutually exclusive with --from)
+  --max-block-size-bytes N    Reference cap in bytes (default: 16777216 = 16 MB)
+  --json                      Emit structured JSON envelope instead of human
+  --anomalies-only            Print only anomalies; exit 2 if any fire
+  -h, --help                  Show this help
+
+Window defaults:
+  If neither --from, --to, nor --last is supplied, the window is
+  max(0, tip-1000)..tip (last 1000 blocks).
 
 Anomaly flags:
-  block_size_warn      any block > 50% of S-022 BLOCK cap (2 MB)
-  block_size_critical  any block > 80% of S-022 BLOCK cap (3.2 MB)
-  tx_count_spike       any block with tx count > 10× window median
-  empty_block_run      > 100 consecutive empty blocks in window
+  block_size_cap_approach        any block > 75% of --max-block-size-bytes
+  block_size_cap_hit             any block within 1 KB of --max-block-size-bytes
+  tx_type_imbalance_high         any single tx-type > 80% of total tx volume
+  equivocation_events_in_window  any block carries ≥1 equivocation_events
 
 Exit codes:
   0   success (or informational mode)
@@ -96,51 +131,83 @@ Exit codes:
 EOF
 }
 
-PORT=7778
+PORT=""
 JSON_OUT=0
 ANOM_ONLY=0
 FROM_H=""
 TO_H=""
+LAST_N=""
+MAX_BLOCK_SIZE_BYTES=16777216   # 16 MB framing-layer ceiling per S-022
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help)         usage; exit 0 ;;
-    --rpc-port)        PORT="$2";   shift 2 ;;
-    --json)            JSON_OUT=1;  shift ;;
-    --from)            FROM_H="$2"; shift 2 ;;
-    --to)              TO_H="$2";   shift 2 ;;
-    --anomalies-only)  ANOM_ONLY=1; shift ;;
+    -h|--help)                 usage; exit 0 ;;
+    --rpc-port)                PORT="${2:-}";                shift 2 ;;
+    --json)                    JSON_OUT=1;                   shift ;;
+    --from)                    FROM_H="${2:-}";              shift 2 ;;
+    --to)                      TO_H="${2:-}";                shift 2 ;;
+    --last)                    LAST_N="${2:-}";              shift 2 ;;
+    --max-block-size-bytes)    MAX_BLOCK_SIZE_BYTES="${2:-}";shift 2 ;;
+    --anomalies-only)          ANOM_ONLY=1;                  shift ;;
     *) echo "operator_block_size_audit: unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+# --rpc-port is required per the spec.
+if [ -z "$PORT" ]; then
+  echo "operator_block_size_audit: --rpc-port is required" >&2
+  usage >&2
+  exit 1
+fi
 
 # Numeric guards on user-supplied values.
 case "$PORT" in *[!0-9]*|"")
   echo "operator_block_size_audit: --rpc-port must be a positive integer (got '$PORT')" >&2
   exit 1 ;;
 esac
-for v in "$FROM_H" "$TO_H"; do
+for v in "$FROM_H" "$TO_H" "$LAST_N"; do
   if [ -n "$v" ]; then
     case "$v" in *[!0-9]*)
-      echo "operator_block_size_audit: --from / --to must be unsigned integers (got '$v')" >&2
+      echo "operator_block_size_audit: --from / --to / --last must be unsigned integers (got '$v')" >&2
       exit 1 ;;
     esac
   fi
 done
+case "$MAX_BLOCK_SIZE_BYTES" in *[!0-9]*|"")
+  echo "operator_block_size_audit: --max-block-size-bytes must be a positive integer (got '$MAX_BLOCK_SIZE_BYTES')" >&2
+  exit 1 ;;
+esac
+if [ "$MAX_BLOCK_SIZE_BYTES" -lt 2048 ]; then
+  # A cap below 2 KB makes the "within 1 KB of cap" threshold absurd —
+  # surface that early rather than emit nonsense anomalies.
+  echo "operator_block_size_audit: --max-block-size-bytes must be ≥ 2048 (got '$MAX_BLOCK_SIZE_BYTES')" >&2
+  exit 1
+fi
+if [ -n "$FROM_H" ] && [ -n "$LAST_N" ]; then
+  echo "operator_block_size_audit: --from and --last are mutually exclusive" >&2
+  exit 1
+fi
 
 cd "$(dirname "$0")/.."
 source tools/common.sh
 
-# S-022 BLOCK cap. Mirrors include/determ/net/messages.hpp::max_message_bytes(BLOCK)
-# = 4 * 1024 * 1024 = 4194304 bytes. See also src/main.cpp test-binary-codec
-# §10 which locks this in as a regression test.
-SIZE_CAP_BYTES=4194304
-SIZE_WARN_BYTES=$(( SIZE_CAP_BYTES / 2 ))         # 50% = 2 MB
-SIZE_CRIT_BYTES=$(( SIZE_CAP_BYTES * 80 / 100 ))  # 80% = 3.2 MB
-EMPTY_RUN_THRESH=100
-TX_SPIKE_MULT=10
+# Resolve DETERM to an absolute path. Python's subprocess.run on Windows
+# uses CreateProcessW which does not honor the inherited bash cwd the
+# same way exec*() does — a relative `build/Release/determ.exe` resolves
+# fine from a bash command but FileNotFoundError'd from python on
+# Windows. Pre-resolving here keeps the Python driver portable without
+# touching common.sh or the sibling operator_*.sh scripts.
+case "$DETERM" in
+  /*|[A-Za-z]:/*|[A-Za-z]:\\*) DETERM_ABS="$DETERM" ;;
+  *) DETERM_ABS="$PROJECT_ROOT/$DETERM" ;;
+esac
+
+# Derived thresholds.
+SOFT_THRESHOLD_BYTES=$(( MAX_BLOCK_SIZE_BYTES * 75 / 100 ))   # 75% of cap
+HIT_THRESHOLD_BYTES=$(( MAX_BLOCK_SIZE_BYTES - 1024 ))        # within 1 KB
+TX_TYPE_IMBALANCE_PCT_BPS=8000                                # 80% in basis points
 
 # ── Step 1: resolve current tip ───────────────────────────────────────────────
-HEAD_H=$("$DETERM" head --field height --rpc-port "$PORT" 2>/dev/null) || {
+HEAD_H=$("$DETERM_ABS" head --field height --rpc-port "$PORT" 2>/dev/null) || {
   echo "operator_block_size_audit: cannot reach daemon on rpc-port $PORT" >&2
   exit 1
 }
@@ -149,29 +216,53 @@ case "$HEAD_H" in *[!0-9]*|"")
   exit 1 ;;
 esac
 
-# Default window: last 1000 blocks ending at tip (per spec).
-FROM=${FROM_H:-$(( HEAD_H > 1000 ? HEAD_H - 1000 : 0 ))}
+# ── Step 2: resolve window ────────────────────────────────────────────────────
+# Precedence:
+#   1. --from / --to explicit → use as-is (clamp --to to HEAD_H).
+#   2. --last N → window = max(0, TO - N + 1) .. TO (where TO = --to or HEAD_H).
+#   3. Default → max(0, HEAD_H - 1000) .. HEAD_H.
 TO=${TO_H:-$HEAD_H}
 if [ "$TO" -gt "$HEAD_H" ]; then TO=$HEAD_H; fi
+
+if [ -n "$FROM_H" ]; then
+  FROM="$FROM_H"
+elif [ -n "$LAST_N" ]; then
+  if [ "$LAST_N" -eq 0 ]; then
+    echo "operator_block_size_audit: --last must be ≥ 1" >&2
+    exit 1
+  fi
+  N1=$(( LAST_N - 1 ))
+  if [ "$TO" -gt "$N1" ]; then
+    FROM=$(( TO - N1 ))
+  else
+    FROM=0
+  fi
+else
+  if [ "$HEAD_H" -gt 1000 ]; then
+    FROM=$(( HEAD_H - 1000 ))
+  else
+    FROM=0
+  fi
+fi
+
 if [ "$FROM" -gt "$TO" ]; then
   echo "operator_block_size_audit: --from ($FROM) > --to ($TO); nothing to audit" >&2
   exit 1
 fi
-
-# Window block count, inclusive.
 WIN_BLOCKS=$(( TO - FROM + 1 ))
 
-# ── Step 2: walk the window + collect tx counts + size estimates ──────────────
-# Python driver: handles JSON parsing + percentile math + tx-type
-# tallying + max-empty-run tracking. Single block-info round trip per
-# block (no batched RPC available on this surface).
-#
-# Output written as TSV summary to TMP_STATS (one line):
-#   total_blocks<TAB>empty_blocks<TAB>nonempty_blocks
-#   <TAB>tx_mean<TAB>tx_median<TAB>tx_p95<TAB>tx_max<TAB>tx_max_block_idx
-#   <TAB>bytes_mean<TAB>bytes_median<TAB>bytes_p95<TAB>bytes_max<TAB>bytes_max_block_idx
-#   <TAB>max_empty_run<TAB>warn_count<TAB>critical_count<TAB>spike_count
-# Plus TMP_TXDIST: per-tx-type TSV (type_name<TAB>count) sorted by count desc.
+# ── Step 3: walk the window + collect per-block metrics ──────────────────────
+# Python driver: handles JSON parsing + percentile math + tx-type +
+# event tallying. Single block-info round trip per block (no batched
+# RPC available on this surface). Output written to two temp files:
+#   TMP_STATS (one TSV line):
+#     total_blocks <TAB> empty_blocks <TAB> total_txs
+#     <TAB> bytes_avg <TAB> bytes_p50 <TAB> bytes_p90 <TAB> bytes_p99 <TAB> bytes_max <TAB> bytes_max_block
+#     <TAB> total_abort_events <TAB> total_equivocation_events <TAB> total_cross_shard_receipts
+#     <TAB> blocks_with_equivocation
+#     <TAB> approach_count <TAB> hit_count <TAB> imbalance_present
+#   TMP_TXDIST (one row per tx-type seen):
+#     name<TAB>count
 TMP_STATS=$(mktemp 2>/dev/null) || {
   echo "operator_block_size_audit: cannot create temp file" >&2; exit 1;
 }
@@ -180,25 +271,25 @@ TMP_TXDIST=$(mktemp 2>/dev/null) || {
 }
 trap 'rm -f "$TMP_STATS" "$TMP_TXDIST" 2>/dev/null' EXIT
 
-python - "$DETERM" "$PORT" "$FROM" "$TO" \
-       "$SIZE_WARN_BYTES" "$SIZE_CRIT_BYTES" "$TX_SPIKE_MULT" \
+python - "$DETERM_ABS" "$PORT" "$FROM" "$TO" \
+       "$SOFT_THRESHOLD_BYTES" "$HIT_THRESHOLD_BYTES" \
+       "$TX_TYPE_IMBALANCE_PCT_BPS" \
        "$TMP_STATS" "$TMP_TXDIST" <<'PY'
 import json, subprocess, sys
 from collections import defaultdict
 
 (determ, port, from_h, to_h,
- size_warn, size_crit, tx_spike_mult,
+ soft_thresh, hit_thresh, imbalance_bps,
  stats_path, txdist_path) = sys.argv[1:10]
 from_h        = int(from_h)
 to_h          = int(to_h)
-size_warn     = int(size_warn)
-size_crit     = int(size_crit)
-tx_spike_mult = int(tx_spike_mult)
+soft_thresh   = int(soft_thresh)
+hit_thresh    = int(hit_thresh)
+imbalance_bps = int(imbalance_bps)
 
-# TxType integer → name mapping. Mirrors include/determ/chain/block.hpp
-# TxType enum so the human-readable output uses canonical names.
-# Any unseen integer falls back to "TYPE_<n>" so the script doesn't
-# silently drop counts on future TxType additions.
+# TxType integer → canonical name. Mirrors include/determ/chain/block.hpp
+# enum class TxType. Unknown integers fall back to TYPE_<n> so the
+# script does not silently drop counts on future TxType additions.
 TX_TYPE_NAMES = {
     0:  "TRANSFER",
     1:  "REGISTER",
@@ -213,17 +304,17 @@ TX_TYPE_NAMES = {
     10: "DAPP_CALL",
 }
 
-tx_counts          = []      # tx count per block
-tx_count_blocks    = []      # parallel block-index list (for max-finder)
-byte_sizes         = []      # JSON-envelope length per block
-byte_size_blocks   = []      # parallel block-index list
-type_counts        = defaultdict(int)
-empty_blocks       = 0
-max_empty_run      = 0
-cur_empty_run      = 0
-warn_count         = 0
-critical_count     = 0
-# tx_count_spike depends on the median — computed after the walk.
+byte_sizes               = []     # JSON-envelope length per block
+byte_size_blocks         = []     # parallel block-index list (for max-finder)
+type_counts              = defaultdict(int)
+total_txs                = 0
+empty_blocks             = 0
+total_abort_events       = 0
+total_equivocation       = 0
+total_cross_shard        = 0
+blocks_with_equivocation = 0
+approach_count           = 0     # blocks > soft threshold (75% of cap)
+hit_count                = 0     # blocks ≥ hit threshold (within 1 KB of cap)
 
 for h in range(from_h, to_h + 1):
     try:
@@ -250,8 +341,9 @@ for h in range(from_h, to_h + 1):
     if not isinstance(txs, list):
         txs = []
     n_tx = len(txs)
-    tx_counts.append(n_tx)
-    tx_count_blocks.append(h)
+    total_txs += n_tx
+    if n_tx == 0:
+        empty_blocks += 1
 
     # Tally tx-type distribution.
     for tx in txs:
@@ -260,40 +352,36 @@ for h in range(from_h, to_h + 1):
             if isinstance(t, int):
                 type_counts[t] += 1
 
-    # Estimated serialized size = length of the canonical JSON envelope.
-    # This is an UPPER BOUND on the binary wire format because the JSON
-    # encoding expands every hex-encoded digest / sig / payload by ~2×
-    # and adds field names + quoting. For operator capacity-planning
-    # against the S-022 BLOCK cap (4 MB), the upper bound is the
-    # conservative direction (if JSON-est is well under cap, the binary
-    # form is too).
-    #
-    # We re-serialize via json.dumps (no whitespace) rather than reusing
-    # the RPC response bytes because the RPC may emit a pretty-printed
-    # or extra-whitespace variant depending on the daemon's dump mode.
+    # Event payloads.
+    aes = blk.get("abort_events") or []
+    if isinstance(aes, list):
+        total_abort_events += len(aes)
+    eqs = blk.get("equivocation_events") or []
+    if isinstance(eqs, list):
+        if len(eqs) > 0:
+            blocks_with_equivocation += 1
+        total_equivocation += len(eqs)
+    csrs = blk.get("cross_shard_receipts") or []
+    if isinstance(csrs, list):
+        total_cross_shard += len(csrs)
+
+    # Estimated serialized size = canonical-JSON envelope length. This
+    # is an UPPER BOUND on the binary wire format because JSON adds
+    # field names + quoting + 2× hex on every digest/sig/payload. We
+    # re-serialize via json.dumps (separators removed) rather than
+    # reusing the RPC response bytes because the RPC may emit a pretty-
+    # printed variant depending on the daemon's dump mode.
     size = len(json.dumps(blk, separators=(",", ":")))
     byte_sizes.append(size)
     byte_size_blocks.append(h)
 
-    if size > size_crit:
-        critical_count += 1
-    elif size > size_warn:
-        warn_count += 1
+    if size >= hit_thresh:
+        hit_count += 1
+    if size > soft_thresh:
+        approach_count += 1
 
-    # Empty-block-run tracking. An "empty" block here is one with zero
-    # transactions; consensus-empty blocks (no creators) are subsumed
-    # because such blocks also carry no transactions. The longest
-    # consecutive run is what we flag (an empty block here and there is
-    # normal; a sustained run signals stalled tx flow or a mempool issue).
-    if n_tx == 0:
-        empty_blocks += 1
-        cur_empty_run += 1
-        if cur_empty_run > max_empty_run:
-            max_empty_run = cur_empty_run
-    else:
-        cur_empty_run = 0
-
-# Percentile via sort + index (type-7 quantile, same as numpy/R/excel).
+# Percentile via sort + interpolation (type-7 quantile, same as
+# numpy/R/excel). Returns 0 on empty input.
 def quantile(sorted_xs, q):
     if not sorted_xs:
         return 0
@@ -305,48 +393,48 @@ def quantile(sorted_xs, q):
     frac = pos - lo
     return int(round(sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * frac))
 
-def stats_for(values, blocks):
-    if not values:
-        return (0, 0, 0, 0, 0)
-    sorted_v = sorted(values)
-    mean = int(round(sum(values) / len(values)))
-    median = quantile(sorted_v, 0.50)
-    p95 = quantile(sorted_v, 0.95)
-    mx = sorted_v[-1]
-    # Find block index for max (first occurrence).
-    mx_idx = 0
-    for i, v in enumerate(values):
-        if v == mx:
-            mx_idx = blocks[i]
+if byte_sizes:
+    sorted_b = sorted(byte_sizes)
+    bytes_avg = int(round(sum(byte_sizes) / len(byte_sizes)))
+    bytes_p50 = quantile(sorted_b, 0.50)
+    bytes_p90 = quantile(sorted_b, 0.90)
+    bytes_p99 = quantile(sorted_b, 0.99)
+    bytes_max = sorted_b[-1]
+    bytes_max_block = 0
+    for i, v in enumerate(byte_sizes):
+        if v == bytes_max:
+            bytes_max_block = byte_size_blocks[i]
             break
-    return (mean, median, p95, mx, mx_idx)
+else:
+    bytes_avg = 0
+    bytes_p50 = 0
+    bytes_p90 = 0
+    bytes_p99 = 0
+    bytes_max = 0
+    bytes_max_block = 0
 
-tx_mean, tx_median, tx_p95, tx_max, tx_max_block = stats_for(tx_counts, tx_count_blocks)
-b_mean,  b_median,  b_p95,  b_max,  b_max_block  = stats_for(byte_sizes, byte_size_blocks)
+# tx_type_imbalance: any single tx-type > 80% of total tx volume.
+# Only meaningful when total_txs > 0; an empty window has no
+# meaningful share denominator and the flag stays off.
+imbalance_present = 0
+if total_txs > 0:
+    for cnt in type_counts.values():
+        if cnt * 10000 > imbalance_bps * total_txs:
+            imbalance_present = 1
+            break
 
-# tx_count_spike: any single block has tx count > tx_spike_mult × median.
-# Skip the check on a degenerate window where the median is 0 (an
-# all-empty window has no meaningful spike threshold; any non-empty
-# block would otherwise trip the flag trivially).
-spike_count = 0
-if tx_median > 0:
-    thresh = tx_median * tx_spike_mult
-    for v in tx_counts:
-        if v > thresh:
-            spike_count += 1
-
-total_blocks = len(tx_counts)
-nonempty_blocks = total_blocks - empty_blocks
+total_blocks = len(byte_sizes)
 
 with open(stats_path, "w", encoding="utf-8") as f:
     f.write("\t".join(str(x) for x in [
-        total_blocks, empty_blocks, nonempty_blocks,
-        tx_mean, tx_median, tx_p95, tx_max, tx_max_block,
-        b_mean, b_median, b_p95, b_max, b_max_block,
-        max_empty_run, warn_count, critical_count, spike_count,
+        total_blocks, empty_blocks, total_txs,
+        bytes_avg, bytes_p50, bytes_p90, bytes_p99, bytes_max, bytes_max_block,
+        total_abort_events, total_equivocation, total_cross_shard,
+        blocks_with_equivocation,
+        approach_count, hit_count, imbalance_present,
     ]) + "\n")
 
-# Tx-type distribution: name<TAB>count, sorted by count desc (ties by name asc).
+# Per-tx-type distribution, sorted by count desc then name asc.
 named = []
 for type_int, count in type_counts.items():
     name = TX_TYPE_NAMES.get(type_int, f"TYPE_{type_int}")
@@ -361,7 +449,7 @@ if [ "$?" -ne 0 ]; then
   exit 1
 fi
 
-# ── Step 3: read stats back into shell-aggregable form ────────────────────────
+# ── Step 4: read stats back into shell-aggregable form ────────────────────────
 STATS_LINE=$(head -1 "$TMP_STATS" 2>/dev/null || echo "")
 if [ -z "$STATS_LINE" ]; then
   echo "operator_block_size_audit: empty stats payload" >&2
@@ -369,44 +457,36 @@ if [ -z "$STATS_LINE" ]; then
 fi
 TOTAL_BLOCKS=$(printf '%s'    "$STATS_LINE" | cut -f1)
 EMPTY_BLOCKS=$(printf '%s'    "$STATS_LINE" | cut -f2)
-NONEMPTY_BLOCKS=$(printf '%s' "$STATS_LINE" | cut -f3)
-TX_MEAN=$(printf '%s'         "$STATS_LINE" | cut -f4)
-TX_MEDIAN=$(printf '%s'       "$STATS_LINE" | cut -f5)
-TX_P95=$(printf '%s'          "$STATS_LINE" | cut -f6)
-TX_MAX=$(printf '%s'          "$STATS_LINE" | cut -f7)
-TX_MAX_BLOCK=$(printf '%s'    "$STATS_LINE" | cut -f8)
-B_MEAN=$(printf '%s'          "$STATS_LINE" | cut -f9)
-B_MEDIAN=$(printf '%s'        "$STATS_LINE" | cut -f10)
-B_P95=$(printf '%s'           "$STATS_LINE" | cut -f11)
-B_MAX=$(printf '%s'           "$STATS_LINE" | cut -f12)
-B_MAX_BLOCK=$(printf '%s'     "$STATS_LINE" | cut -f13)
-MAX_EMPTY_RUN=$(printf '%s'   "$STATS_LINE" | cut -f14)
-WARN_COUNT=$(printf '%s'      "$STATS_LINE" | cut -f15)
-CRIT_COUNT=$(printf '%s'      "$STATS_LINE" | cut -f16)
-SPIKE_COUNT=$(printf '%s'     "$STATS_LINE" | cut -f17)
+TOTAL_TXS=$(printf '%s'       "$STATS_LINE" | cut -f3)
+BYTES_AVG=$(printf '%s'       "$STATS_LINE" | cut -f4)
+BYTES_P50=$(printf '%s'       "$STATS_LINE" | cut -f5)
+BYTES_P90=$(printf '%s'       "$STATS_LINE" | cut -f6)
+BYTES_P99=$(printf '%s'       "$STATS_LINE" | cut -f7)
+BYTES_MAX=$(printf '%s'       "$STATS_LINE" | cut -f8)
+BYTES_MAX_BLOCK=$(printf '%s' "$STATS_LINE" | cut -f9)
+TOTAL_ABORTS=$(printf '%s'    "$STATS_LINE" | cut -f10)
+TOTAL_EQUIVS=$(printf '%s'    "$STATS_LINE" | cut -f11)
+TOTAL_CSRS=$(printf '%s'      "$STATS_LINE" | cut -f12)
+BLOCKS_WITH_EQUIV=$(printf '%s' "$STATS_LINE" | cut -f13)
+APPROACH_COUNT=$(printf '%s'  "$STATS_LINE" | cut -f14)
+HIT_COUNT=$(printf '%s'       "$STATS_LINE" | cut -f15)
+IMBALANCE_PRESENT=$(printf '%s' "$STATS_LINE" | cut -f16)
 
-# Total tx count = sum over per-type distribution. (Could also recompute
-# from tx_mean × total_blocks, but the txdist sum is the ground truth.)
-TOTAL_TXS=0
-if [ -s "$TMP_TXDIST" ]; then
-  TOTAL_TXS=$(awk -F'\t' '{s += $2} END {print s+0}' "$TMP_TXDIST")
-fi
-
-# Largest-block-as-percent-of-cap (basis points to avoid bash floats).
+# Largest-block-as-percent-of-cap, in basis points (avoids bash floats).
 MAX_PCT_OF_CAP_BPS=0
-if [ "$SIZE_CAP_BYTES" -gt 0 ]; then
-  MAX_PCT_OF_CAP_BPS=$(( B_MAX * 10000 / SIZE_CAP_BYTES ))
+if [ "$MAX_BLOCK_SIZE_BYTES" -gt 0 ]; then
+  MAX_PCT_OF_CAP_BPS=$(( BYTES_MAX * 10000 / MAX_BLOCK_SIZE_BYTES ))
 fi
 
-# ── Step 4: assemble anomalies list ───────────────────────────────────────────
+# ── Step 5: anomaly classification ────────────────────────────────────────────
 ANOMALIES=""
 add_anom() {
   if [ -z "$ANOMALIES" ]; then ANOMALIES="$1"; else ANOMALIES="$ANOMALIES,$1"; fi
 }
-if [ "$CRIT_COUNT" -gt 0 ];                       then add_anom "block_size_critical"; fi
-if [ "$WARN_COUNT" -gt 0 ];                       then add_anom "block_size_warn"; fi
-if [ "$SPIKE_COUNT" -gt 0 ];                      then add_anom "tx_count_spike"; fi
-if [ "$MAX_EMPTY_RUN" -gt "$EMPTY_RUN_THRESH" ];  then add_anom "empty_block_run"; fi
+if [ "$APPROACH_COUNT" -gt 0 ];     then add_anom "block_size_cap_approach"; fi
+if [ "$HIT_COUNT" -gt 0 ];          then add_anom "block_size_cap_hit"; fi
+if [ "$IMBALANCE_PRESENT" = "1" ];  then add_anom "tx_type_imbalance_high"; fi
+if [ "$BLOCKS_WITH_EQUIV" -gt 0 ];  then add_anom "equivocation_events_in_window"; fi
 ANOM_COUNT=0
 if [ -n "$ANOMALIES" ]; then
   ANOM_COUNT=$(printf '%s' "$ANOMALIES" | awk -F, '{print NF}')
@@ -420,9 +500,8 @@ render_pct() {
   local frac=$(( (bps % 100) / 10 ))
   printf '%d.%d%%' "$whole" "$frac"
 }
-# Render a byte count as a human-readable size (KB / MB with 1 decimal).
-# Uses 1024-base (KiB/MiB) but labels as KB/MB for operator readability,
-# matching the convention used in operator_*.sh output throughout.
+# Render a byte count as human-readable (KB/MB with 1 decimal place,
+# 1024-base, labels KB/MB per the convention in other operator_*.sh).
 render_bytes() {
   local b="$1"
   case "$b" in *[!0-9]*|"") echo "0 B"; return ;; esac
@@ -439,31 +518,36 @@ render_bytes() {
   fi
 }
 
-# ── Step 5: emit output ───────────────────────────────────────────────────────
+# ── Step 6: emit output ───────────────────────────────────────────────────────
 if [ "$JSON_OUT" = "1" ]; then
   printf '{"window":{"from":%s,"to":%s,"blocks":%s},' "$FROM" "$TO" "$WIN_BLOCKS"
-  printf '"total_blocks":%s,"empty_blocks":%s,"nonempty_blocks":%s,"total_txs":%s,' \
-    "$TOTAL_BLOCKS" "$EMPTY_BLOCKS" "$NONEMPTY_BLOCKS" "$TOTAL_TXS"
-  printf '"tx_count_stats":{"mean":%s,"median":%s,"p95":%s,"max":%s,"max_block":%s},' \
-    "$TX_MEAN" "$TX_MEDIAN" "$TX_P95" "$TX_MAX" "$TX_MAX_BLOCK"
-  printf '"bytes_stats":{"mean":%s,"median":%s,"p95":%s,"max":%s,"max_block":%s},' \
-    "$B_MEAN" "$B_MEDIAN" "$B_P95" "$B_MAX" "$B_MAX_BLOCK"
+  printf '"total_blocks":%s,"empty_blocks":%s,"total_txs":%s,' \
+    "$TOTAL_BLOCKS" "$EMPTY_BLOCKS" "$TOTAL_TXS"
+  printf '"block_bytes":{"avg":%s,"p50":%s,"p90":%s,"p99":%s,"max":%s,"max_block":%s},' \
+    "$BYTES_AVG" "$BYTES_P50" "$BYTES_P90" "$BYTES_P99" "$BYTES_MAX" "$BYTES_MAX_BLOCK"
   printf '"tx_type_distribution":{'
   FIRST=1
   if [ -s "$TMP_TXDIST" ]; then
     while IFS=$'\t' read -r NAME CNT; do
       [ "$FIRST" = "1" ] || printf ','
       FIRST=0
-      printf '"%s":%s' "$NAME" "$CNT"
+      # Compute per-type share in basis points (denominator = TOTAL_TXS).
+      if [ "$TOTAL_TXS" -gt 0 ]; then
+        PCT_BPS=$(( CNT * 10000 / TOTAL_TXS ))
+      else
+        PCT_BPS=0
+      fi
+      printf '"%s":{"count":%s,"share_bps":%s}' "$NAME" "$CNT" "$PCT_BPS"
     done <"$TMP_TXDIST"
   fi
   printf '},'
-  printf '"size_cap_bytes":%s,"size_warn_bytes":%s,"size_critical_bytes":%s,' \
-    "$SIZE_CAP_BYTES" "$SIZE_WARN_BYTES" "$SIZE_CRIT_BYTES"
-  printf '"max_pct_of_cap_bps":%s,"size_warn_count":%s,"size_critical_count":%s,' \
-    "$MAX_PCT_OF_CAP_BPS" "$WARN_COUNT" "$CRIT_COUNT"
-  printf '"tx_count_spike_count":%s,"max_empty_run":%s,' \
-    "$SPIKE_COUNT" "$MAX_EMPTY_RUN"
+  printf '"event_counts":{"abort_events":%s,"equivocation_events":%s,"cross_shard_receipts":%s,"blocks_with_equivocation":%s},' \
+    "$TOTAL_ABORTS" "$TOTAL_EQUIVS" "$TOTAL_CSRS" "$BLOCKS_WITH_EQUIV"
+  printf '"max_block_size_bytes":%s,"soft_threshold_bytes":%s,"hit_threshold_bytes":%s,' \
+    "$MAX_BLOCK_SIZE_BYTES" "$SOFT_THRESHOLD_BYTES" "$HIT_THRESHOLD_BYTES"
+  printf '"max_pct_of_cap_bps":%s,"cap_approach_count":%s,"cap_hit_count":%s,' \
+    "$MAX_PCT_OF_CAP_BPS" "$APPROACH_COUNT" "$HIT_COUNT"
+  printf '"tx_type_imbalance_present":%s,' "$IMBALANCE_PRESENT"
   printf '"anomalies":['
   if [ -n "$ANOMALIES" ]; then
     printf '%s' "$ANOMALIES" | awk -F, '{
@@ -476,14 +560,17 @@ else
   if [ "$ANOM_ONLY" = "1" ] && [ "$ANOM_COUNT" = "0" ]; then
     echo "operator_block_size_audit: no anomalies (port $PORT, window [$FROM..$TO])"
   else
-    echo "=== Block size audit (port $PORT, window [$FROM..$TO]) ==="
-    echo "Blocks: $TOTAL_BLOCKS ($NONEMPTY_BLOCKS non-empty, $EMPTY_BLOCKS empty)"
+    echo "=== Block size audit (port $PORT, window [$FROM..$TO], $WIN_BLOCKS blocks) ==="
+    echo "Blocks: $TOTAL_BLOCKS ($EMPTY_BLOCKS empty), txs: $TOTAL_TXS"
     if [ "$ANOM_ONLY" != "1" ]; then
-      printf "Tx counts: mean %s, median %s, p95 %s, max %s (block %s)\n" \
-        "$TX_MEAN" "$TX_MEDIAN" "$TX_P95" "$TX_MAX" "$TX_MAX_BLOCK"
-      printf "Block bytes (estimated): mean %s, median %s, p95 %s, max %s (block %s)\n" \
-        "$(render_bytes $B_MEAN)" "$(render_bytes $B_MEDIAN)" \
-        "$(render_bytes $B_P95)"  "$(render_bytes $B_MAX)" "$B_MAX_BLOCK"
+      printf "Block bytes (JSON envelope, approx upper bound on wire): avg %s, p50 %s, p90 %s, p99 %s, max %s (block %s)\n" \
+        "$(render_bytes $BYTES_AVG)" \
+        "$(render_bytes $BYTES_P50)" \
+        "$(render_bytes $BYTES_P90)" \
+        "$(render_bytes $BYTES_P99)" \
+        "$(render_bytes $BYTES_MAX)" \
+        "$BYTES_MAX_BLOCK"
+      # Tx-type distribution line.
       if [ -s "$TMP_TXDIST" ] && [ "$TOTAL_TXS" -gt 0 ]; then
         DIST_LINE=""
         while IFS=$'\t' read -r NAME CNT; do
@@ -498,44 +585,47 @@ else
       else
         echo "Tx-type distribution: (no transactions in window)"
       fi
-      # Capacity summary: largest block vs S-022 cap.
+      # Event payload counts.
+      printf "Events: abort=%s equivocation=%s cross_shard_receipts=%s (blocks with equivocation: %s)\n" \
+        "$TOTAL_ABORTS" "$TOTAL_EQUIVS" "$TOTAL_CSRS" "$BLOCKS_WITH_EQUIV"
+      # Capacity summary line.
       CAP_STATUS="No pressure."
-      if [ "$MAX_PCT_OF_CAP_BPS" -gt 8000 ]; then
-        CAP_STATUS="CRITICAL — exceeds 80% of cap."
-      elif [ "$MAX_PCT_OF_CAP_BPS" -gt 5000 ]; then
-        CAP_STATUS="WARN — exceeds 50% of cap."
+      if [ "$HIT_COUNT" -gt 0 ]; then
+        CAP_STATUS="CRITICAL — at least one block within 1 KB of cap."
+      elif [ "$APPROACH_COUNT" -gt 0 ]; then
+        CAP_STATUS="WARN — at least one block > 75% of cap."
       fi
-      printf "Block-size cap (S-022): %s. Largest: %s (%s of cap). %s\n" \
-        "$(render_bytes $SIZE_CAP_BYTES)" \
-        "$(render_bytes $B_MAX)" \
+      printf "Block-size cap (--max-block-size-bytes): %s. Largest: %s (%s of cap). %s\n" \
+        "$(render_bytes $MAX_BLOCK_SIZE_BYTES)" \
+        "$(render_bytes $BYTES_MAX)" \
         "$(render_pct $MAX_PCT_OF_CAP_BPS)" \
         "$CAP_STATUS"
     fi
     echo
     if [ "$ANOM_COUNT" = "0" ]; then
-      echo "[OK] No size anomalies"
+      echo "[OK] No anomalies"
     else
       echo "[ANOMALY] $ANOM_COUNT flag(s): $ANOMALIES"
-      if [ "$CRIT_COUNT" -gt 0 ]; then
-        echo "  block_size_critical : $CRIT_COUNT block(s) exceed 80% of S-022 cap (> $(render_bytes $SIZE_CRIT_BYTES))"
+      if [ "$APPROACH_COUNT" -gt 0 ]; then
+        echo "  block_size_cap_approach        : $APPROACH_COUNT block(s) > 75% of cap (> $(render_bytes $SOFT_THRESHOLD_BYTES))"
       fi
-      if [ "$WARN_COUNT" -gt 0 ]; then
-        echo "  block_size_warn     : $WARN_COUNT block(s) exceed 50% of S-022 cap (> $(render_bytes $SIZE_WARN_BYTES))"
+      if [ "$HIT_COUNT" -gt 0 ]; then
+        echo "  block_size_cap_hit             : $HIT_COUNT block(s) within 1 KB of cap (≥ $(render_bytes $HIT_THRESHOLD_BYTES))"
       fi
-      if [ "$SPIKE_COUNT" -gt 0 ]; then
-        echo "  tx_count_spike      : $SPIKE_COUNT block(s) have tx count > ${TX_SPIKE_MULT}× window median (>$(( TX_MEDIAN * TX_SPIKE_MULT )))"
+      if [ "$IMBALANCE_PRESENT" = "1" ]; then
+        echo "  tx_type_imbalance_high         : one tx-type accounts for > 80% of total tx volume"
       fi
-      if [ "$MAX_EMPTY_RUN" -gt "$EMPTY_RUN_THRESH" ]; then
-        echo "  empty_block_run     : longest empty-block run = $MAX_EMPTY_RUN (> $EMPTY_RUN_THRESH consecutive)"
+      if [ "$BLOCKS_WITH_EQUIV" -gt 0 ]; then
+        echo "  equivocation_events_in_window  : $BLOCKS_WITH_EQUIV block(s) carry equivocation evidence (slashing in progress)"
       fi
     fi
   fi
 fi
 
-# ── Step 6: exit-code policy ──────────────────────────────────────────────────
-# Same convention as operator_subsidy_audit / operator_fork_watch: exit 2
-# only when --anomalies-only is set AND at least one anomaly fired.
-# Default informational mode always exits 0 if the RPC walk succeeded.
+# ── Step 7: exit-code policy ──────────────────────────────────────────────────
+# Same convention as the other operator_*.sh scripts: exit 2 only when
+# --anomalies-only is set AND at least one anomaly fired. Default
+# informational mode always exits 0 if the RPC walk succeeded.
 if [ "$ANOM_ONLY" = "1" ] && [ "$ANOM_COUNT" -gt 0 ]; then
   exit 2
 fi
