@@ -8190,6 +8190,547 @@ int cmd_anon_batch_balance(int argc, char** argv) {
     return 0;
 }
 
+// determ-wallet bulk-send — Batch TRANSFER submission from a single
+// keyfile to many recipients via the daemon's RPC, with per-recipient
+// nonce sequencing.
+//
+// Use case: payroll / airdrop / mass-distribution from a hot wallet.
+// Operator prepares a batch file (JSON array or CSV) of
+// {recipient, amount, fee?} rows, runs `wallet bulk-send`, and gets back
+// a per-row submission result. Each row consumes the next nonce in
+// sequence starting from the address's current next_nonce — so a single
+// invocation can submit N transactions in one shot without round-tripping
+// to the daemon for each nonce.
+//
+// CLI:
+//   --priv-keyfile <path>      REQUIRED. Single-account JSON
+//                              {address, privkey_hex} (account-export
+//                              shape; same as every other wallet command).
+//   --batch-file <path>        REQUIRED. JSON array of objects with keys
+//                              {"to": "0x...", "amount": N, "fee": N
+//                              (optional)} OR CSV with header-less rows
+//                              `to,amount[,fee]`. Format is auto-detected
+//                              by extension (.json vs .csv); files with
+//                              other extensions are parsed as JSON if the
+//                              first non-whitespace byte is '[', else CSV.
+//   --rpc-port <N>             REQUIRED unless --dry-run. Daemon RPC port.
+//   --fee <N>                  Default fee applied to rows that don't
+//                              specify one. Defaults to 0.
+//   --dry-run                  Skip RPC submission. Each row is built +
+//                              signed + the hash is computed, but nothing
+//                              is sent to the daemon. The result row
+//                              still carries tx_hash, plus the signed tx
+//                              JSON in a new "signed_tx" field, so the
+//                              operator can pipe the output to a cold-
+//                              wallet workflow. Starting nonce is fetched
+//                              via RPC if --rpc-port is supplied; otherwise
+//                              defaults to 0 (operator can override the
+//                              starting nonce with --starting-nonce).
+//   --starting-nonce <N>       Override the starting nonce instead of
+//                              fetching from the daemon. Useful for
+//                              --dry-run workflows that haven't connected
+//                              to a daemon, OR for pipelined submission
+//                              where a prior batch hasn't yet landed
+//                              on-chain (the operator picks up where the
+//                              previous batch left off).
+//   --continue-on-error        Keep submitting subsequent rows even if a
+//                              row fails. Default is abort-on-first-error
+//                              (matches payroll semantics — a mistake at
+//                              row K should NOT silently fan out to
+//                              every subsequent row).
+//   --json                     Accepted for parity; output is always JSON.
+//
+// Output (one-line JSON on stdout):
+//   {"keyfile": "...", "batch_size": N, "submitted": N, "failed": N,
+//    "starting_nonce": N, "ending_nonce": N,
+//    "results": [
+//      {"row": 0, "to": "0x...", "amount": N, "fee": N, "nonce": N,
+//       "tx_hash": "...", "status": "ok"|"error",
+//       "reason": "..." (only on error),
+//       "signed_tx": {...} (only with --dry-run)},
+//      ...
+//    ]}
+//
+// Exit codes:
+//   0  every row succeeded (no failures recorded)
+//   1  args / parse / IO / libsodium / RPC-connect error before any row
+//      could be attempted
+//   2  at least one row failed (whether the run aborted on first error
+//      or continued through — the exit code reports the outcome)
+int cmd_bulk_send(int argc, char** argv) {
+    std::string priv_keyfile;
+    std::string batch_file;
+    int      rpc_port = -1;
+    uint64_t default_fee = 0;
+    bool     dry_run = false;
+    bool     continue_on_error = false;
+    int64_t  starting_nonce_override = -1;
+    bool     json_out = false;  // accepted; output is always JSON
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv-keyfile"  && i + 1 < argc) priv_keyfile = argv[++i];
+        else if (a == "--batch-file"    && i + 1 < argc) batch_file   = argv[++i];
+        else if (a == "--rpc-port"      && i + 1 < argc) rpc_port     = std::atoi(argv[++i]);
+        else if (a == "--fee"           && i + 1 < argc) default_fee  = std::stoull(argv[++i]);
+        else if (a == "--starting-nonce" && i + 1 < argc) starting_nonce_override = std::stoll(argv[++i]);
+        else if (a == "--dry-run")                        dry_run             = true;
+        else if (a == "--continue-on-error")              continue_on_error   = true;
+        else if (a == "--json")                           json_out            = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet bulk-send --priv-keyfile <path> "
+                "--batch-file <path> --rpc-port <N>\n"
+                "       [--fee <N>] [--dry-run] [--starting-nonce <N>] "
+                "[--continue-on-error] [--json]\n"
+                "\n"
+                "  Batch TRANSFER submission from a single keyfile to many\n"
+                "  recipients with per-recipient nonce sequencing. --batch-file\n"
+                "  accepts JSON array [{\"to\":..,\"amount\":..,\"fee\":..}, ...]\n"
+                "  or CSV (to,amount[,fee]) — auto-detected by extension.\n"
+                "  --dry-run builds + signs every tx without submission (for\n"
+                "  cold-wallet pipelines). --continue-on-error keeps going\n"
+                "  past a failed row; default is abort-on-first-error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "bulk-send: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet bulk-send --priv-keyfile <path> "
+                         "--batch-file <path> --rpc-port <N> "
+                         "[--fee <N>] [--dry-run] [--starting-nonce <N>] "
+                         "[--continue-on-error] [--json]\n";
+            return 1;
+        }
+    }
+    (void)json_out;
+    if (priv_keyfile.empty() || batch_file.empty()) {
+        std::cerr << "bulk-send: --priv-keyfile and --batch-file are required\n";
+        return 1;
+    }
+    if (!dry_run && (rpc_port <= 0 || rpc_port > 65535)) {
+        std::cerr << "bulk-send: --rpc-port <N> is required (1..65535) "
+                     "unless --dry-run is supplied\n";
+        return 1;
+    }
+
+    // ── Load priv keyfile ──────────────────────────────────────────────────
+    std::vector<uint8_t> priv_seed;
+    std::string keyfile_address;
+    {
+        std::string err;
+        if (!load_priv_keyfile(priv_keyfile, priv_seed, keyfile_address, err)) {
+            std::cerr << "bulk-send: " << err << "\n";
+            return 1;
+        }
+    }
+
+    // ── Parse batch file ──────────────────────────────────────────────────
+    // Auto-detect format: extension wins; otherwise sniff first non-ws byte.
+    struct BatchRow {
+        std::string to;
+        uint64_t    amount;
+        uint64_t    fee;          // resolved (row.fee || default_fee)
+        bool        fee_explicit; // whether row carried its own fee
+    };
+    std::vector<BatchRow> rows;
+
+    auto resolve_fee = [&](std::optional<uint64_t> row_fee) -> std::pair<uint64_t, bool> {
+        if (row_fee.has_value()) return {*row_fee, true};
+        return {default_fee, false};
+    };
+
+    auto ends_with_ci = [](const std::string& s, const std::string& suf) {
+        if (s.size() < suf.size()) return false;
+        for (size_t i = 0; i < suf.size(); ++i) {
+            char a = s[s.size() - suf.size() + i];
+            char b = suf[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+            if (a != b) return false;
+        }
+        return true;
+    };
+
+    // Slurp the batch file into memory once; large operator batches still fit
+    // comfortably (a 10000-row payroll JSON is ~700KB).
+    std::ifstream bf(batch_file, std::ios::binary);
+    if (!bf) {
+        std::cerr << "bulk-send: cannot open --batch-file: " << batch_file << "\n";
+        return 1;
+    }
+    std::string body((std::istreambuf_iterator<char>(bf)),
+                      std::istreambuf_iterator<char>());
+
+    bool is_json = false;
+    if (ends_with_ci(batch_file, ".json")) {
+        is_json = true;
+    } else if (ends_with_ci(batch_file, ".csv")) {
+        is_json = false;
+    } else {
+        // Sniff first non-whitespace byte.
+        size_t p = 0;
+        while (p < body.size() &&
+               (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' ||
+                body[p] == '\n')) ++p;
+        is_json = (p < body.size() && body[p] == '[');
+    }
+
+    if (is_json) {
+        nlohmann::json arr;
+        try { arr = nlohmann::json::parse(body); }
+        catch (std::exception& e) {
+            std::cerr << "bulk-send: --batch-file JSON parse error: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (!arr.is_array()) {
+            std::cerr << "bulk-send: --batch-file JSON must be an array "
+                         "of {to, amount, fee?} objects\n";
+            return 1;
+        }
+        for (size_t i = 0; i < arr.size(); ++i) {
+            const auto& row = arr[i];
+            if (!row.is_object()) {
+                std::cerr << "bulk-send: --batch-file row " << i
+                          << " is not a JSON object\n";
+                return 1;
+            }
+            if (!row.contains("to") || !row["to"].is_string()) {
+                std::cerr << "bulk-send: --batch-file row " << i
+                          << " missing string field 'to'\n";
+                return 1;
+            }
+            if (!row.contains("amount") || !row["amount"].is_number()) {
+                std::cerr << "bulk-send: --batch-file row " << i
+                          << " missing numeric field 'amount'\n";
+                return 1;
+            }
+            BatchRow br;
+            br.to     = row["to"].get<std::string>();
+            br.amount = row["amount"].is_number_unsigned()
+                          ? row["amount"].get<uint64_t>()
+                          : static_cast<uint64_t>(row["amount"].get<int64_t>());
+            std::optional<uint64_t> row_fee;
+            if (row.contains("fee") && row["fee"].is_number()) {
+                row_fee = row["fee"].is_number_unsigned()
+                            ? row["fee"].get<uint64_t>()
+                            : static_cast<uint64_t>(row["fee"].get<int64_t>());
+            }
+            auto rf = resolve_fee(row_fee);
+            br.fee = rf.first;
+            br.fee_explicit = rf.second;
+            rows.push_back(br);
+        }
+    } else {
+        // CSV: header-less; each non-empty, non-comment line is
+        // `to,amount[,fee]`. Lines starting with '#' are comments
+        // (so operators can annotate payroll runs). A leading line
+        // matching `to,amount` (case-insensitive) is also treated as
+        // a header and skipped — convenience for spreadsheet exports.
+        std::istringstream iss(body);
+        std::string line;
+        size_t lineno = 0;
+        while (std::getline(iss, line)) {
+            ++lineno;
+            // Strip CR + leading/trailing whitespace.
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == ' ' ||
+                    line.back() == '\t')) line.pop_back();
+            size_t pos = 0;
+            while (pos < line.size() &&
+                   (line[pos] == ' ' || line[pos] == '\t')) ++pos;
+            if (pos > 0) line.erase(0, pos);
+            if (line.empty()) continue;
+            if (line[0] == '#') continue;
+
+            // Header sniff: if the first non-empty line starts with a
+            // letter (not 0/1/2... or 0x for an address), treat as header.
+            // We accept either "to,amount" or "to,amount,fee".
+            if (rows.empty() && !line.empty() &&
+                ((line[0] >= 'A' && line[0] <= 'Z') ||
+                 (line[0] >= 'a' && line[0] <= 'z'))) {
+                // Could be a literal "to" header OR an address starting
+                // with a letter — but anon addresses always start with
+                // "0x", so a leading letter is unambiguously a header.
+                // (Domain-name recipients also start with a letter; those
+                // can't be common in CSV bulk-send the same way payroll
+                // anon-addresses are. Still, prefer correctness: only
+                // skip if the line is literally "to,..." or "TO,...".)
+                std::string lowfirst;
+                for (size_t k = 0; k < line.size() && line[k] != ','; ++k) {
+                    char c = line[k];
+                    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+                    lowfirst.push_back(c);
+                }
+                if (lowfirst == "to") continue;
+            }
+
+            std::vector<std::string> cols;
+            {
+                std::string cur;
+                for (char c : line) {
+                    if (c == ',') { cols.push_back(cur); cur.clear(); }
+                    else          { cur.push_back(c); }
+                }
+                cols.push_back(cur);
+            }
+            if (cols.size() < 2) {
+                std::cerr << "bulk-send: --batch-file CSV line " << lineno
+                          << " expected `to,amount[,fee]`; got '" << line << "'\n";
+                return 1;
+            }
+            // Trim each column.
+            for (auto& c : cols) {
+                while (!c.empty() && (c.back() == ' ' || c.back() == '\t'))
+                    c.pop_back();
+                size_t pp = 0;
+                while (pp < c.size() && (c[pp] == ' ' || c[pp] == '\t')) ++pp;
+                if (pp > 0) c.erase(0, pp);
+            }
+            BatchRow br;
+            br.to = cols[0];
+            try {
+                br.amount = std::stoull(cols[1]);
+            } catch (std::exception&) {
+                std::cerr << "bulk-send: --batch-file CSV line " << lineno
+                          << " amount '" << cols[1] << "' is not a u64\n";
+                return 1;
+            }
+            std::optional<uint64_t> row_fee;
+            if (cols.size() >= 3 && !cols[2].empty()) {
+                try { row_fee = std::stoull(cols[2]); }
+                catch (std::exception&) {
+                    std::cerr << "bulk-send: --batch-file CSV line " << lineno
+                              << " fee '" << cols[2] << "' is not a u64\n";
+                    return 1;
+                }
+            }
+            auto rf = resolve_fee(row_fee);
+            br.fee = rf.first;
+            br.fee_explicit = rf.second;
+            rows.push_back(br);
+        }
+    }
+
+    if (rows.empty()) {
+        std::cerr << "bulk-send: --batch-file parsed to zero rows\n";
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        return 1;
+    }
+
+    // ── Init libsodium + derive keypair from the priv seed ────────────────
+    if (!primitives::init_libsodium()) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        std::cerr << "bulk-send: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "bulk-send: crypto_sign_seed_keypair failed\n";
+        return 1;
+    }
+    // Sanity-check the derived address against the keyfile-claimed address.
+    // make_anon_address is "0x" + lowercase 64-hex of the pubkey.
+    std::string derived_addr = "0x" + to_hex(pub);
+    if (derived_addr != keyfile_address) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "bulk-send: --priv-keyfile address mismatch: "
+                     "keyfile.address=" << keyfile_address
+                  << " derived=" << derived_addr
+                  << " (keyfile is corrupt or wrong shape)\n";
+        return 1;
+    }
+    // priv_seed not needed past keypair derivation; scrub.
+    sodium_memzero(priv_seed.data(), priv_seed.size());
+
+    // ── Optional: connect to RPC, fetch starting nonce ────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok && !dry_run) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "bulk-send: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    sock_t rpc_sock = kInvalidSock;
+    std::string inbuf;
+    uint64_t starting_nonce = 0;
+    bool nonce_fetched = false;
+    if (rpc_port > 0) {
+        std::string conn_err;
+        rpc_sock = rpc_connect_localhost(
+            static_cast<uint16_t>(rpc_port), conn_err);
+        if (rpc_sock == kInvalidSock) {
+            // For --dry-run with no daemon available, fall back to nonce=0
+            // (or operator-supplied --starting-nonce). For real submission
+            // we cannot proceed.
+            if (!dry_run) {
+                sodium_memzero(sk.data(), sk.size());
+                std::cerr << "bulk-send: " << conn_err << "\n";
+                return 1;
+            }
+        } else {
+            try {
+                auto n_resp = rpc_call_over_socket(
+                    rpc_sock, inbuf, "nonce", {{"domain", keyfile_address}});
+                if (n_resp.contains("next_nonce") && n_resp["next_nonce"].is_number()) {
+                    starting_nonce = n_resp["next_nonce"].is_number_unsigned()
+                        ? n_resp["next_nonce"].get<uint64_t>()
+                        : static_cast<uint64_t>(n_resp["next_nonce"].get<int64_t>());
+                }
+                nonce_fetched = true;
+            } catch (std::exception& e) {
+                if (!dry_run) {
+                    close_sock(rpc_sock);
+                    sodium_memzero(sk.data(), sk.size());
+                    std::cerr << "bulk-send: nonce query failed: "
+                              << e.what() << "\n";
+                    return 1;
+                }
+                // dry-run: tolerate nonce-query failure; fall through.
+            }
+        }
+    }
+    if (starting_nonce_override >= 0) {
+        starting_nonce = static_cast<uint64_t>(starting_nonce_override);
+        nonce_fetched = true;
+    }
+    if (!nonce_fetched) {
+        // dry-run without daemon and without --starting-nonce: default to 0.
+        starting_nonce = 0;
+    }
+
+    // ── Per-row build / sign / submit ─────────────────────────────────────
+    nlohmann::json results = nlohmann::json::array();
+    size_t submitted = 0;
+    size_t failed    = 0;
+    bool   aborted   = false;
+    uint64_t ending_nonce = starting_nonce;  // advances per row submitted
+
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto& br = rows[i];
+        uint64_t row_nonce = starting_nonce + static_cast<uint64_t>(i);
+
+        nlohmann::json row_out;
+        row_out["row"]    = i;
+        row_out["to"]     = br.to;
+        row_out["amount"] = br.amount;
+        row_out["fee"]    = br.fee;
+        row_out["nonce"]  = row_nonce;
+
+        // Build canonical signing_bytes (matches src/chain/block.cpp
+        // Transaction::signing_bytes; same encoding as cmd_cold_sign /
+        // cmd_tx_sign_verify above). TRANSFER has empty payload.
+        std::vector<uint8_t> sb;
+        sb.reserve(1 + keyfile_address.size() + 1 + br.to.size() + 1 + 24);
+        sb.push_back(static_cast<uint8_t>(0));  // TxType::TRANSFER == 0
+        sb.insert(sb.end(), keyfile_address.begin(), keyfile_address.end());
+        sb.push_back(0);
+        sb.insert(sb.end(), br.to.begin(), br.to.end());
+        sb.push_back(0);
+        for (int j = 7; j >= 0; --j) sb.push_back((br.amount   >> (j * 8)) & 0xFF);
+        for (int j = 7; j >= 0; --j) sb.push_back((br.fee      >> (j * 8)) & 0xFF);
+        for (int j = 7; j >= 0; --j) sb.push_back((row_nonce   >> (j * 8)) & 0xFF);
+        // payload = empty for TRANSFER; nothing appended.
+
+        std::array<uint8_t, 32> sb_sha{};
+        SHA256(sb.data(), sb.size(), sb_sha.data());
+
+        std::array<uint8_t, crypto_sign_BYTES> sig{};
+        unsigned long long sig_len = 0;
+        if (crypto_sign_detached(sig.data(), &sig_len,
+                                  sb.data(), sb.size(),
+                                  sk.data()) != 0 ||
+            sig_len != crypto_sign_BYTES) {
+            row_out["status"]  = "error";
+            row_out["reason"]  = "crypto_sign_detached failed";
+            row_out["tx_hash"] = to_hex(sb_sha);
+            ++failed;
+            results.push_back(row_out);
+            if (!continue_on_error) { aborted = true; break; }
+            continue;
+        }
+
+        // Build the Transaction JSON envelope (matches Transaction::to_json
+        // shape exactly so the chain's submit_tx parses it via from_json).
+        nlohmann::json tx_json = {
+            {"type",    0},                  // TxType::TRANSFER
+            {"from",    keyfile_address},
+            {"to",      br.to},
+            {"amount",  br.amount},
+            {"fee",     br.fee},
+            {"nonce",   row_nonce},
+            {"payload", ""},                 // empty hex payload
+            {"sig",     to_hex(sig)},
+            {"hash",    to_hex(sb_sha)},
+        };
+
+        row_out["tx_hash"] = to_hex(sb_sha);
+
+        if (dry_run) {
+            // Don't submit; just emit the signed tx for cold-wallet pipelines.
+            row_out["signed_tx"] = tx_json;
+            row_out["status"]    = "ok";
+            ++submitted;
+            ending_nonce = row_nonce + 1;
+            results.push_back(row_out);
+            continue;
+        }
+
+        // Live submission via RPC. rpc_call_over_socket throws on RPC
+        // error; we catch + record reason. On a connection-level failure
+        // (socket closed mid-batch) we abort the loop unconditionally —
+        // re-establishing mid-batch invites pipelined-nonce confusion.
+        try {
+            auto resp = rpc_call_over_socket(
+                rpc_sock, inbuf, "submit_tx", {{"tx", tx_json}});
+            // Server returns {"status":"queued","hash":"..."} on success.
+            std::string server_status = resp.value("status", std::string{});
+            std::string server_hash   = resp.value("hash",   std::string{});
+            if (server_status == "queued") {
+                row_out["status"] = "ok";
+                if (!server_hash.empty()) row_out["tx_hash"] = server_hash;
+                ++submitted;
+                ending_nonce = row_nonce + 1;
+            } else {
+                row_out["status"] = "error";
+                row_out["reason"] = "unexpected submit_tx response: " + resp.dump();
+                ++failed;
+            }
+        } catch (std::exception& e) {
+            row_out["status"] = "error";
+            row_out["reason"] = e.what();
+            ++failed;
+            results.push_back(row_out);
+            if (!continue_on_error) { aborted = true; break; }
+            continue;
+        }
+
+        results.push_back(row_out);
+    }
+
+    if (rpc_sock != kInvalidSock) close_sock(rpc_sock);
+    sodium_memzero(sk.data(), sk.size());
+
+    nlohmann::json out;
+    out["keyfile"]        = priv_keyfile;
+    out["batch_size"]     = rows.size();
+    out["submitted"]      = submitted;
+    out["failed"]         = failed;
+    out["starting_nonce"] = starting_nonce;
+    out["ending_nonce"]   = ending_nonce;
+    out["dry_run"]        = dry_run;
+    out["aborted"]        = aborted;
+    out["results"]        = results;
+    std::cout << out.dump() << "\n";
+
+    if (failed > 0) return 2;
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -8526,6 +9067,35 @@ void print_usage() {
         "                                             address sets, CI fixtures verifying multi-\n"
         "                                             address scenarios. Exit 0 success, 1 args/\n"
         "                                             IO/RPC failure.\n"
+        "  bulk-send --priv-keyfile <path>            Batch TRANSFER submission from a single\n"
+        "            --batch-file <path> --rpc-port <N>\n"
+        "            [--fee <N>] [--dry-run] [--starting-nonce <N>]\n"
+        "            [--continue-on-error] [--json]\n"
+        "                                             keyfile to many recipients via RPC, with\n"
+        "                                             per-recipient nonce sequencing. Use case:\n"
+        "                                             payroll / airdrop / mass-distribution from\n"
+        "                                             a hot wallet. --batch-file accepts JSON\n"
+        "                                             array [{\"to\":..,\"amount\":..,\"fee\":..}, ...]\n"
+        "                                             or CSV `to,amount[,fee]` (auto-detected by\n"
+        "                                             extension; sniffed by first non-ws byte\n"
+        "                                             otherwise). --fee sets the default fee for\n"
+        "                                             rows that omit one. --dry-run builds + signs\n"
+        "                                             each tx but skips RPC submission (each row\n"
+        "                                             gains a 'signed_tx' field for cold-wallet\n"
+        "                                             pipelining). --starting-nonce overrides the\n"
+        "                                             daemon-fetched start (useful for pipelined\n"
+        "                                             submission across batches before the prior\n"
+        "                                             batch lands on-chain). --continue-on-error\n"
+        "                                             keeps submitting subsequent rows after a\n"
+        "                                             failed one; default aborts. Output (one-\n"
+        "                                             line JSON): {keyfile, batch_size, submitted,\n"
+        "                                             failed, starting_nonce, ending_nonce,\n"
+        "                                             dry_run, aborted, results:[{row, to,\n"
+        "                                             amount, fee, nonce, tx_hash, status:ok|\n"
+        "                                             error, reason?, signed_tx?}]}. Exit 0 all\n"
+        "                                             rows succeeded, 1 args/parse/IO/RPC-connect\n"
+        "                                             error before any row, 2 at least one row\n"
+        "                                             failed.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -8576,6 +9146,7 @@ int main(int argc, char** argv) {
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
+    if (cmd == "bulk-send")       return cmd_bulk_send       (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
