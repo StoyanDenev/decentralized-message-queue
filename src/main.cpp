@@ -829,6 +829,23 @@ Additional in-process tests:
                                               HELLO encode rejected per
                                               binary-codec contract;
                                               malformed-header diagnostics.
+  determ test-time-monotonicity               Block.timestamp monotonicity
+                                              contract — pin actual current
+                                              behavior across chain + validator
+                                              layers. Chain::append accepts
+                                              backward / equal / far-future /
+                                              negative timestamps (no inter-
+                                              block check); now_unix() non-
+                                              decreasing; compute_hash +
+                                              signing_bytes BIND timestamp;
+                                              compute_block_digest EXCLUDES it
+                                              (S-030 D2); genesis pinned at 0;
+                                              validate() short-circuits genesis
+                                              regardless of timestamp.
+                                              Documents the V14 ±30s wall-clock
+                                              gate (validator.cpp::check_
+                                              timestamp) as the ONLY enforced
+                                              bound.
 )" << "\n";
 }
 
@@ -28730,6 +28747,302 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": protocol-version-pinning "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Path 1: Block.timestamp monotonicity contract — pin actual
+    // current behavior, including the documented gap.
+    //
+    // The Preliminaries V14 invariant states the validator's check is
+    // wall-clock proximity ONLY (`|B.timestamp - now()| ≤ 30s`, per
+    // src/node/validator.cpp::check_timestamp). There is NO inter-block
+    // monotonicity check at the validator OR chain layer:
+    //   - Chain::append does NOT compare b.timestamp to head().timestamp
+    //   - BlockValidator::validate runs check_timestamp last; it only
+    //     enforces the ±30s wall-clock window, never a non-decreasing
+    //     ordering across heights
+    //
+    // This test pins both the surfaces that DO bind timestamp into
+    // identity / signing (compute_hash, signing_bytes) and the surfaces
+    // that DO NOT (compute_block_digest), AND pins the actual current
+    // chain-layer / validator-layer non-enforcement of monotonicity.
+    // The latter is documented as a potential gap — if a future revision
+    // adds an inter-block timestamp gate, this test's "current behavior"
+    // assertions for backward / equal / future-bounded timestamps will
+    // need to be flipped from "accept" to "reject."
+    //
+    // Scope: ~17 assertions across 9 scenarios.
+    if (cmd == "test-time-monotonicity") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Fixture: alice as sole creator with balance + stake.
+        GenesisConfig cfg;
+        cfg.chain_id = "time-monotonicity-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Build a fresh chain with a single empty block at height 1
+        // carrying the supplied timestamp. No transactions, no abort
+        // events — pure timestamp / metadata fixture.
+        auto build_chain_at_ts = [&](int64_t ts) -> Chain {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block b;
+            b.index = 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.timestamp = ts;
+            c.append(b);
+            return c;
+        };
+
+        // === Scenario 1: backward timestamp at height N+1 (current behavior: accepted by Chain) ===
+        //
+        // Pin the actual chain-layer behavior: Chain::append (src/chain/
+        // chain.cpp:54) does NOT compare b.timestamp to head().timestamp.
+        // Two adjacent blocks where the second is "earlier" round-trip
+        // cleanly through append + chain accessors. Inter-block monotonic
+        // non-decrease is NOT enforced by the chain layer.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.timestamp = 2000;
+            c.append(b1);
+
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.timestamp = 1999;  // BACKWARD by 1 second
+            bool threw = false;
+            try { c.append(b2); }
+            catch (const std::exception&) { threw = true; }
+            check(!threw,
+                  "(1) Chain::append accepts backward timestamp (T2 < T1) "
+                  "— current chain layer does NOT enforce inter-block "
+                  "monotonicity; documented gap vs strict-monotonic spec");
+            check(c.height() == 3,
+                  "(1) Chain advanced to height 3 despite backward timestamp");
+            check(c.at(2).timestamp == 1999,
+                  "(1) Stored timestamp at height 2 is the backward value 1999");
+            check(c.at(1).timestamp == 2000,
+                  "(1) Earlier block at height 1 still reads 2000 (unmodified)");
+        }
+
+        // === Scenario 2: equal timestamps at adjacent heights (non-strict monotonic OK) ===
+        //
+        // Even under a hypothetical future strict-non-decrease rule,
+        // T2 == T1 is acceptable. Pin that current chain layer accepts it.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.timestamp = 5000;
+            c.append(b1);
+
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = c.head().compute_hash();
+            b2.creators = {"alice"};
+            b2.timestamp = 5000;  // EQUAL
+            bool threw = false;
+            try { c.append(b2); }
+            catch (const std::exception&) { threw = true; }
+            check(!threw,
+                  "(2) Chain::append accepts equal adjacent timestamps "
+                  "(T2 == T1) — non-strict monotonic boundary case");
+            check(c.at(1).timestamp == c.at(2).timestamp,
+                  "(2) Adjacent block timestamps stored as equal");
+        }
+
+        // === Scenario 3: far-future timestamp (no upper bound at chain layer) ===
+        //
+        // The Block.timestamp field is int64_t and Chain::append does
+        // NOT compare against wall-clock — only BlockValidator's
+        // check_timestamp does (±30s window). At the chain layer
+        // alone, a far-future timestamp round-trips. This is the actual
+        // current behavior; the wall-clock window is a validator-only
+        // gate, NOT a chain invariant.
+        //
+        // Year 2050 in unix-seconds = 2'524'608'000.
+        {
+            constexpr int64_t year_2050 = 2524608000LL;
+            Chain c = build_chain_at_ts(year_2050);
+            check(c.head().timestamp == year_2050,
+                  "(3) Chain stores far-future timestamp (year 2050) verbatim "
+                  "— chain-layer has no upper bound; only validator's "
+                  "check_timestamp enforces ±30s wall-clock window");
+            check(c.head().timestamp > now_unix(),
+                  "(3) Stored timestamp is in fact greater than wall-clock");
+        }
+
+        // === Scenario 4: now_unix() helper monotonicity at this layer ===
+        //
+        // now_unix() in include/determ/types.hpp wraps std::chrono::
+        // system_clock — wall clock, NOT a strictly-monotonic clock.
+        // Steady invariance is "n2 >= n1" in normal forward-progressing
+        // time. Pin that two consecutive samples satisfy non-decrease.
+        // (Two samples in the same scheduling quantum will typically
+        // yield equal seconds-resolution values; we only require >=.)
+        {
+            int64_t n1 = now_unix();
+            int64_t n2 = now_unix();
+            check(n2 >= n1,
+                  "(4) now_unix() non-decreasing across two consecutive "
+                  "calls (wall-clock layer; not strictly monotonic — "
+                  "can repeat within the same second)");
+        }
+
+        // === Scenario 5: Block::compute_hash binds timestamp ===
+        //
+        // Two blocks at the same (idx, prev_hash, txs, creators) with
+        // DIFFERENT timestamps must produce different compute_hash.
+        // compute_hash drives chain identity + head_hash linkage; a
+        // collision here would let a producer substitute a different-
+        // timestamp body while keeping the prev_hash chain intact.
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(c1.head().compute_hash() != c2.head().compute_hash(),
+                  "(5) compute_hash IS sensitive to timestamp "
+                  "(block-identity binds the field)");
+        }
+
+        // === Scenario 6: Block::signing_bytes binds timestamp ===
+        //
+        // signing_bytes is the per-creator signature target. If two
+        // blocks with different timestamps shared signing_bytes, a
+        // committee member's signature could replay across timestamps.
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(c1.head().signing_bytes() != c2.head().signing_bytes(),
+                  "(6) signing_bytes IS sensitive to timestamp "
+                  "(creator-signature-target binds the field; no replay)");
+        }
+
+        // === Scenario 7: compute_block_digest EXCLUDES timestamp ===
+        //
+        // Per producer.cpp::compute_block_digest (line ~577) and the
+        // S-030 D2 analysis in docs/proofs/S030-D2-Analysis.md, the
+        // K-of-K Phase-2 digest deliberately excludes consensus-time
+        // metadata. timestamp is one such field — two blocks differing
+        // ONLY in timestamp share the same compute_block_digest.
+        //
+        // This is by design: the digest is signed before Phase-2 reveal,
+        // and committee members must agree on the digest without
+        // re-coordinating on wall-clock samples taken at slightly
+        // different moments.
+        {
+            Chain c1 = build_chain_at_ts(1000);
+            Chain c2 = build_chain_at_ts(2000);
+            check(compute_block_digest(c1.head()) ==
+                  compute_block_digest(c2.head()),
+                  "(7) compute_block_digest is INVARIANT to timestamp "
+                  "(by design — excludes consensus-time metadata; see "
+                  "S-030 D2 Analysis)");
+        }
+
+        // === Scenario 8: Genesis block timestamp pinned at 0 ===
+        //
+        // make_genesis_block (src/chain/genesis.cpp:301) hard-codes
+        // g.timestamp = 0. Genesis has no "previous block" so
+        // monotonicity is undefined for it; the constant-0 convention
+        // is what compute_genesis_hash assumes for chain-identity
+        // determinism.
+        {
+            Block g = make_genesis_block(cfg);
+            check(g.index == 0,
+                  "(8) make_genesis_block produces index 0");
+            check(g.timestamp == 0,
+                  "(8) make_genesis_block hard-codes timestamp = 0 "
+                  "(no 'previous' block — monotonicity undefined at genesis)");
+
+            // And any non-genesis block with a SMALLER timestamp than
+            // genesis (impossible — int64_t lower bound of timestamp
+            // domain is genesis's 0 by convention; negative wall-clock
+            // is technically representable but semantically anomalous)
+            // — confirm chain accepts it nonetheless (current behavior).
+            Chain c;
+            c.append(g);
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            b1.timestamp = -100;  // BEFORE genesis's 0
+            bool threw = false;
+            try { c.append(b1); }
+            catch (const std::exception&) { threw = true; }
+            check(!threw,
+                  "(8) Chain accepts negative timestamp on block-after-genesis "
+                  "— chain layer does NOT cross-check against genesis's 0");
+        }
+
+        // === Scenario 9: validate() entry point — short-circuits genesis ===
+        //
+        // BlockValidator::validate (validator.cpp:19) returns OK
+        // unconditionally for index 0 (genesis trust = pinned hash).
+        // check_timestamp NEVER fires on genesis. Pin this contract.
+        //
+        // For non-genesis blocks, validate() runs ~13 gates and
+        // check_timestamp is the LAST one. We can't reach it through
+        // a minimal fixture (would need full committee signatures,
+        // delay output, etc.). But we CAN pin that the gate ONLY
+        // enforces the ±30s wall-clock window — NOT inter-block
+        // monotonicity — by reading the source. The chain-layer
+        // append() acceptance demonstrated in scenarios 1, 2, 3, 8
+        // already proves there's no inter-block check below the
+        // validator level.
+        {
+            BlockValidator bv;
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            NodeRegistry reg = NodeRegistry::build_from_chain(c, 0);
+
+            // Genesis short-circuit — even with an absurd timestamp.
+            Block fake_g;
+            fake_g.index = 0;
+            fake_g.timestamp = 9999999999LL;  // year 2286
+            auto r = bv.validate(fake_g, c, reg);
+            check(r.ok,
+                  "(9) validate() short-circuits OK on genesis (index 0) "
+                  "regardless of timestamp value — check_timestamp "
+                  "never fires at index 0");
+
+            // Genesis short-circuit with a NEGATIVE timestamp.
+            Block fake_g_neg;
+            fake_g_neg.index = 0;
+            fake_g_neg.timestamp = -1;
+            auto r2 = bv.validate(fake_g_neg, c, reg);
+            check(r2.ok,
+                  "(9) validate() short-circuits OK on genesis with "
+                  "negative timestamp — index 0 bypasses every gate");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": time-monotonicity "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
