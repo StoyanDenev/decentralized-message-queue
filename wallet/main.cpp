@@ -8190,6 +8190,335 @@ int cmd_anon_batch_balance(int argc, char** argv) {
     return 0;
 }
 
+// determ-wallet stake-bulk-query — bulk-query validator stake info for
+// many domain names against a running daemon's RPC.
+//
+// Use case:
+//   Operator dashboards listing stake / region / activation-height
+//   across a known validator roster; on-call tooling auditing a
+//   subset of mainnet validators in one shot; CI fixtures asserting a
+//   multi-validator test scenario.
+//
+// Difference from anon-batch-balance:
+//   anon-batch-balance targets anon-addresses (`0x` + 64 hex) and
+//   returns balance/nonce/stake; stake-bulk-query targets validator
+//   DOMAINS (e.g. "alice.v") and returns the full per-validator
+//   stake row {stake_locked, accumulated_slashed, active_from,
+//   region, ed_pub, exists}. accumulated_slashed is chain-global
+//   today (no per-domain accounting exists in chain state — see
+//   chain::accumulated_slashed_), so it surfaces as 0 per row.
+//
+// CLI:
+//   --rpc-port N         (required) daemon RPC port (e.g. 8830)
+//   --domains <list|@f>  (required) comma-separated domains, or
+//                        @path to read one-per-line from a file
+//                        (lines starting with # are skipped,
+//                        blank lines ignored)
+//   --json               emit one-line JSON envelope on stdout
+//                        instead of a human-readable table
+//   --help               print this usage and exit 0
+//
+// Wire pattern: opens ONE TCP connection to 127.0.0.1:<rpc_port>;
+// sends `status` once for chain_height; sends `validators` once to
+// collect ed_pub/active_from/region per validator; sends
+// `stake_info` per requested domain (the per-domain stake_locked
+// path that the test asserts against `determ stake_info <domain>`).
+//
+// Default output (human-readable, sorted by stake_locked desc):
+//   chain_height: N (rpc_port=N)
+//   DOMAIN                          STAKE_LOCKED  ACTIVE_FROM  REGION  EXISTS
+//   alice.v                            3000000000           0    us-east  YES
+//   bob.v                              2000000000           0           YES
+//   nobody.v                                    0           -           NO
+//   (3 domains, 2 exist, total_stake_locked=5000000000)
+//
+// --json envelope (one-line JSON on stdout):
+//   {"rpc_port": N, "chain_height": N, "domains": [
+//     {"domain": "alice.v", "stake_locked": N,
+//      "accumulated_slashed": 0, "active_from": N,
+//      "region": "us-east", "ed_pub": "<hex>", "exists": true},
+//     ...
+//   ], "summary": {"total_domains": N, "total_stake_locked": N,
+//                   "total_accumulated_slashed": 0,
+//                   "exists_count": N}}
+//
+// `exists` per row: true iff the domain appears in the validator
+// registrant table OR has non-zero stake_locked. (Either condition
+// implies the domain has been on-chain; both are kept so that a
+// domain registered without a stake — rare but legal — and a
+// staked-but-deregistered domain both surface as "exists".)
+//
+// Exit codes:
+//   0 success
+//   1 args / IO / RPC transport / JSON-parse failure
+int cmd_stake_bulk_query(int argc, char** argv) {
+    int rpc_port = -1;
+    std::string domains_in;
+    bool want_json = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) rpc_port = std::atoi(argv[++i]);
+        else if (a == "--domains"  && i + 1 < argc) domains_in = argv[++i];
+        else if (a == "--json")    want_json = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet stake-bulk-query "
+                "--rpc-port <N> --domains <list|@file>\n"
+                "       [--json]\n"
+                "\n"
+                "  Batch-query validator stake info for a list of\n"
+                "  domain names against a running daemon's RPC.\n"
+                "  --domains accepts comma-separated values or @<path>\n"
+                "  to read one domain per line from a file (lines\n"
+                "  starting with '#' and blank lines are skipped).\n"
+                "  Default output is a human-readable table sorted by\n"
+                "  stake_locked desc; --json emits one-line JSON.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "stake-bulk-query: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet stake-bulk-query "
+                         "--rpc-port <N> --domains <list|@file> "
+                         "[--json]\n";
+            return 1;
+        }
+    }
+    if (rpc_port <= 0 || rpc_port > 65535) {
+        std::cerr << "stake-bulk-query: --rpc-port <N> is required "
+                     "(1..65535)\n";
+        return 1;
+    }
+    if (domains_in.empty()) {
+        std::cerr << "stake-bulk-query: --domains <list|@file> is "
+                     "required\n";
+        return 1;
+    }
+
+    // ── Resolve domain list ───────────────────────────────────────────────
+    // Accept either comma-separated inline, or @<path> (one per line).
+    // Mirrors the anon-batch-balance file-parse contract (# comments,
+    // blank lines ignored, surrounding whitespace trimmed).
+    std::vector<std::string> domains;
+    if (!domains_in.empty() && domains_in[0] == '@') {
+        std::string path = domains_in.substr(1);
+        std::ifstream in_f(path);
+        if (!in_f) {
+            std::cerr << "stake-bulk-query: cannot open --domains file: "
+                      << path << "\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in_f, line)) {
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == ' ' ||
+                    line.back() == '\t' || line.back() == '\n'))
+                line.pop_back();
+            size_t pos = 0;
+            while (pos < line.size() &&
+                   (line[pos] == ' ' || line[pos] == '\t'))
+                ++pos;
+            if (pos > 0) line.erase(0, pos);
+            if (line.empty()) continue;
+            if (line[0] == '#') continue;
+            domains.push_back(line);
+        }
+    } else {
+        std::stringstream ss(domains_in);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            while (!tok.empty() &&
+                   (tok.back() == ' ' || tok.back() == '\t'))
+                tok.pop_back();
+            size_t pos = 0;
+            while (pos < tok.size() &&
+                   (tok[pos] == ' ' || tok[pos] == '\t'))
+                ++pos;
+            if (pos > 0) tok.erase(0, pos);
+            if (!tok.empty()) domains.push_back(tok);
+        }
+    }
+    if (domains.empty()) {
+        std::cerr << "stake-bulk-query: --domains resolved to zero "
+                     "entries (empty file or empty list)\n";
+        return 1;
+    }
+
+    // ── Winsock init + socket connect ─────────────────────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok) {
+        std::cerr << "stake-bulk-query: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    std::string conn_err;
+    sock_t s = rpc_connect_localhost(
+        static_cast<uint16_t>(rpc_port), conn_err);
+    if (s == kInvalidSock) {
+        std::cerr << "stake-bulk-query: " << conn_err << "\n";
+        return 1;
+    }
+
+    std::string inbuf;
+    uint64_t chain_height = 0;
+    // Per-domain validator metadata (ed_pub / active_from / region)
+    // sourced from the `validators` RPC. Missing entries → domain is
+    // not a registered validator (exists may still be true via the
+    // stake_info path if it has stake locked).
+    struct ValidatorMeta {
+        std::string ed_pub;
+        uint64_t    active_from{0};
+        std::string region;
+        bool        in_registry{false};
+    };
+    std::map<std::string, ValidatorMeta> registry;
+
+    struct Row {
+        std::string domain;
+        uint64_t    stake_locked{0};
+        uint64_t    accumulated_slashed{0};  // chain-global today; 0 per-row
+        uint64_t    active_from{0};
+        std::string region;
+        std::string ed_pub;
+        bool        exists{false};
+    };
+    std::vector<Row> rows;
+    rows.reserve(domains.size());
+
+    try {
+        // ── status: chain_height for the envelope ─────────────────────────
+        auto st = rpc_call_over_socket(
+            s, inbuf, "status", nlohmann::json::object());
+        if (st.contains("height") && st["height"].is_number_unsigned())
+            chain_height = st["height"].get<uint64_t>();
+        else if (st.contains("height") && st["height"].is_number_integer())
+            chain_height = static_cast<uint64_t>(st["height"].get<int64_t>());
+
+        // ── validators: collect per-domain ed_pub/active_from/region ─────
+        auto vals = rpc_call_over_socket(
+            s, inbuf, "validators", nlohmann::json::object());
+        if (vals.is_array()) {
+            for (auto& v : vals) {
+                if (!v.is_object()) continue;
+                ValidatorMeta m;
+                m.in_registry = true;
+                if (v.contains("ed_pub") && v["ed_pub"].is_string())
+                    m.ed_pub = v["ed_pub"].get<std::string>();
+                if (v.contains("active_from") && v["active_from"].is_number()) {
+                    m.active_from = v["active_from"].is_number_unsigned()
+                        ? v["active_from"].get<uint64_t>()
+                        : static_cast<uint64_t>(
+                            v["active_from"].get<int64_t>());
+                }
+                if (v.contains("region") && v["region"].is_string())
+                    m.region = v["region"].get<std::string>();
+                std::string d = v.value("domain", std::string());
+                if (!d.empty()) registry[d] = m;
+            }
+        }
+
+        // ── stake_info per requested domain ───────────────────────────────
+        // The locked field is the authoritative source for stake_locked
+        // (matches `determ stake_info <domain>` exactly — both call
+        // chain_.stake_lockfree under the hood per node.cpp:2974).
+        for (auto& d : domains) {
+            Row r;
+            r.domain = d;
+            auto sr = rpc_call_over_socket(
+                s, inbuf, "stake_info", {{"domain", d}});
+            uint64_t locked = 0;
+            if (sr.contains("locked") && sr["locked"].is_number()) {
+                locked = sr["locked"].is_number_unsigned()
+                    ? sr["locked"].get<uint64_t>()
+                    : static_cast<uint64_t>(sr["locked"].get<int64_t>());
+            }
+            r.stake_locked = locked;
+            auto it = registry.find(d);
+            if (it != registry.end()) {
+                r.active_from = it->second.active_from;
+                r.region      = it->second.region;
+                r.ed_pub      = it->second.ed_pub;
+                r.exists      = true;
+            }
+            // S-028 parity / safety net: also flag as existing if there
+            // is any stake locked even without a registry entry (a
+            // deregistered-but-not-yet-unlocked domain can land here).
+            if (locked > 0) r.exists = true;
+            rows.push_back(r);
+        }
+    } catch (std::exception& e) {
+        close_sock(s);
+        std::cerr << "stake-bulk-query: " << e.what() << "\n";
+        return 1;
+    }
+    close_sock(s);
+
+    // ── Summary aggregates ────────────────────────────────────────────────
+    uint64_t total_stake     = 0;
+    uint64_t total_slashed   = 0;
+    size_t   exists_count    = 0;
+    for (auto& r : rows) {
+        total_stake   += r.stake_locked;
+        total_slashed += r.accumulated_slashed;
+        if (r.exists) ++exists_count;
+    }
+
+    if (want_json) {
+        nlohmann::json out;
+        out["rpc_port"]     = rpc_port;
+        out["chain_height"] = chain_height;
+        nlohmann::json arr  = nlohmann::json::array();
+        for (auto& r : rows) {
+            nlohmann::json row;
+            row["domain"]              = r.domain;
+            row["stake_locked"]        = r.stake_locked;
+            row["accumulated_slashed"] = r.accumulated_slashed;
+            row["active_from"]         = r.active_from;
+            row["region"]              = r.region;
+            row["ed_pub"]              = r.ed_pub;
+            row["exists"]              = r.exists;
+            arr.push_back(row);
+        }
+        out["domains"] = arr;
+        out["summary"] = {
+            {"total_domains",             rows.size()},
+            {"total_stake_locked",        total_stake},
+            {"total_accumulated_slashed", total_slashed},
+            {"exists_count",              exists_count},
+        };
+        std::cout << out.dump() << "\n";
+    } else {
+        // Human-readable table, sorted by stake_locked desc (ties broken
+        // by domain name asc for stable output).
+        std::vector<Row> sorted = rows;
+        std::sort(sorted.begin(), sorted.end(),
+            [](const Row& a, const Row& b) {
+                if (a.stake_locked != b.stake_locked)
+                    return a.stake_locked > b.stake_locked;
+                return a.domain < b.domain;
+            });
+        std::cout << "chain_height: " << chain_height
+                  << " (rpc_port=" << rpc_port << ")\n";
+        std::cout << "DOMAIN"
+                  << std::string(26, ' ')
+                  << "STAKE_LOCKED  ACTIVE_FROM  REGION   EXISTS\n";
+        for (auto& r : sorted) {
+            std::ostringstream line;
+            line << std::left << std::setw(32) << r.domain
+                 << std::right << std::setw(12) << r.stake_locked
+                 << std::setw(13)  << (r.exists ? std::to_string(r.active_from) : std::string("-"))
+                 << "  "
+                 << std::left << std::setw(7) << (r.region.empty() ? std::string("-") : r.region)
+                 << "  " << (r.exists ? "YES" : "NO");
+            std::cout << line.str() << "\n";
+        }
+        std::cout << "(" << rows.size()
+                  << " domains, " << exists_count << " exist, total_stake_locked="
+                  << total_stake << ")\n";
+    }
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -8526,6 +8855,30 @@ void print_usage() {
         "                                             address sets, CI fixtures verifying multi-\n"
         "                                             address scenarios. Exit 0 success, 1 args/\n"
         "                                             IO/RPC failure.\n"
+        "  stake-bulk-query --rpc-port <N>            Batch-query validator stake info for a list\n"
+        "                   --domains <list|@file> [--json]\n"
+        "                                             of domain names against a running daemon's\n"
+        "                                             RPC. --domains accepts comma-separated\n"
+        "                                             (alice.v,bob.v,...) or @<path> (one per\n"
+        "                                             line, # comments + blank lines skipped).\n"
+        "                                             Opens ONE TCP connection and pipelines\n"
+        "                                             status + validators + per-domain stake_info\n"
+        "                                             over it. Default output: human-readable\n"
+        "                                             table sorted by stake_locked descending.\n"
+        "                                             --json emits {rpc_port, chain_height,\n"
+        "                                             domains:[{domain, stake_locked,\n"
+        "                                             accumulated_slashed, active_from, region,\n"
+        "                                             ed_pub, exists}], summary:{total_domains,\n"
+        "                                             total_stake_locked,\n"
+        "                                             total_accumulated_slashed, exists_count}}.\n"
+        "                                             Per-row exists=true iff domain is in the\n"
+        "                                             validator registry OR has non-zero stake.\n"
+        "                                             accumulated_slashed is chain-global today\n"
+        "                                             (per-domain accounting deferred); surfaces\n"
+        "                                             as 0 per row. Use cases: operator dashboards\n"
+        "                                             auditing a validator roster, on-call tooling\n"
+        "                                             checking a subset of validators in one shot.\n"
+        "                                             Exit 0 success, 1 args/IO/RPC failure.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -8576,6 +8929,7 @@ int main(int argc, char** argv) {
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
+    if (cmd == "stake-bulk-query") return cmd_stake_bulk_query(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
