@@ -225,6 +225,59 @@ else
 fi
 
 echo
+echo "=== 5. S-028 G-2 closure: nonce + stake_info RPCs also normalize case ==="
+# Pre-G-2, rpc_nonce and rpc_stake_info passed `domain` straight to the
+# lock-free accessor, producing UX inconsistency: uppercase queries hit
+# a different store-key than lowercase ones (because the underlying
+# accounts_ map is keyed by canonical lowercase form). Post-G-2 (this
+# commit), both handlers normalize at input via the same pattern as
+# rpc_balance. Pin both queries return the SAME result for both cases.
+NONCE_LOWER=$($DETERM nonce "$ANON_ADDR" --rpc-port 8830 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('next_nonce',-1))
+except: print(-2)")
+NONCE_UPPER=$($DETERM nonce "$ANON_UPPER" --rpc-port 8830 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('next_nonce',-1))
+except: print(-2)")
+echo "  nonce(lower)=$NONCE_LOWER  nonce(upper)=$NONCE_UPPER"
+if [ "$NONCE_LOWER" = "$NONCE_UPPER" ] && [ "$NONCE_LOWER" -ge "0" ]; then
+  assert true "nonce RPC normalizes case (both queries return same nonce)"
+else
+  assert false "nonce RPC didn't normalize (lower=$NONCE_LOWER upper=$NONCE_UPPER)"
+fi
+
+# stake_info: anon-addresses can't stake (only validator domains can),
+# so both queries should report locked=0. The G-2 closure just ensures
+# both queries land in the SAME canonical map slot (rather than upper
+# falling off the end of the lowercase-keyed map). Both return zero
+# either way, but the test pins that both produce IDENTICAL responses
+# (modulo the echoed `domain` field).
+STAKE_LOWER=$($DETERM stake_info "$ANON_ADDR" --rpc-port 8830 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('locked',-1))
+except: print(-2)")
+STAKE_UPPER=$($DETERM stake_info "$ANON_UPPER" --rpc-port 8830 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('locked',-1))
+except: print(-2)")
+echo "  stake_info.locked(lower)=$STAKE_LOWER  stake_info.locked(upper)=$STAKE_UPPER"
+if [ "$STAKE_LOWER" = "$STAKE_UPPER" ] && [ "$STAKE_LOWER" -ge "0" ]; then
+  assert true "stake_info RPC normalizes case (both queries return same locked value)"
+else
+  assert false "stake_info RPC didn't normalize (lower=$STAKE_LOWER upper=$STAKE_UPPER)"
+fi
+
+# The echoed `domain` field should be canonical lowercase regardless of
+# input case — confirms normalize_anon_address ran (not just a hash
+# coincidence). Pulls the response again as raw JSON to inspect.
+NONCE_UPPER_DOMAIN=$($DETERM nonce "$ANON_UPPER" --rpc-port 8830 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('domain',''))
+except: print('')")
+echo "  nonce(upper).domain field: $NONCE_UPPER_DOMAIN"
+if [ "$NONCE_UPPER_DOMAIN" = "$ANON_ADDR" ]; then
+  assert true "nonce RPC echoes canonical lowercase domain (G-2 closure complete)"
+else
+  assert false "nonce RPC echoed wrong domain: got '$NONCE_UPPER_DOMAIN' expected '$ANON_ADDR'"
+fi
+
+echo
 echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then

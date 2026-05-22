@@ -2930,7 +2930,17 @@ json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
     return {{"status", "queued"}, {"hash", to_hex(tx.hash)}, {"unlock_at", chain_.stake_unlock_height(cfg_.domain)}};
 }
 
-json Node::rpc_nonce(const std::string& domain) const {
+json Node::rpc_nonce(const std::string& domain_in) const {
+    // S-028 G-2 closure: normalize anon-address input so "0xABC..."
+    // resolves to the same account as "0xabc..." — matches the
+    // rpc_balance + rpc_send normalization pattern. Domain names pass
+    // through unchanged. Pre-G-2, this handler took raw `domain` and
+    // passed it directly to the lock-free accessor, producing a UX
+    // inconsistency vs. rpc_balance for mixed-case input. No safety
+    // impact pre-fix (the stale-nonce drop catches any tx using the
+    // wrong-case nonce) — purely operator-experience cleanup. Surfaced
+    // by docs/proofs/S028AnonAddressNormalization.md §6 G-2.
+    const std::string domain = normalize_anon_address(domain_in);
     // A9 Phase 2C-Node: lock-free read path. balance_lockfree /
     // next_nonce_lockfree atomic-load the committed accounts view
     // published at the last successful apply commit. No state_mutex_
@@ -2942,7 +2952,16 @@ json Node::rpc_nonce(const std::string& domain) const {
     return {{"domain", domain}, {"next_nonce", chain_.next_nonce_lockfree(domain)}};
 }
 
-json Node::rpc_stake_info(const std::string& domain) const {
+json Node::rpc_stake_info(const std::string& domain_in) const {
+    // S-028 G-2 closure: normalize anon-address input. Same rationale
+    // as rpc_nonce above — pre-G-2 this handler took raw `domain` and
+    // an uppercase-form anon-address query returned `locked=0` because
+    // the lockfree map is keyed by canonical lowercase form, while a
+    // lowercase-form query against the same address returned the real
+    // stake. No safety impact (a mismatched key just returns zero) —
+    // UX-only fix. Surfaced by docs/proofs/S028AnonAddressNormalization.md
+    // §6 G-2.
+    const std::string domain = normalize_anon_address(domain_in);
     // A9 Phase 2C-Node: lock-free read path for stakes. See rpc_balance
     // / rpc_nonce above. The two atomic_loads (one per lockfree call)
     // are independent — they may return shared_ptrs from different
