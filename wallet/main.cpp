@@ -44,10 +44,22 @@
 #include <cstdlib>
 #include <ctime>
 #ifdef _WIN32
+// winsock2.h MUST be included before windows.h — otherwise windows.h
+// drags in the older winsock.h via windef.h and you get redefinition
+// errors. anon-batch-balance is the first wallet command that opens a
+// raw TCP socket (others either don't need RPC or shell out for it);
+// the winsock pull-in here is gated to _WIN32 only.
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
 #  include <windows.h>
 #else
 #  include <unistd.h>
 #  include <termios.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#  include <netdb.h>
+#  include <errno.h>
 #endif
 
 using namespace determ::wallet;
@@ -6849,6 +6861,411 @@ int cmd_verify_arbitrary(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// ── RPC socket helpers for cmd_anon_batch_balance ───────────────────────────
+//
+// The wallet doesn't link asio, so we drop down to BSD sockets / Winsock for
+// the one command (anon-batch-balance) that genuinely needs RPC access. The
+// chain's RPC protocol is JSON-over-TCP line-framed: send one
+// `{"method":...,"params":{...}}\n` per request; receive one `{"result":...,
+// "error":...}\n`. Multiple requests CAN share a single TCP connection — the
+// server's handle_session loops on read_until('\n'), so we batch all
+// per-address queries (balance, optional nonce, optional stake_info) over
+// ONE socket to minimize connect()/accept() churn for large address lists.
+
+#ifdef _WIN32
+struct WinsockInit {
+    WinsockInit() : ok(false) {
+        WSADATA wsa{};
+        ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+    }
+    ~WinsockInit() { if (ok) WSACleanup(); }
+    bool ok;
+};
+using sock_t = SOCKET;
+constexpr sock_t kInvalidSock = INVALID_SOCKET;
+inline void close_sock(sock_t s) { closesocket(s); }
+#else
+using sock_t = int;
+constexpr sock_t kInvalidSock = -1;
+inline void close_sock(sock_t s) { ::close(s); }
+#endif
+
+// Open a TCP connection to 127.0.0.1:<port>. Returns kInvalidSock on
+// failure (with `err_out` populated). The caller must close_sock() on
+// success.
+sock_t rpc_connect_localhost(uint16_t port, std::string& err_out) {
+    sock_t s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s == kInvalidSock) {
+        err_out = "socket() failed";
+        return kInvalidSock;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    // 127.0.0.1 in network byte order.
+#ifdef _WIN32
+    addr.sin_addr.s_addr = htonl(0x7F000001UL);
+#else
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#endif
+    if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close_sock(s);
+        err_out = "connect() to 127.0.0.1:" + std::to_string(port) +
+                  " failed (daemon not running?)";
+        return kInvalidSock;
+    }
+    return s;
+}
+
+// Send `line + \n` over the open socket. Returns false on any short
+// write or socket error.
+bool rpc_send_line(sock_t s, const std::string& payload) {
+    std::string buf = payload;
+    if (buf.empty() || buf.back() != '\n') buf.push_back('\n');
+    size_t sent = 0;
+    while (sent < buf.size()) {
+#ifdef _WIN32
+        int n = ::send(s, buf.data() + sent,
+                        static_cast<int>(buf.size() - sent), 0);
+#else
+        ssize_t n = ::send(s, buf.data() + sent, buf.size() - sent, 0);
+#endif
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+// Read bytes until we see a '\n', return everything up to (and not
+// including) it. Returns std::nullopt on socket error / EOF before
+// newline. Buffers leftover bytes in `inbuf` so subsequent reads in the
+// same session pick up where this one left off.
+std::optional<std::string> rpc_read_line(sock_t s, std::string& inbuf) {
+    while (true) {
+        auto nl = inbuf.find('\n');
+        if (nl != std::string::npos) {
+            std::string line = inbuf.substr(0, nl);
+            inbuf.erase(0, nl + 1);
+            return line;
+        }
+        char tmp[4096];
+#ifdef _WIN32
+        int n = ::recv(s, tmp, sizeof(tmp), 0);
+#else
+        ssize_t n = ::recv(s, tmp, sizeof(tmp), 0);
+#endif
+        if (n <= 0) return std::nullopt;
+        inbuf.append(tmp, static_cast<size_t>(n));
+    }
+}
+
+// Issue one JSON-RPC call over an already-open socket and return the
+// parsed result. Throws std::runtime_error on transport / parse / RPC-
+// error. The exception text is the diagnostic surface the caller emits.
+nlohmann::json rpc_call_over_socket(sock_t s,
+                                     std::string& inbuf,
+                                     const std::string& method,
+                                     const nlohmann::json& params) {
+    nlohmann::json req = {{"method", method}, {"params", params}};
+    if (!rpc_send_line(s, req.dump()))
+        throw std::runtime_error("send failed for " + method);
+    auto line = rpc_read_line(s, inbuf);
+    if (!line)
+        throw std::runtime_error("no response for " + method +
+                                  " (daemon closed connection?)");
+    nlohmann::json resp;
+    try { resp = nlohmann::json::parse(*line); }
+    catch (std::exception& e) {
+        throw std::runtime_error("malformed response for " + method + ": " +
+                                  e.what());
+    }
+    if (!resp.contains("error") || !resp["error"].is_null()) {
+        std::string err = resp.value("error",
+            nlohmann::json("unknown_error")).dump();
+        throw std::runtime_error("RPC error on " + method + ": " + err);
+    }
+    return resp.value("result", nlohmann::json());
+}
+
+// determ-wallet anon-batch-balance — query balances + nonces + stakes
+// for a batch of anon addresses against a running daemon's RPC.
+//
+// Use case:
+//   Wallet UIs displaying a portfolio across many anon addresses;
+//   operator accounting tools auditing a known set of bearer addresses;
+//   CI fixtures asserting a multi-address test scenario.
+//
+// CLI:
+//   --rpc-port N             (required) daemon RPC port (e.g. 8830)
+//   --addresses <list|@file> (required) comma-separated addresses, or
+//                            @path to read one-per-line from a file
+//   --include-nonce          also fetch next_nonce per address (off)
+//   --include-stake          also fetch stake_locked per address (off)
+//   --json                   ignored (output is always JSON)
+//   --help                   print this usage and exit 0
+//
+// Wire pattern: opens ONE TCP connection to 127.0.0.1:<rpc_port>; sends
+// `status` once for chain_height; then pipelines `balance` (+ optional
+// `nonce` + optional `stake_info`) for each address; closes the socket.
+//
+// Output (one-line JSON to stdout):
+//   {"rpc_port": N, "chain_height": N, "addresses": [
+//     {"address":"0x..", "balance": N, "nonce": N, "stake": N,
+//      "exists": true},
+//     ...
+//   ], "summary": {"total_addresses": N, "total_balance": N,
+//                   "total_stake": N, "exists_count": N}}
+//
+// `nonce` / `stake` fields are present only when --include-nonce /
+// --include-stake are passed. `exists` is true iff balance > 0 OR
+// nonce > 0 OR stake > 0 (any non-zero footprint on chain); for the
+// balance-only path it is balance > 0.
+//
+// Exit codes:
+//   0 success
+//   1 args / IO / RPC transport / JSON-parse failure
+int cmd_anon_batch_balance(int argc, char** argv) {
+    int rpc_port = -1;
+    std::string addrs_in;
+    bool include_nonce = false;
+    bool include_stake = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) rpc_port = std::atoi(argv[++i]);
+        else if (a == "--addresses" && i + 1 < argc) addrs_in = argv[++i];
+        else if (a == "--include-nonce") include_nonce = true;
+        else if (a == "--include-stake") include_stake = true;
+        else if (a == "--json") {/* default; no-op */}
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet anon-batch-balance "
+                "--rpc-port <N> --addresses <list|@file>\n"
+                "       [--include-nonce] [--include-stake] [--json]\n"
+                "\n"
+                "  Batch-query balances (and optionally nonces + stakes) for\n"
+                "  a list of anon addresses against a running daemon's RPC.\n"
+                "  --addresses accepts comma-separated values or @<path> to\n"
+                "  read one address per line from a file. All addresses are\n"
+                "  normalized to lowercase before query (S-028 case-insensitive\n"
+                "  parity). Output is one-line JSON.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "anon-batch-balance: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet anon-batch-balance "
+                         "--rpc-port <N> --addresses <list|@file> "
+                         "[--include-nonce] [--include-stake] [--json]\n";
+            return 1;
+        }
+    }
+    if (rpc_port <= 0 || rpc_port > 65535) {
+        std::cerr << "anon-batch-balance: --rpc-port <N> is required "
+                     "(1..65535)\n";
+        return 1;
+    }
+    if (addrs_in.empty()) {
+        std::cerr << "anon-batch-balance: --addresses <list|@file> is "
+                     "required\n";
+        return 1;
+    }
+
+    // ── Resolve addresses ──────────────────────────────────────────────────
+    // Accept either comma-separated inline, or @<path> (one per line).
+    std::vector<std::string> addrs_raw;
+    if (!addrs_in.empty() && addrs_in[0] == '@') {
+        std::string path = addrs_in.substr(1);
+        std::ifstream in_f(path);
+        if (!in_f) {
+            std::cerr << "anon-batch-balance: cannot open --addresses file: "
+                      << path << "\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in_f, line)) {
+            // Trim CR (Windows line endings) and surrounding whitespace.
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == ' ' ||
+                    line.back() == '\t' || line.back() == '\n'))
+                line.pop_back();
+            size_t pos = 0;
+            while (pos < line.size() &&
+                   (line[pos] == ' ' || line[pos] == '\t'))
+                ++pos;
+            if (pos > 0) line.erase(0, pos);
+            if (line.empty()) continue;
+            if (line[0] == '#') continue;   // allow comments
+            addrs_raw.push_back(line);
+        }
+    } else {
+        std::stringstream ss(addrs_in);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            while (!tok.empty() &&
+                   (tok.back() == ' ' || tok.back() == '\t'))
+                tok.pop_back();
+            size_t pos = 0;
+            while (pos < tok.size() &&
+                   (tok[pos] == ' ' || tok[pos] == '\t'))
+                ++pos;
+            if (pos > 0) tok.erase(0, pos);
+            if (!tok.empty()) addrs_raw.push_back(tok);
+        }
+    }
+    if (addrs_raw.empty()) {
+        std::cerr << "anon-batch-balance: --addresses resolved to zero "
+                     "entries (empty file or empty list)\n";
+        return 1;
+    }
+
+    // Normalize each address: lowercase hex tail (S-028 parity). We
+    // accept the relaxed "0x" + 64 hex shape (either case) and lowercase
+    // it. Non-anon-shape inputs pass through verbatim (mirroring the
+    // chain's normalize_anon_address contract — domain names are
+    // unchanged so the same RPC handler can resolve them too).
+    auto normalize_anon = [](std::string s) {
+        if (s.size() == 66 && s[0] == '0' && s[1] == 'x') {
+            bool all_hex = true;
+            for (size_t i = 2; i < s.size(); ++i) {
+                char c = s[i];
+                bool ok = (c >= '0' && c <= '9') ||
+                          (c >= 'a' && c <= 'f') ||
+                          (c >= 'A' && c <= 'F');
+                if (!ok) { all_hex = false; break; }
+            }
+            if (all_hex) {
+                for (size_t i = 2; i < s.size(); ++i) {
+                    char c = s[i];
+                    if (c >= 'A' && c <= 'F')
+                        s[i] = static_cast<char>(c - 'A' + 'a');
+                }
+            }
+        }
+        return s;
+    };
+    std::vector<std::string> addrs;
+    addrs.reserve(addrs_raw.size());
+    for (auto& a : addrs_raw) addrs.push_back(normalize_anon(a));
+
+    // ── Winsock init + socket connect ──────────────────────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok) {
+        std::cerr << "anon-batch-balance: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    std::string conn_err;
+    sock_t s = rpc_connect_localhost(
+        static_cast<uint16_t>(rpc_port), conn_err);
+    if (s == kInvalidSock) {
+        std::cerr << "anon-batch-balance: " << conn_err << "\n";
+        return 1;
+    }
+
+    std::string inbuf;
+    nlohmann::json out;
+    out["rpc_port"] = rpc_port;
+    nlohmann::json addr_arr = nlohmann::json::array();
+
+    uint64_t total_balance  = 0;
+    uint64_t total_stake    = 0;
+    size_t   exists_count   = 0;
+    uint64_t chain_height   = 0;
+
+    try {
+        // Fetch chain_height once for the output envelope. `status` is a
+        // cheap RPC and gives operators something concrete to anchor the
+        // snapshot at (multiple calls to anon-batch-balance from different
+        // times can be diffed against each other via chain_height).
+        auto st = rpc_call_over_socket(s, inbuf, "status", nlohmann::json::object());
+        if (st.contains("height") && st["height"].is_number_unsigned())
+            chain_height = st["height"].get<uint64_t>();
+        else if (st.contains("height") && st["height"].is_number_integer())
+            chain_height = static_cast<uint64_t>(st["height"].get<int64_t>());
+
+        for (auto& addr : addrs) {
+            nlohmann::json row;
+            row["address"] = addr;
+
+            // balance is the always-on field.
+            auto bal_resp = rpc_call_over_socket(
+                s, inbuf, "balance", {{"domain", addr}});
+            uint64_t bal = 0;
+            if (bal_resp.contains("balance") &&
+                bal_resp["balance"].is_number()) {
+                bal = bal_resp["balance"].is_number_unsigned()
+                    ? bal_resp["balance"].get<uint64_t>()
+                    : static_cast<uint64_t>(
+                        bal_resp["balance"].get<int64_t>());
+            }
+            row["balance"] = bal;
+            total_balance += bal;
+
+            uint64_t nce = 0;
+            bool nce_seen = false;
+            if (include_nonce) {
+                auto n_resp = rpc_call_over_socket(
+                    s, inbuf, "nonce", {{"domain", addr}});
+                if (n_resp.contains("next_nonce") &&
+                    n_resp["next_nonce"].is_number()) {
+                    nce = n_resp["next_nonce"].is_number_unsigned()
+                        ? n_resp["next_nonce"].get<uint64_t>()
+                        : static_cast<uint64_t>(
+                            n_resp["next_nonce"].get<int64_t>());
+                }
+                row["nonce"] = nce;
+                nce_seen = true;
+            }
+
+            uint64_t stk = 0;
+            bool stk_seen = false;
+            if (include_stake) {
+                auto st_resp = rpc_call_over_socket(
+                    s, inbuf, "stake_info", {{"domain", addr}});
+                if (st_resp.contains("locked") &&
+                    st_resp["locked"].is_number()) {
+                    stk = st_resp["locked"].is_number_unsigned()
+                        ? st_resp["locked"].get<uint64_t>()
+                        : static_cast<uint64_t>(
+                            st_resp["locked"].get<int64_t>());
+                }
+                row["stake"] = stk;
+                stk_seen = true;
+                total_stake += stk;
+            }
+
+            // `exists` = any non-zero footprint we observed. For the
+            // balance-only path it collapses to balance > 0; with
+            // --include-nonce / --include-stake it picks up addresses
+            // that have been used (nonce advanced) or have stake locked
+            // even at zero balance.
+            bool exists = (bal > 0) ||
+                          (nce_seen && nce > 0) ||
+                          (stk_seen && stk > 0);
+            row["exists"] = exists;
+            if (exists) ++exists_count;
+
+            addr_arr.push_back(row);
+        }
+    } catch (std::exception& e) {
+        close_sock(s);
+        std::cerr << "anon-batch-balance: " << e.what() << "\n";
+        return 1;
+    }
+    close_sock(s);
+
+    out["chain_height"] = chain_height;
+    out["addresses"]    = addr_arr;
+    out["summary"] = {
+        {"total_addresses", addrs.size()},
+        {"total_balance",   total_balance},
+        {"total_stake",     total_stake},
+        {"exists_count",    exists_count},
+    };
+    std::cout << out.dump() << "\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -7127,6 +7544,25 @@ void print_usage() {
         "                                             field from the JSON bundle and pins the\n"
         "                                             domain separator (a bundle with a non-\n"
         "                                             canonical domain field is reported INVALID).\n"
+        "  anon-batch-balance --rpc-port <N>          Query balances (+ optional nonces / stakes)\n"
+        "                     --addresses <list|@file>  for a batch of anon addresses against a\n"
+        "                     [--include-nonce] [--include-stake] [--json]\n"
+        "                                             running daemon's RPC. --addresses accepts\n"
+        "                                             comma-separated (0xABC,0xDEF,...) or\n"
+        "                                             @<path> (one per line). All addresses are\n"
+        "                                             normalized to lowercase (S-028 parity)\n"
+        "                                             before query. Opens ONE TCP connection and\n"
+        "                                             pipelines balance + optional nonce +\n"
+        "                                             stake_info per address. Output (one-line\n"
+        "                                             JSON): {rpc_port, chain_height, addresses:\n"
+        "                                             [{address, balance, [nonce], [stake],\n"
+        "                                             exists}], summary:{total_addresses,\n"
+        "                                             total_balance, total_stake, exists_count}}.\n"
+        "                                             Use cases: wallet UIs displaying portfolio,\n"
+        "                                             operator-accounting audits of known bearer\n"
+        "                                             address sets, CI fixtures verifying multi-\n"
+        "                                             address scenarios. Exit 0 success, 1 args/\n"
+        "                                             IO/RPC failure.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -7174,6 +7610,7 @@ int main(int argc, char** argv) {
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
+    if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
