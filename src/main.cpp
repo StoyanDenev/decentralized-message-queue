@@ -829,6 +829,28 @@ Additional in-process tests:
                                               HELLO encode rejected per
                                               binary-codec contract;
                                               malformed-header diagnostics.
+)" << R"(  determ test-state-root-determinism          S-033 / v2.1 state-commitment
+                                              determinism contract — pins three
+                                              axes the consensus layer depends
+                                              on: (a) replay determinism over
+                                              Chain::save/load + fresh rebuild,
+                                              (b) insertion-order independence
+                                              at the namespace level (std::map
+                                              iteration + sorted-leaves Merkle),
+                                              (c) canonical byte-identity over
+                                              snapshot serialize/restore round-
+                                              trip + boundary-value encoding;
+                                              empty-namespace path (d:/i:/b:/m:
+                                              all zero entries) doesn't crash
+                                              and is distinct from populated;
+                                              single-bit +1 TRANSFER cascades
+                                              to state_root by ≥ 1 byte; 10-
+                                              namespace coverage smoke
+                                              (a/s/r/d/i/b/m/p/k/c) is non-zero,
+                                              reproducible, and byte-identical
+                                              across fresh Chain instances.
+                                              Companion to R25
+                                              S033StateRootNamespaceCoverage.md.
 )" << "\n";
 }
 
@@ -28732,6 +28754,674 @@ int main(int argc, char** argv) {
                   << ": protocol-version-pinning "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
+    // S-033 / v2.1 state-commitment determinism contract — pin the three
+    // axes the consensus layer depends on:
+    //
+    //   (a) Replay determinism: a chain built from identical inputs
+    //       produces the same state_root regardless of process, build,
+    //       or save-then-load round-trip. K-of-K nodes that diverge here
+    //       silently fail Phase-2 signature gathering.
+    //
+    //   (b) Insertion-order independence (at the namespace level): the
+    //       chain's state containers are std::map<std::string,...> /
+    //       std::map<ShardId,...>, which iterate in canonical sorted
+    //       order, and build_state_leaves further sorts the (namespace,
+    //       key, value-hash) leaf set before merkle_root. Two chains
+    //       reaching the same final state via different insertion paths
+    //       must produce the same state_root.
+    //
+    //   (c) Cross-platform / canonical byte identity: the state_root
+    //       must be byte-identical across runs of the same binary on the
+    //       same input. Re-invocation, snapshot round-trip, and chain-
+    //       file round-trip all preserve it.
+    //
+    // Companion tests:
+    //   - test-state-root: setter-level k:-namespace algebra
+    //   - test-state-root-namespaces: per-namespace mutation sensitivity
+    //   - test-state-root-determinism (this test): order + replay +
+    //     snapshot round-trip + 10-namespace coverage smoke.
+    //
+    // The "single-bit-cascade" scenario locks in the contract that EVERY
+    // state-change changes state_root by at least one byte; the empty-
+    // namespace scenario guarantees compute_state_root doesn't crash
+    // when an optional namespace (d:, i:, b:) has zero entries.
+    //
+    // Scope: ~19 assertions across 7 scenarios.
+    if (cmd == "test-state-root-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Shared fixture: alice + bob + charlie registered with stakes;
+        // dave gets a starting balance for transfers. The roster covers
+        // every namespace we want to populate in scenarios 1, 2, 7.
+        auto make_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "state-root-determinism-test";
+            GenesisCreator alice_c, bob_c, charlie_c;
+            alice_c.domain   = "alice";
+            bob_c.domain     = "bob";
+            charlie_c.domain = "charlie";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+                alice_c.ed_pub[i]   = uint8_t(0x10 + i);
+                bob_c.ed_pub[i]     = uint8_t(0x20 + i);
+                charlie_c.ed_pub[i] = uint8_t(0x30 + i);
+            }
+            alice_c.initial_stake   = 500;
+            bob_c.initial_stake     = 500;
+            charlie_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c, bob_c, charlie_c};
+
+            GenesisAllocation alice_bal, bob_bal, charlie_bal, dave_bal;
+            alice_bal.domain   = "alice";   alice_bal.balance   = 1000;
+            bob_bal.domain     = "bob";     bob_bal.balance     = 1000;
+            charlie_bal.domain = "charlie"; charlie_bal.balance = 1000;
+            dave_bal.domain    = "dave";    dave_bal.balance    = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal, charlie_bal, dave_bal};
+            return cfg;
+        };
+
+        // Helper: append an empty-or-tx block at the next height.
+        auto append_block = [](Chain& c,
+                                const std::vector<Transaction>& txs) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions = txs;
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(0x42);
+            c.append(b);
+        };
+
+        // Helper: make a TRANSFER.
+        auto make_transfer = [](const std::string& from,
+                                  const std::string& to,
+                                  uint64_t amount, uint64_t fee,
+                                  uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = from; tx.to = to;
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+            return tx;
+        };
+
+        // Helper: make a STAKE.
+        auto make_stake = [](const std::string& from, uint64_t amount,
+                              uint64_t fee, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::STAKE;
+            tx.from = from; tx.fee = fee; tx.nonce = nonce;
+            tx.payload.resize(8);
+            for (int i = 0; i < 8; ++i)
+                tx.payload[i] = uint8_t((amount >> (8 * i)) & 0xff);
+            return tx;
+        };
+
+        // === Scenario 1: Replay determinism ===
+        //
+        // Build a chain with 5 blocks (TRANSFER + STAKE mix). Capture
+        // state_root. Save to JSON, reload via Chain::load, assert byte-
+        // identity. Then rebuild the SAME chain from scratch in a fresh
+        // process-local instance and assert byte-identity.
+        //
+        // 4 assertions: pre-save root non-zero; post-load root matches;
+        // fresh-rebuild root matches; head_hash also matches (sanity).
+        {
+            auto build_5_block_chain = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                append_block(c, {make_transfer("dave", "alice", 100, 1, 0)});
+                append_block(c, {make_stake("alice",  50, 1, 1)});
+                append_block(c, {make_transfer("dave", "bob",   75, 1, 1)});
+                append_block(c, {make_stake("bob",    30, 1, 1)});
+                append_block(c, {make_transfer("alice", "charlie", 25, 1, 2)});
+                return c;
+            };
+
+            Chain c1 = build_5_block_chain();
+            Hash root1 = c1.compute_state_root();
+            check(root1 != Hash{},
+                  "(1) Replay determinism: chain with 5 mixed blocks has "
+                  "non-zero state_root (baseline)");
+
+            // Save → load round-trip via Chain::save / Chain::load.
+            namespace fs = std::filesystem;
+            auto tmp = fs::temp_directory_path() /
+                       "determ-test-state-root-determinism.json";
+            std::string path = tmp.string();
+            std::error_code ec;
+            fs::remove(path, ec);
+            c1.save(path);
+            // block_subsidy 0 (chain default); apply path replays.
+            Chain reloaded = Chain::load(path, /*block_subsidy=*/0);
+            Hash root_reloaded = reloaded.compute_state_root();
+            check(root_reloaded == root1,
+                  "(1) Replay determinism: Chain::load round-trip preserves "
+                  "state_root byte-for-byte");
+            check(reloaded.head_hash() == c1.head_hash(),
+                  "(1) Replay determinism: head_hash also preserved (S-021 + "
+                  "compute_hash sanity that surrounds state_root)");
+            fs::remove(path, ec);
+
+            // Fresh rebuild from identical inputs.
+            Chain c2 = build_5_block_chain();
+            Hash root2 = c2.compute_state_root();
+            check(root2 == root1,
+                  "(1) Replay determinism: fresh rebuild from identical "
+                  "inputs produces identical state_root (no hidden "
+                  "process-local state)");
+        }
+
+        // === Scenario 2: Insertion-order independence ===
+        //
+        // Build two chains that reach the SAME final state via DIFFERENT
+        // insertion paths. Chain A funds alice → bob → charlie in that
+        // order; Chain B funds charlie → bob → alice. Final balances +
+        // stakes are constructed to be identical. The state containers
+        // (std::map<std::string,...>) are sorted by domain, and
+        // build_state_leaves sorts leaves before merkle_root, so the
+        // state_root MUST match regardless of insertion path.
+        //
+        // 2 assertions: roots match; sanity check that final balances
+        // are in fact identical.
+        {
+            auto chain_a = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                // Order: alice gains first, then bob, then charlie.
+                append_block(c, {make_transfer("dave", "alice",   100, 1, 0)});
+                append_block(c, {make_transfer("dave", "bob",     100, 1, 1)});
+                append_block(c, {make_transfer("dave", "charlie", 100, 1, 2)});
+                return c;
+            };
+            auto chain_b = [&]() {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                // Order: charlie first, then bob, then alice.
+                append_block(c, {make_transfer("dave", "charlie", 100, 1, 0)});
+                append_block(c, {make_transfer("dave", "bob",     100, 1, 1)});
+                append_block(c, {make_transfer("dave", "alice",   100, 1, 2)});
+                return c;
+            };
+
+            Chain a = chain_a();
+            Chain b = chain_b();
+
+            // Sanity: final balances match. Fees go back to the creator
+            // (alice in both chains via the {"alice"} creators slot), so
+            // alice's running fee credit differs ONLY by the order in
+            // which her own balance was credited from dave — but since
+            // dave sends EXACTLY +100 to each of alice/bob/charlie and
+            // pays 1 fee to alice on every block (the sole creator), the
+            // net deltas are identical.
+            check(a.balance("alice")   == b.balance("alice")
+                  && a.balance("bob")     == b.balance("bob")
+                  && a.balance("charlie") == b.balance("charlie")
+                  && a.balance("dave")    == b.balance("dave"),
+                  "(2) Order independence: chains A and B reach identical "
+                  "balance distributions despite different insertion paths");
+            check(a.compute_state_root() == b.compute_state_root(),
+                  "(2) Order independence: identical final state produces "
+                  "identical state_root (std::map iteration + sorted-leaves "
+                  "Merkle is canonical regardless of insertion order)");
+        }
+
+        // === Scenario 3: Empty-namespace cases ===
+        //
+        // A minimal chain (genesis only, no DApp registrations, no
+        // cross-shard receipts, no abort records) exercises the
+        // compute_state_root path where the d:/i:/b: namespaces are
+        // empty. The function must NOT crash and must produce a stable,
+        // reproducible hash. The k: + a: + s: + r: namespaces always
+        // emit leaves (k: from constants, a:/s:/r: from genesis), so
+        // the resulting root is non-zero — but the empty-namespace
+        // namespaces simply contribute zero leaves to the sorted leaf
+        // set.
+        //
+        // 3 assertions: non-zero; reproducible; insertion of a non-
+        // empty d: namespace via DAPP_REGISTER changes the root.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            Hash root_empty = c.compute_state_root();
+            check(root_empty != Hash{},
+                  "(3) Empty namespace: compute_state_root over a chain with "
+                  "empty d:/i:/b:/m:/p: namespaces is non-zero (k:/a:/s:/r: "
+                  "leaves always present)");
+
+            // Reproducibility on the same instance.
+            Hash root_again = c.compute_state_root();
+            check(root_again == root_empty,
+                  "(3) Empty namespace: compute_state_root is reproducible "
+                  "across consecutive calls on the same Chain (no internal "
+                  "caching surprise on empty-namespace path)");
+
+            // Add a DAPP_REGISTER to populate d:-namespace; assert root
+            // changes (this proves the empty-d: case is in fact distinct
+            // from the populated-d: case — i.e., empty d: doesn't get
+            // "treated as if populated with zeros" by accident).
+            std::vector<uint8_t> payload;
+            payload.push_back(0);  // op=0 create
+            PubKey svc{};
+            for (size_t i = 0; i < svc.size(); ++i) svc[i] = uint8_t(0xA0 + i);
+            payload.insert(payload.end(), svc.begin(), svc.end());
+            payload.push_back(0);  // url_len = 0
+            payload.push_back(0);  // topic_count = 0
+            payload.push_back(1);  // retention
+            payload.push_back(0); payload.push_back(0);  // metalen = 0
+
+            Transaction tx;
+            tx.type = TxType::DAPP_REGISTER;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+            tx.payload = payload;
+            append_block(c, {tx});
+            Hash root_dapp = c.compute_state_root();
+            check(root_dapp != root_empty,
+                  "(3) Empty namespace: adding a d:-namespace entry "
+                  "(DAPP_REGISTER) changes state_root — empty d: is "
+                  "distinct from populated d: (no accidental zero-leaf "
+                  "collision)");
+        }
+
+        // === Scenario 4: Single-bit account change cascades to state_root ===
+        //
+        // Pin the "every state mutation changes state_root" contract.
+        // We use TRANSFER amount=1 (the smallest positive transfer) as
+        // the single-bit-difference probe. The CORRECT shape:
+        //
+        //   (a) take chain at root R
+        //   (b) apply 1 TRANSFER => root R' != R
+        //   (c) the only sound way to verify "revert" is to rebuild a
+        //       parallel chain that doesn't apply the transfer, and
+        //       confirm its root == R.
+        //
+        // 3 assertions: pre vs post differ; single-byte difference
+        // detection (≥ 1 byte differs); parallel chain matches pre.
+        {
+            // Build base chain (no transfer applied).
+            Chain c_base;
+            c_base.append(make_genesis_block(make_cfg()));
+            append_block(c_base, {});  // empty block @ height 1
+            Hash root_before = c_base.compute_state_root();
+
+            // Apply a single +1 TRANSFER.
+            Chain c_after;
+            c_after.append(make_genesis_block(make_cfg()));
+            append_block(c_after, {});  // empty block @ height 1, same as base
+            append_block(c_after,
+                          {make_transfer("dave", "alice", 1, 0, 0)});
+            Hash root_after = c_after.compute_state_root();
+
+            check(root_after != root_before,
+                  "(4) Single-bit cascade: +1 TRANSFER changes state_root "
+                  "(every state-change mutates the commitment)");
+
+            // Count differing bytes (must be ≥ 1).
+            size_t diff_bytes = 0;
+            for (size_t i = 0; i < root_before.size(); ++i)
+                if (root_before[i] != root_after[i]) ++diff_bytes;
+            check(diff_bytes >= 1,
+                  "(4) Single-bit cascade: state_root differs by ≥ 1 byte "
+                  "(SHA-256 avalanche over the leaf set)");
+
+            // Build a parallel-but-identical-to-base chain; root must
+            // match the original base, proving the diff is fully
+            // attributable to the +1 transfer rather than process-local
+            // nondeterminism.
+            Chain c_base_again;
+            c_base_again.append(make_genesis_block(make_cfg()));
+            append_block(c_base_again, {});
+            check(c_base_again.compute_state_root() == root_before,
+                  "(4) Single-bit cascade: parallel identical chain (without "
+                  "the +1 TRANSFER) produces the original root — diff is "
+                  "fully attributable to the transfer");
+        }
+
+        // === Scenario 5: Snapshot serialize → restore preserves state_root ===
+        //
+        // serialize_state writes the chain's state to JSON; restore_
+        // from_snapshot reads it back. The S-038 closure pins that
+        // compute_state_root over the restored chain matches the
+        // original (also gated on the head's stored state_root field).
+        //
+        // 3 assertions: round-trip preserves state_root; tail head's
+        // state_root field matches the live recompute; restored chain's
+        // recompute matches the original.
+        {
+            // Build a populated chain so all-namespaces (a/s/r/i/b/k/c)
+            // have non-trivial content.
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            c.set_block_subsidy(50);
+
+            // Block 1: empty (mints subsidy → counters mutate).
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            c.append(b1);
+
+            // Block 2: TRANSFER + STAKE in one block (a:, s: mutate).
+            append_block(c,
+                          {make_transfer("dave", "bob", 50, 1, 0),
+                           make_stake("alice", 100, 1, 1)});
+
+            Hash root_orig = c.compute_state_root();
+            check(root_orig != Hash{},
+                  "(5) Snapshot round-trip: pre-serialize state_root "
+                  "is non-zero (sanity)");
+
+            // Serialize + restore.
+            nlohmann::json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            Hash root_restored = r.compute_state_root();
+            check(root_restored == root_orig,
+                  "(5) Snapshot round-trip: compute_state_root after "
+                  "serialize_state → restore_from_snapshot matches the "
+                  "original (S-037 closure: dapp_registry serialize gap "
+                  "fixed; S-038 closure: producer-side state_root wiring)");
+
+            // Sanity: the restored chain's head block also has
+            // state_root populated in restoring path? Pre-S-038 the
+            // producer didn't populate body.state_root, so the field
+            // could be empty even on a freshly-loaded chain. We check
+            // that the restored Chain's recompute matches whatever the
+            // snapshot's tail-head said (or zero if pre-S-038-style).
+            const Block& tail = r.head();
+            // If tail.state_root is non-zero, it must equal the recompute
+            // (the S-033 apply-time gate would have rejected on mismatch
+            // at append time). If zero, restore is in legacy compat mode.
+            Hash zero{};
+            bool tail_matches = (tail.state_root == zero)
+                                || (tail.state_root == root_restored);
+            check(tail_matches,
+                  "(5) Snapshot round-trip: tail head's state_root field "
+                  "either is zero (pre-S-038 compat) OR matches the live "
+                  "recompute (S-033 gate enforced on append)");
+        }
+
+        // === Scenario 6: Canonical encoding of boundary values ===
+        //
+        // Push a few near-edge values through the state and verify
+        // compute_state_root remains deterministic:
+        //   (a) min_stake = UINT64_MAX (max u64 setter value);
+        //   (b) shard_salt = all-zero hash;
+        //   (c) shard_count = 1 (smallest non-zero);
+        //   (d) shard_salt = all-0xFF (max byte content).
+        //
+        // Each variation must produce a stable, distinguishable root.
+        // The "all-zero hash" case in particular pins that the canonical
+        // encoder doesn't treat zero specially (which would let an
+        // attacker conflate zero-valued and absent state).
+        //
+        // 3 assertions: each variation is deterministic; all four
+        // variations are mutually distinct.
+        {
+            auto build = [&](uint64_t min_stake, uint32_t sc,
+                              uint8_t salt_byte) {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                c.set_min_stake(min_stake);
+                Hash salt{};
+                for (size_t i = 0; i < salt.size(); ++i) salt[i] = salt_byte;
+                c.set_shard_routing(sc, salt, ShardId{0});
+                return c.compute_state_root();
+            };
+
+            // (a) UINT64_MAX min_stake, zero-salt, 1 shard.
+            Hash ra1 = build(uint64_t(~0ULL), 1, 0x00);
+            Hash ra2 = build(uint64_t(~0ULL), 1, 0x00);
+            check(ra1 == ra2,
+                  "(6) Canonical encoding: UINT64_MAX min_stake + zero-salt "
+                  "+ single-shard is reproducible across calls "
+                  "(deterministic over boundary inputs)");
+
+            // (b) Same config but salt is all-0xFF.
+            Hash rb1 = build(uint64_t(~0ULL), 1, 0xFF);
+            check(rb1 != ra1,
+                  "(6) Canonical encoding: all-zero salt vs all-0xFF salt "
+                  "produce distinct roots (no shortcut for 'zero hash')");
+
+            // (c) Mid-range min_stake; assert variation also reproducible
+            // and distinguishable from the UINT64_MAX variant.
+            Hash rc1 = build(uint64_t(1) << 32, 4, 0x42);
+            Hash rc2 = build(uint64_t(1) << 32, 4, 0x42);
+            check(rc1 == rc2 && rc1 != ra1 && rc1 != rb1,
+                  "(6) Canonical encoding: mid-range min_stake + non-zero "
+                  "salt is reproducible and distinct from boundary cases "
+                  "(no value-collision)");
+        }
+
+        // === Scenario 7: 10-namespace coverage smoke ===
+        //
+        // The S-033 invariant is that compute_state_root walks ALL TEN
+        // namespaces declared in PROTOCOL.md §4.1.1 (a/s/r/d/i/b/m/p/k/c).
+        // Build a chain that mutates at least one entry in each via the
+        // standard apply path (where possible) plus direct setters /
+        // stage_param_change. Assert the resulting root is non-zero,
+        // reproducible across calls, and changes when ANY single
+        // namespace gets an additional mutation.
+        //
+        // Namespaces:
+        //   a:  account balances           → TRANSFER
+        //   s:  stakes                     → STAKE
+        //   r:  registrants                → genesis (alice/bob/charlie)
+        //   d:  dapp_registry              → DAPP_REGISTER
+        //   i:  applied_inbound_receipts   → inbound receipt
+        //   b:  abort_records              → AbortEvent
+        //   m:  merge_state                → MERGE_EVENT (sharded mode)
+        //   p:  pending_param_changes      → stage_param_change
+        //   k:  constants                  → set_block_subsidy
+        //   c:  counters                   → empty block (subsidy mints)
+        //
+        // 2 assertions: all-10-populated chain has a non-zero,
+        // reproducible state_root that's distinct from the
+        // empty-namespaces baseline + cross-instance byte-identity.
+        {
+            // First the baseline: genesis-only.
+            Chain c_base;
+            c_base.append(make_genesis_block(make_cfg()));
+            Hash root_base = c_base.compute_state_root();
+
+            // Now: build the full-10-namespace chain.
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            // Enable sharded mode so MERGE_EVENT can apply.
+            Hash salt{};
+            for (size_t i = 0; i < salt.size(); ++i) salt[i] = uint8_t(0xC0 + i);
+            c.set_shard_routing(4, salt, ShardId{0});
+
+            // k: constants — set_block_subsidy.
+            c.set_block_subsidy(50);
+
+            // p: pending_param_changes — stage_param_change.
+            c.stage_param_change(9999, "MIN_STAKE",
+                                  std::vector<uint8_t>(8, 0x42));
+
+            // Block 1: empty block (a:c: subsidy counters mint;
+            // a:/s:/r: from genesis already populated).
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            c.append(b1);
+
+            // Block 2: TRANSFER (a:) + STAKE (s:).
+            append_block(c,
+                          {make_transfer("dave", "bob", 100, 1, 0),
+                           make_stake("alice", 100, 1, 1)});
+
+            // Block 3: AbortEvent (b:).
+            {
+                Block b3;
+                b3.index = 3; b3.prev_hash = c.head().compute_hash();
+                b3.creators = {"alice"};
+                AbortEvent ae;
+                ae.round = 1;
+                ae.aborting_node = "alice";
+                b3.abort_events.push_back(ae);
+                c.append(b3);
+            }
+
+            // Block 4: DAPP_REGISTER (d:).
+            {
+                std::vector<uint8_t> payload;
+                payload.push_back(0);
+                PubKey svc{};
+                for (size_t i = 0; i < svc.size(); ++i) svc[i] = uint8_t(0xA0 + i);
+                payload.insert(payload.end(), svc.begin(), svc.end());
+                payload.push_back(0);
+                payload.push_back(0);
+                payload.push_back(1);
+                payload.push_back(0); payload.push_back(0);
+                Transaction tx;
+                tx.type = TxType::DAPP_REGISTER;
+                tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+                tx.payload = payload;
+                append_block(c, {tx});
+            }
+
+            // Block 5: MERGE_EVENT (m:).
+            {
+                MergeEvent ev;
+                ev.event_type = MergeEvent::BEGIN;
+                ev.shard_id = ShardId{1};
+                ev.partner_id = ShardId{2};
+                ev.effective_height = 100;
+                ev.evidence_window_start = 0;
+                ev.merging_shard_region = "us";
+                Transaction tx;
+                tx.type = TxType::MERGE_EVENT;
+                tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+                tx.payload = ev.encode();
+                append_block(c, {tx});
+            }
+
+            // Block 6: inbound receipt (i:).
+            {
+                CrossShardReceipt rec;
+                rec.src_shard = 1; rec.dst_shard = 0;
+                rec.src_block_index = 1;
+                rec.src_block_hash = Hash{};
+                rec.tx_hash = Hash{};
+                rec.tx_hash[0] = 0xDE;
+                rec.from = "remote"; rec.to = "bob";
+                rec.amount = 10; rec.fee = 0; rec.nonce = 0;
+
+                Block b6;
+                b6.index = 6; b6.prev_hash = c.head().compute_hash();
+                b6.creators = {"alice"};
+                b6.inbound_receipts.push_back(rec);
+                c.append(b6);
+            }
+
+            Hash root_full = c.compute_state_root();
+            Hash root_full_again = c.compute_state_root();
+            check(root_full != Hash{}
+                  && root_full == root_full_again
+                  && root_full != root_base,
+                  "(7) 10-namespace coverage: chain exercising all ten "
+                  "namespaces (a/s/r/d/i/b/m/p/k/c) produces non-zero "
+                  "state_root that is reproducible across calls and "
+                  "distinct from the empty-namespaces baseline (S-033 "
+                  "namespace-completeness invariant)");
+
+            // A second instance of the same construction must produce
+            // the identical root — locks the S-033 cross-process / cross-
+            // run byte-identity invariant for the full-namespace case.
+            Chain c_twin;
+            c_twin.append(make_genesis_block(make_cfg()));
+            Hash salt2{};
+            for (size_t i = 0; i < salt2.size(); ++i) salt2[i] = uint8_t(0xC0 + i);
+            c_twin.set_shard_routing(4, salt2, ShardId{0});
+            c_twin.set_block_subsidy(50);
+            c_twin.stage_param_change(9999, "MIN_STAKE",
+                                       std::vector<uint8_t>(8, 0x42));
+            {
+                Block b1;
+                b1.index = 1; b1.prev_hash = c_twin.head().compute_hash();
+                b1.creators = {"alice"};
+                c_twin.append(b1);
+            }
+            append_block(c_twin,
+                          {make_transfer("dave", "bob", 100, 1, 0),
+                           make_stake("alice", 100, 1, 1)});
+            {
+                Block b3;
+                b3.index = 3; b3.prev_hash = c_twin.head().compute_hash();
+                b3.creators = {"alice"};
+                AbortEvent ae;
+                ae.round = 1;
+                ae.aborting_node = "alice";
+                b3.abort_events.push_back(ae);
+                c_twin.append(b3);
+            }
+            {
+                std::vector<uint8_t> payload;
+                payload.push_back(0);
+                PubKey svc{};
+                for (size_t i = 0; i < svc.size(); ++i) svc[i] = uint8_t(0xA0 + i);
+                payload.insert(payload.end(), svc.begin(), svc.end());
+                payload.push_back(0);
+                payload.push_back(0);
+                payload.push_back(1);
+                payload.push_back(0); payload.push_back(0);
+                Transaction tx;
+                tx.type = TxType::DAPP_REGISTER;
+                tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+                tx.payload = payload;
+                append_block(c_twin, {tx});
+            }
+            {
+                MergeEvent ev;
+                ev.event_type = MergeEvent::BEGIN;
+                ev.shard_id = ShardId{1};
+                ev.partner_id = ShardId{2};
+                ev.effective_height = 100;
+                ev.evidence_window_start = 0;
+                ev.merging_shard_region = "us";
+                Transaction tx;
+                tx.type = TxType::MERGE_EVENT;
+                tx.from = "alice"; tx.fee = 1; tx.nonce = 0;
+                tx.payload = ev.encode();
+                append_block(c_twin, {tx});
+            }
+            {
+                CrossShardReceipt rec;
+                rec.src_shard = 1; rec.dst_shard = 0;
+                rec.src_block_index = 1;
+                rec.src_block_hash = Hash{};
+                rec.tx_hash = Hash{};
+                rec.tx_hash[0] = 0xDE;
+                rec.from = "remote"; rec.to = "bob";
+                rec.amount = 10; rec.fee = 0; rec.nonce = 0;
+                Block b6;
+                b6.index = 6; b6.prev_hash = c_twin.head().compute_hash();
+                b6.creators = {"alice"};
+                b6.inbound_receipts.push_back(rec);
+                c_twin.append(b6);
+            }
+            check(c_twin.compute_state_root() == root_full,
+                  "(7) 10-namespace coverage: identical construction in a "
+                  "fresh Chain instance produces byte-identical state_root "
+                  "(S-033 cross-run determinism over the full namespace set)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": state-root-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);

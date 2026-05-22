@@ -103,6 +103,13 @@ target_link_libraries(determ PRIVATE
 
 if(WIN32)
   target_link_libraries(determ PRIVATE ws2_32 wsock32 crypt32)
+  # MSVC default stack is 1 MB — too small for our largest in-process
+  # test bodies (test-state-root-determinism builds many chains with
+  # nested lambdas + on-stack Block/Chain temporaries). Bump to 16 MB
+  # to match Linux defaults. No runtime cost.
+  if(MSVC)
+    target_link_options(determ PRIVATE /STACK:16777216)
+  endif()
 endif()
 
 if(UNIX)
