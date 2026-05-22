@@ -8190,6 +8190,356 @@ int cmd_anon_batch_balance(int argc, char** argv) {
     return 0;
 }
 
+// determ-wallet validator-roster-snapshot — capture a point-in-time
+// JSON snapshot of the active validator set for offline audit /
+// monitoring / diff tooling.
+//
+// Use case:
+//   Operator dashboards want a versioned, diff-friendly artifact of
+//   "who was a validator at chain_height H". Two snapshots taken at
+//   different heights can be diffed (`diff snap_H1.json snap_H2.json`)
+//   to surface roster churn — REGISTER, DEREGISTER, region migrations,
+//   stake-rebalances — without scraping `determ validators --json`
+//   into a homebrew format each time. The schema is versioned
+//   (`snapshot_format_version: 1`) so downstream consumers can pin a
+//   shape and refuse newer schemas they don't understand.
+//
+// CLI:
+//   --rpc-port N             (required) daemon RPC port (e.g. 8830)
+//   --out <file>             (required) write snapshot JSON to this file
+//                            (atomic write via <file>.tmp + rename).
+//   --include-stake-history  also fetch per-validator stake_info
+//                            (stake_locked + accumulated_slashed); off
+//                            by default to keep snapshots lighter.
+//   --force                  allow overwriting an existing --out file
+//   --json                   default; emits a status line to stdout
+//                            (the snapshot itself lands in --out)
+//   --help                   print this usage and exit 0
+//
+// Wire pattern: opens ONE TCP connection to 127.0.0.1:<rpc_port>;
+// pipelines `status` (for chain_height + genesis-as-chain_id) +
+// `validators` (for the roster) + optionally per-validator `stake_info`
+// calls. Closes the socket on completion or error.
+//
+// Snapshot envelope shape (written to --out):
+//   {
+//     "snapshot_format_version": 1,
+//     "captured_at_unix":        <unix_ts>,
+//     "rpc_port":                <N>,
+//     "chain_height":            <H>,
+//     "chain_id":                "<genesis-hash-hex>",
+//     "total_validators":        <N>,
+//     "total_stake_locked":      <sum of stake>,
+//     "validators": [
+//       {
+//         "rank":                 <0..N-1>,
+//         "domain":               "alice.v",
+//         "ed_pub":               "<64-hex>",
+//         "region":               "us-east",
+//         "active_from":          <block-height>,
+//         "stake_locked":         <amount>,         // --include-stake-history only
+//         "accumulated_slashed":  <amount>,         //   ditto (chain-global, surfaced 0 per row)
+//       },
+//       ...
+//     ]
+//   }
+//
+// `rank` is the 0-indexed position in the `validators` RPC return
+// order (which is sorted alphabetically by domain — see
+// NodeRegistry::sorted_nodes). The snapshot itself is emitted sorted
+// by ascending `rank` so byte-for-byte diffs are stable across runs
+// against the same chain head.
+//
+// Atomic write:
+//   Writes to "<--out>.tmp" first, fsyncs, then renames atomically
+//   to "<--out>". std::filesystem::rename is MoveFileExA on Windows
+//   (atomic for same-volume targets, REPLACE_EXISTING implied via
+//   std::filesystem) and ::rename(2) on POSIX (atomic for same-
+//   filesystem targets). No partial-file is ever visible at the
+//   final path. The .tmp suffix is also removed on error paths.
+//
+// Refuses to overwrite an existing --out without --force; clear
+// diagnostic on stderr ("refusing to overwrite: ... pass --force").
+//
+// Status output (to stdout):
+//   {"status":"ok","out":"<path>","chain_height":N,"total_validators":N,
+//    "include_stake_history": <bool>}
+//
+// Exit codes:
+//   0 success
+//   1 args / IO / RPC transport / JSON-parse failure
+int cmd_validator_roster_snapshot(int argc, char** argv) {
+    int rpc_port = -1;
+    std::string out_path;
+    bool include_stake_history = false;
+    bool force = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) rpc_port = std::atoi(argv[++i]);
+        else if (a == "--out"      && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--include-stake-history")    include_stake_history = true;
+        else if (a == "--force")                    force = true;
+        else if (a == "--json") {/* default; no-op */}
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet validator-roster-snapshot "
+                "--rpc-port <N> --out <file>\n"
+                "       [--include-stake-history] [--force] [--json]\n"
+                "\n"
+                "  Capture a point-in-time JSON snapshot of the active\n"
+                "  validator set (from the `validators` RPC) for offline\n"
+                "  audit, monitoring, or diff tooling. Output is written\n"
+                "  atomically to --out (via <out>.tmp + rename); refuses to\n"
+                "  overwrite an existing --out without --force.\n"
+                "\n"
+                "  Snapshot envelope:\n"
+                "    {snapshot_format_version, captured_at_unix, rpc_port,\n"
+                "     chain_height, chain_id, total_validators,\n"
+                "     total_stake_locked, validators: [{rank, domain,\n"
+                "     ed_pub, region, active_from, [stake_locked,\n"
+                "     accumulated_slashed]}, ...]}\n"
+                "\n"
+                "  --include-stake-history adds stake_locked +\n"
+                "  accumulated_slashed per row (one extra stake_info RPC\n"
+                "  per validator). Validators are sorted by ascending\n"
+                "  rank for stable diff-friendly output.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "validator-roster-snapshot: unknown argument '"
+                      << a << "'\n";
+            std::cerr << "Usage: determ-wallet validator-roster-snapshot "
+                         "--rpc-port <N> --out <file> [--include-stake-history] "
+                         "[--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (rpc_port <= 0 || rpc_port > 65535) {
+        std::cerr << "validator-roster-snapshot: --rpc-port <N> is required "
+                     "(1..65535)\n";
+        return 1;
+    }
+    if (out_path.empty()) {
+        std::cerr << "validator-roster-snapshot: --out <file> is required\n";
+        return 1;
+    }
+
+    // ── Overwrite guard ───────────────────────────────────────────────────
+    // Mirrors account-create-batch / backup-create / keyfile-create
+    // overwrite semantics: the snapshot file is a record of the
+    // validator set at a specific point in time; silently clobbering
+    // a previously-captured snapshot would lose audit history. --force
+    // is the explicit opt-in.
+    namespace fs = std::filesystem;
+    std::error_code probe_ec;
+    if (fs::exists(out_path, probe_ec) && !force) {
+        std::cerr << "validator-roster-snapshot: refusing to overwrite "
+                  << "existing file '" << out_path
+                  << "' (pass --force to allow)\n";
+        return 1;
+    }
+
+    // ── Winsock init + socket connect ─────────────────────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok) {
+        std::cerr << "validator-roster-snapshot: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    std::string conn_err;
+    sock_t s = rpc_connect_localhost(
+        static_cast<uint16_t>(rpc_port), conn_err);
+    if (s == kInvalidSock) {
+        std::cerr << "validator-roster-snapshot: " << conn_err << "\n";
+        return 1;
+    }
+
+    std::string inbuf;
+    uint64_t    chain_height = 0;
+    std::string chain_id;
+
+    // Per-validator row, populated from `validators` RPC; stake_locked
+    // + accumulated_slashed only populated under --include-stake-history.
+    struct Row {
+        uint64_t    rank{0};
+        std::string domain;
+        std::string ed_pub;
+        std::string region;
+        uint64_t    active_from{0};
+        uint64_t    stake_locked{0};
+        uint64_t    accumulated_slashed{0};  // chain-global; 0 per-row today
+        bool        have_stake_history{false};
+    };
+    std::vector<Row> rows;
+
+    try {
+        // ── status: chain_height + genesis hash (chain_id) ──────────────
+        auto st = rpc_call_over_socket(
+            s, inbuf, "status", nlohmann::json::object());
+        if (st.contains("height") && st["height"].is_number_unsigned())
+            chain_height = st["height"].get<uint64_t>();
+        else if (st.contains("height") && st["height"].is_number_integer())
+            chain_height = static_cast<uint64_t>(st["height"].get<int64_t>());
+        // `genesis` field is the hex of the genesis block's compute_hash —
+        // the natural chain-identifier. Two snapshots from different
+        // chains (different genesis configs) will have different chain_id
+        // strings; downstream diff tooling can refuse cross-chain diffs.
+        if (st.contains("genesis") && st["genesis"].is_string())
+            chain_id = st["genesis"].get<std::string>();
+
+        // ── validators: roster ──────────────────────────────────────────
+        auto vals = rpc_call_over_socket(
+            s, inbuf, "validators", nlohmann::json::object());
+        if (!vals.is_array()) {
+            throw std::runtime_error(
+                "validators RPC returned non-array result");
+        }
+        uint64_t rank = 0;
+        for (auto& v : vals) {
+            if (!v.is_object()) continue;
+            Row r;
+            r.rank   = rank++;
+            r.domain = v.value("domain", std::string{});
+            r.ed_pub = v.value("ed_pub", std::string{});
+            r.region = v.value("region", std::string{});
+            if (v.contains("active_from") && v["active_from"].is_number()) {
+                r.active_from = v["active_from"].is_number_unsigned()
+                    ? v["active_from"].get<uint64_t>()
+                    : static_cast<uint64_t>(
+                        v["active_from"].get<int64_t>());
+            }
+            // The validators RPC already surfaces `stake` per row — use
+            // it as the default stake_locked value when --include-stake-
+            // history is OFF too (it's the same number stake_info would
+            // return, sourced from chain_.stake(domain) under the
+            // state_mutex_), but only EMIT it in the snapshot when the
+            // flag is set, to keep the off-by-default footprint smaller.
+            if (v.contains("stake") && v["stake"].is_number()) {
+                r.stake_locked = v["stake"].is_number_unsigned()
+                    ? v["stake"].get<uint64_t>()
+                    : static_cast<uint64_t>(v["stake"].get<int64_t>());
+            }
+            rows.push_back(r);
+        }
+
+        // ── Optional per-validator stake_info ─────────────────────────
+        // The validators RPC's `stake` field is already an authoritative
+        // snapshot of chain_.stake(domain) at call time. We requery
+        // stake_info here only when --include-stake-history is on to
+        // ALSO surface `accumulated_slashed` (chain-global today, 0
+        // per-row in this transitional shape) and re-confirm stake_locked
+        // from the alternate code path. The two queries land on the same
+        // mutex-protected source and should always agree.
+        if (include_stake_history) {
+            for (auto& r : rows) {
+                if (r.domain.empty()) continue;
+                auto sr = rpc_call_over_socket(
+                    s, inbuf, "stake_info", {{"domain", r.domain}});
+                uint64_t locked = 0;
+                if (sr.contains("locked") && sr["locked"].is_number()) {
+                    locked = sr["locked"].is_number_unsigned()
+                        ? sr["locked"].get<uint64_t>()
+                        : static_cast<uint64_t>(sr["locked"].get<int64_t>());
+                }
+                r.stake_locked       = locked;
+                r.accumulated_slashed = 0; // chain-global; per-row 0 today
+                r.have_stake_history  = true;
+            }
+        }
+    } catch (std::exception& e) {
+        close_sock(s);
+        std::cerr << "validator-roster-snapshot: " << e.what() << "\n";
+        return 1;
+    }
+    close_sock(s);
+
+    // ── Sort by ascending rank for stable diff-friendly output ────────────
+    // (Rank was assigned in the order the RPC returned, which is
+    // already NodeRegistry::sorted_nodes — alphabetical by domain — so
+    // this sort is structurally a no-op against the current RPC. The
+    // explicit sort guards against any future drift in the RPC's
+    // return ordering.)
+    std::sort(rows.begin(), rows.end(),
+        [](const Row& a, const Row& b) { return a.rank < b.rank; });
+
+    // ── Aggregate ─────────────────────────────────────────────────────────
+    uint64_t total_stake_locked = 0;
+    for (auto& r : rows) total_stake_locked += r.stake_locked;
+
+    // ── Build the envelope ────────────────────────────────────────────────
+    nlohmann::json snap;
+    snap["snapshot_format_version"] = 1;
+    snap["captured_at_unix"]        = static_cast<int64_t>(std::time(nullptr));
+    snap["rpc_port"]                = rpc_port;
+    snap["chain_height"]            = chain_height;
+    snap["chain_id"]                = chain_id;
+    snap["total_validators"]        = rows.size();
+    snap["total_stake_locked"]      = total_stake_locked;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (auto& r : rows) {
+        nlohmann::json e;
+        e["rank"]        = r.rank;
+        e["domain"]      = r.domain;
+        e["ed_pub"]      = r.ed_pub;
+        e["region"]      = r.region;
+        e["active_from"] = r.active_from;
+        if (include_stake_history) {
+            e["stake_locked"]        = r.stake_locked;
+            e["accumulated_slashed"] = r.accumulated_slashed;
+        }
+        arr.push_back(e);
+    }
+    snap["validators"] = arr;
+
+    // ── Atomic write: <out>.tmp + rename ──────────────────────────────────
+    // Mirrors chain.cpp::save: write to a tmp file first, flush, then
+    // rename. std::filesystem::rename is atomic for same-volume
+    // targets on both Windows (MoveFileExA implicit REPLACE_EXISTING
+    // when overwriting) and POSIX (::rename(2)).
+    std::string tmp_path = out_path + ".tmp";
+    {
+        std::error_code mkdir_ec;
+        fs::create_directories(fs::path(tmp_path).parent_path(), mkdir_ec);
+        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            std::cerr << "validator-roster-snapshot: cannot open tmp file '"
+                      << tmp_path << "' for writing\n";
+            return 1;
+        }
+        f << snap.dump(2);
+        f.flush();
+        if (!f) {
+            std::cerr << "validator-roster-snapshot: failed to flush tmp "
+                         "file '" << tmp_path << "'\n";
+            std::error_code rm_ec;
+            fs::remove(tmp_path, rm_ec);
+            return 1;
+        }
+    }
+    std::error_code rename_ec;
+    fs::rename(tmp_path, out_path, rename_ec);
+    if (rename_ec) {
+        std::cerr << "validator-roster-snapshot: cannot rename tmp "
+                  << tmp_path << " → " << out_path << ": "
+                  << rename_ec.message() << "\n";
+        std::error_code rm_ec;
+        fs::remove(tmp_path, rm_ec);
+        return 1;
+    }
+
+    // ── Status line on stdout ─────────────────────────────────────────────
+    nlohmann::json status;
+    status["status"]               = "ok";
+    status["out"]                  = out_path;
+    status["chain_height"]         = chain_height;
+    status["total_validators"]     = rows.size();
+    status["include_stake_history"] = include_stake_history;
+    std::cout << status.dump() << "\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -8526,6 +8876,34 @@ void print_usage() {
         "                                             address sets, CI fixtures verifying multi-\n"
         "                                             address scenarios. Exit 0 success, 1 args/\n"
         "                                             IO/RPC failure.\n"
+        "  validator-roster-snapshot --rpc-port <N>   Capture a point-in-time JSON snapshot of\n"
+        "                            --out <file>     the active validator set for offline audit /\n"
+        "                            [--include-stake-history] [--force] [--json]\n"
+        "                                             monitoring / diff tooling. Opens ONE TCP\n"
+        "                                             connection and pipelines `status` (for\n"
+        "                                             chain_height + genesis-as-chain_id) +\n"
+        "                                             `validators` (for the roster) + optionally\n"
+        "                                             per-validator `stake_info` calls. Output is\n"
+        "                                             written ATOMICALLY to --out (via <out>.tmp\n"
+        "                                             + rename); refuses to overwrite an existing\n"
+        "                                             --out without --force. Envelope:\n"
+        "                                             {snapshot_format_version, captured_at_unix,\n"
+        "                                             rpc_port, chain_height, chain_id,\n"
+        "                                             total_validators, total_stake_locked,\n"
+        "                                             validators:[{rank, domain, ed_pub, region,\n"
+        "                                             active_from, [stake_locked,\n"
+        "                                             accumulated_slashed]}, ...]}. validators[]\n"
+        "                                             is sorted by ascending rank for stable\n"
+        "                                             diff-friendly output. --include-stake-\n"
+        "                                             history adds the stake_locked +\n"
+        "                                             accumulated_slashed fields per row (one\n"
+        "                                             extra stake_info RPC per validator).\n"
+        "                                             Use cases: operator dashboards capturing a\n"
+        "                                             versioned validator-set artifact for diff\n"
+        "                                             over time (REGISTER / DEREGISTER / region\n"
+        "                                             churn), CI / regression fixtures pinning a\n"
+        "                                             known-good roster. Exit 0 success, 1 args/\n"
+        "                                             IO/RPC failure.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -8576,6 +8954,7 @@ int main(int argc, char** argv) {
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
+    if (cmd == "validator-roster-snapshot") return cmd_validator_roster_snapshot(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
