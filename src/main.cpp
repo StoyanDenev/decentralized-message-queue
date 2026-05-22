@@ -288,6 +288,24 @@ In-process tests (deterministic, no network):
   determ test-s018-json-validation            S-018 json_require<T> field-name diagnostics
   determ test-merkle                          v2.1 Merkle primitives (root, proof, verify,
                                               tampering detection, domain separation)
+  determ test-protocol-version-pinning        PROTOCOL.md §16 version contract pinning —
+                                              MsgType enum integers (gossip envelope type
+                                              byte), wire-version negotiation constants
+                                              (kWireVersionLegacy=0/Binary=1/Max), binary
+                                              envelope magic+version bytes (0xB1 0x01),
+                                              snapshot version field (S-018 gate at
+                                              version=1), chain envelope schema (S-021
+                                              {head_hash,blocks} — DELIBERATELY no version
+                                              field; legacy array-form fallback), genesis
+                                              schema (no version field; unknown keys
+                                              tolerated), Block JSON (no version field;
+                                              S-018 field-name diagnostics on missing
+                                              required fields), HELLO wire_version
+                                              field (default + override + round-trip),
+                                              HELLO-always-JSON invariant. Defends against
+                                              migration drift where a regression would
+                                              either accept arbitrary version numbers
+                                              (silent format fork) or break v1 parsers.
   determ test-committee-selection             Committee-selection primitives (S-020 hybrid
                                               select_m_creators + select_after_abort_m
                                               + epoch_committee_seed determinism)
@@ -27862,6 +27880,424 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": merkle-proof-tampering "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 / PROTOCOL.md §16: protocol-version contract pinning.
+    //
+    // Determ v1 has FOUR distinct version surfaces, each with its own
+    // backward-compat policy (see PROTOCOL.md §16.2). A regression on
+    // any one of them would silently fork the wire format or break
+    // upgrade paths. This test pins the CURRENT contract for every
+    // surface so the next reviewer who touches a version field has to
+    // update this test deliberately rather than by accident.
+    //
+    //   1. MsgType enum integers (the gossip envelope's `type` byte —
+    //      net/messages.hpp). 19 variants assigned 0..18. Reordering
+    //      would mis-route every peer-to-peer message. This is the
+    //      most cited drift risk because adding a new MsgType is a
+    //      common feature-PR shape.
+    //
+    //   2. Wire-version negotiation constants (kWireVersionLegacy=0 /
+    //      kWireVersionBinary=1 / kWireVersionMax=1 — A3 / S8). HELLO
+    //      advertises `wire_version: u8` and peers negotiate down to
+    //      min(local, remote). Pre-A3 peers omit the field — defaults
+    //      to 0 (legacy JSON) for backward compat.
+    //
+    //   3. Binary envelope magic + version (0xB1 0x01 — the first two
+    //      body bytes of an A3 binary message). is_binary_envelope
+    //      gates the format-detecting deserializer; getting these
+    //      wrong = silent JSON parse failure on every binary peer.
+    //
+    //   4. Snapshot version field (snap["version"] == 1 — S-018
+    //      gate at chain.cpp::restore_from_snapshot). version=0
+    //      (missing) / version=2 (future) / version=-1 must all
+    //      reject with clear diagnostic.
+    //
+    //   5. Chain envelope schema (S-021 — chain.json now wraps
+    //      {head_hash, blocks} but DELIBERATELY has NO version
+    //      field; the schema is identified by shape, with legacy
+    //      array-form chain.json files accepted as a fallback). Pin
+    //      "no version field" so a future PR that accidentally adds
+    //      one breaks this test rather than breaking pre-versioned
+    //      parsers.
+    //
+    //   6. Genesis schema (GenesisConfig::from_json — also NO
+    //      version field; backward-compat preserved by field-level
+    //      defaults and skip-mix-when-default invariants in
+    //      compute_genesis_hash). Pin "no version field" so the
+    //      operator-edited genesis JSON contract stays stable.
+    //
+    //   7. Block JSON (Block::from_json — also NO version field;
+    //      schema is identified by required fields {index, prev_hash,
+    //      timestamp, transactions, creators, cumulative_rand,
+    //      abort_events}). The S-018 closure made every required
+    //      field's absence throw with field-name diagnostic; pin
+    //      that contract so a peer sending a malformed BLOCK still
+    //      produces an operator-triagable error.
+    //
+    //   8. HELLO `wire_version` field. Tests that make_hello sets
+    //      kWireVersionMax by default + accepts an override. The
+    //      wire_version field is the only protocol-version-adjacent
+    //      data in HELLO; pin its default + override semantics.
+    //
+    // Defends against migration drift where a regression would either
+    // silently accept arbitrary version numbers (silent format change)
+    // or break v1 — the two scenarios behind every chain-fork incident
+    // in production blockchains.
+    if (cmd == "test-protocol-version-pinning") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // ── (1) MsgType enum integer pinning — the gossip envelope
+        //     type byte. Already covered by test-enum-values, but we
+        //     re-anchor the small subset that's MOST critical to the
+        //     PROTOCOL.md §16 contract here: HELLO (negotiation-
+        //     bootstrap), CONTRIB (Phase 1), BLOCK_SIG (Phase 2), and
+        //     BLOCK (the chain envelope's content). A reorder of any
+        //     of these would silently corrupt every consensus
+        //     exchange on the wire.
+        check(static_cast<uint8_t>(MsgType::HELLO) == 0,
+              "(1) MsgType::HELLO == 0 (handshake — bootstraps version negotiation)");
+        check(static_cast<uint8_t>(MsgType::BLOCK) == 1,
+              "(1) MsgType::BLOCK == 1 (the chain envelope's content)");
+        check(static_cast<uint8_t>(MsgType::CONTRIB) == 4,
+              "(1) MsgType::CONTRIB == 4 (Phase 1 consensus chatter)");
+        check(static_cast<uint8_t>(MsgType::BLOCK_SIG) == 3,
+              "(1) MsgType::BLOCK_SIG == 3 (Phase 2 consensus chatter)");
+
+        // ── (2) Wire-version negotiation constants (A3 / S8). These
+        //     are the values HELLO advertises. PROTOCOL.md §16.1 pins:
+        //         kWireVersionLegacy = 0    (JSON-over-TCP)
+        //         kWireVersionBinary = 1    (binary codec)
+        //         kWireVersionMax    = 1    (highest understood)
+        //     Bumping kWireVersionMax without a corresponding codec
+        //     upgrade would break negotiation silently — peers would
+        //     advertise a version no one implements.
+        check(kWireVersionLegacy == 0,
+              "(2) kWireVersionLegacy == 0 (legacy JSON envelope)");
+        check(kWireVersionBinary == 1,
+              "(2) kWireVersionBinary == 1 (binary codec)");
+        check(kWireVersionMax == kWireVersionBinary,
+              "(2) kWireVersionMax == kWireVersionBinary (current build's max)");
+
+        // ── (3) Binary envelope magic + version bytes. A binary
+        //     message's body starts with [0xB1, 0x01, msg_type,
+        //     reserved=0, ...]. is_binary_envelope gates dispatch on
+        //     the first two bytes. We round-trip a STATUS_RESPONSE
+        //     through serialize_binary + strip the 4-byte framing
+        //     prefix to inspect the magic.
+        {
+            json status = {{"height", 100}, {"genesis", "abcd"}};
+            Message m{MsgType::STATUS_RESPONSE, status};
+            auto framed = m.serialize_binary();
+            // Strip the 4-byte big-endian framing length prefix.
+            std::vector<uint8_t> body(framed.begin() + 4, framed.end());
+
+            check(body.size() >= 4 && body[0] == 0xB1,
+                  "(3) binary envelope magic byte 0 == 0xB1");
+            check(body.size() >= 4 && body[1] == 0x01,
+                  "(3) binary envelope version byte 1 == 0x01");
+            check(is_binary_envelope(body.data(), body.size()),
+                  "(3) is_binary_envelope detects 0xB1 0x01 prefix");
+
+            // Tampering the version byte to 0x02 must make
+            // is_binary_envelope return false — defends against a
+            // future codec upgrade that forgets to update the magic
+            // check. Decode_binary itself also rejects with
+            // "unsupported binary version".
+            std::vector<uint8_t> bad = body;
+            bad[1] = 0x02;
+            check(!is_binary_envelope(bad.data(), bad.size()),
+                  "(3) binary envelope version=0x02 not recognized as binary "
+                  "(forces future codec upgrade to update detector)");
+            bool threw = false;
+            try { decode_binary(bad.data(), bad.size()); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "(3) decode_binary rejects version=0x02 with diagnostic");
+        }
+
+        // ── (4) Snapshot version field (S-018 / chain.cpp::
+        //     restore_from_snapshot). Already covered exhaustively by
+        //     test-snapshot-version-rejection; we re-anchor the
+        //     positive (version=1 baseline) + negative (version=2
+        //     future, version=0 missing-default) cases here so the
+        //     protocol-version contract is pinned in a single visible
+        //     test surface.
+        {
+            // 4a. Round-trip baseline: serialize_state(empty) emits
+            //     version=1.
+            Chain c;
+            json snap = c.serialize_state(0);
+            check(snap.value("version", 0) == 1,
+                  "(4) serialize_state writes snapshot version=1");
+
+            // 4b. restore_from_snapshot(version=1) succeeds.
+            bool ok = true;
+            try { (void)Chain::restore_from_snapshot(snap); }
+            catch (const std::exception&) { ok = false; }
+            check(ok,
+                  "(4) restore_from_snapshot accepts version=1");
+
+            // 4c. Future version (2) rejected — pins the gate that
+            //     forces a deliberate bump.
+            json future_snap = {{"version", 2}};
+            bool threw_future = false;
+            std::string what_future;
+            try { (void)Chain::restore_from_snapshot(future_snap); }
+            catch (const std::exception& e) {
+                threw_future = true;
+                what_future = e.what();
+            }
+            check(threw_future && what_future.find(
+                    "unsupported snapshot version: 2") != std::string::npos,
+                  "(4) restore_from_snapshot rejects version=2 "
+                  "(future-format detector)");
+
+            // 4d. Missing version field rejected (defaults to 0 →
+            //     != 1 → throws).
+            json missing_snap = json::object();
+            bool threw_missing = false;
+            try { (void)Chain::restore_from_snapshot(missing_snap); }
+            catch (const std::exception&) { threw_missing = true; }
+            check(threw_missing,
+                  "(4) restore_from_snapshot rejects missing version field");
+        }
+
+        // ── (5) Chain envelope schema pin (S-021 / chain.cpp::save).
+        //     The wrapped form is {head_hash, blocks} — DELIBERATELY
+        //     NO version field. The schema is identified by shape:
+        //     legacy array-form chain.json is the fallback. Pin "no
+        //     version field" so a future PR that accidentally adds
+        //     one breaks this test rather than the millions of
+        //     pre-versioned chain.json files in the wild.
+        {
+            namespace fs = std::filesystem;
+            auto tmp = (fs::temp_directory_path()
+                         / "determ-test-protocol-version-pinning-chain.json").string();
+            std::error_code ec; fs::remove(tmp, ec);
+
+            // 5a. Save an empty chain and read raw JSON. The wrapped
+            //     envelope must NOT carry a "version" field — its
+            //     schema is shape-identified.
+            Chain c;
+            c.save(tmp);
+            std::ifstream f(tmp);
+            json envelope = json::parse(f);
+            f.close();
+            check(envelope.is_object(),
+                  "(5) chain.json save() produces wrapped object form (S-021)");
+            check(envelope.contains("head_hash") && envelope.contains("blocks"),
+                  "(5) chain.json envelope has {head_hash, blocks} fields");
+            check(!envelope.contains("version"),
+                  "(5) chain.json envelope has NO version field — schema is "
+                  "shape-identified; a future PR adding one breaks pre-versioned parsers");
+
+            // 5b. Legacy array-form chain.json is still accepted as
+            //     fallback. This is the backward-compat contract for
+            //     pre-S-021 on-disk files. Write a bare JSON array
+            //     (no envelope) and confirm load() returns a chain
+            //     (empty, since the array is empty).
+            std::error_code ec2; fs::remove(tmp, ec2);
+            {
+                std::ofstream w(tmp);
+                w << "[]";
+            }
+            bool legacy_ok = true;
+            try {
+                Chain r = Chain::load(tmp);
+                if (!r.empty()) legacy_ok = false;
+            } catch (const std::exception&) { legacy_ok = false; }
+            check(legacy_ok,
+                  "(5) chain.json legacy array-form accepted (pre-S-021 backward compat)");
+
+            // 5c. Object envelope missing 'blocks' field rejected
+            //     with clean diagnostic.
+            {
+                std::ofstream w(tmp);
+                w << "{\"head_hash\":\"\"}";  // missing blocks
+            }
+            bool threw_missing_blocks = false;
+            std::string what_blocks;
+            try { (void)Chain::load(tmp); }
+            catch (const std::exception& e) {
+                threw_missing_blocks = true;
+                what_blocks = e.what();
+            }
+            check(threw_missing_blocks && what_blocks.find("blocks")
+                    != std::string::npos,
+                  "(5) wrapped chain.json missing 'blocks' rejected with "
+                  "field-name diagnostic");
+
+            // Cleanup
+            std::error_code ec3; fs::remove(tmp, ec3);
+        }
+
+        // ── (6) Genesis schema pin (chain/genesis.cpp::
+        //     GenesisConfig::from_json). Also NO version field —
+        //     forward-compat is via field-level defaults + skip-mix-
+        //     when-default invariants in compute_genesis_hash (so a
+        //     pre-A5 genesis JSON loaded into a post-A5 binary gives
+        //     byte-identical genesis hash). Pin "no version field".
+        {
+            // Minimal valid genesis JSON object.
+            GenesisConfig cfg;
+            cfg.chain_id = "test-protocol-version-pinning-genesis";
+            json gj = cfg.to_json();
+            check(!gj.contains("version"),
+                  "(6) GenesisConfig::to_json emits NO version field "
+                  "(schema is field-level forward-compat)");
+
+            // A genesis JSON WITH an unknown key (e.g., 'version':99)
+            // must STILL load successfully — GenesisConfig::from_json
+            // is forward-compat via .value(key, default) for every
+            // known field; unknown keys are ignored. Pin that
+            // tolerance so a hypothetical future v2 genesis with
+            // extra metadata still loads in a v1 binary (at least
+            // until a v2-only field changes hash inputs).
+            json gj_with_unknown = gj;
+            gj_with_unknown["version"] = 99;  // unknown to v1
+            gj_with_unknown["future_field"] = "future-value";
+            bool tolerant = true;
+            try { (void)GenesisConfig::from_json(gj_with_unknown); }
+            catch (const std::exception&) { tolerant = false; }
+            check(tolerant,
+                  "(6) GenesisConfig::from_json tolerates unknown keys "
+                  "(forward-compat via .value() defaults)");
+        }
+
+        // ── (7) Block JSON schema pin (chain/block.cpp::Block::
+        //     from_json). NO version field — schema is identified by
+        //     required-field set. S-018 closure made every required
+        //     field's absence throw a field-name diagnostic. Pin
+        //     that contract: a malformed BLOCK (missing 'index') must
+        //     throw with 'index' in the message.
+        {
+            // Round-trip a minimal Block and verify to_json emits
+            // no version field.
+            Block b;
+            b.index = 0;
+            b.timestamp = 0;
+            b.cumulative_rand = {};
+            json bj = b.to_json();
+            check(!bj.contains("version"),
+                  "(7) Block::to_json emits NO version field "
+                  "(schema is required-field-set-identified)");
+
+            // S-018: missing 'index' throws with field-name in
+            // the diagnostic.
+            json bad = bj;
+            bad.erase("index");
+            bool threw_idx = false;
+            std::string what_idx;
+            try { (void)Block::from_json(bad); }
+            catch (const std::exception& e) {
+                threw_idx = true; what_idx = e.what();
+            }
+            check(threw_idx && what_idx.find("index") != std::string::npos,
+                  "(7) Block::from_json missing 'index' throws "
+                  "S-018 field-name diagnostic");
+
+            // S-018: missing 'prev_hash' similarly.
+            bad = bj;
+            bad.erase("prev_hash");
+            bool threw_ph = false;
+            std::string what_ph;
+            try { (void)Block::from_json(bad); }
+            catch (const std::exception& e) {
+                threw_ph = true; what_ph = e.what();
+            }
+            check(threw_ph && what_ph.find("prev_hash") != std::string::npos,
+                  "(7) Block::from_json missing 'prev_hash' throws "
+                  "S-018 field-name diagnostic");
+        }
+
+        // ── (8) HELLO `wire_version` field — the in-message carrier
+        //     of the A3 / S8 negotiation value. make_hello defaults
+        //     `wire_version` to kWireVersionMax (sender advertises
+        //     its highest); the override parameter lets a test or
+        //     deliberate downgrade peer ship a lower value. Pin:
+        //       8a. default = kWireVersionMax (= 1)
+        //       8b. explicit 0 (legacy-only) accepted
+        //       8c. round-trip preserves the field
+        {
+            // 8a. Default.
+            Message hello_default = make_hello("alice", 7777);
+            check(hello_default.payload.value("wire_version",
+                                                  uint8_t{255})
+                    == kWireVersionMax,
+                  "(8) make_hello defaults wire_version to kWireVersionMax");
+
+            // 8b. Explicit downgrade — peers may advertise legacy.
+            Message hello_legacy = make_hello("bob", 7777,
+                                              ChainRole::SINGLE, 0,
+                                              kWireVersionLegacy);
+            check(hello_legacy.payload.value("wire_version",
+                                                 uint8_t{255})
+                    == kWireVersionLegacy,
+                  "(8) make_hello override wire_version=0 (legacy) accepted");
+
+            // 8c. Round-trip preserves wire_version. HELLO is
+            //     always JSON pre-negotiation; deserialize must
+            //     surface the field unchanged.
+            auto framed = hello_default.serialize();
+            std::vector<uint8_t> body(framed.begin() + 4, framed.end());
+            Message back = Message::deserialize(body.data(), body.size());
+            check(back.type == MsgType::HELLO
+                    && back.payload.value("wire_version", uint8_t{255})
+                          == kWireVersionMax,
+                  "(8) HELLO JSON round-trip preserves wire_version");
+        }
+
+        // ── (9) Defense-in-depth: HELLO is the ONLY pre-negotiation
+        //     message, and it must NEVER be sent via binary codec
+        //     (the receiver doesn't yet know the codec). Pin that
+        //     encode_binary(HELLO) throws — defends against a
+        //     future bug that omits the HELLO carve-out.
+        {
+            Message hello = make_hello("alice", 7777);
+            bool threw = false;
+            std::string what;
+            try { (void)encode_binary(hello); }
+            catch (const std::exception& e) {
+                threw = true; what = e.what();
+            }
+            check(threw && what.find("HELLO") != std::string::npos,
+                  "(9) encode_binary(HELLO) throws — HELLO must always be JSON "
+                  "(pre-negotiation invariant)");
+        }
+
+        // ── (10) Total MsgType count — the wire-format namespace size
+        //     for the type byte. Currently 19 variants (HELLO=0
+        //     through HEADERS_RESPONSE=18). Pin the highest used
+        //     integer so an accidental hole in the numbering (which
+        //     would be a fork-causing reorder if any subsequent
+        //     variant moved down to fill it) is caught here. We
+        //     check that HEADERS_RESPONSE — the highest assigned
+        //     value at v1 — is 18, and that the default branch of
+        //     max_message_bytes still treats an out-of-range value
+        //     (e.g., 19, 20, 200) as 1 MB (the "any new MsgType"
+        //     conservative cap from S-022).
+        check(static_cast<uint8_t>(MsgType::HEADERS_RESPONSE) == 18,
+              "(10) MsgType::HEADERS_RESPONSE == 18 (highest assigned v1 value)");
+        check(max_message_bytes(static_cast<MsgType>(19)) == 1 * 1024 * 1024,
+              "(10) max_message_bytes(MsgType=19) == 1 MB "
+              "(S-022 default-branch conservative cap for future variants)");
+        check(max_message_bytes(static_cast<MsgType>(200)) == 1 * 1024 * 1024,
+              "(10) max_message_bytes(MsgType=200) == 1 MB "
+              "(S-022 default-branch invariant)");
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": protocol-version-pinning "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
