@@ -63,6 +63,10 @@ The deployment manifest contains:
 - Cryptographic primitives in use (curve25519 family, FROST-Ed25519, etc.)
 - Manifest version (incremented on mutation)
 - Co-signing record (every mutation signed by the existing committee of every shard, K-of-K per shard)
+- **Operator-tunable parameters** (per review-week BL-3, BL-5, BL-6):
+  - `epoch_snapshot_interval: u64` — committee-log compaction cadence (default 100 epochs)
+  - `merritt_k: u8` — Byzantine-shard tolerance for merge-detection; invariant `num_shards > k(k+1)` (default 1)
+  - `epoch_boundary_cutoff_blocks: u64` — cutoff window for late-shard randomness contributions (default 10 blocks)
 
 **Replication.** Manifest is replicated via gossip across all shard validators. Each shard's validator set independently verifies the manifest's co-signing chain back to the deployment-genesis manifest. Light clients fetch the manifest from any gossip peer and verify the same chain.
 
@@ -76,6 +80,53 @@ The deployment manifest contains:
 **Alternatives rejected:**
 - *Single-shard authoritative manifest:* Reintroduces beacon-like privileged shard.
 - *On-chain manifest committed to each shard's genesis:* No mutation path; would require complete re-genesis for any shard add/remove.
+
+#### Q2.1: Manifest validation (hard invariants + soft warnings)
+
+**Problem.** BL-3/5/6 made `epoch_snapshot_interval`, `merritt_k`, and `epoch_boundary_cutoff_blocks` operator-tunable. Without explicit validation, an operator can ship a manifest whose claimed properties do not match actual deployment behavior. Most critically: `merritt_k` chosen without satisfying `num_shards > k(k+1)` silently degrades Byzantine tolerance — the deployment looks correct, runs correctly under benign conditions, and only reveals weakness under adversarial exploitation. No observable signal until attack.
+
+**Two tiers of validation.**
+
+**Hard invariants (consensus-enforced; `MANIFEST_UPDATE` apply path rejects):**
+
+```
+merritt_k >= 1
+merritt_k <= 5                                  // Merritt construction unwieldy beyond
+num_shards > merritt_k * (merritt_k + 1)        // Byzantine tolerance precondition
+```
+
+Rationale: these gate security properties. Putting them in consensus means every node validates and the chain cannot operate with the invariant violated. No operator override path.
+
+**Soft warnings (manifest-construction tooling only; not consensus-enforced):**
+
+```
+epoch_snapshot_interval >= 10                                          // prevent pathological churn
+epoch_snapshot_interval <= 10000                                       // prevent bootstrap pain
+epoch_boundary_cutoff_blocks >= 2                                      // prevent tiny-subset bias in deployment rand
+epoch_boundary_cutoff_blocks <= 1000                                   // prevent liveness loss
+epoch_boundary_cutoff_blocks < epoch_snapshot_interval / 10            // cross-field sanity
+```
+
+Rationale: these are performance failure modes that operations teams catch and fix (slow nodes, stuck epochs, surge alerts). Consensus-enforcing them would freeze the operating envelope and prevent legitimate experimentation. Warning emitted at manifest construction with explicit acknowledgment of consequence required to override.
+
+**Where validation runs.**
+- **Manifest-construction tooling** (CLI / operator builder): runs BOTH hard and soft checks. Hard violations block manifest construction. Soft violations emit warnings that require `--acknowledge-soft-violations` flag to bypass.
+- **`MANIFEST_UPDATE` apply path** (consensus-enforced on every validator): runs ONLY hard checks. Soft thresholds are not consensus-relevant. A manifest passing tooling-time hard checks always passes apply-path validation; a hand-crafted manifest violating hard invariants is rejected.
+
+**Definition source.** All thresholds defined as compile-time constants in `manifest_validity.hpp`. One source of truth; spec text references the file; values not duplicated in spec body to prevent drift.
+
+**Rationale.**
+- **Decouples security guarantees from operator judgment.** The Merritt invariant is a precondition for the security property the spec claims; consensus-enforcement makes the precondition non-negotiable.
+- **Preserves operator flexibility for performance tuning.** Soft thresholds reflect *recommended* operating envelope, not algorithmic requirements. Research labs, custom deployments, and future experiments retain the ability to step outside.
+- **Failure-mode separation matches detection-mode.** Security failures (silent until exploited) → hard. Performance failures (operationally visible) → soft.
+
+**Alternatives rejected.**
+- *All-hard (consensus-enforce performance bounds too):* freezes operating envelope; prevents legitimate experimentation; couples consensus rules to performance heuristics that may evolve.
+- *All-soft (only warn on Merritt invariant violation):* allows misconfigured deployments to ship; reproduces the failure mode this amendment exists to prevent.
+- *External validation document only (no code-level enforcement):* relies on operators reading and following docs; provides no defense against accidental misconfiguration.
+- *Per-deployment governance-vote override of Merritt invariant:* introduces complexity for a corner case (operator deliberately wants weaker tolerance — should be rare; if needed, operator can run a fork with adjusted constants).
+
+**Effort.** ~1 week: spec text (~2-3h), `manifest_validity.hpp` + `validate_manifest()` (~3-5 days), apply-path integration + manifest-construction-tool integration (~1-2 days), tests covering each invariant violation case (~2 days). Composes with BL-2 (`MANIFEST_UPDATE` apply path already exists from the manifest mutation infrastructure).
 
 ### Q3: Committee continuity — append-only committee-rotation log per shard
 
@@ -113,7 +164,7 @@ The log is stored as a per-shard data structure committed in each block's state_
 2. Walk S's committee log from epoch 0 to epoch N, verifying each `prev_committee_sig` against the previous epoch's committee.
 3. The terminal entry is the committee at epoch N.
 
-**Compaction.** The log grows without bound. Snapshot mechanism: every `EPOCH_SNAPSHOT_INTERVAL` epochs (default 100), the log emits a snapshot root committing the entire log up to that epoch. Light clients verify against snapshots, not raw entries, for epochs older than the snapshot interval.
+**Compaction.** The log grows without bound. Snapshot mechanism: every `manifest.epoch_snapshot_interval` epochs (default 100), the log emits a snapshot root committing the entire log up to that epoch. Light clients verify against snapshots, not raw entries, for epochs older than the snapshot interval. Interval is operator-tunable per deployment via the manifest (BL-3 revise).
 
 **Rationale.**
 - Cryptographically auditable: any historical committee verifiable by anyone with the deployment manifest.
@@ -142,7 +193,7 @@ CrossShardReceipt {
 4. Verify the source committee signature on the header against the source shard's committee log at `source_height`'s epoch.
 5. If all verifications pass, dedup against `applied_inbound_receipts_` by `receipt_id`, then apply.
 
-**Receipt-id format.** `receipt_id = SHA256("DTM-RECEIPT" || source_shard || dest_shard || source_height || nonce_within_block)`. Globally unique by construction; survives the beacon-relay-removal that breaks the v1.x receipt-ID assumption (which relied on beacon-assigned ordering).
+**Receipt-id format.** `receipt_id = SHA256("DTM-RECEIPT" || source_shard || dest_shard || source_height || nonce_within_block: u32)`. `nonce_within_block` pinned at u32 (BL-4 revise) — 4B receipts per shard per block, effectively unbounded for any realistic workload. Globally unique by construction; survives the beacon-relay-removal that breaks the v1.x receipt-ID assumption (which relied on beacon-assigned ordering).
 
 **Rationale.**
 - Receiver doesn't trust source's word — verifies cryptographically.
@@ -163,7 +214,7 @@ then this shard locally emits `MERGE_BEGIN(target=S)` in its next block. The MER
 
 **Coordination.** Multiple shards may observe S's silence simultaneously and emit overlapping MERGE_BEGINs. Resolution rule: the modular-neighbor shard (`T = (S+1) mod num_shards`, per the established R4 modular-merge pattern) is the canonical merge target; other shards' MERGE_BEGINs are advisory and discarded. T's MERGE_BEGIN goes into effect at `effective_height = current + merge_grace_blocks`.
 
-**Adversary tolerance.** Adopts Merritt's Mutually Verified Election ("Elections in the Presence of Faults," PODC 1984). Each shard `i` has deterministic j-witnesses `(i+1)..(i+k+j) mod num_shards` for j = 1..k. Heartbeat absence claims propagate through witnesses; merge fires only when claim collects k-affidavits. Tolerates k Byzantine shards given `num_shards > k(k+1)`. With v1.x's `num_shards >= 3` invariant, k=1 Byzantine shard is tolerated; k=2 needs `num_shards >= 7`; k=3 needs `num_shards >= 13`.
+**Adversary tolerance.** Adopts Merritt's Mutually Verified Election ("Elections in the Presence of Faults," PODC 1984). Each shard `i` has deterministic j-witnesses `(i+1)..(i+k+j) mod num_shards` for j = 1..k. Heartbeat absence claims propagate through witnesses; merge fires only when claim collects k-affidavits. Tolerates `k = manifest.merritt_k` Byzantine shards given `num_shards > k(k+1)` (manifest-validation invariant, BL-5 revise). Reference points: k=1 needs `num_shards >= 3` (v1.x default); k=2 needs `num_shards >= 7`; k=3 needs `num_shards >= 13`. Operator picks k per deployment threat model.
 
 **Rationale.**
 - Removes beacon's role as merge coordinator.
@@ -187,7 +238,7 @@ deployment_rand_N+1 = SHA256(
 
 Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the shard's own commit-reveal output via XOR. Result: committee selection depends on BOTH this shard's current epoch AND every other shard's previous epoch — biasing committee selection requires controlling this shard AND every other shard in the deployment, simultaneously, before the epoch boundary.
 
-**Late-shard handling.** If some shards haven't emitted their epoch-N threshold signature by the epoch-boundary cutoff, deployment_rand_N+1 is computed over the subset that did. Each shard records which subset was used in its block header (via a new `deployment_rand_subset` field), so light clients can verify the derivation deterministically.
+**Late-shard handling.** If some shards haven't emitted their epoch-N threshold signature within `manifest.epoch_boundary_cutoff_blocks` of the epoch boundary, deployment_rand_N+1 is computed over the subset that did. Each shard records which subset was used in its block header (via a new `deployment_rand_subset` field), so light clients can verify the derivation deterministically. Cutoff window is operator-tunable per deployment via the manifest (BL-6 revise) — shorter window favors liveness, longer window favors complete-shard participation.
 
 **Rationale.**
 - Removes beacon as randomness aggregator.
@@ -240,12 +291,13 @@ Block {
 - Eviction policy (per-source, `LIGHT_CLIENT_RETENTION_BLOCKS` window).
 - Light-client header chain validation (signature-chain check against committee log).
 
-### 4.2 Deployment manifest infrastructure (~2-3 weeks)
+### 4.2 Deployment manifest infrastructure (~3-4 weeks)
 
 - Manifest data structure + serialization.
 - Gossip-layer replication (`MANIFEST_REPLICATE`).
 - Mutation path: `MANIFEST_UPDATE` tx, co-signing collection, flag-day activation.
 - Manifest-verification logic (any node verifies against any peer).
+- **Q2.1 manifest validity (~1 week):** `manifest_validity.hpp` compile-time thresholds; `validate_manifest()` function with hard (consensus-enforced) and soft (warning-only) tiers; `MANIFEST_UPDATE` apply-path integration; manifest-construction-tool integration with `--acknowledge-soft-violations` override flag; unit tests covering each invariant violation case.
 
 ### 4.3 Committee-rotation log (~1-2 weeks)
 
@@ -296,7 +348,7 @@ Block {
 | Sub-component | Effort |
 |---|---|
 | Light-client mesh infrastructure | 3-4 weeks |
-| Deployment manifest infrastructure | 2-3 weeks |
+| Deployment manifest infrastructure (incl. Q2.1 validity ~1w) | 3-4 weeks |
 | Committee-rotation log | 1-2 weeks |
 | Cross-shard receipt with Merkle proofs | 2-3 weeks |
 | Decentralized merge-detection | 1-2 weeks |
@@ -332,6 +384,10 @@ This is genuinely a multi-month architectural effort — significantly larger th
 **Risk: Spec disagreement during review.** Q1 (Option A vs alternatives) is the highest-impact choice. If review prefers Option B (rotating hub) or Option D (sample-and-attest), substantial revision required.
 
 *Mitigation.* Pre-implementation review per §8 below.
+
+**Risk: Operator ships manifest with `merritt_k` violating `num_shards > k(k+1)`.** Deployment silently runs with weaker Byzantine tolerance than claimed (e.g., k=2 with num_shards=4 actually tolerates only k=1). No observable signal until adversarial exploitation; security audit decouples from operational reality.
+
+*Mitigation.* Q2.1 manifest validity: hard invariants consensus-enforced at `MANIFEST_UPDATE` apply path; rejected at validator-level. Manifest-construction tooling also enforces — invalid manifests cannot be built without errors. No operator override path for hard invariants. Soft performance thresholds emit construction-time warnings with `--acknowledge-soft-violations` flag for legitimate experimentation.
 
 **Rollback plan.** If Beaconless v2 ships with a bug discovered after deployment-wide migration:
 1. Governance pause across all shards.

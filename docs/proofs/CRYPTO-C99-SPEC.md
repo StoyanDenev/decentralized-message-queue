@@ -425,6 +425,7 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 | Passphrase KDF (v2.17 keyfiles) | Argon2id (RFC 9106) | **PBKDF2-HMAC-SHA-256 (SP 800-132)** — substantially weaker; FIPS-validated |
 | AEAD (v2.17 keyfiles, v2.22 amount encryption, direct-to-DApp) | XChaCha20-Poly1305 | **AES-256-GCM (FIPS 197 + SP 800-38D)** |
 | Prime-order group | secp256k1 | **NIST P-256 (FIPS 186-5)** |
+| ECDH (v2.22 amount handshake; v2.24 audit-key exchange) | secp256k1 ECDH (libsecp256k1) | **NIST P-256 ECDH (SP 800-56A)** |
 | **Confidential transactions (v2.22 Bulletproofs)** | ✅ Available | ❌ **UNAVAILABLE — no FIPS-validated range proofs exist** |
 | Theme 9 DSSO OPRF (v2.25) | secp256k1 voprf | **NIST P-256 voprf** |
 
