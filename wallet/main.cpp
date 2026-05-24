@@ -9842,6 +9842,713 @@ int cmd_derive_tx_hash(int argc, char** argv) {
     return 0;
 }
 
+// ── inspect-tx ───────────────────────────────────────────────────────────────
+//
+// Read-only introspection of a signed tx envelope: parse every standard
+// field, decode the payload per TxType where the format is known, and
+// report everything in either a human block or a one-line JSON object.
+// Distinct from validate-tx + derive-tx-hash:
+//
+//   * validate-tx     — composite gate: structural + Ed25519 + tx_hash +
+//                       optional --strict / --rpc-port liveness.
+//                       Verdict-shaped; returns 0/1/2 by overall validity.
+//   * derive-tx-hash  — focused: rebuild signing_bytes + SHA-256.
+//                       Single-value shaped; --check returns 2 on mismatch.
+//   * inspect-tx      — diagnostic: print everything decoded for human
+//                       eyes. No validity verdict, no signature verify,
+//                       no daemon round-trip. Exit 0 success, 1 args /
+//                       parse error.
+//
+// Accepts BOTH envelope shapes (matches validate-tx / derive-tx-hash
+// tolerance): canonical chain JSON ({type:int, sig}) and sign-anon-tx
+// output ({type:"TRANSFER", signature}). Field names `sig` and
+// `signature` are accepted interchangeably.
+//
+// Payload decode coverage (when the per-TxType shape is recognized):
+//
+//   TRANSFER         empty payload — reported as "(no payload)"
+//   STAKE / UNSTAKE  8-byte little-endian u64 → "stake_amount"
+//   REGISTER         32-byte ed_pub + optional region_len/region tail
+//   DEREGISTER       empty (validator-enforced) — reported as such
+//   PARAM_CHANGE     name_len + name + value_len + value + effective_height
+//                    (see src/chain/chain.cpp:case TxType::PARAM_CHANGE)
+//   MERGE_EVENT      canonical 25-byte structure (event_type, shard_id,
+//                    partner_id, effective_height, evidence_window_start,
+//                    + optional region tail).
+//   COMPOSABLE_BATCH JSON array of inner txs (just emit the inner count;
+//                    a full nested decode would explode output).
+//   DAPP_REGISTER    op-byte, then (op=0) 32B service_pubkey + url_len +
+//                    url + topic_count + (topic_len + topic)* +
+//                    retention + metalen + metadata; (op=1) deactivate.
+//   DAPP_CALL        topic_len + topic + ct_len(u32 LE) + ciphertext_bytes
+//
+// Derived fields (recomputed + reported):
+//   * signing_bytes_hex     — canonical pre-image (byte-for-byte equal to
+//                              src/chain/block.cpp Transaction::signing_bytes)
+//   * computed_hash         — SHA-256(signing_bytes_hex bytes)
+//   * hash_match            — true iff envelope.hash (case-insensitive) ==
+//                              computed_hash; false if either is missing.
+//
+// Exit codes: 0 success, 1 args / parse / IO error.
+int cmd_inspect_tx(int argc, char** argv) {
+    std::string tx_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--tx-json" && i + 1 < argc) tx_path = argv[++i];
+        else if (a == "--json")                    json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet inspect-tx --tx-json <file|->\n"
+                "                                [--json]\n"
+                "\n"
+                "  Read-only inspector for a signed tx envelope. Parses\n"
+                "  every standard field, decodes the payload per TxType\n"
+                "  where the format is known, and reports everything for\n"
+                "  diagnostic / debugging use. No validation, no Ed25519\n"
+                "  verify, no daemon round-trip — for that, use\n"
+                "  validate-tx (composite gate) or tx-sign-verify\n"
+                "  (signature only) or derive-tx-hash (hash recompute).\n"
+                "\n"
+                "  --tx-json <file|->  REQUIRED. Path to signed envelope\n"
+                "                      JSON, or `-` for stdin.\n"
+                "  --json              Machine-readable one-line JSON output\n"
+                "                      with the full decoded field set.\n"
+                "                      Default is human-readable indented\n"
+                "                      blocks.\n"
+                "\n"
+                "  Decoded per-type payloads: TRANSFER, STAKE, UNSTAKE,\n"
+                "  REGISTER, DEREGISTER, PARAM_CHANGE, MERGE_EVENT,\n"
+                "  COMPOSABLE_BATCH, DAPP_REGISTER, DAPP_CALL. Unknown\n"
+                "  types are still parsed at the envelope level; the\n"
+                "  payload is reported as raw hex.\n"
+                "\n"
+                "  Derived fields recomputed locally: signing_bytes_hex,\n"
+                "  computed_hash (= SHA-256(signing_bytes)), hash_match\n"
+                "  (envelope.hash vs. computed_hash, case-insensitive).\n"
+                "\n"
+                "  Accepts BOTH envelope shapes — canonical chain JSON\n"
+                "  ({type:int, sig}) and sign-anon-tx output\n"
+                "  ({type:\"TRANSFER\", signature}) — interchangeably. Field\n"
+                "  names `sig` and `signature` are both accepted.\n"
+                "\n"
+                "  Exit codes: 0 success, 1 args/parse/IO error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "inspect-tx: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet inspect-tx --tx-json <file|-> "
+                         "[--json]\n";
+            return 1;
+        }
+    }
+    if (tx_path.empty()) {
+        std::cerr << "Usage: determ-wallet inspect-tx --tx-json <file|-> "
+                     "[--json]\n"
+                     "  (--tx-json is required; pass `-` for stdin)\n";
+        return 1;
+    }
+
+    // ── Read + parse the tx JSON ─────────────────────────────────────────
+    nlohmann::json j;
+    try {
+        if (tx_path == "-") {
+            j = nlohmann::json::parse(std::cin);
+        } else {
+            std::ifstream tx_f(tx_path);
+            if (!tx_f) {
+                std::cerr << "inspect-tx: cannot open --tx-json file: "
+                          << tx_path << "\n";
+                return 1;
+            }
+            tx_f >> j;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "inspect-tx: --tx-json is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!j.is_object()) {
+        std::cerr << "inspect-tx: --tx-json must be a JSON object\n";
+        return 1;
+    }
+
+    // Mnemonic table (mirrors include/determ/chain/block.hpp TxType ordering
+    // — identical to validate-tx / derive-tx-hash).
+    auto type_mnemonic_to_int = [](const std::string& s) -> int {
+        if (s == "TRANSFER")         return 0;
+        if (s == "REGISTER")         return 1;
+        if (s == "DEREGISTER")       return 2;
+        if (s == "STAKE")            return 3;
+        if (s == "UNSTAKE")          return 4;
+        if (s == "REGION_CHANGE")    return 5;
+        if (s == "PARAM_CHANGE")     return 6;
+        if (s == "MERGE_EVENT")      return 7;
+        if (s == "COMPOSABLE_BATCH") return 8;
+        if (s == "DAPP_REGISTER")    return 9;
+        if (s == "DAPP_CALL")        return 10;
+        return -1;
+    };
+    auto int_to_type_mnemonic = [](int t) -> const char* {
+        switch (t) {
+            case 0:  return "TRANSFER";
+            case 1:  return "REGISTER";
+            case 2:  return "DEREGISTER";
+            case 3:  return "STAKE";
+            case 4:  return "UNSTAKE";
+            case 5:  return "REGION_CHANGE";
+            case 6:  return "PARAM_CHANGE";
+            case 7:  return "MERGE_EVENT";
+            case 8:  return "COMPOSABLE_BATCH";
+            case 9:  return "DAPP_REGISTER";
+            case 10: return "DAPP_CALL";
+            default: return "UNKNOWN";
+        }
+    };
+
+    // ── Envelope-level field extraction. Any required-but-missing field
+    //    aborts with exit 1 so machine consumers get a clean parse error
+    //    rather than partial decoded output. ────────────────────────────
+    int         tx_type_int = -1;
+    std::string from_str, to_str, payload_hex, sig_hex, hash_hex;
+    uint64_t    amount = 0, fee = 0, nonce = 0;
+    bool        sig_present  = false;
+    bool        hash_present = false;
+
+    if (!j.contains("type")) {
+        std::cerr << "inspect-tx: missing required field 'type'\n";
+        return 1;
+    } else if (j["type"].is_number()) {
+        tx_type_int = j["type"].get<int>();
+        if (tx_type_int < 0 || tx_type_int > 255) {
+            std::cerr << "inspect-tx: 'type' out of u8 range ("
+                      << tx_type_int << ")\n";
+            return 1;
+        }
+    } else if (j["type"].is_string()) {
+        const std::string s = j["type"].get<std::string>();
+        int mapped = type_mnemonic_to_int(s);
+        if (mapped < 0) {
+            std::cerr << "inspect-tx: unknown 'type' mnemonic '"
+                      << s << "'\n";
+            return 1;
+        }
+        tx_type_int = mapped;
+    } else {
+        std::cerr << "inspect-tx: 'type' must be int or upper-case "
+                     "mnemonic string\n";
+        return 1;
+    }
+    if (!j.contains("from") || !j["from"].is_string()) {
+        std::cerr << "inspect-tx: missing/wrong-typed 'from' "
+                     "(expected string)\n";
+        return 1;
+    }
+    from_str = j["from"].get<std::string>();
+    if (!j.contains("to") || !j["to"].is_string()) {
+        std::cerr << "inspect-tx: missing/wrong-typed 'to' "
+                     "(expected string)\n";
+        return 1;
+    }
+    to_str = j["to"].get<std::string>();
+    if (!j.contains("amount") || !j["amount"].is_number()) {
+        std::cerr << "inspect-tx: missing/wrong-typed 'amount' "
+                     "(expected integer)\n";
+        return 1;
+    }
+    amount = j["amount"].is_number_unsigned()
+        ? j["amount"].get<uint64_t>()
+        : static_cast<uint64_t>(j["amount"].get<int64_t>());
+    if (!j.contains("nonce") || !j["nonce"].is_number()) {
+        std::cerr << "inspect-tx: missing/wrong-typed 'nonce' "
+                     "(expected integer)\n";
+        return 1;
+    }
+    nonce = j["nonce"].is_number_unsigned()
+        ? j["nonce"].get<uint64_t>()
+        : static_cast<uint64_t>(j["nonce"].get<int64_t>());
+    if (j.contains("fee")) {
+        if (!j["fee"].is_number()) {
+            std::cerr << "inspect-tx: 'fee' present but not a number\n";
+            return 1;
+        }
+        fee = j["fee"].is_number_unsigned()
+            ? j["fee"].get<uint64_t>()
+            : static_cast<uint64_t>(j["fee"].get<int64_t>());
+    }
+    if (!j.contains("payload") || !j["payload"].is_string()) {
+        std::cerr << "inspect-tx: missing/wrong-typed 'payload' "
+                     "(expected hex string)\n";
+        return 1;
+    }
+    payload_hex = j["payload"].get<std::string>();
+    if (j.contains("sig") && j["sig"].is_string()) {
+        sig_hex = j["sig"].get<std::string>();
+        sig_present = true;
+    } else if (j.contains("signature") && j["signature"].is_string()) {
+        sig_hex = j["signature"].get<std::string>();
+        sig_present = true;
+    }
+    if (j.contains("hash") && j["hash"].is_string()) {
+        hash_hex = j["hash"].get<std::string>();
+        hash_present = true;
+    }
+
+    // ── Decode payload bytes ─────────────────────────────────────────────
+    std::vector<uint8_t> payload_bytes;
+    try { payload_bytes = from_hex(payload_hex); }
+    catch (std::exception& e) {
+        std::cerr << "inspect-tx: invalid 'payload' hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // ── Per-TxType payload decoder. Returns a {known, details} pair where
+    //    `details` is a JSON object with parsed fields when known is true;
+    //    when known is false the payload is opaque (raw hex still reported
+    //    by the caller). ────────────────────────────────────────────────
+    nlohmann::json payload_decoded = nlohmann::json::object();
+    bool payload_decode_known = false;
+    std::string payload_decode_note;
+
+    auto u64_le = [](const std::vector<uint8_t>& p, size_t off) -> uint64_t {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v |= uint64_t(p[off + i]) << (8 * i);
+        return v;
+    };
+
+    switch (tx_type_int) {
+        case 0: {  // TRANSFER
+            payload_decode_known = true;
+            if (payload_bytes.empty()) {
+                payload_decode_note = "TRANSFER has no payload (expected)";
+            } else {
+                payload_decode_note = "TRANSFER carries non-empty payload "
+                                       "(chain ignores; reported as hex)";
+            }
+            break;
+        }
+        case 1: {  // REGISTER
+            // [pubkey: 32B][region_len: u8][region: utf8]
+            if (payload_bytes.size() < 32) {
+                payload_decode_note = "REGISTER payload < 32 bytes "
+                                       "(malformed)";
+                break;
+            }
+            std::vector<uint8_t> pub(payload_bytes.begin(),
+                                     payload_bytes.begin() + 32);
+            payload_decoded["ed_pub_hex"] = to_hex(pub);
+            std::string region;
+            if (payload_bytes.size() > 32) {
+                size_t rlen = payload_bytes[32];
+                if (payload_bytes.size() == 32 + 1 + rlen) {
+                    region.assign(reinterpret_cast<const char*>(
+                                      payload_bytes.data() + 33), rlen);
+                    payload_decoded["region"] = region;
+                } else {
+                    payload_decode_note = "REGISTER region_len mismatch "
+                                           "(malformed)";
+                    break;
+                }
+            } else {
+                payload_decoded["region"] = "";  // legacy / global pool
+            }
+            payload_decode_known = true;
+            break;
+        }
+        case 2: {  // DEREGISTER
+            payload_decode_known = true;
+            if (payload_bytes.empty()) {
+                payload_decode_note = "DEREGISTER has no payload (expected)";
+            } else {
+                payload_decode_note = "DEREGISTER carries " +
+                                       std::to_string(payload_bytes.size()) +
+                                       "-byte payload (chain ignores)";
+            }
+            break;
+        }
+        case 3:    // STAKE
+        case 4: {  // UNSTAKE
+            if (payload_bytes.size() != 8) {
+                payload_decode_note =
+                    (tx_type_int == 3 ? std::string("STAKE")
+                                       : std::string("UNSTAKE")) +
+                    " payload != 8 bytes (malformed)";
+                break;
+            }
+            payload_decoded["stake_amount"] = u64_le(payload_bytes, 0);
+            payload_decode_known = true;
+            break;
+        }
+        case 6: {  // PARAM_CHANGE
+            // [name_len: u8][name: utf8][value_len: u16 LE]
+            // [value: bytes][effective_height: u64 LE]
+            if (payload_bytes.empty()) {
+                payload_decode_note = "PARAM_CHANGE payload empty (malformed)";
+                break;
+            }
+            size_t off = 0;
+            size_t nlen = payload_bytes[off++];
+            if (payload_bytes.size() < off + nlen + 2) {
+                payload_decode_note = "PARAM_CHANGE name overruns payload";
+                break;
+            }
+            std::string name(payload_bytes.begin() + off,
+                             payload_bytes.begin() + off + nlen);
+            off += nlen;
+            uint16_t vlen = uint16_t(payload_bytes[off]) |
+                            (uint16_t(payload_bytes[off + 1]) << 8);
+            off += 2;
+            if (payload_bytes.size() < off + vlen + 8) {
+                payload_decode_note = "PARAM_CHANGE value/effective overruns "
+                                       "payload";
+                break;
+            }
+            std::vector<uint8_t> value(payload_bytes.begin() + off,
+                                       payload_bytes.begin() + off + vlen);
+            off += vlen;
+            uint64_t eff = u64_le(payload_bytes, off);
+            payload_decoded["param_name"]         = name;
+            payload_decoded["param_value_hex"]    = to_hex(value);
+            payload_decoded["param_value_len"]    = value.size();
+            payload_decoded["effective_height"]   = eff;
+            // Value is usually a u64 LE for numeric params; surface that
+            // interpretation when the length matches so operators see
+            // the human-readable number.
+            if (value.size() == 8) {
+                uint64_t v = 0;
+                for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                payload_decoded["param_value_u64"] = v;
+            }
+            payload_decode_known = true;
+            break;
+        }
+        case 7: {  // MERGE_EVENT
+            // Canonical encoding mirrors include/determ/chain/block.hpp
+            // MergeEvent::{encode, decode}: event_type(u8) + shard_id(u32 LE)
+            // + partner_id(u32 LE) + effective_height(u64 LE) +
+            // evidence_window_start(u64 LE) + region_len(u8) + region.
+            if (payload_bytes.size() < 25) {
+                payload_decode_note = "MERGE_EVENT payload < 25 bytes "
+                                       "(malformed)";
+                break;
+            }
+            uint8_t  event_type = payload_bytes[0];
+            uint32_t shard_id =
+                uint32_t(payload_bytes[1])
+                | (uint32_t(payload_bytes[2]) << 8)
+                | (uint32_t(payload_bytes[3]) << 16)
+                | (uint32_t(payload_bytes[4]) << 24);
+            uint32_t partner_id =
+                uint32_t(payload_bytes[5])
+                | (uint32_t(payload_bytes[6]) << 8)
+                | (uint32_t(payload_bytes[7]) << 16)
+                | (uint32_t(payload_bytes[8]) << 24);
+            uint64_t eff_h = u64_le(payload_bytes, 9);
+            uint64_t evw   = u64_le(payload_bytes, 17);
+            payload_decoded["event_type"] =
+                (event_type == 0 ? "BEGIN" :
+                 event_type == 1 ? "END"   : "UNKNOWN");
+            payload_decoded["shard_id"]              = shard_id;
+            payload_decoded["partner_id"]            = partner_id;
+            payload_decoded["effective_height"]      = eff_h;
+            payload_decoded["evidence_window_start"] = evw;
+            if (payload_bytes.size() > 25) {
+                size_t rlen = payload_bytes[25];
+                if (payload_bytes.size() == 25 + 1 + rlen) {
+                    std::string region(
+                        reinterpret_cast<const char*>(payload_bytes.data() + 26),
+                        rlen);
+                    payload_decoded["merging_shard_region"] = region;
+                } else {
+                    payload_decode_note = "MERGE_EVENT region_len mismatch";
+                    break;
+                }
+            } else {
+                payload_decoded["merging_shard_region"] = "";
+            }
+            payload_decode_known = true;
+            break;
+        }
+        case 8: {  // COMPOSABLE_BATCH
+            // Payload = JSON array of inner txs. Don't recursively decode
+            // each inner (would explode output); just report the inner
+            // count + a peek at the inner types.
+            try {
+                std::string s(payload_bytes.begin(), payload_bytes.end());
+                auto arr = nlohmann::json::parse(s);
+                if (!arr.is_array()) {
+                    payload_decode_note = "COMPOSABLE_BATCH payload is JSON "
+                                           "but not an array (malformed)";
+                    break;
+                }
+                payload_decoded["inner_count"] = arr.size();
+                nlohmann::json inner_types = nlohmann::json::array();
+                for (auto& inner : arr) {
+                    if (inner.is_object() && inner.contains("type")) {
+                        if (inner["type"].is_number()) {
+                            int t = inner["type"].get<int>();
+                            inner_types.push_back(int_to_type_mnemonic(t));
+                        } else if (inner["type"].is_string()) {
+                            inner_types.push_back(
+                                inner["type"].get<std::string>());
+                        }
+                    } else {
+                        inner_types.push_back("?");
+                    }
+                }
+                payload_decoded["inner_types"] = std::move(inner_types);
+                payload_decode_known = true;
+            } catch (std::exception& e) {
+                payload_decode_note =
+                    std::string("COMPOSABLE_BATCH JSON parse failed: ") +
+                    e.what();
+            }
+            break;
+        }
+        case 9: {  // DAPP_REGISTER
+            // [op:u8] then op=0: [service_pubkey:32B][url_len:u8][url:utf8]
+            // [topic_count:u8] [topic_len:u8][topic:utf8]* [retention:u8]
+            // [metalen:u16 LE][metadata:bytes]
+            // op=1: deactivate (no further fields).
+            if (payload_bytes.empty()) {
+                payload_decode_note = "DAPP_REGISTER payload empty";
+                break;
+            }
+            uint8_t op = payload_bytes[0];
+            payload_decoded["op"] = int(op);
+            payload_decoded["op_name"] =
+                (op == 0 ? "create_or_update" :
+                 op == 1 ? "deactivate"       : "unknown");
+            if (op == 1) {
+                payload_decode_known = true;
+                break;
+            }
+            if (op != 0) {
+                payload_decode_note = "DAPP_REGISTER unknown op " +
+                                       std::to_string(int(op));
+                break;
+            }
+            size_t p = 1;
+            auto need = [&](size_t n) {
+                return p + n <= payload_bytes.size();
+            };
+            if (!need(32)) {
+                payload_decode_note = "DAPP_REGISTER missing service_pubkey";
+                break;
+            }
+            std::vector<uint8_t> svc(payload_bytes.begin() + p,
+                                     payload_bytes.begin() + p + 32);
+            payload_decoded["service_pubkey_hex"] = to_hex(svc);
+            p += 32;
+            if (!need(1)) {
+                payload_decode_note = "DAPP_REGISTER missing url_len";
+                break;
+            }
+            uint8_t url_len = payload_bytes[p++];
+            if (!need(url_len)) {
+                payload_decode_note = "DAPP_REGISTER url overruns payload";
+                break;
+            }
+            std::string url(
+                reinterpret_cast<const char*>(payload_bytes.data() + p),
+                url_len);
+            payload_decoded["endpoint_url"] = url;
+            p += url_len;
+            if (!need(1)) {
+                payload_decode_note = "DAPP_REGISTER missing topic_count";
+                break;
+            }
+            uint8_t topic_count = payload_bytes[p++];
+            nlohmann::json topics = nlohmann::json::array();
+            bool topic_decode_ok = true;
+            for (uint8_t i = 0; i < topic_count; ++i) {
+                if (!need(1)) { topic_decode_ok = false; break; }
+                uint8_t tl = payload_bytes[p++];
+                if (!need(tl)) { topic_decode_ok = false; break; }
+                topics.push_back(std::string(
+                    reinterpret_cast<const char*>(payload_bytes.data() + p),
+                    tl));
+                p += tl;
+            }
+            if (!topic_decode_ok) {
+                payload_decode_note = "DAPP_REGISTER topics overrun payload";
+                break;
+            }
+            payload_decoded["topics"] = std::move(topics);
+            if (!need(1)) {
+                payload_decode_note = "DAPP_REGISTER missing retention";
+                break;
+            }
+            payload_decoded["retention"] = int(payload_bytes[p++]);
+            if (!need(2)) {
+                payload_decode_note = "DAPP_REGISTER missing metalen";
+                break;
+            }
+            uint16_t metalen = uint16_t(payload_bytes[p])
+                | (uint16_t(payload_bytes[p + 1]) << 8);
+            p += 2;
+            if (!need(metalen)) {
+                payload_decode_note = "DAPP_REGISTER metadata overruns "
+                                       "payload";
+                break;
+            }
+            std::vector<uint8_t> meta(payload_bytes.begin() + p,
+                                      payload_bytes.begin() + p + metalen);
+            payload_decoded["metadata_len"] = meta.size();
+            payload_decoded["metadata_hex"] = to_hex(meta);
+            payload_decode_known = true;
+            break;
+        }
+        case 10: {  // DAPP_CALL
+            // [topic_len:u8][topic:utf8][ct_len:u32 LE][ciphertext:bytes]
+            if (payload_bytes.empty()) {
+                payload_decode_note = "DAPP_CALL payload empty";
+                break;
+            }
+            uint8_t tl = payload_bytes[0];
+            if (size_t(1) + tl > payload_bytes.size()) {
+                payload_decode_note = "DAPP_CALL topic_len overruns payload";
+                break;
+            }
+            std::string topic(
+                reinterpret_cast<const char*>(payload_bytes.data() + 1), tl);
+            payload_decoded["topic"] = topic;
+            size_t p = 1 + size_t(tl);
+            if (p + 4 > payload_bytes.size()) {
+                payload_decode_note = "DAPP_CALL missing ct_len";
+                break;
+            }
+            uint32_t ct_len = uint32_t(payload_bytes[p])
+                | (uint32_t(payload_bytes[p + 1]) << 8)
+                | (uint32_t(payload_bytes[p + 2]) << 16)
+                | (uint32_t(payload_bytes[p + 3]) << 24);
+            p += 4;
+            payload_decoded["ciphertext_len"] = ct_len;
+            if (p + ct_len != payload_bytes.size()) {
+                payload_decode_note = "DAPP_CALL ciphertext_len mismatch "
+                                       "(framing malformed)";
+                break;
+            }
+            // Don't emit the full ciphertext (could be ~1 MB); just a
+            // peek at the first 16 bytes for human eyes.
+            std::vector<uint8_t> ct_preview(
+                payload_bytes.begin() + p,
+                payload_bytes.begin() + p + std::min<size_t>(ct_len, 16));
+            payload_decoded["ciphertext_preview_hex"] = to_hex(ct_preview);
+            payload_decode_known = true;
+            break;
+        }
+        default: {
+            payload_decode_note = std::string(int_to_type_mnemonic(tx_type_int)) +
+                                  " payload format not decoded by inspect-tx "
+                                   "(raw hex reported below)";
+            break;
+        }
+    }
+
+    // ── Derived fields: signing_bytes + recomputed hash + match flag ────
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+               + payload_bytes.size());
+    sb.push_back(static_cast<uint8_t>(tx_type_int));
+    sb.insert(sb.end(), from_str.begin(), from_str.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+    sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
+
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+    const std::string signing_bytes_hex   = to_hex(sb);
+    const std::string computed_hash       = to_hex(sb_sha);
+
+    bool hash_match = false;
+    std::string stored_hash_lower;
+    if (hash_present) {
+        stored_hash_lower = hash_hex;
+        for (auto& c : stored_hash_lower) {
+            if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        }
+        hash_match = (stored_hash_lower == computed_hash);
+    }
+
+    // ── Output ───────────────────────────────────────────────────────────
+    const std::string mnemonic = int_to_type_mnemonic(tx_type_int);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["type"]               = tx_type_int;
+        r["type_mnemonic"]      = mnemonic;
+        r["from"]               = from_str;
+        r["to"]                 = to_str;
+        r["amount"]             = amount;
+        r["fee"]                = fee;
+        r["nonce"]              = nonce;
+        r["payload_hex"]        = payload_hex;
+        r["payload_len"]        = payload_bytes.size();
+        r["payload_decoded"]    = payload_decoded;
+        r["payload_decode_known"] = payload_decode_known;
+        if (!payload_decode_note.empty())
+            r["payload_decode_note"] = payload_decode_note;
+        if (sig_present)  r["signature"]      = sig_hex;
+        if (hash_present) r["stored_hash"]    = stored_hash_lower;
+        r["signing_bytes_hex"]  = signing_bytes_hex;
+        r["computed_hash"]      = computed_hash;
+        r["hash_match"]         = hash_match;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "type:               " << tx_type_int
+                  << "  (" << mnemonic << ")\n";
+        std::cout << "from:               " << from_str << "\n";
+        std::cout << "to:                 " << to_str   << "\n";
+        std::cout << "amount:             " << amount   << "\n";
+        std::cout << "fee:                " << fee      << "\n";
+        std::cout << "nonce:              " << nonce    << "\n";
+        std::cout << "payload_len:        " << payload_bytes.size()
+                  << " bytes\n";
+        std::cout << "payload_hex:        " << payload_hex << "\n";
+        if (payload_decode_known) {
+            std::cout << "payload_decoded:\n";
+            // Pretty-print each top-level key from payload_decoded.
+            for (auto it = payload_decoded.begin();
+                 it != payload_decoded.end(); ++it) {
+                std::cout << "  " << it.key() << ": ";
+                if (it.value().is_string()) {
+                    std::cout << it.value().get<std::string>();
+                } else if (it.value().is_array()) {
+                    std::cout << it.value().dump();
+                } else {
+                    std::cout << it.value().dump();
+                }
+                std::cout << "\n";
+            }
+            if (!payload_decode_note.empty())
+                std::cout << "  note: " << payload_decode_note << "\n";
+        } else {
+            std::cout << "payload_decoded:    "
+                      << "(not decoded — " << payload_decode_note
+                      << ")\n";
+        }
+        std::cout << "signature:          "
+                  << (sig_present ? sig_hex : std::string("(absent)"))
+                  << "\n";
+        std::cout << "stored_hash:        "
+                  << (hash_present ? stored_hash_lower : std::string("(absent)"))
+                  << "\n";
+        std::cout << "signing_bytes_hex:  " << signing_bytes_hex << "\n";
+        std::cout << "computed_hash:      " << computed_hash     << "\n";
+        std::cout << "hash_match:         "
+                  << (hash_present ? (hash_match ? "true" : "false")
+                                    : "(no stored hash)")
+                  << "\n";
+    }
+    return 0;
+}
+
 // ── sign-arbitrary / verify-arbitrary ────────────────────────────────────────
 //
 // Paired commands for OFF-CHAIN, arbitrary-message Ed25519 signing using a
@@ -14818,6 +15525,28 @@ void print_usage() {
         "                                             field names are both accepted. Pass `-` to\n"
         "                                             --tx-json to read from stdin. Exit 0 success,\n"
         "                                             1 args/parse/IO error, 2 --check mismatch.\n"
+        "  inspect-tx --tx-json <file|-> [--json]     READ-ONLY introspection of a signed tx\n"
+        "                                             envelope. Parses every standard field,\n"
+        "                                             decodes the payload per TxType where the\n"
+        "                                             format is known (TRANSFER, STAKE, UNSTAKE,\n"
+        "                                             REGISTER, DEREGISTER, PARAM_CHANGE, MERGE_\n"
+        "                                             EVENT, COMPOSABLE_BATCH, DAPP_REGISTER,\n"
+        "                                             DAPP_CALL), and reports everything for\n"
+        "                                             diagnostic use. No validation, no Ed25519\n"
+        "                                             verify, no daemon round-trip (use validate-\n"
+        "                                             tx / tx-sign-verify / derive-tx-hash for\n"
+        "                                             those). Derived fields include signing_\n"
+        "                                             bytes_hex, computed_hash (= SHA-256(signing_\n"
+        "                                             bytes)), and hash_match (envelope.hash vs.\n"
+        "                                             computed_hash, case-insensitive). Accepts\n"
+        "                                             both envelope shapes — canonical chain JSON\n"
+        "                                             ({type:int, sig}) and sign-anon-tx output\n"
+        "                                             ({type:\"TRANSFER\", signature}) — and the\n"
+        "                                             field names `sig` and `signature` are\n"
+        "                                             interchangeable. --json emits a one-line\n"
+        "                                             machine envelope; default is a human block.\n"
+        "                                             --tx-json `-` reads from stdin. Exit 0\n"
+        "                                             success, 1 args/parse/IO error.\n"
         "  sign-arbitrary --priv-keyfile <path>\n"
         "                 (--msg <str> | --msg-file <path>)\n"
         "                 [--out <file>] [--detached | --bundle]\n"
@@ -15132,6 +15861,7 @@ int main(int argc, char** argv) {
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
+    if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
