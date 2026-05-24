@@ -9626,6 +9626,579 @@ int cmd_bulk_send(int argc, char** argv) {
     return 0;
 }
 
+// determ-wallet bulk-stake — Batch STAKE submission from a single
+// keyfile across many validator domains via the daemon's RPC, with
+// per-row nonce sequencing.
+//
+// Use case:
+//   Operator running multiple validators wants to top up stake on N
+//   validators in one shot (campaign rebalance / committee-eligibility
+//   threshold push / region-scaling). Sibling of `bulk-send` —
+//   identical input + output shapes, but the on-wire txs are STAKE
+//   instead of TRANSFER. STAKE encoding follows the on-chain
+//   convention: tx.to is empty, tx.amount is 0, the stake amount is
+//   carried as an 8-byte little-endian payload (matches
+//   chain::Chain::apply STAKE branch + Node::rpc_stake). The row's
+//   "domain" field is operator-side metadata identifying the
+//   target validator; the chain itself credits stake to tx.from
+//   (the keyfile's address), so the operator typically uses a keyfile
+//   that controls the validator(s) being staked.
+//
+// CLI:
+//   --priv-keyfile <path>      REQUIRED. Single-account JSON
+//                              {address, privkey_hex}. The keyfile's
+//                              address is the staker (tx.from on every
+//                              row).
+//   --stake-list <file>        REQUIRED. JSON
+//                              {"stakes":[{"domain":"validator.v",
+//                              "amount":N,"fee":N (optional)}, ...]} OR
+//                              CSV `domain,amount[,fee]`. Format is
+//                              auto-detected by extension (.json vs
+//                              .csv); files with other extensions are
+//                              parsed as JSON if the first non-whitespace
+//                              byte is '{' or '[', else CSV.
+//   --rpc-port <N>             REQUIRED unless --dry-run. Daemon RPC port.
+//   --fee <N>                  Default fee applied to rows that don't
+//                              specify one. Defaults to 0.
+//   --dry-run                  Skip RPC submission. Each row is built +
+//                              signed + the hash is computed, but nothing
+//                              is sent to the daemon. The result row
+//                              still carries tx_hash, plus the signed tx
+//                              JSON in a new "signed_tx" field, so the
+//                              operator can pipe the output to a cold-
+//                              wallet workflow.
+//   --starting-nonce <N>       Override the starting nonce instead of
+//                              fetching from the daemon.
+//   --continue-on-error        Keep submitting subsequent rows even if
+//                              a row fails. Default is abort-on-first-
+//                              error.
+//   --json                     Accepted for parity; output is always JSON.
+//
+// Output (one-line JSON on stdout):
+//   {"keyfile": "...", "batch_size": N, "submitted": N, "failed": N,
+//    "starting_nonce": N, "ending_nonce": N, "dry_run": false,
+//    "aborted": false,
+//    "results": [
+//      {"row": 0, "domain": "validator1.v", "amount": N, "fee": N,
+//       "nonce": N, "tx_hash": "...", "status": "ok"|"error",
+//       "reason": "..." (only on error),
+//       "signed_tx": {...} (only with --dry-run)},
+//      ...
+//    ]}
+//
+// Exit codes:
+//   0  every row succeeded
+//   1  args / parse / IO / libsodium / RPC-connect error before any row
+//      could be attempted; stake-list validation failure (e.g.
+//      non-positive amount, malformed CSV, file-not-found)
+//   2  at least one row failed
+int cmd_bulk_stake(int argc, char** argv) {
+    std::string priv_keyfile;
+    std::string stake_list;
+    int      rpc_port = -1;
+    uint64_t default_fee = 0;
+    bool     dry_run = false;
+    bool     continue_on_error = false;
+    int64_t  starting_nonce_override = -1;
+    bool     json_out = false;  // accepted; output is always JSON
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--priv-keyfile"   && i + 1 < argc) priv_keyfile = argv[++i];
+        else if (a == "--stake-list"     && i + 1 < argc) stake_list   = argv[++i];
+        else if (a == "--rpc-port"       && i + 1 < argc) rpc_port     = std::atoi(argv[++i]);
+        else if (a == "--fee"            && i + 1 < argc) default_fee  = std::stoull(argv[++i]);
+        else if (a == "--starting-nonce" && i + 1 < argc) starting_nonce_override = std::stoll(argv[++i]);
+        else if (a == "--dry-run")                        dry_run             = true;
+        else if (a == "--continue-on-error")              continue_on_error   = true;
+        else if (a == "--json")                           json_out            = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet bulk-stake --priv-keyfile <path> "
+                "--stake-list <path> --rpc-port <N>\n"
+                "       [--fee <N>] [--dry-run] [--starting-nonce <N>] "
+                "[--continue-on-error] [--json]\n"
+                "\n"
+                "  Batch STAKE submission from a single keyfile across many\n"
+                "  validator domains with per-row nonce sequencing. STAKE\n"
+                "  txs encode the stake amount as an 8-byte LE payload\n"
+                "  (matches the chain's STAKE convention; tx.to is empty,\n"
+                "  tx.amount is 0). --stake-list accepts JSON\n"
+                "  {\"stakes\":[{\"domain\":..,\"amount\":..,\"fee\":..}, ...]}\n"
+                "  or CSV (domain,amount[,fee]) — auto-detected by extension.\n"
+                "  --dry-run builds + signs every tx without submission (for\n"
+                "  cold-wallet pipelines). --continue-on-error keeps going\n"
+                "  past a failed row; default is abort-on-first-error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "bulk-stake: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet bulk-stake --priv-keyfile <path> "
+                         "--stake-list <path> --rpc-port <N> "
+                         "[--fee <N>] [--dry-run] [--starting-nonce <N>] "
+                         "[--continue-on-error] [--json]\n";
+            return 1;
+        }
+    }
+    (void)json_out;
+    if (priv_keyfile.empty() || stake_list.empty()) {
+        std::cerr << "bulk-stake: --priv-keyfile and --stake-list are required\n";
+        return 1;
+    }
+    if (!dry_run && (rpc_port <= 0 || rpc_port > 65535)) {
+        std::cerr << "bulk-stake: --rpc-port <N> is required (1..65535) "
+                     "unless --dry-run is supplied\n";
+        return 1;
+    }
+
+    // ── Load priv keyfile ──────────────────────────────────────────────────
+    std::vector<uint8_t> priv_seed;
+    std::string keyfile_address;
+    {
+        std::string err;
+        if (!load_priv_keyfile(priv_keyfile, priv_seed, keyfile_address, err)) {
+            std::cerr << "bulk-stake: " << err << "\n";
+            return 1;
+        }
+    }
+
+    // ── Parse stake-list ──────────────────────────────────────────────────
+    struct StakeRow {
+        std::string domain;
+        uint64_t    amount;
+        uint64_t    fee;          // resolved (row.fee || default_fee)
+        bool        fee_explicit; // whether row carried its own fee
+    };
+    std::vector<StakeRow> rows;
+
+    auto resolve_fee = [&](std::optional<uint64_t> row_fee) -> std::pair<uint64_t, bool> {
+        if (row_fee.has_value()) return {*row_fee, true};
+        return {default_fee, false};
+    };
+
+    auto ends_with_ci = [](const std::string& s, const std::string& suf) {
+        if (s.size() < suf.size()) return false;
+        for (size_t i = 0; i < suf.size(); ++i) {
+            char a = s[s.size() - suf.size() + i];
+            char b = suf[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+            if (a != b) return false;
+        }
+        return true;
+    };
+
+    std::ifstream sf(stake_list, std::ios::binary);
+    if (!sf) {
+        std::cerr << "bulk-stake: cannot open --stake-list: " << stake_list << "\n";
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        return 1;
+    }
+    std::string body((std::istreambuf_iterator<char>(sf)),
+                      std::istreambuf_iterator<char>());
+
+    bool is_json = false;
+    if (ends_with_ci(stake_list, ".json")) {
+        is_json = true;
+    } else if (ends_with_ci(stake_list, ".csv")) {
+        is_json = false;
+    } else {
+        // Sniff first non-whitespace byte.
+        size_t p = 0;
+        while (p < body.size() &&
+               (body[p] == ' ' || body[p] == '\t' || body[p] == '\r' ||
+                body[p] == '\n')) ++p;
+        is_json = (p < body.size() && (body[p] == '{' || body[p] == '['));
+    }
+
+    if (is_json) {
+        nlohmann::json doc;
+        try { doc = nlohmann::json::parse(body); }
+        catch (std::exception& e) {
+            std::cerr << "bulk-stake: --stake-list JSON parse error: "
+                      << e.what() << "\n";
+            sodium_memzero(priv_seed.data(), priv_seed.size());
+            return 1;
+        }
+        // Accept either {"stakes":[...]} or a bare [...] for parity
+        // with bulk-send. Spec-mandated shape is the wrapped form.
+        const nlohmann::json* arr = nullptr;
+        if (doc.is_object() && doc.contains("stakes") && doc["stakes"].is_array()) {
+            arr = &doc["stakes"];
+        } else if (doc.is_array()) {
+            arr = &doc;
+        } else {
+            std::cerr << "bulk-stake: --stake-list JSON must be "
+                         "{\"stakes\":[{domain,amount,fee?}, ...]} "
+                         "or a bare array of {domain,amount,fee?} objects\n";
+            sodium_memzero(priv_seed.data(), priv_seed.size());
+            return 1;
+        }
+        for (size_t i = 0; i < arr->size(); ++i) {
+            const auto& row = (*arr)[i];
+            if (!row.is_object()) {
+                std::cerr << "bulk-stake: --stake-list row " << i
+                          << " is not a JSON object\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            if (!row.contains("domain") || !row["domain"].is_string()) {
+                std::cerr << "bulk-stake: --stake-list row " << i
+                          << " missing string field 'domain'\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            if (!row.contains("amount") || !row["amount"].is_number()) {
+                std::cerr << "bulk-stake: --stake-list row " << i
+                          << " missing numeric field 'amount'\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            StakeRow sr;
+            sr.domain = row["domain"].get<std::string>();
+            sr.amount = row["amount"].is_number_unsigned()
+                          ? row["amount"].get<uint64_t>()
+                          : static_cast<uint64_t>(row["amount"].get<int64_t>());
+            // Reject non-positive stake amounts — STAKE with amount=0 is
+            // a no-op on-chain that still consumes a nonce + fee. Catch
+            // it early.
+            if (sr.amount == 0) {
+                std::cerr << "bulk-stake: --stake-list row " << i
+                          << " amount must be positive (got 0)\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            std::optional<uint64_t> row_fee;
+            if (row.contains("fee") && row["fee"].is_number()) {
+                row_fee = row["fee"].is_number_unsigned()
+                            ? row["fee"].get<uint64_t>()
+                            : static_cast<uint64_t>(row["fee"].get<int64_t>());
+            }
+            auto rf = resolve_fee(row_fee);
+            sr.fee = rf.first;
+            sr.fee_explicit = rf.second;
+            rows.push_back(sr);
+        }
+    } else {
+        // CSV: header-less; each non-empty, non-comment line is
+        // `domain,amount[,fee]`. Lines starting with '#' are comments.
+        // A leading line matching `domain,amount` (case-insensitive)
+        // is treated as a header and skipped.
+        std::istringstream iss(body);
+        std::string line;
+        size_t lineno = 0;
+        while (std::getline(iss, line)) {
+            ++lineno;
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == ' ' ||
+                    line.back() == '\t')) line.pop_back();
+            size_t pos = 0;
+            while (pos < line.size() &&
+                   (line[pos] == ' ' || line[pos] == '\t')) ++pos;
+            if (pos > 0) line.erase(0, pos);
+            if (line.empty()) continue;
+            if (line[0] == '#') continue;
+
+            // Header sniff: skip a literal "domain,..." first line.
+            if (rows.empty() && !line.empty()) {
+                std::string lowfirst;
+                for (size_t k = 0; k < line.size() && line[k] != ','; ++k) {
+                    char c = line[k];
+                    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+                    lowfirst.push_back(c);
+                }
+                if (lowfirst == "domain") continue;
+            }
+
+            std::vector<std::string> cols;
+            {
+                std::string cur;
+                for (char c : line) {
+                    if (c == ',') { cols.push_back(cur); cur.clear(); }
+                    else          { cur.push_back(c); }
+                }
+                cols.push_back(cur);
+            }
+            if (cols.size() < 2) {
+                std::cerr << "bulk-stake: --stake-list CSV line " << lineno
+                          << " expected `domain,amount[,fee]`; got '" << line << "'\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            for (auto& c : cols) {
+                while (!c.empty() && (c.back() == ' ' || c.back() == '\t'))
+                    c.pop_back();
+                size_t pp = 0;
+                while (pp < c.size() && (c[pp] == ' ' || c[pp] == '\t')) ++pp;
+                if (pp > 0) c.erase(0, pp);
+            }
+            StakeRow sr;
+            sr.domain = cols[0];
+            if (sr.domain.empty()) {
+                std::cerr << "bulk-stake: --stake-list CSV line " << lineno
+                          << " domain is empty\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            try {
+                sr.amount = std::stoull(cols[1]);
+            } catch (std::exception&) {
+                std::cerr << "bulk-stake: --stake-list CSV line " << lineno
+                          << " amount '" << cols[1] << "' is not a u64\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            if (sr.amount == 0) {
+                std::cerr << "bulk-stake: --stake-list CSV line " << lineno
+                          << " amount must be positive (got 0)\n";
+                sodium_memzero(priv_seed.data(), priv_seed.size());
+                return 1;
+            }
+            std::optional<uint64_t> row_fee;
+            if (cols.size() >= 3 && !cols[2].empty()) {
+                try { row_fee = std::stoull(cols[2]); }
+                catch (std::exception&) {
+                    std::cerr << "bulk-stake: --stake-list CSV line " << lineno
+                              << " fee '" << cols[2] << "' is not a u64\n";
+                    sodium_memzero(priv_seed.data(), priv_seed.size());
+                    return 1;
+                }
+            }
+            auto rf = resolve_fee(row_fee);
+            sr.fee = rf.first;
+            sr.fee_explicit = rf.second;
+            rows.push_back(sr);
+        }
+    }
+
+    if (rows.empty()) {
+        std::cerr << "bulk-stake: --stake-list parsed to zero rows\n";
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        return 1;
+    }
+
+    // ── Init libsodium + derive keypair from the priv seed ────────────────
+    if (!primitives::init_libsodium()) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        std::cerr << "bulk-stake: libsodium init failed\n";
+        return 1;
+    }
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "bulk-stake: crypto_sign_seed_keypair failed\n";
+        return 1;
+    }
+    // For anon-form keyfiles (0x + 64 hex) the address is derivable
+    // from the priv_seed via pubkey-hex; cross-check to catch corrupt
+    // / mismatched keyfiles before we waste a daemon round-trip. For
+    // domain-name keyfiles (validator addresses; e.g. "node1.v") we
+    // cannot derive the address from the seed — the binding is the
+    // chain registry's record. We accept the claimed address verbatim
+    // and rely on the daemon-side signature verification (which
+    // looks up the registered ed_pub by domain) to catch a mismatch.
+    bool keyfile_is_anon = (keyfile_address.size() == 66
+                          && keyfile_address.compare(0, 2, "0x") == 0);
+    if (keyfile_is_anon) {
+        std::string derived_addr = "0x" + to_hex(pub);
+        if (derived_addr != keyfile_address) {
+            sodium_memzero(priv_seed.data(), priv_seed.size());
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "bulk-stake: --priv-keyfile address mismatch: "
+                         "keyfile.address=" << keyfile_address
+                      << " derived=" << derived_addr
+                      << " (keyfile is corrupt or wrong shape)\n";
+            return 1;
+        }
+    }
+    sodium_memzero(priv_seed.data(), priv_seed.size());
+
+    // ── Optional: connect to RPC, fetch starting nonce ────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok && !dry_run) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "bulk-stake: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    sock_t rpc_sock = kInvalidSock;
+    std::string inbuf;
+    uint64_t starting_nonce = 0;
+    bool nonce_fetched = false;
+    if (rpc_port > 0) {
+        std::string conn_err;
+        rpc_sock = rpc_connect_localhost(
+            static_cast<uint16_t>(rpc_port), conn_err);
+        if (rpc_sock == kInvalidSock) {
+            if (!dry_run) {
+                sodium_memzero(sk.data(), sk.size());
+                std::cerr << "bulk-stake: " << conn_err << "\n";
+                return 1;
+            }
+        } else {
+            try {
+                auto n_resp = rpc_call_over_socket(
+                    rpc_sock, inbuf, "nonce", {{"domain", keyfile_address}});
+                if (n_resp.contains("next_nonce") && n_resp["next_nonce"].is_number()) {
+                    starting_nonce = n_resp["next_nonce"].is_number_unsigned()
+                        ? n_resp["next_nonce"].get<uint64_t>()
+                        : static_cast<uint64_t>(n_resp["next_nonce"].get<int64_t>());
+                }
+                nonce_fetched = true;
+            } catch (std::exception& e) {
+                if (!dry_run) {
+                    close_sock(rpc_sock);
+                    sodium_memzero(sk.data(), sk.size());
+                    std::cerr << "bulk-stake: nonce query failed: "
+                              << e.what() << "\n";
+                    return 1;
+                }
+            }
+        }
+    }
+    if (starting_nonce_override >= 0) {
+        starting_nonce = static_cast<uint64_t>(starting_nonce_override);
+        nonce_fetched = true;
+    }
+    if (!nonce_fetched) {
+        starting_nonce = 0;
+    }
+
+    // ── Per-row build / sign / submit ─────────────────────────────────────
+    nlohmann::json results = nlohmann::json::array();
+    size_t submitted = 0;
+    size_t failed    = 0;
+    bool   aborted   = false;
+    uint64_t ending_nonce = starting_nonce;
+
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto& sr = rows[i];
+        uint64_t row_nonce = starting_nonce + static_cast<uint64_t>(i);
+
+        nlohmann::json row_out;
+        row_out["row"]    = i;
+        row_out["domain"] = sr.domain;
+        row_out["amount"] = sr.amount;
+        row_out["fee"]    = sr.fee;
+        row_out["nonce"]  = row_nonce;
+
+        // Build canonical signing_bytes for STAKE. STAKE convention
+        // (matches chain::Transaction::signing_bytes +
+        // Node::rpc_stake + chain::apply STAKE branch):
+        //   type   = TxType::STAKE == 3
+        //   from   = keyfile_address (staker)
+        //   to     = ""    (empty per current STAKE convention)
+        //   amount = 0     (chain ignores tx.amount for STAKE)
+        //   fee    = sr.fee
+        //   nonce  = row_nonce
+        //   payload = 8-byte little-endian encoding of sr.amount
+        //             (chain reads stake amount from here)
+        std::vector<uint8_t> payload(8);
+        for (int j = 0; j < 8; ++j)
+            payload[j] = static_cast<uint8_t>((sr.amount >> (8 * j)) & 0xFF);
+
+        std::vector<uint8_t> sb;
+        sb.reserve(1 + keyfile_address.size() + 1 + 0 + 1 + 24 + 8);
+        sb.push_back(static_cast<uint8_t>(3));  // TxType::STAKE == 3
+        sb.insert(sb.end(), keyfile_address.begin(), keyfile_address.end());
+        sb.push_back(0);
+        // tx.to is empty → just the null terminator.
+        sb.push_back(0);
+        for (int j = 7; j >= 0; --j) sb.push_back((uint64_t{0}     >> (j * 8)) & 0xFF); // amount=0
+        for (int j = 7; j >= 0; --j) sb.push_back((sr.fee          >> (j * 8)) & 0xFF);
+        for (int j = 7; j >= 0; --j) sb.push_back((row_nonce       >> (j * 8)) & 0xFF);
+        sb.insert(sb.end(), payload.begin(), payload.end());
+
+        std::array<uint8_t, 32> sb_sha{};
+        SHA256(sb.data(), sb.size(), sb_sha.data());
+
+        std::array<uint8_t, crypto_sign_BYTES> sig{};
+        unsigned long long sig_len = 0;
+        if (crypto_sign_detached(sig.data(), &sig_len,
+                                  sb.data(), sb.size(),
+                                  sk.data()) != 0 ||
+            sig_len != crypto_sign_BYTES) {
+            row_out["status"]  = "error";
+            row_out["reason"]  = "crypto_sign_detached failed";
+            row_out["tx_hash"] = to_hex(sb_sha);
+            ++failed;
+            results.push_back(row_out);
+            if (!continue_on_error) { aborted = true; break; }
+            continue;
+        }
+
+        // Transaction JSON envelope (matches Transaction::to_json).
+        nlohmann::json tx_json = {
+            {"type",    3},                  // TxType::STAKE
+            {"from",    keyfile_address},
+            {"to",      ""},                 // STAKE convention: empty
+            {"amount",  0},                  // chain ignores; payload carries
+            {"fee",     sr.fee},
+            {"nonce",   row_nonce},
+            {"payload", to_hex(payload)},
+            {"sig",     to_hex(sig)},
+            {"hash",    to_hex(sb_sha)},
+        };
+
+        row_out["tx_hash"] = to_hex(sb_sha);
+
+        if (dry_run) {
+            row_out["signed_tx"] = tx_json;
+            row_out["status"]    = "ok";
+            ++submitted;
+            ending_nonce = row_nonce + 1;
+            results.push_back(row_out);
+            continue;
+        }
+
+        try {
+            auto resp = rpc_call_over_socket(
+                rpc_sock, inbuf, "submit_tx", {{"tx", tx_json}});
+            std::string server_status = resp.value("status", std::string{});
+            std::string server_hash   = resp.value("hash",   std::string{});
+            if (server_status == "queued") {
+                row_out["status"] = "ok";
+                if (!server_hash.empty()) row_out["tx_hash"] = server_hash;
+                ++submitted;
+                ending_nonce = row_nonce + 1;
+            } else {
+                row_out["status"] = "error";
+                row_out["reason"] = "unexpected submit_tx response: " + resp.dump();
+                ++failed;
+            }
+        } catch (std::exception& e) {
+            row_out["status"] = "error";
+            row_out["reason"] = e.what();
+            ++failed;
+            results.push_back(row_out);
+            if (!continue_on_error) { aborted = true; break; }
+            continue;
+        }
+
+        results.push_back(row_out);
+    }
+
+    if (rpc_sock != kInvalidSock) close_sock(rpc_sock);
+    sodium_memzero(sk.data(), sk.size());
+
+    nlohmann::json out;
+    out["keyfile"]        = priv_keyfile;
+    out["batch_size"]     = rows.size();
+    out["submitted"]      = submitted;
+    out["failed"]         = failed;
+    out["starting_nonce"] = starting_nonce;
+    out["ending_nonce"]   = ending_nonce;
+    out["dry_run"]        = dry_run;
+    out["aborted"]        = aborted;
+    out["results"]        = results;
+    std::cout << out.dump() << "\n";
+
+    if (failed > 0) return 2;
+    return 0;
+}
+
 // determ-wallet stake-bulk-query — bulk-query validator stake info for
 // many domain names against a running daemon's RPC.
 //
@@ -10640,6 +11213,42 @@ void print_usage() {
         "                                             rows succeeded, 1 args/parse/IO/RPC-connect\n"
         "                                             error before any row, 2 at least one row\n"
         "                                             failed.\n"
+        "  bulk-stake --priv-keyfile <path>           Batch STAKE submission from a single keyfile\n"
+        "             --stake-list <path> --rpc-port <N>\n"
+        "             [--fee <N>] [--dry-run] [--starting-nonce <N>]\n"
+        "             [--continue-on-error] [--json]\n"
+        "                                             across many validator domains via RPC with\n"
+        "                                             per-row nonce sequencing. Sibling of bulk-\n"
+        "                                             send: identical envelope shape, but on-wire\n"
+        "                                             txs are STAKE (type=3) — tx.to is empty,\n"
+        "                                             tx.amount is 0, and the stake amount is\n"
+        "                                             carried as an 8-byte LE payload (matches\n"
+        "                                             chain::Chain::apply STAKE branch +\n"
+        "                                             Node::rpc_stake convention). Use case:\n"
+        "                                             operator running multiple validators tops up\n"
+        "                                             stake on N validators in one shot (campaign\n"
+        "                                             rebalance, committee-eligibility threshold,\n"
+        "                                             region scaling). --stake-list accepts JSON\n"
+        "                                             {\"stakes\":[{\"domain\":..,\"amount\":..,\n"
+        "                                             \"fee\":..}, ...]} or CSV `domain,amount[,fee]`\n"
+        "                                             (auto-detected by extension; sniffed by first\n"
+        "                                             non-ws byte otherwise — accepts {/[ for JSON).\n"
+        "                                             --fee sets the default fee for rows omitting\n"
+        "                                             one. --dry-run builds + signs each tx but\n"
+        "                                             skips RPC submission (each row gains a\n"
+        "                                             'signed_tx' field). --starting-nonce overrides\n"
+        "                                             the daemon-fetched start. --continue-on-error\n"
+        "                                             keeps submitting after a failed row; default\n"
+        "                                             aborts. Output (one-line JSON): {keyfile,\n"
+        "                                             batch_size, submitted, failed, starting_nonce,\n"
+        "                                             ending_nonce, dry_run, aborted, results:\n"
+        "                                             [{row, domain, amount, fee, nonce, tx_hash,\n"
+        "                                             status:ok|error, reason?, signed_tx?}]}. Rows\n"
+        "                                             with amount=0 are rejected at parse-time\n"
+        "                                             (STAKE-with-zero is a no-op that still burns\n"
+        "                                             a nonce + fee). Exit 0 all rows succeeded,\n"
+        "                                             1 args/parse/IO/RPC-connect error before any\n"
+        "                                             row, 2 at least one row failed.\n"
         "  stake-bulk-query --rpc-port <N>            Batch-query validator stake info for a list\n"
         "                   --domains <list|@file> [--json]\n"
         "                                             of domain names against a running daemon's\n"
@@ -10745,6 +11354,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
     if (cmd == "bulk-send")       return cmd_bulk_send       (argc - 2, argv + 2);
+    if (cmd == "bulk-stake")      return cmd_bulk_stake      (argc - 2, argv + 2);
     if (cmd == "stake-bulk-query") return cmd_stake_bulk_query(argc - 2, argv + 2);
     if (cmd == "validator-roster-snapshot") return cmd_validator_roster_snapshot(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
