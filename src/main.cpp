@@ -942,6 +942,29 @@ Additional in-process tests:
                                               shard_address_salt do NOT change
                                               the hash; pins the current no-
                                               effect behavior).
+  determ test-empty-genesis-edge              Minimal / edge-case GenesisConfig
+                                              pinning — default-constructed
+                                              defaults (empty collections, K=M=3,
+                                              SINGLE / shard 0, STAKE_INCLUSION,
+                                              bft_enabled=true); genesis with
+                                              zero allocations (1 creator + empty
+                                              initial_balances → Chain boots,
+                                              account auto-created at 0);
+                                              single-creator K=1 (Chain boots,
+                                              select_m_creators(K=1,N=1) = [0]
+                                              deterministically); allocation
+                                              with balance=0 (accepted, not
+                                              dropped from initial_state);
+                                              creator with initial_stake=0
+                                              (RegistryEntry installed,
+                                              stakes_[] entry skipped per
+                                              `if (a.stake > 0)` guard);
+                                              compute_genesis_hash on empty
+                                              config deterministic + non-zero;
+                                              compute_state_root on minimal-
+                                              genesis Chain non-zero +
+                                              cross-instance deterministic
+                                              (k:/c: namespaces always populate).
   determ test-anon-address-derivation         make_anon_address(Ed25519 pubkey)
                                               byte-identity contract — pins
                                               the derivation surface every
@@ -33656,6 +33679,377 @@ int main(int argc, char** argv) {
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": genesis-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    // test-empty-genesis-edge: pin minimal-genesis + zero-allocation +
+    // single-creator + zero-stake edge cases. Companion to:
+    //   - test-genesis (compute_genesis_hash sensitivity / S-018 hardening)
+    //   - test-genesis-determinism (R33A5 JSON + block byte-identity)
+    //   - test-genesis-message (genesis_message hash-mixing)
+    //   - test-genesis-sharded (chain_role / shard_id / committee_region)
+    //   - test-genesis-with-region (R1 regional creator coverage)
+    //
+    // Targets corners of GenesisConfig that the sibling tests don't pin:
+    //   (1) Default-constructed GenesisConfig field defaults — every
+    //       header default at its expected value. If the struct's
+    //       default-member-initializers ever drift, this catches it.
+    //   (2) Genesis with zero allocations (no initial_balances) but
+    //       at least one creator — make_genesis_block + Chain boot still
+    //       succeed; creator's account auto-created with balance 0.
+    //   (3) Single-creator genesis (K=1) — committee-selection
+    //       degenerate case: select_m_creators(K=1, N=1) returns
+    //       [0] deterministically.
+    //   (4) Allocation with balance=0 — accepted, account auto-created
+    //       with balance 0; A1 genesis_total accounting unaffected.
+    //   (5) Creator with initial_stake=0 — accepted, RegistryEntry
+    //       installed at genesis (since ed_pub != zero), but no stake
+    //       entry (per apply_transactions `if (a.stake > 0)` gate).
+    //   (6) Determinism on empty: compute_genesis_hash(EmptyCfg) is
+    //       stable across N invocations (no hidden process state).
+    //   (7) compute_state_root on minimal-genesis Chain — well-defined,
+    //       non-zero (k:/c: namespaces always populate via Chain
+    //       constants), deterministic across rebuilds.
+    //
+    // Coverage: 7 scenarios, ~17 assertions.
+    if (cmd == "test-empty-genesis-edge") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
+        };
+
+        // === Scenario 1: Default-constructed GenesisConfig ===
+        //
+        // Pins every documented header default. If a future change
+        // drifts one (e.g., flipping bft_enabled to false), the
+        // chain-identity surface changes silently and existing
+        // deployments stop matching. Defaults locked here: empty
+        // collections (initial_creators/initial_balances), empty
+        // chain_id (operator MUST set), default genesis_message,
+        // K = M = 3 (strong BFT), SINGLE / no shard, STAKE_INCLUSION,
+        // min_stake=1000, bft_enabled=true.
+        //
+        // 3 assertions.
+        {
+            GenesisConfig c;
+
+            // (1a) Collections + chain_id default empty.
+            check(c.initial_creators.empty()
+                  && c.initial_balances.empty()
+                  && c.chain_id.empty(),
+                  "(1) Default GenesisConfig: initial_creators + "
+                  "initial_balances both empty; chain_id default empty "
+                  "(operator must explicitly set)");
+
+            // (1b) Consensus + sharding defaults.
+            check(c.m_creators == 3
+                  && c.k_block_sigs == 3
+                  && c.chain_role == ChainRole::SINGLE
+                  && c.shard_id == 0
+                  && c.initial_shard_count == 1
+                  && c.epoch_blocks == 1000,
+                  "(1) Default GenesisConfig: m_creators=k_block_sigs=3 "
+                  "(strong BFT K-of-K), chain_role=SINGLE, shard_id=0, "
+                  "initial_shard_count=1, epoch_blocks=1000");
+
+            // (1c) Economics + BFT escalation + inclusion defaults.
+            check(c.bft_enabled == true
+                  && c.bft_escalation_threshold == 5
+                  && c.inclusion_model == InclusionModel::STAKE_INCLUSION
+                  && c.min_stake == 1000
+                  && c.block_subsidy == 0
+                  && c.subsidy_pool_initial == 0
+                  && c.zeroth_pool_initial == 0
+                  && c.governance_mode == 0
+                  && c.genesis_message == DEFAULT_GENESIS_MESSAGE,
+                  "(1) Default GenesisConfig: bft_enabled=true, "
+                  "escalation_threshold=5, STAKE_INCLUSION, "
+                  "min_stake=1000, subsidies/pool=0, "
+                  "governance_mode=uncontrolled, default genesis_message");
+        }
+
+        // === Scenario 2: Genesis with zero allocations ===
+        //
+        // Build a config with 1 creator but EMPTY initial_balances.
+        // make_genesis_block must succeed; Chain must boot from this
+        // genesis; the creator's account auto-creates with balance 0
+        // (the apply_transactions genesis-special-case writes
+        // accounts_[domain].balance = 0 unconditionally from the
+        // initial_state[] entry).
+        //
+        // 3 assertions.
+        {
+            GenesisConfig c;
+            c.chain_id = "empty-allocs-test";
+            GenesisCreator gc;
+            gc.domain        = "alice";
+            for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                gc.ed_pub[i] = uint8_t(0x10 + i);
+            gc.initial_stake = 500;
+            c.initial_creators.push_back(gc);
+            // initial_balances remains empty.
+
+            Block g = make_genesis_block(c);
+            check(g.index == 0
+                  && g.creators.size() == 1
+                  && g.creators[0] == "alice",
+                  "(2) Zero allocations: make_genesis_block succeeds on "
+                  "config with 1 creator + empty initial_balances; block "
+                  "creators[] = [alice]");
+
+            Chain chain(g);
+            check(chain.height() == 1
+                  && chain.balance("alice") == 0,
+                  "(2) Zero allocations: Chain bootstraps from this "
+                  "genesis; alice's balance auto-created at 0 (no "
+                  "explicit allocation needed)");
+
+            check(chain.stake("alice") == 500
+                  && chain.registrant("alice").has_value(),
+                  "(2) Zero allocations: alice is registered with "
+                  "stake=500 even without an initial_balances entry "
+                  "(initial_stake is independent of initial_balances)");
+        }
+
+        // === Scenario 3: Single-creator genesis (K=1) ===
+        //
+        // Degenerate-but-valid committee size. Pin that K=1 works
+        // through:
+        //   (a) make_genesis_block: produces a valid Block 0
+        //   (b) Chain bootstrap: accepts the singleton creator
+        //   (c) select_m_creators(K=1, N=1) returns [0]
+        //       deterministically — base case for the hybrid
+        //       rejection-sampling / Fisher-Yates selector.
+        //
+        // 3 assertions.
+        {
+            GenesisConfig c;
+            c.chain_id     = "single-creator-test";
+            c.m_creators   = 1;
+            c.k_block_sigs = 1;
+            GenesisCreator gc;
+            gc.domain        = "soloist";
+            for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                gc.ed_pub[i] = uint8_t(0x77);
+            gc.initial_stake = 5000;
+            c.initial_creators.push_back(gc);
+            GenesisAllocation ba;
+            ba.domain = "soloist"; ba.balance = 1234;
+            c.initial_balances.push_back(ba);
+
+            Block g = make_genesis_block(c);
+            Chain chain(g);
+            check(chain.height() == 1
+                  && chain.balance("soloist") == 1234
+                  && chain.stake("soloist") == 5000,
+                  "(3) Single-creator (K=1): Chain boots; soloist's "
+                  "balance=1234 + stake=5000 installed at genesis");
+
+            // Committee-selection at K=1, N=1: must return [0]
+            // regardless of random_state.
+            Hash rs{};
+            for (size_t i = 0; i < rs.size(); ++i) rs[i] = uint8_t(0xAB);
+            std::vector<size_t> picks = select_m_creators(rs, 1, 1);
+            check(picks.size() == 1 && picks[0] == 0,
+                  "(3) Single-creator (K=1): select_m_creators(K=1,N=1) "
+                  "returns the singleton index [0] (degenerate case)");
+
+            // Determinism across two random_state values: K=N=1 means
+            // there's only one possible answer regardless of seed.
+            Hash rs2{};
+            for (size_t i = 0; i < rs2.size(); ++i) rs2[i] = uint8_t(0xCD);
+            std::vector<size_t> picks2 = select_m_creators(rs2, 1, 1);
+            check(picks2.size() == 1 && picks2[0] == 0,
+                  "(3) Single-creator (K=1): select_m_creators returns "
+                  "[0] regardless of random_state (no choice exists at "
+                  "K=N=1)");
+        }
+
+        // === Scenario 4: Allocation with balance=0 ===
+        //
+        // Pin that GenesisAllocation { balance: 0 } is accepted, NOT
+        // silently dropped. Account auto-created with balance 0 even
+        // for an explicit-zero allocation (matches the "first credit
+        // creates account" semantic). The A1 genesis_total includes
+        // this account but adds 0.
+        //
+        // 2 assertions.
+        {
+            GenesisConfig c;
+            c.chain_id = "zero-balance-alloc";
+            GenesisCreator gc;
+            gc.domain        = "owner";
+            for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                gc.ed_pub[i] = uint8_t(0x33);
+            gc.initial_stake = 1000;
+            c.initial_creators.push_back(gc);
+            // Explicit zero-balance allocation for a non-creator domain.
+            GenesisAllocation zero_ba;
+            zero_ba.domain  = "ghost";
+            zero_ba.balance = 0;
+            c.initial_balances.push_back(zero_ba);
+            // Owner gets a non-zero balance for sanity.
+            GenesisAllocation owner_ba;
+            owner_ba.domain  = "owner";
+            owner_ba.balance = 100;
+            c.initial_balances.push_back(owner_ba);
+
+            Block g = make_genesis_block(c);
+            Chain chain(g);
+            check(chain.balance("ghost") == 0
+                  && chain.balance("owner") == 100,
+                  "(4) Zero-balance alloc: ghost (balance=0) accepted; "
+                  "owner (balance=100) credited normally");
+
+            // The genesis block's initial_state must contain BOTH
+            // entries — the zero-balance alloc is NOT a no-op at the
+            // block-encoding layer.
+            bool found_ghost = false, found_owner = false;
+            for (auto& a : g.initial_state) {
+                if (a.domain == "ghost") found_ghost = true;
+                if (a.domain == "owner") found_owner = true;
+            }
+            check(found_ghost && found_owner,
+                  "(4) Zero-balance alloc: both 'ghost' (balance=0) + "
+                  "'owner' (balance=100) appear in block.initial_state "
+                  "(zero-balance allocs are not silently dropped from "
+                  "the genesis block encoding)");
+        }
+
+        // === Scenario 5: Creator with initial_stake=0 ===
+        //
+        // Per apply_transactions: registry entry installed when ed_pub
+        // != zero (which it always is for a real creator), but NO
+        // stake entry created when initial_stake == 0 (guarded by
+        // `if (a.stake > 0)`). This is the under-staked-at-genesis
+        // case — operator must STAKE later before passing the FA1
+        // min_stake gate to be selectable on a committee.
+        //
+        // 3 assertions.
+        {
+            GenesisConfig c;
+            c.chain_id = "zero-stake-creator";
+            GenesisCreator gc;
+            gc.domain        = "newbie";
+            for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                gc.ed_pub[i] = uint8_t(0x44);
+            gc.initial_stake = 0;   // edge: registered but unstaked.
+            c.initial_creators.push_back(gc);
+
+            Block g = make_genesis_block(c);
+            Chain chain(g);
+
+            // (5a) Registry installed even with zero stake.
+            auto re = chain.registrant("newbie");
+            check(re.has_value() && re->ed_pub == gc.ed_pub
+                  && re->active_from == 0,
+                  "(5) Zero-stake creator: RegistryEntry installed "
+                  "(ed_pub matches, active_from=0) — creator is in the "
+                  "registry despite no stake");
+
+            // (5b) No stake entry: Chain::stake returns 0.
+            check(chain.stake("newbie") == 0,
+                  "(5) Zero-stake creator: Chain::stake('newbie') == 0 "
+                  "(apply_transactions guard `if (a.stake > 0)` skips "
+                  "stakes_[] insertion for zero-stake entries)");
+
+            // (5c) Balance auto-created at 0 even without an
+            // initial_balances entry.
+            check(chain.balance("newbie") == 0,
+                  "(5) Zero-stake creator: account auto-created with "
+                  "balance=0 (the initial_state[] entry writes the "
+                  "balance unconditionally)");
+        }
+
+        // === Scenario 6: Genesis-hash determinism on the empty config ===
+        //
+        // The pathological empty-config case — default-constructed,
+        // no fields set — must produce a STABLE compute_genesis_hash
+        // across repeated calls. Pins that compute_genesis_hash
+        // depends ONLY on the config bytes, not on call-site,
+        // call-order, or hidden process-local state. If a future
+        // change pulls in clock / RNG / env-var at hash time, this
+        // catches it.
+        //
+        // 2 assertions.
+        {
+            GenesisConfig c1;  // default-constructed
+            Hash h1 = compute_genesis_hash(c1);
+            Hash h2 = compute_genesis_hash(c1);
+            GenesisConfig c2;  // fresh default-constructed
+            Hash h3 = compute_genesis_hash(c2);
+            Hash h4 = compute_genesis_hash(c2);
+
+            check(h1 == h2 && h2 == h3 && h3 == h4,
+                  "(6) Empty-config determinism: compute_genesis_hash "
+                  "over default-constructed config produces the same "
+                  "hash across 4 calls (2 instances × 2 calls) — no "
+                  "hidden process state");
+
+            // Sanity: the hash itself is non-zero (the builder mixes
+            // at least the DTM-genesis-v1 magic + chain_role + shard_id).
+            Hash zero{};
+            check(h1 != zero,
+                  "(6) Empty-config determinism: empty-config genesis "
+                  "hash is non-zero (the magic + role + shard_id "
+                  "prefix always contributes content to the SHA-256)");
+        }
+
+        // === Scenario 7: compute_state_root on minimal genesis ===
+        //
+        // Build a Chain from a minimal-but-valid genesis (1 creator,
+        // empty balances). compute_state_root must be:
+        //   (a) non-zero (k:/c: namespaces always populate via Chain's
+        //       set_* constants and accumulator counters, even on a
+        //       fresh genesis);
+        //   (b) deterministic across two rebuilds from the SAME config
+        //       (catches hidden state in compute_state_root).
+        //
+        // 2 assertions.
+        {
+            auto make_min_cfg = []() {
+                GenesisConfig c;
+                c.chain_id = "min-state-root";
+                GenesisCreator gc;
+                gc.domain = "lone";
+                for (size_t i = 0; i < gc.ed_pub.size(); ++i)
+                    gc.ed_pub[i] = uint8_t(0x88);
+                gc.initial_stake = 1000;
+                c.initial_creators.push_back(gc);
+                return c;
+            };
+
+            Chain a(make_genesis_block(make_min_cfg()));
+            Chain b(make_genesis_block(make_min_cfg()));
+            Hash r_a = a.compute_state_root();
+            Hash r_b = b.compute_state_root();
+
+            Hash zero{};
+            check(r_a != zero,
+                  "(7) Minimal-genesis state_root: non-zero (k:/c: "
+                  "namespaces always contribute leaves via Chain "
+                  "constants + A1 accumulator counters)");
+
+            check(r_a == r_b,
+                  "(7) Minimal-genesis state_root: two Chains built "
+                  "from identical minimal-genesis configs produce the "
+                  "SAME state_root (cross-instance determinism on the "
+                  "empty-balances / single-creator path)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": empty-genesis-edge ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
