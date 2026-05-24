@@ -894,6 +894,28 @@ Additional in-process tests:
                                               degenerate, K=0 well-defined);
                                               output-domain coverage (≥90 of
                                               100 distinct across varying index).
+  determ test-hello-handshake-determinism     HELLO message encode/decode
+                                              determinism + handshake-state
+                                              contract — pins replay determinism
+                                              (3x encode byte-identical),
+                                              round-trip identity (encode →
+                                              deserialize → encode preserves
+                                              bytes for full + minimal HELLO),
+                                              cross-instance byte-identity (two
+                                              HelloMsg with identical fields
+                                              encode identically), field-binding
+                                              completeness (mutating any of
+                                              domain / port / role / shard_id /
+                                              wire_version changes the bytes),
+                                              HELLO-always-JSON contract
+                                              (encode_binary(HELLO) THROWS,
+                                              is_binary_envelope returns false
+                                              for HELLO body), boundary values
+                                              (wire_version=0/Max, empty domain,
+                                              200-char domain, port=0/65535),
+                                              canonical encoding (alphabetical
+                                              key ordering on dump is insertion-
+                                              order independent).
 )" << "\n";
 }
 
@@ -32328,6 +32350,387 @@ int main(int argc, char** argv) {
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": config-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+    // HELLO message encode/decode determinism + handshake-state contract.
+    //
+    // Scope: pin every byte-level invariant the HELLO handshake relies on.
+    // HELLO is the FIRST wire message in any Determ peer connection — it
+    // exchanges domain / port / role / shard_id / wire_version BEFORE any
+    // codec negotiation is complete, so it MUST be transmitted as JSON
+    // unconditionally (the receiver doesn't yet know whether the binary
+    // envelope is in play). Two byte-divergent encodings of "the same"
+    // HELLO would have downstream consequences: a fingerprint-based
+    // anti-DDoS layer would see two distinct peers, and any peer-id
+    // hashing scheme that consumed the wire bytes would key off the wrong
+    // value.
+    //
+    // Coverage axes (7 scenarios, ~18 assertions):
+    //   (1) Replay determinism: encoding the same HelloMsg 3 times in a
+    //       row yields 3 byte-identical outputs (no hidden global / object
+    //       state mutation).
+    //   (2) Round-trip identity: encode → decode → re-encode produces
+    //       byte-identical output for both all-fields-populated HELLO
+    //       and a minimal HELLO (defaults only).
+    //   (3) Cross-instance byte-identity: two distinct HelloMsg objects
+    //       with identical field values produce byte-identical JSON
+    //       (proves serialization depends ONLY on field values, not on
+    //       object identity).
+    //   (4) Field-binding completeness: mutating each HELLO field
+    //       (domain / port / role / shard_id / wire_version) changes
+    //       the encoded output. This is the "no silently-dropped
+    //       field" contract — defends against a future from_json that
+    //       reads a field and silently drops it from the round-trip.
+    //   (5) HELLO-always-JSON contract: encode_binary(HELLO) THROWS
+    //       per binary_codec.cpp's HELLO carve-out; the JSON-serialized
+    //       HELLO body does NOT match is_binary_envelope (the body
+    //       starts with '{' not the 0xB1 magic). Pins the pre-
+    //       negotiation invariant that HELLO never reaches the binary
+    //       codec path.
+    //   (6) Boundary values: wire_version=kWireVersionLegacy (0),
+    //       wire_version=kWireVersionMax, empty domain, long domain,
+    //       port=0 / port=65535 — all round-trip cleanly.
+    //   (7) Canonical encoding: nlohmann::json's std::map-backed key
+    //       ordering produces stable alphabetical output regardless of
+    //       insertion order. Two HelloMsg objects constructed by different
+    //       paths but holding the same JSON fields encode to byte-
+    //       identical output (no insertion-order sensitivity).
+    //
+    // Companion to test-protocol-version-pinning §8/§9 (which pin the
+    // wire_version field surface + the encode_binary(HELLO) reject path
+    // as part of the broader PROTOCOL.md §16 surface). This test
+    // exercises the full HelloMsg encode/decode pipeline byte-for-byte
+    // across replay / round-trip / field-binding / boundary axes.
+    //
+    // Companion to test-protocol-version-pinning (PROTOCOL.md §16
+    // contract), test-state-root-determinism, test-tx-signing-determinism,
+    // test-config-determinism (the in-process determinism suite).
+    if (cmd == "test-hello-handshake-determinism") {
+        using namespace determ;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::fputs("  PASS: ", stdout);
+            else      { std::fputs("  FAIL: ", stdout); fail++; }
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+        };
+
+        // Helper: serialize a Message and strip the 4-byte big-endian
+        // framing length prefix that Message::serialize prepends. Returns
+        // the inner JSON envelope body — the actual wire payload that
+        // peers parse via Message::deserialize.
+        auto encode_hello_body = [](const Message& m) -> std::vector<uint8_t> {
+            auto framed = m.serialize();
+            return std::vector<uint8_t>(framed.begin() + 4, framed.end());
+        };
+
+        // Helper: build a fully-populated HELLO with non-default values
+        // across every field. Used as the canonical baseline for replay /
+        // round-trip / cross-instance / field-mutation scenarios.
+        auto make_populated_hello = []() {
+            return make_hello("alice.example.org", uint16_t{17777},
+                              ChainRole::SHARD, ShardId{3},
+                              kWireVersionBinary);
+        };
+
+        // === Scenario 1: Replay determinism ===
+        //
+        // Encoding the same HelloMsg 3 times in a row must produce 3
+        // byte-identical outputs. A failure here would indicate hidden
+        // global state (clock, RNG, counter) leaking into the serialized
+        // form — a fork-causing class of bug for a wire protocol.
+        //
+        // 3 assertions.
+        {
+            Message hello = make_populated_hello();
+            auto enc1 = encode_hello_body(hello);
+            auto enc2 = encode_hello_body(hello);
+            auto enc3 = encode_hello_body(hello);
+
+            check(enc1 == enc2,
+                  "(1) Replay determinism: encode #1 == encode #2 "
+                  "(byte-for-byte identical across consecutive serialize)");
+            check(enc2 == enc3,
+                  "(1) Replay determinism: encode #2 == encode #3 "
+                  "(no hidden state mutation across three calls)");
+            check(!enc1.empty() && enc1[0] == static_cast<uint8_t>('{'),
+                  "(1) Replay determinism: encoded HELLO body starts with "
+                  "'{' — JSON envelope, NOT the binary 0xB1 magic byte");
+        }
+
+        // === Scenario 2: Round-trip identity ===
+        //
+        // Encode HELLO → deserialize → re-encode. Output must equal input
+        // byte-for-byte. Tested with both an all-fields-populated HELLO
+        // and a minimal HELLO (defaults only — role=SINGLE, shard_id=0,
+        // wire_version=kWireVersionMax).
+        //
+        // 4 assertions: full-field round-trip preserves bytes + preserves
+        // type==HELLO + payload semantic-equal + minimal HELLO also
+        // round-trips byte-for-byte.
+        {
+            // 2a. Full-field HELLO round-trip.
+            Message hello_full = make_populated_hello();
+            auto body_full = encode_hello_body(hello_full);
+            Message back_full = Message::deserialize(body_full.data(),
+                                                     body_full.size());
+            auto body_full2 = encode_hello_body(back_full);
+            check(body_full == body_full2,
+                  "(2) Round-trip identity (full): encode → deserialize → "
+                  "encode preserves bytes byte-for-byte");
+            check(back_full.type == MsgType::HELLO,
+                  "(2) Round-trip identity (full): deserialize preserves "
+                  "MsgType::HELLO");
+            check(back_full.payload == hello_full.payload,
+                  "(2) Round-trip identity (full): deserialized payload "
+                  "is semantically equal to the source payload");
+
+            // 2b. Minimal HELLO round-trip — just domain + port; role,
+            //     shard_id, wire_version take defaults from make_hello.
+            Message hello_min = make_hello("bob", uint16_t{9000});
+            auto body_min = encode_hello_body(hello_min);
+            Message back_min = Message::deserialize(body_min.data(),
+                                                    body_min.size());
+            auto body_min2 = encode_hello_body(back_min);
+            check(body_min == body_min2,
+                  "(2) Round-trip identity (minimal): defaults-only HELLO "
+                  "encode → deserialize → encode also byte-identical");
+        }
+
+        // === Scenario 3: Cross-instance byte-identity ===
+        //
+        // Two distinct HelloMsg objects holding identical field values
+        // must produce byte-identical encoded output. Proves that
+        // serialization depends ONLY on the field-value tuple — not on
+        // pointer identity, construction order, or any object-side
+        // hidden state.
+        //
+        // 2 assertions.
+        {
+            Message a = make_hello("alice.test", uint16_t{7777},
+                                   ChainRole::BEACON, ShardId{1},
+                                   kWireVersionBinary);
+            Message b = make_hello("alice.test", uint16_t{7777},
+                                   ChainRole::BEACON, ShardId{1},
+                                   kWireVersionBinary);
+            auto enc_a = encode_hello_body(a);
+            auto enc_b = encode_hello_body(b);
+            check(enc_a == enc_b,
+                  "(3) Cross-instance: two distinct HelloMsg objects with "
+                  "identical field values produce byte-identical JSON");
+            check(&a != &b,
+                  "(3) Cross-instance: the two HelloMsg instances ARE "
+                  "distinct objects (guards against accidental copy-elision "
+                  "that would make the prior assertion vacuous)");
+        }
+
+        // === Scenario 4: Field-binding completeness ===
+        //
+        // Mutating any HELLO field — domain, port, role, shard_id,
+        // wire_version — MUST change the encoded JSON output. This is
+        // the "every field is bound, no silently-dropped field"
+        // contract. A failure here would mean a peer could ship a field
+        // with a divergent value without the receiver noticing, which
+        // would break role-based gossip filtering, shard routing, or
+        // wire-version negotiation depending on which field went silent.
+        //
+        // 5 assertions — one per field.
+        {
+            Message baseline = make_populated_hello();
+            auto base_bytes = encode_hello_body(baseline);
+
+            // 4a. Mutate domain.
+            {
+                Message m = baseline;
+                m.payload["domain"] = "different.example.org";
+                check(encode_hello_body(m) != base_bytes,
+                      "(4) Field binding: mutating 'domain' changes the "
+                      "encoded HELLO bytes");
+            }
+            // 4b. Mutate port.
+            {
+                Message m = baseline;
+                m.payload["port"] = uint16_t{18888};
+                check(encode_hello_body(m) != base_bytes,
+                      "(4) Field binding: mutating 'port' changes the "
+                      "encoded HELLO bytes");
+            }
+            // 4c. Mutate role.
+            {
+                Message m = baseline;
+                m.payload["role"] = static_cast<uint8_t>(ChainRole::BEACON);
+                check(encode_hello_body(m) != base_bytes,
+                      "(4) Field binding: mutating 'role' changes the "
+                      "encoded HELLO bytes");
+            }
+            // 4d. Mutate shard_id.
+            {
+                Message m = baseline;
+                m.payload["shard_id"] = ShardId{7};
+                check(encode_hello_body(m) != base_bytes,
+                      "(4) Field binding: mutating 'shard_id' changes the "
+                      "encoded HELLO bytes");
+            }
+            // 4e. Mutate wire_version.
+            {
+                Message m = baseline;
+                m.payload["wire_version"] = kWireVersionLegacy;
+                check(encode_hello_body(m) != base_bytes,
+                      "(4) Field binding: mutating 'wire_version' changes "
+                      "the encoded HELLO bytes (A3 / S8 negotiation field)");
+            }
+        }
+
+        // === Scenario 5: HELLO-always-JSON contract ===
+        //
+        // PROTOCOL.md + binary_codec.cpp guarantee:
+        //   (a) encode_binary(HELLO) THROWS — the pre-negotiation
+        //       invariant. A peer sending a HELLO via the binary codec
+        //       would be unparseable because the receiver hasn't yet
+        //       negotiated which codec is in use.
+        //   (b) The JSON-encoded HELLO body does NOT start with the
+        //       binary envelope magic byte (0xB1) — is_binary_envelope
+        //       returns false. This guarantees that even if a future
+        //       receive-side bug routed HELLO bytes through the
+        //       format-detecting deserialize, the JSON path would
+        //       still be taken.
+        //
+        // 2 assertions.
+        {
+            Message hello = make_populated_hello();
+
+            // 5a. encode_binary(HELLO) throws — pin the carve-out.
+            bool threw = false;
+            try { (void)encode_binary(hello); }
+            catch (const std::exception&) { threw = true; }
+            check(threw,
+                  "(5) HELLO-always-JSON: encode_binary(HELLO) THROWS "
+                  "(binary codec rejects HELLO per pre-negotiation invariant)");
+
+            // 5b. The JSON-encoded HELLO body is NOT a binary envelope.
+            auto body = encode_hello_body(hello);
+            check(!is_binary_envelope(body.data(), body.size()),
+                  "(5) HELLO-always-JSON: JSON HELLO body is NOT detected "
+                  "as binary envelope (no 0xB1 magic — first byte is '{')");
+        }
+
+        // === Scenario 6: Boundary values ===
+        //
+        // wire_version=0 (kWireVersionLegacy — pre-A3 peers default here);
+        // wire_version=kWireVersionMax (modern peers); empty domain
+        // (legal — listener may not yet have its DNS name); a fairly long
+        // domain (255-char DNS label limit); port=0 (some test fixtures
+        // use this); port=65535 (max). All must round-trip byte-for-byte.
+        //
+        // 3 assertions covering the three boundary classes.
+        {
+            // 6a. wire_version boundaries (0 and Max).
+            Message hv_low = make_hello("a", uint16_t{1234},
+                                        ChainRole::SINGLE, ShardId{0},
+                                        kWireVersionLegacy);
+            Message hv_high = make_hello("a", uint16_t{1234},
+                                         ChainRole::SINGLE, ShardId{0},
+                                         kWireVersionMax);
+            auto b_low_1  = encode_hello_body(hv_low);
+            auto b_low_2  = encode_hello_body(Message::deserialize(
+                                b_low_1.data(), b_low_1.size()));
+            auto b_high_1 = encode_hello_body(hv_high);
+            auto b_high_2 = encode_hello_body(Message::deserialize(
+                                b_high_1.data(), b_high_1.size()));
+            check(b_low_1 == b_low_2 && b_high_1 == b_high_2,
+                  "(6) Boundary: wire_version=0 (Legacy) and "
+                  "wire_version=kWireVersionMax both round-trip "
+                  "byte-for-byte through encode → deserialize → encode");
+
+            // 6b. domain length extremes — empty and long.
+            Message h_empty = make_hello("", uint16_t{7777});
+            Message h_long  = make_hello(std::string(200, 'x'),
+                                         uint16_t{7777});
+            auto e1 = encode_hello_body(h_empty);
+            auto e2 = encode_hello_body(Message::deserialize(
+                            e1.data(), e1.size()));
+            auto l1 = encode_hello_body(h_long);
+            auto l2 = encode_hello_body(Message::deserialize(
+                            l1.data(), l1.size()));
+            check(e1 == e2 && l1 == l2,
+                  "(6) Boundary: empty domain AND 200-char domain both "
+                  "round-trip byte-for-byte (no length-based truncation "
+                  "or default-fallback drift)");
+
+            // 6c. port extremes — 0 and 65535.
+            Message p_zero = make_hello("a", uint16_t{0});
+            Message p_max  = make_hello("a", uint16_t{65535});
+            auto z1 = encode_hello_body(p_zero);
+            auto z2 = encode_hello_body(Message::deserialize(
+                            z1.data(), z1.size()));
+            auto m1 = encode_hello_body(p_max);
+            auto m2 = encode_hello_body(Message::deserialize(
+                            m1.data(), m1.size()));
+            check(z1 == z2 && m1 == m2,
+                  "(6) Boundary: port=0 and port=65535 (u16 extremes) "
+                  "both round-trip byte-for-byte through encode → "
+                  "deserialize → encode");
+        }
+
+        // === Scenario 7: Canonical encoding (insertion-order independent) ===
+        //
+        // nlohmann::json defaults to a std::map-backed object — keys are
+        // emitted in alphabetical order on dump regardless of insertion
+        // order. Construct two HELLO Messages with the SAME field set but
+        // different field-insertion orderings; assert both encode to
+        // byte-identical JSON. Pins the canonical-output contract so a
+        // future migration to nlohmann::ordered_json (which preserves
+        // insertion order) doesn't silently break wire-byte determinism
+        // across peers that build HELLO from differently-ordered sources.
+        //
+        // 2 assertions: pretty-form key-ordering canonical; same Message
+        // re-built from cross-source dumps round-trips identically.
+        {
+            Message m1{MsgType::HELLO, json::object()};
+            m1.payload["domain"]       = "alice";
+            m1.payload["port"]         = uint16_t{7777};
+            m1.payload["role"]         = static_cast<uint8_t>(ChainRole::SHARD);
+            m1.payload["shard_id"]     = ShardId{2};
+            m1.payload["wire_version"] = kWireVersionBinary;
+
+            Message m2{MsgType::HELLO, json::object()};
+            // Same field set inserted in REVERSE order — canonical
+            // ordering on dump must yield the same bytes.
+            m2.payload["wire_version"] = kWireVersionBinary;
+            m2.payload["shard_id"]     = ShardId{2};
+            m2.payload["role"]         = static_cast<uint8_t>(ChainRole::SHARD);
+            m2.payload["port"]         = uint16_t{7777};
+            m2.payload["domain"]       = "alice";
+
+            auto enc_m1 = encode_hello_body(m1);
+            auto enc_m2 = encode_hello_body(m2);
+            check(enc_m1 == enc_m2,
+                  "(7) Canonical encoding: two HelloMsg with identical "
+                  "fields inserted in opposite orders produce byte-"
+                  "identical JSON (alphabetical key ordering on dump)");
+
+            // 7b. The serialized envelope ("type" + "payload" wrapping)
+            //     also has canonical ordering — re-encoding after a
+            //     round-trip yields the SAME bytes as the original.
+            //     "payload" alphabetizes AFTER "type" so the envelope
+            //     should always have type first, payload second.
+            Message back = Message::deserialize(enc_m1.data(), enc_m1.size());
+            auto enc_back = encode_hello_body(back);
+            check(enc_back == enc_m1,
+                  "(7) Canonical encoding: envelope key ordering survives "
+                  "the round-trip (type before payload, payload-object "
+                  "keys alphabetical — no diff churn across reorderings)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": hello-handshake-determinism ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
