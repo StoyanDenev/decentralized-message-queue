@@ -31844,6 +31844,495 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
+
+    if (cmd == "test-config-determinism") {
+        using namespace determ;
+        using namespace determ::node;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
+        };
+
+        // Builder: a Config with every field populated to a non-default
+        // value so the round-trip exercises the full serialized surface.
+        // Default-constructed values (empty strings, defaulted numerics)
+        // are tested separately in Scenario 1.
+        auto make_populated_cfg = []() {
+            Config c;
+            c.domain                   = "alice.test";
+            c.data_dir                 = "/var/lib/determ";
+            c.listen_port              = uint16_t{12345};
+            c.rpc_port                 = uint16_t{12346};
+            c.rpc_localhost_only       = false;
+            c.rpc_auth_secret          = "deadbeef" + std::string(56, 'a');
+            c.rpc_rate_per_sec         = 250.0;
+            c.rpc_rate_burst           = 500.0;
+            c.gossip_rate_per_sec      = 1000.0;
+            c.gossip_rate_burst        = 2000.0;
+            c.bootstrap_peers          = {"127.0.0.1:7777", "10.0.0.1:7778"};
+            c.beacon_peers             = {"beacon-1:9000"};
+            c.shard_peers              = {"shard-1:9001", "shard-2:9002"};
+            c.key_path                 = "/etc/determ/node_key.json";
+            c.chain_path               = "/custom/chain.json";
+            c.snapshot_path            = "/srv/determ/snapshot.json";
+            c.shard_manifest_path      = "/etc/determ/shards.json";
+            c.genesis_path             = "/etc/determ/genesis.json";
+            c.genesis_hash             = std::string(64, '7');
+            c.m_creators               = 5;
+            c.k_block_sigs             = 4;
+            c.bft_enabled              = false;
+            c.bft_escalation_threshold = 9;
+            c.chain_role               = ChainRole::SHARD;
+            c.sharding_mode            = ShardingMode::EXTENDED;
+            c.shard_id                 = ShardId{3};
+            c.initial_shard_count      = 7;
+            c.epoch_blocks             = 5000;
+            c.tx_commit_ms             = 350;
+            c.block_sig_ms             = 400;
+            c.abort_claim_ms           = 250;
+            c.region                   = "us-west-2";
+            c.committee_region         = "us-west";
+            c.log_quiet                = true;
+            return c;
+        };
+
+        // === Scenario 1: Empty Config round-trip ===
+        //
+        // Default-constructed Config. to_json must produce a stable
+        // textual form that survives from_json + re-serialize as a
+        // byte-identical string. This pins that the round-trip is
+        // lossless even when every field carries its default value.
+        // 3 assertions.
+        {
+            Config c1;
+            json j1 = c1.to_json();
+            Config c2 = Config::from_json(j1);
+            json j2 = c2.to_json();
+
+            // (1a) Textual byte-identity at dump(2) (operator-facing form).
+            check(j1.dump(2) == j2.dump(2),
+                  "(1) Empty Config round-trip: to_json(default) → from_json "
+                  "→ to_json produces byte-identical pretty-printed JSON");
+
+            // (1b) Compact dump byte-identity (network-facing form).
+            check(j1.dump() == j2.dump(),
+                  "(1) Empty Config round-trip: compact dump() also "
+                  "byte-identical (no whitespace-dependent drift)");
+
+            // (1c) Semantic equality at the JSON-AST level (orthogonal
+            //      to textual — guards against semantic-drift-with-text-
+            //      identity if the dump happened to be a coincidence).
+            check(j1 == j2,
+                  "(1) Empty Config round-trip: nlohmann::json semantic "
+                  "equality holds across the round-trip");
+        }
+
+        // === Scenario 2: All-fields-populated round-trip ===
+        //
+        // Build a Config with every field set to a non-default value.
+        // Round-trip via to_json → from_json → to_json. Pin byte-identity
+        // both textually and semantically. Cross-check that representative
+        // fields survive the round-trip (defends against silent field
+        // drops in from_json that text-identity alone wouldn't catch if
+        // the dropped field happened to be absent from to_json too).
+        // 8 assertions.
+        {
+            Config orig = make_populated_cfg();
+            json j_orig = orig.to_json();
+            Config restored = Config::from_json(j_orig);
+            json j_restored = restored.to_json();
+
+            // (2a) Pretty-printed textual byte-identity.
+            check(j_orig.dump(2) == j_restored.dump(2),
+                  "(2) All-fields-populated: to_json → from_json → to_json "
+                  "produces byte-identical pretty-printed JSON across "
+                  "every Config field");
+
+            // (2b) Compact byte-identity.
+            check(j_orig.dump() == j_restored.dump(),
+                  "(2) All-fields-populated: compact dump() also "
+                  "byte-identical");
+
+            // (2c) Semantic equality.
+            check(j_orig == j_restored,
+                  "(2) All-fields-populated: semantic JSON equality "
+                  "across the round-trip");
+
+            // (2d-h) Representative-field round-trip checks. If text-
+            // identity passed but from_json silently dropped a field,
+            // these would catch it (orig→restored field comparison).
+            check(restored.rpc_port == orig.rpc_port
+                  && restored.rpc_auth_secret == orig.rpc_auth_secret
+                  && restored.chain_path == orig.chain_path,
+                  "(2) Field round-trip: rpc_port + rpc_auth_secret + "
+                  "chain_path preserved exactly");
+            check(restored.sharding_mode == orig.sharding_mode
+                  && restored.chain_role == orig.chain_role
+                  && restored.shard_id == orig.shard_id,
+                  "(2) Field round-trip: sharding_mode + chain_role + "
+                  "shard_id preserved exactly (enums + ShardId)");
+            check(restored.bootstrap_peers == orig.bootstrap_peers
+                  && restored.beacon_peers == orig.beacon_peers
+                  && restored.shard_peers == orig.shard_peers,
+                  "(2) Field round-trip: peer vectors (bootstrap/beacon/"
+                  "shard) preserved element-wise");
+            check(restored.rpc_rate_per_sec == orig.rpc_rate_per_sec
+                  && restored.rpc_rate_burst == orig.rpc_rate_burst
+                  && restored.gossip_rate_per_sec == orig.gossip_rate_per_sec
+                  && restored.gossip_rate_burst == orig.gossip_rate_burst,
+                  "(2) Field round-trip: all four rate-limit doubles "
+                  "preserved (no precision loss on float JSON encoding)");
+            check(restored.log_quiet == orig.log_quiet
+                  && restored.bft_enabled == orig.bft_enabled
+                  && restored.rpc_localhost_only == orig.rpc_localhost_only,
+                  "(2) Field round-trip: all three bool flags preserved "
+                  "(log_quiet, bft_enabled, rpc_localhost_only)");
+        }
+
+        // === Scenario 3: Field-order independence in input JSON ===
+        //
+        // Build two JSON inputs with the SAME field-value set but the
+        // text appears with fields in different orders (one reverse
+        // alphabetical, one alphabetical). nlohmann::json's parse
+        // canonicalizes the AST regardless of source field order, AND
+        // to_json's dump emits keys in canonical (alphabetical) order
+        // — so re-serializing both must produce byte-identical output.
+        // This pins the canonical-output contract: an external tool
+        // emitting an arbitrarily-ordered config can round-trip the
+        // node's view without churn diff. 3 assertions.
+        {
+            // Build a small canonical config, then construct two source-
+            // text forms with different field ordering.
+            std::string raw_alpha = R"({
+                "chain_path": "/p/c.json",
+                "data_dir": "/d",
+                "domain": "alice",
+                "listen_port": 9001,
+                "rpc_port": 9002
+            })";
+            std::string raw_reverse = R"({
+                "rpc_port": 9002,
+                "listen_port": 9001,
+                "domain": "alice",
+                "data_dir": "/d",
+                "chain_path": "/p/c.json"
+            })";
+
+            json j_a = json::parse(raw_alpha);
+            json j_r = json::parse(raw_reverse);
+            Config c_a = Config::from_json(j_a);
+            Config c_r = Config::from_json(j_r);
+            json out_a = c_a.to_json();
+            json out_r = c_r.to_json();
+
+            // (3a) Both Configs produce byte-identical serialized output
+            // (canonical key ordering on dump regardless of input order).
+            check(out_a.dump(2) == out_r.dump(2),
+                  "(3) Order-independent input: two JSON inputs with same "
+                  "fields in alphabetical vs reverse order round-trip to "
+                  "byte-identical pretty-printed output");
+
+            // (3b) Compact form also byte-identical.
+            check(out_a.dump() == out_r.dump(),
+                  "(3) Order-independent input: compact dump() also "
+                  "byte-identical regardless of source field order");
+
+            // (3c) Field-level equality (defends against text-identity-
+            // coincidence if both happened to produce the same garbled
+            // output that lost fields).
+            check(c_a.chain_path == c_r.chain_path
+                  && c_a.domain == c_r.domain
+                  && c_a.listen_port == c_r.listen_port
+                  && c_a.rpc_port == c_r.rpc_port
+                  && c_a.data_dir == c_r.data_dir,
+                  "(3) Order-independent input: 5 representative fields "
+                  "round-trip identically across both ordering variants");
+        }
+
+        // === Scenario 4: Cross-instance determinism ===
+        //
+        // Construct two Config instances arriving at the same logical
+        // state via different code paths: (a) direct field assignment
+        // on a default-constructed Config, (b) Config::from_json over a
+        // JSON object built to match the same field values. Both
+        // instances must produce byte-identical to_json() output —
+        // pinning that to_json's output is a pure function of field
+        // values, not of construction path. 2 assertions.
+        //
+        // Important: Config's header-init defaults do NOT all match
+        // from_json's .value(..., default) defaults. The known divergence
+        // is abort_claim_ms (header=100, from_json default=200). Both
+        // paths therefore EXPLICITLY set every field that has a non-
+        // matching default so the two paths converge on the same
+        // logical state — this scenario tests to_json purity, not
+        // header-vs-from_json default reconciliation (which is a
+        // separate operational design choice tested in
+        // test-config-defaults + test-config-permissive).
+        {
+            // Path (a): direct field assignment.
+            Config c_direct;
+            c_direct.domain          = "beta";
+            c_direct.listen_port     = uint16_t{7000};
+            c_direct.rpc_port        = uint16_t{7001};
+            c_direct.chain_path      = "/p/x.json";
+            c_direct.log_quiet       = true;
+            c_direct.abort_claim_ms  = 200;  // match from_json default
+
+            // Path (b): from_json with equivalent JSON. Every field that
+            // differs in default between header-init and from_json must
+            // be explicitly stamped here so the two paths converge.
+            json eq = json::object();
+            eq["domain"]         = "beta";
+            eq["listen_port"]    = uint16_t{7000};
+            eq["rpc_port"]       = uint16_t{7001};
+            eq["chain_path"]     = "/p/x.json";
+            eq["log_quiet"]      = true;
+            eq["abort_claim_ms"] = uint32_t{200};
+            Config c_from_json = Config::from_json(eq);
+
+            json j_direct    = c_direct.to_json();
+            json j_from_json = c_from_json.to_json();
+
+            // (4a) Textual byte-identity across the two construction
+            // paths.
+            check(j_direct.dump(2) == j_from_json.dump(2),
+                  "(4) Cross-instance determinism: direct-assignment and "
+                  "from_json-built Configs with the same logical state "
+                  "produce byte-identical to_json output");
+
+            // (4b) Semantic JSON equality (orthogonal).
+            check(j_direct == j_from_json,
+                  "(4) Cross-instance determinism: AST-level semantic "
+                  "equality across construction paths");
+        }
+
+        // === Scenario 5: Replay determinism ===
+        //
+        // Serializing the same Config 3 times in a row must produce 3
+        // identical outputs. This is the "no hidden process-local state
+        // / no internal cache surprise / no nondeterministic field
+        // ordering" contract for to_json itself. 2 assertions.
+        {
+            Config c = make_populated_cfg();
+            std::string s1 = c.to_json().dump(2);
+            std::string s2 = c.to_json().dump(2);
+            std::string s3 = c.to_json().dump(2);
+
+            // (5a) All three outputs identical.
+            check(s1 == s2 && s2 == s3,
+                  "(5) Replay determinism: 3 consecutive to_json().dump(2) "
+                  "calls on the same Config produce identical strings");
+
+            // (5b) Across re-construction (covers builder + serializer
+            // jointly). A fresh make_populated_cfg() must also produce
+            // the same string.
+            Config c_fresh = make_populated_cfg();
+            std::string s_fresh = c_fresh.to_json().dump(2);
+            check(s_fresh == s1,
+                  "(5) Replay determinism: a fresh Config with identical "
+                  "field values produces byte-identical to_json output "
+                  "(no object-identity dependence)");
+        }
+
+        // === Scenario 6: Boundary values ===
+        //
+        // Push edge values through the round-trip and confirm they
+        // survive byte-for-byte: empty strings, UINT32_MAX numerics,
+        // all-zero numerics with all-false bools, max-string-content.
+        // The empty/zero/false case is especially important — it pins
+        // that absent semantic markers can't get confused with default-
+        // filled markers (would otherwise let from_json silently fall
+        // back to header defaults on a zero-filled wire input). 3 assertions.
+        {
+            // (6a) Empty / zero / false everywhere. Identical to
+            // default-constructed but with every string explicitly
+            // assigned empty so the dump emits "" for every string field.
+            Config c_empty;
+            c_empty.domain                   = "";
+            c_empty.data_dir                 = "";
+            c_empty.listen_port              = uint16_t{0};
+            c_empty.rpc_port                 = uint16_t{0};
+            c_empty.rpc_localhost_only       = false;
+            c_empty.rpc_auth_secret          = "";
+            c_empty.rpc_rate_per_sec         = 0.0;
+            c_empty.rpc_rate_burst           = 0.0;
+            c_empty.gossip_rate_per_sec      = 0.0;
+            c_empty.gossip_rate_burst        = 0.0;
+            c_empty.bootstrap_peers          = {};
+            c_empty.beacon_peers             = {};
+            c_empty.shard_peers              = {};
+            c_empty.key_path                 = "";
+            c_empty.chain_path               = "";
+            c_empty.snapshot_path            = "";
+            c_empty.shard_manifest_path      = "";
+            c_empty.genesis_path             = "";
+            c_empty.genesis_hash             = "";
+            c_empty.m_creators               = 0;
+            c_empty.k_block_sigs             = 0;
+            c_empty.bft_enabled              = false;
+            c_empty.bft_escalation_threshold = 0;
+            c_empty.chain_role               = ChainRole::SINGLE;
+            c_empty.sharding_mode            = ShardingMode::NONE;
+            c_empty.shard_id                 = ShardId{0};
+            c_empty.initial_shard_count      = 0;
+            c_empty.epoch_blocks             = 0;
+            c_empty.tx_commit_ms             = 0;
+            c_empty.block_sig_ms             = 0;
+            c_empty.abort_claim_ms           = 0;
+            c_empty.region                   = "";
+            c_empty.committee_region         = "";
+            c_empty.log_quiet                = false;
+
+            json j_empty = c_empty.to_json();
+            Config c_empty_rt = Config::from_json(j_empty);
+            check(c_empty_rt.to_json().dump(2) == j_empty.dump(2),
+                  "(6) Boundary values: all-empty / all-zero / all-false "
+                  "Config round-trips byte-identically (no default-fallback "
+                  "confusion in from_json on wire-zero values)");
+
+            // (6b) Maximum-ish numerics. UINT16_MAX listen/rpc ports,
+            // UINT32_MAX for numeric u32 fields, large double rates.
+            // shard_id is ShardId == uint32_t, also UINT32_MAX-able.
+            Config c_max;
+            c_max.listen_port              = uint16_t{0xFFFF};
+            c_max.rpc_port                 = uint16_t{0xFFFE};
+            c_max.rpc_rate_per_sec         = 1e9;
+            c_max.rpc_rate_burst           = 1e9;
+            c_max.gossip_rate_per_sec      = 1e9;
+            c_max.gossip_rate_burst        = 1e9;
+            c_max.m_creators               = uint32_t{0xFFFFFFFF};
+            c_max.k_block_sigs             = uint32_t{0xFFFFFFFF};
+            c_max.bft_escalation_threshold = uint32_t{0xFFFFFFFF};
+            c_max.shard_id                 = ShardId{0xFFFFFFFF};
+            c_max.initial_shard_count      = uint32_t{0xFFFFFFFF};
+            c_max.epoch_blocks             = uint32_t{0xFFFFFFFF};
+            c_max.tx_commit_ms             = uint32_t{0xFFFFFFFF};
+            c_max.block_sig_ms             = uint32_t{0xFFFFFFFF};
+            c_max.abort_claim_ms           = uint32_t{0xFFFFFFFF};
+
+            json j_max = c_max.to_json();
+            Config c_max_rt = Config::from_json(j_max);
+            check(c_max_rt.to_json().dump(2) == j_max.dump(2)
+                  && c_max_rt.listen_port == c_max.listen_port
+                  && c_max_rt.shard_id == c_max.shard_id
+                  && c_max_rt.m_creators == c_max.m_creators,
+                  "(6) Boundary values: max u16 ports + max u32 numerics "
+                  "round-trip byte-identically (no narrowing on JSON "
+                  "encode/decode)");
+
+            // (6c) Large string content. Long auth secret + long peer
+            // list. Pins that no length truncation creeps into the
+            // serialization layer.
+            Config c_big;
+            c_big.rpc_auth_secret = std::string(1024, 'x');
+            std::vector<std::string> peers;
+            for (int i = 0; i < 100; ++i) {
+                peers.push_back("peer-" + std::to_string(i) + ":7777");
+            }
+            c_big.bootstrap_peers = peers;
+
+            json j_big = c_big.to_json();
+            Config c_big_rt = Config::from_json(j_big);
+            check(c_big_rt.to_json().dump(2) == j_big.dump(2)
+                  && c_big_rt.rpc_auth_secret.size() == 1024
+                  && c_big_rt.bootstrap_peers.size() == 100,
+                  "(6) Boundary values: 1024-byte rpc_auth_secret + 100-"
+                  "element bootstrap_peers list round-trip byte-identically "
+                  "(no truncation in JSON layer)");
+        }
+
+        // === Scenario 7: Field-binding completeness ===
+        //
+        // For every Config field listed in to_json (per node.cpp), mutate
+        // that ONE field on a baseline and assert to_json's textual form
+        // CHANGES. This is the "every field is bound to the serialized
+        // output / no silently-dropped field" contract — analogous to
+        // test-tx-signing-determinism scenario 2 for Transaction. 8
+        // assertions covering all field categories: string, uint16_t,
+        // uint32_t, bool, double, enum, ShardId, vector<string>.
+        {
+            Config base;
+            std::string base_str = base.to_json().dump(2);
+
+            // (7a) string field: domain.
+            {
+                Config c = base;
+                c.domain = "mutated.domain";
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating domain (string) "
+                      "changes to_json output");
+            }
+            // (7b) uint16_t field: rpc_port.
+            {
+                Config c = base;
+                c.rpc_port = static_cast<uint16_t>(c.rpc_port + 1);
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating rpc_port (uint16_t) "
+                      "changes to_json output");
+            }
+            // (7c) bool field: rpc_localhost_only.
+            {
+                Config c = base;
+                c.rpc_localhost_only = !c.rpc_localhost_only;
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating rpc_localhost_only "
+                      "(bool) changes to_json output (S-001 binding)");
+            }
+            // (7d) double field: rpc_rate_per_sec.
+            {
+                Config c = base;
+                c.rpc_rate_per_sec = 100.0;
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating rpc_rate_per_sec "
+                      "(double) changes to_json output");
+            }
+            // (7e) enum field: chain_role.
+            {
+                Config c = base;
+                c.chain_role = ChainRole::BEACON;
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating chain_role "
+                      "(ChainRole enum) changes to_json output");
+            }
+            // (7f) ShardId field: shard_id.
+            {
+                Config c = base;
+                c.shard_id = ShardId{42};
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating shard_id (ShardId) "
+                      "changes to_json output");
+            }
+            // (7g) uint32_t field: epoch_blocks.
+            {
+                Config c = base;
+                c.epoch_blocks = c.epoch_blocks + 1;
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating epoch_blocks "
+                      "(uint32_t) changes to_json output");
+            }
+            // (7h) vector<string> field: bootstrap_peers.
+            {
+                Config c = base;
+                c.bootstrap_peers = {"new.peer:7777"};
+                check(c.to_json().dump(2) != base_str,
+                      "(7) Field binding: mutating bootstrap_peers "
+                      "(vector<string>) changes to_json output");
+            }
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": config-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);
     if (cmd == "unstake")     return cmd_unstake(sub_argc, sub_argv);
     if (cmd == "nonce")       return cmd_nonce(sub_argc, sub_argv);
