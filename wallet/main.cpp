@@ -11331,6 +11331,543 @@ int cmd_tx_history_export(int argc, char** argv) {
     return 0;
 }
 
+int cmd_diff_snapshots(int argc, char** argv) {
+    std::string from_path, to_path;
+    std::string group = "all";
+    bool account_detail = false;
+    bool json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--from" && i + 1 < argc) from_path = argv[++i];
+        else if (a == "--to"   && i + 1 < argc) to_path   = argv[++i];
+        else if (a == "--group" && i + 1 < argc) group    = argv[++i];
+        else if (a == "--account-detail")        account_detail = true;
+        else if (a == "--json")                  json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet diff-snapshots --from <file> --to <file>\n"
+                "       [--group {all|counters|state|accounts|stakes|registrants|params}]\n"
+                "       [--account-detail] [--json]\n"
+                "\n"
+                "  Offline pairwise diff of two snapshot JSON files (as produced by\n"
+                "  `determ snapshot create` / Chain::serialize_state). No chain restore,\n"
+                "  no daemon RPC — pure text-level JSON comparison for incident triage.\n"
+                "\n"
+                "  Groups:\n"
+                "    counters    A1 unitary-supply scalars (accumulated_inbound,\n"
+                "                accumulated_outbound, accumulated_slashed,\n"
+                "                accumulated_subsidy, genesis_total).\n"
+                "    state       Top-level scalars (head_hash, state_root from tail\n"
+                "                header, block_index, chain_id if present).\n"
+                "    accounts    Set-diff on accounts[] keyed by domain.\n"
+                "    stakes      Set-diff on stakes[] keyed by domain.\n"
+                "    registrants Set-diff on registrants[] keyed by domain.\n"
+                "    params      Set-diff on pending_param_changes[] keyed by\n"
+                "                (effective_height, name).\n"
+                "    all         Run every group (default).\n"
+                "\n"
+                "  Anomalies (emitted at the end of human output / inside `anomalies`\n"
+                "  array in JSON output):\n"
+                "    block_index_negative_delta (INFO)\n"
+                "      `to.block_index < from.block_index` — operator likely swapped\n"
+                "      the --from/--to arguments.\n"
+                "    supply_drift (CRITICAL — exit 2)\n"
+                "      accumulated_inbound or accumulated_outbound advanced but no\n"
+                "      account/stake row changed. Indicates data integrity concern\n"
+                "      (the counters are summed over apply events; advancement without\n"
+                "      a matching row mutation is structurally inconsistent).\n"
+                "    identical_snapshots (INFO)\n"
+                "      All groups show zero changes.\n"
+                "    state_root_unchanged_but_accounts_changed (CRITICAL — exit 2)\n"
+                "      state_root identical but accounts[] differ. Under S-033's\n"
+                "      Merkle binding, this is structurally unreachable on honest\n"
+                "      snapshots; fires only if state_root binding is broken.\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  success (or INFO-only anomalies)\n"
+                "    1  file open / JSON parse / args error\n"
+                "    2  CRITICAL anomaly fired\n";
+            return 0;
+        }
+        else {
+            std::cerr << "diff-snapshots: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet diff-snapshots --from <file> --to <file> "
+                         "[--group {all|counters|state|accounts|stakes|registrants|params}] "
+                         "[--account-detail] [--json]\n";
+            return 1;
+        }
+    }
+    if (from_path.empty() || to_path.empty()) {
+        std::cerr << "diff-snapshots: --from <file> and --to <file> are required\n";
+        return 1;
+    }
+    static const std::set<std::string> kValidGroups = {
+        "all", "counters", "state", "accounts", "stakes", "registrants", "params"
+    };
+    if (!kValidGroups.count(group)) {
+        std::cerr << "diff-snapshots: unknown --group '" << group
+                  << "' (expected: all|counters|state|accounts|stakes|"
+                     "registrants|params)\n";
+        return 1;
+    }
+
+    auto load = [&](const std::string& path, nlohmann::json& out) -> int {
+        std::ifstream f(path);
+        if (!f) {
+            std::cerr << "diff-snapshots: cannot open '" << path << "'\n";
+            return 1;
+        }
+        try {
+            out = nlohmann::json::parse(f);
+        } catch (const std::exception& e) {
+            std::cerr << "diff-snapshots: JSON parse failed for '" << path
+                      << "': " << e.what() << "\n";
+            return 1;
+        }
+        if (!out.is_object()) {
+            std::cerr << "diff-snapshots: '" << path
+                      << "' is not a JSON object (top-level must be a snapshot envelope)\n";
+            return 1;
+        }
+        return 0;
+    };
+
+    nlohmann::json a_snap, b_snap;
+    if (int rc = load(from_path, a_snap); rc != 0) return rc;
+    if (int rc = load(to_path,   b_snap); rc != 0) return rc;
+
+    // Pull metadata + state_root from each snapshot. state_root lives in
+    // the tail header (last entry of `headers[]`) and is only emitted by
+    // Block::to_json when non-zero (see src/chain/block.cpp:434). Treat
+    // absence as the canonical zero state_root.
+    auto tail_state_root = [](const nlohmann::json& snap) -> std::string {
+        if (!snap.contains("headers") || !snap["headers"].is_array()
+            || snap["headers"].empty()) return "";
+        const auto& tail = snap["headers"].back();
+        if (!tail.is_object()) return "";
+        return tail.value("state_root", std::string{});
+    };
+    uint64_t a_block_index = a_snap.value("block_index", uint64_t{0});
+    uint64_t b_block_index = b_snap.value("block_index", uint64_t{0});
+    std::string a_head_hash = a_snap.value("head_hash", std::string{});
+    std::string b_head_hash = b_snap.value("head_hash", std::string{});
+    std::string a_state_root = tail_state_root(a_snap);
+    std::string b_state_root = tail_state_root(b_snap);
+    // chain_id is not part of Chain::serialize_state today but the spec
+    // calls for diffing it if present — handle defensively so a future
+    // schema addition Just Works.
+    std::string a_chain_id = a_snap.value("chain_id", std::string{});
+    std::string b_chain_id = b_snap.value("chain_id", std::string{});
+
+    bool want_all         = (group == "all");
+    bool want_counters    = want_all || (group == "counters");
+    bool want_state       = want_all || (group == "state");
+    bool want_accounts    = want_all || (group == "accounts");
+    bool want_stakes      = want_all || (group == "stakes");
+    bool want_registrants = want_all || (group == "registrants");
+    bool want_params      = want_all || (group == "params");
+
+    // ── Counters group ─────────────────────────────────────────────────────
+    // A1 unitary-supply scalars + a few genesis-pinned values that surface
+    // operator-relevant divergence.
+    struct CounterDelta {
+        std::string name;
+        uint64_t    a_val{0};
+        uint64_t    b_val{0};
+        int64_t     delta{0};   // signed (uint64 wrap is intentional via cast)
+    };
+    std::vector<CounterDelta> counter_diffs;
+    static const std::vector<std::string> kCounterFields = {
+        "accumulated_inbound",
+        "accumulated_outbound",
+        "accumulated_slashed",
+        "accumulated_subsidy",
+        "genesis_total",
+        "block_subsidy",
+        "min_stake",
+        "subsidy_pool_initial",
+    };
+    if (want_counters) {
+        for (auto& name : kCounterFields) {
+            uint64_t av = a_snap.value(name, uint64_t{0});
+            uint64_t bv = b_snap.value(name, uint64_t{0});
+            if (av != bv) {
+                int64_t d = static_cast<int64_t>(bv) - static_cast<int64_t>(av);
+                counter_diffs.push_back({name, av, bv, d});
+            }
+        }
+    }
+
+    // ── State group ────────────────────────────────────────────────────────
+    struct StateDelta { std::string name, a_val, b_val; };
+    std::vector<StateDelta> state_diffs;
+    if (want_state) {
+        if (a_head_hash != b_head_hash)
+            state_diffs.push_back({"head_hash", a_head_hash, b_head_hash});
+        if (a_state_root != b_state_root)
+            state_diffs.push_back({"state_root", a_state_root, b_state_root});
+        if (a_chain_id != b_chain_id)
+            state_diffs.push_back({"chain_id", a_chain_id, b_chain_id});
+    }
+
+    // Helper: turn an array of {domain, ...} objects into a map keyed by
+    // domain → the original JSON object. Used for set-diff on accounts /
+    // stakes / registrants. Drop rows without a domain key (defensive
+    // against partial/malformed snapshots).
+    auto index_by_domain = [](const nlohmann::json& snap, const char* key) {
+        std::map<std::string, nlohmann::json> out;
+        if (!snap.contains(key) || !snap[key].is_array()) return out;
+        for (const auto& row : snap[key]) {
+            if (!row.is_object() || !row.contains("domain")) continue;
+            out[row["domain"].get<std::string>()] = row;
+        }
+        return out;
+    };
+
+    // ── Accounts / Stakes / Registrants groups ─────────────────────────────
+    struct RowDiff {
+        std::vector<std::string>                 added;
+        std::vector<std::string>                 removed;
+        struct Modified { std::string key; nlohmann::json a; nlohmann::json b; };
+        std::vector<Modified>                    modified;
+    };
+    auto compute_row_diff = [&](const char* key) {
+        RowDiff d;
+        auto am = index_by_domain(a_snap, key);
+        auto bm = index_by_domain(b_snap, key);
+        for (auto& [k, v] : am) {
+            auto it = bm.find(k);
+            if (it == bm.end()) d.removed.push_back(k);
+            else if (it->second != v)
+                d.modified.push_back({k, v, it->second});
+        }
+        for (auto& [k, v] : bm) {
+            if (!am.count(k)) d.added.push_back(k);
+        }
+        std::sort(d.added.begin(), d.added.end());
+        std::sort(d.removed.begin(), d.removed.end());
+        std::sort(d.modified.begin(), d.modified.end(),
+                  [](const auto& x, const auto& y) { return x.key < y.key; });
+        return d;
+    };
+    RowDiff acct_diff, stake_diff, reg_diff;
+    if (want_accounts)    acct_diff  = compute_row_diff("accounts");
+    if (want_stakes)      stake_diff = compute_row_diff("stakes");
+    if (want_registrants) reg_diff   = compute_row_diff("registrants");
+
+    // ── Params group ───────────────────────────────────────────────────────
+    // pending_param_changes is a list of buckets; each bucket has
+    // (effective_height, entries[{name, value}]). Diff key = "<eff>:<name>".
+    auto index_pending_params = [](const nlohmann::json& snap) {
+        std::map<std::string, nlohmann::json> out;
+        if (!snap.contains("pending_param_changes")
+            || !snap["pending_param_changes"].is_array()) return out;
+        for (const auto& bucket : snap["pending_param_changes"]) {
+            if (!bucket.is_object()) continue;
+            uint64_t eff = bucket.value("effective_height", uint64_t{0});
+            if (!bucket.contains("entries") || !bucket["entries"].is_array())
+                continue;
+            for (const auto& e : bucket["entries"]) {
+                if (!e.is_object() || !e.contains("name")) continue;
+                std::ostringstream oss;
+                oss << eff << ":" << e["name"].get<std::string>();
+                out[oss.str()] = nlohmann::json{
+                    {"effective_height", eff},
+                    {"name",  e.value("name",  std::string{})},
+                    {"value", e.value("value", std::string{})},
+                };
+            }
+        }
+        return out;
+    };
+    RowDiff params_diff;
+    if (want_params) {
+        auto am = index_pending_params(a_snap);
+        auto bm = index_pending_params(b_snap);
+        for (auto& [k, v] : am) {
+            auto it = bm.find(k);
+            if (it == bm.end()) params_diff.removed.push_back(k);
+            else if (it->second != v)
+                params_diff.modified.push_back({k, v, it->second});
+        }
+        for (auto& [k, v] : bm) {
+            if (!am.count(k)) params_diff.added.push_back(k);
+        }
+        std::sort(params_diff.added.begin(), params_diff.added.end());
+        std::sort(params_diff.removed.begin(), params_diff.removed.end());
+        std::sort(params_diff.modified.begin(), params_diff.modified.end(),
+                  [](const auto& x, const auto& y) { return x.key < y.key; });
+    }
+
+    // ── Anomaly detection ──────────────────────────────────────────────────
+    // INFO: not exit-blocking. CRITICAL: exits 2 to flag forensic attention.
+    struct Anomaly {
+        std::string code;
+        std::string severity;   // "INFO" | "CRITICAL"
+        std::string message;
+    };
+    std::vector<Anomaly> anomalies;
+
+    int64_t block_index_delta =
+        static_cast<int64_t>(b_block_index) - static_cast<int64_t>(a_block_index);
+
+    if (block_index_delta < 0) {
+        anomalies.push_back({
+            "block_index_negative_delta", "INFO",
+            "to.block_index (" + std::to_string(b_block_index) +
+            ") < from.block_index (" + std::to_string(a_block_index) +
+            "); --from/--to arguments may be swapped"
+        });
+    }
+
+    // supply_drift: any A1 inbound/outbound counter advanced (positive
+    // delta) but no account or stake row mutated. Computed even when
+    // group filters hide the underlying diffs — the operator deserves
+    // the anomaly regardless of focus. We re-compute the row diffs here
+    // (when filtered out) so the check is sound under any --group value.
+    bool accounts_changed = !acct_diff.added.empty()
+                         || !acct_diff.removed.empty()
+                         || !acct_diff.modified.empty();
+    bool stakes_changed   = !stake_diff.added.empty()
+                         || !stake_diff.removed.empty()
+                         || !stake_diff.modified.empty();
+    if (!want_accounts) {
+        auto tmp = compute_row_diff("accounts");
+        accounts_changed = !tmp.added.empty()
+                        || !tmp.removed.empty()
+                        || !tmp.modified.empty();
+    }
+    if (!want_stakes) {
+        auto tmp = compute_row_diff("stakes");
+        stakes_changed = !tmp.added.empty()
+                      || !tmp.removed.empty()
+                      || !tmp.modified.empty();
+    }
+    uint64_t a_in  = a_snap.value("accumulated_inbound",  uint64_t{0});
+    uint64_t b_in  = b_snap.value("accumulated_inbound",  uint64_t{0});
+    uint64_t a_out = a_snap.value("accumulated_outbound", uint64_t{0});
+    uint64_t b_out = b_snap.value("accumulated_outbound", uint64_t{0});
+    bool inbound_advanced  = (b_in  > a_in);
+    bool outbound_advanced = (b_out > a_out);
+    if ((inbound_advanced || outbound_advanced)
+        && !accounts_changed && !stakes_changed) {
+        std::ostringstream m;
+        m << "supply counter advanced (inbound: " << a_in << "→" << b_in
+          << ", outbound: " << a_out << "→" << b_out
+          << ") but no account/stake row changed — data integrity concern";
+        anomalies.push_back({"supply_drift", "CRITICAL", m.str()});
+    }
+
+    // state_root_unchanged_but_accounts_changed: structurally
+    // unreachable under S-033 binding; fires only if state_root binding
+    // is broken (Merkle leaves built from a:-namespace include account
+    // balance + nonce — see src/chain/chain.cpp:build_state_leaves).
+    if (!a_state_root.empty()
+        && a_state_root == b_state_root
+        && accounts_changed) {
+        anomalies.push_back({
+            "state_root_unchanged_but_accounts_changed", "CRITICAL",
+            "state_root identical between snapshots but accounts[] differ — "
+            "S-033 Merkle binding broken (structurally unreachable on honest "
+            "snapshots)"
+        });
+    }
+
+    // identical_snapshots: all (computed) groups had zero changes AND no
+    // top-level scalar diverged. Computed against the full diff (regardless
+    // of --group) so the operator sees the true picture.
+    bool any_diff = !counter_diffs.empty()
+                 || !state_diffs.empty()
+                 || accounts_changed
+                 || stakes_changed
+                 || !reg_diff.added.empty()
+                 || !reg_diff.removed.empty()
+                 || !reg_diff.modified.empty()
+                 || !params_diff.added.empty()
+                 || !params_diff.removed.empty()
+                 || !params_diff.modified.empty()
+                 || (a_block_index != b_block_index)
+                 || (a_head_hash != b_head_hash)
+                 || (a_state_root != b_state_root)
+                 || (a_chain_id != b_chain_id);
+    if (!any_diff) {
+        anomalies.push_back({
+            "identical_snapshots", "INFO",
+            "all groups show zero changes"
+        });
+    }
+
+    bool any_critical = false;
+    for (auto& a : anomalies) if (a.severity == "CRITICAL") any_critical = true;
+
+    // ── Output emission ────────────────────────────────────────────────────
+    if (json_out) {
+        nlohmann::json env;
+        env["from"] = {
+            {"file",        from_path},
+            {"block_index", a_block_index},
+            {"head_hash",   a_head_hash},
+            {"state_root",  a_state_root},
+        };
+        env["to"] = {
+            {"file",        to_path},
+            {"block_index", b_block_index},
+            {"head_hash",   b_head_hash},
+            {"state_root",  b_state_root},
+        };
+        env["block_index_delta"] = block_index_delta;
+
+        if (want_counters) {
+            nlohmann::json cj = nlohmann::json::object();
+            for (auto& d : counter_diffs) {
+                cj[d.name] = {
+                    {"from",  d.a_val},
+                    {"to",    d.b_val},
+                    {"delta", d.delta},
+                };
+            }
+            env["counters"] = cj;
+        }
+        if (want_state) {
+            nlohmann::json sj = nlohmann::json::object();
+            for (auto& d : state_diffs) {
+                sj[d.name] = {{"from", d.a_val}, {"to", d.b_val}};
+            }
+            env["state"] = sj;
+        }
+        auto emit_rowdiff = [&](const char* group_name, const RowDiff& d) {
+            nlohmann::json j = nlohmann::json::object();
+            j["added"]   = d.added;
+            j["removed"] = d.removed;
+            nlohmann::json mods = nlohmann::json::array();
+            for (auto& m : d.modified) {
+                mods.push_back({
+                    {"key", m.key},
+                    {"old", m.a},
+                    {"new", m.b},
+                });
+            }
+            j["modified"] = mods;
+            env[group_name] = j;
+        };
+        if (want_accounts)    emit_rowdiff("accounts",    acct_diff);
+        if (want_stakes)      emit_rowdiff("stakes",      stake_diff);
+        if (want_registrants) emit_rowdiff("registrants", reg_diff);
+        if (want_params)      emit_rowdiff("params",      params_diff);
+
+        nlohmann::json aj = nlohmann::json::array();
+        for (auto& a : anomalies) {
+            aj.push_back({
+                {"code",     a.code},
+                {"severity", a.severity},
+                {"message",  a.message},
+            });
+        }
+        env["anomalies"] = aj;
+        std::cout << env.dump() << "\n";
+    } else {
+        std::cout << "diff-snapshots: " << from_path << " -> " << to_path << "\n";
+        std::cout << "  block_index: " << a_block_index << " -> "
+                  << b_block_index << " (delta=" << block_index_delta << ")\n";
+
+        if (want_counters) {
+            std::cout << "[counters]\n";
+            if (counter_diffs.empty()) {
+                std::cout << "  (no changes)\n";
+            } else {
+                for (auto& d : counter_diffs) {
+                    std::cout << "  [~] " << d.name << ": "
+                              << d.a_val << " -> " << d.b_val
+                              << " (delta=" << d.delta << ")\n";
+                }
+            }
+        }
+        if (want_state) {
+            std::cout << "[state]\n";
+            if (state_diffs.empty()) {
+                std::cout << "  (no changes)\n";
+            } else {
+                for (auto& d : state_diffs) {
+                    std::cout << "  [~] " << d.name << ": "
+                              << (d.a_val.empty() ? "(empty)" : d.a_val)
+                              << " -> "
+                              << (d.b_val.empty() ? "(empty)" : d.b_val)
+                              << "\n";
+                }
+            }
+        }
+        auto emit_human_rowdiff = [&](const char* label, const RowDiff& d,
+                                       bool with_detail) {
+            std::cout << "[" << label << "]\n";
+            bool any = !d.added.empty() || !d.removed.empty() || !d.modified.empty();
+            if (!any) {
+                std::cout << "  (no changes)\n";
+                return;
+            }
+            std::cout << "  added:    " << d.added.size() << "\n";
+            std::cout << "  removed:  " << d.removed.size() << "\n";
+            std::cout << "  modified: " << d.modified.size() << "\n";
+            if (with_detail) {
+                for (auto& k : d.added)
+                    std::cout << "  [+] " << k << "\n";
+                for (auto& k : d.removed)
+                    std::cout << "  [-] " << k << "\n";
+                for (auto& m : d.modified) {
+                    // For accounts, surface the balance delta inline since
+                    // that's the most operator-actionable scalar.
+                    uint64_t old_bal = m.a.value("balance", uint64_t{0});
+                    uint64_t new_bal = m.b.value("balance", uint64_t{0});
+                    int64_t  bal_d   = static_cast<int64_t>(new_bal)
+                                     - static_cast<int64_t>(old_bal);
+                    if (m.a.contains("balance") || m.b.contains("balance")) {
+                        std::cout << "  [~] " << m.key
+                                  << " balance: " << old_bal << " -> "
+                                  << new_bal << " (delta=" << bal_d << ")\n";
+                    } else {
+                        std::cout << "  [~] " << m.key
+                                  << " (full-row diff suppressed; use --json)\n";
+                    }
+                }
+            }
+        };
+        // Account-detail mode applies to all set-diff groups, with balance
+        // delta only meaningful for accounts. Other groups print [+]/[-]/[~]
+        // keys without a scalar delta.
+        if (want_accounts)    emit_human_rowdiff("accounts",    acct_diff,  account_detail);
+        if (want_stakes)      emit_human_rowdiff("stakes",      stake_diff, account_detail);
+        if (want_registrants) emit_human_rowdiff("registrants", reg_diff,   account_detail);
+        if (want_params)      emit_human_rowdiff("params",      params_diff, account_detail);
+
+        std::cout << "[summary]\n";
+        std::cout << "  counter_diffs:    " << counter_diffs.size()    << "\n";
+        std::cout << "  state_diffs:      " << state_diffs.size()      << "\n";
+        std::cout << "  account_diffs:    "
+                  << (acct_diff.added.size() + acct_diff.removed.size()
+                       + acct_diff.modified.size()) << "\n";
+        std::cout << "  stake_diffs:      "
+                  << (stake_diff.added.size() + stake_diff.removed.size()
+                       + stake_diff.modified.size()) << "\n";
+        std::cout << "  registrant_diffs: "
+                  << (reg_diff.added.size() + reg_diff.removed.size()
+                       + reg_diff.modified.size()) << "\n";
+        std::cout << "  params_diffs:     "
+                  << (params_diff.added.size() + params_diff.removed.size()
+                       + params_diff.modified.size()) << "\n";
+        std::cout << "[anomalies]\n";
+        if (anomalies.empty()) {
+            std::cout << "  (none)\n";
+        } else {
+            for (auto& a : anomalies) {
+                std::cout << "  [" << a.severity << "] " << a.code
+                          << ": " << a.message << "\n";
+            }
+        }
+    }
+
+    return any_critical ? 2 : 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -11927,6 +12464,7 @@ int main(int argc, char** argv) {
     if (cmd == "stake-bulk-query") return cmd_stake_bulk_query(argc - 2, argv + 2);
     if (cmd == "validator-roster-snapshot") return cmd_validator_roster_snapshot(argc - 2, argv + 2);
     if (cmd == "tx-history-export") return cmd_tx_history_export(argc - 2, argv + 2);
+    if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
