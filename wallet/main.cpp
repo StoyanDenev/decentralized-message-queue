@@ -8678,6 +8678,875 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     return 0;
 }
 
+// ── RPC socket helpers (used by cmd_validate_tx --rpc-port AND by
+//    cmd_anon_batch_balance / cmd_bulk_send below). Originally lived near
+//    cmd_anon_batch_balance (first consumer); promoted here so the
+//    earlier cmd_validate_tx --rpc-port path can call them without
+//    forward-declaration gymnastics. The wallet doesn't link asio, so we
+//    drop to BSD sockets / Winsock. Chain RPC protocol is JSON-over-TCP
+//    line-framed: send `{"method":...,"params":{...}}\n`; receive
+//    `{"result":...,"error":...}\n`. Multiple requests CAN share one TCP
+//    connection — the server's handle_session loops on read_until('\n'). ──
+
+#ifdef _WIN32
+struct WinsockInit {
+    WinsockInit() : ok(false) {
+        WSADATA wsa{};
+        ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+    }
+    ~WinsockInit() { if (ok) WSACleanup(); }
+    bool ok;
+};
+using sock_t = SOCKET;
+constexpr sock_t kInvalidSock = INVALID_SOCKET;
+inline void close_sock(sock_t s) { closesocket(s); }
+#else
+using sock_t = int;
+constexpr sock_t kInvalidSock = -1;
+inline void close_sock(sock_t s) { ::close(s); }
+#endif
+
+// Open a TCP connection to 127.0.0.1:<port>. Returns kInvalidSock on
+// failure (with `err_out` populated). The caller must close_sock() on
+// success.
+inline sock_t rpc_connect_localhost(uint16_t port, std::string& err_out) {
+    sock_t s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s == kInvalidSock) {
+        err_out = "socket() failed";
+        return kInvalidSock;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    // 127.0.0.1 in network byte order.
+#ifdef _WIN32
+    addr.sin_addr.s_addr = htonl(0x7F000001UL);
+#else
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#endif
+    if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close_sock(s);
+        err_out = "connect() to 127.0.0.1:" + std::to_string(port) +
+                  " failed (daemon not running?)";
+        return kInvalidSock;
+    }
+    return s;
+}
+
+// Send `line + \n` over the open socket. Returns false on any short
+// write or socket error.
+inline bool rpc_send_line(sock_t s, const std::string& payload) {
+    std::string buf = payload;
+    if (buf.empty() || buf.back() != '\n') buf.push_back('\n');
+    size_t sent = 0;
+    while (sent < buf.size()) {
+#ifdef _WIN32
+        int n = ::send(s, buf.data() + sent,
+                        static_cast<int>(buf.size() - sent), 0);
+#else
+        ssize_t n = ::send(s, buf.data() + sent, buf.size() - sent, 0);
+#endif
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+// Read bytes until we see a '\n', return everything up to (and not
+// including) it. Returns std::nullopt on socket error / EOF before
+// newline. Buffers leftover bytes in `inbuf` so subsequent reads in the
+// same session pick up where this one left off.
+inline std::optional<std::string> rpc_read_line(sock_t s, std::string& inbuf) {
+    while (true) {
+        auto nl = inbuf.find('\n');
+        if (nl != std::string::npos) {
+            std::string line = inbuf.substr(0, nl);
+            inbuf.erase(0, nl + 1);
+            return line;
+        }
+        char tmp[4096];
+#ifdef _WIN32
+        int n = ::recv(s, tmp, sizeof(tmp), 0);
+#else
+        ssize_t n = ::recv(s, tmp, sizeof(tmp), 0);
+#endif
+        if (n <= 0) return std::nullopt;
+        inbuf.append(tmp, static_cast<size_t>(n));
+    }
+}
+
+// Issue one JSON-RPC call over an already-open socket and return the
+// parsed result. Throws std::runtime_error on transport / parse / RPC-
+// error. The exception text is the diagnostic surface the caller emits.
+inline nlohmann::json rpc_call_over_socket(sock_t s,
+                                            std::string& inbuf,
+                                            const std::string& method,
+                                            const nlohmann::json& params) {
+    nlohmann::json req = {{"method", method}, {"params", params}};
+    if (!rpc_send_line(s, req.dump()))
+        throw std::runtime_error("send failed for " + method);
+    auto line = rpc_read_line(s, inbuf);
+    if (!line)
+        throw std::runtime_error("no response for " + method +
+                                  " (daemon closed connection?)");
+    nlohmann::json resp;
+    try { resp = nlohmann::json::parse(*line); }
+    catch (std::exception& e) {
+        throw std::runtime_error("malformed response for " + method + ": " +
+                                  e.what());
+    }
+    if (!resp.contains("error") || !resp["error"].is_null()) {
+        std::string err = resp.value("error",
+            nlohmann::json("unknown_error")).dump();
+        throw std::runtime_error("RPC error on " + method + ": " + err);
+    }
+    return resp.value("result", nlohmann::json());
+}
+
+// determ-wallet validate-tx — Offline validation of an already-signed tx
+// envelope.
+//
+// CONTEXT
+// -------
+// We already ship:
+//   * tx-sign-verify (Round 17)     — verifies the Ed25519 signature on
+//                                     a Transaction JSON, given an out-of-
+//                                     band --pubkey. Auth-gate only.
+//   * cold-sign      (Round 23A8)   — air-gapped signer; produces a
+//                                     signed envelope.
+//   * sign-anon-tx   (Round 35A1)   — composite builder + signer for an
+//                                     anon-address TRANSFER.
+//
+// What was missing: a single command that takes an ALREADY-SIGNED tx
+// envelope and runs the full battery of offline structural + crypto
+// checks an operator wants BEFORE submitting:
+//   (a) JSON shape / required fields / sane field types
+//   (b) Reconstructs canonical signing_bytes (matches src/chain/block.cpp
+//       Transaction::signing_bytes byte-for-byte)
+//   (c) Verifies the Ed25519 signature (sender's pubkey derived from the
+//       anon-address `from` field — no out-of-band pubkey needed for
+//       anon-address senders)
+//   (d) Recomputes SHA-256(signing_bytes) and matches it against the
+//       envelope's stored `hash` field (catches tamper-in-flight on the
+//       envelope's amount/fee/nonce/payload that didn't get re-signed)
+//   (e) Optional --strict mode adds TRANSFER-specific rules (anon-address
+//       canonical-case per S-028, non-empty `to`, etc.)
+//   (f) Optional --rpc-port mode adds liveness warnings (nonce drift vs.
+//       chain's next_nonce; insufficient balance for amount+fee)
+//
+// This is the diagnostic the operator runs RIGHT BEFORE `determ submit-
+// tx` to be certain the envelope is well-formed, signed by the correct
+// key, and economically viable. It's the inverse of sign-anon-tx /
+// cold-sign in workflow position: those PRODUCE a signed envelope; this
+// VALIDATES one.
+//
+// CRITICAL: validate-tx is a SUPERSET of tx-sign-verify's surface, NOT a
+// replacement. tx-sign-verify requires --pubkey (operator-supplied trust
+// anchor); validate-tx derives the pubkey for anon-address senders from
+// the `from` field (anon_address == "0x"+hex(ed_pub), so the pubkey is
+// embedded in the address). For domain-name senders the wallet has no
+// chain registry to look up the pubkey; we fall back to a
+// `signature_verified` = "skipped (no pubkey available — domain sender;
+// use tx-sign-verify with --pubkey)" diagnostic in that case rather than
+// failing closed (the structural + hash checks are still useful).
+//
+// CLI
+// ---
+//   --tx-json <file>    REQUIRED. Path to signed tx envelope JSON.
+//                       Pass `-` to read from stdin (operator convenience
+//                       for pipelining: `cat signed.json | validate-tx
+//                       --tx-json -`).
+//                       Accepts either the chain's canonical shape
+//                       ({type:int, from, to, amount, [fee], nonce,
+//                       payload, sig, hash}) OR the sign-anon-tx shape
+//                       ({type:"TRANSFER", ..., signature, hash}). Field
+//                       names `sig` and `signature` are accepted
+//                       interchangeably; numeric and upper-case-mnemonic
+//                       `type` values both work.
+//   --strict            Enforce TRANSFER-specific rules: tx.to non-empty,
+//                       anon-shape addresses must be canonical lowercase
+//                       (S-028), amount > 0. Warnings (not errors) for
+//                       things like fee == 0 (cheap-tx red flag) or
+//                       payload non-empty for TRANSFER (chain ignores it
+//                       but operator probably meant a different tx
+//                       type). When --strict is OFF, any strict-only
+//                       violation downgrades to a no-op (not flagged at
+//                       all).
+//   --rpc-port <N>      Optional. If supplied, opens one TCP connection
+//                       to 127.0.0.1:<N> and calls `nonce` + `balance`
+//                       for the sender to add liveness warnings:
+//                         * nonce != next_nonce  → "stale_nonce" warning
+//                         * balance < amount+fee → "insufficient_funds"
+//                       warning. RPC failures (daemon down, transport
+//                       error) downgrade to an "rpc_unreachable" warning
+//                       — they do NOT fail the overall validity check
+//                       (the operator may be air-gapped intentionally).
+//   --json              Machine-readable single-line JSON output instead
+//                       of the human-readable per-check report.
+//
+// OUTPUT
+// ------
+// Human (default):
+//   valid_structural:        true|false (diagnostic if false)
+//   signing_bytes_hex:       <64 hex>
+//   signature_verified:      true|false|skipped
+//   tx_hash_match:           true|false (stored vs recomputed)
+//   strict_warnings:         (when --strict) list, one per line
+//   rpc_warnings:            (when --rpc-port) list, one per line
+//   overall_valid:           true|false
+//
+// JSON:
+//   {
+//     "valid_structural":      bool,
+//     "structural_diagnostic": "...",
+//     "signing_bytes_hex":     "<64 hex>",   // SHA-256(signing_bytes)
+//     "signature_verified":    "true"|"false"|"skipped",
+//     "signature_diagnostic":  "..." (when skipped or false),
+//     "tx_hash_match":         bool,
+//     "tx_hash_stored":        "<64 hex>",
+//     "tx_hash_recomputed":    "<64 hex>",
+//     "strict_warnings":       [string] (only with --strict),
+//     "rpc_warnings":          [string] (only with --rpc-port),
+//     "overall_valid":         bool
+//   }
+//
+// EXIT CODES
+// ----------
+//   0  overall_valid == true (composite passes; warnings are NOT failures)
+//   1  args / parse / IO error (operator error, not validity failure)
+//   2  overall_valid == false (signature failure, hash mismatch, or any
+//      structural issue detected)
+int cmd_validate_tx(int argc, char** argv) {
+    std::string tx_path;
+    bool strict     = false;
+    bool json_out   = false;
+    int  rpc_port   = -1;
+    bool rpc_set    = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--tx-json"  && i + 1 < argc) tx_path = argv[++i];
+        else if (a == "--strict")                   strict = true;
+        else if (a == "--json")                     json_out = true;
+        else if (a == "--rpc-port" && i + 1 < argc) {
+            rpc_port = std::atoi(argv[++i]);
+            rpc_set = true;
+        }
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet validate-tx --tx-json <file|->\n"
+                "                                 [--strict] [--rpc-port <N>] [--json]\n"
+                "\n"
+                "  Offline validation of an already-signed tx envelope.\n"
+                "  Performs (a) JSON shape + structural checks,\n"
+                "  (b) canonical signing_bytes recomputation, (c) Ed25519\n"
+                "  signature verification (anon-address senders only —\n"
+                "  the pubkey is derived from the 'from' field; domain\n"
+                "  senders are skipped with a diagnostic), and (d) tx_hash\n"
+                "  recompute-vs-stored match. --strict adds TRANSFER-\n"
+                "  specific rule checks (S-028 anon canonical-case, tx.to\n"
+                "  non-empty, amount > 0). --rpc-port adds liveness\n"
+                "  warnings (nonce drift, insufficient funds) via the\n"
+                "  local daemon's RPC.\n"
+                "\n"
+                "  Accepts the chain's canonical JSON shape ({type:int,\n"
+                "  from, to, amount, [fee], nonce, payload, sig, hash})\n"
+                "  AND the sign-anon-tx output shape ({type:\"TRANSFER\",\n"
+                "  ..., signature, hash}). Field names `sig` and\n"
+                "  `signature` are accepted interchangeably.\n"
+                "\n"
+                "  Pass `-` to --tx-json to read from stdin.\n"
+                "\n"
+                "  Exit codes: 0 overall_valid, 1 args/parse/IO error,\n"
+                "  2 invalid (sig failure, hash mismatch, structural).\n";
+            return 0;
+        }
+        else {
+            std::cerr << "validate-tx: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet validate-tx --tx-json <file|-> "
+                         "[--strict] [--rpc-port <N>] [--json]\n";
+            return 1;
+        }
+    }
+    if (tx_path.empty()) {
+        std::cerr << "Usage: determ-wallet validate-tx --tx-json <file|-> "
+                     "[--strict] [--rpc-port <N>] [--json]\n"
+                     "  (--tx-json is required; pass `-` for stdin)\n";
+        return 1;
+    }
+    if (rpc_set && (rpc_port <= 0 || rpc_port > 65535)) {
+        std::cerr << "validate-tx: --rpc-port " << rpc_port
+                  << " out of range (expected 1..65535)\n";
+        return 1;
+    }
+
+    // ── Read + parse the tx JSON ──────────────────────────────────────────
+    nlohmann::json j;
+    try {
+        if (tx_path == "-") {
+            j = nlohmann::json::parse(std::cin);
+        } else {
+            std::ifstream tx_f(tx_path);
+            if (!tx_f) {
+                std::cerr << "validate-tx: cannot open --tx-json file: "
+                          << tx_path << "\n";
+                return 1;
+            }
+            tx_f >> j;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "validate-tx: --tx-json is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!j.is_object()) {
+        std::cerr << "validate-tx: --tx-json must be a JSON object\n";
+        return 1;
+    }
+
+    // ── Result accumulator. We collect every check's outcome, then
+    //    compose them at the end. Order: structural -> signature -> hash
+    //    -> strict warnings -> RPC warnings -> overall. Any FAIL (not
+    //    warning) flips overall_valid to false. ───────────────────────────
+    bool        valid_structural        = true;
+    std::string structural_diagnostic;
+    bool        signature_attempted     = false;
+    bool        signature_verified      = false;
+    std::string signature_diagnostic;
+    std::string signing_bytes_hex;
+    bool        hash_attempted          = false;
+    bool        tx_hash_match           = false;
+    std::string tx_hash_stored_hex;
+    std::string tx_hash_recomputed_hex;
+    std::vector<std::string> strict_warnings;
+    std::vector<std::string> rpc_warnings;
+
+    // ── Phase 1: Structural fields ────────────────────────────────────────
+    //
+    // Required: type (int OR upper-case mnemonic), from (string), to
+    // (string), amount (int), nonce (int), payload (hex string, possibly
+    // empty), sig OR signature (hex string of 128 chars), hash (hex of
+    // 64 chars). fee defaults to 0 if absent (matches chain's
+    // Transaction::from_json behavior). The mnemonic table mirrors
+    // TxType:: enum values in include/determ/chain/block.hpp.
+    int         tx_type_int = -1;
+    std::string from_str, to_str, payload_hex, sig_hex, hash_hex;
+    uint64_t    amount = 0, fee = 0, nonce = 0;
+    bool        sig_field_present = false;
+    bool        hash_field_present = false;
+
+    auto type_mnemonic_to_int = [](const std::string& s) -> int {
+        // Match include/determ/chain/block.hpp TxType ordering.
+        if (s == "TRANSFER")         return 0;
+        if (s == "REGISTER")         return 1;
+        if (s == "DEREGISTER")       return 2;
+        if (s == "STAKE")            return 3;
+        if (s == "UNSTAKE")          return 4;
+        if (s == "REGION_CHANGE")    return 5;
+        if (s == "PARAM_CHANGE")     return 6;
+        if (s == "MERGE_EVENT")      return 7;
+        if (s == "COMPOSABLE_BATCH") return 8;
+        if (s == "DAPP_REGISTER")    return 9;
+        if (s == "DAPP_CALL")        return 10;
+        return -1;
+    };
+    auto int_to_type_mnemonic = [](int t) -> const char* {
+        switch (t) {
+            case 0:  return "TRANSFER";
+            case 1:  return "REGISTER";
+            case 2:  return "DEREGISTER";
+            case 3:  return "STAKE";
+            case 4:  return "UNSTAKE";
+            case 5:  return "REGION_CHANGE";
+            case 6:  return "PARAM_CHANGE";
+            case 7:  return "MERGE_EVENT";
+            case 8:  return "COMPOSABLE_BATCH";
+            case 9:  return "DAPP_REGISTER";
+            case 10: return "DAPP_CALL";
+            default: return nullptr;
+        }
+    };
+
+    auto set_structural_fail = [&](const std::string& d) {
+        valid_structural = false;
+        if (structural_diagnostic.empty()) structural_diagnostic = d;
+    };
+
+    // type: accept int (canonical) or upper-case mnemonic string
+    // (sign-anon-tx shape). Range check the int value against the known
+    // TxType enum; values outside [0, 10] are flagged as unknown-but-
+    // structurally-shaped.
+    if (!j.contains("type")) {
+        set_structural_fail("missing required field 'type'");
+    } else if (j["type"].is_number()) {
+        tx_type_int = j["type"].get<int>();
+        if (int_to_type_mnemonic(tx_type_int) == nullptr) {
+            // Unknown enum value: signing_bytes will still encode the
+            // first byte verbatim, but a downstream chain submit will
+            // reject. Flag as structural failure (the chain would).
+            set_structural_fail("unknown 'type' enum value " +
+                                 std::to_string(tx_type_int) +
+                                 " (expected 0..10)");
+        }
+    } else if (j["type"].is_string()) {
+        const std::string s = j["type"].get<std::string>();
+        int mapped = type_mnemonic_to_int(s);
+        if (mapped < 0) {
+            set_structural_fail("unknown 'type' mnemonic '" + s + "'");
+        } else {
+            tx_type_int = mapped;
+        }
+    } else {
+        set_structural_fail("'type' must be an integer or an upper-case mnemonic string");
+    }
+
+    // from / to: required strings. Both must be present even for non-
+    // TRANSFER (the chain's signing_bytes encodes both unconditionally;
+    // we mirror that). Empty strings are accepted by the structural
+    // gate; --strict promotes empty `to` for TRANSFER to a failure.
+    if (!j.contains("from") || !j["from"].is_string()) {
+        set_structural_fail("missing/wrong-typed 'from' (expected string)");
+    } else {
+        from_str = j["from"].get<std::string>();
+    }
+    if (!j.contains("to") || !j["to"].is_string()) {
+        set_structural_fail("missing/wrong-typed 'to' (expected string)");
+    } else {
+        to_str = j["to"].get<std::string>();
+    }
+
+    // amount / nonce: required integers. fee is optional (defaults to 0;
+    // matches Transaction::from_json).
+    if (!j.contains("amount") || !j["amount"].is_number()) {
+        set_structural_fail("missing/wrong-typed 'amount' (expected integer)");
+    } else {
+        amount = j["amount"].is_number_unsigned()
+            ? j["amount"].get<uint64_t>()
+            : static_cast<uint64_t>(j["amount"].get<int64_t>());
+    }
+    if (!j.contains("nonce") || !j["nonce"].is_number()) {
+        set_structural_fail("missing/wrong-typed 'nonce' (expected integer)");
+    } else {
+        nonce = j["nonce"].is_number_unsigned()
+            ? j["nonce"].get<uint64_t>()
+            : static_cast<uint64_t>(j["nonce"].get<int64_t>());
+    }
+    if (j.contains("fee")) {
+        if (!j["fee"].is_number()) {
+            set_structural_fail("'fee' present but not a number");
+        } else {
+            fee = j["fee"].is_number_unsigned()
+                ? j["fee"].get<uint64_t>()
+                : static_cast<uint64_t>(j["fee"].get<int64_t>());
+        }
+    }
+
+    // payload: required string (hex). Empty string is valid for TRANSFER.
+    if (!j.contains("payload") || !j["payload"].is_string()) {
+        set_structural_fail("missing/wrong-typed 'payload' (expected hex string)");
+    } else {
+        payload_hex = j["payload"].get<std::string>();
+    }
+
+    // sig / signature: accept either field name. Required: 128 hex chars.
+    if (j.contains("sig") && j["sig"].is_string()) {
+        sig_hex = j["sig"].get<std::string>();
+        sig_field_present = true;
+    } else if (j.contains("signature") && j["signature"].is_string()) {
+        sig_hex = j["signature"].get<std::string>();
+        sig_field_present = true;
+    } else {
+        set_structural_fail("missing 'sig' (or 'signature') field — expected 128 hex chars");
+    }
+    if (sig_field_present && sig_hex.size() != 128) {
+        set_structural_fail("'sig'/'signature' must be 128 hex chars; got " +
+                             std::to_string(sig_hex.size()));
+    }
+
+    // hash: required, 64 hex chars.
+    if (j.contains("hash") && j["hash"].is_string()) {
+        hash_hex = j["hash"].get<std::string>();
+        hash_field_present = true;
+        if (hash_hex.size() != 64) {
+            set_structural_fail("'hash' must be 64 hex chars; got " +
+                                 std::to_string(hash_hex.size()));
+        }
+    } else {
+        set_structural_fail("missing/wrong-typed 'hash' (expected 64 hex chars)");
+    }
+
+    // ── Phase 2: signing_bytes + Ed25519 verify (only if structural OK
+    //    enough that the byte string can be built — i.e., we have type,
+    //    from, to, amount, fee, nonce, payload, and a parseable sig) ──
+    std::vector<uint8_t> sb;
+    std::vector<uint8_t> payload_bytes;
+    std::vector<uint8_t> sig_bytes;
+    bool sig_can_be_parsed = false;
+    if (valid_structural || (!from_str.empty() && !to_str.empty()
+                              && tx_type_int >= 0 && tx_type_int <= 255
+                              && hash_field_present && sig_field_present
+                              && sig_hex.size() == 128)) {
+        // Even with a structural failure we still TRY to compute
+        // signing_bytes when the minimal field set is present, so the
+        // operator sees the recomputed hash for diagnostic value.
+        try { payload_bytes = from_hex(payload_hex); }
+        catch (std::exception& e) {
+            set_structural_fail(std::string("invalid 'payload' hex: ") + e.what());
+        }
+        if (sig_field_present && sig_hex.size() == 128) {
+            try {
+                sig_bytes = from_hex(sig_hex);
+                if (sig_bytes.size() != 64) {
+                    set_structural_fail("decoded sig is " +
+                                         std::to_string(sig_bytes.size()) +
+                                         " bytes (expected 64)");
+                } else {
+                    sig_can_be_parsed = true;
+                }
+            } catch (std::exception& e) {
+                set_structural_fail(std::string("invalid 'sig' hex: ") + e.what());
+            }
+        }
+        // Build signing_bytes — byte-for-byte identical to
+        // src/chain/block.cpp Transaction::signing_bytes.
+        if (tx_type_int >= 0 && tx_type_int <= 255) {
+            sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+                       + payload_bytes.size());
+            sb.push_back(static_cast<uint8_t>(tx_type_int));
+            sb.insert(sb.end(), from_str.begin(), from_str.end());
+            sb.push_back(0);
+            sb.insert(sb.end(), to_str.begin(), to_str.end());
+            sb.push_back(0);
+            for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+            for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+            for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+            sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
+
+            std::array<uint8_t, 32> sb_sha{};
+            SHA256(sb.data(), sb.size(), sb_sha.data());
+            signing_bytes_hex = to_hex(sb_sha);
+            tx_hash_recomputed_hex = signing_bytes_hex;
+            hash_attempted = true;
+
+            // Hash match: recomputed signing_bytes SHA-256 must equal the
+            // envelope's stored `hash`. Mismatch indicates the envelope
+            // body was tampered with after signing (e.g., someone bumped
+            // `amount`). The chain would still verify the SIG against
+            // signing_bytes built from the body fields, so a mismatch
+            // here means the envelope's `hash` advertisement is wrong —
+            // possibly the signal of a downstream tool that didn't re-
+            // hash. We treat this as a validity failure: the signed
+            // intent the envelope advertises (via `hash`) doesn't match
+            // the bytes the chain would actually hash. Operators should
+            // never submit such an envelope; either re-sign from
+            // scratch, or refuse.
+            if (hash_field_present) {
+                // Compare case-insensitively (some tools emit upper-case
+                // hex; the chain emits lower).
+                std::string a = hash_hex, b = tx_hash_recomputed_hex;
+                for (auto& c : a) if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+                for (auto& c : b) if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+                tx_hash_stored_hex = a;
+                tx_hash_match = (a == b);
+                if (!tx_hash_match) {
+                    set_structural_fail(
+                        "tx_hash mismatch: envelope.hash=" + a +
+                        " != recomputed_signing_bytes_sha256=" + b +
+                        " (envelope body was modified after signing OR "
+                        "encoder didn't re-hash before storing)");
+                }
+            }
+        }
+    }
+
+    // Signature verification. For anon-address senders, the pubkey is
+    // derivable from the address (anon_address = "0x" + hex(ed_pub)),
+    // so no out-of-band trust anchor is needed. For domain-name
+    // senders, the wallet has no chain registry; we skip the verify
+    // step with a diagnostic pointing the operator at tx-sign-verify +
+    // --pubkey instead.
+    auto is_anon_shape = [](const std::string& s) -> bool {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+
+    if (sig_can_be_parsed && !sb.empty()) {
+        if (!primitives::init_libsodium()) {
+            std::cerr << "validate-tx: libsodium init failed\n";
+            return 1;
+        }
+        if (is_anon_shape(from_str)) {
+            // Derive the pubkey from the 64-hex tail of the anon-address.
+            // Normalize case for the hex decode (S-028 normalize_anon_
+            // address treats lowercase as canonical, but Ed25519 verify
+            // works on raw bytes, which are case-insensitive).
+            std::string addr_lower = from_str;
+            for (auto& c : addr_lower) {
+                if (c >= 'A' && c <= 'F') c = c - 'A' + 'a';
+            }
+            std::vector<uint8_t> pub_bytes;
+            try {
+                pub_bytes = from_hex(addr_lower.substr(2));
+            } catch (std::exception& e) {
+                signature_attempted = true;
+                signature_diagnostic = std::string("from-address hex decode "
+                                                    "failed: ") + e.what();
+            }
+            if (!pub_bytes.empty() && pub_bytes.size() == 32) {
+                signature_attempted = true;
+                int rc = crypto_sign_verify_detached(
+                    sig_bytes.data(),
+                    sb.data(), sb.size(),
+                    pub_bytes.data());
+                signature_verified = (rc == 0);
+                if (!signature_verified) {
+                    signature_diagnostic = "Ed25519 signature does NOT verify "
+                                            "under from-derived pubkey "
+                                            "(sig forged, body modified, "
+                                            "or wrong key)";
+                }
+            }
+        } else {
+            // Domain-name sender: no in-wallet way to fetch the pubkey.
+            signature_diagnostic = "skipped: sender '" + from_str +
+                                    "' is not an anon-address; pubkey "
+                                    "lookup requires chain registry "
+                                    "(use tx-sign-verify --pubkey)";
+        }
+    } else if (!sig_field_present) {
+        signature_diagnostic = "skipped: no 'sig'/'signature' field present";
+    } else {
+        signature_diagnostic = "skipped: cannot construct signing_bytes "
+                                "(prerequisite structural fields missing/"
+                                "malformed)";
+    }
+
+    // ── Phase 3: --strict TRANSFER-specific rules ─────────────────────────
+    //
+    // Warnings (not auto-fails): things like fee == 0 or non-empty
+    // payload for TRANSFER. These don't fail submit at the chain (chain
+    // accepts fee=0 in v1) but are red flags the operator should review.
+    // Hard FAILS (flip overall_valid to false): TRANSFER tx.to empty,
+    // amount == 0 (chain's apply rejects), anon-address from/to in
+    // non-canonical case (S-028: chain's rpc_submit_tx rejects).
+    bool strict_violation = false;
+    if (strict) {
+        const bool is_transfer = (tx_type_int == 0);
+        if (is_transfer) {
+            if (to_str.empty()) {
+                strict_warnings.push_back(
+                    "FAIL: TRANSFER with empty 'to' (chain rejects)");
+                strict_violation = true;
+            }
+            if (amount == 0) {
+                strict_warnings.push_back(
+                    "FAIL: TRANSFER with amount == 0 (chain rejects: "
+                    "is_valid() requires amount > 0 for TRANSFER)");
+                strict_violation = true;
+            }
+            if (fee == 0) {
+                strict_warnings.push_back(
+                    "WARN: TRANSFER with fee == 0 (legal in v1, but "
+                    "validators may deprioritize)");
+            }
+            if (!payload_hex.empty()) {
+                strict_warnings.push_back(
+                    "WARN: TRANSFER with non-empty payload (chain "
+                    "ignores; operator likely intended a different "
+                    "TxType)");
+            }
+        }
+        // S-028 anon-address canonicalization: both `from` and (if
+        // anon-shape) `to` MUST be canonical lowercase. Chain's
+        // rpc_submit_tx rejects non-canonical anon shapes outright.
+        auto check_anon_canon = [&](const std::string& field,
+                                     const std::string& s) {
+            if (!is_anon_shape(s)) return;  // domain name; opaque
+            for (size_t i = 2; i < s.size(); ++i) {
+                char c = s[i];
+                if (c >= 'A' && c <= 'F') {
+                    strict_warnings.push_back(
+                        "FAIL: '" + field + "' is anon-shape but not "
+                        "canonical lowercase (S-028); chain's "
+                        "rpc_submit_tx rejects non-canonical anon "
+                        "addresses");
+                    strict_violation = true;
+                    return;
+                }
+            }
+        };
+        check_anon_canon("from", from_str);
+        if (is_transfer) check_anon_canon("to", to_str);
+    }
+
+    // ── Phase 4: --rpc-port liveness warnings ─────────────────────────────
+    //
+    // Open ONE TCP connection to 127.0.0.1:<port>, issue `nonce` +
+    // `balance` for the sender, and emit warnings on mismatch. Any RPC
+    // failure downgrades to an `rpc_unreachable` warning — NEVER a fail
+    // (operator may be air-gapped intentionally; the structural + sig
+    // + hash checks remain authoritative).
+    if (rpc_set && rpc_port > 0) {
+#ifdef _WIN32
+        WinsockInit wsa;
+        if (!wsa.ok) {
+            rpc_warnings.push_back("rpc_unreachable: WSAStartup failed");
+        } else
+#endif
+        {
+            std::string conn_err;
+            sock_t rs = rpc_connect_localhost(
+                static_cast<uint16_t>(rpc_port), conn_err);
+            if (rs == kInvalidSock) {
+                rpc_warnings.push_back(
+                    "rpc_unreachable: " + conn_err);
+            } else {
+                std::string inbuf;
+                // Nonce.
+                try {
+                    auto n_resp = rpc_call_over_socket(
+                        rs, inbuf, "nonce", {{"domain", from_str}});
+                    if (n_resp.contains("next_nonce")
+                        && n_resp["next_nonce"].is_number()) {
+                        uint64_t next_nonce =
+                            n_resp["next_nonce"].is_number_unsigned()
+                                ? n_resp["next_nonce"].get<uint64_t>()
+                                : static_cast<uint64_t>(
+                                    n_resp["next_nonce"].get<int64_t>());
+                        if (nonce != next_nonce) {
+                            rpc_warnings.push_back(
+                                "stale_nonce: tx.nonce=" +
+                                std::to_string(nonce) +
+                                " but chain's next_nonce(" + from_str +
+                                ")=" + std::to_string(next_nonce) +
+                                " (tx may be rejected as replay/gap)");
+                        }
+                    }
+                } catch (std::exception& e) {
+                    rpc_warnings.push_back(
+                        std::string("nonce_rpc_failed: ") + e.what());
+                }
+                // Balance.
+                try {
+                    auto b_resp = rpc_call_over_socket(
+                        rs, inbuf, "balance", {{"domain", from_str}});
+                    if (b_resp.contains("balance")
+                        && b_resp["balance"].is_number()) {
+                        uint64_t bal =
+                            b_resp["balance"].is_number_unsigned()
+                                ? b_resp["balance"].get<uint64_t>()
+                                : static_cast<uint64_t>(
+                                    b_resp["balance"].get<int64_t>());
+                        // amount + fee with overflow guard (overflow
+                        // implies an obviously-broken tx anyway).
+                        uint64_t need = amount;
+                        if (UINT64_MAX - need < fee) {
+                            rpc_warnings.push_back(
+                                "overflow: amount + fee exceeds u64 "
+                                "range");
+                        } else {
+                            need += fee;
+                            if (bal < need) {
+                                rpc_warnings.push_back(
+                                    "insufficient_funds: chain balance(" +
+                                    from_str + ")=" +
+                                    std::to_string(bal) +
+                                    " < amount+fee=" +
+                                    std::to_string(need));
+                            }
+                        }
+                    }
+                } catch (std::exception& e) {
+                    rpc_warnings.push_back(
+                        std::string("balance_rpc_failed: ") + e.what());
+                }
+                close_sock(rs);
+            }
+        }
+    }
+
+    // ── Composite verdict ─────────────────────────────────────────────────
+    // overall_valid is true when ALL of:
+    //   * valid_structural == true (covers hash mismatch + bad shape)
+    //   * signature_attempted ⇒ signature_verified == true
+    //     (a skipped sig is NOT a failure — operator may be validating
+    //     a domain-sender tx whose pubkey isn't in-wallet)
+    //   * --strict: no strict_violation flagged
+    //
+    // RPC warnings are NEVER fatal — they're advisory.
+    bool overall_valid = valid_structural;
+    if (signature_attempted && !signature_verified) overall_valid = false;
+    if (strict && strict_violation)                 overall_valid = false;
+
+    const char* sig_field_str =
+        signature_attempted ? (signature_verified ? "true" : "false")
+                            : "skipped";
+
+    if (json_out) {
+        nlohmann::json r;
+        r["valid_structural"]      = valid_structural;
+        if (!structural_diagnostic.empty())
+            r["structural_diagnostic"] = structural_diagnostic;
+        r["signing_bytes_hex"]     = signing_bytes_hex;
+        r["signature_verified"]    = sig_field_str;
+        if (!signature_diagnostic.empty())
+            r["signature_diagnostic"]  = signature_diagnostic;
+        r["tx_hash_match"]         = tx_hash_match;
+        if (hash_attempted) {
+            r["tx_hash_stored"]     = tx_hash_stored_hex;
+            r["tx_hash_recomputed"] = tx_hash_recomputed_hex;
+        }
+        if (strict) {
+            r["strict_warnings"] = nlohmann::json::array();
+            for (auto& w : strict_warnings) r["strict_warnings"].push_back(w);
+        }
+        if (rpc_set) {
+            r["rpc_warnings"] = nlohmann::json::array();
+            for (auto& w : rpc_warnings) r["rpc_warnings"].push_back(w);
+        }
+        r["overall_valid"] = overall_valid;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "valid_structural:        "
+                  << (valid_structural ? "true" : "false");
+        if (!structural_diagnostic.empty())
+            std::cout << "  (" << structural_diagnostic << ")";
+        std::cout << "\n";
+        std::cout << "signing_bytes_hex:       " << signing_bytes_hex << "\n";
+        std::cout << "signature_verified:      " << sig_field_str;
+        if (!signature_diagnostic.empty())
+            std::cout << "  (" << signature_diagnostic << ")";
+        std::cout << "\n";
+        std::cout << "tx_hash_match:           "
+                  << (tx_hash_match ? "true" : "false");
+        if (hash_attempted) {
+            std::cout << "  (stored=" << tx_hash_stored_hex
+                      << " recomputed=" << tx_hash_recomputed_hex << ")";
+        }
+        std::cout << "\n";
+        if (strict) {
+            std::cout << "strict_warnings:         "
+                      << strict_warnings.size() << "\n";
+            for (auto& w : strict_warnings) std::cout << "  - " << w << "\n";
+        }
+        if (rpc_set) {
+            std::cout << "rpc_warnings:            "
+                      << rpc_warnings.size() << "\n";
+            for (auto& w : rpc_warnings) std::cout << "  - " << w << "\n";
+        }
+        std::cout << "overall_valid:           "
+                  << (overall_valid ? "true" : "false") << "\n";
+    }
+    return overall_valid ? 0 : 2;
+}
+
 // ── sign-arbitrary / verify-arbitrary ────────────────────────────────────────
 //
 // Paired commands for OFF-CHAIN, arbitrary-message Ed25519 signing using a
@@ -9138,131 +10007,14 @@ int cmd_verify_arbitrary(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
-// ── RPC socket helpers for cmd_anon_batch_balance ───────────────────────────
-//
-// The wallet doesn't link asio, so we drop down to BSD sockets / Winsock for
-// the one command (anon-batch-balance) that genuinely needs RPC access. The
-// chain's RPC protocol is JSON-over-TCP line-framed: send one
-// `{"method":...,"params":{...}}\n` per request; receive one `{"result":...,
-// "error":...}\n`. Multiple requests CAN share a single TCP connection — the
-// server's handle_session loops on read_until('\n'), so we batch all
-// per-address queries (balance, optional nonce, optional stake_info) over
-// ONE socket to minimize connect()/accept() churn for large address lists.
-
-#ifdef _WIN32
-struct WinsockInit {
-    WinsockInit() : ok(false) {
-        WSADATA wsa{};
-        ok = (WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
-    }
-    ~WinsockInit() { if (ok) WSACleanup(); }
-    bool ok;
-};
-using sock_t = SOCKET;
-constexpr sock_t kInvalidSock = INVALID_SOCKET;
-inline void close_sock(sock_t s) { closesocket(s); }
-#else
-using sock_t = int;
-constexpr sock_t kInvalidSock = -1;
-inline void close_sock(sock_t s) { ::close(s); }
-#endif
-
-// Open a TCP connection to 127.0.0.1:<port>. Returns kInvalidSock on
-// failure (with `err_out` populated). The caller must close_sock() on
-// success.
-sock_t rpc_connect_localhost(uint16_t port, std::string& err_out) {
-    sock_t s = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (s == kInvalidSock) {
-        err_out = "socket() failed";
-        return kInvalidSock;
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    // 127.0.0.1 in network byte order.
-#ifdef _WIN32
-    addr.sin_addr.s_addr = htonl(0x7F000001UL);
-#else
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-#endif
-    if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close_sock(s);
-        err_out = "connect() to 127.0.0.1:" + std::to_string(port) +
-                  " failed (daemon not running?)";
-        return kInvalidSock;
-    }
-    return s;
-}
-
-// Send `line + \n` over the open socket. Returns false on any short
-// write or socket error.
-bool rpc_send_line(sock_t s, const std::string& payload) {
-    std::string buf = payload;
-    if (buf.empty() || buf.back() != '\n') buf.push_back('\n');
-    size_t sent = 0;
-    while (sent < buf.size()) {
-#ifdef _WIN32
-        int n = ::send(s, buf.data() + sent,
-                        static_cast<int>(buf.size() - sent), 0);
-#else
-        ssize_t n = ::send(s, buf.data() + sent, buf.size() - sent, 0);
-#endif
-        if (n <= 0) return false;
-        sent += static_cast<size_t>(n);
-    }
-    return true;
-}
-
-// Read bytes until we see a '\n', return everything up to (and not
-// including) it. Returns std::nullopt on socket error / EOF before
-// newline. Buffers leftover bytes in `inbuf` so subsequent reads in the
-// same session pick up where this one left off.
-std::optional<std::string> rpc_read_line(sock_t s, std::string& inbuf) {
-    while (true) {
-        auto nl = inbuf.find('\n');
-        if (nl != std::string::npos) {
-            std::string line = inbuf.substr(0, nl);
-            inbuf.erase(0, nl + 1);
-            return line;
-        }
-        char tmp[4096];
-#ifdef _WIN32
-        int n = ::recv(s, tmp, sizeof(tmp), 0);
-#else
-        ssize_t n = ::recv(s, tmp, sizeof(tmp), 0);
-#endif
-        if (n <= 0) return std::nullopt;
-        inbuf.append(tmp, static_cast<size_t>(n));
-    }
-}
-
-// Issue one JSON-RPC call over an already-open socket and return the
-// parsed result. Throws std::runtime_error on transport / parse / RPC-
-// error. The exception text is the diagnostic surface the caller emits.
-nlohmann::json rpc_call_over_socket(sock_t s,
-                                     std::string& inbuf,
-                                     const std::string& method,
-                                     const nlohmann::json& params) {
-    nlohmann::json req = {{"method", method}, {"params", params}};
-    if (!rpc_send_line(s, req.dump()))
-        throw std::runtime_error("send failed for " + method);
-    auto line = rpc_read_line(s, inbuf);
-    if (!line)
-        throw std::runtime_error("no response for " + method +
-                                  " (daemon closed connection?)");
-    nlohmann::json resp;
-    try { resp = nlohmann::json::parse(*line); }
-    catch (std::exception& e) {
-        throw std::runtime_error("malformed response for " + method + ": " +
-                                  e.what());
-    }
-    if (!resp.contains("error") || !resp["error"].is_null()) {
-        std::string err = resp.value("error",
-            nlohmann::json("unknown_error")).dump();
-        throw std::runtime_error("RPC error on " + method + ": " + err);
-    }
-    return resp.value("result", nlohmann::json());
-}
+// NOTE: The RPC socket helpers (WinsockInit, rpc_connect_localhost,
+// rpc_send_line, rpc_read_line, rpc_call_over_socket, close_sock,
+// sock_t, kInvalidSock) were promoted above cmd_validate_tx so the
+// earlier offline-validator command can call them without forward-
+// declaration gymnastics. The original definitions used to live at this
+// site (next to cmd_anon_batch_balance, the first consumer). See the
+// `// ── RPC socket helpers ──` block earlier in this file for the
+// definitions and rationale.
 
 // determ-wallet anon-batch-balance — query balances + nonces + stakes
 // for a batch of anon addresses against a running daemon's RPC.
@@ -13714,6 +14466,38 @@ void print_usage() {
         "                                             payload:\"\",signature,hash}. Exit 0 signed,\n"
         "                                             1 args/keyfile/validation error, 2 crypto\n"
         "                                             failure.\n"
+        "  validate-tx --tx-json <file|->             OFFLINE validation of an already-signed tx\n"
+        "              [--strict] [--rpc-port <N>] [--json]\n"
+        "                                             envelope. Performs (a) JSON shape +\n"
+        "                                             structural checks, (b) canonical signing_\n"
+        "                                             bytes recomputation (matches src/chain/\n"
+        "                                             block.cpp Transaction::signing_bytes),\n"
+        "                                             (c) Ed25519 signature verification (anon-\n"
+        "                                             address senders only — pubkey derived from\n"
+        "                                             the `from` field; domain senders are\n"
+        "                                             skipped with a diagnostic pointing at\n"
+        "                                             tx-sign-verify), (d) tx_hash stored-vs-\n"
+        "                                             recomputed match (catches body-tamper-\n"
+        "                                             after-sign). Accepts both the chain's\n"
+        "                                             canonical JSON shape (numeric `type`, `sig`\n"
+        "                                             field) and the sign-anon-tx shape (upper-\n"
+        "                                             case mnemonic `type`, `signature` field).\n"
+        "                                             --tx-json `-` reads from stdin. --strict\n"
+        "                                             adds TRANSFER-specific gates (S-028 anon\n"
+        "                                             canonicalization, tx.to non-empty,\n"
+        "                                             amount > 0). --rpc-port adds liveness\n"
+        "                                             warnings (nonce drift vs. chain's next_\n"
+        "                                             nonce; insufficient funds for amount+fee)\n"
+        "                                             via JSON-RPC; transport failures degrade to\n"
+        "                                             advisory `rpc_unreachable` warnings rather\n"
+        "                                             than failing the validation. Output\n"
+        "                                             (default human; --json for one-line JSON):\n"
+        "                                             {valid_structural, signing_bytes_hex,\n"
+        "                                             signature_verified, tx_hash_match,\n"
+        "                                             strict_warnings, rpc_warnings,\n"
+        "                                             overall_valid}. Exit 0 overall_valid,\n"
+        "                                             1 args/parse/IO error, 2 invalid (sig\n"
+        "                                             failure, hash mismatch, structural).\n"
         "  sign-arbitrary --priv-keyfile <path>\n"
         "                 (--msg <str> | --msg-file <path>)\n"
         "                 [--out <file>] [--detached | --bundle]\n"
@@ -14026,6 +14810,7 @@ int main(int argc, char** argv) {
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
+    if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
