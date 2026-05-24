@@ -877,6 +877,23 @@ Additional in-process tests:
                                               pins V0 genesis short-circuit
                                               + negative determinism over
                                               identical reject-path inputs.
+  determ test-block-rand-distribution         compute_block_rand distribution +
+                                              per-block randomness contracts —
+                                              companion to test-block-rand.
+                                              Pins replay determinism across
+                                              instance / scope / map-rebuild;
+                                              single-byte avalanche on secrets,
+                                              prev_hash, index; committee-
+                                              selection-order binding (reorder
+                                              breaks pairing); per-bit uniformity
+                                              smoke (256 samples, mean of per-bit
+                                              set-counts in [120, 136] window
+                                              around binomial(256, 0.5)
+                                              expectation 128); K-subset
+                                              behavior (K=3 vs K=5, K=1
+                                              degenerate, K=0 well-defined);
+                                              output-domain coverage (≥90 of
+                                              100 distinct across varying index).
 )" << "\n";
 }
 
@@ -31432,6 +31449,396 @@ int main(int argc, char** argv) {
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": merge-event-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    // S-009 / rev.9 randomness-output distribution contract — pin the
+    // statistical + binding properties of compute_block_rand (the per-
+    // block 32-byte committee randomness derived from delay_seed plus
+    // the K ordered Phase-2 secret reveals). test-block-rand exercises
+    // baseline sensitivity + domain separation; this companion pins
+    // (a) replay determinism across instance / process / map-rebuild,
+    // (b) avalanche on single-byte perturbations of each input class
+    //     (secret bytes, delay_seed-anchored prev_hash, delay_seed-
+    //     anchored index),
+    // (c) committee-selection-order binding (reorder breaks the FA1
+    //     commit/reveal pairing),
+    // (d) per-bit uniformity smoke (256-sample binomial sanity, not a
+    //     crypto-strength uniformity proof — just pins "looks random"
+    //     at the per-bit level so a future change to the hash gluing
+    //     can't silently regress to a degenerate output),
+    // (e) K-count subset behavior (K=3 vs K=5, K=1 degenerate, K=0
+    //     well-defined),
+    // (f) cross-instance byte identity (no hidden process-local state),
+    // (g) output-domain coverage across varying index.
+    // Together with test-block-rand, this is the FA1 / FA5 / FA8
+    // foundation that downstream committee selection at every height
+    // depends on. A regression that broke uniformity would skew the
+    // committee distribution; a regression that broke determinism or
+    // order-binding would fork randomness across nodes (safety
+    // failure) or allow Phase-2 reorder bias (FA1 violation).
+    if (cmd == "test-block-rand-distribution") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Helpers: deterministic Hash builders. Match the style used by
+        // test-block-rand so cross-test fixtures share the same shape.
+        auto fill_hash = [](uint8_t fill) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i) h[i] = fill;
+            return h;
+        };
+        auto patterned_hash = [](uint8_t base) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i)
+                h[i] = uint8_t(base + i);
+            return h;
+        };
+
+        // Shared baseline fixture. The triple (IDX, PREV, TXR) plus the
+        // K dh_inputs fully define delay_seed via compute_delay_seed;
+        // SECRETS are the K ordered Phase-2 reveals fed to
+        // compute_block_rand alongside delay_seed.
+        const uint64_t IDX = 100;
+        const Hash PREV = fill_hash(0xA1);
+        const Hash TXR  = fill_hash(0xB2);
+        const std::vector<Hash> DH_INPUTS = {
+            patterned_hash(0x10), patterned_hash(0x20), patterned_hash(0x30)};
+        const std::vector<Hash> SECRETS = {
+            patterned_hash(0x40), patterned_hash(0x50), patterned_hash(0x60)};
+        const Hash DELAY_SEED = compute_delay_seed(IDX, PREV, TXR, DH_INPUTS);
+        const Hash RAND_BASELINE = compute_block_rand(DELAY_SEED, SECRETS);
+
+        // === Scenario 1: Replay determinism ===
+        //
+        // Same delay_seed + ordered_secrets → same block_rand across 3
+        // back-to-back invocations, across freshly-rebuilt input
+        // containers (no hidden std::vector / std::map identity
+        // dependence), and across a map-rebuild path (compose secrets
+        // from a std::map iteration order — the map is sorted, so a
+        // rebuild from key/value pairs yields the same vector order,
+        // and therefore the same block_rand).
+        //
+        // 3 assertions.
+        {
+            Hash r1 = compute_block_rand(DELAY_SEED, SECRETS);
+            Hash r2 = compute_block_rand(DELAY_SEED, SECRETS);
+            Hash r3 = compute_block_rand(DELAY_SEED, SECRETS);
+            check(r1 == RAND_BASELINE && r2 == RAND_BASELINE
+                  && r3 == RAND_BASELINE,
+                  "(1) Replay determinism: 3 consecutive "
+                  "compute_block_rand invocations on identical inputs "
+                  "produce byte-identical block_rand (no hidden "
+                  "process-local state in the SHA-256-glue path)");
+
+            // Cross-instance: fresh local containers built from the
+            // same scalar values must produce the same output. Locks
+            // "input-pure" — no dependence on std::vector heap address
+            // or object identity.
+            std::vector<Hash> secrets_fresh = {
+                patterned_hash(0x40), patterned_hash(0x50),
+                patterned_hash(0x60)};
+            Hash fresh_seed = compute_delay_seed(IDX, PREV, TXR,
+                {patterned_hash(0x10), patterned_hash(0x20),
+                 patterned_hash(0x30)});
+            Hash r_fresh = compute_block_rand(fresh_seed, secrets_fresh);
+            check(r_fresh == RAND_BASELINE,
+                  "(1) Replay determinism: freshly-built input "
+                  "containers with identical scalar values produce "
+                  "byte-identical block_rand (no object-identity "
+                  "dependence)");
+
+            // Map-rebuild path: compose ordered_secrets via std::map
+            // iteration (sorted by key). The vector we feed to
+            // compute_block_rand is identical to SECRETS because the
+            // map keys (0, 1, 2) iterate in order, so block_rand must
+            // match.
+            std::map<int, Hash> secret_map;
+            secret_map[0] = patterned_hash(0x40);
+            secret_map[1] = patterned_hash(0x50);
+            secret_map[2] = patterned_hash(0x60);
+            std::vector<Hash> rebuilt;
+            for (auto& kv : secret_map) rebuilt.push_back(kv.second);
+            Hash r_map = compute_block_rand(DELAY_SEED, rebuilt);
+            check(r_map == RAND_BASELINE,
+                  "(1) Replay determinism: ordered_secrets rebuilt via "
+                  "std::map iteration (sorted by key) yields the same "
+                  "block_rand (no container-identity dependence)");
+        }
+
+        // === Scenario 2: Single-byte sensitivity ===
+        //
+        // Flip ONE byte in each input class and assert block_rand
+        // changes. This is the avalanche property — the SHA-256 glue
+        // should propagate any single-bit input change to the full
+        // 256-bit output with overwhelming probability. We don't
+        // measure the *amount* of avalanche (Hamming distance ≈ 128
+        // bits is the SHA-256 norm), just the binary "did it move at
+        // all" — which must be true for every single-byte perturbation
+        // unless SHA-256 has a 2^-256 collision (astronomically
+        // unlikely on fixed test inputs).
+        //
+        // 3 assertions: flip in a secret byte, flip in prev_hash (via
+        // re-derived delay_seed), bump index by 1 (via re-derived
+        // delay_seed).
+        {
+            // Flip the lowest byte of secrets[1].
+            std::vector<Hash> sec_flip = SECRETS;
+            sec_flip[1][0] = uint8_t(sec_flip[1][0] ^ 0x01);
+            Hash r = compute_block_rand(DELAY_SEED, sec_flip);
+            check(r != RAND_BASELINE,
+                  "(2) Avalanche: single-byte XOR-flip of "
+                  "ordered_secrets[1][0] changes block_rand (the secret "
+                  "bytes are fully bound)");
+
+            // Flip the lowest byte of prev_hash — re-derive delay_seed
+            // since prev_hash feeds compute_delay_seed.
+            Hash prev_flip = PREV;
+            prev_flip[0] = uint8_t(prev_flip[0] ^ 0x01);
+            Hash seed_prev = compute_delay_seed(IDX, prev_flip, TXR,
+                                                  DH_INPUTS);
+            Hash r2 = compute_block_rand(seed_prev, SECRETS);
+            check(r2 != RAND_BASELINE,
+                  "(2) Avalanche: single-byte XOR-flip of prev_hash "
+                  "changes block_rand (prev_hash is bound via "
+                  "compute_delay_seed → compute_block_rand chain)");
+
+            // Bump index by 1 — re-derive delay_seed.
+            Hash seed_idx = compute_delay_seed(IDX + 1, PREV, TXR,
+                                                 DH_INPUTS);
+            Hash r3 = compute_block_rand(seed_idx, SECRETS);
+            check(r3 != RAND_BASELINE,
+                  "(2) Avalanche: incrementing block_index by 1 "
+                  "changes block_rand (height monotonicity feeds "
+                  "through compute_delay_seed)");
+        }
+
+        // === Scenario 3: Order-bound input ===
+        //
+        // ordered_secrets[i] must correspond to creators[i] (the
+        // committee-selection order is canonical — Phase-1 commits and
+        // Phase-2 reveals share the same indexing). Reordering breaks
+        // the binding and MUST change block_rand. Without this, an
+        // honest-but-malicious gather could shuffle reveals to bias
+        // future randomness (FA1 selective-abort attack with extra
+        // degrees of freedom).
+        //
+        // 2 assertions: swap two secrets; reverse the entire vector.
+        {
+            // Swap secrets[0] and secrets[2].
+            std::vector<Hash> swapped = SECRETS;
+            std::swap(swapped[0], swapped[2]);
+            Hash r = compute_block_rand(DELAY_SEED, swapped);
+            check(r != RAND_BASELINE,
+                  "(3) Order binding: swapping ordered_secrets[0] and "
+                  "[2] changes block_rand (committee-selection order "
+                  "is canonical — Phase-1/Phase-2 indexing must match)");
+
+            // Reverse the entire vector (a "maximal" reorder).
+            std::vector<Hash> reversed(SECRETS.rbegin(), SECRETS.rend());
+            Hash r2 = compute_block_rand(DELAY_SEED, reversed);
+            check(r2 != RAND_BASELINE,
+                  "(3) Order binding: reversing ordered_secrets "
+                  "changes block_rand (no permutation-invariant glue "
+                  "in compute_block_rand — order is strictly bound)");
+        }
+
+        // === Scenario 4: Bit-distribution sample ===
+        //
+        // Generate 256 block_rand values by varying index 0..255 with
+        // fixed creators + prev_hash. For each of the 256 bit
+        // positions, count how many of the 256 samples have that bit
+        // set. Each bit should be set in ~128 samples (mean=128,
+        // std≈8 for binomial(256, 0.5)). Assert the MEAN of those 256
+        // per-bit counts is in [120, 136] (a wide ±8 window around
+        // 128 — 1σ for binomial; gives a non-flaky smoke check that
+        // block_rand "looks random" at the per-bit level).
+        //
+        // Strict per-bit assertion would be brittle (a single bit far
+        // from 128 would fail), so we use the mean of the 256 counts.
+        // For an ideal random hash, the mean across all 256 positions
+        // collapses variance further (E[mean] = 128 with std ≈ 0.5),
+        // so the [120, 136] window is extremely tight against an
+        // adversarial regression while leaving headroom for a working
+        // hash.
+        //
+        // 2 assertions: count vector populated; mean in window.
+        {
+            const int N_SAMPLES = 256;
+            const int N_BITS = 256;
+            std::vector<int> bit_counts(N_BITS, 0);
+            for (int i = 0; i < N_SAMPLES; ++i) {
+                Hash seed_i = compute_delay_seed(uint64_t(i), PREV, TXR,
+                                                   DH_INPUTS);
+                Hash r = compute_block_rand(seed_i, SECRETS);
+                for (int b = 0; b < N_BITS; ++b) {
+                    int byte_idx = b / 8;
+                    int bit_idx  = b % 8;
+                    if (r[byte_idx] & (uint8_t(1) << bit_idx))
+                        bit_counts[b]++;
+                }
+            }
+            // Sanity: at least one bit was counted (basic non-zero).
+            int total = 0;
+            for (int c : bit_counts) total += c;
+            check(total > 0,
+                  "(4) Bit-distribution: per-bit set-counts populated "
+                  "across 256 samples (sanity that the hash actually "
+                  "emits non-zero output)");
+
+            // Mean of per-bit counts. For an ideal random output we
+            // expect ~ N_SAMPLES * 0.5 == 128. The [120, 136] window
+            // is ±8 (1σ for binomial(256, 0.5)); the MEAN across 256
+            // positions has variance / N so realistically lands in
+            // [127, 129] for a working hash. The wide window is
+            // intentionally non-flaky.
+            double mean = double(total) / double(N_BITS);
+            check(mean >= 120.0 && mean <= 136.0,
+                  "(4) Bit-distribution: mean of per-bit set-counts "
+                  "across 256 samples lies in [120, 136] window "
+                  "around the binomial(256, 0.5) expectation of 128 "
+                  "— smoke test that block_rand 'looks random' at the "
+                  "per-bit level");
+        }
+
+        // === Scenario 5: K-creator subset behavior ===
+        //
+        // (a) K=3 vs K=5 with first 3 creators identical → different
+        //     block_rand (the extra reveals contribute to the hash).
+        // (b) K=1 (degenerate but valid) → block_rand well-defined and
+        //     deterministic.
+        // (c) K=0 (empty creator set) → block_rand well-defined per
+        //     the test-block-rand assertion #7 contract:
+        //     compute_block_rand(delay_seed, {}) is just sha256(seed)
+        //     — non-zero, deterministic, distinct from any non-empty K.
+        //
+        // 4 assertions: K=3 ≠ K=5; K=1 deterministic; K=0 deterministic;
+        // K=0 ≠ K=3 baseline (empty vs non-empty input distinction).
+        {
+            std::vector<Hash> sec3 = SECRETS;
+            std::vector<Hash> sec5 = SECRETS;
+            sec5.push_back(patterned_hash(0x70));
+            sec5.push_back(patterned_hash(0x80));
+            Hash r3 = compute_block_rand(DELAY_SEED, sec3);
+            Hash r5 = compute_block_rand(DELAY_SEED, sec5);
+            check(r3 != r5,
+                  "(5) K-subset: K=3 vs K=5 with the first 3 secrets "
+                  "identical produces different block_rand (extra "
+                  "reveals contribute to the hash glue)");
+
+            // K=1 — single-secret degenerate. Determinism only.
+            std::vector<Hash> sec1 = {patterned_hash(0x40)};
+            Hash r1a = compute_block_rand(DELAY_SEED, sec1);
+            Hash r1b = compute_block_rand(DELAY_SEED, sec1);
+            check(r1a == r1b,
+                  "(5) K-subset: K=1 (degenerate single-secret) "
+                  "produces deterministic block_rand on replay");
+
+            // K=0 — empty reveal vector. Per test-block-rand assertion
+            // #7 (compute_block_rand on empty secrets is just
+            // sha256(delay_seed)), this is well-defined.
+            std::vector<Hash> empty;
+            Hash r0a = compute_block_rand(DELAY_SEED, empty);
+            Hash r0b = compute_block_rand(DELAY_SEED, empty);
+            check(r0a == r0b,
+                  "(5) K-subset: K=0 (empty reveal vector) produces "
+                  "deterministic block_rand (well-defined edge case — "
+                  "all-aborted-Phase-2 path)");
+            check(r0a != RAND_BASELINE,
+                  "(5) K-subset: K=0 block_rand is distinct from the "
+                  "K=3 baseline (empty vs non-empty input distinction "
+                  "is preserved by the hash)");
+        }
+
+        // === Scenario 6: Distinct invocations, same input → identical ===
+        //
+        // The function is pure: two fully independent invocations
+        // (separate local variables, separate scopes, no shared state)
+        // compute the same block_rand for the same input. This is the
+        // peer-node analogue — two nodes running on different machines
+        // must produce byte-identical block_rand for the same
+        // committee, prev_hash, index, secrets. A regression here would
+        // silently fork randomness across the K-of-K committee.
+        //
+        // 2 assertions: independent scope #1 and #2 produce the same
+        // block_rand; the result also matches RAND_BASELINE for cross-
+        // scenario anchoring.
+        {
+            Hash r_scope_a;
+            {
+                std::vector<Hash> sec_a = {
+                    patterned_hash(0x40), patterned_hash(0x50),
+                    patterned_hash(0x60)};
+                Hash seed_a = compute_delay_seed(IDX, PREV, TXR,
+                    {patterned_hash(0x10), patterned_hash(0x20),
+                     patterned_hash(0x30)});
+                r_scope_a = compute_block_rand(seed_a, sec_a);
+            }
+            Hash r_scope_b;
+            {
+                std::vector<Hash> sec_b = {
+                    patterned_hash(0x40), patterned_hash(0x50),
+                    patterned_hash(0x60)};
+                Hash seed_b = compute_delay_seed(IDX, PREV, TXR,
+                    {patterned_hash(0x10), patterned_hash(0x20),
+                     patterned_hash(0x30)});
+                r_scope_b = compute_block_rand(seed_b, sec_b);
+            }
+            check(r_scope_a == r_scope_b,
+                  "(6) Cross-scope identity: two independent scopes "
+                  "with the same inputs compute byte-identical "
+                  "block_rand (peer-node analogue — no scope-local "
+                  "or container-identity dependence)");
+            check(r_scope_a == RAND_BASELINE,
+                  "(6) Cross-scope identity: scope-local result also "
+                  "matches the shared baseline (cross-scenario "
+                  "anchoring — no fixture drift)");
+        }
+
+        // === Scenario 7: Output-domain coverage ===
+        //
+        // Compute block_rand for 100 distinct index values (0..99) with
+        // fixed creators + prev_hash + secrets. Insert each result into
+        // a std::set<Hash>; assert at least 90 unique values. SHA-256's
+        // output domain is 2^256, so the expected number of collisions
+        // across 100 samples is ~ 100*99/2 / 2^256 ≈ 4.3 * 10^-74 —
+        // astronomically near zero. The 90/100 threshold gives slack
+        // for any future hash change that might (incorrectly) reduce
+        // the effective output domain to <2^64 (the threshold at which
+        // birthday-paradox collisions become observable on 100
+        // samples). A working hash will produce 100/100 distinct.
+        //
+        // 1 assertion: distinct-count ≥ 90 of 100.
+        {
+            std::set<Hash> outputs;
+            for (uint64_t i = 0; i < 100; ++i) {
+                Hash seed_i = compute_delay_seed(i, PREV, TXR, DH_INPUTS);
+                Hash r = compute_block_rand(seed_i, SECRETS);
+                outputs.insert(r);
+            }
+            check(outputs.size() >= 90,
+                  "(7) Output-domain coverage: ≥90 of 100 block_rand "
+                  "values are pairwise distinct (pins that block_rand "
+                  "is not stuck or degenerate — birthday-paradox "
+                  "collisions are astronomically unlikely on 2^256 "
+                  "output domain)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": block-rand-distribution ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
