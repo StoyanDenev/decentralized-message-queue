@@ -128,6 +128,9 @@ java -jar tla2tools.jar -config MakeBlockSigPrimitive.cfg MakeBlockSigPrimitive.
 
 # FB41 — STAKE/DEREGISTER/UNSTAKE refund timing + deferred-unlock contract (FB8 parent; FB16 apply-layer slash sibling; FB21 cascade context)
 java -jar tla2tools.jar -config StakeRefundFlow.cfg StakeRefundFlow.tla
+
+# FB42 — DApp registry register/call/deregister/deactivate lifecycle-transition state machine (FB9 parent; FA-Apply-5 analytic; R37A2 operator_dapp_lifecycle_audit + S019DAppEndpointSpoof composition)
+java -jar tla2tools.jar -config DAppRegistryLifecycleSM.cfg DAppRegistryLifecycleSM.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -178,6 +181,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | TcpKeepaliveReap.tla (Peers={p1, p2}, KeepaliveInterval=2, KeepaliveProbes=3, MaxTime=12) | ~10⁴ (est.; 5 actions × bounded peer_present subset (2^2 = 4) × per-peer alive/dead flag (2^2 = 4) × per-peer-time last_keepalive_response axis × MaxTime-bounded clock × per-peer reap-then-reconnect interleaving) | < 30s (est., spec written, TLC pending) |
 | MakeBlockSigPrimitive.tla (Members={m1, m2, m3}, Digests={d1, d2}, Rounds={r1, r2}, Positions={1, 2, 3}) | ~10⁴ (est.; InputTuple cardinality 3·2·2·3 = 36 × Generate enumeration order × Regenerate re-touch × per-tuple field-binding cross-quantification) | < 30s (est., spec written, TLC pending) |
 | StakeRefundFlow.tla (Domains={d1, d2}, MaxAmount=3, UNSTAKE_DELAY=2, MaxHeight=5, NONE=1000) | ~10⁴ (est.; 6 actions × bounded current_height (0..5) × per-domain RegState tri-state × per-domain unlock_height in 0..NONE × Stake amount enumeration 1..MaxAmount × cross-domain interleaving) | < 30s (est., spec written, TLC pending) |
+| DAppRegistryLifecycleSM.tla (Domains={d1, d2}, Owners={o1, o2}, PubKeys={k1, k2}, Payloads={p1, p2}, MaxHeight=5, DAPP_GRACE_BLOCKS=2, NONE=1000) | ~10⁴ (est.; 8 actions × bounded current_height (0..5) × per-domain EntryState tri-state-plus-NONE × per-domain deactivation_height in 0..NONE × cross-owner adversary interleaving × Call payload enumeration × cross-domain independence) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
