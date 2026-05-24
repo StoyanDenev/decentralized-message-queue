@@ -122,6 +122,9 @@ java -jar tla2tools.jar -config BoundedMempoolAdmission.cfg BoundedMempoolAdmiss
 
 # FB39 — SO_KEEPALIVE dead-peer reap state machine (S-026 closure; FB25 sibling at the gossip-layer resource-exhaustion surface)
 java -jar tla2tools.jar -config TcpKeepaliveReap.cfg TcpKeepaliveReap.tla
+
+# FB40 — make_block_sig Phase-2 commitment primitive + round/digest/member binding (FB24 Phase-1 sibling; FB22 reconciliation + FB23 Ed25519 EUF-CMA composition)
+java -jar tla2tools.jar -config MakeBlockSigPrimitive.cfg MakeBlockSigPrimitive.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -170,6 +173,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | HelloHandshake.tla (WireVersions={0, 1}, ChainIds={"chain_a", "chain_b"}, NodeIds={"n1", "n2", "n3"}, MaxHandshakes=4) | ~10⁴ (est.; 4 actions × bounded peer_handshakes length × 2-wire-version universe × 2-chain-id universe × 3-node-id universe × per-entry status transitions × cross-chain mismatch interleaving × multi-peer handshake-triangle scheduling) | < 30s (est., spec written, TLC pending) |
 | BoundedMempoolAdmission.tla (Senders={"a", "b"}, Nonces={0, 1, 2}, Fees={1, 2, 3}, Cap=3, MaxOps=4) | ~10⁴ (est.; 5 actions × bounded mempool set ≤3 × 2-sender universe × 3-nonce universe × 3-fee universe × per-sender next_nonce evolution × eviction_log append-only growth × MaxOps-bounded total-action budget) | < 30s (est., spec written, TLC pending) |
 | TcpKeepaliveReap.tla (Peers={p1, p2}, KeepaliveInterval=2, KeepaliveProbes=3, MaxTime=12) | ~10⁴ (est.; 5 actions × bounded peer_present subset (2^2 = 4) × per-peer alive/dead flag (2^2 = 4) × per-peer-time last_keepalive_response axis × MaxTime-bounded clock × per-peer reap-then-reconnect interleaving) | < 30s (est., spec written, TLC pending) |
+| MakeBlockSigPrimitive.tla (Members={m1, m2, m3}, Digests={d1, d2}, Rounds={r1, r2}, Positions={1, 2, 3}) | ~10⁴ (est.; InputTuple cardinality 3·2·2·3 = 36 × Generate enumeration order × Regenerate re-touch × per-tuple field-binding cross-quantification) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
