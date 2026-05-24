@@ -12422,6 +12422,479 @@ int cmd_diff_snapshots(int argc, char** argv) {
     return any_critical ? 2 : 0;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// snapshot-verify --in <file> [--determ-bin <path>] [--json]
+//                 [--expect-state-root <hex>] [--expect-head-hash <hex>]
+//
+// OFFLINE snapshot internal-consistency check. Invokes
+// `determ snapshot inspect --in <file> --json` as a subprocess to run the
+// heavy restore + S-033/S-038 state_root recompute, then surfaces the
+// result with optional pin-comparison against operator-supplied expected
+// values. Pure local-file workflow (no daemon RPC); the wallet binary
+// exposes the operator-friendly UX while the chain binary does the
+// cryptographic verification.
+//
+// Why subprocess: the wallet binary doesn't link against the chain
+// library (intentional TCB separation — see top-of-file comment), so it
+// can't directly call Chain::restore_from_snapshot /
+// compute_state_root. Subprocessing the chain binary keeps the heavy
+// lifting on the chain side while letting operators stay in the wallet
+// CLI for the rest of their workflow.
+//
+// Exit codes (per spec):
+//   0 valid (all expectations match if supplied)
+//   1 args / file-unreadable / subprocess-error
+//   2 invalid snapshot OR expectation mismatch
+int cmd_snapshot_verify(int argc, char** argv) {
+    std::string in_path, determ_bin, expect_state_root, expect_head_hash;
+    bool json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"                 && i + 1 < argc) in_path           = argv[++i];
+        else if (a == "--determ-bin"         && i + 1 < argc) determ_bin        = argv[++i];
+        else if (a == "--expect-state-root"  && i + 1 < argc) expect_state_root = argv[++i];
+        else if (a == "--expect-head-hash"   && i + 1 < argc) expect_head_hash  = argv[++i];
+        else if (a == "--json")                               json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet snapshot-verify --in <file>\n"
+                "                                     [--determ-bin <path>]\n"
+                "                                     [--expect-state-root <hex64>]\n"
+                "                                     [--expect-head-hash <hex64>]\n"
+                "                                     [--json]\n"
+                "\n"
+                "  OFFLINE snapshot internal-consistency check. Invokes\n"
+                "  `determ snapshot inspect --in <file> --json` as a subprocess\n"
+                "  to run the full restore + S-033/S-038 state_root recompute\n"
+                "  pipeline, then reports the computed head_hash + state_root\n"
+                "  with optional pin-comparison against operator-supplied\n"
+                "  expected values. Pure local-file workflow — no daemon RPC,\n"
+                "  no network. The wallet binary keeps operator UX in one place\n"
+                "  while the chain binary does the cryptographic verification.\n"
+                "\n"
+                "  --in <file>\n"
+                "      Required. Path to a snapshot JSON file (as produced by\n"
+                "      `determ snapshot create` / `snapshot fetch`).\n"
+                "\n"
+                "  --determ-bin <path>\n"
+                "      Optional. Path to the determ chain binary. Default\n"
+                "      search order:\n"
+                "        1. $DETERM environment variable, if set\n"
+                "        2. build/Release/determ.exe (Windows MSVC)\n"
+                "        3. build/Release/determ      (Linux/Mac multi-config)\n"
+                "        4. build/determ.exe          (Windows single-config)\n"
+                "        5. build/determ              (Linux/Mac single-config)\n"
+                "        6. determ                    (rely on $PATH)\n"
+                "\n"
+                "  --expect-state-root <hex64>\n"
+                "      Optional. Compare the computed state_root against this\n"
+                "      value. Mismatch fires expectation_mismatch (exit 2).\n"
+                "\n"
+                "  --expect-head-hash <hex64>\n"
+                "      Optional. Compare the computed head_hash against this\n"
+                "      value. Mismatch fires expectation_mismatch (exit 2).\n"
+                "\n"
+                "  --json\n"
+                "      Emit one-line machine-readable JSON. Default is human\n"
+                "      output. JSON shape:\n"
+                "        { snapshot, block_index, head_hash, state_root, valid,\n"
+                "          expectations: { state_root_match: bool|null,\n"
+                "                          head_hash_match:  bool|null },\n"
+                "          exit_reason: \"ok\" | \"invalid_snapshot\"\n"
+                "                     | \"expectation_mismatch\" }\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  snapshot valid (all supplied expectations matched)\n"
+                "    1  args / file-unreadable / subprocess error\n"
+                "    2  invalid snapshot OR expectation mismatch\n";
+            return 0;
+        }
+        else {
+            std::cerr << "snapshot-verify: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet snapshot-verify --in <file> "
+                         "[--determ-bin <path>] [--expect-state-root <hex>] "
+                         "[--expect-head-hash <hex>] [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "snapshot-verify: --in <file> is required\n";
+        return 1;
+    }
+    // Pre-flight: confirm the snapshot file is openable + parses as JSON
+    // BEFORE spawning a subprocess. Matches the spec ("validate --in file
+    // exists + is readable JSON") and gives a tighter diagnostic for the
+    // common 'fat-finger the path' case.
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",   in_path},
+                    {"valid",      false},
+                    {"exit_reason","file_unreadable"},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "snapshot-verify: cannot open '" << in_path << "'\n";
+            }
+            return 1;
+        }
+        try {
+            nlohmann::json probe = nlohmann::json::parse(f);
+            if (!probe.is_object()) {
+                if (json_out) {
+                    nlohmann::json err = {
+                        {"snapshot",   in_path},
+                        {"valid",      false},
+                        {"exit_reason","invalid_snapshot"},
+                        {"reason",     "top-level JSON is not an object"},
+                    };
+                    std::cout << err.dump() << "\n";
+                } else {
+                    std::cerr << "snapshot-verify: '" << in_path
+                              << "' top-level JSON is not an object\n";
+                }
+                return 2;
+            }
+        } catch (const std::exception& e) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",   in_path},
+                    {"valid",      false},
+                    {"exit_reason","invalid_snapshot"},
+                    {"reason",     std::string("JSON parse failed: ") + e.what()},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "snapshot-verify: JSON parse failed for '"
+                          << in_path << "': " << e.what() << "\n";
+            }
+            return 2;
+        }
+    }
+
+    // Pin-length validation up front — matches `snapshot inspect`'s
+    // server-side check but lets us emit a wallet-prefixed diagnostic
+    // before paying the subprocess cost.
+    auto check_hex64 = [&](const std::string& name, const std::string& val) -> bool {
+        if (val.empty()) return true;
+        if (val.size() != 64) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",   in_path},
+                    {"valid",      false},
+                    {"exit_reason","invalid_args"},
+                    {"reason",     name + " must be 64 hex chars (32 bytes), got "
+                                    + std::to_string(val.size())},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "snapshot-verify: " << name
+                          << " must be 64 hex chars (32 bytes), got "
+                          << val.size() << "\n";
+            }
+            return false;
+        }
+        for (char c : val) {
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) {
+                if (json_out) {
+                    nlohmann::json err = {
+                        {"snapshot",   in_path},
+                        {"valid",      false},
+                        {"exit_reason","invalid_args"},
+                        {"reason",     name + " contains non-hex character"},
+                    };
+                    std::cout << err.dump() << "\n";
+                } else {
+                    std::cerr << "snapshot-verify: " << name
+                              << " contains non-hex character\n";
+                }
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!check_hex64("--expect-state-root", expect_state_root)) return 1;
+    if (!check_hex64("--expect-head-hash",  expect_head_hash))  return 1;
+
+    // Resolve the determ chain binary path. Default search order:
+    //   1. --determ-bin <path>           (operator override)
+    //   2. $DETERM env var               (CI / tests)
+    //   3. build/Release/determ.exe      (Windows MSVC multi-config)
+    //   4. build/Release/determ          (Linux/Mac multi-config)
+    //   5. build/determ.exe              (Windows single-config)
+    //   6. build/determ                  (Linux/Mac single-config)
+    //   7. plain "determ"                (let the shell resolve via PATH)
+    auto file_executable = [](const std::string& p) {
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) return false;
+        if (!std::filesystem::is_regular_file(p, ec)) return false;
+        return true;
+    };
+    std::string bin = determ_bin;
+    if (bin.empty()) {
+        const char* env = std::getenv("DETERM");
+        if (env && *env) bin = env;
+    }
+    if (bin.empty()) {
+        static const char* candidates[] = {
+            "build/Release/determ.exe",
+            "build/Release/determ",
+            "build/determ.exe",
+            "build/determ",
+            nullptr
+        };
+        for (size_t i = 0; candidates[i]; ++i) {
+            if (file_executable(candidates[i])) {
+                bin = candidates[i];
+                break;
+            }
+        }
+    }
+    if (bin.empty()) {
+        // Last-ditch: rely on PATH. Pipe-open will fail gracefully if
+        // the binary truly isn't installed.
+        bin = "determ";
+    } else if (!determ_bin.empty() && !file_executable(bin)) {
+        // Operator gave us an explicit --determ-bin that doesn't exist —
+        // diagnose specifically before spawning a doomed subprocess.
+        if (json_out) {
+            nlohmann::json err = {
+                {"snapshot",   in_path},
+                {"valid",      false},
+                {"exit_reason","subprocess_error"},
+                {"reason",     std::string("--determ-bin not found: ") + bin},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "snapshot-verify: --determ-bin not found: " << bin << "\n";
+        }
+        return 1;
+    }
+
+    // Build the subprocess command. Quote each component so paths with
+    // spaces survive both POSIX shells and cmd.exe. On Windows, the
+    // outermost double-quote pair around the entire command is required
+    // by `cmd /S /C` quoting rules (which _popen uses internally).
+    auto shell_quote = [](const std::string& s) {
+        // Sufficient for typical paths (no embedded double-quote in
+        // build artifacts or operator-supplied snapshot paths). If the
+        // path contains a literal " we reject; operators shouldn't be
+        // staging snapshots under paths with double-quotes.
+        return std::string("\"") + s + "\"";
+    };
+    for (auto* s : {&bin, &in_path}) {
+        if (s->find('"') != std::string::npos) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",   in_path},
+                    {"valid",      false},
+                    {"exit_reason","invalid_args"},
+                    {"reason",     "path contains embedded double-quote (refused)"},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "snapshot-verify: refusing to invoke subprocess "
+                             "with a path containing an embedded \"\n";
+            }
+            return 1;
+        }
+    }
+    std::ostringstream cmd_oss;
+#ifdef _WIN32
+    // cmd.exe /C eats one set of outer quotes — wrap the whole command.
+    cmd_oss << "\"" << shell_quote(bin)
+            << " snapshot inspect --in " << shell_quote(in_path)
+            << " --json\"";
+#else
+    cmd_oss << shell_quote(bin)
+            << " snapshot inspect --in " << shell_quote(in_path)
+            << " --json";
+#endif
+    std::string cmd = cmd_oss.str();
+
+    // Spawn + capture stdout. We use _popen / popen because the
+    // subprocess output is a single short JSON line — no need for full
+    // CreateProcess/fork plumbing. The chain binary already writes the
+    // error JSON to stdout in --json mode (see cmd_snapshot_inspect
+    // failure paths), so we capture stdout only.
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
+    FILE* pipe = popen(cmd.c_str(), "r");
+#endif
+    if (!pipe) {
+        if (json_out) {
+            nlohmann::json err = {
+                {"snapshot",   in_path},
+                {"valid",      false},
+                {"exit_reason","subprocess_error"},
+                {"reason",     "failed to spawn determ subprocess"},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "snapshot-verify: failed to spawn `" << cmd << "`\n";
+        }
+        return 1;
+    }
+    std::string out;
+    char buf[4096];
+    while (true) {
+        size_t n = std::fread(buf, 1, sizeof(buf), pipe);
+        if (n == 0) break;
+        out.append(buf, n);
+    }
+#ifdef _WIN32
+    int rc = _pclose(pipe);
+#else
+    int rc = pclose(pipe);
+#endif
+
+    // Trim trailing whitespace (the chain binary emits a trailing '\n').
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'
+                          || out.back() == ' '  || out.back() == '\t')) {
+        out.pop_back();
+    }
+
+    // Parse the subprocess JSON. On parse failure surface as
+    // subprocess_error — the chain binary should always emit valid JSON
+    // on its `--json` path, so a parse failure is a structural problem
+    // (truncated pipe / wrong binary on disk / etc).
+    nlohmann::json inspect;
+    try {
+        inspect = nlohmann::json::parse(out);
+    } catch (const std::exception& e) {
+        if (json_out) {
+            nlohmann::json err = {
+                {"snapshot",     in_path},
+                {"valid",        false},
+                {"exit_reason",  "subprocess_error"},
+                {"reason",       std::string("subprocess output not JSON: ") + e.what()},
+                {"subprocess_rc",rc},
+                {"raw_output",   out},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "snapshot-verify: subprocess output not JSON (rc="
+                      << rc << "): " << out << "\n";
+        }
+        return 1;
+    }
+
+    // The chain binary returns status="ok" on success and an error
+    // envelope ({"error":..., ...}) on failure. Either shape may carry
+    // path/state_root/head_hash depending on which failure path fired.
+    bool valid = false;
+    std::string status = inspect.value("status", std::string{});
+    if (status == "ok") valid = true;
+    // Some failure paths emit {"error":"..."} without a status field;
+    // treat any non-"ok" status (including absent) as invalid.
+
+    uint64_t    block_index = inspect.value("block_index", uint64_t{0});
+    std::string head_hash   = inspect.value("head_hash",   std::string{});
+    std::string state_root  = inspect.value("state_root",  std::string{});
+
+    // Expectation comparisons (case-insensitive; the chain binary emits
+    // lowercase hex, but operators may paste mixed case from logs).
+    auto eq_ci = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            char x = a[i], y = b[i];
+            if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
+            if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
+            if (x != y) return false;
+        }
+        return true;
+    };
+
+    // bool_or_null: track whether an expectation was supplied + matched.
+    // Three-state: matched (true), mismatched (false), unsupplied (null).
+    bool state_root_supplied = !expect_state_root.empty();
+    bool head_hash_supplied  = !expect_head_hash.empty();
+    bool state_root_match    = state_root_supplied
+                             ? eq_ci(state_root, expect_state_root)
+                             : true;
+    bool head_hash_match     = head_hash_supplied
+                             ? eq_ci(head_hash,  expect_head_hash)
+                             : true;
+
+    // Exit-reason precedence:
+    //   1. invalid_snapshot — subprocess reported the snapshot is bad
+    //   2. expectation_mismatch — snapshot OK but operator-pin diverged
+    //   3. ok — snapshot OK + all expectations matched (or absent)
+    std::string exit_reason;
+    int exit_code;
+    if (!valid) {
+        exit_reason = "invalid_snapshot";
+        exit_code   = 2;
+    } else if ((state_root_supplied && !state_root_match)
+            || (head_hash_supplied  && !head_hash_match)) {
+        exit_reason = "expectation_mismatch";
+        exit_code   = 2;
+    } else {
+        exit_reason = "ok";
+        exit_code   = 0;
+    }
+
+    if (json_out) {
+        nlohmann::json expectations;
+        if (state_root_supplied)
+            expectations["state_root_match"] = state_root_match;
+        else
+            expectations["state_root_match"] = nullptr;
+        if (head_hash_supplied)
+            expectations["head_hash_match"] = head_hash_match;
+        else
+            expectations["head_hash_match"] = nullptr;
+
+        nlohmann::json env = {
+            {"snapshot",     in_path},
+            {"block_index",  block_index},
+            {"head_hash",    head_hash},
+            {"state_root",   state_root},
+            {"valid",        valid},
+            {"expectations", expectations},
+            {"exit_reason",  exit_reason},
+        };
+        // Surface a few subprocess-error details so an operator can
+        // pinpoint why the inspector rejected the snapshot.
+        if (!valid) {
+            if (inspect.contains("error"))
+                env["subprocess_error"] = inspect["error"];
+            if (inspect.contains("message"))
+                env["subprocess_message"] = inspect["message"];
+        }
+        std::cout << env.dump() << "\n";
+    } else {
+        std::cout << "snapshot-verify: " << in_path << "\n";
+        std::cout << "  block_index : " << block_index << "\n";
+        std::cout << "  head_hash   : " << head_hash << "\n";
+        std::cout << "  state_root  : " << state_root << "\n";
+        std::cout << "  valid       : " << (valid ? "true" : "false") << "\n";
+        if (!valid) {
+            std::string e = inspect.value("error", std::string{});
+            std::string m = inspect.value("message", std::string{});
+            if (!e.empty()) std::cout << "  error       : " << e << "\n";
+            if (!m.empty()) std::cout << "  message     : " << m << "\n";
+        }
+        if (state_root_supplied) {
+            std::cout << "  state_root_match : "
+                      << (state_root_match ? "true" : "false") << "\n";
+        }
+        if (head_hash_supplied) {
+            std::cout << "  head_hash_match  : "
+                      << (head_hash_match ? "true" : "false") << "\n";
+        }
+        std::cout << "  exit_reason : " << exit_reason << "\n";
+    }
+    return exit_code;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -12991,6 +13464,36 @@ void print_usage() {
         "                                             ('what was the balance at block H?').\n"
         "                                             Exit 0 success (including empty result), 1\n"
         "                                             args/parse/IO/RPC error or invalid account.\n"
+        "  snapshot-verify --in <file>                OFFLINE snapshot internal-consistency\n"
+        "                  [--determ-bin <path>]      check. Invokes `determ snapshot inspect\n"
+        "                  [--expect-state-root <hex>]   --in <file> --json` as a subprocess to\n"
+        "                  [--expect-head-hash <hex>] run the full restore + S-033/S-038\n"
+        "                  [--json]                   state_root recompute pipeline, then\n"
+        "                                             reports the computed head_hash +\n"
+        "                                             state_root with optional pin-comparison\n"
+        "                                             against operator-supplied expected\n"
+        "                                             values. Pure local-file workflow — no\n"
+        "                                             daemon RPC, no network. The wallet\n"
+        "                                             binary keeps operator UX in one place\n"
+        "                                             while the chain binary does the heavy\n"
+        "                                             cryptographic verification. --determ-bin\n"
+        "                                             defaults to $DETERM env var, then a\n"
+        "                                             standard build/Release/determ[.exe]\n"
+        "                                             search list, then plain `determ` via\n"
+        "                                             $PATH. --expect-state-root /\n"
+        "                                             --expect-head-hash are optional 64-hex\n"
+        "                                             pins compared (case-insensitive) against\n"
+        "                                             the inspector's computed values; mismatch\n"
+        "                                             fires expectation_mismatch (exit 2).\n"
+        "                                             Output (JSON): {snapshot, block_index,\n"
+        "                                             head_hash, state_root, valid,\n"
+        "                                             expectations: {state_root_match: bool|\n"
+        "                                             null, head_hash_match: bool|null},\n"
+        "                                             exit_reason: ok|invalid_snapshot|\n"
+        "                                             expectation_mismatch}. Exit 0 valid, 1\n"
+        "                                             args/file-unreadable/subprocess error,\n"
+        "                                             2 invalid snapshot OR expectation\n"
+        "                                             mismatch.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -13050,6 +13553,7 @@ int main(int argc, char** argv) {
     if (cmd == "tx-history-export") return cmd_tx_history_export(argc - 2, argv + 2);
     if (cmd == "account-balance-history") return cmd_account_balance_history(argc - 2, argv + 2);
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
+    if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
