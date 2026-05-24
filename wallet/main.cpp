@@ -9547,6 +9547,301 @@ int cmd_validate_tx(int argc, char** argv) {
     return overall_valid ? 0 : 2;
 }
 
+// ── derive-tx-hash ───────────────────────────────────────────────────────────
+//
+// Recompute the canonical tx_hash from a signed tx envelope. The chain
+// stores tx_hash = SHA-256(signing_bytes); operators frequently need to
+// either (a) reproduce the hash for downstream pipelines (audit logs,
+// receipts, replay-detection systems) or (b) verify that a hand-edited
+// envelope's stored `hash` field still matches the body it claims to
+// describe. Distinct from validate-tx, which is the full structural +
+// signature + hash composite gate. This command does ONE thing: rebuild
+// signing_bytes and SHA-256 it, optionally comparing against the
+// envelope's stored hash.
+//
+// Accepts BOTH envelope shapes (matches validate-tx tolerance):
+//   * Canonical chain JSON: {type:int, from, to, amount, [fee], nonce,
+//                            payload, sig, hash}
+//   * sign-anon-tx output:  {type:"TRANSFER", ..., signature, hash}
+//
+// Signing-bytes layout (mirrors src/chain/block.cpp Transaction::
+// signing_bytes byte-for-byte; same routine cmd_validate_tx / cmd_tx_
+// sign_verify / cmd_cold_sign / cmd_sign_anon_tx all use):
+//
+//   [type:u8] [from:bytes] [0x00] [to:bytes] [0x00]
+//   [amount:be_u64] [fee:be_u64] [nonce:be_u64] [payload:bytes]
+//
+// Exit codes:
+//   0  success (or --check match)
+//   1  args / parse / IO error (incl. missing required fields)
+//   2  --check mismatch (only emitted when --check is set)
+int cmd_derive_tx_hash(int argc, char** argv) {
+    std::string tx_path;
+    std::string field = "hash";  // hash | signing_bytes | both
+    bool        do_check = false;
+    bool        json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--tx-json" && i + 1 < argc) tx_path = argv[++i];
+        else if (a == "--field"   && i + 1 < argc) field   = argv[++i];
+        else if (a == "--check")                   do_check = true;
+        else if (a == "--json")                    json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet derive-tx-hash --tx-json <file|->\n"
+                "                                    [--field hash|signing_bytes|both]\n"
+                "                                    [--check] [--json]\n"
+                "\n"
+                "  Recompute the canonical tx_hash from a signed tx envelope.\n"
+                "  tx_hash = SHA-256(signing_bytes) where signing_bytes is\n"
+                "  the chain's canonical pre-image (src/chain/block.cpp\n"
+                "  Transaction::signing_bytes).\n"
+                "\n"
+                "  --tx-json <file|->    REQUIRED. Path to signed envelope JSON,\n"
+                "                        or `-` for stdin.\n"
+                "  --field <name>        Which value to emit. One of:\n"
+                "                          hash           (default — 64 hex of\n"
+                "                                          SHA-256(signing_bytes))\n"
+                "                          signing_bytes  (the canonical pre-image\n"
+                "                                          as hex)\n"
+                "                          both           (emit both as JSON)\n"
+                "  --check               Compare recomputed hash against the\n"
+                "                        envelope's stored `hash` field. Reports\n"
+                "                        match=true|false and exits 2 on mismatch.\n"
+                "  --json                Machine-readable one-line JSON output\n"
+                "                        {recomputed_hash, stored_hash,\n"
+                "                         signing_bytes, match}.\n"
+                "\n"
+                "  Accepts BOTH envelope shapes — canonical chain JSON\n"
+                "  ({type:int, sig}) and sign-anon-tx output\n"
+                "  ({type:\"TRANSFER\", signature}) — interchangeably. Field\n"
+                "  names `sig` and `signature` are both accepted.\n"
+                "\n"
+                "  Exit codes: 0 success, 1 args/parse/IO error,\n"
+                "  2 hash mismatch (only with --check).\n";
+            return 0;
+        }
+        else {
+            std::cerr << "derive-tx-hash: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet derive-tx-hash --tx-json <file|-> "
+                         "[--field hash|signing_bytes|both] [--check] [--json]\n";
+            return 1;
+        }
+    }
+    if (tx_path.empty()) {
+        std::cerr << "Usage: determ-wallet derive-tx-hash --tx-json <file|-> "
+                     "[--field hash|signing_bytes|both] [--check] [--json]\n"
+                     "  (--tx-json is required; pass `-` for stdin)\n";
+        return 1;
+    }
+    if (field != "hash" && field != "signing_bytes" && field != "both") {
+        std::cerr << "derive-tx-hash: --field must be hash | signing_bytes | "
+                     "both (got '" << field << "')\n";
+        return 1;
+    }
+
+    // ── Read + parse the tx JSON ─────────────────────────────────────────
+    nlohmann::json j;
+    try {
+        if (tx_path == "-") {
+            j = nlohmann::json::parse(std::cin);
+        } else {
+            std::ifstream tx_f(tx_path);
+            if (!tx_f) {
+                std::cerr << "derive-tx-hash: cannot open --tx-json file: "
+                          << tx_path << "\n";
+                return 1;
+            }
+            tx_f >> j;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "derive-tx-hash: --tx-json is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!j.is_object()) {
+        std::cerr << "derive-tx-hash: --tx-json must be a JSON object\n";
+        return 1;
+    }
+
+    // Mnemonic → int (matches include/determ/chain/block.hpp TxType
+    // ordering; identical to cmd_validate_tx).
+    auto type_mnemonic_to_int = [](const std::string& s) -> int {
+        if (s == "TRANSFER")         return 0;
+        if (s == "REGISTER")         return 1;
+        if (s == "DEREGISTER")       return 2;
+        if (s == "STAKE")            return 3;
+        if (s == "UNSTAKE")          return 4;
+        if (s == "REGION_CHANGE")    return 5;
+        if (s == "PARAM_CHANGE")     return 6;
+        if (s == "MERGE_EVENT")      return 7;
+        if (s == "COMPOSABLE_BATCH") return 8;
+        if (s == "DAPP_REGISTER")    return 9;
+        if (s == "DAPP_CALL")        return 10;
+        return -1;
+    };
+
+    // ── Required field extraction ────────────────────────────────────────
+    int         tx_type_int = -1;
+    std::string from_str, to_str, payload_hex;
+    uint64_t    amount = 0, fee = 0, nonce = 0;
+    if (!j.contains("type")) {
+        std::cerr << "derive-tx-hash: missing required field 'type'\n";
+        return 1;
+    } else if (j["type"].is_number()) {
+        tx_type_int = j["type"].get<int>();
+        if (tx_type_int < 0 || tx_type_int > 255) {
+            std::cerr << "derive-tx-hash: 'type' out of u8 range ("
+                      << tx_type_int << ")\n";
+            return 1;
+        }
+    } else if (j["type"].is_string()) {
+        const std::string s = j["type"].get<std::string>();
+        int mapped = type_mnemonic_to_int(s);
+        if (mapped < 0) {
+            std::cerr << "derive-tx-hash: unknown 'type' mnemonic '"
+                      << s << "'\n";
+            return 1;
+        }
+        tx_type_int = mapped;
+    } else {
+        std::cerr << "derive-tx-hash: 'type' must be int or upper-case "
+                     "mnemonic string\n";
+        return 1;
+    }
+    if (!j.contains("from") || !j["from"].is_string()) {
+        std::cerr << "derive-tx-hash: missing/wrong-typed 'from' "
+                     "(expected string)\n";
+        return 1;
+    }
+    from_str = j["from"].get<std::string>();
+    if (!j.contains("to") || !j["to"].is_string()) {
+        std::cerr << "derive-tx-hash: missing/wrong-typed 'to' "
+                     "(expected string)\n";
+        return 1;
+    }
+    to_str = j["to"].get<std::string>();
+    if (!j.contains("amount") || !j["amount"].is_number()) {
+        std::cerr << "derive-tx-hash: missing/wrong-typed 'amount' "
+                     "(expected integer)\n";
+        return 1;
+    }
+    amount = j["amount"].is_number_unsigned()
+        ? j["amount"].get<uint64_t>()
+        : static_cast<uint64_t>(j["amount"].get<int64_t>());
+    if (!j.contains("nonce") || !j["nonce"].is_number()) {
+        std::cerr << "derive-tx-hash: missing/wrong-typed 'nonce' "
+                     "(expected integer)\n";
+        return 1;
+    }
+    nonce = j["nonce"].is_number_unsigned()
+        ? j["nonce"].get<uint64_t>()
+        : static_cast<uint64_t>(j["nonce"].get<int64_t>());
+    if (j.contains("fee")) {
+        if (!j["fee"].is_number()) {
+            std::cerr << "derive-tx-hash: 'fee' present but not a number\n";
+            return 1;
+        }
+        fee = j["fee"].is_number_unsigned()
+            ? j["fee"].get<uint64_t>()
+            : static_cast<uint64_t>(j["fee"].get<int64_t>());
+    }
+    if (!j.contains("payload") || !j["payload"].is_string()) {
+        std::cerr << "derive-tx-hash: missing/wrong-typed 'payload' "
+                     "(expected hex string)\n";
+        return 1;
+    }
+    payload_hex = j["payload"].get<std::string>();
+
+    // stored hash (only required when --check is set; otherwise it's
+    // informational and surfaced in JSON output when present).
+    std::string stored_hash_hex;
+    bool        stored_hash_present = false;
+    if (j.contains("hash") && j["hash"].is_string()) {
+        stored_hash_hex = j["hash"].get<std::string>();
+        stored_hash_present = true;
+    }
+    if (do_check && !stored_hash_present) {
+        std::cerr << "derive-tx-hash: --check requires a 'hash' field in the "
+                     "envelope (none present)\n";
+        return 1;
+    }
+
+    // ── Build signing_bytes — byte-for-byte identical to src/chain/
+    //    block.cpp Transaction::signing_bytes (same encoder shared by
+    //    cmd_validate_tx / cmd_tx_sign_verify / cmd_cold_sign / cmd_
+    //    sign_anon_tx). ─────────────────────────────────────────────────
+    std::vector<uint8_t> payload_bytes;
+    try { payload_bytes = from_hex(payload_hex); }
+    catch (std::exception& e) {
+        std::cerr << "derive-tx-hash: invalid 'payload' hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+               + payload_bytes.size());
+    sb.push_back(static_cast<uint8_t>(tx_type_int));
+    sb.insert(sb.end(), from_str.begin(), from_str.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+    sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
+
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+    const std::string signing_bytes_hex = to_hex(sb);
+    const std::string recomputed_hash_hex = to_hex(sb_sha);
+
+    // ── --check (when set) ───────────────────────────────────────────────
+    // Compare case-insensitively (some tools emit upper-case hex; the chain
+    // emits lower). Same normalization cmd_validate_tx uses.
+    bool match = false;
+    std::string stored_lower;
+    if (stored_hash_present) {
+        stored_lower = stored_hash_hex;
+        for (auto& c : stored_lower) {
+            if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        }
+        match = (stored_lower == recomputed_hash_hex);
+    }
+
+    // ── Output ───────────────────────────────────────────────────────────
+    if (json_out) {
+        nlohmann::json r;
+        r["recomputed_hash"] = recomputed_hash_hex;
+        if (stored_hash_present) r["stored_hash"] = stored_lower;
+        r["signing_bytes"]   = signing_bytes_hex;
+        if (do_check)        r["match"] = match;
+        std::cout << r.dump() << "\n";
+    } else {
+        if (field == "hash") {
+            std::cout << recomputed_hash_hex << "\n";
+        } else if (field == "signing_bytes") {
+            std::cout << signing_bytes_hex << "\n";
+        } else {  // both
+            nlohmann::json r;
+            r["recomputed_hash"] = recomputed_hash_hex;
+            r["signing_bytes"]   = signing_bytes_hex;
+            if (stored_hash_present) r["stored_hash"] = stored_lower;
+            if (do_check)            r["match"] = match;
+            std::cout << r.dump() << "\n";
+        }
+        if (do_check) {
+            // Also emit a one-line match=true|false summary in non-JSON
+            // mode so shell consumers don't have to parse JSON for the
+            // common case. (Hash field already emitted above.)
+            std::cout << "match=" << (match ? "true" : "false") << "\n";
+        }
+    }
+
+    if (do_check && !match) return 2;
+    return 0;
+}
+
 // ── sign-arbitrary / verify-arbitrary ────────────────────────────────────────
 //
 // Paired commands for OFF-CHAIN, arbitrary-message Ed25519 signing using a
@@ -14498,6 +14793,31 @@ void print_usage() {
         "                                             overall_valid}. Exit 0 overall_valid,\n"
         "                                             1 args/parse/IO error, 2 invalid (sig\n"
         "                                             failure, hash mismatch, structural).\n"
+        "  derive-tx-hash --tx-json <file|->          Recompute the canonical tx_hash from a\n"
+        "                 [--field hash|signing_bytes|both]\n"
+        "                 [--check] [--json]\n"
+        "                                             signed tx envelope. tx_hash = SHA-256(\n"
+        "                                             signing_bytes) where signing_bytes mirrors\n"
+        "                                             src/chain/block.cpp Transaction::signing_\n"
+        "                                             bytes byte-for-byte (same encoder cmd_\n"
+        "                                             validate-tx / tx-sign-verify / cold-sign /\n"
+        "                                             sign-anon-tx all share). One job: rebuild\n"
+        "                                             the pre-image and SHA-256 it, optionally\n"
+        "                                             comparing to the envelope's stored `hash`.\n"
+        "                                             --field hash (default) emits the recomputed\n"
+        "                                             64 hex; signing_bytes emits the pre-image\n"
+        "                                             hex; both emits a small JSON pair. --check\n"
+        "                                             compares against the envelope's stored\n"
+        "                                             `hash` field and exits 2 on mismatch (use\n"
+        "                                             for tamper-detection in audit pipelines).\n"
+        "                                             --json emits {recomputed_hash, stored_hash,\n"
+        "                                             signing_bytes, match}. Accepts BOTH envelope\n"
+        "                                             shapes — canonical chain JSON ({type:int})\n"
+        "                                             and sign-anon-tx output ({type:\"TRANSFER\"})\n"
+        "                                             — interchangeably; `sig` and `signature`\n"
+        "                                             field names are both accepted. Pass `-` to\n"
+        "                                             --tx-json to read from stdin. Exit 0 success,\n"
+        "                                             1 args/parse/IO error, 2 --check mismatch.\n"
         "  sign-arbitrary --priv-keyfile <path>\n"
         "                 (--msg <str> | --msg-file <path>)\n"
         "                 [--out <file>] [--detached | --bundle]\n"
@@ -14811,6 +15131,7 @@ int main(int argc, char** argv) {
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
+    if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);

@@ -125,6 +125,9 @@ java -jar tla2tools.jar -config TcpKeepaliveReap.cfg TcpKeepaliveReap.tla
 
 # FB40 — make_block_sig Phase-2 commitment primitive + round/digest/member binding (FB24 Phase-1 sibling; FB22 reconciliation + FB23 Ed25519 EUF-CMA composition)
 java -jar tla2tools.jar -config MakeBlockSigPrimitive.cfg MakeBlockSigPrimitive.tla
+
+# FB41 — STAKE/DEREGISTER/UNSTAKE refund timing + deferred-unlock contract (FB8 parent; FB16 apply-layer slash sibling; FB21 cascade context)
+java -jar tla2tools.jar -config StakeRefundFlow.cfg StakeRefundFlow.tla
 ```
 
 Each run should report `Model checking completed. No error has been found.` for the invariants listed in the `.cfg` file. For `Consensus.tla`, the temporal property `Prop_Termination` is also checked.
@@ -174,6 +177,7 @@ These are the expected approximate magnitudes for the shipped configurations:
 | BoundedMempoolAdmission.tla (Senders={"a", "b"}, Nonces={0, 1, 2}, Fees={1, 2, 3}, Cap=3, MaxOps=4) | ~10⁴ (est.; 5 actions × bounded mempool set ≤3 × 2-sender universe × 3-nonce universe × 3-fee universe × per-sender next_nonce evolution × eviction_log append-only growth × MaxOps-bounded total-action budget) | < 30s (est., spec written, TLC pending) |
 | TcpKeepaliveReap.tla (Peers={p1, p2}, KeepaliveInterval=2, KeepaliveProbes=3, MaxTime=12) | ~10⁴ (est.; 5 actions × bounded peer_present subset (2^2 = 4) × per-peer alive/dead flag (2^2 = 4) × per-peer-time last_keepalive_response axis × MaxTime-bounded clock × per-peer reap-then-reconnect interleaving) | < 30s (est., spec written, TLC pending) |
 | MakeBlockSigPrimitive.tla (Members={m1, m2, m3}, Digests={d1, d2}, Rounds={r1, r2}, Positions={1, 2, 3}) | ~10⁴ (est.; InputTuple cardinality 3·2·2·3 = 36 × Generate enumeration order × Regenerate re-touch × per-tuple field-binding cross-quantification) | < 30s (est., spec written, TLC pending) |
+| StakeRefundFlow.tla (Domains={d1, d2}, MaxAmount=3, UNSTAKE_DELAY=2, MaxHeight=5, NONE=1000) | ~10⁴ (est.; 6 actions × bounded current_height (0..5) × per-domain RegState tri-state × per-domain unlock_height in 0..NONE × Stake amount enumeration 1..MaxAmount × cross-domain interleaving) | < 30s (est., spec written, TLC pending) |
 
 If a future run reports significantly different magnitudes (10× off in either direction), the spec or config likely changed semantics and warrants review.
 
