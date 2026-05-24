@@ -8220,6 +8220,464 @@ int cmd_cold_sign(int argc, char** argv) {
     return 0;
 }
 
+// ── sign-anon-tx — offline TRANSFER sign for an anon-address holder ──────────
+//
+// Specialised sibling of `cold-sign`: rather than reading a pre-built unsigned
+// tx JSON, it BUILDS a canonical TRANSFER from operator-supplied --to /
+// --amount / --fee / --nonce flags, using the anon-account keyfile's address
+// as `from`, then signs with the keyfile's Ed25519 priv_seed.
+//
+// CLI:
+//   --keyfile <path> : required; anon-account keyfile. Accepts both shapes:
+//                        canonical wallet shape    {address, privkey_hex}
+//                          (account-create-batch / account-import / account-
+//                          export single-record output)
+//                        alternate ed-pub shape    {ed_priv_hex, ed_pub_hex,
+//                                                    anon_address}
+//                          (some external tooling).
+//                      Either way the privkey is 32-byte hex (64 chars) and
+//                      the address must be canonical lowercase per S-028.
+//   --to <addr-or-domain> : required; recipient. If anon-shape (66 char
+//                      0x + 64 hex), MUST be lowercase per S-028.
+//   --amount <N>     : required; > 0.
+//   --fee <N>        : required; >= 0.
+//   --nonce <N>      : required; >= 0. Offline workflow ⇒ operator supplies.
+//   --out <file>     : write signed-tx JSON to file (or stdout if absent).
+//   --allow-stdout   : opt-in to allow signed tx on stdout.
+//   --json           : accepted for parity; output is always JSON.
+//
+// Output (stdout, one-line JSON):
+//   {"type":"TRANSFER","from":"0x...","to":"...","amount":N,"fee":N,
+//    "nonce":N,"payload":"","signature":"<128 hex>","hash":"<64 hex>"}
+//
+//   `type` is the upper-case mnemonic "TRANSFER" per the task spec (NOT the
+//   numeric TxType byte 0 used elsewhere — the sign-anon-tx output is
+//   intended as a human-inspectable envelope for the operator to feed back
+//   into hot-machine submit RPCs, which know the mnemonic mapping). The
+//   underlying signing_bytes still encodes the type byte (0 = TRANSFER)
+//   per chain::Transaction::signing_bytes — the JSON `type` field is for
+//   the operator's eyes, not for re-serialisation.
+//
+// Exit codes:
+//   0 — signed successfully
+//   1 — args / IO / keyfile-shape / validation error
+//   2 — cryptographic failure (init / keygen / sign)
+int cmd_sign_anon_tx(int argc, char** argv) {
+    std::string keyfile_path, to_str, out_path;
+    int64_t amount = -1;
+    int64_t fee    = -1;
+    int64_t nonce  = -1;
+    bool allow_stdout = false;
+    bool json_out     = false;  // accepted for parity; output is always JSON
+    bool have_amount = false, have_fee = false, have_nonce = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        auto parse_u64 = [&](const char* flag, int64_t& dst, bool& flag_set) {
+            if (i + 1 >= argc) {
+                std::cerr << "sign-anon-tx: " << flag << " requires a value\n";
+                return false;
+            }
+            std::string v = argv[++i];
+            try {
+                size_t pos = 0;
+                long long n = std::stoll(v, &pos);
+                if (pos != v.size()) throw std::invalid_argument("trailing chars");
+                if (n < 0) {
+                    std::cerr << "sign-anon-tx: " << flag
+                              << " must be non-negative; got " << v << "\n";
+                    return false;
+                }
+                dst = n;
+                flag_set = true;
+                return true;
+            } catch (std::exception&) {
+                std::cerr << "sign-anon-tx: " << flag
+                          << " must be a non-negative integer; got '"
+                          << v << "'\n";
+                return false;
+            }
+        };
+        if      (a == "--keyfile"      && i + 1 < argc) keyfile_path = argv[++i];
+        else if (a == "--to"           && i + 1 < argc) to_str       = argv[++i];
+        else if (a == "--amount") { if (!parse_u64("--amount", amount, have_amount)) return 1; }
+        else if (a == "--fee")    { if (!parse_u64("--fee",    fee,    have_fee))    return 1; }
+        else if (a == "--nonce")  { if (!parse_u64("--nonce",  nonce,  have_nonce))  return 1; }
+        else if (a == "--out"          && i + 1 < argc) out_path     = argv[++i];
+        else if (a == "--allow-stdout")                 allow_stdout = true;
+        else if (a == "--json")                         json_out     = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet sign-anon-tx --keyfile <path> --to <addr-or-domain> "
+                "--amount <N> --fee <N> --nonce <N> "
+                "(--out <file> | --allow-stdout) [--json]\n"
+                "\n"
+                "  Offline TRANSFER signing for an anon-address holder.\n"
+                "  Builds a canonical TRANSFER from --to/--amount/--fee/\n"
+                "  --nonce using the keyfile's anon address as `from`,\n"
+                "  signs with the keyfile's Ed25519 priv_seed (canonical\n"
+                "  signing_bytes per src/chain/block.cpp Transaction::\n"
+                "  signing_bytes), and writes the signed envelope to --out\n"
+                "  (or stdout with --allow-stdout). No network, no RPC.\n"
+                "\n"
+                "  --keyfile accepts both wallet shapes:\n"
+                "    canonical    {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
+                "                 (account-create-batch / account-import /\n"
+                "                  account-export single-record output)\n"
+                "    alternate    {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\",\n"
+                "                  \"anon_address\":\"0x...\"}\n"
+                "                 (some external tooling).\n"
+                "\n"
+                "  Validation (exit 1):\n"
+                "    * --keyfile address must be canonical lowercase 0x+64-hex\n"
+                "      (S-028) AND match its ed_pub derivation.\n"
+                "    * --to must be canonical lowercase if anon-shape (S-028);\n"
+                "      domain names pass through verbatim.\n"
+                "    * --amount > 0, --fee >= 0, --nonce >= 0.\n"
+                "\n"
+                "  Output (stdout, one-line JSON):\n"
+                "    {\"type\":\"TRANSFER\",\"from\":\"0x...\",\"to\":\"...\",\n"
+                "     \"amount\":N,\"fee\":N,\"nonce\":N,\"payload\":\"\",\n"
+                "     \"signature\":\"<128 hex>\",\"hash\":\"<64 hex>\"}\n"
+                "\n"
+                "  Exit codes: 0 signed, 1 args / keyfile / validation error,\n"
+                "  2 cryptographic failure.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "sign-anon-tx: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet sign-anon-tx --keyfile <path> "
+                         "--to <addr-or-domain> --amount <N> --fee <N> "
+                         "--nonce <N> (--out <file> | --allow-stdout) [--json]\n";
+            return 1;
+        }
+    }
+    (void)json_out;
+    if (keyfile_path.empty() || to_str.empty()
+        || !have_amount || !have_fee || !have_nonce) {
+        std::cerr << "Usage: determ-wallet sign-anon-tx --keyfile <path> "
+                     "--to <addr-or-domain> --amount <N> --fee <N> "
+                     "--nonce <N> (--out <file> | --allow-stdout) [--json]\n";
+        std::cerr << "  (all of --keyfile / --to / --amount / --fee / "
+                     "--nonce are required)\n";
+        return 1;
+    }
+    if (out_path.empty() && !allow_stdout) {
+        std::cerr << "sign-anon-tx: --out is required unless --allow-stdout is "
+                     "supplied (refusing to write secret-derived material to "
+                     "stdout by default; pass --allow-stdout to override)\n";
+        return 1;
+    }
+
+    // ── Validate --amount / --fee / --nonce ranges ────────────────────────
+    // amount must be > 0 — a zero-amount transfer is degenerate (and the
+    // chain's Transaction::is_valid rejects it for TRANSFER). fee and
+    // nonce are >= 0 already enforced by parse_u64.
+    if (amount <= 0) {
+        std::cerr << "sign-anon-tx: --amount must be > 0 (got " << amount
+                  << ")\n";
+        return 1;
+    }
+    const uint64_t amount_u = static_cast<uint64_t>(amount);
+    const uint64_t fee_u    = static_cast<uint64_t>(fee);
+    const uint64_t nonce_u  = static_cast<uint64_t>(nonce);
+
+    // ── Validate --to (S-028: anon-shape MUST be lowercase) ───────────────
+    // Domain names pass through verbatim — same convention as the chain's
+    // normalize_anon_address (only "0x"+64-hex shapes are case-normalized;
+    // anything else is opaque). We REJECT mis-cased anon shapes rather than
+    // silently lowercasing because the operator built the tx body off-line
+    // and the sig binds the exact `to` string they typed — silently
+    // mutating it would produce a signed envelope the operator can't
+    // reproduce from their own records.
+    auto is_anon_shape = [](const std::string& s) -> bool {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto is_canonical_anon = [&](const std::string& s) -> bool {
+        if (!is_anon_shape(s)) return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (c >= 'A' && c <= 'F') return false;
+        }
+        return true;
+    };
+    if (is_anon_shape(to_str) && !is_canonical_anon(to_str)) {
+        std::cerr << "sign-anon-tx: --to is anon-shape but not canonical "
+                     "lowercase (S-028); got '" << to_str << "'\n"
+                     "  (pass the lowercase form — the chain rejects non-"
+                     "canonical anon addresses on submit)\n";
+        return 1;
+    }
+
+    // ── --out preconditions (mirrors cold-sign behaviour) ────────────────
+    // Check BEFORE loading the priv keyfile so a misconfigured operator
+    // doesn't read secret material before hitting the refusal.
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "sign-anon-tx: --out parent directory does not exist: "
+                      << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        // Note: unlike cold-sign, sign-anon-tx has no --force flag. The
+        // task spec says nothing about overwrite semantics, so we mirror
+        // the conservative "refuse to overwrite" default. Operator
+        // deletes / renames manually if they want to re-sign.
+        if (std::filesystem::exists(p)) {
+            std::cerr << "sign-anon-tx: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; operator must remove "
+                         "the existing file to re-sign)\n";
+            return 1;
+        }
+    }
+
+    // ── Load + parse the keyfile ──────────────────────────────────────────
+    std::ifstream kf(keyfile_path);
+    if (!kf) {
+        std::cerr << "sign-anon-tx: cannot open --keyfile: "
+                  << keyfile_path << "\n";
+        return 1;
+    }
+    nlohmann::json acc_doc;
+    try { kf >> acc_doc; }
+    catch (std::exception& e) {
+        std::cerr << "sign-anon-tx: --keyfile is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!acc_doc.is_object()) {
+        std::cerr << "sign-anon-tx: --keyfile must be a JSON object\n";
+        return 1;
+    }
+
+    // Accept both keyfile shapes (canonical wallet, and the alternate
+    // ed-pub shape the task spec mentions). Either way we end up with
+    // (address, priv_hex) and an OPTIONAL pre-computed pub_hex used as a
+    // cross-check against the address derivation.
+    std::string keyfile_address, priv_hex, pub_hex_hint;
+    if (acc_doc.contains("address") && acc_doc["address"].is_string()
+        && acc_doc.contains("privkey_hex") && acc_doc["privkey_hex"].is_string()) {
+        // Canonical wallet shape.
+        keyfile_address = acc_doc["address"].get<std::string>();
+        priv_hex        = acc_doc["privkey_hex"].get<std::string>();
+    } else if (acc_doc.contains("anon_address") && acc_doc["anon_address"].is_string()
+               && acc_doc.contains("ed_priv_hex") && acc_doc["ed_priv_hex"].is_string()) {
+        // Alternate ed-pub shape from the task spec.
+        keyfile_address = acc_doc["anon_address"].get<std::string>();
+        priv_hex        = acc_doc["ed_priv_hex"].get<std::string>();
+        if (acc_doc.contains("ed_pub_hex") && acc_doc["ed_pub_hex"].is_string()) {
+            pub_hex_hint = acc_doc["ed_pub_hex"].get<std::string>();
+        }
+    } else {
+        std::cerr << "sign-anon-tx: --keyfile shape error: expected either\n"
+                     "  {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
+                     "  or\n"
+                     "  {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\","
+                     "\"anon_address\":\"0x...\"}\n";
+        return 1;
+    }
+
+    // Validate the address: must be canonical lowercase 0x+64-hex (S-028).
+    if (!is_canonical_anon(keyfile_address)) {
+        std::cerr << "sign-anon-tx: --keyfile address is not canonical "
+                     "lowercase 0x+64-hex (S-028); got '"
+                  << keyfile_address << "'\n";
+        return 1;
+    }
+    if (priv_hex.size() != 64) {
+        std::cerr << "sign-anon-tx: keyfile priv must be 64 hex chars "
+                     "(32-byte Ed25519 priv_seed); got length "
+                  << priv_hex.size() << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> priv_seed;
+    try { priv_seed = from_hex(priv_hex); }
+    catch (std::exception& e) {
+        std::cerr << "sign-anon-tx: keyfile priv is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (priv_seed.size() != 32) {
+        std::cerr << "sign-anon-tx: keyfile priv decoded length must be 32; "
+                     "got " << priv_seed.size() << "\n";
+        return 1;
+    }
+
+    // ── Derive the pubkey + verify address-vs-derivation (S-028 + key
+    //    integrity) ──────────────────────────────────────────────────────
+    if (!primitives::init_libsodium()) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        std::cerr << "sign-anon-tx: libsodium init failed\n";
+        return 2;
+    }
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        sodium_memzero(sk.data(),        sk.size());
+        std::cerr << "sign-anon-tx: crypto_sign_seed_keypair failed\n";
+        return 2;
+    }
+    // priv_seed not needed past keypair derivation; scrub.
+    sodium_memzero(priv_seed.data(), priv_seed.size());
+
+    // Address derivation: anon_address = "0x" + lowercase 64-hex of pubkey
+    // (matches src/wallet/account.cpp::make_anon_address + every other
+    // anon-shape derivation in this binary).
+    std::string derived_addr = "0x" + to_hex(pub);
+    if (derived_addr != keyfile_address) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "sign-anon-tx: --keyfile address mismatch: keyfile."
+                     "address=" << keyfile_address
+                  << " derived-from-priv=" << derived_addr
+                  << "\n  (keyfile is corrupt or wrong shape — address must "
+                     "match Ed25519 pubkey of the priv seed per S-028)\n";
+        return 1;
+    }
+    // If the alternate shape supplied ed_pub_hex, cross-check it too.
+    if (!pub_hex_hint.empty()) {
+        std::string derived_pub_hex = to_hex(pub);
+        // Hint may be either case; normalize for compare.
+        std::string hint_lower = pub_hex_hint;
+        for (auto& c : hint_lower) {
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (hint_lower != derived_pub_hex) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "sign-anon-tx: --keyfile ed_pub_hex mismatch: "
+                         "ed_pub_hex=" << pub_hex_hint
+                      << " derived=" << derived_pub_hex
+                      << "\n  (keyfile is internally inconsistent — "
+                         "ed_pub_hex disagrees with ed_priv_hex's pubkey)\n";
+            return 1;
+        }
+    }
+
+    // ── Build canonical signing_bytes (matches src/chain/block.cpp
+    //    Transaction::signing_bytes; same encoding as cmd_cold_sign /
+    //    cmd_tx_sign_verify / bulk-send) ──────────────────────────────────
+    //
+    // Layout:
+    //   u8(TxType=0 TRANSFER)
+    //   from_str || 0x00
+    //   to_str   || 0x00
+    //   u64_be(amount)
+    //   u64_be(fee)
+    //   u64_be(nonce)
+    //   payload  (empty for TRANSFER)
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + keyfile_address.size() + 1 + to_str.size() + 1 + 24);
+    sb.push_back(static_cast<uint8_t>(0));  // TxType::TRANSFER == 0
+    sb.insert(sb.end(), keyfile_address.begin(), keyfile_address.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    for (int i = 7; i >= 0; --i) sb.push_back((amount_u >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((fee_u    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce_u  >> (i * 8)) & 0xFF);
+    // payload = empty for TRANSFER; nothing appended.
+
+    // SHA-256(signing_bytes) — both the chain's Transaction::compute_hash
+    // result AND what we emit in the success envelope as `hash`.
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+
+    // ── Ed25519 sign over signing_bytes ───────────────────────────────────
+    std::array<uint8_t, crypto_sign_BYTES> sig{};
+    unsigned long long sig_len = 0;
+    if (crypto_sign_detached(sig.data(), &sig_len,
+                              sb.data(), sb.size(),
+                              sk.data()) != 0) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "sign-anon-tx: crypto_sign_detached failed\n";
+        return 2;
+    }
+    sodium_memzero(sk.data(), sk.size());
+    if (sig_len != crypto_sign_BYTES) {
+        std::cerr << "sign-anon-tx: unexpected sig length " << sig_len << "\n";
+        return 2;
+    }
+
+    // ── Build signed envelope JSON ────────────────────────────────────────
+    // Per task spec: type is the upper-case mnemonic "TRANSFER" (NOT the
+    // numeric 0), signature field name is "signature" (NOT "sig" — though
+    // we ALSO emit `sig` as an alias so the envelope is wire-compatible
+    // with cmd_tx_sign_verify / cmd_cold_sign / chain Transaction::
+    // from_json without any rewrite). hash is SHA-256(signing_bytes) hex.
+    nlohmann::json signed_doc = {
+        {"type",      "TRANSFER"},
+        {"from",      keyfile_address},
+        {"to",        to_str},
+        {"amount",    amount_u},
+        {"fee",       fee_u},
+        {"nonce",     nonce_u},
+        {"payload",   ""},
+        {"signature", to_hex(sig)},
+        {"hash",      to_hex(sb_sha)},
+    };
+
+    std::string signed_text = signed_doc.dump();
+
+    if (out_path.empty()) {
+        // --allow-stdout path: signed JSON on stdout, status on stderr
+        // (same stream-discipline as cold-sign so downstream pipes get a
+        // clean envelope and humans get the human-readable status line).
+        std::cout << signed_text << "\n";
+        nlohmann::json status = {
+            {"status",      "ok"},
+            {"tx_hash_hex", to_hex(sb_sha)},
+            {"out",         "<stdout>"},
+        };
+        std::cerr << status.dump() << "\n";
+        return 0;
+    }
+
+    // --out path: write the signed JSON file, then 0600 perms.
+    {
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "sign-anon-tx: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << signed_text << "\n";
+        if (!of) {
+            std::cerr << "sign-anon-tx: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+    // 0600 — owner-only read/write. POSIX semantic; on Windows the
+    // read/write bits are a no-op (NTFS ACL inherits from parent), same
+    // convention every other secret-derived-output command follows.
+    std::error_code perm_ec;
+    std::filesystem::permissions(
+        out_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        perm_ec);
+    (void)perm_ec;
+
+    nlohmann::json status = {
+        {"status",      "ok"},
+        {"tx_hash_hex", to_hex(sb_sha)},
+        {"out",         out_path},
+    };
+    std::cout << status.dump() << "\n";
+    return 0;
+}
+
 // ── sign-arbitrary / verify-arbitrary ────────────────────────────────────────
 //
 // Paired commands for OFF-CHAIN, arbitrary-message Ed25519 signing using a
@@ -13232,6 +13690,30 @@ void print_usage() {
         "                                             exfil guard). Output (stdout): {status:ok,\n"
         "                                             tx_hash_hex, out}. Refusal exits emit a\n"
         "                                             {status:error,reason:...} JSON on stdout.\n"
+        "  sign-anon-tx --keyfile <path> --to <addr-or-domain>\n"
+        "               --amount <N> --fee <N> --nonce <N>\n"
+        "               (--out <file> | --allow-stdout) [--json]\n"
+        "                                             OFFLINE TRANSFER signing for an anon-address\n"
+        "                                             holder. Builds a canonical TRANSFER from\n"
+        "                                             --to/--amount/--fee/--nonce using the\n"
+        "                                             keyfile's anon address as `from`, signs with\n"
+        "                                             the keyfile's Ed25519 priv_seed (canonical\n"
+        "                                             signing_bytes per src/chain/block.cpp\n"
+        "                                             Transaction::signing_bytes), writes the\n"
+        "                                             signed envelope to --out (0600 on POSIX)\n"
+        "                                             or stdout (--allow-stdout opt-in; off by\n"
+        "                                             default as an exfil guard). --keyfile accepts\n"
+        "                                             both {address,privkey_hex} (canonical wallet\n"
+        "                                             shape) and {ed_priv_hex,ed_pub_hex,\n"
+        "                                             anon_address} (alternate shape). --to must\n"
+        "                                             be canonical lowercase if anon-shape (S-028);\n"
+        "                                             domain names pass through verbatim. amount\n"
+        "                                             must be > 0; fee and nonce >= 0. Offline\n"
+        "                                             workflow — operator supplies the nonce. Out:\n"
+        "                                             {type:\"TRANSFER\",from,to,amount,fee,nonce,\n"
+        "                                             payload:\"\",signature,hash}. Exit 0 signed,\n"
+        "                                             1 args/keyfile/validation error, 2 crypto\n"
+        "                                             failure.\n"
         "  sign-arbitrary --priv-keyfile <path>\n"
         "                 (--msg <str> | --msg-file <path>)\n"
         "                 [--out <file>] [--detached | --bundle]\n"
@@ -13543,6 +14025,7 @@ int main(int argc, char** argv) {
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
+    if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
     if (cmd == "anon-batch-balance") return cmd_anon_batch_balance(argc - 2, argv + 2);
