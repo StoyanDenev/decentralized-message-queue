@@ -997,6 +997,28 @@ Additional in-process tests:
                                               contract sanity (valid +
                                               unknown fields side-by-side
                                               load cleanly).
+  determ test-fee-edge-cases                  Per-tx fee handling at the apply
+                                              layer — companion to test-fee-
+                                              distribution-edge on the input
+                                              side. Zero-fee TRANSFER legal
+                                              (exact-amount debit, no creator
+                                              credit); max-fee-within-balance
+                                              drains sender to 1 unit;
+                                              fee+amount > balance rejected
+                                              (cost gate at chain.cpp:744);
+                                              fee==balance with amount=0
+                                              boundary-admit (cost==balance,
+                                              not strictly greater); UINT64_MAX
+                                              fee naturally rejected (cost
+                                              > balance without overflow);
+                                              cost-wraparound throws S-007
+                                              + A9 atomic-apply rollback;
+                                              multi-tx fee distribution to
+                                              3 creators exact-divide (no
+                                              dust); empty block fee_pool=0
+                                              flows subsidy-only to creators
+                                              (accumulated_subsidy unchanged
+                                              by absent fee_pool).
 )" << "\n";
 }
 
@@ -21324,6 +21346,365 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": fee-distribution-edge " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: per-tx fee handling at the apply layer. Companion
+    // to test-fee-distribution-edge (which exercises the per-creator
+    // SPLIT side); this test exercises the per-TX FEE side — the input
+    // shape that feeds the fee pool. Covers zero-fee TRANSFER (legal),
+    // maximum-fee-within-balance (drains sender to zero), fee + amount
+    // > balance (apply-time reject via the `cost > balance` check),
+    // fee == balance with amount=0 (boundary admit), UINT64_MAX fee
+    // (natural reject via overflowed cost; cost-wraparound rollback
+    // contract), explicit per-creator distribution accounting with
+    // exact-divide N=3 (no dust), and empty-block fee_pool = 0
+    // (subsidy-only credit). Pins behavior at chain.cpp:742-769
+    // (TRANSFER cost gate + total_fees accumulator) and
+    // chain.cpp:1279-1305 (total_distributed split + S-007 overflow
+    // throw on per-creator credit).
+    if (cmd == "test-fee-edge-cases") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Shared fixture: alice is sole creator (so the entire fee_pool
+        // funnels to a single account, making per-tx-fee accounting
+        // pop out by inspection). dave is a non-creator funded for
+        // sending; bob is a non-creator passive recipient. Three other
+        // recipients (eve / faye / gus) only appear in Scenario 6 to
+        // give the multi-tx block distinct (to, nonce) tuples.
+        auto make_cfg = [](uint64_t alice_bal,
+                            uint64_t bob_bal,
+                            uint64_t dave_bal) {
+            GenesisConfig cfg;
+            cfg.chain_id = "fee-edge-cases-test";
+            GenesisCreator a_c;
+            a_c.domain = "alice";
+            for (size_t i = 0; i < a_c.ed_pub.size(); ++i)
+                a_c.ed_pub[i] = uint8_t(0x10 + i);
+            a_c.initial_stake = 0;  // simpler A1 math; no stake leaves to track
+            cfg.initial_creators = {a_c};
+            GenesisAllocation ab, bb, db;
+            ab.domain = "alice"; ab.balance = alice_bal;
+            bb.domain = "bob";   bb.balance = bob_bal;
+            db.domain = "dave";  db.balance = dave_bal;
+            cfg.initial_balances = {ab, bb, db};
+            return cfg;
+        };
+
+        auto make_transfer = [](const std::string& from,
+                                  const std::string& to,
+                                  uint64_t amount, uint64_t fee,
+                                  uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = from; tx.to = to;
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+            return tx;
+        };
+
+        // === Scenario 1: Zero-fee TRANSFER ===
+        //
+        // fee = 0 is legal at the apply layer (no minimum-fee gate in
+        // chain.cpp's TRANSFER arm). Sender debited EXACTLY the amount
+        // (cost = amount + 0); recipient credited amount; fee_pool
+        // stays 0, so creator (alice) gets no per-block credit beyond
+        // subsidy (which is 0 by default → alice unchanged).
+        //
+        // 3 assertions: dave debit exact; bob credit exact; alice
+        // creator unchanged (no fee_pool to distribute).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, 1000)));
+            // c.set_block_subsidy(0) — default; explicit for documentation.
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(
+                make_transfer("dave", "bob", 100, /*fee=*/0, /*nonce=*/0));
+            c.append(b);
+
+            check(c.balance("dave") == 900,
+                  "(1) Zero-fee TRANSFER: sender debited EXACTLY amount "
+                  "(1000 - 100 - 0 = 900); no fee deducted");
+            check(c.balance("bob") == 600,
+                  "(1) Zero-fee TRANSFER: recipient credited amount "
+                  "(500 + 100 = 600)");
+            check(c.balance("alice") == 1000,
+                  "(1) Zero-fee TRANSFER: fee_pool=0 + subsidy=0 → "
+                  "creator (alice) receives no credit");
+        }
+
+        // === Scenario 2: Maximum fee within balance ===
+        //
+        // fee = balance - amount - 1 leaves the sender with exactly 1
+        // unit. This is the largest fee a sender can pay without being
+        // rejected (cost = amount + fee = balance - 1 < balance). The
+        // sole creator (alice) gets the full fee, so the fee path is
+        // observed by inspection.
+        //
+        // 3 assertions: dave drained to 1 (spare unit); bob credited
+        // exact amount; alice creator picks up the full fee_pool.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, 1000)));
+
+            // amount=50, fee=949 → cost = 999, dave balance 1000-999 = 1
+            const uint64_t amount = 50;
+            const uint64_t fee    = 949;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(
+                make_transfer("dave", "bob", amount, fee, /*nonce=*/0));
+            c.append(b);
+
+            check(c.balance("dave") == 1,
+                  "(2) Max fee within balance: sender drained to 1 unit "
+                  "(1000 - 50 - 949 = 1)");
+            check(c.balance("bob") == 550,
+                  "(2) Max fee within balance: recipient credited "
+                  "amount (500 + 50 = 550)");
+            check(c.balance("alice") == 1949,
+                  "(2) Max fee within balance: sole creator harvests "
+                  "the entire fee_pool (1000 + 949 = 1949)");
+        }
+
+        // === Scenario 3: Fee + amount > balance → REJECTED ===
+        //
+        // dave has balance=50; transfers 100 with fee=10. cost = 110 >
+        // 50 ⇒ `continue` at chain.cpp:744 (no mutation). Sender's
+        // balance unchanged, recipient unchanged, fee_pool unchanged,
+        // creator unchanged. nonce ALSO unchanged (the `next_nonce++`
+        // at line 768 sits after the cost gate).
+        //
+        // 3 assertions: dave balance unchanged; bob balance unchanged;
+        // alice unchanged (no fee credited because tx rejected).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, /*dave=*/50)));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(
+                make_transfer("dave", "bob", /*amount=*/100,
+                                /*fee=*/10, /*nonce=*/0));
+            c.append(b);
+
+            check(c.balance("dave") == 50,
+                  "(3) cost > balance: sender balance unchanged on "
+                  "reject (50, not 50-110-wrap)");
+            check(c.balance("bob") == 500,
+                  "(3) cost > balance: recipient unchanged (no credit)");
+            check(c.balance("alice") == 1000,
+                  "(3) cost > balance: creator unchanged (fee_pool=0, "
+                  "no distribution branch entered)");
+        }
+
+        // === Scenario 4: Fee == balance, amount = 0 ===
+        //
+        // amount=0 TRANSFER is legal (test-fee-distribution-edge
+        // already pins this; chain.cpp has no `amount > 0` gate). With
+        // fee == balance and amount=0, cost = 0 + 100 = 100 == balance
+        // (NOT strictly less), so `sender.balance < cost` is FALSE,
+        // and the tx APPLIES. Sender drains to 0; recipient unchanged
+        // (amount=0); fee_pool = 100 → flows to sole creator alice.
+        //
+        // 3 assertions: dave drained to 0; bob unchanged (amount=0);
+        // alice picks up full fee.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, /*dave=*/100)));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(
+                make_transfer("dave", "bob", /*amount=*/0,
+                                /*fee=*/100, /*nonce=*/0));
+            c.append(b);
+
+            check(c.balance("dave") == 0,
+                  "(4) Fee == balance + amount=0: sender drained exactly "
+                  "(100 - 0 - 100 = 0; boundary admit because cost == "
+                  "balance, not strictly greater)");
+            check(c.balance("bob") == 500,
+                  "(4) Fee == balance + amount=0: recipient unchanged "
+                  "(amount = 0)");
+            check(c.balance("alice") == 1100,
+                  "(4) Fee == balance + amount=0: full fee flows to "
+                  "sole creator (1000 + 100 = 1100)");
+        }
+
+        // === Scenario 5a: fee = UINT64_MAX, small amount → natural reject ===
+        //
+        // The schema is u64; there is no "negative" fee. The defense
+        // against absurd fees is two-layered: (a) `cost = amount + fee`
+        // overflows only when amount + fee > UINT64_MAX, otherwise it
+        // produces a huge value that fails the `balance < cost` check;
+        // (b) if cost DOES wrap (5b below), the per-creator distribution
+        // path's S-007 overflow check trips and the apply throws.
+        //
+        // 5a: dave=100, amount=0, fee=UINT64_MAX. cost = UINT64_MAX, no
+        // wrap; 100 < UINT64_MAX ⇒ tx skipped. State unchanged.
+        //
+        // 2 assertions for 5a: dave + alice balances unchanged.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, /*dave=*/100)));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(
+                make_transfer("dave", "bob", /*amount=*/0,
+                                /*fee=*/UINT64_MAX, /*nonce=*/0));
+            c.append(b);
+
+            check(c.balance("dave") == 100,
+                  "(5a) fee=UINT64_MAX, amount=0, balance=100: natural "
+                  "reject (cost = UINT64_MAX > balance, no overflow); "
+                  "sender unchanged");
+            check(c.balance("alice") == 1000,
+                  "(5a) fee=UINT64_MAX: no fee_pool entry because "
+                  "tx was skipped pre-`total_fees +=`");
+        }
+
+        // === Scenario 5b: cost-wraparound → S-007 throw + rollback ===
+        //
+        // amount=2, fee=UINT64_MAX-1. cost = 2 + UINT64_MAX - 1 = 0
+        // (mod 2^64). dave=1000; 1000 < 0 is FALSE ⇒ tx admitted.
+        // sender.balance -= 0 (no change); recipient += 2 (would
+        // succeed); total_fees += UINT64_MAX - 1 (succeeds). But at
+        // distribution time, per_creator = UINT64_MAX - 1 and
+        // checked_add_u64(alice.balance, UINT64_MAX-1) overflows
+        // (1000 + UINT64_MAX-1 > UINT64_MAX), throwing S-007. The
+        // apply_transactions catch handler restores the entry-time
+        // snapshot, so all balances are exactly as before the
+        // (failed) append call.
+        //
+        // 1 assertion that append THROWS + 2 assertions that state is
+        // fully rolled back. Total: 3 assertions for 5b.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, /*dave=*/1000)));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(
+                make_transfer("dave", "bob", /*amount=*/2,
+                                /*fee=*/UINT64_MAX - 1, /*nonce=*/0));
+
+            bool threw = false;
+            try {
+                c.append(b);
+            } catch (const std::exception&) {
+                threw = true;
+            }
+
+            check(threw,
+                  "(5b) cost wraps to 0 → S-007 overflow at per-creator "
+                  "distribution → append THROWS");
+            check(c.balance("dave") == 1000,
+                  "(5b) Apply rollback: dave balance unchanged after "
+                  "thrown append (A9 atomic-apply contract)");
+            check(c.balance("alice") == 1000 && c.balance("bob") == 500,
+                  "(5b) Apply rollback: alice + bob balances unchanged "
+                  "after thrown append");
+        }
+
+        // === Scenario 6: Multi-tx fee distribution across N creators ===
+        //
+        // 3 TRANSFER txs from dave, each fee=10 (amount=0 so the txs
+        // touch only the fee pool, isolating the distribution accounting
+        // from amount transfers). Block has 3 creators {alice, bob,
+        // carol}. Total fee_pool = 30; 30 / 3 = 10 each, remainder = 0
+        // (no dust). Per-creator credit observed by inspection.
+        //
+        // NOTE: bob and carol are NOT registered as creators in this
+        // fixture's genesis (only alice is); but Chain::apply doesn't
+        // validate that b.creators members are registered — it just
+        // distributes to whatever names are in b.creators. This mirrors
+        // test-fee-distribution-edge's approach.
+        //
+        // 3 assertions: each creator credited exactly 10 (no dust).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, /*dave=*/100)));
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};  // 3 creators, exact divide
+            b.transactions.push_back(
+                make_transfer("dave", "eve",  0, /*fee=*/10, /*nonce=*/0));
+            b.transactions.push_back(
+                make_transfer("dave", "faye", 0, /*fee=*/10, /*nonce=*/1));
+            b.transactions.push_back(
+                make_transfer("dave", "gus",  0, /*fee=*/10, /*nonce=*/2));
+            c.append(b);
+
+            // alice was creator AND starting balance holder. 1000 + 10
+            // (per-creator share, no dust because 30 % 3 == 0) = 1010.
+            check(c.balance("alice") == 1010,
+                  "(6) 3 txs fee=10 + 3 creators: alice (creator[0]) "
+                  "1000 + 10 = 1010 (per_creator = 30/3 = 10, no dust)");
+            // bob was passive recipient with starting balance 500.
+            // After getting a creator credit of 10: 500 + 10 = 510.
+            check(c.balance("bob") == 510,
+                  "(6) 3 txs fee=10 + 3 creators: bob 500 + 10 = 510 "
+                  "(per_creator share only)");
+            // carol had no genesis balance (0 default) + 10 share.
+            check(c.balance("carol") == 10,
+                  "(6) 3 txs fee=10 + 3 creators: carol auto-created "
+                  "with 0, then +10 share = 10");
+        }
+
+        // === Scenario 7: Empty block — no fee_pool, subsidy only ===
+        //
+        // No transactions in the block ⇒ total_fees = 0. With
+        // block_subsidy > 0, the distribution path runs on subsidy
+        // ALONE. With 3 creators and subsidy 30, each creator gets
+        // exactly 10 (no dust). Pins that fee_pool=0 doesn't suppress
+        // the distribution branch entirely — the subsidy still flows.
+        //
+        // 2 assertions: alice creator-share equals subsidy/N + dust;
+        // accumulated_subsidy bumps by exactly subsidy_this_block (no
+        // double-count of empty fee_pool).
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg(1000, 500, 1000)));
+            c.set_block_subsidy(30);
+
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob", "carol"};
+            // no transactions
+            c.append(b);
+
+            check(c.balance("alice") == 1010
+                  && c.balance("bob") == 510
+                  && c.balance("carol") == 10,
+                  "(7) Empty block: fee_pool=0 → only subsidy distributed "
+                  "(30/3 = 10 each, no dust); creators credited exactly");
+            check(c.accumulated_subsidy() == 30,
+                  "(7) Empty block: accumulated_subsidy = 30 (subsidy_this_"
+                  "block alone; no fee_pool contribution to the supply "
+                  "delta because fees are internal transfers)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": fee-edge-cases " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
