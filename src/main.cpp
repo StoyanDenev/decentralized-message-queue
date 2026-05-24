@@ -942,6 +942,37 @@ Additional in-process tests:
                                               shard_address_salt do NOT change
                                               the hash; pins the current no-
                                               effect behavior).
+  determ test-anon-address-derivation         make_anon_address(Ed25519 pubkey)
+                                              byte-identity contract — pins
+                                              the derivation surface every
+                                              anon-address transaction flows
+                                              through. Replay determinism (3
+                                              calls byte-identical + fresh-
+                                              rebuilt pubkey matches), format
+                                              shape (^0x[a-f0-9]{66}$ across
+                                              zero / 0xFF / pseudorandom
+                                              pubkeys), per-byte + per-bit
+                                              sensitivity (all 32 bytes + all
+                                              256 bits change the address;
+                                              first-vs-last positional non-
+                                              aliasing), distinctness over
+                                              100 random pubkeys (no
+                                              encoding collisions; catches
+                                              truncation), lowercase
+                                              canonical (normalize_anon_
+                                              address is a no-op on the
+                                              emit form; S-028 ingress is
+                                              exact-inverse), round-trip
+                                              contract (parse_anon_pubkey ∘
+                                              make_anon_address == identity
+                                              — derivation is a bijection,
+                                              NOT a one-way hash), and
+                                              golden fixtures (pk=0x00*32 →
+                                              0x0000…0000; pk[i]=i →
+                                              0x000102…1d1e1f pins big-
+                                              endian byte order + lowercase
+                                              hex + nibble width across
+                                              platforms).
 )" << "\n";
 }
 
@@ -33582,6 +33613,338 @@ int main(int argc, char** argv) {
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": shard-routing-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-anon-address-derivation") {
+        // Pins the Ed25519-pubkey → anon-address derivation byte-for-byte.
+        // The derivation surface is `make_anon_address(pk) = "0x" +
+        // to_hex_lower(pk)` (types.hpp lines 153-155). Existing tests
+        // (test-anon-address: parser + normalizer helpers; test-anon-
+        // routing: cross-shard integration) don't pin the derivation
+        // itself. This test does: byte-identity across replays, format
+        // shape, per-bit sensitivity, lowercase canonical, round-trip
+        // contract, and a hardcoded golden fixture for cross-platform
+        // byte-identity. A regression in the encoding (case drift,
+        // length truncation, prefix change) would silently fork the
+        // identity layer — every anon-address transaction's sender/
+        // recipient flows through make_anon_address.
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::fputs("  PASS: ", stdout);
+            else      { std::fputs("  FAIL: ", stdout); fail++; }
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+        };
+
+        // Helper: deterministic pubkey from SHA-256(tag, i). Stable
+        // across runs/platforms, so distinct fixtures are reproducible.
+        auto make_pk = [](uint64_t i) -> PubKey {
+            Hash h = SHA256Builder{}
+                .append(std::string("anon-address-derivation-test"))
+                .append(i)
+                .finalize();
+            PubKey pk;
+            for (size_t k = 0; k < pk.size(); ++k) pk[k] = h[k];
+            return pk;
+        };
+
+        // === Scenario 1: Replay determinism ===
+        //
+        // Same pubkey → same address across 3 consecutive calls; the
+        // derivation must be pure (no RNG, no global state, no clock).
+        //
+        // 3 assertions.
+        {
+            PubKey pk = make_pk(1);
+            std::string a1 = make_anon_address(pk);
+            std::string a2 = make_anon_address(pk);
+            std::string a3 = make_anon_address(pk);
+            check(a1 == a2,
+                  "(1) Replay determinism: call #1 == call #2 "
+                  "(byte-identical anon-address across consecutive derivations)");
+            check(a2 == a3,
+                  "(1) Replay determinism: call #2 == call #3 "
+                  "(no drift across three consecutive derivations)");
+            // Cross-instance: a freshly-constructed PubKey with the
+            // same bytes must yield the same address — pins that there
+            // is no hidden instance-id or memoization.
+            PubKey pk_again = make_pk(1);
+            std::string a4 = make_anon_address(pk_again);
+            check(pk == pk_again && a1 == a4,
+                  "(1) Replay determinism: fresh-rebuilt PubKey produces "
+                  "identical anon-address (no hidden cross-instance state)");
+        }
+
+        // === Scenario 2: Format pin — "^0x[a-f0-9]{64}$" ===
+        //
+        // Pin the wire shape: 66 chars total = "0x" + 64 lowercase
+        // hex. Catches a regression that drops the prefix, changes
+        // case, or alters length. We check across several pubkeys
+        // (including all-zeros, all-0xFF, and a pseudorandom one)
+        // to cover edge values too.
+        //
+        // 3 assertions.
+        {
+            auto matches_shape = [](const std::string& s) {
+                if (s.size() != 66) return false;
+                if (s[0] != '0' || s[1] != 'x') return false;
+                for (size_t i = 2; i < 66; ++i) {
+                    char c = s[i];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                        return false;
+                }
+                return true;
+            };
+            PubKey pk_zero{}; // default-constructed: all zeros
+            PubKey pk_ff{};
+            for (size_t i = 0; i < pk_ff.size(); ++i) pk_ff[i] = 0xFF;
+            std::string a_zero = make_anon_address(pk_zero);
+            std::string a_ff   = make_anon_address(pk_ff);
+            std::string a_rand = make_anon_address(make_pk(2));
+            check(matches_shape(a_zero),
+                  "(2) Format pin: all-zeros pubkey → matches "
+                  "^0x[a-f0-9]{64}$ (boundary)");
+            check(matches_shape(a_ff),
+                  "(2) Format pin: all-0xFF pubkey → matches "
+                  "^0x[a-f0-9]{64}$ (note: 'F' must be lowercased to 'f')");
+            check(matches_shape(a_rand),
+                  "(2) Format pin: pseudorandom pubkey → matches "
+                  "^0x[a-f0-9]{64}$ (general case)");
+        }
+
+        // === Scenario 3: Single-byte / single-bit sensitivity ===
+        //
+        // Flipping any single byte (or any single bit) of the pubkey
+        // MUST change the anon-address — the derivation is a pure
+        // injective hex encoding, so every input bit is bound. A
+        // regression that truncates, ignores, or zeroes any pubkey
+        // byte would collapse derivations and silently let two
+        // distinct keys share an address.
+        //
+        // 3 assertions: every single-byte flip changes the address;
+        // every single-bit flip changes the address; the helper
+        // covers all 32 bytes.
+        {
+            PubKey base = make_pk(3);
+            std::string a_base = make_anon_address(base);
+            bool all_byte_flips_differ = true;
+            for (size_t b = 0; b < 32; ++b) {
+                PubKey mut = base;
+                mut[b] = static_cast<uint8_t>(mut[b] ^ 0xFF);
+                if (make_anon_address(mut) == a_base) {
+                    all_byte_flips_differ = false;
+                    break;
+                }
+            }
+            check(all_byte_flips_differ,
+                  "(3) Per-byte sensitivity: flipping any of the 32 "
+                  "pubkey bytes changes the anon-address (no byte is "
+                  "ignored or truncated)");
+
+            bool all_bit_flips_differ = true;
+            for (size_t b = 0; b < 32; ++b) {
+                for (int bit = 0; bit < 8; ++bit) {
+                    PubKey mut = base;
+                    mut[b] = static_cast<uint8_t>(mut[b] ^ (1u << bit));
+                    if (make_anon_address(mut) == a_base) {
+                        all_bit_flips_differ = false;
+                        break;
+                    }
+                }
+                if (!all_bit_flips_differ) break;
+            }
+            check(all_bit_flips_differ,
+                  "(3) Per-bit sensitivity: flipping any of the 256 "
+                  "pubkey bits changes the anon-address (no bit is "
+                  "masked off by the encoding)");
+
+            // First-vs-last byte sanity: flipping byte 0 and byte 31
+            // both differ and differ from each other (rules out a
+            // mid-string substitution table that maps both flips to
+            // the same change).
+            PubKey mut_first = base; mut_first[0]  = static_cast<uint8_t>(mut_first[0]  ^ 0x01);
+            PubKey mut_last  = base; mut_last[31]  = static_cast<uint8_t>(mut_last[31]  ^ 0x01);
+            std::string a_first = make_anon_address(mut_first);
+            std::string a_last  = make_anon_address(mut_last);
+            check(a_first != a_base && a_last != a_base && a_first != a_last,
+                  "(3) Per-byte sensitivity: byte-0 flip and byte-31 flip "
+                  "both differ from base AND from each other (no positional "
+                  "aliasing)");
+        }
+
+        // === Scenario 4: Distinctness over 100 random pubkeys ===
+        //
+        // 100 distinct pubkeys produce 100 distinct anon-addresses.
+        // SHA-256(tag, i) gives uniform pubkeys → collision
+        // probability ≈ 100²/2^257 ≈ 0 (effectively impossible). A
+        // regression that truncates the encoding to <64 hex chars
+        // would yield collisions long before 100 samples.
+        //
+        // 2 assertions: 100 unique pubkeys, 100 unique addresses.
+        {
+            std::set<PubKey> pks;
+            std::set<std::string> addrs;
+            for (uint64_t i = 0; i < 100; ++i) {
+                PubKey pk = make_pk(0x4000 + i);
+                pks.insert(pk);
+                addrs.insert(make_anon_address(pk));
+            }
+            check(pks.size() == 100,
+                  "(4) Distinctness: 100 deterministically-seeded "
+                  "pubkeys are mutually distinct (fixture sanity — "
+                  "SHA-256(tag, i) is collision-free at this scale)");
+            check(addrs.size() == 100,
+                  "(4) Distinctness: 100 distinct pubkeys derive 100 "
+                  "distinct anon-addresses (no encoding collisions; "
+                  "catches truncation or fixed-prefix bugs)");
+        }
+
+        // === Scenario 5: Lowercase canonical — normalize is a no-op ===
+        //
+        // make_anon_address must emit lowercase hex (no A-F), so
+        // normalize_anon_address (which lowercases A-F → a-f) is a
+        // no-op on the derivation output. Pins S-028 closure at the
+        // emit side: the chain's canonical storage form matches
+        // exactly what make_anon_address produces.
+        //
+        // 3 assertions across pubkey variants.
+        {
+            std::vector<PubKey> probes;
+            probes.push_back(PubKey{}); // all zeros
+            PubKey pk_ff{}; for (size_t i = 0; i < pk_ff.size(); ++i) pk_ff[i] = 0xFF;
+            probes.push_back(pk_ff);
+            probes.push_back(make_pk(5));
+
+            // Per-probe: emitted address has no uppercase A-F.
+            bool all_lower = true;
+            for (const auto& pk : probes) {
+                std::string a = make_anon_address(pk);
+                for (size_t i = 2; i < a.size(); ++i) {
+                    char c = a[i];
+                    if (c >= 'A' && c <= 'F') { all_lower = false; break; }
+                }
+                if (!all_lower) break;
+            }
+            check(all_lower,
+                  "(5) Lowercase canonical: make_anon_address output "
+                  "contains no uppercase A-F across {zero, 0xFF, "
+                  "pseudorandom} pubkeys");
+
+            // normalize is a no-op on the derivation output.
+            bool norm_noop = true;
+            for (const auto& pk : probes) {
+                std::string a = make_anon_address(pk);
+                std::string n = normalize_anon_address(a);
+                if (a != n) { norm_noop = false; break; }
+            }
+            check(norm_noop,
+                  "(5) Lowercase canonical: normalize_anon_address("
+                  "make_anon_address(pk)) == make_anon_address(pk) "
+                  "(emit form IS the canonical form)");
+
+            // Cross-check: an uppercase variant of the same address
+            // normalizes BACK to the make_anon_address output.
+            PubKey pk = make_pk(5);
+            std::string lower = make_anon_address(pk);
+            std::string upper = lower;
+            for (size_t i = 2; i < upper.size(); ++i) {
+                char c = upper[i];
+                if (c >= 'a' && c <= 'f')
+                    upper[i] = static_cast<char>(c - 'a' + 'A');
+            }
+            check(normalize_anon_address(upper) == lower,
+                  "(5) Lowercase canonical: uppercase variant of the "
+                  "same address normalizes to the make_anon_address "
+                  "output (S-028 ingress contract is exact-inverse "
+                  "of emit form)");
+        }
+
+        // === Scenario 6: Round-trip via parse_anon_pubkey ===
+        //
+        // Per the actual implementation (types.hpp lines 144-155), the
+        // anon-address IS the lowercase hex of the pubkey — NOT a
+        // SHA-256 hash. So `parse_anon_pubkey(make_anon_address(pk)) == pk`
+        // is the contract; the derivation is a bijection over its
+        // 32-byte input. Pin this so a future change that swaps the
+        // encoding for a hash (one-way) trips the assertion loudly
+        // and forces an explicit decision.
+        //
+        // 3 assertions: round-trip equality across {zero, 0xFF, random}.
+        {
+            std::vector<PubKey> probes;
+            probes.push_back(PubKey{});
+            PubKey pk_ff{}; for (size_t i = 0; i < pk_ff.size(); ++i) pk_ff[i] = 0xFF;
+            probes.push_back(pk_ff);
+            probes.push_back(make_pk(6));
+
+            check(parse_anon_pubkey(make_anon_address(probes[0])) == probes[0],
+                  "(6) Round-trip: parse_anon_pubkey(make_anon_address("
+                  "zero_pk)) == zero_pk — derivation is a bijection, "
+                  "NOT a one-way SHA-256");
+            check(parse_anon_pubkey(make_anon_address(probes[1])) == probes[1],
+                  "(6) Round-trip: parse_anon_pubkey(make_anon_address("
+                  "ff_pk)) == ff_pk — pins the 0xFF byte path");
+            check(parse_anon_pubkey(make_anon_address(probes[2])) == probes[2],
+                  "(6) Round-trip: parse_anon_pubkey(make_anon_address("
+                  "rand_pk)) == rand_pk — general case");
+        }
+
+        // === Scenario 7: Cross-platform byte-identity (golden fixtures) ===
+        //
+        // Hardcoded golden values pin the derivation to a specific
+        // byte sequence. If the encoding ever drifts (e.g., big- vs
+        // little-endian byte order, case change, prefix change), the
+        // golden assertion trips immediately on every platform.
+        //
+        // Two fixtures:
+        //   A. All-zero pubkey → "0x" + 64 '0' chars.
+        //   B. Sequential pubkey pk[i] = i → "0x000102...1d1e1f".
+        //
+        // Both are reproducible a priori by anyone reading this test
+        // — no external state, no hashing, just hex encoding.
+        //
+        // 3 assertions: A, B, and is_anon_address acceptance of the
+        // golden B.
+        {
+            // Fixture A: pk = 0x00 * 32
+            PubKey pk_zero{};
+            std::string a_zero = make_anon_address(pk_zero);
+            std::string golden_zero =
+                "0x0000000000000000000000000000000000000000000000000000000000000000";
+            check(a_zero == golden_zero,
+                  "(7) Golden A: make_anon_address(0x00 * 32) == "
+                  "0x0000...0000 (66 chars total; boundary fixture)");
+
+            // Fixture B: pk[i] = i, so the hex is 0x00 01 02 .. 1F.
+            PubKey pk_seq{};
+            for (size_t i = 0; i < pk_seq.size(); ++i)
+                pk_seq[i] = static_cast<uint8_t>(i);
+            std::string a_seq = make_anon_address(pk_seq);
+            std::string golden_seq =
+                "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+            check(a_seq == golden_seq,
+                  "(7) Golden B: make_anon_address(pk[i]=i) == "
+                  "0x000102...1d1e1f (pins big-endian byte-order + "
+                  "lowercase hex + nibble width)");
+
+            // Acceptance: golden B must satisfy is_anon_address (this
+            // is the cross-check that the format-pin from Scenario 2
+            // composes with the address-classifier).
+            check(is_anon_address(golden_seq),
+                  "(7) Golden B: is_anon_address(golden) accepts the "
+                  "derived address (format pin composes with the "
+                  "classifier)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": anon-address-derivation ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
