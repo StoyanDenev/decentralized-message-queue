@@ -10800,6 +10800,537 @@ int cmd_validator_roster_snapshot(int argc, char** argv) {
     return 0;
 }
 
+// determ-wallet tx-history-export — Stream-friendly NDJSON exporter of
+// transaction history for one or more accounts.
+//
+// Walks the chain via the `block` RPC over a single TCP connection,
+// filters per-block transactions whose `from` OR `to` matches any of
+// the supplied accounts, and emits one JSON object per matching tx as
+// NDJSON (newline-delimited JSON). Block hashes are fetched in pages
+// via the `headers` RPC to amortize round-trips. Output is streamed:
+// rows are flushed as they're computed so a long export can be piped
+// to `head` / `grep` / `tail -f` without waiting for the full walk.
+//
+// Use case: multi-account audit (operator pulling a full payment
+// history for a list of bearer / domain accounts), wallet UI building a
+// "Recent activity" pane, regulatory / compliance export, customer-
+// dispute reconstruction. NDJSON is preferred over a single-document
+// JSON for streaming + grep + tail-friendly history exports (matches
+// the `tools/operator_chain_export.sh --format ndjson` pattern).
+//
+// CLI:
+//   --rpc-port <N>             REQUIRED. Daemon RPC port (e.g. 8830).
+//   --accounts <list|@file>    REQUIRED. Comma-separated addresses
+//                              inline OR @<path> (one per line, '#'
+//                              comments + blank lines skipped). At
+//                              least one account required. Each entry
+//                              must be either an anon address (0x +
+//                              64 lowercase hex) or a domain name
+//                              (matches [a-z][a-z0-9-]*\.[a-z]+).
+//                              Mixed-case anon addresses normalized
+//                              to lowercase per S-028.
+//   --from H                   First block index to walk (default 0).
+//   --to H                     Last block index, inclusive (default
+//                              current head_index = height - 1).
+//   --last N                   Convenience: walk the last N blocks
+//                              ending at the chain head (equivalent
+//                              to --from (head - N + 1) --to head).
+//                              Mutually exclusive with --from / --to.
+//   --out <file>               Write NDJSON to a file (created with
+//                              0600 on POSIX; truncated). Default
+//                              writes to stdout.
+//   --include-empty-blocks     By default the exporter skips blocks
+//                              with no matching txs; with this flag
+//                              emits an empty `{"block":H,"matches":[]}`
+//                              NDJSON-line per block for stream-
+//                              completeness (audit reproducibility).
+//   --json                     Accepted for parity with the other
+//                              wallet commands; the output format is
+//                              always NDJSON.
+//
+// Output (one JSON object per line, terminated by '\n'):
+//   {"block": H, "block_hash": "...", "tx_index": N, "type": "TRANSFER",
+//    "from": "...", "to": "...", "amount": N, "fee": N, "nonce": N,
+//    "tx_hash": "..."}
+//
+// With --include-empty-blocks, blocks with no matches also emit:
+//   {"block": H, "matches": []}
+//
+// The `type` field is the upper-case mnemonic (TRANSFER, REGISTER,
+// DEREGISTER, STAKE, UNSTAKE, REGION_CHANGE, PARAM_CHANGE,
+// MERGE_EVENT, COMPOSABLE_BATCH, DAPP_REGISTER, DAPP_CALL); unknown
+// future types render as "UNKNOWN_<N>" so the export stays
+// machine-parsable.
+//
+// Exit codes:
+//   0  export complete (or empty if no matching txs)
+//   1  args / parse error / RPC unreachable / unwritable output /
+//      unreadable accounts file / invalid account shape
+int cmd_tx_history_export(int argc, char** argv) {
+    int rpc_port = -1;
+    std::string accounts_in;
+    int64_t from_h_arg = -1;
+    int64_t to_h_arg   = -1;
+    int64_t last_n_arg = -1;
+    std::string out_path;
+    bool include_empty = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port"             && i + 1 < argc) rpc_port      = std::atoi(argv[++i]);
+        else if (a == "--accounts"             && i + 1 < argc) accounts_in   = argv[++i];
+        else if (a == "--from"                 && i + 1 < argc) from_h_arg    = std::stoll(argv[++i]);
+        else if (a == "--to"                   && i + 1 < argc) to_h_arg      = std::stoll(argv[++i]);
+        else if (a == "--last"                 && i + 1 < argc) last_n_arg    = std::stoll(argv[++i]);
+        else if (a == "--out"                  && i + 1 < argc) out_path      = argv[++i];
+        else if (a == "--include-empty-blocks")                 include_empty = true;
+        else if (a == "--json") {/* default; no-op */}
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet tx-history-export "
+                "--rpc-port <N> --accounts <list|@file>\n"
+                "       [--from H] [--to H | --last N] [--out <file>]\n"
+                "       [--include-empty-blocks] [--json]\n"
+                "\n"
+                "  Stream-friendly NDJSON exporter of transaction history for\n"
+                "  one or more accounts. Walks the chain via the `block` RPC\n"
+                "  and emits one JSON object per matching tx as newline-\n"
+                "  delimited JSON. Per-row shape:\n"
+                "    {\"block\": H, \"block_hash\": \"...\", \"tx_index\": N,\n"
+                "     \"type\": \"TRANSFER|STAKE|...\", \"from\": \"...\",\n"
+                "     \"to\": \"...\", \"amount\": N, \"fee\": N, \"nonce\": N,\n"
+                "     \"tx_hash\": \"...\"}\n"
+                "\n"
+                "  --accounts accepts comma-separated values or @<path>\n"
+                "  (one per line, # comments + blank lines skipped). Each\n"
+                "  account is either an anon address (0x + 64 lowercase hex;\n"
+                "  mixed case normalized per S-028) or a domain name\n"
+                "  ([a-z][a-z0-9-]*\\.[a-z]+).\n"
+                "\n"
+                "  --from / --to bracket the walk window (inclusive on both\n"
+                "  ends); defaults to 0..head. --last N is a convenience for\n"
+                "  the last-N-blocks tail; mutually exclusive with --from /\n"
+                "  --to. --out writes to a file; default is stdout.\n"
+                "\n"
+                "  --include-empty-blocks emits {\"block\": H, \"matches\": []}\n"
+                "  per block with no matching txs (stream-completeness for\n"
+                "  audit reproducibility); default skips them.\n"
+                "\n"
+                "  Exit 0 on success (including empty result), 1 on args/IO/\n"
+                "  RPC/parse error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "tx-history-export: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet tx-history-export "
+                         "--rpc-port <N> --accounts <list|@file> "
+                         "[--from H] [--to H | --last N] [--out <file>] "
+                         "[--include-empty-blocks] [--json]\n";
+            return 1;
+        }
+    }
+    if (rpc_port <= 0 || rpc_port > 65535) {
+        std::cerr << "tx-history-export: --rpc-port <N> is required "
+                     "(1..65535)\n";
+        return 1;
+    }
+    if (accounts_in.empty()) {
+        std::cerr << "tx-history-export: --accounts <list|@file> is "
+                     "required\n";
+        return 1;
+    }
+    // --last is mutually exclusive with --from / --to to keep the
+    // window selection unambiguous (otherwise a stale --from from a
+    // prior invocation could silently override --last semantics).
+    if (last_n_arg >= 0 && (from_h_arg >= 0 || to_h_arg >= 0)) {
+        std::cerr << "tx-history-export: --last is mutually exclusive "
+                     "with --from / --to\n";
+        return 1;
+    }
+    if (last_n_arg == 0) {
+        std::cerr << "tx-history-export: --last must be >= 1\n";
+        return 1;
+    }
+
+    // ── Resolve account list ──────────────────────────────────────────────
+    // Accept either comma-separated inline or @<path> (one per line).
+    // Mirrors anon-batch-balance / stake-bulk-query parse contract:
+    // '#' comments + blank lines skipped, surrounding whitespace
+    // trimmed, CR stripped (Windows line-endings tolerated).
+    std::vector<std::string> accounts_raw;
+    if (!accounts_in.empty() && accounts_in[0] == '@') {
+        std::string path = accounts_in.substr(1);
+        std::ifstream in_f(path);
+        if (!in_f) {
+            std::cerr << "tx-history-export: cannot open --accounts file: "
+                      << path << "\n";
+            return 1;
+        }
+        std::string line;
+        while (std::getline(in_f, line)) {
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == ' ' ||
+                    line.back() == '\t' || line.back() == '\n'))
+                line.pop_back();
+            size_t pos = 0;
+            while (pos < line.size() &&
+                   (line[pos] == ' ' || line[pos] == '\t'))
+                ++pos;
+            if (pos > 0) line.erase(0, pos);
+            if (line.empty()) continue;
+            if (line[0] == '#') continue;
+            accounts_raw.push_back(line);
+        }
+    } else {
+        std::stringstream ss(accounts_in);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            while (!tok.empty() &&
+                   (tok.back() == ' ' || tok.back() == '\t'))
+                tok.pop_back();
+            size_t pos = 0;
+            while (pos < tok.size() &&
+                   (tok[pos] == ' ' || tok[pos] == '\t'))
+                ++pos;
+            if (pos > 0) tok.erase(0, pos);
+            if (!tok.empty()) accounts_raw.push_back(tok);
+        }
+    }
+    if (accounts_raw.empty()) {
+        std::cerr << "tx-history-export: --accounts resolved to zero "
+                     "entries (empty file or empty list)\n";
+        return 1;
+    }
+
+    // Validate + normalize accounts. Each entry must look like either:
+    //   * anon address: ^0x[0-9a-fA-F]{64}$  (case-normalized to lower)
+    //   * domain name:  ^[a-z][a-z0-9-]*\.[a-z]+$  (already lowercase
+    //                   by genesis-tool convention; mixed-case here
+    //                   would mismatch on-chain lookups)
+    // The lenient domain-pattern matches the bulk of the on-chain
+    // domains (alice.v, dapp.app, etc.) without trying to enforce
+    // every operator-configured domain rule; the regex is documented
+    // in the help text so operators with a custom domain policy can
+    // adjust their inputs accordingly.
+    auto is_anon_shape = [](const std::string& s) {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9') ||
+                      (c >= 'a' && c <= 'f') ||
+                      (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto is_domain_shape = [](const std::string& s) {
+        // [a-z][a-z0-9-]*\.[a-z]+
+        if (s.empty()) return false;
+        if (!(s[0] >= 'a' && s[0] <= 'z')) return false;
+        size_t dot = s.find('.');
+        if (dot == std::string::npos || dot == 0 || dot == s.size() - 1)
+            return false;
+        for (size_t i = 1; i < dot; ++i) {
+            char c = s[i];
+            bool ok = (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') ||
+                      (c == '-');
+            if (!ok) return false;
+        }
+        for (size_t i = dot + 1; i < s.size(); ++i) {
+            char c = s[i];
+            if (!(c >= 'a' && c <= 'z')) return false;
+        }
+        return true;
+    };
+    auto normalize_anon = [&](std::string s) {
+        // Lowercase the 64 hex chars after '0x'. Preserves domain
+        // names verbatim (caller has already classified the entry).
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (c >= 'A' && c <= 'F')
+                s[i] = static_cast<char>(c - 'A' + 'a');
+        }
+        return s;
+    };
+    std::set<std::string> accounts;
+    for (auto& a : accounts_raw) {
+        if (is_anon_shape(a)) {
+            accounts.insert(normalize_anon(a));
+        } else if (is_domain_shape(a)) {
+            accounts.insert(a);
+        } else {
+            std::cerr << "tx-history-export: invalid account '" << a
+                      << "' — expected anon address (0x + 64 hex) "
+                         "or domain name ([a-z][a-z0-9-]*\\.[a-z]+)\n";
+            return 1;
+        }
+    }
+    if (accounts.empty()) {
+        std::cerr << "tx-history-export: --accounts resolved to zero "
+                     "valid entries\n";
+        return 1;
+    }
+
+    // ── Output sink ───────────────────────────────────────────────────────
+    // Open the output file early (before any RPC chatter) so an
+    // unwritable destination fails fast with no daemon-side state
+    // touched. The sink is flushed per-line for tail -f friendliness
+    // (an export piped through `tail -f /path/to/out` should see new
+    // rows as they're computed, not at end-of-stream).
+    namespace fs = std::filesystem;
+    std::ostream* sink = &std::cout;
+    std::ofstream out_f;
+    if (!out_path.empty()) {
+        std::error_code mkdir_ec;
+        fs::create_directories(fs::path(out_path).parent_path(), mkdir_ec);
+        out_f.open(out_path, std::ios::binary | std::ios::trunc);
+        if (!out_f) {
+            std::cerr << "tx-history-export: cannot open --out file '"
+                      << out_path << "' for writing\n";
+            return 1;
+        }
+        sink = &out_f;
+#ifndef _WIN32
+        // 0600 on POSIX (audit data may include account identifiers
+        // operators want kept private). Best-effort: failure to chmod
+        // doesn't fail the export.
+        ::chmod(out_path.c_str(), 0600);
+#endif
+    }
+
+    // ── Winsock init + socket connect ─────────────────────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok) {
+        std::cerr << "tx-history-export: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    std::string conn_err;
+    sock_t s = rpc_connect_localhost(
+        static_cast<uint16_t>(rpc_port), conn_err);
+    if (s == kInvalidSock) {
+        std::cerr << "tx-history-export: " << conn_err << "\n";
+        return 1;
+    }
+
+    std::string inbuf;
+    uint64_t chain_height = 0;
+    try {
+        // Fetch chain_height once to bracket the walk.
+        auto st = rpc_call_over_socket(
+            s, inbuf, "status", nlohmann::json::object());
+        if (st.contains("height") && st["height"].is_number_unsigned())
+            chain_height = st["height"].get<uint64_t>();
+        else if (st.contains("height") && st["height"].is_number_integer())
+            chain_height = static_cast<uint64_t>(st["height"].get<int64_t>());
+    } catch (std::exception& e) {
+        close_sock(s);
+        std::cerr << "tx-history-export: status RPC failed: " << e.what()
+                  << "\n";
+        return 1;
+    }
+
+    // ── Resolve walk window ───────────────────────────────────────────────
+    // Empty chain (height == 0): nothing to walk; emit no rows, exit 0
+    // (this is the documented "empty if no matching txs" exit-0 path —
+    // including the trivial case of no chain at all).
+    if (chain_height == 0) {
+        close_sock(s);
+        if (out_f.is_open()) out_f.close();
+        return 0;
+    }
+    uint64_t head_index = chain_height - 1;
+    uint64_t from_h = 0;
+    uint64_t to_h   = head_index;
+    if (last_n_arg > 0) {
+        uint64_t n = static_cast<uint64_t>(last_n_arg);
+        if (n > chain_height) n = chain_height;
+        from_h = chain_height - n;
+        to_h   = head_index;
+    } else {
+        if (from_h_arg >= 0) from_h = static_cast<uint64_t>(from_h_arg);
+        if (to_h_arg   >= 0) to_h   = static_cast<uint64_t>(to_h_arg);
+        // Clamp the upper bound to the actual head (operators frequently
+        // pass --to <head> from a prior status call that has since been
+        // overtaken; rejecting would surprise; clamping matches the
+        // headers RPC's own server-side truncation contract).
+        if (to_h > head_index) to_h = head_index;
+    }
+    if (from_h > to_h) {
+        // Empty window (operator's --from is past --to). Honest exit-0
+        // empty export — matches the documented contract.
+        close_sock(s);
+        if (out_f.is_open()) out_f.close();
+        return 0;
+    }
+
+    // Map TxType enum → upper-case mnemonic. Unknown future types
+    // render as "UNKNOWN_<N>" so the NDJSON parser still sees a
+    // string-valued `type` field instead of a bare integer.
+    auto type_name = [](int t) -> std::string {
+        switch (t) {
+            case 0:  return "TRANSFER";
+            case 1:  return "REGISTER";
+            case 2:  return "DEREGISTER";
+            case 3:  return "STAKE";
+            case 4:  return "UNSTAKE";
+            case 5:  return "REGION_CHANGE";
+            case 6:  return "PARAM_CHANGE";
+            case 7:  return "MERGE_EVENT";
+            case 8:  return "COMPOSABLE_BATCH";
+            case 9:  return "DAPP_REGISTER";
+            case 10: return "DAPP_CALL";
+            default: return "UNKNOWN_" + std::to_string(t);
+        }
+    };
+
+    // ── Page block_hash fetches via the headers RPC ───────────────────────
+    // The `block` RPC returns Block::to_json() which does NOT include
+    // the computed block_hash (server-side compute_hash is a derived
+    // value not part of the natural Block JSON shape). Rather than
+    // recompute server-side via N round-trips, we issue one `headers`
+    // call per page-aligned window (256 blocks per page, matching
+    // HEADERS_PAGE_MAX) and cache the hashes for the per-height
+    // `block` calls that follow.
+    constexpr uint32_t HEADERS_PAGE = 256;
+    std::map<uint64_t, std::string> block_hash_cache;
+    auto load_hash_page = [&](uint64_t page_start) -> bool {
+        uint64_t want_end = std::min<uint64_t>(
+            page_start + HEADERS_PAGE - 1, to_h);
+        uint32_t want_count = static_cast<uint32_t>(
+            want_end - page_start + 1);
+        try {
+            auto h_resp = rpc_call_over_socket(
+                s, inbuf, "headers",
+                {{"from", page_start}, {"count", want_count}});
+            if (!h_resp.is_object() || !h_resp.contains("headers") ||
+                !h_resp["headers"].is_array()) {
+                throw std::runtime_error(
+                    "headers RPC returned unexpected shape");
+            }
+            for (auto& h : h_resp["headers"]) {
+                if (!h.is_object()) continue;
+                uint64_t idx = h.value("index", uint64_t{0});
+                std::string hh = h.value("block_hash", std::string{});
+                if (!hh.empty()) block_hash_cache[idx] = std::move(hh);
+            }
+            return true;
+        } catch (std::exception& e) {
+            std::cerr << "tx-history-export: headers RPC failed for "
+                         "page starting at " << page_start << ": "
+                      << e.what() << "\n";
+            return false;
+        }
+    };
+
+    // ── Walk blocks, filter txs, emit NDJSON ──────────────────────────────
+    // Per-line write + flush after each row so a long export piped
+    // through `tail -f` shows progress incrementally.
+    auto emit_line = [&](const nlohmann::json& obj) {
+        *sink << obj.dump() << "\n";
+        sink->flush();
+    };
+
+    uint64_t total_matches = 0;
+    for (uint64_t h = from_h; h <= to_h; ++h) {
+        // Load the headers page that covers `h` if not already cached.
+        if (block_hash_cache.find(h) == block_hash_cache.end()) {
+            uint64_t page_start = from_h +
+                ((h - from_h) / HEADERS_PAGE) * HEADERS_PAGE;
+            if (!load_hash_page(page_start)) {
+                close_sock(s);
+                if (out_f.is_open()) out_f.close();
+                return 1;
+            }
+        }
+        std::string block_hash_hex;
+        {
+            auto it = block_hash_cache.find(h);
+            if (it != block_hash_cache.end()) block_hash_hex = it->second;
+        }
+
+        // Fetch the full block JSON (transactions[] is the load-bearing
+        // field).
+        nlohmann::json blk;
+        try {
+            blk = rpc_call_over_socket(
+                s, inbuf, "block", {{"index", h}});
+        } catch (std::exception& e) {
+            close_sock(s);
+            if (out_f.is_open()) out_f.close();
+            std::cerr << "tx-history-export: block RPC failed at "
+                      << h << ": " << e.what() << "\n";
+            return 1;
+        }
+        if (!blk.is_object() || !blk.contains("transactions") ||
+            !blk["transactions"].is_array()) {
+            // Empty block at this height (or missing — block RPC
+            // returns nullptr past head). Honor --include-empty-blocks
+            // and continue.
+            if (include_empty) {
+                nlohmann::json row;
+                row["block"]   = h;
+                row["matches"] = nlohmann::json::array();
+                emit_line(row);
+            }
+            continue;
+        }
+
+        bool any_match = false;
+        const auto& txs = blk["transactions"];
+        for (size_t i = 0; i < txs.size(); ++i) {
+            const auto& tx = txs[i];
+            if (!tx.is_object()) continue;
+            std::string frm = tx.value("from", std::string{});
+            std::string to  = tx.value("to",   std::string{});
+            // Normalize anon-shape addresses to lowercase so case-only
+            // mismatch can't silently miss a hit (server-side accepts
+            // either case at submission time, but emits whatever was
+            // canonicalized at apply-time; the cache key is the
+            // canonical lowercase form). Domain entries are passed
+            // through verbatim (already lowercase per genesis-tool).
+            if (is_anon_shape(frm)) frm = normalize_anon(frm);
+            if (is_anon_shape(to))  to  = normalize_anon(to);
+            bool from_hit = accounts.find(frm) != accounts.end();
+            bool to_hit   = accounts.find(to)  != accounts.end();
+            if (!from_hit && !to_hit) continue;
+            any_match = true;
+            ++total_matches;
+
+            nlohmann::json row;
+            row["block"]      = h;
+            row["block_hash"] = block_hash_hex;
+            row["tx_index"]   = i;
+            int t = tx.value("type", 0);
+            row["type"]   = type_name(t);
+            row["from"]   = frm;
+            row["to"]     = to;
+            // amount / fee / nonce are uint64 on-chain; emit them as
+            // JSON numbers (nlohmann handles the 53-bit-mantissa
+            // overflow risk by serializing as integers — consumers
+            // doing large-amount arithmetic should parse as int64).
+            row["amount"] = tx.value("amount", uint64_t{0});
+            row["fee"]    = tx.value("fee",    uint64_t{0});
+            row["nonce"]  = tx.value("nonce",  uint64_t{0});
+            row["tx_hash"] = tx.value("hash", std::string{});
+            emit_line(row);
+        }
+        if (!any_match && include_empty) {
+            nlohmann::json row;
+            row["block"]   = h;
+            row["matches"] = nlohmann::json::array();
+            emit_line(row);
+        }
+    }
+
+    close_sock(s);
+    if (out_f.is_open()) out_f.close();
+    (void)total_matches;  // intentional — exit 0 even when empty
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -11301,6 +11832,44 @@ void print_usage() {
         "                                             churn), CI / regression fixtures pinning a\n"
         "                                             known-good roster. Exit 0 success, 1 args/\n"
         "                                             IO/RPC failure.\n"
+        "  tx-history-export --rpc-port <N>           Stream-friendly NDJSON exporter of\n"
+        "                    --accounts <list|@file>  transaction history for one or more accounts.\n"
+        "                    [--from H] [--to H | --last N]\n"
+        "                    [--out <file>] [--include-empty-blocks] [--json]\n"
+        "                                             Walks the chain via the `block` RPC over a\n"
+        "                                             single TCP connection, filters per-block\n"
+        "                                             transactions whose `from` OR `to` matches any\n"
+        "                                             of the supplied accounts, and emits one JSON\n"
+        "                                             object per matching tx as newline-delimited\n"
+        "                                             JSON (NDJSON). Block hashes are fetched in\n"
+        "                                             pages via the `headers` RPC (256/page) to\n"
+        "                                             amortize round-trips. Per-row shape:\n"
+        "                                             {block, block_hash, tx_index, type:\n"
+        "                                             TRANSFER|STAKE|..., from, to, amount, fee,\n"
+        "                                             nonce, tx_hash}. --accounts accepts comma-\n"
+        "                                             separated values or @<path> (one per line,\n"
+        "                                             # comments + blank lines skipped). Each\n"
+        "                                             account is either an anon address (0x +\n"
+        "                                             64 lowercase hex; mixed case normalized per\n"
+        "                                             S-028) or a domain name ([a-z][a-z0-9-]*\\.\n"
+        "                                             [a-z]+). Window selection: --from H / --to H\n"
+        "                                             (inclusive on both ends; default 0..head)\n"
+        "                                             OR --last N (last-N-blocks tail; mutually\n"
+        "                                             exclusive with --from / --to). --out writes\n"
+        "                                             NDJSON to a file (0600 on POSIX, truncated);\n"
+        "                                             default stdout. Output is flushed per-line\n"
+        "                                             for tail -f / streaming-grep friendliness.\n"
+        "                                             --include-empty-blocks emits {block, matches:\n"
+        "                                             []} per block with no matching txs (stream-\n"
+        "                                             completeness for audit reproducibility);\n"
+        "                                             default skips them. Use cases: multi-account\n"
+        "                                             audit (operator pulling full payment history\n"
+        "                                             across many bearer / domain accounts), wallet\n"
+        "                                             UI 'Recent activity' panes, regulatory /\n"
+        "                                             compliance exports, customer-dispute\n"
+        "                                             reconstruction. Exit 0 success (including\n"
+        "                                             empty result if no matching txs), 1 args/\n"
+        "                                             parse/IO/RPC error or invalid account shape.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -11357,6 +11926,7 @@ int main(int argc, char** argv) {
     if (cmd == "bulk-stake")      return cmd_bulk_stake      (argc - 2, argv + 2);
     if (cmd == "stake-bulk-query") return cmd_stake_bulk_query(argc - 2, argv + 2);
     if (cmd == "validator-roster-snapshot") return cmd_validator_roster_snapshot(argc - 2, argv + 2);
+    if (cmd == "tx-history-export") return cmd_tx_history_export(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
