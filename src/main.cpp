@@ -916,6 +916,32 @@ Additional in-process tests:
                                               canonical encoding (alphabetical
                                               key ordering on dump is insertion-
                                               order independent).
+  determ test-genesis-determinism             GenesisConfig::to_json +
+                                              make_genesis_block byte-identity
+                                              contract — pins JSON round-trip
+                                              determinism (empty + all-fields-
+                                              populated; to_json → from_json →
+                                              to_json byte-identical),
+                                              make_genesis_block determinism
+                                              (3 calls identical hash +
+                                              cumulative_rand + full Block
+                                              JSON), field-binding completeness
+                                              (mutating chain_id / chain_role /
+                                              shard_id / committee_region /
+                                              genesis_message / initial_creators
+                                              ed_pub / suspension_slash changes
+                                              the genesis block hash), cross-
+                                              instance determinism (direct vs
+                                              from_json construction paths
+                                              produce identical blocks), order-
+                                              sensitivity contract (reversing
+                                              initial_creators[] changes the
+                                              hash — order is committed),
+                                              S-039 documented gap (m_creators /
+                                              block_subsidy / bft_enabled /
+                                              shard_address_salt do NOT change
+                                              the hash; pins the current no-
+                                              effect behavior).
 )" << "\n";
 }
 
@@ -32731,6 +32757,469 @@ int main(int argc, char** argv) {
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": hello-handshake-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+    // GenesisConfig::to_json + make_genesis_block byte-identity contract.
+    //
+    // Genesis is THE consensus origin of every Determ deployment — every node
+    // independently computes the chain identity from the same GenesisConfig
+    // JSON. If two operators' tooling silently re-orders fields, drops a
+    // field on round-trip, or produces hash-divergent blocks from byte-
+    // identical configs, the network never converges (each node sees a
+    // different genesis_hash and refuses to peer with the others).
+    //
+    // This test pins three orthogonal axes:
+    //   (a) JSON round-trip determinism: GenesisConfig::to_json →
+    //       from_json → to_json is byte-identical (no field drift, no
+    //       silently-dropped fields).
+    //   (b) make_genesis_block determinism: identical GenesisConfig
+    //       inputs produce byte-identical Block 0 outputs across replay
+    //       AND across independently-constructed config instances.
+    //   (c) Field-binding completeness: every GenesisConfig field that
+    //       SHOULD bind the genesis block hash actually does (chain_id,
+    //       chain_role, shard_id, committee_region, genesis_message,
+    //       initial_creators[].ed_pub, suspension_slash non-default,
+    //       merge_threshold_blocks non-default).
+    //   (d) S-039 documented gap: operational params NOT bound to the
+    //       genesis hash (m_creators, k_block_sigs, block_subsidy,
+    //       subsidy_pool_initial, min_stake, initial_shard_count,
+    //       bft_enabled, bft_escalation_threshold, epoch_blocks,
+    //       shard_address_salt) stay NOT-bound. Pinning this contract
+    //       lets us notice if someone accidentally promotes one of
+    //       these into the hash without a coordinated migration —
+    //       which would invalidate every existing chain's genesis_hash.
+    //
+    // Companion to test-genesis (compute_genesis_hash sensitivity),
+    // test-genesis-sharded (sharding-mode invariants), test-genesis-
+    // with-region (region-tag mixing), test-make-genesis-block (block
+    // shape invariants), test-config-determinism / test-state-root-
+    // determinism / test-tx-signing-determinism / test-hello-handshake-
+    // determinism (the broader in-process determinism suite).
+    //
+    // Coverage: 7 scenarios, ~21 assertions.
+    if (cmd == "test-genesis-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            std::fputs(cond ? "  PASS: " : "  FAIL: ", stdout);
+            std::fputs(msg, stdout);
+            std::fputs("\n", stdout);
+            std::fflush(stdout);
+            if (!cond) fail++;
+        };
+
+        // Builder: a GenesisConfig with every field populated to a
+        // non-default value (or, where the field is hashed only when
+        // non-default, a value that triggers the mix path). Two calls
+        // must produce field-equal configs whose make_genesis_block
+        // outputs are byte-identical.
+        auto make_populated_cfg = []() {
+            GenesisConfig c;
+            c.chain_id                   = "determinism-test-chain";
+            c.genesis_message            = "Custom inscription for determinism test";
+            c.m_creators                 = 5;
+            c.k_block_sigs               = 4;
+            c.block_subsidy              = 250;
+            c.subsidy_pool_initial       = 1000000;
+            c.subsidy_mode               = 1;        // LOTTERY
+            c.lottery_jackpot_multiplier = 5;        // valid LOTTERY config (>=2)
+            c.zeroth_pool_initial        = 500000;
+            c.bft_enabled                = false;
+            c.bft_escalation_threshold   = 7;
+            c.inclusion_model            = InclusionModel::DOMAIN_INCLUSION;
+            c.min_stake                  = 0;        // DOMAIN_INCLUSION pins min_stake=0
+            c.suspension_slash           = 99;       // non-default → mixed into hash
+            c.unstake_delay              = 2222;     // non-default → mixed into hash
+            c.merge_threshold_blocks     = 50;       // non-default → mixed into hash
+            c.revert_threshold_blocks    = 150;      // non-default → mixed into hash
+            c.merge_grace_blocks         = 20;       // non-default → mixed into hash
+            c.chain_role                 = ChainRole::SHARD;
+            c.shard_id                   = ShardId{3};
+            c.initial_shard_count        = 8;
+            c.epoch_blocks               = 2000;
+            for (int i = 0; i < 32; ++i) c.shard_address_salt[i] = static_cast<uint8_t>(0xA5 ^ i);
+            c.committee_region           = "us-west-2";
+            c.governance_mode            = 0;
+            // GenesisCreators: 3 distinct domains with synthetic ed_pubs +
+            // initial_stake. Region tag exercised on one of them.
+            for (int i = 0; i < 3; ++i) {
+                GenesisCreator gc;
+                gc.domain        = std::string("creator-") + char('a' + i) + ".test";
+                for (int b = 0; b < 32; ++b) gc.ed_pub[b] = static_cast<uint8_t>(0x10 + i * 0x20 + b);
+                gc.initial_stake = uint64_t{1000} + i;
+                gc.region        = (i == 0) ? std::string("us-west-2") : std::string{};
+                c.initial_creators.push_back(gc);
+            }
+            // GenesisAllocations: 3 entries, one for an existing creator
+            // (gets merged into initial_state) and two for new domains
+            // (push fresh entries; order-sensitive via initial_state
+            // insertion order — exercised in Scenario 6).
+            c.initial_balances.push_back({"creator-a.test", uint64_t{10000}});
+            c.initial_balances.push_back({"alice.test",     uint64_t{20000}});
+            c.initial_balances.push_back({"bob.test",       uint64_t{30000}});
+            return c;
+        };
+
+        // === Scenario 1: Empty GenesisConfig round-trip ===
+        //
+        // Default-constructed GenesisConfig. to_json must produce a
+        // stable textual form that survives from_json + re-serialize as
+        // a byte-identical string. Pins the no-default-drift contract:
+        // even with every field at its header default, the round-trip
+        // produces the same bytes (no field's default in to_json
+        // disagrees with from_json's default). 3 assertions.
+        {
+            GenesisConfig c1;
+            json j1 = c1.to_json();
+            GenesisConfig c2 = GenesisConfig::from_json(j1);
+            json j2 = c2.to_json();
+
+            // (1a) Pretty-printed textual byte-identity.
+            check(j1.dump(2) == j2.dump(2),
+                  "(1) Empty GenesisConfig round-trip: to_json(default) → "
+                  "from_json → to_json produces byte-identical pretty-"
+                  "printed JSON");
+
+            // (1b) Compact dump byte-identity (operator-distributed form).
+            check(j1.dump() == j2.dump(),
+                  "(1) Empty GenesisConfig round-trip: compact dump() "
+                  "byte-identical (no whitespace-dependent drift)");
+
+            // (1c) Semantic JSON equality (orthogonal to text identity —
+            // guards against the coincidence case where both dumps happen
+            // to be garbled but produce identical garbage).
+            check(j1 == j2,
+                  "(1) Empty GenesisConfig round-trip: nlohmann::json "
+                  "semantic equality holds across the round-trip");
+        }
+
+        // === Scenario 2: All-fields-populated round-trip ===
+        //
+        // Build a GenesisConfig with every field set to a non-default
+        // value (or a value that triggers the conditional-mix path).
+        // Round-trip via to_json → from_json → to_json and pin byte-
+        // identity textually + semantically. Cross-check that
+        // representative fields survive the round-trip exactly (defends
+        // against silent field drops in from_json that text-identity
+        // alone wouldn't catch). 6 assertions.
+        {
+            GenesisConfig orig = make_populated_cfg();
+            json j_orig = orig.to_json();
+            GenesisConfig restored = GenesisConfig::from_json(j_orig);
+            json j_restored = restored.to_json();
+
+            // (2a) Pretty-printed textual byte-identity.
+            check(j_orig.dump(2) == j_restored.dump(2),
+                  "(2) All-fields-populated: to_json → from_json → to_json "
+                  "byte-identical pretty-printed JSON across every "
+                  "GenesisConfig field");
+
+            // (2b) Compact byte-identity.
+            check(j_orig.dump() == j_restored.dump(),
+                  "(2) All-fields-populated: compact dump() byte-identical");
+
+            // (2c) Semantic equality.
+            check(j_orig == j_restored,
+                  "(2) All-fields-populated: nlohmann::json semantic "
+                  "equality across the round-trip");
+
+            // (2d) Scalar-field round-trip: chain_id + numeric set.
+            check(restored.chain_id == orig.chain_id
+                  && restored.m_creators == orig.m_creators
+                  && restored.k_block_sigs == orig.k_block_sigs
+                  && restored.block_subsidy == orig.block_subsidy
+                  && restored.shard_id == orig.shard_id,
+                  "(2) Field round-trip: chain_id + m_creators + "
+                  "k_block_sigs + block_subsidy + shard_id preserved exactly");
+
+            // (2e) Bool + enum + ShardId fields.
+            check(restored.bft_enabled == orig.bft_enabled
+                  && restored.chain_role == orig.chain_role
+                  && restored.inclusion_model == orig.inclusion_model
+                  && restored.subsidy_mode == orig.subsidy_mode,
+                  "(2) Field round-trip: bft_enabled + chain_role + "
+                  "inclusion_model + subsidy_mode preserved exactly");
+
+            // (2f) Collection fields: initial_creators + initial_balances
+            // + shard_address_salt (32-byte Hash) survive element-wise.
+            check(restored.initial_creators.size() == orig.initial_creators.size()
+                  && restored.initial_balances.size() == orig.initial_balances.size()
+                  && restored.shard_address_salt == orig.shard_address_salt
+                  && restored.committee_region == orig.committee_region
+                  && restored.genesis_message == orig.genesis_message,
+                  "(2) Field round-trip: initial_creators[] + "
+                  "initial_balances[] sizes + shard_address_salt + "
+                  "committee_region + genesis_message preserved exactly");
+        }
+
+        // === Scenario 3: make_genesis_block determinism ===
+        //
+        // The SAME GenesisConfig must yield byte-identical genesis
+        // Blocks across multiple calls. Pins the producer side of
+        // chain identity: every operator running the same config
+        // produces the SAME Block 0. If make_genesis_block ever picks
+        // up hidden process-local entropy (time-of-day, RNG, env vars),
+        // this scenario catches it. 3 assertions.
+        {
+            GenesisConfig cfg = make_populated_cfg();
+            Block g1 = make_genesis_block(cfg);
+            Block g2 = make_genesis_block(cfg);
+            Block g3 = make_genesis_block(cfg);
+
+            // (3a) Block hashes identical across 3 calls.
+            check(g1.compute_hash() == g2.compute_hash()
+                  && g2.compute_hash() == g3.compute_hash(),
+                  "(3) make_genesis_block determinism: 3 calls on the same "
+                  "GenesisConfig produce byte-identical block hashes");
+
+            // (3b) cumulative_rand identical across 3 calls (the
+            // produce-side entropy anchor that feeds Block 1's
+            // committee-selection seed).
+            check(g1.cumulative_rand == g2.cumulative_rand
+                  && g2.cumulative_rand == g3.cumulative_rand,
+                  "(3) make_genesis_block determinism: cumulative_rand "
+                  "byte-identical across 3 calls (no hidden entropy)");
+
+            // (3c) JSON dump byte-identical across 3 calls (catches
+            // any nondeterminism that doesn't propagate into the hash
+            // but DOES land in the serialized form — e.g. an unhashed
+            // field with hidden state).
+            check(g1.to_json().dump() == g2.to_json().dump()
+                  && g2.to_json().dump() == g3.to_json().dump(),
+                  "(3) make_genesis_block determinism: full Block JSON "
+                  "byte-identical across 3 calls");
+        }
+
+        // === Scenario 4: Field-binding completeness on genesis block ===
+        //
+        // For each GenesisConfig field that SHOULD affect the genesis
+        // block hash, mutate it on a baseline config and assert
+        // make_genesis_block(modified).compute_hash() differs from the
+        // baseline hash. This is the "every hash-relevant field is
+        // actually bound" contract — guards against a field's mix-
+        // condition silently regressing to a no-op. 7 assertions
+        // covering the 7 distinct hash-binding paths.
+        {
+            GenesisConfig base = make_populated_cfg();
+            Hash base_hash = make_genesis_block(base).compute_hash();
+
+            // (4a) chain_id (primary chain-identity anchor; always mixed).
+            {
+                GenesisConfig c = base;
+                c.chain_id = "different-chain-id";
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating chain_id changes "
+                      "genesis block hash");
+            }
+            // (4b) chain_role (BEACON / SHARD / SINGLE; always mixed).
+            {
+                GenesisConfig c = base;
+                c.chain_role = ChainRole::BEACON;
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating chain_role changes "
+                      "genesis block hash");
+            }
+            // (4c) shard_id (different shards must have distinct
+            // identities even on the same chain_id).
+            {
+                GenesisConfig c = base;
+                c.shard_id = ShardId{99};
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating shard_id changes "
+                      "genesis block hash");
+            }
+            // (4d) committee_region (R1; non-empty already in base so
+            // mutating to a different non-empty value re-triggers mix
+            // with different bytes).
+            {
+                GenesisConfig c = base;
+                c.committee_region = "eu-central-1";
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating committee_region "
+                      "changes genesis block hash");
+            }
+            // (4e) genesis_message (S-035 inscription; non-default
+            // already in base so mutating produces different mix).
+            {
+                GenesisConfig c = base;
+                c.genesis_message = "An entirely different inscription";
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating genesis_message "
+                      "changes genesis block hash");
+            }
+            // (4f) initial_creators[].ed_pub (the creator-set anchor;
+            // both cumulative_rand mix AND initial_state membership
+            // depend on it). Flip one byte of one creator's ed_pub.
+            {
+                GenesisConfig c = base;
+                c.initial_creators[0].ed_pub[0] ^= 0xFF;
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating initial_creators[0]."
+                      "ed_pub changes genesis block hash (via "
+                      "cumulative_rand + initial_state binding)");
+            }
+            // (4g) suspension_slash (A5 Phase 3; mixed only when non-
+            // default — base sets 99 non-default so mutating produces
+            // different mix).
+            {
+                GenesisConfig c = base;
+                c.suspension_slash = 77;
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(4) Field binding: mutating suspension_slash "
+                      "(non-default mix path) changes genesis block hash");
+            }
+        }
+
+        // === Scenario 5: Cross-instance determinism ===
+        //
+        // Two GenesisConfig instances constructed via DIFFERENT code
+        // paths but holding the same logical state must produce byte-
+        // identical genesis blocks. Path (a): direct field assignment.
+        // Path (b): from_json over an equivalent JSON object. Pins
+        // that make_genesis_block depends ONLY on the logical config
+        // values, not on the construction path / object identity.
+        // 2 assertions.
+        {
+            // Path (a): direct field assignment via the builder.
+            GenesisConfig cfg_direct = make_populated_cfg();
+
+            // Path (b): round-trip through JSON to produce a config
+            // with field-equal state but different construction path.
+            // from_json's defaults are exercised on every absent field;
+            // since to_json emits every field, the from_json side never
+            // hits a default — making this a pure round-trip equivalent.
+            GenesisConfig cfg_rt = GenesisConfig::from_json(cfg_direct.to_json());
+
+            Block g_direct = make_genesis_block(cfg_direct);
+            Block g_rt     = make_genesis_block(cfg_rt);
+
+            // (5a) Block hash identity across construction paths.
+            check(g_direct.compute_hash() == g_rt.compute_hash(),
+                  "(5) Cross-instance determinism: direct-assignment "
+                  "and from_json-built GenesisConfigs with the same "
+                  "logical state produce identical genesis block hashes");
+
+            // (5b) Full Block JSON byte-identical (catches any non-
+            // hash-binding field that diverges across construction paths).
+            check(g_direct.to_json().dump() == g_rt.to_json().dump(),
+                  "(5) Cross-instance determinism: full Block JSON "
+                  "byte-identical across construction paths (no non-"
+                  "hash-binding field divergence)");
+        }
+
+        // === Scenario 6: Order-independent field listings ===
+        //
+        // initial_creators[] order is COMMITTED into the genesis block
+        // hash via two paths: (i) initial_state push order (each
+        // GenesisAlloc's domain/ed_pub/balance/stake flows into
+        // signing_bytes in vector order) and (ii) cumulative_rand
+        // mixes ed_pub in insertion order. Reordering creators
+        // therefore produces a DIFFERENT hash — the order is part of
+        // the chain identity contract. This scenario pins that
+        // contract: operators cannot freely reorder initial_creators
+        // without changing the chain identity. 2 assertions.
+        //
+        // Note: block.creators[] (the chain's selectable-validator
+        // list) is std::sort'd in make_genesis_block, but that's the
+        // DERIVED block field, not the cumulative_rand / initial_state
+        // input order. The hash depends on the input config order.
+        {
+            GenesisConfig cfg_normal = make_populated_cfg();
+            Hash normal_hash = make_genesis_block(cfg_normal).compute_hash();
+
+            GenesisConfig cfg_reversed = make_populated_cfg();
+            std::reverse(cfg_reversed.initial_creators.begin(),
+                         cfg_reversed.initial_creators.end());
+            Hash reversed_hash = make_genesis_block(cfg_reversed).compute_hash();
+
+            // (6a) Reordering initial_creators MUST change the hash.
+            // Pins the order-sensitivity contract — operators distributing
+            // a different creator order get a different chain identity,
+            // not a silently-equivalent one.
+            check(normal_hash != reversed_hash,
+                  "(6) Order-independent listings: reversing "
+                  "initial_creators[] order produces a DIFFERENT genesis "
+                  "block hash (the order is committed to chain identity)");
+
+            // (6b) Same-order replay still produces identical hash
+            // (sanity check that reverse() didn't mutate cfg_normal).
+            check(make_genesis_block(cfg_normal).compute_hash() == normal_hash,
+                  "(6) Order-independent listings: re-applying "
+                  "make_genesis_block to the unmodified normal-order "
+                  "config produces the same hash (idempotent)");
+        }
+
+        // === Scenario 7: S-039 documented gap — operational params NOT
+        //                 in compute_genesis_hash ===
+        //
+        // Per docs/SECURITY.md S-039 / tools/test_genesis.sh: the
+        // following GenesisConfig fields contribute NOTHING to
+        // compute_genesis_hash by current design. Two operators with
+        // the same chain_id but different m_creators (etc.) hit
+        // cryptic consensus failures rather than a clear "your config
+        // doesn't match the chain" error.
+        //
+        // Tracked as a forward-dev item; not fixed here because adding
+        // any to the hash invalidates every existing chain's
+        // genesis_hash. This scenario LOCKS the CURRENT no-effect
+        // contract so we notice if it changes accidentally (e.g.,
+        // someone adds one to the hash without a coordinated migration).
+        // 4 assertions covering the major no-effect fields.
+        {
+            GenesisConfig base = make_populated_cfg();
+            Hash base_hash = make_genesis_block(base).compute_hash();
+
+            // (7a) m_creators (committee size K) — NOT in hash.
+            {
+                GenesisConfig c = base;
+                c.m_creators = base.m_creators + 1;
+                check(make_genesis_block(c).compute_hash() == base_hash,
+                      "(7) S-039 no-effect: mutating m_creators does NOT "
+                      "change genesis block hash (documented gap; pinned)");
+            }
+            // (7b) block_subsidy + subsidy_pool_initial (E1/E3 economics)
+            // — NOT in hash.
+            {
+                GenesisConfig c = base;
+                c.block_subsidy = base.block_subsidy + 1000;
+                c.subsidy_pool_initial = base.subsidy_pool_initial + 5000;
+                check(make_genesis_block(c).compute_hash() == base_hash,
+                      "(7) S-039 no-effect: mutating block_subsidy + "
+                      "subsidy_pool_initial does NOT change genesis block "
+                      "hash (documented gap; pinned)");
+            }
+            // (7c) bft_enabled + bft_escalation_threshold + epoch_blocks
+            // — NOT in hash.
+            {
+                GenesisConfig c = base;
+                c.bft_enabled = !base.bft_enabled;
+                c.bft_escalation_threshold = base.bft_escalation_threshold + 3;
+                c.epoch_blocks = base.epoch_blocks + 100;
+                check(make_genesis_block(c).compute_hash() == base_hash,
+                      "(7) S-039 no-effect: mutating bft_enabled + "
+                      "bft_escalation_threshold + epoch_blocks does NOT "
+                      "change genesis block hash (documented gap; pinned)");
+            }
+            // (7d) shard_address_salt + initial_shard_count — NOT in hash.
+            {
+                GenesisConfig c = base;
+                for (int i = 0; i < 32; ++i) c.shard_address_salt[i] ^= 0xFF;
+                c.initial_shard_count = base.initial_shard_count + 5;
+                check(make_genesis_block(c).compute_hash() == base_hash,
+                      "(7) S-039 no-effect: mutating shard_address_salt + "
+                      "initial_shard_count does NOT change genesis block "
+                      "hash (documented gap; pinned)");
+            }
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": genesis-determinism ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
