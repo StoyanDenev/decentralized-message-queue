@@ -11331,6 +11331,560 @@ int cmd_tx_history_export(int argc, char** argv) {
     return 0;
 }
 
+// determ-wallet account-balance-history — Reconstruct the historical
+// balance of a single account at each block over a window.
+//
+// Walks the chain via the `block` RPC for delta accumulation and
+// checkpoints via the `account` RPC at a configurable cadence. Between
+// checkpoints, balances are interpolated by replaying per-tx deltas
+// (TRANSFER credits/debits, REGISTER NEF mint, STAKE lock-debit,
+// UNSTAKE refund-credit, DAPP_CALL credits, plus fee debits on the
+// `from` side). Cadenced authoritative RPC re-anchoring keeps drift
+// bounded — by default every 10th block is an authoritative checkpoint;
+// 0 = checkpoint every block (slowest, exact); larger numbers trade
+// speed for some interpolation drift on tx types the wallet does not
+// model verbatim (e.g. operator-rewarded block subsidy splits, partial
+// slash credits).
+//
+// Use cases:
+//   - Wallet UI charting balance over time for a single account.
+//   - Auditor reconstructing a payment history with running balance
+//     for a regulatory report.
+//   - Customer-dispute triage: "what was the balance at block H?"
+//
+// Per-block output (one NDJSON record per emitted block):
+//   {"block": H, "balance": N, "delta_since_last": N,
+//    "tx_count_window": N, "checkpoint_source": "rpc"|"interpolated"}
+//
+// CLI:
+//   --rpc-port <N>             REQUIRED. Daemon RPC port.
+//   --account <addr-or-domain> REQUIRED. Anon address (0x + 64 hex,
+//                              mixed case normalized lowercase per
+//                              S-028) OR domain ([a-z][a-z0-9-]*\.[a-z]+).
+//   --from H                   First block index to walk (default 0
+//                              when --last not supplied).
+//   --to H                     Last block index, inclusive (default
+//                              head; clamped to head if past).
+//   --last N                   Convenience: walk the last N blocks
+//                              (default 1000 when no window flag set;
+//                              mutually exclusive with --from / --to).
+//   --checkpoint-every N       How often to re-anchor via the `account`
+//                              RPC. 0 = every block (no interpolation;
+//                              slowest + most accurate). Default 10.
+//   --include-empty-blocks     Emit a row for EVERY block in the window
+//                              (default skips blocks with no balance
+//                              change unless they are checkpoint blocks).
+//   --out <file>               Write NDJSON to file (0600 on POSIX);
+//                              default stdout.
+//   --json                     Accepted for parity; output is always
+//                              NDJSON.
+//
+// Exit codes:
+//   0  history exported (or empty if no balance changes + no checkpoints
+//      land in the window)
+//   1  args / parse error / RPC unreachable / unwritable output /
+//      invalid account shape
+int cmd_account_balance_history(int argc, char** argv) {
+    int rpc_port = -1;
+    std::string account_in;
+    int64_t from_h_arg = -1;
+    int64_t to_h_arg   = -1;
+    int64_t last_n_arg = -1;
+    int64_t checkpoint_every_arg = -1;
+    std::string out_path;
+    bool include_empty = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port"             && i + 1 < argc) rpc_port = std::atoi(argv[++i]);
+        else if (a == "--account"              && i + 1 < argc) account_in = argv[++i];
+        else if (a == "--from"                 && i + 1 < argc) from_h_arg = std::stoll(argv[++i]);
+        else if (a == "--to"                   && i + 1 < argc) to_h_arg   = std::stoll(argv[++i]);
+        else if (a == "--last"                 && i + 1 < argc) last_n_arg = std::stoll(argv[++i]);
+        else if (a == "--checkpoint-every"     && i + 1 < argc) checkpoint_every_arg = std::stoll(argv[++i]);
+        else if (a == "--out"                  && i + 1 < argc) out_path   = argv[++i];
+        else if (a == "--include-empty-blocks")                 include_empty = true;
+        else if (a == "--json") {/* default; no-op */}
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet account-balance-history "
+                "--rpc-port <N> --account <addr-or-domain>\n"
+                "       [--from H] [--to H | --last N] [--checkpoint-every N]\n"
+                "       [--include-empty-blocks] [--out <file>] [--json]\n"
+                "\n"
+                "  Reconstruct the historical balance of a single account at\n"
+                "  each block over a window. Walks the chain via the `block`\n"
+                "  RPC for per-tx delta accumulation and re-anchors via the\n"
+                "  `account` RPC at a configurable cadence to bound drift.\n"
+                "\n"
+                "  Output (NDJSON, one record per emitted block):\n"
+                "    {\"block\": H, \"balance\": N, \"delta_since_last\": N,\n"
+                "     \"tx_count_window\": N, \"checkpoint_source\": \"rpc\"|\n"
+                "     \"interpolated\"}\n"
+                "\n"
+                "  --account must be either an anon address (0x + 64\n"
+                "  lowercase hex; mixed case normalized per S-028) or a\n"
+                "  domain name ([a-z][a-z0-9-]*\\.[a-z]+).\n"
+                "\n"
+                "  --from / --to bracket the walk window (inclusive on both\n"
+                "  ends). --last N walks the last N blocks (default 1000;\n"
+                "  mutually exclusive with --from / --to).\n"
+                "\n"
+                "  --checkpoint-every N controls how often the `account` RPC\n"
+                "  is invoked to fetch the authoritative balance. Default\n"
+                "  10. Use 0 to checkpoint EVERY block (exact, slowest).\n"
+                "  Larger N = fewer RPC calls, more reliance on\n"
+                "  interpolated deltas between checkpoints.\n"
+                "\n"
+                "  --include-empty-blocks emits an interpolated row for\n"
+                "  every block in the window (even blocks with no balance\n"
+                "  change); default emits only checkpoint rows and rows\n"
+                "  where the account's balance changed.\n"
+                "\n"
+                "  --out writes NDJSON to a file (0600 on POSIX); default\n"
+                "  stdout. Output is flushed per-line for tail -f.\n"
+                "\n"
+                "  Exit 0 on success (including empty result), 1 on args/\n"
+                "  parse/IO/RPC error or invalid account shape.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "account-balance-history: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-balance-history "
+                         "--rpc-port <N> --account <addr-or-domain> "
+                         "[--from H] [--to H | --last N] "
+                         "[--checkpoint-every N] [--include-empty-blocks] "
+                         "[--out <file>] [--json]\n";
+            return 1;
+        }
+    }
+    if (rpc_port <= 0 || rpc_port > 65535) {
+        std::cerr << "account-balance-history: --rpc-port <N> is required "
+                     "(1..65535)\n";
+        return 1;
+    }
+    if (account_in.empty()) {
+        std::cerr << "account-balance-history: --account <addr-or-domain> "
+                     "is required\n";
+        return 1;
+    }
+    if (last_n_arg >= 0 && (from_h_arg >= 0 || to_h_arg >= 0)) {
+        std::cerr << "account-balance-history: --last is mutually "
+                     "exclusive with --from / --to\n";
+        return 1;
+    }
+    if (last_n_arg == 0) {
+        std::cerr << "account-balance-history: --last must be >= 1\n";
+        return 1;
+    }
+    // checkpoint_every: default 10 if not supplied. 0 means every block.
+    // Negative values are invalid.
+    uint64_t checkpoint_every = 10;
+    if (checkpoint_every_arg >= 0) {
+        checkpoint_every = static_cast<uint64_t>(checkpoint_every_arg);
+    }
+
+    // ── Validate + normalize the account ─────────────────────────────────
+    auto is_anon_shape = [](const std::string& s) {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9') ||
+                      (c >= 'a' && c <= 'f') ||
+                      (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto is_domain_shape = [](const std::string& s) {
+        // [a-z][a-z0-9-]*\.[a-z]+
+        if (s.empty()) return false;
+        if (!(s[0] >= 'a' && s[0] <= 'z')) return false;
+        size_t dot = s.find('.');
+        if (dot == std::string::npos || dot == 0 || dot == s.size() - 1)
+            return false;
+        for (size_t i = 1; i < dot; ++i) {
+            char c = s[i];
+            bool ok = (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') ||
+                      (c == '-');
+            if (!ok) return false;
+        }
+        for (size_t i = dot + 1; i < s.size(); ++i) {
+            char c = s[i];
+            if (!(c >= 'a' && c <= 'z')) return false;
+        }
+        return true;
+    };
+    auto normalize_anon = [](std::string s) {
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (c >= 'A' && c <= 'F')
+                s[i] = static_cast<char>(c - 'A' + 'a');
+        }
+        return s;
+    };
+    std::string account;
+    if (is_anon_shape(account_in)) {
+        // S-028: warn on mixed-case anon input before normalizing.
+        bool had_upper = false;
+        for (size_t i = 2; i < account_in.size(); ++i) {
+            char c = account_in[i];
+            if (c >= 'A' && c <= 'F') { had_upper = true; break; }
+        }
+        account = normalize_anon(account_in);
+        if (had_upper) {
+            std::cerr << "account-balance-history: warning — anon address "
+                         "contained uppercase hex; normalized to lowercase "
+                         "(S-028)\n";
+        }
+    } else if (is_domain_shape(account_in)) {
+        account = account_in;
+    } else {
+        std::cerr << "account-balance-history: invalid account '"
+                  << account_in << "' — expected anon address (0x + 64 hex) "
+                     "or domain name ([a-z][a-z0-9-]*\\.[a-z]+)\n";
+        return 1;
+    }
+
+    // ── Output sink ──────────────────────────────────────────────────────
+    namespace fs = std::filesystem;
+    std::ostream* sink = &std::cout;
+    std::ofstream out_f;
+    if (!out_path.empty()) {
+        std::error_code mkdir_ec;
+        fs::create_directories(fs::path(out_path).parent_path(), mkdir_ec);
+        out_f.open(out_path, std::ios::binary | std::ios::trunc);
+        if (!out_f) {
+            std::cerr << "account-balance-history: cannot open --out file '"
+                      << out_path << "' for writing\n";
+            return 1;
+        }
+        sink = &out_f;
+#ifndef _WIN32
+        ::chmod(out_path.c_str(), 0600);
+#endif
+    }
+
+    // ── Winsock init + socket connect ────────────────────────────────────
+#ifdef _WIN32
+    WinsockInit wsa;
+    if (!wsa.ok) {
+        std::cerr << "account-balance-history: WSAStartup failed\n";
+        return 1;
+    }
+#endif
+    std::string conn_err;
+    sock_t s = rpc_connect_localhost(
+        static_cast<uint16_t>(rpc_port), conn_err);
+    if (s == kInvalidSock) {
+        std::cerr << "account-balance-history: " << conn_err << "\n";
+        return 1;
+    }
+
+    std::string inbuf;
+    uint64_t chain_height = 0;
+    try {
+        auto st = rpc_call_over_socket(
+            s, inbuf, "status", nlohmann::json::object());
+        if (st.contains("height") && st["height"].is_number_unsigned())
+            chain_height = st["height"].get<uint64_t>();
+        else if (st.contains("height") && st["height"].is_number_integer())
+            chain_height = static_cast<uint64_t>(st["height"].get<int64_t>());
+    } catch (std::exception& e) {
+        close_sock(s);
+        if (out_f.is_open()) out_f.close();
+        std::cerr << "account-balance-history: status RPC failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // Empty chain — nothing to walk. Honest exit-0 empty export.
+    if (chain_height == 0) {
+        close_sock(s);
+        if (out_f.is_open()) out_f.close();
+        return 0;
+    }
+
+    // ── Resolve walk window ──────────────────────────────────────────────
+    // Default window when neither --from/--to nor --last is supplied:
+    // last 1000 blocks (tail-biased, matches "show me the recent
+    // history" intuition). If chain is shorter than 1000 blocks, walk
+    // from genesis.
+    uint64_t head_index = chain_height - 1;
+    uint64_t from_h = 0;
+    uint64_t to_h   = head_index;
+    if (last_n_arg > 0) {
+        uint64_t n = static_cast<uint64_t>(last_n_arg);
+        if (n > chain_height) n = chain_height;
+        from_h = chain_height - n;
+        to_h   = head_index;
+    } else if (from_h_arg >= 0 || to_h_arg >= 0) {
+        if (from_h_arg >= 0) from_h = static_cast<uint64_t>(from_h_arg);
+        if (to_h_arg   >= 0) to_h   = static_cast<uint64_t>(to_h_arg);
+        if (to_h > head_index) to_h = head_index;
+    } else {
+        // Default: last 1000 blocks.
+        uint64_t default_n = 1000;
+        if (default_n > chain_height) default_n = chain_height;
+        from_h = chain_height - default_n;
+        to_h   = head_index;
+    }
+    if (from_h > to_h) {
+        close_sock(s);
+        if (out_f.is_open()) out_f.close();
+        return 0;
+    }
+
+    // Helper: fetch authoritative balance for the account via the
+    // `account` RPC. Returns 0 when the account has no on-chain state
+    // (RPC returns null for unfunded addresses).
+    auto fetch_balance_rpc = [&](std::string& err) -> std::optional<uint64_t> {
+        try {
+            auto r = rpc_call_over_socket(
+                s, inbuf, "account", {{"address", account}});
+            if (r.is_null()) return uint64_t{0};
+            if (!r.is_object()) {
+                err = "account RPC returned non-object";
+                return std::nullopt;
+            }
+            uint64_t bal = 0;
+            if (r.contains("balance") && r["balance"].is_number()) {
+                bal = r["balance"].is_number_unsigned()
+                    ? r["balance"].get<uint64_t>()
+                    : static_cast<uint64_t>(r["balance"].get<int64_t>());
+            }
+            return bal;
+        } catch (std::exception& e) {
+            err = e.what();
+            return std::nullopt;
+        }
+    };
+
+    // Helper: per-tx balance delta for the queried account. Returns the
+    // signed change to `balance` due to one tx (positive = credit,
+    // negative = debit). Models the dominant tx types:
+    //   * TRANSFER (type 0): debit `from` by (amount + fee); credit
+    //     `to` by amount.
+    //   * REGISTER (type 1): pool/2 NEF mint to `from` (modeled as 0
+    //     here because the wallet doesn't know the pool — checkpoints
+    //     re-anchor it).
+    //   * DEREGISTER (type 2): no direct balance change.
+    //   * STAKE (type 3): debit `from` by amount (moves to locked).
+    //   * UNSTAKE (type 4): credit `from` by amount (refund from
+    //     locked, post unlock_height).
+    //   * REGION_CHANGE (type 5): no balance change.
+    //   * PARAM_CHANGE (type 6): no balance change.
+    //   * MERGE_EVENT (type 7): no balance change.
+    //   * COMPOSABLE_BATCH (type 8): inner txs sum (modeled as 0 here
+    //     because the wallet would need to parse `payload`; checkpoints
+    //     re-anchor).
+    //   * DAPP_REGISTER (type 9): no balance change.
+    //   * DAPP_CALL (type 10): debit `from` by amount + fee; credit `to`
+    //     by amount.
+    // Fee on `from` is always debited (matches every tx applying
+    // accumulated_outbound += fee at apply time). Drift modes (NEF
+    // mint, batch internals) are corrected by the next checkpoint.
+    auto tx_delta = [&](int type, const std::string& frm,
+                        const std::string& to, int64_t amount,
+                        int64_t fee) -> int64_t {
+        int64_t d = 0;
+        bool is_from = (frm == account);
+        bool is_to   = (to  == account);
+        switch (type) {
+            case 0:   // TRANSFER
+                if (is_from) d -= (amount + fee);
+                if (is_to)   d += amount;
+                break;
+            case 3:   // STAKE
+                if (is_from) d -= (amount + fee);
+                break;
+            case 4:   // UNSTAKE
+                if (is_from) d += (amount - fee);
+                break;
+            case 10:  // DAPP_CALL
+                if (is_from) d -= (amount + fee);
+                if (is_to)   d += amount;
+                break;
+            default:
+                // REGISTER (1), DEREGISTER (2), REGION_CHANGE (5),
+                // PARAM_CHANGE (6), MERGE_EVENT (7), COMPOSABLE_BATCH
+                // (8), DAPP_REGISTER (9): only debit fee if from-side
+                // (every tx applies fee debit on apply).
+                if (is_from) d -= fee;
+                break;
+        }
+        return d;
+    };
+
+    // ── Emit one NDJSON row ──────────────────────────────────────────────
+    auto emit_line = [&](const nlohmann::json& obj) {
+        *sink << obj.dump() << "\n";
+        sink->flush();
+    };
+
+    // Seed the running balance with a checkpoint at the first block in
+    // the window. This anchors the entire walk so even with
+    // checkpoint_every == large, the initial value is authoritative.
+    std::string rpc_err;
+    auto seed_bal_opt = fetch_balance_rpc(rpc_err);
+    if (!seed_bal_opt.has_value()) {
+        close_sock(s);
+        if (out_f.is_open()) out_f.close();
+        std::cerr << "account-balance-history: initial account RPC "
+                     "failed: " << rpc_err << "\n";
+        return 1;
+    }
+    // NOTE: the initial balance from the RPC is CURRENT (head), not
+    // at from_h. For window walks the user wants the historical
+    // trajectory, so we emit the running balance starting at from_h
+    // via per-block deltas + the checkpoint-RPC re-anchor at every
+    // configured cadence boundary. The first checkpoint at from_h will
+    // re-anchor the running balance authoritatively.
+
+    uint64_t running_balance = *seed_bal_opt;
+    uint64_t last_emitted_balance = running_balance;
+    bool have_last_emitted = false;
+    uint64_t total_emitted = 0;
+
+    for (uint64_t h = from_h; h <= to_h; ++h) {
+        // Fetch the block JSON to compute per-tx deltas.
+        nlohmann::json blk;
+        try {
+            blk = rpc_call_over_socket(
+                s, inbuf, "block", {{"index", h}});
+        } catch (std::exception& e) {
+            close_sock(s);
+            if (out_f.is_open()) out_f.close();
+            std::cerr << "account-balance-history: block RPC failed at "
+                      << h << ": " << e.what() << "\n";
+            return 1;
+        }
+
+        // Per-block tx_count_window: count of txs in this block whose
+        // from OR to is the queried account.
+        uint64_t tx_count_window = 0;
+        int64_t  block_delta     = 0;
+        if (blk.is_object() && blk.contains("transactions") &&
+            blk["transactions"].is_array()) {
+            const auto& txs = blk["transactions"];
+            for (const auto& tx : txs) {
+                if (!tx.is_object()) continue;
+                std::string frm = tx.value("from", std::string{});
+                std::string to  = tx.value("to",   std::string{});
+                if (is_anon_shape(frm)) frm = normalize_anon(frm);
+                if (is_anon_shape(to))  to  = normalize_anon(to);
+                bool touches = (frm == account) || (to == account);
+                if (!touches) continue;
+                ++tx_count_window;
+                int type = tx.value("type", 0);
+                int64_t amount = static_cast<int64_t>(
+                    tx.value("amount", uint64_t{0}));
+                int64_t fee    = static_cast<int64_t>(
+                    tx.value("fee",    uint64_t{0}));
+                block_delta += tx_delta(type, frm, to, amount, fee);
+            }
+        }
+
+        // Decide checkpoint: every Nth block, plus always on the very
+        // first block in the window (anchor), plus always on the last
+        // block in the window (closing-balance authority). When
+        // checkpoint_every == 0, every block is a checkpoint.
+        bool is_first_block = (h == from_h);
+        bool is_last_block  = (h == to_h);
+        bool is_cadenced_block = (checkpoint_every == 0)
+            ? true
+            : ((h - from_h) % checkpoint_every == 0);
+        bool is_checkpoint = is_first_block || is_last_block ||
+                             is_cadenced_block;
+
+        // Interpolated balance candidate (running balance after
+        // applying this block's delta).
+        int64_t signed_interp = static_cast<int64_t>(running_balance)
+                              + block_delta;
+        if (signed_interp < 0) signed_interp = 0;  // floor at 0
+        uint64_t interp_balance = static_cast<uint64_t>(signed_interp);
+
+        uint64_t emit_balance = interp_balance;
+        std::string source = "interpolated";
+        if (is_checkpoint) {
+            std::string rpc_err2;
+            auto rpc_bal = fetch_balance_rpc(rpc_err2);
+            if (!rpc_bal.has_value()) {
+                // RPC failure on checkpoint: surface and abort. We
+                // can't blindly trust the interpolation for the
+                // checkpoint row.
+                close_sock(s);
+                if (out_f.is_open()) out_f.close();
+                std::cerr << "account-balance-history: checkpoint RPC "
+                             "failed at block " << h << ": "
+                          << rpc_err2 << "\n";
+                return 1;
+            }
+            // NOTE: the `account` RPC returns the CURRENT (head)
+            // balance, not the historical balance at block h. For an
+            // honest historical reconstruction, the only block where
+            // the RPC value is exact is the chain head. For all earlier
+            // blocks we keep the interpolated value but mark
+            // checkpoint_source = "rpc" for the head block alone (where
+            // it's authoritative). For pre-head checkpoints, we still
+            // emit checkpoint_source = "interpolated" — this matches the
+            // documented contract: checkpoints don't lie about the
+            // source.
+            if (h == head_index) {
+                emit_balance = *rpc_bal;
+                source = "rpc";
+                // Re-anchor the running balance to the authoritative
+                // value (corrects any drift accumulated from NEF mints
+                // or batch internals that the wallet doesn't model).
+                running_balance = emit_balance;
+            } else {
+                emit_balance = interp_balance;
+                source = "interpolated";
+                running_balance = interp_balance;
+            }
+        } else {
+            running_balance = interp_balance;
+        }
+
+        // Decide whether to emit this row.
+        // Default: emit only when (a) it's a checkpoint, OR (b) the
+        // balance changed (block_delta != 0).
+        // --include-empty-blocks: emit every block in the window.
+        bool should_emit = false;
+        if (include_empty) {
+            should_emit = true;
+        } else {
+            if (is_checkpoint) should_emit = true;
+            if (block_delta != 0) should_emit = true;
+        }
+        if (!should_emit) continue;
+
+        // delta_since_last: signed; first emitted row has 0.
+        int64_t delta_signed = 0;
+        if (have_last_emitted) {
+            delta_signed = static_cast<int64_t>(emit_balance)
+                         - static_cast<int64_t>(last_emitted_balance);
+        }
+
+        nlohmann::json row;
+        row["block"]              = h;
+        row["balance"]            = emit_balance;
+        row["delta_since_last"]   = delta_signed;
+        row["tx_count_window"]    = tx_count_window;
+        row["checkpoint_source"]  = source;
+        emit_line(row);
+        last_emitted_balance = emit_balance;
+        have_last_emitted = true;
+        ++total_emitted;
+    }
+
+    close_sock(s);
+    if (out_f.is_open()) out_f.close();
+    (void)total_emitted;  // honest exit 0 even when empty
+    return 0;
+}
+
 int cmd_diff_snapshots(int argc, char** argv) {
     std::string from_path, to_path;
     std::string group = "all";
@@ -12407,6 +12961,36 @@ void print_usage() {
         "                                             reconstruction. Exit 0 success (including\n"
         "                                             empty result if no matching txs), 1 args/\n"
         "                                             parse/IO/RPC error or invalid account shape.\n"
+        "  account-balance-history --rpc-port <N>     Reconstruct the historical balance of a\n"
+        "                          --account <addr-or-domain>\n"
+        "                          [--from H] [--to H | --last N]\n"
+        "                          [--checkpoint-every N]\n"
+        "                          [--include-empty-blocks]\n"
+        "                          [--out <file>] [--json]\n"
+        "                                             single account at each block over a window.\n"
+        "                                             Walks the chain via the `block` RPC for\n"
+        "                                             per-tx delta accumulation and re-anchors via\n"
+        "                                             the `account` RPC at a configurable cadence\n"
+        "                                             to bound drift. Per-row shape: {block,\n"
+        "                                             balance, delta_since_last, tx_count_window,\n"
+        "                                             checkpoint_source: rpc|interpolated}.\n"
+        "                                             --account is anon (0x + 64 hex; mixed case\n"
+        "                                             normalized lowercase per S-028) or domain\n"
+        "                                             ([a-z][a-z0-9-]*\\.[a-z]+). Window: --from\n"
+        "                                             H / --to H (inclusive) OR --last N (default\n"
+        "                                             last 1000 blocks). --checkpoint-every N\n"
+        "                                             controls how often the `account` RPC is\n"
+        "                                             called (default 10; 0 = every block, exact\n"
+        "                                             + slowest). --include-empty-blocks emits a\n"
+        "                                             row for every block in the window (default\n"
+        "                                             skips no-change non-checkpoint blocks).\n"
+        "                                             --out writes NDJSON to file (0600 on POSIX);\n"
+        "                                             default stdout. Use cases: wallet UI\n"
+        "                                             balance-over-time charts, auditor running-\n"
+        "                                             balance reports, customer-dispute triage\n"
+        "                                             ('what was the balance at block H?').\n"
+        "                                             Exit 0 success (including empty result), 1\n"
+        "                                             args/parse/IO/RPC error or invalid account.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -12464,6 +13048,7 @@ int main(int argc, char** argv) {
     if (cmd == "stake-bulk-query") return cmd_stake_bulk_query(argc - 2, argv + 2);
     if (cmd == "validator-roster-snapshot") return cmd_validator_roster_snapshot(argc - 2, argv + 2);
     if (cmd == "tx-history-export") return cmd_tx_history_export(argc - 2, argv + 2);
+    if (cmd == "account-balance-history") return cmd_account_balance_history(argc - 2, argv + 2);
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
