@@ -134,6 +134,8 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 
 ## Theme 3 — Cryptographic hardening
 
+> **Post-v2 candidates (not in this theme's scope).** Four wire-format / consensus optimizations are documented at `docs/Improvements.md` and tracked individually in the post-v1.0 enhancement queue at `docs/proofs/Improvements.md` §6: (1) BLS signature aggregation [§6.1], (2) Quorum Liveness 2F+1 BFT-threshold finalization — **OPTIONAL deployment mode**, not a default-replacement [§6.2], (3) deduplicated_tx_root [§6.3], (4) IBLT/Minisketch Phase-1 bandwidth reduction [§6.4]. All four are classified Breaking under the no-migrations constraint *except* §6.2 which is Additive-via-opt-in (legacy K-of-K finalization remains the v1.0 default codepath). These items are NOT scheduled and have no v2.X bundle assignment; they appear here as cross-references so reviewers asking "what about BLS aggregation / 2F+1 / IBLT?" find the answer.
+
 ### v2.7 — F2 view reconciliation (S-030 D2 full closure)
 
 **Motivation.** Closes S-030 D2 at the consensus layer. D2 is the structural property that two K-of-K-signed block instances can share a digest but differ in evidence/receipt lists — the digest covers a strict subset of block fields.
