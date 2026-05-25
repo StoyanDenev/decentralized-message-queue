@@ -12,6 +12,7 @@ test_*/
 testnode/
 *_run.out
 test_run.out
+.smoke_*/
 
 # Local tooling / session state
 .claude/
