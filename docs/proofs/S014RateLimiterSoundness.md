@@ -563,3 +563,185 @@ This proof was added in the current review pass as part of the analytic-closure 
 - `docs/proofs/Preliminaries.md` §3 — network model (asio thread-pool concurrency assumption underlying T-2's mutex argument).
 - `docs/proofs/RpcAuthHmacSoundness.md` (S-001 closure) — companion proof; auth-before-rate-limit ordering reference for T-2's dispatch ordering.
 - `docs/proofs/MakeContribCommitmentBackwardCompat.md` — companion proof; structural-disjointness lemma style used in L-3 + L-4.
+- `docs/proofs/Censorship.md` §8 — FA2 censorship-resistance composition with the rate-limiter; consumed by §9.5 below.
+
+---
+
+## 9. R39+ round-2 re-cap — RL-1..RL-4 explicit theorem statements + FA2 composition
+
+This section is a focused re-cap of the proof's main results in the labeling style used by other R39+ FA-track closures (theorem prefix `RL-` for "Rate Limiter"), plus the explicit FA2-composition statement that A6's `Censorship.md` §8 cites as "F-1 closure" footing. It does NOT introduce new claims — every result here is a restatement of, or a direct corollary of, T-1..T-6 + L-1..L-7 above. It exists so a reviewer reading only this section can take the central soundness conclusion as a single self-contained statement.
+
+### 9.1 Scope re-statement
+
+**In scope** — this proof formalizes the soundness of the S-014 per-peer-IP token-bucket rate-limiter as deployed on Determ's two wire surfaces:
+
+1. The RPC accept layer at `src/rpc/rpc.cpp:172` (`rate_limiter_.consume(peer_ip)` gating every non-rate-limited RPC request).
+2. The gossip receive layer at `src/net/gossip.cpp:154` (`rate_limiter_.consume(ip)` gating every non-HELLO gossip message).
+
+with the HELLO-message exemption at `src/net/gossip.cpp:148` preserving handshake liveness under flood pressure.
+
+**Out of scope** — the proof does NOT cover:
+
+- **OS-level / TCP-layer DoS** (SYN flood, ack flood, raw-packet flood at the kernel network stack). Mitigation is the responsibility of upstream router / firewall / operating-system network-buffer tuning (`net.core.somaxconn`, `net.ipv4.tcp_max_syn_backlog`, etc.). The token-bucket runs at the application layer above any kernel-level filtering.
+- **Layer-7 DoS via slowloris-style connection holding** (an attacker opens many TCP connections, sends partial requests, holds open without completing). Mitigation is the asio accept-loop's connection limit + `idle_timeout_seconds` config + OS file-descriptor ulimit, not the token-bucket. The token-bucket fires only when a complete framed message arrives — partial requests sit in the receive buffer until either the framing layer completes (and the token fires) or the connection times out.
+- **Spoofed source IPs across the open Internet**. TCP's three-way handshake requires the attacker to receive the SYN-ACK reply at the claimed source IP, which is not possible from an arbitrary spoofed address across the internet (modulo BGP hijack or upstream-cooperative ISP, both out of scope). The token-bucket is keyed on the IP that completed 3WHS, which is therefore the real source IP. Local-network or same-broadcast-domain spoofing remains possible but is a network-trust-boundary concern, not a rate-limiter concern.
+- **Aggregate / distributed DoS using many real source IPs** (botnet-style). Per-IP limiting bounds each IP independently; the aggregate flood-source admitted rate scales linearly with `N` (RL-3 below), which is exactly the per-IP design intent. Defending against the aggregate requires an upstream-layer mitigation (CDN / DDoS scrubbing / global rate-limit at the LB), discussed in §6.1 adversary family (b).
+
+### 9.2 Threat model — `A_flood` adversary
+
+**Adversary `A_flood`.** Controls a finite set of source IPs `I = {i_1, …, i_N}` with `N ≥ 1` and aims to:
+
+- **(a) RPC bandwidth exhaustion.** Flood the RPC accept layer with valid-shape but irrelevant JSON-RPC method calls (e.g., repeated `status`, repeated `snapshot`, repeated `account` queries with random addresses) to consume CPU / memory / response-buffer bandwidth on the daemon, degrading service for legitimate RPC clients.
+
+- **(b) Gossip channel crowding.** Flood the gossip receive layer with valid-shape consensus or transaction messages (e.g., spurious ContribMsg, replayed BlockSig, garbage CrossShardReceipt) to crowd out legitimate consensus messages from the honest peer set, degrading consensus throughput or finality latency.
+
+`A_flood` has unbounded request-generation capacity per IP — limited only by the IPs' upstream bandwidth — but is gated by the per-IP token bucket at the receive layer.
+
+**Out of scope for `A_flood`:**
+
+- **OS-level / TCP-layer flood** (kernel-level SYN flood, ack flood). Mitigation: upstream router / firewall / OS-level rate-limit. Not a rate-limiter concern.
+- **Layer-7 DoS via expensive RPC operations** (a single RPC call that itself does O(state) work, e.g., a `snapshot` request returning hundreds of KB). Partial mitigation: the token-bucket counts one token per call regardless of method cost (Finding F-3 in §6.2), but per-method weighting is deferred. The full mitigation is composition with S-022's per-MsgType body cap and the operator-configurable `rpc_idle_timeout_seconds`. See §9.5 for the cross-layer composition argument.
+- **Adversary spoofing IPs across the internet**. TCP 3WHS prevents — see §9.1 out-of-scope item 3.
+
+### 9.3 Primitive specification (formal restatement)
+
+The per-IP token bucket is parameterized by `(C, r)`:
+
+- `C := burst_ > 0` — bucket capacity in tokens (max sustainable burst).
+- `r := rate_per_sec_ > 0` — steady-state refill rate (tokens per second).
+
+For each `(remote_addr, channel)` pair where `channel ∈ {rpc, gossip}`, the daemon maintains an independent bucket `B[remote_addr, channel] ∈ [0, C]`. Buckets are lazily initialized on first observation: `B = C, last = now` (the legitimate-caller-doesn't-pay-cold-start property).
+
+On request arrival at time `t` for `(addr, channel)`:
+
+```
+elapsed := t - last[addr, channel]               # seconds (steady_clock; ≥ 0)
+B[addr, channel] := min(C, B[addr, channel] + elapsed × r)
+last[addr, channel] := t
+if B[addr, channel] ≥ 1.0:
+    B[addr, channel] := B[addr, channel] - 1.0
+    SERVE request
+else:
+    DROP request   # log "rate_limited"; no further work
+```
+
+`(C, r)` are operator-configurable per surface (RPC, gossip) via `RpcServer::set_rate_limit(per_sec, burst)` + `GossipNet::set_rate_limit(per_sec, burst)`. HELLO bypasses the bucket on the gossip surface (see RL-2). RPC has no exempt method — every RPC request consumes one token.
+
+The buckets for `(addr, rpc)` and `(addr, gossip)` are separate maps owned by `RpcServer::rate_limiter_` and `GossipNet::rate_limiter_` respectively. A flooder can therefore drain one IP's RPC bucket and gossip bucket *independently* — the two bucket pools do not share state. This is a deliberate decision (§2.2): a legitimate caller hitting RPC heavily must not lose their gossip-channel budget.
+
+The post-F-1-closure addition of `configure_eviction(threshold_sec, interval_sec)` adds an idle-bucket sweep that erases buckets unused for `threshold_sec` seconds on every consume after `interval_sec` since the last sweep. Defaults `(threshold_sec, interval_sec) = (600, 60)` give a 10-minute idle-eviction window with 1-minute amortized sweep cadence. Disabling via `configure_eviction(0)` reverts to the legacy unbounded-growth behavior — useful for tests / forensics, not production.
+
+### 9.4 Theorems RL-1..RL-4
+
+**Theorem RL-1 (Per-IP rate bound — admitted-rate ceiling).** For any single source IP `I` and any channel `ch ∈ {rpc, gossip}`, over any time window `[t, t + Δ]` of length `Δ ≥ 0` seconds, the number of admitted requests `A_{I,ch}([t, t + Δ])` satisfies
+
+$$
+A_{I,ch}([t, t + \Delta]) \;\leq\; \lfloor C + r \cdot \Delta \rfloor.
+$$
+
+The bound is achievable (the burst-then-sustain witness; see L-2).
+
+*Proof.* Direct restatement of T-1 and L-2. `B[I, ch](t) ≤ C` by the invariant L-1. The total tokens added by refill over `[t, t + Δ]` are bounded above by `r · Δ` (the lazy-refill arithmetic adds `elapsed × r` per consume event, clamped at `C`; the cumulative refill contribution to admitted requests cannot exceed the continuous-refill ceiling `r · Δ`). Each admitted request consumes exactly one token. Therefore `A_{I,ch}([t, t + Δ]) ≤ B[I, ch](t) + r · Δ ≤ C + r · Δ`. The floor follows from `A_{I,ch}` being integer-valued.   ∎
+
+**Theorem RL-2 (HELLO-exempt liveness — handshake never throttled).** A new honest peer attempting to connect to the daemon can always complete a HELLO handshake regardless of the gossip-channel rate-limiter load on the peer's source IP.
+
+*Proof.* The HELLO exemption gate at `src/net/gossip.cpp:148` (`if (msg.type != MsgType::HELLO)`) bypasses the `rate_limiter_.consume(ip)` check entirely for HELLO. The only constraints on HELLO admission are:
+
+1. The OS-level TCP `accept()` queue (`net.core.somaxconn` on Linux; equivalent on Windows). Bounded by the operating system.
+2. The asio accept-loop's concurrency limit (effectively `min(FD_limit, asio_thread_pool_size)`).
+3. The S-022 framing-layer body cap `max_message_bytes(MsgType::HELLO)` — bounded by the body-size check at `src/net/peer.cpp:90-94`, which closes the connection on oversize but does not throttle by rate.
+
+None of these are functions of the gossip-channel rate-limiter state. A flooder cannot deny the HELLO-handshake completion to a new honest peer by draining the peer's IP bucket, because the HELLO bypasses the bucket.   ∎
+
+The safety of this exemption (i.e., that HELLO cannot itself be weaponized for sustained DoS) is established by T-4 / L-6: HELLO is size-bounded + idempotent + connection-rate-limited at the TCP layer. The exemption applies to gossip's HELLO message only — RPC has no HELLO concept, and every RPC request consumes a token.
+
+**Theorem RL-3 (Flood-attack bandwidth dilution bound).** Under `A_flood` controlling N distinct source IPs `I = {i_1, …, i_N}`, the total flood-source admitted rate from `A_flood` across any window `[t, t + Δ]` on channel `ch` is bounded by
+
+$$
+\sum_{j=1}^{N} A_{i_j, ch}([t, t + \Delta]) \;\leq\; N \cdot \lfloor C + r \cdot \Delta \rfloor.
+$$
+
+Honest peers' admitted rate from any IP `i_h ∉ I` remains at most `⌊C + r · Δ⌋` per IP, unaffected by `A_flood`'s consumption.
+
+*Proof.* RL-1 applies to each `i_j` independently. The total flood admitted rate is the sum of N per-IP bounds. Per-IP independence (T-3 / L-3) ensures that `A_flood`'s consumption of `B[i_j, ch]` for `j ∈ {1, …, N}` does not modify `B[i_h, ch]` for any honest peer's IP `i_h ∉ I`. Therefore honest peers' admitted rate is computed by RL-1 applied to `i_h` alone, with no contribution from `A_flood`'s buckets.   ∎
+
+**Corollary RL-3.1 (Linear-rather-than-amplified attack scaling).** The flood-source admitted rate scales linearly in N (the number of attacker IPs), not exponentially or polynomially. Per-IP rate limiting alone does not defeat large-N attacks; aggregate defense (upstream LB / CDN / global cap) is the next defense layer up the stack. This is documented as out-of-scope for S-014 (§9.1 and §6.1 adversary family (b)).
+
+**Theorem RL-4 (No false-positive denial — honest peer within capacity is never denied).** For any honest peer with source IP `i_h` issuing at most `C` requests in a burst followed by at most `r` requests per second sustained, the rate-limiter admits every request.
+
+*Proof.* Inductive on the request sequence. Initial: by lazy initialization, the bucket starts at `B[i_h, ch] = C`. After the burst of `C` requests (one token consumed per request), `B = 0`. Refill semantics (L-1, L-2): at sustained rate `≤ r` requests/sec, the inter-arrival interval `Δt ≥ 1/r`. The token added per inter-arrival is `Δt × r ≥ 1`. Therefore at the next request after `Δt ≥ 1/r`, `B ≥ 1` and the request is admitted.
+
+More precisely: if `Δt_i` is the inter-arrival interval before the i-th post-burst request, the bucket level at that request's arrival is `min(C, B_{prev} + Δt_i × r)`. For sustained `r_actual ≤ r`, we have `Δt_i ≥ 1/r ≥ 1/r_actual`, so `Δt_i × r ≥ 1`. After the previous consume, `B_{prev} ≥ 0`, so `B_{prev} + Δt_i × r ≥ 1`, and the request is admitted. An honest peer never trips the false-positive denial.
+
+The bound is tight at the rate ceiling: an honest peer issuing exactly `r` requests/sec sustained at uniform intervals `1/r` keeps `B` oscillating between `0` and `1` and gets every request admitted (modulo floating-point edge cases at the boundary, which are operationally invisible).   ∎
+
+### 9.5 Composition with FA2 (Censorship.md §8.1 → §8.3)
+
+A6's round-1 `Censorship.md §8` (commit 017a64c) establishes the FA2 ↔ S-014 composition with three sub-claims:
+
+- **§8.1 Upside.** Pre-S-014, a Byzantine flooder could dilute the honest signal in two ways: (a) flood the gossip receive layer with garbage messages, crowding out honest peer tx forwarding; (b) flood the RPC submit_tx endpoint with garbage tx, exhausting the daemon's mempool admission path. Post-S-014, both attacks are bounded by per-peer-IP token rates — the flooder operating from a single IP exhausts their bucket within burst-time and gets rate-limited at the receive layer before their messages reach the dispatch path.
+
+- **§8.2 New attack surface.** S-014 introduces a victim-IP-drain attack: a Byzantine coalition could spoof a victim peer's source IP to drain the victim's bucket before the victim's own legitimate messages arrive. Per-layer bucket independence partially mitigates this: an attack on the RPC bucket doesn't degrade the gossip bucket; gossip is FA2's relevant channel; RPC-side noise is structurally isolated. Local-network spoofing remains a concern (§9.1 out-of-scope item 3).
+
+- **§8.3 Composition statement.** FA2's `(f/N)^K` per-round censorship probability bound is preserved across the composition. F2 and S-014 do not change the bound; they change *which attacks the bound applies to* and the practical surface available to an adversary trying to defeat it.
+
+This proof's RL-1..RL-4 imply Censorship.md §8.1's "bounded flood-attack" property:
+
+- **Per-flooder bound (RL-1).** The maximum sustained gossip flood from a single Byzantine IP is `r` messages/sec with burst `C`. For the default gossip config `(C, r) = (1000, 500)`, sustained malicious gossip from one IP is bounded at 500 msg/sec — well below the daemon's gossip-dispatch capacity even at minimum-cost message types.
+
+- **Honest signal preservation (RL-3).** Honest peers' admitted rate is unaffected by flood-source consumption. The honest peer's union-tx-root contribution can be admitted at the honest peer's per-IP rate, in parallel with the flooder's bucket-rate-limited contribution. The flooder cannot consume tokens out of the honest peer's bucket.
+
+- **Handshake liveness (RL-2).** A newly-joining honest peer can complete HELLO regardless of any IP's bucket state. The peer enters the gossip mesh and can immediately contribute to the union-tx-root, subject to their own per-IP rate budget.
+
+- **No false-positive denial (RL-4).** Honest peers operating within capacity are never throttled. The rate-limiter does not introduce a denial-of-service against honest traffic.
+
+**Composition statement (formal).** Let `P_censor_FA2(f/N, K, R)` denote FA2's `(f/N)^{KR}` persistent-censorship bound over R rounds. Let `P_admit_S014(I, Δ)` denote the maximum admitted-rate from an attacker IP `I` over a window `Δ` from RL-1 (i.e., `⌊C + r · Δ⌋`). Then:
+
+$$
+\text{Pr}[\text{honest tx } T \text{ censored across R rounds}] \;\leq\; P_\text{censor\_FA2}(f/N, K, R)
+$$
+
+and the bound is **independent of** `P_admit_S014` for any honest IP `I_h ∉ I_attacker`. The composition is one-directional: RL-* tightens FA2's bound on Byzantine-flood-induced honest-message-loss by capping the flooder's per-IP throughput, without weakening FA2's union-tx-root admission rule (which is the core FA2 censorship-resistance mechanism).
+
+*Proof sketch.* By RL-3, the flooder's admitted rate is bounded per-IP. By RL-4, the honest peer's admitted rate is uncapped within capacity. By the FA2 union-tx-root inclusion rule (Censorship.md §3), the honest tx `T` is included in the union-tx-root commitment as long as at least one honest committee member observes `T` in their phase-1 commit. Since honest peers can freely forward `T` (RL-4) and the flooder cannot drain honest peers' buckets (RL-3 via per-IP independence T-3), the honest forwarding path is intact under the composition. The FA2 bound `(f/N)^K` per round (probability that all K committee members are Byzantine and exclude `T` from their phase-1 commits) applies unchanged.
+
+The composition's one-directional property is critical: RL-* does NOT introduce any new censorship surface — it does not gate the union-tx-root inclusion logic; it gates only the wire-level message admission rate. Therefore FA2's safety bound is preserved.   ∎
+
+### 9.6 Open implementation questions + operator policy
+
+The proof establishes the soundness of the token-bucket scheme as parameterized; it does NOT prescribe specific `(C, r)` values. The operator-policy questions surface here are:
+
+- **Capacity-rate tuning.** Per T-6 / L-7, the per-profile recommended ranges in `tools/operator_rate_limiter_audit.sh:307-313` balance burst tolerance vs. adversary-burst absorption + sustained-load tolerance vs. sustained-adversary cost. Lower `(r, C)` makes attacks more costly but raises false-positive risk under legitimate burst. There is no closed-form `(r, C)` that defeats both burst and sustained adversaries at zero legitimate-traffic cost (Cruz 1991 §3; RFC 2475 §4).
+
+- **NAT and shared-IP behavior.** Many honest peers may share an IP if behind NAT (e.g., consumer ISP CG-NAT, corporate proxy, university LAN). The per-IP rate-limiter treats all peers behind the same NAT as one source. Two operational notes:
+  1. **Canonical deployment pattern.** Determ's intended deployment has operators run their own peers — validators, RPC nodes, gateways are operator-controlled and have their own public IPs. Shared-NAT *consumers* (e.g., wallet users hitting a public RPC endpoint) do not contribute to consensus liveness. Their rate-limit interaction is a UX concern, not a consensus concern. Mitigation: operators size `(C, r)` for the expected NAT'd-consumer pool, OR operate behind a per-user authenticated front-end (e.g., reverse proxy with per-API-key rate-limit) — out of scope for the S-014 layer.
+  2. **No NAT-awareness in the bucket key.** The bucket key is `peer->address()` with `:port` stripped (line `src/net/gossip.cpp:151`). There is no attempt to derive a per-user identifier (e.g., from HMAC auth or session token) for finer-grained limiting. This is a deliberate choice: layer-4 IP is the universal identifier across both RPC and gossip surfaces; HMAC auth (S-001) is RPC-only and would not bind to gossip; deriving a per-connection identifier would require introducing a session-token scheme. Tracked as a v2.x design item (not S-014 scope).
+
+- **Per-method weighting on RPC.** Currently every RPC method consumes one token. The `snapshot` method costs much more server work than `status`. An attacker maximizing server work-per-token would prefer `snapshot`. Mitigation deferred (Finding F-3 in §6.2); per-IP T-1 bound still applies so the maximum snapshot rate from one IP is `r` snapshots/sec.
+
+- **Disabling the rate-limiter.** Setting `(r ≤ 0) ∨ (C ≤ 0)` disables the limiter (`enabled() == false`); `consume(key)` returns `true` unconditionally. This is the "no-rate-limit" configuration, useful for development / single-tenant clusters / scenarios with upstream rate-limiting at the LB. The audit script flags A1 (both surfaces disabled) as CRITICAL because it's typically a misconfiguration.
+
+### 9.7 Implementation cross-references (re-cap)
+
+| File | Role |
+|---|---|
+| `include/determ/net/rate_limiter.hpp` | The shared `determ::net::RateLimiter` helper (capacity + refill arithmetic; F-1 eviction; configure_eviction). |
+| `src/rpc/rpc.cpp:172` | RPC-channel `consume(peer_ip)` integration; runs BEFORE JSON parse + auth. |
+| `src/rpc/rpc.cpp:143-153` | `peer_ip` cached once per session (S-014 design pattern; minimizes per-request overhead). |
+| `src/net/gossip.cpp:154` | Gossip-channel `consume(ip)` integration; HELLO-exempt; IP normalized (strip `:port`). |
+| `src/net/gossip.cpp:148` | HELLO exemption gate (`if (msg.type != MsgType::HELLO)`). |
+| `tools/test_gossip_rate_limit.sh` | Gossip-channel integration test (3/3 PASS). |
+| `tools/test_rpc_rate_limit.sh` | RPC-channel integration test (4/4 PASS). |
+| `tools/test_rate_limiter.sh` | Unit-test harness exercising the `RateLimiter` helper directly via `determ test-rate-limiter` (16 scenarios + 8 F-1 eviction scenarios post-closure). |
+| `tools/operator_rate_limiter_audit.sh` | Operator-facing config audit; per-profile `PROFILE_RANGES` table; A1/A2/A3 anomaly classification. |
+| `docs/SECURITY.md` §S-014 | Operational closure narrative; the upstream document this proof formalizes. |
+| `docs/proofs/Censorship.md` §8 | FA2 composition consumer; cites this proof as "F-1 closure" footing. |
+
+### 9.8 Status
+
+- **Spec complete.** RL-1..RL-4 + L-1..L-7 + T-1..T-6 cover the per-IP bucket soundness, HELLO-exempt liveness, multi-IP independence, and the FA2 composition.
+- **Implementation shipped.** S-014 closed per `docs/SECURITY.md` §S-014; both RPC and gossip surfaces gated by the shared `RateLimiter` helper; HELLO exempt; F-1 closure (time-decay eviction) shipped after Round 20.
+- **Regression tests passing.** `tools/test_gossip_rate_limit.sh` (3/3 PASS) + `tools/test_rpc_rate_limit.sh` (4/4 PASS) + `tools/test_rate_limiter.sh` (24/24 PASS post-F-1).
+- **Audit-trail.** This proof formalizes the per-IP token-bucket soundness for the standard `(σ, ρ)`-regulator (Cruz 1991; RFC 2475; RFC 2697) under Determ's specific deployment, with explicit RL-1..RL-4 theorems matching the labeling style used by other R39+ FA-track closures and explicit cross-references for `Censorship.md §8`'s F2 + S-014 composition.
+
+This section is a re-cap; no new theorems are introduced beyond the restatement of T-1..T-6 + L-1..L-7 under the RL-N labeling that A6's Censorship.md §8 cites. The proof's primary content remains §1-§8.
