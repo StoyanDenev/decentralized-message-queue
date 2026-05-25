@@ -220,6 +220,7 @@ add_executable(determ-light
   light/keyfile.cpp
   light/sign_tx.cpp
   light/watch.cpp
+  light/export.cpp
   # Reused from src/ (explicit list — no glob):
   src/crypto/merkle.cpp
   src/crypto/keys.cpp
