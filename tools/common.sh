@@ -84,4 +84,25 @@ else
     DETERM_WALLET=""
 fi
 
-export PROJECT_ROOT DETERM DETERM_WALLET
+# ── DETERM_LIGHT (light-client binary) ────────────────────────────────────────
+# Third Determ binary (alongside `determ` + `determ-wallet`): the
+# trust-minimized light-client that verifies every RPC response
+# against a pinned genesis hash + committee-signed state_root.
+# Optional like the wallet — tests that don't exercise it skip the
+# detection block entirely.
+if [ -n "${DETERM_LIGHT_BIN:-}" ]; then
+    DETERM_LIGHT="$DETERM_LIGHT_BIN"
+elif [ -x "build/Release/determ-light.exe" ]; then
+    DETERM_LIGHT="build/Release/determ-light.exe"
+elif [ -x "build/determ-light.exe" ]; then
+    DETERM_LIGHT="build/determ-light.exe"
+elif [ -x "build/determ-light" ]; then
+    DETERM_LIGHT="build/determ-light"
+elif [ -x "build/Release/determ-light" ]; then
+    DETERM_LIGHT="build/Release/determ-light"
+else
+    # Light-client is optional for tests that don't exercise it.
+    DETERM_LIGHT=""
+fi
+
+export PROJECT_ROOT DETERM DETERM_WALLET DETERM_LIGHT

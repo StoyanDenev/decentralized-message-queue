@@ -150,6 +150,8 @@ External-bind-without-auth warning. When `rpc_localhost_only=false` AND `rpc_aut
 
 **Recommended.** Options 1 + 2 immediately (~1h total). Options 3 or 4 only if RPC must be exposed beyond loopback.
 
+**Light-client trust model (determ-light).** The `determ-light` binary does NOT require the daemon to have HMAC RPC auth or rate limiting enabled to be safe. The operator's daemon is the data-serving party; the light-client is the verifier. Every fetched datum (headers, state-proofs, account replies) is verified locally against (a) the committee-signed `state_root`, (b) the chain-of-hashes from the pinned genesis, (c) Ed25519 sigs from the genesis-derived committee seed. Even a malicious daemon cannot mislead an honest light-client under the honest-majority-of-committee assumption — the worst the daemon can do is refuse to serve data or serve data that fails verification (which the light-client rejects with a clear diagnostic). The security property is *operational-equivalence with full-node operation* under that assumption. This is orthogonal to S-001: enabling HMAC auth on the daemon hardens against unauthenticated tx submission and state mutation; the light-client read path is already safe by construction.
+
 ---
 
 ### S-002 — Mempool accepts unverified-signature transactions

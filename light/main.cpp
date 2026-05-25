@@ -540,15 +540,16 @@ int cmd_submit_tx(int argc, char** argv) {
     }
     try {
         json tx = read_json_file(tx_path);
-        // The daemon's submit_tx RPC accepts the canonical Transaction
-        // JSON shape with `sig` (not `signature`). Sign-tx emits both so
-        // either keyfile-derived chain works.
+        // The daemon's submit_tx RPC accepts {"tx": <canonical-tx-json>}
+        // per rpc.cpp:226 params.value("tx", ...). Sign-tx emits the
+        // canonical Transaction shape with `sig` (not `signature`); we
+        // wrap it here.
         RpcClient rpc(port);
         if (!rpc.open()) {
             std::cerr << "submit-tx: " << rpc.last_error() << "\n";
             return 1;
         }
-        auto reply = rpc.call("submit_tx", tx);
+        auto reply = rpc.call("submit_tx", {{"tx", tx}});
         std::cout << reply.dump() << "\n";
         return 0;
     } catch (const std::exception& e) {
@@ -609,8 +610,8 @@ int cmd_verify_and_submit(int argc, char** argv) {
         auto signed_tx = sign_light_tx(kf, LightTxType::TRANSFER,
                                          canonical_to, amount, fee,
                                          view.next_nonce);
-        // 5. Submit.
-        auto submit_reply = rpc.call("submit_tx", signed_tx);
+        // 5. Submit (params shape per rpc.cpp:226 is {"tx": <tx-json>}).
+        auto submit_reply = rpc.call("submit_tx", {{"tx", signed_tx}});
         json out = {
             {"verified_at_height", view.height},
             {"verified_nonce",     view.next_nonce},

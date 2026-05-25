@@ -96,12 +96,20 @@ nlohmann::json sign_light_tx(const LightKeyfile& kf,
     // chain stores as `hash` in Transaction::compute_hash.
     Hash tx_hash = determ::crypto::sha256(sb.data(), sb.size());
 
-    // Emit the canonical envelope. We populate BOTH `signature` (the
-    // sign-anon-tx wire shape) AND `sig` (the chain
-    // Transaction::from_json wire shape) so the same envelope round-
-    // trips through submit_tx without rewriting.
+    // Emit the canonical envelope.
+    //
+    // The chain's Transaction::from_json (src/chain/block.cpp:57) reads
+    // `type` as a numeric int and casts to TxType. The light-client
+    // emits `type` AS A NUMBER so the same envelope round-trips through
+    // submit_tx without rewriting. The original `type_name` mnemonic
+    // is preserved as `type_name` for human-readability.
+    //
+    // We populate BOTH `signature` (the sign-anon-tx wire shape) AND
+    // `sig` (the chain Transaction::from_json wire shape) so the same
+    // envelope is interchangeable with wallet-signed envelopes.
     json out = {
-        {"type",      tx_type_name(type)},
+        {"type",      static_cast<int>(type)},
+        {"type_name", tx_type_name(type)},
         {"from",      kf.anon_address},
         {"to",        to_str},
         {"amount",    amount},

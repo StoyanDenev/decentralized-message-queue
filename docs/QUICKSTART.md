@@ -298,7 +298,32 @@ SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 For under-quorum compromise resistance against guardians, use `--scheme opaque`. The development-stub adapter (default today) is offline-grindable from any single compromised guardian; the wallet's `is_stub()` flag reports this and `docs/proofs/WalletRecovery.md` (FA12) documents the bound degradation. Production deployments should wait for **v2.14 — Real OPAQUE wallet recovery** (real `libopaque` integration; tracked in `docs/V2-DESIGN.md`; status gated on the upstream-VLA MSVC porting work in `wallet/PHASE6_PORTING_NOTES.md`).
 
-## 12. Under-quorum merge (R4, EXTENDED mode only)
+## 12. Light-client workflow
+
+The `determ-light` binary is a trust-minimized light-client wallet. Unlike `determ-wallet` (which never talks to a daemon), `determ-light` reads chain state via a daemon's RPC and locally verifies every response against a pinned genesis hash + the committee-signed `state_root`. A malicious or compromised daemon cannot serve fabricated balances, nonces, or chain history to an honest `determ-light` client — the client refuses on hash mismatch.
+
+```bash
+# Step 1: verify the daemon's chain end-to-end against the genesis pin.
+# Anchors genesis, walks every header, checks K-of-K committee sigs.
+./build/Release/determ-light verify-chain \
+  --rpc-port 8771 --genesis genesis.json
+
+# Step 2: read alice's balance trustlessly. The composite cross-checks
+# the daemon's cleartext `account` reply against a Merkle state-proof
+# anchored at the verified state_root.
+./build/Release/determ-light balance-trustless \
+  --rpc-port 8771 --genesis genesis.json --domain alice --json
+
+# Step 3: send a TRANSFER end-to-end with a trustless-fetched nonce.
+# Signs offline with the keyfile, submits via the daemon's RPC.
+./build/Release/determ-light verify-and-submit \
+  --rpc-port 8771 --genesis genesis.json --keyfile alice.json \
+  --to 0xbob... --amount 100 --fee 0
+```
+
+The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `verify-state-proof`, `fetch-headers`, `fetch-state-proof`, `verify-chain`, `balance-trustless`, `nonce-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `version`.
+
+## 13. Under-quorum merge (R4, EXTENDED mode only)
 
 When a regional shard's validator pool drops below 2K, the protocol can absorb it into the modular-next shard's committee. v1.x is operator-driven; v1.1 will auto-detect on the beacon.
 
@@ -333,5 +358,5 @@ See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN
 - `README.md` §18.5 — wallet recovery (A2).
 - `README.md` §19 — formal verification (FA-track + FB-track).
 - `README.md` §17 — explicit non-goals (no smart contracts, no bridges, no oracles).
-- `tools/` — behavioral tests of every protocol feature (209 regression suites; `docs/README.md` has a representative table).
+- `tools/` — behavioral tests of every protocol feature (218 regression suites; `docs/README.md` has a representative table).
 - `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12 + FA-Apply-1..FA-Apply-16 + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest + S007OverflowProtection + S012SnapshotStateRootGate + S031ConcurrencyComposition + S036UnderQuorumMerge + S013PerSignerCap + S020CommitteeSelection + S008BoundedMempool + S027InfoLeakage + S026TcpKeepalive + F2ApplyComposition + S015AsyncSavePersistence + S024EpochBlocks + S009DelayHashRemoval + S025BFTEscalationSoundness + S005PassphraseKeyfile + UnitTestCoverageMap + S014RateLimiterDDOSResistance + S022WireFormatCapsCompleteness + S016InboundReceiptTimeOrdered + S019DAppEndpointSpoof + S023NodeKeyfileEncryption + F2RPCAuthEnvComposition analytic, plus FB1–FB42 TLA+ specs).

@@ -148,6 +148,15 @@ VerifiedChain verify_chain_to_head(
 
         // Per-block committee-sig check.
         for (auto& h : page["headers"]) {
+            // Genesis block (index 0) is the chain seed — by construction
+            // it has zero creator_block_sigs (no committee produced it;
+            // it's the deterministic GenesisConfig→Block transform). The
+            // genesis anchor at line 188 above already cross-checked
+            // block 0's block_hash against compute_genesis_hash, which
+            // is the load-bearing integrity check for genesis. Skip
+            // sig verification on index 0.
+            uint64_t idx = h.value("index", uint64_t{0});
+            if (idx == 0) continue;
             auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
             if (!vbs.ok) {
                 // BFT mode fallback: a BFT-escalated block has at most
@@ -157,7 +166,7 @@ VerifiedChain verify_chain_to_head(
                 if (!vbs.ok) {
                     throw std::runtime_error(
                         "verify-chain: block at index "
-                        + std::to_string(h.value("index", uint64_t{0}))
+                        + std::to_string(idx)
                         + ": " + vbs.detail);
                 }
             }
@@ -207,11 +216,94 @@ AccountView read_account_trustless(
             + proof["error"].dump());
     }
 
-    // 4. Verify the proof against THE HEAD'S state_root (NOT the
-    //    daemon-claimed root inside the proof reply).
-    auto vsp = verify_state_proof(proof, vc.head_state_root);
+    // 4. Verify the proof self-consistently (the proof's Merkle
+    //    siblings must roll up to the claimed state_root).
+    auto vsp = verify_state_proof(proof, {});
     if (!vsp.ok) {
         throw std::runtime_error("trustless-read: " + vsp.detail);
+    }
+
+    // 5. Anchor the proof's claimed state_root to a committee-signed
+    //    header. Because the chain may have advanced during the
+    //    round-trip, the proof's `height` can be > vc.height. We
+    //    fetch the header at proof.height and confirm its state_root
+    //    matches the proof's claimed root. Then we verify that
+    //    header's committee sigs in isolation against the same
+    //    committee seed we used in step 2 — by induction this binds
+    //    the proof to a committee-attested state, even when the
+    //    chain advanced past vc.height during the round-trip.
+    uint64_t proof_height = proof.value("height", uint64_t{0});
+    std::string proof_root = proof.value("state_root", std::string{});
+    if (proof_height < vc.height) {
+        throw std::runtime_error(
+            "trustless-read: proof.height=" + std::to_string(proof_height)
+            + " is BEFORE verified-chain head=" + std::to_string(vc.height)
+            + " — daemon is serving stale state");
+    }
+    if (proof_height > vc.height) {
+        // Build committee-json for the per-header sig check.
+        json committee_json;
+        {
+            json arr = json::array();
+            for (auto& [domain_, pk] : committee_seed) {
+                arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
+            }
+            committee_json = json{{"members", arr}};
+        }
+        // proof.height is the count of applied blocks; the LAST applied
+        // block lives at index proof.height - 1 and its state_root is
+        // the post-apply commitment (block.state_root is "the state
+        // after applying THIS block"). So we anchor the proof root to
+        // the header at index proof.height - 1.
+        uint64_t anchor_index = proof_height - 1;
+        auto pg = rpc.call("headers",
+            {{"from", anchor_index}, {"count", 1}});
+        if (!pg.contains("headers") || !pg["headers"].is_array()
+            || pg["headers"].empty()) {
+            throw std::runtime_error(
+                "trustless-read: cannot fetch header at index="
+                + std::to_string(anchor_index)
+                + " (proof.height=" + std::to_string(proof_height) + ")");
+        }
+        auto& h = pg["headers"][0];
+        std::string hdr_root = h.value("state_root", std::string{});
+        if (hdr_root != proof_root) {
+            throw std::runtime_error(
+                "trustless-read: proof.state_root=" + proof_root
+                + " does not match header[" + std::to_string(anchor_index)
+                + "].state_root=" + hdr_root);
+        }
+        // Verify the committee signed off on this header.
+        auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
+        if (!vbs.ok) {
+            vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
+        }
+        if (!vbs.ok) {
+            throw std::runtime_error(
+                "trustless-read: header[" + std::to_string(anchor_index)
+                + "] committee-sig check failed: " + vbs.detail);
+        }
+        // Also confirm the new header chains to the previously-verified
+        // head via a prev_hash walk — refetch the headers between
+        // vc.height and the anchor for completeness.
+        if (anchor_index >= vc.height) {
+            auto walk = rpc.call("headers",
+                {{"from", vc.height - 1}, {"count", proof_height - vc.height + 2}});
+            auto vh = verify_headers(walk, "", "");
+            if (!vh.ok) {
+                throw std::runtime_error(
+                    "trustless-read: prev_hash walk vc.height→proof.height: "
+                    + vh.detail);
+            }
+        }
+        vc.head_state_root = proof_root;
+        vc.height = proof_height;
+        vc.head_block_hash = h.value("block_hash", std::string{});
+    } else if (proof_root != vc.head_state_root) {
+        throw std::runtime_error(
+            "trustless-read: proof.state_root=" + proof_root
+            + " does not match verified head state_root="
+            + vc.head_state_root);
     }
 
     // 5. Now fetch the cleartext account fields via the daemon's
