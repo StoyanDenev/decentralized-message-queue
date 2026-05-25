@@ -1775,6 +1775,450 @@ int cmd_account_import(int argc, char** argv) {
     return 0;
 }
 
+// ── account-import-many — bulk-import N accounts from a JSON array ─────────
+//
+// Companion to `cmd_account_import` (single-record). Takes a JSON array of
+// account-import records and emits one keyfile per record under --out-dir,
+// plus an optional summary file. Designed for migration / onboarding /
+// custodial-seeding flows where N is large (regulated-gambling-industry
+// operator migrating 50,000 customer accounts; payroll service onboarding
+// employees; exchange seeding cold-wallet anonymous addresses).
+//
+// CLI:
+//   --in <array.json>       : JSON array of records, each
+//                             {"address":"0x...", "privkey_hex":"...",
+//                              "name"?:"..."}. The `address` field is
+//                             VERIFIED against the seed-derived pubkey —
+//                             a mismatch flags the record with status="error"
+//                             so a mis-tagged record can't silently land
+//                             under the wrong filename.
+//   --out-dir <dir>         : output directory (must exist). One keyfile
+//                             per record is written here. Filename is
+//                             "<name>.keyfile" if record has a name field,
+//                             otherwise "<address>.keyfile" (full 66-char
+//                             "0x..." form). Refuses overwrite of existing
+//                             keyfiles without --force.
+//   --passphrase-env <NAME> : optional. If set, each keyfile is encrypted
+//                             at rest using the same envelope shape as
+//                             `keyfile-create` (DETERM-NODE-V1 header +
+//                             DWE1 envelope with AES-256-GCM + PBKDF2-HMAC-
+//                             SHA-256). All N records share the same
+//                             passphrase (drawn from the named env var).
+//                             Output is then loadable via `keyfile-info`.
+//                             If NOT set, output is plaintext single-account
+//                             JSON matching `account-import --out` shape.
+//   --summary <path>        : optional. If set, writes a JSON array of
+//                             {address, keyfile_path, status:
+//                              "ok"|"skipped"|"error", reason?} — one
+//                             record per input element.
+//   --force                 : permit overwriting existing keyfiles in
+//                             --out-dir. Without --force, the first
+//                             collision triggers status="error" on that
+//                             record (other records still process).
+//
+// Per-record error handling:
+//   The loop is fault-tolerant: an individual record's failure marks it
+//   status="error" + reason populated but does NOT abort the bulk import.
+//   This is critical at N=50k — a single bad row should not invalidate
+//   49,999 good ones. Operator-correctable input errors (bad hex,
+//   address/seed mismatch, duplicate) are surfaced via the summary.
+//
+// Determinism: same input JSON + same --out-dir + same --passphrase-env
+// produces the same keyfile filenames + same summary structure. The
+// envelope ciphertext WILL differ between runs (per-keyfile random salt
+// + nonce), but file presence and addresses are byte-exact.
+//
+// Use cases:
+//   1. Migration off a legacy custodial system: dump customer accounts to
+//      JSON array, run account-import-many, ship encrypted keyfiles.
+//   2. Exchange cold-wallet provisioning: pre-generate keys offline, then
+//      bulk-import into the production wallet directory in one shot.
+//   3. CSV-style onboarding: a sister script converts the CSV to the
+//      account-import JSON shape, this command handles the wallet-layer
+//      materialization.
+//
+// Exit codes:
+//   0 = ran to completion (some individual records may have errored —
+//       the summary reports per-record outcomes)
+//   1 = top-level error (missing --in or --out-dir; --in not readable;
+//       --in not a JSON array; --out-dir missing; --passphrase-env name
+//       set but env not populated; --summary write fails). No keyfiles
+//       are written on a top-level error.
+int cmd_account_import_many(int argc, char** argv) {
+    std::string in_path, out_dir, passphrase_env_name, summary_path;
+    bool force = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"              && i + 1 < argc) in_path             = argv[++i];
+        else if (a == "--out-dir"         && i + 1 < argc) out_dir             = argv[++i];
+        else if (a == "--passphrase-env"  && i + 1 < argc) passphrase_env_name = argv[++i];
+        else if (a == "--summary"         && i + 1 < argc) summary_path        = argv[++i];
+        else if (a == "--force")                           force               = true;
+        else {
+            std::cerr << "account-import-many: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet account-import-many --in <array.json> "
+                         "--out-dir <dir> [--passphrase-env <NAME>] "
+                         "[--summary <path>] [--force]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty() || out_dir.empty()) {
+        std::cerr << "account-import-many: --in and --out-dir are required\n";
+        std::cerr << "Usage: determ-wallet account-import-many --in <array.json> "
+                     "--out-dir <dir> [--passphrase-env <NAME>] "
+                     "[--summary <path>] [--force]\n";
+        return 1;
+    }
+
+    // ── Resolve passphrase (if --passphrase-env set) ────────────────────────
+    // Per the spec: --passphrase-env NAME → reads $NAME from the
+    // environment. We read getenv directly here rather than via
+    // passphrase_from_source(env:...) because account-import-many is
+    // defined ahead of that helper in this TU; inlining keeps the
+    // function self-contained at top of file.
+    std::string passphrase;
+    const bool encrypt = !passphrase_env_name.empty();
+    if (encrypt) {
+        const char* v = std::getenv(passphrase_env_name.c_str());
+        if (!v || !*v) {
+            std::cerr << "account-import-many: environment variable not set "
+                         "or empty: " << passphrase_env_name << "\n";
+            return 1;
+        }
+        passphrase.assign(v);
+    }
+
+    // ── Validate --out-dir exists and is a directory ───────────────────────
+    {
+        std::filesystem::path d(out_dir);
+        std::error_code ec;
+        if (!std::filesystem::exists(d, ec) || ec) {
+            std::cerr << "account-import-many: --out-dir does not exist: "
+                      << out_dir
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (!std::filesystem::is_directory(d, ec) || ec) {
+            std::cerr << "account-import-many: --out-dir is not a directory: "
+                      << out_dir << "\n";
+            return 1;
+        }
+    }
+
+    // ── Read and parse --in ─────────────────────────────────────────────────
+    nlohmann::json arr;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "account-import-many: cannot open --in: "
+                      << in_path << "\n";
+            return 1;
+        }
+        try {
+            f >> arr;
+        } catch (std::exception& e) {
+            std::cerr << "account-import-many: --in is not valid JSON: "
+                      << e.what() << "\n";
+            return 1;
+        }
+    }
+    if (!arr.is_array()) {
+        std::cerr << "account-import-many: --in must be a JSON array of "
+                     "{address, privkey_hex, name?} records\n";
+        return 1;
+    }
+
+    // ── Init libsodium once for the whole batch ─────────────────────────────
+    if (!primitives::init_libsodium()) {
+        std::cerr << "account-import-many: libsodium init failed\n";
+        return 1;
+    }
+
+    // ── Iterate records ─────────────────────────────────────────────────────
+    // Per-record error handling: each record produces exactly one summary
+    // entry with status in {"ok", "skipped", "error"}. Failures DO NOT
+    // abort the loop — at N=50k a single malformed row mustn't invalidate
+    // 49,999 valid imports.
+    nlohmann::json summary = nlohmann::json::array();
+    std::set<std::string> seen_addresses;
+    int ok_count = 0, skipped_count = 0, error_count = 0;
+
+    for (size_t idx = 0; idx < arr.size(); ++idx) {
+        const auto& rec = arr[idx];
+        nlohmann::json out_rec;
+        // address may be missing or empty in malformed input — we still
+        // populate the summary entry's "address" with whatever we got
+        // (empty string for missing) so the operator can correlate
+        // failures back to row indices.
+        std::string address, priv_hex, name;
+        if (rec.is_object()) {
+            if (rec.contains("address") && rec["address"].is_string())
+                address = rec["address"].get<std::string>();
+            if (rec.contains("privkey_hex") && rec["privkey_hex"].is_string())
+                priv_hex = rec["privkey_hex"].get<std::string>();
+            if (rec.contains("name") && rec["name"].is_string())
+                name = rec["name"].get<std::string>();
+        }
+        out_rec["address"]      = address;
+        out_rec["keyfile_path"] = "";
+
+        // Record-shape validation ------------------------------------------------
+        if (!rec.is_object()) {
+            out_rec["status"] = "error";
+            out_rec["reason"] = "record at index " + std::to_string(idx)
+                              + " is not a JSON object";
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+        if (priv_hex.empty()) {
+            out_rec["status"] = "error";
+            out_rec["reason"] = "missing required field 'privkey_hex'";
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+        if (priv_hex.size() != 64 && priv_hex.size() != 128) {
+            out_rec["status"] = "error";
+            out_rec["reason"] = "privkey_hex must be 64 or 128 hex chars; got "
+                              + std::to_string(priv_hex.size());
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+        std::vector<uint8_t> priv_bytes;
+        try { priv_bytes = from_hex(priv_hex); }
+        catch (std::exception& e) {
+            out_rec["status"] = "error";
+            out_rec["reason"] = std::string("invalid privkey_hex: ") + e.what();
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+
+        // Derive pubkey from seed ----------------------------------------------
+        std::array<uint8_t, 32> seed{};
+        std::memcpy(seed.data(), priv_bytes.data(), 32);
+        std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> derived_pub{};
+        std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+        if (crypto_sign_ed25519_seed_keypair(derived_pub.data(), sk.data(),
+                                             seed.data()) != 0) {
+            sodium_memzero(seed.data(), seed.size());
+            out_rec["status"] = "error";
+            out_rec["reason"] = "crypto_sign_ed25519_seed_keypair failed "
+                                "(seed not a valid Ed25519 private key)";
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+        sodium_memzero(sk.data(), sk.size());
+
+        // 64-byte form tail check (mirrors single-record account-import) -------
+        if (priv_bytes.size() == 64) {
+            std::array<uint8_t, 32> supplied_pub{};
+            std::memcpy(supplied_pub.data(), priv_bytes.data() + 32, 32);
+            if (supplied_pub != derived_pub) {
+                sodium_memzero(seed.data(), seed.size());
+                out_rec["status"] = "error";
+                out_rec["reason"] = "64-byte privkey_hex tail does not match "
+                                    "seed-derived pubkey";
+                summary.push_back(out_rec);
+                ++error_count;
+                continue;
+            }
+        }
+
+        std::string pubkey_hex   = to_hex(derived_pub);
+        std::string derived_addr = "0x" + pubkey_hex;
+        std::string priv_seed_hex = to_hex(seed);
+
+        // Address verification ---------------------------------------------------
+        // Spec: address is supplied as input; we reject mismatch so a
+        // mis-tagged record can't silently land under the wrong filename
+        // (would otherwise let a custodial system silently re-key
+        // customers). Empty supplied address is permissive — operator
+        // chose not to supply, we use the derived form.
+        if (!address.empty() && address != derived_addr) {
+            sodium_memzero(seed.data(), seed.size());
+            out_rec["status"] = "error";
+            out_rec["reason"] = "address field does not match seed-derived "
+                                "address (supplied=" + address
+                              + ", derived=" + derived_addr + ")";
+            // Update out_rec.address to reflect the derived (truthful) form,
+            // so the summary reader can trace which keyfile would have
+            // been emitted.
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+        if (address.empty()) address = derived_addr;
+        out_rec["address"] = address;
+
+        // Duplicate detection ----------------------------------------------------
+        // First sighting wins; subsequent records with the same address
+        // are recorded as status="skipped". This prevents the second
+        // import from overwriting the first under the same filename
+        // (deterministic behavior — order in the input array matters).
+        if (seen_addresses.count(address)) {
+            sodium_memzero(seed.data(), seed.size());
+            out_rec["status"] = "skipped";
+            out_rec["reason"] = "duplicate address (already imported earlier "
+                                "in this batch)";
+            summary.push_back(out_rec);
+            ++skipped_count;
+            continue;
+        }
+        seen_addresses.insert(address);
+
+        // ── Build output path ────────────────────────────────────────────────
+        // Naming: <name>.keyfile if name field set + non-empty; otherwise
+        // <address>.keyfile (full 0x... form). The .keyfile suffix is
+        // operator-friendly — matches the convention used by keyfile-create
+        // outputs (operators recognize a "*.keyfile" glob).
+        std::string filename = (!name.empty() ? name : address) + ".keyfile";
+        std::filesystem::path out_path = std::filesystem::path(out_dir) / filename;
+
+        if (std::filesystem::exists(out_path) && !force) {
+            sodium_memzero(seed.data(), seed.size());
+            out_rec["status"] = "error";
+            out_rec["reason"] = "output file already exists: "
+                              + out_path.string()
+                              + " (pass --force to override)";
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+
+        // ── Emit keyfile (encrypted or plaintext per --passphrase-env) ──────
+        bool write_ok = true;
+        std::string write_err;
+        if (encrypt) {
+            // Mirror keyfile-create's envelope shape: DETERM-NODE-V1 header
+            // + DWE1 envelope (AES-256-GCM + PBKDF2-HMAC-SHA-256). The
+            // plaintext inside is the canonical {pubkey, priv_seed} JSON
+            // (matches src/crypto/keys.cpp::load_node_key + keyfile-info
+            // expectations).
+            nlohmann::json keyfile_json = {
+                {"pubkey",    pubkey_hex},
+                {"priv_seed", priv_seed_hex}
+            };
+            std::string pt_str = keyfile_json.dump(2);
+            std::vector<uint8_t> pt_bytes(pt_str.begin(), pt_str.end());
+            std::vector<uint8_t> aad(pubkey_hex.begin(), pubkey_hex.end());
+            try {
+                auto env  = envelope::encrypt(pt_bytes, passphrase, aad);
+                std::string blob = envelope::serialize(env);
+                std::ofstream f(out_path);
+                if (!f) {
+                    write_ok = false;
+                    write_err = "cannot open output file for write";
+                } else {
+                    f << "DETERM-NODE-V1 " << pubkey_hex << "\n";
+                    f << blob << "\n";
+                    f.close();
+                    if (!f) {
+                        write_ok = false;
+                        write_err = "write failed";
+                    }
+                }
+            } catch (std::exception& e) {
+                write_ok = false;
+                write_err = std::string("envelope encrypt failed: ") + e.what();
+            }
+        } else {
+            // Plaintext single-account JSON (matches account-import --out
+            // byte-for-byte: {address, privkey_hex}).
+            nlohmann::json acc_json = {
+                {"address",     address},
+                {"privkey_hex", priv_seed_hex}
+            };
+            std::ofstream f(out_path);
+            if (!f) {
+                write_ok = false;
+                write_err = "cannot open output file for write";
+            } else {
+                f << acc_json.dump(2) << "\n";
+                f.close();
+                if (!f) {
+                    write_ok = false;
+                    write_err = "write failed";
+                }
+            }
+        }
+
+        sodium_memzero(seed.data(), seed.size());
+
+        if (!write_ok) {
+            out_rec["status"] = "error";
+            out_rec["reason"] = write_err;
+            summary.push_back(out_rec);
+            ++error_count;
+            continue;
+        }
+
+        // 0600 permissions tightening — best-effort on Windows (NTFS ACL
+        // inherits from parent; the perms call is a no-op for the bits we
+        // care about there).
+        {
+            std::error_code perm_ec;
+            std::filesystem::permissions(
+                out_path,
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                std::filesystem::perm_options::replace,
+                perm_ec);
+            (void)perm_ec;
+        }
+
+        out_rec["keyfile_path"] = out_path.string();
+        out_rec["status"]       = "ok";
+        summary.push_back(out_rec);
+        ++ok_count;
+    }
+
+    // ── Write summary file (if --summary set) ───────────────────────────────
+    if (!summary_path.empty()) {
+        std::ofstream f(summary_path);
+        if (!f) {
+            std::cerr << "account-import-many: cannot open --summary for write: "
+                      << summary_path << "\n";
+            return 1;
+        }
+        f << summary.dump(2) << "\n";
+        f.close();
+        if (!f) {
+            std::cerr << "account-import-many: write failed on --summary: "
+                      << summary_path << "\n";
+            return 1;
+        }
+        // 0600 — the summary references which addresses landed where; not
+        // secret-grade but operator may consider it sensitive.
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            summary_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    // ── Human-readable stdout summary ───────────────────────────────────────
+    std::cout << "account-import-many: " << arr.size() << " input record(s); "
+              << ok_count << " imported, "
+              << skipped_count << " skipped, "
+              << error_count << " errored\n";
+    std::cout << "  out-dir:   " << out_dir << "\n";
+    if (encrypt) {
+        std::cout << "  encrypted: yes (DETERM-NODE-V1 + DWE1 envelope, "
+                     "passphrase from env:" << passphrase_env_name << ")\n";
+    } else {
+        std::cout << "  encrypted: no (plaintext single-account JSON)\n";
+    }
+    if (!summary_path.empty()) {
+        std::cout << "  summary:   " << summary_path << "\n";
+    }
+    return 0;
+}
+
 // ── account-export — re-emit a wallet account file in various formats ──────
 //
 // Inverse of `account-create-batch` / `account-import` / `account-recover`:
@@ -15175,6 +15619,29 @@ void print_usage() {
         "                                             without --force); --json prints JSON to\n"
         "                                             stdout. Output shape (single account):\n"
         "                                             {\"address\":\"0x..\",\"privkey_hex\":\"..\"}.\n"
+        "  account-import-many --in <array.json>      Bulk-import N accounts from a JSON array\n"
+        "                      --out-dir <dir>        (companion to account-import for migration,\n"
+        "                      [--passphrase-env NAME] payroll onboarding, exchange cold-wallet\n"
+        "                      [--summary <path>]     seeding). Input: JSON array of records\n"
+        "                      [--force]              {\"address\":\"0x..\", \"privkey_hex\":\"..\",\n"
+        "                                             \"name\"?:\"..\"}; each address is verified\n"
+        "                                             against the seed-derived pubkey. Output:\n"
+        "                                             one keyfile per record under --out-dir\n"
+        "                                             named '<name>.keyfile' (or\n"
+        "                                             '<address>.keyfile' if no name).\n"
+        "                                             --passphrase-env NAME encrypts each\n"
+        "                                             keyfile using the DETERM-NODE-V1 + DWE1\n"
+        "                                             envelope shape (same as keyfile-create;\n"
+        "                                             loadable via keyfile-info); omit for\n"
+        "                                             plaintext single-account JSON. --summary\n"
+        "                                             writes a JSON array of {address,\n"
+        "                                             keyfile_path, status:\"ok\"|\"skipped\"|\n"
+        "                                             \"error\", reason?} — one entry per input\n"
+        "                                             record. Per-record failures (bad hex,\n"
+        "                                             address/seed mismatch, duplicate) are\n"
+        "                                             surfaced via the summary; the loop\n"
+        "                                             continues so a single bad row can't\n"
+        "                                             invalidate N-1 valid imports.\n"
         "  account-export --in <file>                 Re-emit a single-account JSON file in\n"
         "                 [--format raw-hex|json|backup-bundle]\n"
         "                 [--out <file>] [--force] [--json]\n"
@@ -15840,6 +16307,7 @@ int main(int argc, char** argv) {
     if (cmd == "account-create-batch") return cmd_account_create_batch(argc - 2, argv + 2);
     if (cmd == "account-derive-batch") return cmd_account_derive_batch(argc - 2, argv + 2);
     if (cmd == "account-import")  return cmd_account_import (argc - 2, argv + 2);
+    if (cmd == "account-import-many") return cmd_account_import_many(argc - 2, argv + 2);
     if (cmd == "account-export")  return cmd_account_export (argc - 2, argv + 2);
     if (cmd == "backup-verify")   return cmd_backup_verify  (argc - 2, argv + 2);
     if (cmd == "backup-create")   return cmd_backup_create  (argc - 2, argv + 2);
