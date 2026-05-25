@@ -539,7 +539,7 @@ The single-shard DAPP_CALL apply path explicitly rejects cross-shard recipients 
 
 ### 11.7.1 — DApp upgrade flows: versioned `service_pubkey` rotation with grace period
 
-**Tracking slot:** v2.24 (Theme 7 — DApp upgrade). Effort: ~5-7 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped); v2.25/v2.26 ROTATE_KEY adjacent but independent (DApps use a separate tx).
+**Tracking slot:** v2.24 (Theme 7 — DApp upgrade). Effort: ~5-7 days. Dependencies: v2.18 (DAPP_REGISTER, shipped), v2.19 (DAPP_CALL, shipped); v2.26 ROTATE_KEY adjacent but independent (DApps use a separate tx). Note: v2.25 DSSO is itself a post-v1.0 DApp consumer of this primitive — see `docs/proofs/Improvements.md §8.1` for the substrate→DApp reclassification.
 
 #### Problem statement
 
@@ -2324,7 +2324,7 @@ This design extends Determ to support an application ecosystem WITHOUT becoming 
 
 ## 14. Cross-deployment federation DApp (canonical pattern, v3-deferred ecosystem deliverable)
 
-Federation across multiple Determ deployments — shared identity, federated DSSO, cross-deployment audit, federation governance — is **delivered as a Theme-7 DApp**, not as a protocol feature. The substrate primitives shipped in v2 + Theme 9 + Phase D are sufficient; no protocol-level changes are required.
+Federation across multiple Determ deployments — shared identity, federated DSSO, cross-deployment audit, federation governance — is **delivered as a Theme-7 DApp**, not as a protocol feature. The substrate primitives shipped in v2 + v2.26 (the sole remaining Theme 9 chain-level item after the 2026-05-24 DSSO-as-DApp reclassification) + Phase D are sufficient; no protocol-level changes are required. v2.25 DSSO itself is a peer post-v1.0 DApp (federated DSSO is a federation-of-DSSO-DApps pattern, not a federation of substrate primitives).
 
 **Status: v3-deferred ecosystem deliverable.** Not on the Determ team's protocol roadmap. Documented here as a canonical pattern so that operator consortiums have a reference design when commercial demand surfaces (regulated-vertical multi-jurisdiction deployments, CBDC federations, industry consortium payment rails). Estimated effort: ~1.5-2 months operator-side per federation. Multiple federation DApps can coexist with different governance, audit, and identity-linking policies — the protocol substrate doesn't constrain federation policy.
 
@@ -2332,7 +2332,7 @@ Federation across multiple Determ deployments — shared identity, federated DSS
 - No documented commercial partnership currently demands it
 - Building federations before real deployment partnerships exist risks designing for hypothetical use cases
 - DApp-layer position lets each consortium tailor the federation to their specific regulatory / operational needs
-- Protocol substrate is ready *today* (v2.18 + v2.19 + v2.23 + v2.25 + v2.26 already shipped or spec-resolved); consortiums can build whenever their commercial timing aligns
+- Protocol substrate is ready *today* (v2.18 + v2.19 already shipped; v2.23 + v2.26 spec-resolved); v2.25 DSSO is a peer post-v1.0 DApp rather than substrate (see `docs/proofs/Improvements.md §8.1`), so federation-of-DSSO is a DApp-layer pattern composing DApp-layer pieces. Consortiums can build whenever their commercial timing aligns.
 
 ### 14.1 Motivation
 
