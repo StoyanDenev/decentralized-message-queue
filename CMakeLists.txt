@@ -199,3 +199,46 @@ endif()
 if(UNIX)
   target_link_libraries(determ-wallet PRIVATE pthread)
 endif()
+
+# ── determ-light executable (R39 / robust-gathering-oasis plan) ─────────────
+# Trust-minimized light-client wallet. Talks to a daemon's RPC and verifies
+# every piece of data received (headers, committee sigs, state-proofs) so an
+# honest light-client cannot be tricked even by a malicious daemon. Genesis
+# JSON pins the chain identity on every connection.
+#
+# Dependency footprint: OpenSSL (Ed25519 + SHA-256) + nlohmann/json + BSD
+# sockets (Winsock on Windows). Explicitly NO libsodium, NO asio, NO
+# node/* / producer.cpp / validator.cpp / chain/chain.cpp linkage —
+# reuses the standalone crypto + chain primitives from src/ via an
+# EXPLICIT file list (not glob) so the binary stays small (~3-5 MB
+# stripped) and the linker can't accidentally pull in daemon code.
+add_executable(determ-light
+  light/main.cpp
+  light/rpc_client.cpp
+  light/verify.cpp
+  light/trustless_read.cpp
+  light/keyfile.cpp
+  light/sign_tx.cpp
+  # Reused from src/ (explicit list — no glob):
+  src/crypto/merkle.cpp
+  src/crypto/keys.cpp
+  src/crypto/sha256.cpp
+  src/chain/block.cpp
+  src/chain/genesis.cpp
+)
+target_include_directories(determ-light PRIVATE
+  include
+  light
+  ${openssl_SOURCE_DIR}/include
+)
+target_link_libraries(determ-light PRIVATE
+  ssl
+  crypto
+  nlohmann_json::nlohmann_json
+)
+if(WIN32)
+  target_link_libraries(determ-light PRIVATE ws2_32 crypt32)
+endif()
+if(UNIX)
+  target_link_libraries(determ-light PRIVATE pthread)
+endif()
