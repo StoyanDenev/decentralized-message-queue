@@ -8678,6 +8678,753 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     return 0;
 }
 
+// ── tx-batch-sign — batch-mode offline signing for payroll / airdrop /
+//    settlement operators (A2 round 1) ─────────────────────────────────────
+//
+// Use case: operators with many small payouts (payroll, airdrop batches,
+// gambling-industry settlement) need to sign N TRANSFER/STAKE/UNSTAKE txs
+// efficiently. Doing N invocations of `tx-sign-verify` is slow (process
+// spawn overhead). tx-batch-sign reads a JSON array of tx-input records
+// and emits a parallel array of signed envelopes — one process, N
+// signatures.
+//
+// CLI:
+//   --keyfile <path>          : required; account keyfile. Accepts the same
+//                               TWO PLAINTEXT shapes that sign-anon-tx does
+//                               (canonical wallet {address, privkey_hex} OR
+//                               alternate {ed_priv_hex, ed_pub_hex,
+//                               anon_address}) AND the canonical encrypted
+//                               DETERM-NODE-V1 form produced by keyfile-
+//                               create. The format is auto-detected by
+//                               sniffing the first line.
+//   --in  <path>              : required; JSON file with a top-level array
+//                               of tx-input records:
+//                                 [{"type":"TRANSFER"|"STAKE"|"UNSTAKE",
+//                                   "from":"...", "to":"...",
+//                                   "amount":N, "fee":N, "nonce":N}, ...]
+//                               Empty array is permitted (yields empty
+//                               output).
+//   --out <path>              : required; JSON file written as a top-level
+//                               array of N signed envelopes, in INPUT
+//                               ORDER. Each envelope matches
+//                               Transaction::to_json shape (numeric type,
+//                               from, to, amount, fee, nonce, payload, sig,
+//                               hash).
+//   --passphrase-env <NAME>   : optional; required iff --keyfile points at
+//                               an encrypted DETERM-NODE-V1 keyfile. Reads
+//                               the passphrase from environment variable
+//                               <NAME>. Convenience alias for
+//                               --passphrase-from env:<NAME>.
+//   --passphrase-from <spec>  : optional alternate form; same semantics as
+//                               keyfile-decrypt (file:<path> / env:<NAME> /
+//                               prompt). Either --passphrase-env or
+//                               --passphrase-from may be supplied; if both
+//                               are present, --passphrase-from wins.
+//   --force                   : permit overwriting an existing --out file.
+//                               Default: refuse (mirrors cold-sign).
+//
+// Per-record validation rules:
+//   * type is "TRANSFER" (TxType=0), "STAKE" (TxType=3), or "UNSTAKE"
+//     (TxType=4). Any other value → exit 1 with field name + index.
+//   * from must equal the keyfile's anon address (S-028 lowercase). The
+//     batch must be homogeneous — all txs from the SAME signer. Per-record
+//     `from` mismatch → exit 1.
+//   * to must be a string (anon-shape canonical lowercase OR domain
+//     name OR empty for STAKE / UNSTAKE — those types ignore `to` but the
+//     chain still encodes it in signing_bytes, so whatever the operator
+//     supplied is bound into the signature).
+//   * amount/fee/nonce must be non-negative integers. For TRANSFER,
+//     amount must be > 0 (chain rule).
+//   * payload is not exposed in the input shape — every batch record is
+//     a "small payment" tx with payload = empty. (Operators needing
+//     payload-bearing signs should use cold-sign or sign-anon-tx.)
+//
+// Output envelope:
+//   {"type": <int>, "from": "...", "to": "...", "amount": N, "fee": N,
+//    "nonce": N, "payload": "", "sig": "<128 hex>", "hash": "<64 hex>"}
+//
+// `type` is the numeric TxType per Transaction::to_json (NOT the upper-
+// case mnemonic sign-anon-tx emits) — the agent task spec explicitly
+// asks for "matching Transaction::to_json shape". `payload` is always
+// the empty hex string for this command. `sig` is 64-byte Ed25519
+// detached signature over the same canonical signing_bytes the chain
+// builds (src/chain/block.cpp Transaction::signing_bytes). `hash` is
+// SHA-256(signing_bytes), same as Transaction::compute_hash.
+//
+// Determinism: same input + same keyfile → byte-identical output array.
+// Ed25519 is deterministic (RFC 8032), JSON dump order is stable
+// (nlohmann::json preserves insertion order for ordered_map by default,
+// but we use the default unordered_map → sorted keys; either way the
+// dump is byte-stable for a given key-set).
+//
+// Exit codes:
+//   0 — N signatures written (including N == 0)
+//   1 — args / IO / keyfile-shape / per-record validation error
+//   2 — cryptographic failure (libsodium init / keygen / sign / decrypt)
+int cmd_tx_batch_sign(int argc, char** argv) {
+    std::string keyfile_path, in_path, out_path;
+    std::string passphrase_env_name;
+    std::string passphrase_from_spec;
+    bool force = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--keyfile"         && i + 1 < argc) keyfile_path        = argv[++i];
+        else if (a == "--in"              && i + 1 < argc) in_path             = argv[++i];
+        else if (a == "--out"             && i + 1 < argc) out_path            = argv[++i];
+        else if (a == "--passphrase-env"  && i + 1 < argc) passphrase_env_name = argv[++i];
+        else if (a == "--passphrase-from" && i + 1 < argc) passphrase_from_spec = argv[++i];
+        else if (a == "--force")                           force               = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet tx-batch-sign --keyfile <path> "
+                "--in <json-array> --out <json-array>\n"
+                "                                  [--passphrase-env "
+                "<ENV_VAR_NAME>]\n"
+                "                                  [--passphrase-from "
+                "<file:path|env:NAME|prompt>]\n"
+                "                                  [--force]\n"
+                "\n"
+                "  Offline batch signing for payroll / airdrop / settlement\n"
+                "  operators. Reads a JSON array of TRANSFER / STAKE / UNSTAKE\n"
+                "  tx-input records and emits a parallel JSON array of signed\n"
+                "  envelopes — one process invocation, N signatures.\n"
+                "\n"
+                "  Per-record input shape:\n"
+                "    {\"type\":\"TRANSFER\"|\"STAKE\"|\"UNSTAKE\",\n"
+                "     \"from\":\"0x...\", \"to\":\"...\",\n"
+                "     \"amount\":N, \"fee\":N, \"nonce\":N}\n"
+                "\n"
+                "  Per-record output shape (matches Transaction::to_json):\n"
+                "    {\"type\":<int>, \"from\":\"0x...\", \"to\":\"...\",\n"
+                "     \"amount\":N, \"fee\":N, \"nonce\":N, \"payload\":\"\",\n"
+                "     \"sig\":\"<128 hex>\", \"hash\":\"<64 hex>\"}\n"
+                "\n"
+                "  Keyfile shapes accepted:\n"
+                "    plaintext canonical    {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
+                "    plaintext alternate    {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\",\n"
+                "                            \"anon_address\":\"0x...\"}\n"
+                "    encrypted              DETERM-NODE-V1 header + DWE1 blob\n"
+                "                           (requires --passphrase-env or\n"
+                "                            --passphrase-from)\n"
+                "\n"
+                "  Determinism: same input + same keyfile → byte-identical\n"
+                "  output (Ed25519 RFC 8032 is deterministic).\n"
+                "\n"
+                "  Empty input array → empty output array (exit 0).\n"
+                "\n"
+                "  Exit: 0 N signatures written, 1 args/IO/validation error,\n"
+                "  2 cryptographic failure.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "tx-batch-sign: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet tx-batch-sign --keyfile <path> "
+                         "--in <json-array> --out <json-array> "
+                         "[--passphrase-env <NAME>] [--force]\n";
+            return 1;
+        }
+    }
+    if (keyfile_path.empty() || in_path.empty() || out_path.empty()) {
+        std::cerr << "Usage: determ-wallet tx-batch-sign --keyfile <path> "
+                     "--in <json-array> --out <json-array> "
+                     "[--passphrase-env <NAME>] [--force]\n"
+                     "  (--keyfile / --in / --out are all required)\n";
+        return 1;
+    }
+
+    // ── Read + parse --in as a JSON array ────────────────────────────────
+    nlohmann::json in_j;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "tx-batch-sign: cannot open --in: " << in_path << "\n";
+            return 1;
+        }
+        try { f >> in_j; }
+        catch (std::exception& e) {
+            std::cerr << "tx-batch-sign: --in is not valid JSON: "
+                      << e.what() << "\n";
+            return 1;
+        }
+    }
+    if (!in_j.is_array()) {
+        std::cerr << "tx-batch-sign: --in must be a top-level JSON array "
+                     "(got "
+                  << (in_j.is_object() ? "object" : "non-array scalar")
+                  << ")\n";
+        return 1;
+    }
+
+    // ── --out preconditions (check BEFORE loading the priv keyfile so a
+    //    misconfigured operator doesn't read secret material before
+    //    hitting the refusal) ─────────────────────────────────────────────
+    {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "tx-batch-sign: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "tx-batch-sign: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to "
+                         "override)\n";
+            return 1;
+        }
+    }
+
+    // ── Load the keyfile — auto-detect plaintext vs encrypted ──────────────
+    // Sniff line 1: encrypted DETERM-NODE-V1 keyfiles start with the magic
+    // header "DETERM-NODE-V1 <pubkey_hex>". Plaintext JSON keyfiles start
+    // with '{'. Anything else is a structural error.
+    std::string keyfile_first_line;
+    {
+        std::ifstream kf(keyfile_path);
+        if (!kf) {
+            std::cerr << "tx-batch-sign: cannot open --keyfile: "
+                      << keyfile_path << "\n";
+            return 1;
+        }
+        if (!std::getline(kf, keyfile_first_line)) {
+            std::cerr << "tx-batch-sign: --keyfile is empty: "
+                      << keyfile_path << "\n";
+            return 1;
+        }
+        while (!keyfile_first_line.empty()
+               && (keyfile_first_line.back() == '\r'
+                   || keyfile_first_line.back() == '\n')) {
+            keyfile_first_line.pop_back();
+        }
+    }
+
+    const std::string node_v1_magic = "DETERM-NODE-V1 ";
+    const bool is_encrypted_keyfile =
+        (keyfile_first_line.rfind(node_v1_magic, 0) == 0);
+
+    std::string keyfile_address;
+    std::vector<uint8_t> priv_seed;
+    std::string priv_seed_hex_holder;  // owns the buffer if from encrypted path
+
+    if (is_encrypted_keyfile) {
+        // ── Encrypted DETERM-NODE-V1 path ────────────────────────────────
+        // Need a passphrase. Either --passphrase-env or --passphrase-from
+        // must be supplied. If both are present, --passphrase-from wins
+        // (it's the more expressive form — file:/env:/prompt — and an
+        // operator passing both explicitly probably wants the file:/prompt
+        // override).
+        std::string pass_src;
+        if (!passphrase_from_spec.empty()) {
+            pass_src = passphrase_from_spec;
+        } else if (!passphrase_env_name.empty()) {
+            pass_src = "env:" + passphrase_env_name;
+        } else {
+            std::cerr << "tx-batch-sign: --keyfile is encrypted (DETERM-"
+                         "NODE-V1) but no passphrase source supplied\n"
+                         "  (pass --passphrase-env <ENV_VAR_NAME> or "
+                         "--passphrase-from <spec>)\n";
+            return 1;
+        }
+
+        // Read header pubkey and blob line.
+        std::string header_pubkey_hex =
+            keyfile_first_line.substr(node_v1_magic.size());
+        if (header_pubkey_hex.size() != 64) {
+            std::cerr << "tx-batch-sign: --keyfile header pubkey must be 64 "
+                         "hex chars; got " << header_pubkey_hex.size()
+                      << "\n";
+            return 1;
+        }
+        try { (void)from_hex(header_pubkey_hex); }
+        catch (std::exception& e) {
+            std::cerr << "tx-batch-sign: --keyfile header pubkey is not "
+                         "valid hex: " << e.what() << "\n";
+            return 1;
+        }
+
+        std::string blob_line;
+        {
+            // Re-open and skip first line — std::getline beats split-on-
+            // newline for portability across CRLF/LF mixes.
+            std::ifstream kf(keyfile_path);
+            std::string skip;
+            std::getline(kf, skip);
+            if (!std::getline(kf, blob_line)) {
+                std::cerr << "tx-batch-sign: --keyfile encrypted format "
+                             "missing blob line (expected 2-line: header + "
+                             "blob)\n";
+                return 1;
+            }
+            while (!blob_line.empty()
+                   && (blob_line.back() == '\r' || blob_line.back() == '\n')) {
+                blob_line.pop_back();
+            }
+        }
+        if (blob_line.empty()) {
+            std::cerr << "tx-batch-sign: --keyfile encrypted blob line "
+                         "is empty\n";
+            return 1;
+        }
+
+        std::string err;
+        std::string passphrase = passphrase_from_source(pass_src, err);
+        if (passphrase.empty()) {
+            std::cerr << "tx-batch-sign: " << err << "\n";
+            return 1;
+        }
+
+        auto env_opt = envelope::deserialize(blob_line);
+        if (!env_opt) {
+            std::cerr << "tx-batch-sign: --keyfile blob is malformed "
+                         "(not a valid DWE1 envelope)\n";
+            return 1;
+        }
+        std::vector<uint8_t> aad(header_pubkey_hex.begin(),
+                                  header_pubkey_hex.end());
+        auto pt_opt = envelope::decrypt(*env_opt, passphrase, aad);
+        // Scrub passphrase ASAP — past this point we only need the plaintext
+        // priv_seed.
+        sodium_memzero(passphrase.data(), passphrase.size());
+        if (!pt_opt) {
+            std::cerr << "tx-batch-sign: wrong passphrase or corrupted "
+                         "keyfile\n";
+            return 2;
+        }
+        std::string pt_str(pt_opt->begin(), pt_opt->end());
+        // Scrub the optional plaintext buffer; nlohmann will copy the
+        // string contents into its own structures below.
+        sodium_memzero(pt_opt->data(), pt_opt->size());
+        nlohmann::json keyfile_json;
+        try { keyfile_json = nlohmann::json::parse(pt_str); }
+        catch (std::exception& e) {
+            sodium_memzero(pt_str.data(), pt_str.size());
+            std::cerr << "tx-batch-sign: decrypted keyfile plaintext is "
+                         "not valid JSON: " << e.what() << "\n";
+            return 1;
+        }
+        sodium_memzero(pt_str.data(), pt_str.size());
+        if (!keyfile_json.is_object()
+            || !keyfile_json.contains("pubkey")
+            || !keyfile_json.contains("priv_seed")
+            || !keyfile_json["pubkey"].is_string()
+            || !keyfile_json["priv_seed"].is_string()) {
+            std::cerr << "tx-batch-sign: decrypted keyfile is missing "
+                         "'pubkey' or 'priv_seed' fields\n";
+            return 1;
+        }
+        std::string inner_pubkey_hex =
+            keyfile_json["pubkey"].get<std::string>();
+        priv_seed_hex_holder =
+            keyfile_json["priv_seed"].get<std::string>();
+        if (inner_pubkey_hex != header_pubkey_hex) {
+            std::cerr << "tx-batch-sign: decrypted keyfile inner pubkey "
+                         "does not match header pubkey (corrupt or non-"
+                         "canonical encrypted keyfile)\n";
+            return 1;
+        }
+        if (priv_seed_hex_holder.size() != 64) {
+            std::cerr << "tx-batch-sign: decrypted 'priv_seed' must be 64 "
+                         "hex chars; got " << priv_seed_hex_holder.size()
+                      << "\n";
+            return 1;
+        }
+        try { priv_seed = from_hex(priv_seed_hex_holder); }
+        catch (std::exception& e) {
+            std::cerr << "tx-batch-sign: decrypted 'priv_seed' is not "
+                         "valid hex: " << e.what() << "\n";
+            return 1;
+        }
+        if (priv_seed.size() != 32) {
+            std::cerr << "tx-batch-sign: decrypted 'priv_seed' decoded "
+                         "length must be 32; got " << priv_seed.size()
+                      << "\n";
+            return 1;
+        }
+        keyfile_address = "0x" + inner_pubkey_hex;
+        // Defensive: keyfile addresses derived from DETERM-NODE-V1 should
+        // already be lowercase (the validator's keyfile-create path emits
+        // lowercase pubkey hex), but the field could have been tampered
+        // with off-line. Normalize to lowercase for the canonical-form
+        // check below.
+        for (auto& c : keyfile_address) {
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+        }
+    } else {
+        // ── Plaintext path (canonical or alternate shape) ────────────────
+        // Re-open and parse as JSON. Same two-shape acceptance as
+        // sign-anon-tx — keep the parsing inline here rather than DRY'ing
+        // into a shared helper, mirroring the cmd_tx_sign_verify / cold-sign
+        // / sign-anon-tx convention.
+        std::ifstream kf(keyfile_path);
+        if (!kf) {
+            std::cerr << "tx-batch-sign: cannot re-open --keyfile: "
+                      << keyfile_path << "\n";
+            return 1;
+        }
+        nlohmann::json acc_doc;
+        try { kf >> acc_doc; }
+        catch (std::exception& e) {
+            std::cerr << "tx-batch-sign: --keyfile is not valid JSON: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (!acc_doc.is_object()) {
+            std::cerr << "tx-batch-sign: --keyfile must be a JSON object "
+                         "(plaintext) or DETERM-NODE-V1 file (encrypted)\n";
+            return 1;
+        }
+        std::string priv_hex, pub_hex_hint;
+        if (acc_doc.contains("address") && acc_doc["address"].is_string()
+            && acc_doc.contains("privkey_hex")
+            && acc_doc["privkey_hex"].is_string()) {
+            keyfile_address = acc_doc["address"].get<std::string>();
+            priv_hex        = acc_doc["privkey_hex"].get<std::string>();
+        } else if (acc_doc.contains("anon_address")
+                   && acc_doc["anon_address"].is_string()
+                   && acc_doc.contains("ed_priv_hex")
+                   && acc_doc["ed_priv_hex"].is_string()) {
+            keyfile_address = acc_doc["anon_address"].get<std::string>();
+            priv_hex        = acc_doc["ed_priv_hex"].get<std::string>();
+            if (acc_doc.contains("ed_pub_hex")
+                && acc_doc["ed_pub_hex"].is_string()) {
+                pub_hex_hint = acc_doc["ed_pub_hex"].get<std::string>();
+            }
+        } else {
+            std::cerr << "tx-batch-sign: --keyfile shape error: expected "
+                         "either\n"
+                         "  {\"address\":\"0x...\",\"privkey_hex\":\"...\"}\n"
+                         "  or\n"
+                         "  {\"ed_priv_hex\":\"...\",\"ed_pub_hex\":\"...\","
+                         "\"anon_address\":\"0x...\"}\n";
+            return 1;
+        }
+        if (priv_hex.size() != 64) {
+            std::cerr << "tx-batch-sign: keyfile priv must be 64 hex chars; "
+                         "got length " << priv_hex.size() << "\n";
+            return 1;
+        }
+        try { priv_seed = from_hex(priv_hex); }
+        catch (std::exception& e) {
+            std::cerr << "tx-batch-sign: keyfile priv is not valid hex: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (priv_seed.size() != 32) {
+            std::cerr << "tx-batch-sign: keyfile priv decoded length must "
+                         "be 32; got " << priv_seed.size() << "\n";
+            return 1;
+        }
+        (void)pub_hex_hint;  // cross-check happens against derived_addr below.
+    }
+
+    // Validate the keyfile address is canonical lowercase 0x+64-hex (S-028).
+    {
+        auto is_anon_shape_local = [](const std::string& s) -> bool {
+            if (s.size() != 66) return false;
+            if (s[0] != '0' || s[1] != 'x') return false;
+            for (size_t i = 2; i < s.size(); ++i) {
+                char c = s[i];
+                bool ok = (c >= '0' && c <= '9')
+                       || (c >= 'a' && c <= 'f')
+                       || (c >= 'A' && c <= 'F');
+                if (!ok) return false;
+            }
+            return true;
+        };
+        auto is_canonical_anon_local = [&](const std::string& s) -> bool {
+            if (!is_anon_shape_local(s)) return false;
+            for (size_t i = 2; i < s.size(); ++i) {
+                char c = s[i];
+                if (c >= 'A' && c <= 'F') return false;
+            }
+            return true;
+        };
+        if (!is_canonical_anon_local(keyfile_address)) {
+            sodium_memzero(priv_seed.data(), priv_seed.size());
+            if (!priv_seed_hex_holder.empty()) {
+                sodium_memzero(priv_seed_hex_holder.data(),
+                                priv_seed_hex_holder.size());
+            }
+            std::cerr << "tx-batch-sign: --keyfile address is not canonical "
+                         "lowercase 0x+64-hex (S-028); got '"
+                      << keyfile_address << "'\n";
+            return 1;
+        }
+    }
+
+    // ── Derive pubkey + verify address-vs-derivation ──────────────────────
+    if (!primitives::init_libsodium()) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        if (!priv_seed_hex_holder.empty()) {
+            sodium_memzero(priv_seed_hex_holder.data(),
+                            priv_seed_hex_holder.size());
+        }
+        std::cerr << "tx-batch-sign: libsodium init failed\n";
+        return 2;
+    }
+    std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
+    std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
+    if (crypto_sign_seed_keypair(pub.data(), sk.data(),
+                                  priv_seed.data()) != 0) {
+        sodium_memzero(priv_seed.data(), priv_seed.size());
+        sodium_memzero(sk.data(), sk.size());
+        if (!priv_seed_hex_holder.empty()) {
+            sodium_memzero(priv_seed_hex_holder.data(),
+                            priv_seed_hex_holder.size());
+        }
+        std::cerr << "tx-batch-sign: crypto_sign_seed_keypair failed\n";
+        return 2;
+    }
+    sodium_memzero(priv_seed.data(), priv_seed.size());
+    if (!priv_seed_hex_holder.empty()) {
+        sodium_memzero(priv_seed_hex_holder.data(),
+                        priv_seed_hex_holder.size());
+    }
+
+    std::string derived_addr = "0x" + to_hex(pub);
+    if (derived_addr != keyfile_address) {
+        sodium_memzero(sk.data(), sk.size());
+        std::cerr << "tx-batch-sign: --keyfile address mismatch: keyfile="
+                  << keyfile_address << " derived-from-priv=" << derived_addr
+                  << "\n  (keyfile is corrupt or wrong shape — address "
+                     "must match Ed25519 pubkey of the priv seed per "
+                     "S-028)\n";
+        return 1;
+    }
+
+    // ── Per-record signing loop ───────────────────────────────────────────
+    // Build the output array in INPUT ORDER. Any per-record validation
+    // failure scrubs the secret key and aborts (no partial output —
+    // either every record signs or none does; the operator can fix the
+    // bad record and re-run).
+    auto type_mnemonic_to_int = [](const std::string& s) -> int {
+        if (s == "TRANSFER") return 0;
+        if (s == "STAKE")    return 3;
+        if (s == "UNSTAKE")  return 4;
+        return -1;
+    };
+
+    nlohmann::json out_arr = nlohmann::json::array();
+    const size_t N = in_j.size();
+    for (size_t idx = 0; idx < N; ++idx) {
+        const auto& rec = in_j[idx];
+        if (!rec.is_object()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] is not a JSON object\n";
+            return 1;
+        }
+        // Required fields per spec: type/from/to/amount/fee/nonce.
+        if (!rec.contains("type") || !rec["type"].is_string()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] missing or wrong-typed 'type' "
+                         "(expected string mnemonic)\n";
+            return 1;
+        }
+        if (!rec.contains("from") || !rec["from"].is_string()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] missing or wrong-typed 'from' "
+                         "(expected string)\n";
+            return 1;
+        }
+        if (!rec.contains("to") || !rec["to"].is_string()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] missing or wrong-typed 'to' "
+                         "(expected string)\n";
+            return 1;
+        }
+        if (!rec.contains("amount") || !rec["amount"].is_number()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] missing or wrong-typed 'amount' "
+                         "(expected non-negative integer)\n";
+            return 1;
+        }
+        if (!rec.contains("fee") || !rec["fee"].is_number()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] missing or wrong-typed 'fee' "
+                         "(expected non-negative integer)\n";
+            return 1;
+        }
+        if (!rec.contains("nonce") || !rec["nonce"].is_number()) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] missing or wrong-typed 'nonce' "
+                         "(expected non-negative integer)\n";
+            return 1;
+        }
+
+        const std::string type_str = rec["type"].get<std::string>();
+        const int tx_type_int = type_mnemonic_to_int(type_str);
+        if (tx_type_int < 0) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] unsupported 'type' '" << type_str
+                      << "' (expected TRANSFER / STAKE / UNSTAKE)\n";
+            return 1;
+        }
+        const std::string from_str = rec["from"].get<std::string>();
+        const std::string to_str   = rec["to"].get<std::string>();
+        // Negative-int guard: nlohmann is_number() returns true for
+        // signed-negative; we want u64 semantics. Reject negatives with a
+        // clean diagnostic rather than silently underflowing.
+        if (rec["amount"].is_number_integer()
+            && !rec["amount"].is_number_unsigned()
+            && rec["amount"].get<int64_t>() < 0) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] 'amount' must be non-negative; got "
+                      << rec["amount"].get<int64_t>() << "\n";
+            return 1;
+        }
+        if (rec["fee"].is_number_integer()
+            && !rec["fee"].is_number_unsigned()
+            && rec["fee"].get<int64_t>() < 0) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] 'fee' must be non-negative; got "
+                      << rec["fee"].get<int64_t>() << "\n";
+            return 1;
+        }
+        if (rec["nonce"].is_number_integer()
+            && !rec["nonce"].is_number_unsigned()
+            && rec["nonce"].get<int64_t>() < 0) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] 'nonce' must be non-negative; got "
+                      << rec["nonce"].get<int64_t>() << "\n";
+            return 1;
+        }
+        const uint64_t amount = rec["amount"].is_number_unsigned()
+            ? rec["amount"].get<uint64_t>()
+            : static_cast<uint64_t>(rec["amount"].get<int64_t>());
+        const uint64_t fee = rec["fee"].is_number_unsigned()
+            ? rec["fee"].get<uint64_t>()
+            : static_cast<uint64_t>(rec["fee"].get<int64_t>());
+        const uint64_t nonce = rec["nonce"].is_number_unsigned()
+            ? rec["nonce"].get<uint64_t>()
+            : static_cast<uint64_t>(rec["nonce"].get<int64_t>());
+
+        // TRANSFER amount > 0 (chain rule).
+        if (tx_type_int == 0 && amount == 0) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] TRANSFER amount must be > 0 (chain rule)\n";
+            return 1;
+        }
+
+        // Per-record `from` must match the keyfile address — homogeneous
+        // batches only. If an operator wants to sign txs from multiple
+        // accounts, they run this command once per keyfile.
+        if (from_str != keyfile_address) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: input[" << idx
+                      << "] 'from' (" << from_str
+                      << ") does not match --keyfile address ("
+                      << keyfile_address << ")\n"
+                         "  (batches must be homogeneous — all txs from "
+                         "the same signer)\n";
+            return 1;
+        }
+
+        // ── Build canonical signing_bytes — byte-identical to
+        //    src/chain/block.cpp Transaction::signing_bytes ──────────────
+        std::vector<uint8_t> sb;
+        sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24);
+        sb.push_back(static_cast<uint8_t>(tx_type_int));
+        sb.insert(sb.end(), from_str.begin(), from_str.end());
+        sb.push_back(0);
+        sb.insert(sb.end(), to_str.begin(), to_str.end());
+        sb.push_back(0);
+        for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+        for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+        for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+        // payload = empty for batch-mode txs (small payments). The chain's
+        // signing_bytes appends payload bytes here — empty contributes
+        // nothing, so we skip the insert.
+
+        std::array<uint8_t, 32> sb_sha{};
+        SHA256(sb.data(), sb.size(), sb_sha.data());
+
+        // ── Ed25519 sign over signing_bytes ──────────────────────────────
+        std::array<uint8_t, crypto_sign_BYTES> sig{};
+        unsigned long long sig_len = 0;
+        if (crypto_sign_detached(sig.data(), &sig_len,
+                                  sb.data(), sb.size(),
+                                  sk.data()) != 0) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: crypto_sign_detached failed at "
+                         "input[" << idx << "]\n";
+            return 2;
+        }
+        if (sig_len != crypto_sign_BYTES) {
+            sodium_memzero(sk.data(), sk.size());
+            std::cerr << "tx-batch-sign: unexpected sig length " << sig_len
+                      << " at input[" << idx << "]\n";
+            return 2;
+        }
+
+        // Output envelope — Transaction::to_json shape (numeric type,
+        // `sig` field name, `hash` field, empty `payload`).
+        nlohmann::json envj = {
+            {"type",    tx_type_int},
+            {"from",    from_str},
+            {"to",      to_str},
+            {"amount",  amount},
+            {"fee",     fee},
+            {"nonce",   nonce},
+            {"payload", ""},
+            {"sig",     to_hex(sig)},
+            {"hash",    to_hex(sb_sha)},
+        };
+        out_arr.push_back(std::move(envj));
+    }
+    // All sigs done — scrub the secret key.
+    sodium_memzero(sk.data(), sk.size());
+
+    // ── Write --out ───────────────────────────────────────────────────────
+    // Use compact dump (no whitespace) so the file is byte-stable across
+    // runs (matches the determinism contract). Operators wanting a
+    // pretty-printed copy can pipe through `jq` after the fact.
+    const std::string out_text = out_arr.dump();
+    {
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "tx-batch-sign: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << out_text << "\n";
+        if (!of) {
+            std::cerr << "tx-batch-sign: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+    // 0600 — owner-only read/write (POSIX semantic; Windows ACL inherits).
+    std::error_code perm_ec;
+    std::filesystem::permissions(
+        out_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        perm_ec);
+    (void)perm_ec;
+
+    nlohmann::json status = {
+        {"status", "ok"},
+        {"count",  N},
+        {"out",    out_path},
+    };
+    std::cout << status.dump() << "\n";
+    return 0;
+}
+
 // ── RPC socket helpers (used by cmd_validate_tx --rpc-port AND by
 //    cmd_anon_batch_balance / cmd_bulk_send below). Originally lived near
 //    cmd_anon_batch_balance (first consumer); promoted here so the
@@ -15468,6 +16215,41 @@ void print_usage() {
         "                                             payload:\"\",signature,hash}. Exit 0 signed,\n"
         "                                             1 args/keyfile/validation error, 2 crypto\n"
         "                                             failure.\n"
+        "  tx-batch-sign --keyfile <path> --in <json-array> --out <json-array>\n"
+        "                [--passphrase-env <NAME>]\n"
+        "                [--passphrase-from <file:path|env:NAME|prompt>]\n"
+        "                [--force]\n"
+        "                                             OFFLINE batch signing for payroll / airdrop\n"
+        "                                             / settlement operators. Reads a JSON array\n"
+        "                                             of TRANSFER / STAKE / UNSTAKE tx-input records\n"
+        "                                             ({type:\"TRANSFER\"|\"STAKE\"|\"UNSTAKE\", from,\n"
+        "                                             to, amount, fee, nonce}) and emits a parallel\n"
+        "                                             JSON array of signed envelopes matching\n"
+        "                                             Transaction::to_json shape ({type:<int>, from,\n"
+        "                                             to, amount, fee, nonce, payload:\"\", sig,\n"
+        "                                             hash}) — one process invocation, N\n"
+        "                                             signatures, no per-tx subprocess spawn cost.\n"
+        "                                             Use cases: payroll, airdrop batches, gambling-\n"
+        "                                             industry settlement. --keyfile accepts the\n"
+        "                                             same two plaintext shapes sign-anon-tx does\n"
+        "                                             ({address,privkey_hex} OR {ed_priv_hex,\n"
+        "                                             ed_pub_hex, anon_address}) AND the canonical\n"
+        "                                             encrypted DETERM-NODE-V1 form (auto-\n"
+        "                                             detected). Encrypted keyfiles require\n"
+        "                                             --passphrase-env <NAME> or --passphrase-from\n"
+        "                                             <spec>. Batches must be homogeneous — every\n"
+        "                                             input.from must equal --keyfile address.\n"
+        "                                             Empty input array → empty output array (exit\n"
+        "                                             0). Output is written byte-stably (Ed25519 is\n"
+        "                                             deterministic; nlohmann::json dump order is\n"
+        "                                             stable for a given key-set) so same input +\n"
+        "                                             same keyfile → identical output. --out file\n"
+        "                                             is 0600 on POSIX; refuses to overwrite\n"
+        "                                             without --force. Status line on stdout:\n"
+        "                                             {status:ok, count:N, out}. Exit 0 N sigs\n"
+        "                                             written, 1 args/IO/validation error, 2\n"
+        "                                             crypto failure (libsodium init / decrypt /\n"
+        "                                             sign).\n"
         "  validate-tx --tx-json <file|->             OFFLINE validation of an already-signed tx\n"
         "              [--strict] [--rpc-port <N>] [--json]\n"
         "                                             envelope. Performs (a) JSON shape +\n"
@@ -15859,6 +16641,7 @@ int main(int argc, char** argv) {
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
+    if (cmd == "tx-batch-sign")   return cmd_tx_batch_sign  (argc - 2, argv + 2);
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
