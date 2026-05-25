@@ -288,6 +288,13 @@ In-process tests (deterministic, no network):
   determ test-s018-json-validation            S-018 json_require<T> field-name diagnostics
   determ test-merkle                          v2.1 Merkle primitives (root, proof, verify,
                                               tampering detection, domain separation)
+  determ test-merkle-tree-balanced            S-038 sorted-leaves balanced-tree structural
+                                              pins — empty/1/2/3/4-leaf shapes, sort-on-
+                                              build (out-of-order keys → same root), odd-
+                                              count last-leaf duplication, determinism
+                                              across instances; companion to test-merkle
+                                              positive round-trips + test-merkle-proof-
+                                              tampering negative paths
   determ test-protocol-version-pinning        PROTOCOL.md §16 version contract pinning —
                                               MsgType enum integers (gossip envelope type
                                               byte), wire-version negotiation constants
@@ -30985,6 +30992,250 @@ int main(int argc, char** argv) {
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    // S-038 / v2.1 Merkle structural pins — lock in the sorted-leaves
+    // balanced binary Merkle tree shape that the S-033 state_root
+    // commitment + v2.2 light-client inclusion proofs depend on.
+    //
+    // The test-merkle subcommand (12 assertions) pins positive round-
+    // trips and a few representative tampers; test-merkle-proof-tampering
+    // pins the exhaustive negative-path set. This test pins the STRUCTURAL
+    // shape itself: that the tree is in fact a sorted-leaves balanced
+    // binary tree (NOT a sparse Merkle tree / NOT a Patricia trie / NOT a
+    // hash-list), with last-leaf duplication at odd counts (the standard
+    // Bitcoin-style padding documented in include/determ/crypto/merkle.hpp).
+    // A regression that silently swapped the shape (e.g. switched to a
+    // sparse Merkle tree but kept the same Hash return type) would still
+    // pass the existing round-trip tests because they only exercise
+    // root → proof → verify on the same implementation; they don't pin
+    // the manually-recomputable structural identity below.
+    //
+    // 7 scenarios / ≥ 8 assertions covering:
+    //   (1) Empty: merkle_root({}) == Hash{} sentinel.
+    //   (2) 1-leaf: merkle_root == merkle_leaf_hash(L0.key, L0.value_hash).
+    //   (3) 2-leaf: merkle_root == merkle_inner_hash(LH0, LH1)
+    //       (where LH_i = merkle_leaf_hash of the SORTED-by-key i-th leaf).
+    //   (4) 3-leaf (odd): last-leaf duplication at the bottom row is
+    //       applied — manually recompute the expected root via
+    //       merkle_inner_hash(merkle_inner_hash(LH0, LH1),
+    //                          merkle_inner_hash(LH2, LH2)).
+    //   (5) 4-leaf: depth-2 balanced tree —
+    //       merkle_inner_hash(merkle_inner_hash(LH0, LH1),
+    //                          merkle_inner_hash(LH2, LH3)).
+    //   (6) Determinism: fresh-built leaf vector with the same content
+    //       produces the byte-identical root.
+    //   (7) Sort-on-build: shuffled leaves (descending-key order) produce
+    //       the SAME root as ascending-key order — merkle_root sorts
+    //       internally (per src/crypto/merkle.cpp lines 50-52).
+    //
+    // Companion to test-merkle (positive primitives + proof round-trip),
+    // test-merkle-proof-tampering (exhaustive negative paths), and
+    // test-state-root-determinism (chain-level state-root determinism
+    // built on top of this tree).
+    if (cmd == "test-merkle-tree-balanced") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Build n leaves with deterministic key/value_hash pairs whose
+        // 2-byte keys sort in ascending order for i = 0..255. The byte-
+        // order sort matches insertion order, so the "sorted i" index
+        // and the "construction i" index coincide — manual recomputation
+        // of the tree shape stays readable.
+        auto make_leaves = [](size_t n) {
+            std::vector<MerkleLeaf> v;
+            for (size_t i = 0; i < n; ++i) {
+                MerkleLeaf m;
+                m.key = {'k', static_cast<uint8_t>(i)};
+                SHA256Builder b; b.append(static_cast<uint64_t>(i));
+                m.value_hash = b.finalize();
+                v.push_back(m);
+            }
+            return v;
+        };
+
+        // ── (1) Empty leaf set sentinel ──
+        // merkle.cpp line 46: `if (leaves.empty()) return Hash{};`
+        // The empty case returns the all-zero hash (the "no committed
+        // state" convention; matches what `Hash{}` default-constructs to).
+        {
+            std::vector<MerkleLeaf> empty;
+            Hash r = merkle_root(empty);
+            check(r == Hash{},
+                  "(1) Empty leaf set: merkle_root({}) returns all-zero "
+                  "Hash{} sentinel (the 'no committed state' convention)");
+        }
+
+        // ── (2) Single-leaf degenerate case ──
+        // The while-loop in merkle.cpp doesn't iterate (row.size() == 1),
+        // so the root is exactly the leaf hash. Locks that no padding /
+        // no inner-hash wrap is applied for the single-leaf case.
+        {
+            auto leaves = make_leaves(1);
+            Hash root = merkle_root(leaves);
+            Hash expected = merkle_leaf_hash(leaves[0].key,
+                                                  leaves[0].value_hash);
+            check(root == expected,
+                  "(2) Single-leaf tree: merkle_root == merkle_leaf_hash(L0) "
+                  "(degenerate case; no padding / no inner-hash wrap)");
+        }
+
+        // ── (3) Two-leaf canonical inner-hash ──
+        // The tree shape is unambiguous: one inner node combining the
+        // two leaf hashes in sorted-by-key order. Manually recompute the
+        // expected root via the exposed primitives.
+        {
+            auto leaves = make_leaves(2);
+            Hash root = merkle_root(leaves);
+            Hash lh0 = merkle_leaf_hash(leaves[0].key, leaves[0].value_hash);
+            Hash lh1 = merkle_leaf_hash(leaves[1].key, leaves[1].value_hash);
+            Hash expected = merkle_inner_hash(lh0, lh1);
+            check(root == expected,
+                  "(3) Two-leaf tree: merkle_root == merkle_inner_hash("
+                  "leaf_hash(L0), leaf_hash(L1)) — the canonical sorted-"
+                  "leaves balanced-tree shape at the smallest non-trivial "
+                  "size");
+        }
+
+        // ── (4) Three-leaf odd-count padding ──
+        // 3 is the smallest odd count > 1; tests the "duplicate last
+        // hash to make the row even" padding at the bottom level (per
+        // merkle.cpp line 64: `if (row.size() % 2 == 1) row.push_back(
+        // row.back());`). The bottom row [LH0, LH1, LH2] becomes
+        // [LH0, LH1, LH2, LH2], then the next level is
+        // [inner(LH0, LH1), inner(LH2, LH2)], finally:
+        // root = inner(inner(LH0, LH1), inner(LH2, LH2)).
+        //
+        // This is the EXACT shape Bitcoin's tx-merkle / Cosmos IAVL leaf
+        // padding / OpenSSL HashTree use — and the shape documented in
+        // include/determ/crypto/merkle.hpp lines 9-12. A regression that
+        // switched to a sparse Merkle tree (key-path indexed, no padding)
+        // or to a different padding strategy (e.g. zero-leaf instead of
+        // last-leaf duplication) would fail this assertion.
+        {
+            auto leaves = make_leaves(3);
+            Hash root = merkle_root(leaves);
+            Hash lh0 = merkle_leaf_hash(leaves[0].key, leaves[0].value_hash);
+            Hash lh1 = merkle_leaf_hash(leaves[1].key, leaves[1].value_hash);
+            Hash lh2 = merkle_leaf_hash(leaves[2].key, leaves[2].value_hash);
+            Hash left  = merkle_inner_hash(lh0, lh1);
+            Hash right = merkle_inner_hash(lh2, lh2);  // last-leaf dup
+            Hash expected = merkle_inner_hash(left, right);
+            check(root == expected,
+                  "(4) Three-leaf odd-count tree: last-leaf duplication at "
+                  "the bottom row — root == inner(inner(LH0,LH1), "
+                  "inner(LH2,LH2)). Locks the Bitcoin-style padding "
+                  "documented in merkle.hpp (NOT a sparse Merkle tree)");
+        }
+
+        // ── (5) Four-leaf balanced depth-2 tree ──
+        // 4 is the smallest power-of-2 > 2; tests the standard depth-2
+        // balanced tree shape with no padding. Manually recompute:
+        // root = inner(inner(LH0, LH1), inner(LH2, LH3)).
+        {
+            auto leaves = make_leaves(4);
+            Hash root = merkle_root(leaves);
+            Hash lh0 = merkle_leaf_hash(leaves[0].key, leaves[0].value_hash);
+            Hash lh1 = merkle_leaf_hash(leaves[1].key, leaves[1].value_hash);
+            Hash lh2 = merkle_leaf_hash(leaves[2].key, leaves[2].value_hash);
+            Hash lh3 = merkle_leaf_hash(leaves[3].key, leaves[3].value_hash);
+            Hash left  = merkle_inner_hash(lh0, lh1);
+            Hash right = merkle_inner_hash(lh2, lh3);
+            Hash expected = merkle_inner_hash(left, right);
+            check(root == expected,
+                  "(5) Four-leaf balanced tree: depth-2, no padding — "
+                  "root == inner(inner(LH0,LH1), inner(LH2,LH3)). Locks "
+                  "the canonical power-of-2 shape (left-right structural "
+                  "binding)");
+        }
+
+        // ── (6) Determinism: same content → same root across instances ──
+        // Two independently-built leaf vectors with identical content
+        // must produce byte-identical roots. Locks "no hidden process-
+        // local state" / "no internal caching surprise" at the merkle
+        // primitive layer (the foundation S-033 state_root determinism
+        // builds on).
+        {
+            auto v1 = make_leaves(7);
+            auto v2 = make_leaves(7);
+            check(merkle_root(v1) == merkle_root(v2),
+                  "(6) Determinism: independently-built leaf vectors with "
+                  "identical content produce byte-identical roots (no "
+                  "hidden process-local state at the primitive layer)");
+        }
+
+        // ── (7) Sort-on-build: shuffled leaves produce the SAME root ──
+        // merkle.cpp lines 50-52 sort by key BEFORE building the tree.
+        // So a descending-key-order leaf vector must produce the SAME
+        // root as an ascending-key-order leaf vector containing the
+        // same set. This is the "sort-on-build" contract; callers DON'T
+        // need to pre-sort. (Contrast: a constructor that ASSUMED the
+        // caller had pre-sorted would produce a different root from a
+        // shuffled vector — exactly the regression this assertion pins.)
+        //
+        // Note: the documentation in merkle.hpp lines 42-45 spells this
+        // out: "Leaves are sorted by key inside this call (caller doesn't
+        // need to pre-sort, but sorting upfront is no slower and makes
+        // proof generation easier)." This assertion locks the
+        // implementation against a future change that removed the
+        // internal sort.
+        {
+            auto asc = make_leaves(5);
+            std::vector<MerkleLeaf> desc(asc.rbegin(), asc.rend());
+            // Sanity: keys really are reversed.
+            // asc[0].key  = {'k', 0}; desc[0].key = {'k', 4}
+            Hash root_asc  = merkle_root(asc);
+            Hash root_desc = merkle_root(desc);
+            check(root_asc == root_desc,
+                  "(7) Sort-on-build: descending-key leaf order produces "
+                  "the SAME root as ascending-key order — merkle_root "
+                  "sorts internally (S-038 convention: caller doesn't "
+                  "pre-sort)");
+        }
+
+        // ── (8) Domain separation tip: leaf prefix 0x00 vs inner prefix
+        //     0x01 — pin that a single-leaf tree (root == leaf_hash with
+        //     0x00 prefix) is NEVER byte-identical to ANY same-content
+        //     two-leaf inner-hash root (which would have 0x01 prefix at
+        //     the topmost combiner). The leaf/inner prefix split is the
+        //     classical second-preimage defense (merkle.hpp lines 95-97).
+        //     This isn't a structural shape assertion — it's the
+        //     irreducible-cousin invariant that makes the shape uniquely
+        //     decodable. Single leaf [L0] vs two-leaf [L0, L0]
+        //     (duplicated key) WOULD have collided if not for the
+        //     prefix domain-separation.
+        {
+            // Construct a 2-leaf vector where both leaves are identical
+            // by content (same key + same value_hash). After sort the
+            // bottom row is [LH0, LH0]; root = inner(LH0, LH0).
+            // Meanwhile single-leaf root = LH0 directly.
+            // The two MUST differ (inner-hash with 0x01 prefix vs.
+            // leaf-hash with 0x00 prefix).
+            auto one = make_leaves(1);
+            std::vector<MerkleLeaf> two = one;
+            two.push_back(one[0]);  // duplicate; same key + same value_hash
+            Hash root_one = merkle_root(one);
+            Hash root_two = merkle_root(two);
+            check(root_one != root_two,
+                  "(8) Domain separation: single-leaf root (0x00-prefix "
+                  "leaf_hash) is byte-distinct from same-content two-leaf "
+                  "root (0x01-prefix inner_hash over duplicated leaf) — "
+                  "defeats second-preimage shape conflation between depth-"
+                  "0 and depth-1 trees");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merkle-tree-balanced "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        std::cout.flush();
+        fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
 
