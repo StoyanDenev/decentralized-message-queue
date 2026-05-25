@@ -19,7 +19,7 @@ Start with **F0 Preliminaries**. Everything else cites its notation, assumptions
 |---|---|---|---|
 | F0 | [Preliminaries.md](Preliminaries.md) | Notation, assumptions, validity predicates | ✓ |
 | FA1 | [Safety.md](Safety.md) | K-of-K mutual-distrust safety: ≤1 finalized digest per height | ✓ |
-| FA2 | [Censorship.md](Censorship.md) | Censorship resistance: union-tx-root inclusion of any honest mempool tx | ✓ |
+| FA2 | [Censorship.md](Censorship.md) | Censorship resistance: union-tx-root inclusion of any honest mempool tx. R39+1 A6 extended §7 (F2 view-reconciliation composition — formalizes how the union-tx-root censorship bound survives the v2.7 F2 strict-determinism Phase-1 commitment under T-1 UnionMonotonic + T-3 OrderIndependent), §8 (S-014 rate-limiter interaction — composition with `net::RateLimiter` HELLO exemption + per-IP bucket independence so a single throttled adversary peer cannot starve honest tx admission), §9 (updated FA2 closure footing — restates the union-rule bound under the F2 + S-014 composition for v2.7 readiness) | ✓ |
 | FA3 | [SelectiveAbort.md](SelectiveAbort.md) | Selective-abort resistance: commit-reveal hides delay_output until phase-2 | ✓ |
 | FA4 | [Liveness.md](Liveness.md) | Liveness: finalized block within geometric-bounded rounds | ✓ |
 | FA5 | [BFTSafety.md](BFTSafety.md) | BFT-mode safety under `f_h < |K_h|/3` within the BFT committee (`|K_h| = ⌈2K/3⌉`); slashing recovery otherwise | ✓ |
