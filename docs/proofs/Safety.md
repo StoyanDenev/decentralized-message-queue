@@ -186,3 +186,81 @@ The safety predicate proved here corresponds to the implementation chain:
 | State commitment + apply-time gate (S-033 + S-038, S-030 D1/D2 apply-layer closure) | `src/chain/chain.cpp::compute_state_root` (Merkle root) + `apply_transactions` (`if (b.state_root != zero) verify` gate) + `src/node/node.cpp::try_finalize_round` (producer populates `body.state_root` via tentative-chain dry-run before broadcast — S-038 closure) |
 
 A future reviewer can re-validate the proof by reading the source-level objects in the right column against the predicates in the left.
+
+---
+
+## 7. Light-client safety composition
+
+The trust-minimized light-client `determ-light.exe` (shipped commits `f597c44` + `5e74097`, formalized in `LightClientThreatModel.md`) extends the chain-level safety story established above into a per-invocation pipeline that an honest light-client runs against a single (potentially malicious) operator-controlled daemon. The light-client introduces no new chain-level safety invariant; instead, it COMPOSES the existing FA1 / FA-Apply / S-021 / S-033 / S-038 results into a per-block + per-state-proof verifier under the `A_daemon` adversary model.
+
+This sub-section makes the composition explicit so a reader of Safety.md knows where the light-client extension lives without flipping documents.
+
+### 7.1 Preconditions inherited
+
+The light-client safety claim (`LightClientThreatModel.md` §2.3) takes as preconditions every chain-level safety invariant proved in §1–§6 above, plus the state-integrity composition documented in adjacent proofs:
+
+- **T-1 + Corollary T-1.1 (unique chain head).** The daemon, whether honest or malicious, serves a chain whose finalized heads are unambiguous at the digest level. The light-client trusts that the chain it walks is a single canonical sequence (or fails to walk it).
+- **L-1.1 (committee determinism).** The committee at each height is a deterministic function of the chain prefix. The light-client's `build_genesis_committee` + creator-set match against `b.creators` rests on this determinism.
+- **L-1.2 (`signing_bytes` injectivity + `compute_block_digest` collision resistance).** The light-client's `light_compute_block_digest` (`light/verify.cpp:47-61`) is a byte-for-byte copy of the chain's producer-side digest (`src/node/producer.cpp:577-591`). L-1.2's injectivity is what makes the light-client's local digest recomputation match the producer's signed digest.
+- **L-1.3 (K-of-K signature-set pigeonhole).** Equivalently, the per-block K-of-K (or `Q = ⌈2|K_h|/3⌉` in BFT) sig set witnesses that the chain committed a single canonical block at that height. The light-client's `verify_block_sigs` consumes exactly this primitive.
+- **S-021 (chain integrity at rest).** `chain.json` wrap with head-hash recompute means the daemon's loaded chain has self-consistent prev_hash links before any RPC reply. The light-client walks the served prev_hash chain on top of this foundation.
+- **S-033 (state_root namespace coverage).** The full 10-namespace state surface is bound into `Block.state_root`. The light-client's `read_account_trustless` anchors to this commitment for the `a:` namespace (and the design admits future extension to `d:` / `r:` / etc.).
+- **S-038 (producer-side state_root population).** The producer's `try_finalize_round` populates `body.state_root` via tentative-chain dry-run before broadcast, closing the dormancy gap. The light-client's "chain has not activated state_root" diagnostic path (`light/trustless_read.cpp:202-208`) is the failure mode if S-038 is not active on a deployed chain.
+
+If any precondition above fails on a deployed chain, the light-client safety chain breaks at the corresponding step — see §7.4.
+
+### 7.2 Layered theorems
+
+The light-client adds five per-invocation theorems atop the chain-level base. Each is stated formally in `LightClientThreatModel.md` §4; here we record how each composes with the chain-level invariants above.
+
+- **T-L1 (genesis-anchored chain identity).** Composes with **A2 (SHA-256 collision/preimage resistance, Preliminaries §2.1)** to bind the daemon's served block 0 to the operator's pinned `genesis.json`. The chain-level theorems do not need to know about T-L1 — it is a per-invocation gate at the operator side, not a chain-side invariant. The bound (`≤ 2⁻¹²⁸`) follows from A2.
+- **T-L2 (head trust via committee signatures).** Composes with **FA1 (this document) + A1 (Ed25519 EUF-CMA)**. T-L2 is FA1's per-block K-of-K signature primitive applied at the light-client side. The light-client does NOT independently re-establish T-1's full-chain "no two finalized blocks at the same height" claim; it relies on the per-block primitive that T-1 uses internally. Composition statement in `LightClientThreatModel.md` §5.1: "T-L2 = FA1 per-block primitive applied at the light-client side." No new claim beyond FA1 is asserted.
+- **T-L3 (state-proof correctness).** Composes with **A2 (SHA-256 collision resistance)** and **S-033 (namespace coverage completeness, `S033StateRootNamespaceCoverage.md` T-1 + T-4)**. T-L3 reduces to "forging a Merkle inclusion against a fixed root requires a collision at some level of the tree" — exactly the standard Merkle soundness reduction.
+- **T-L4 (balance/nonce trust via state-proof composition).** Composes with **L-1.3 (state-root inclusion semantics — apply-time gate)** and the FA-Apply suite (chain apply-determinism). T-L4 chains T-L1 + T-L2 + T-L3 with a race-window mitigation (`light/trustless_read.cpp:226-307`) covering the gap between head-anchor time `vc.height` and state-proof time `proof_height`. The mitigation's load-bearing step is the three-branch dispatch for `proof_height < / == / > vc.height` plus the prev_hash walk that re-anchors the proof's claimed root to a committee-signed header on the verified prefix. The race-window mitigation is the light-client-side analog of L-1.3 — both bind the state-root commitment to the canonical chain at the apply boundary.
+- **T-L5 (sign-and-submit correctness).** Composes with **FA-Apply-3 (NonceMonotonicity, `NonceMonotonicity.md`)** and **A1 (Ed25519 EUF-CMA)** to ensure that an operator-supplied tx envelope, built atop a T-L4-verified `next_nonce`, survives daemon mutation by virtue of the signature binding all envelope fields. The light-client's `compute_signing_bytes` (`light/sign_tx.cpp:37-62`) is a byte-for-byte copy of the chain's `Transaction::signing_bytes`, so the chain's apply-time signature check enforces the same field set the operator signed.
+
+### 7.3 Composition theorem
+
+**Theorem T-1.2 (light-client safety inherits chain safety).** Under the preconditions T-1, T-1.1, L-1.1, L-1.2, L-1.3, S-021, S-033, S-038 (all established in §1–§6 of this document and the adjacent integrity proofs), and the threat model of `LightClientThreatModel.md` §2 (adversary `A_daemon` controlling the daemon; cryptographic primitives A1 + A2 + A3 holding), the light-client `determ-light.exe` never **acts on** data that is inconsistent with the operator's pinned `genesis.json`. "Acts on" instantiates to the five operational claims in `LightClientThreatModel.md` §2.3:
+
+1. signing and submitting a transaction using a nonce or amount not verified against a committee-signed state_root,
+2. displaying a balance not so verified,
+3. displaying a `next_nonce` not so verified,
+4. displaying a head height or head block_hash not verified against the genesis anchor + committee sigs,
+5. accepting a state-proof that does not verify against a committee-signed state_root.
+
+**Proof.** Induction over the per-invocation pipeline T-L1 → T-L2 → T-L3 → T-L4 → T-L5.
+
+Each adversarial attempt by `A_daemon` to inject data inconsistent with the genesis-pinned chain is caught at exactly one of the five gates:
+
+- A wrong-genesis lie is caught by T-L1 (byte-equality against locally-computed `compute_genesis_hash(genesis_O)`).
+- A forged block header is caught by T-L2 (`Ed25519.Verify` under the seeded committee map).
+- A forged Merkle inclusion proof is caught by T-L3 (Merkle path recomputation against the verified root).
+- A stale or forked state-proof (different state_root than what the committee signed at the head) is caught by T-L4 (the three-branch race-window dispatch + prev_hash chain re-anchor).
+- A mutated tx envelope on the submit path is caught by T-L5 (the chain's apply-time signature check rejects under A1, since the light-client signed the original field set).
+
+The five gates' adversarial-success bounds are independent (each grounded in a separate cryptographic primitive: A2 for T-L1 + T-L3, A1 for T-L2 + T-L5, composition of A1 + A2 for T-L4). The union bound (`LightClientThreatModel.md` §4.4 derivation) is `≤ 2⁻⁶⁰` per invocation for chains of practical size, dominated by the T-L4 race-window step.
+
+By the chain-level preconditions, any data the light-client successfully verifies through all five gates is consistent with the chain that the operator's pinned `genesis.json` identifies — equivalently, consistent with the unique finalized chain that T-1 + S-021 + S-033 + S-038 jointly characterize. Therefore the light-client never acts on inconsistent data.   ∎
+
+**Corollary T-1.2.1 (fail-closed exit).** Under T-1.2, every inconsistency the light-client detects causes a `throw std::runtime_error(...)` that propagates to a non-zero process exit code with a structured stderr diagnostic. Proof: Lemma L-6 of `LightClientThreatModel.md` (no silent-accept code path exists in `light/verify.cpp` or `light/trustless_read.cpp`).   ∎
+
+### 7.4 Limitations of composition
+
+T-1.2 is a CONDITIONAL safety claim: it holds on the chain-level invariants of §1–§6 plus the integrity composition in adjacent proofs. If a chain-level invariant is broken on a deployed chain, the light-client safety chain breaks at the corresponding step:
+
+- If **T-1** were to fail (two finalized blocks at the same height), T-L2's per-block primitive would still succeed for each individual block, but the light-client's prev_hash walk would diverge across invocations against different daemons — surfacing as "this daemon's head doesn't chain to the previously-verified head" rather than silent acceptance. Soundness within a single invocation is preserved; cross-invocation consistency is operator-visible.
+- If **S-033** were to regress (a state_root namespace becomes uncommitted), the light-client's `verify_state_proof` would still verify Merkle inclusion against the served root, but the served root would no longer reflect the full chain state. T-L3 holds; T-L4's claim that "the value at the leaf reflects the chain's apply-layer state" weakens because the root no longer commits to the full state. This is exactly the failure mode `S033StateRootNamespaceCoverage.md` defends against.
+- If **S-038** were to regress (the producer stops populating `body.state_root` — the pre-S-038 dormancy state), the light-client's `read_account_trustless` would hit the explicit "chain has not activated state_root (S-033)" throw path (`light/trustless_read.cpp:202-208`). Fail-closed exit; no soundness loss, but operational availability is reduced.
+- If **L-1.3** / the apply-time state-root gate were to weaken (e.g., a future regression making `if (b.state_root != zero) verify` skipped), the light-client's race-window mitigation would still bind the proof's `state_root` to a committee-signed header, but the bound state-root would no longer correspond to a strictly apply-validated state. This is the S-030 D2 residual gap that `S030-D2-Analysis.md` §3.5 tracks for full closure via v2.7 F2 view reconciliation.
+
+Cross-ref: `SECURITY.md` §S-037 / §S-038 closure narrative for the deployment-prerequisite story; `BlockchainStateIntegrity.md` for the chain-side composition that T-1.2 transitively depends on.
+
+### 7.5 Cross-references
+
+- `docs/proofs/LightClientThreatModel.md` — full T-L1 through T-L5 statements with adversary games, proofs, and concrete-security bounds (§4); supporting lemmas L-1 through L-6 (§4.6); FA-series composition discussion (§5); known limitations and findings register (§6, §7).
+- `light/trustless_read.cpp::read_account_trustless` (lines 188-350) — the composite trustless-read flow; the race-window mitigation cited by T-L4 lives at lines 226-307; the cleartext-vs-value_hash cross-check binding the daemon's `account` reply lives at lines 309-343.
+- `docs/proofs/Safety.md` §2 (L-1.3) — the K-of-K signature-set pigeonhole that T-L2 leverages as a per-block primitive.
+- `docs/proofs/Safety.md` §6 — implementation cross-reference table for the chain-side functions T-L2 / T-L4 invoke transitively.
+- `docs/proofs/S033StateRootNamespaceCoverage.md` — namespace-coverage completeness underlying T-L3.
+- `docs/proofs/BlockchainStateIntegrity.md` — chain-level integrity composition (S-021 + S-033 + S-038) that T-1.2's preconditions chain to.
