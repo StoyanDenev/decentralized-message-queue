@@ -28,11 +28,11 @@
 
 **Deferred reason.** No production-grade C99 implementation. Canonical Canetti-Halevi-Katz construction requires bilinear pairings (BLS12-381) → would add a third curve family, conflicting with CRYPTO-C99 two-curve discipline. Pairing-free lattice-based FSE constructions exist but are bleeding-edge with no production deployments.
 
-**Classification.** Breaking (replaces OTPK-stream mechanism).
+**Classification.** Breaking (replaces OTPK-stream mechanism). **Could be downgraded to Additive** if v1.0 ships a `view_key_mechanism` discriminator + optional `fs_view_pk` field — see §7.5.
 
 **Dependencies.** Production-grade C99 FSE implementation OR explicit acceptance of a third curve family.
 
-**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary.
+**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary; §7.5 schema-freeze decision.
 
 ### 1.2 Puncturable encryption (Green-Miers / Bloom-filter)
 
@@ -40,11 +40,11 @@
 
 **Deferred reason.** Research-grade primitive; no production deployments; secret-key state grows with each puncture; false-positive risk in Bloom-filter variants requires careful parameterization.
 
-**Classification.** Breaking.
+**Classification.** Breaking. **Could be downgraded to Additive** via the same `view_key_mechanism` discriminator as §1.1 — see §7.5.
 
 **Dependencies.** Production-grade C99 puncturable encryption + extensive cryptographic audit.
 
-**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary.
+**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary; §7.5 schema-freeze decision.
 
 ### 1.3 Stealth addresses (Monero-style) for graph privacy
 
@@ -108,11 +108,11 @@
 
 **Deferred reason.** Centralization vector contrary to DH-consensus ethos. Rejected during v2.22 PRIV-4 deliberation.
 
-**Classification.** Breaking (new chain role + escrow infrastructure).
+**Classification.** Breaking (new chain role + escrow infrastructure). **Could be downgraded to Additive** if v1.0 ships an `Account.audit_model` enum + optional `trusted_issuer_pubkey` field — see §7.5.
 
 **Dependencies.** Project-policy decision to introduce trusted-issuer pattern; deployment-driven demand.
 
-**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-4 dual-mode audit (alternatives section).
+**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-4 dual-mode audit (alternatives section); §7.5 schema-freeze decision.
 
 ---
 
@@ -164,11 +164,11 @@
 
 **Deferred reason.** Threshold-sig accumulator with subset-recording already provides bias-resistance. VRF doesn't solve the withholding attack that's the remaining surface — same attack applies to both. Switch would add new crypto primitive (VRF over Ed25519 / P-256) and discard v2.10 DKG composition. Sideways move at meaningful cost.
 
-**Classification.** Breaking (replaces randomness mechanism + new primitive).
+**Classification.** Breaking (replaces randomness mechanism + new primitive). **Could be downgraded to Additive** if v1.0 manifest schema includes a `randomness_aggregation_form` discriminator — see §7.5.
 
 **Dependencies.** Demonstrated attack on threshold-sig path that VRF would actually defeat.
 
-**Related.** `DECISION-LOG.md` → Beaconless-v2 → BL-6 VRF pushback rationale.
+**Related.** `DECISION-LOG.md` → Beaconless-v2 → BL-6 VRF pushback rationale; §7.5 schema-freeze decision.
 
 ### 3.3 Beaconless v2 manifest `merritt_k` operator-override
 
@@ -190,11 +190,11 @@
 
 **Deferred reason.** Dilithium-FROST not production-ready until 2027-2028.
 
-**Classification.** Breaking (signature format change).
+**Classification.** Breaking (signature format change). **Could be downgraded to Additive** via the same `Block.signature_form` discriminator as §6.1 (one discriminator covers both PQ migration and BLS aggregation) — see §7.5.
 
 **Dependencies.** Dilithium-FROST availability (see 2.2).
 
-**Related.** V2-DESIGN.md §v2.8.
+**Related.** V2-DESIGN.md §v2.8; §7.5 schema-freeze decision.
 
 ### 4.2 v2.9 Distributed VRF for committee selection
 
@@ -286,17 +286,25 @@
 
 A separate design candidate document at `docs/Improvements.md` outlines four wire-format / consensus optimizations targeting a hypothetical post-v2 chain. Each is captured here individually with the standard classification + deferral rationale. The no-migrations constraint discussion that classifies "Breaking" improvements is in §7.1 below.
 
-### 6.1 BLS signature aggregation (aggregate Phase-2 commit-sigs)
+### 6.1 BLS signature aggregation (aggregate Phase-2 commit-sigs) — MODERN-profile only
 
-**Improvement.** Replace the per-creator K-of-K Ed25519 signature array (K × 64 bytes = up to 1024 B at K=16) in the block header with a single constant-size BLS12-381 aggregate signature (96 bytes). Each validator signs the block digest via its BLS12-381 private key; the proposer aggregates the K (or 2F+1 if combined with §7.2) signatures into a single `aggregate_sig` field.
+**Improvement (per-profile dispatch, following the PRIV-3 / C99-11 "curve follows profile" pattern):**
+- **MODERN profile**: replace the per-creator K-of-K Ed25519 signature array (K × 64 bytes = up to 1024 B at K=16) in the block header with a single constant-size BLS12-381 aggregate signature (96 bytes). Each validator signs the block digest via its BLS12-381 private key; the proposer aggregates the K (or 2F+1 if combined with §6.2) signatures into a single `aggregate_sig` field.
+- **FIPS profile** (`tactical` + `cluster`): retain the existing K-of-K Ed25519 signature array (status quo; no aggregation). BLS12-381 is not in NIST's FIPS-validated curve list and BLS signatures have no FIPS standard; FIPS-profile deployments cannot adopt aggregation via BLS. The old K × 64-byte array IS the FIPS configuration variant.
 
-**Deferred reason.** BLS12-381 is a pairing-friendly curve outside CRYPTO-C99's current two-curve discipline (curve25519 + ristretto255 / secp256k1). Adding pairing primitives requires either a third curve family (conflict) OR a carefully audited C99 pairing implementation (currently no production-grade option). Bandwidth savings (~1 KB per block at K=16) are real but secondary to the cryptographic-discipline cost.
+The block-header schema gains a `signature_form` discriminator: `SIG_KK_ED25519` (FIPS path, identical to v1.0 wire format) or `SIG_BLS12_381_AGGREGATE` (MODERN path). Validators dispatch verification by `signature_form` per the deployment's crypto profile (matching the `crypto_profile_build` compile-time gate from C99-13).
 
-**Classification.** Breaking (replaces block-header signature format + introduces new curve family + pairing primitives).
+**Deferred reason (MODERN variant).** BLS12-381 is a pairing-friendly curve outside CRYPTO-C99's current two-curve discipline (curve25519 + secp256k1). Adding pairing primitives requires a carefully audited C99 pairing implementation (currently no production-grade option in C99). Bandwidth savings (~1 KB per block at K=16) are real but secondary to the cryptographic-discipline cost. Project-policy decision required to expand crypto-curve roster.
 
-**Dependencies.** Production-grade C99 BLS12-381 implementation + audited pairing primitives + project-policy decision to expand crypto-curve roster.
+**Deferred reason (FIPS variant).** None — FIPS variant is the current v1.0 K-of-K Ed25519 wire format. The "improvement" for FIPS is the absence of change. Documented here so future implementation threads understand the profile-dispatch contract.
 
-**Related.** `docs/Improvements.md` §1; v2.10 (FROST-Ed25519 — already provides aggregation in the threshold-randomness path but on curve25519, not BLS12-381).
+**Classification.** Breaking for the MODERN profile (replaces block-header signature format + introduces new curve family + pairing primitives). Additive for the FIPS profile (status quo retained; no wire-format change). Under no-migrations, the MODERN profile change cannot ship post-v1.0 without v3 protocol opening; the FIPS profile is unaffected regardless.
+
+**Dependencies (MODERN variant).** Production-grade C99 BLS12-381 implementation + audited pairing primitives + project-policy decision to expand crypto-curve roster + `signature_form` schema addition at v1.0 genesis (so post-v1.0 MODERN-profile chains can opt into BLS aggregation via the discriminator without breaking legacy validators that already expect the field).
+
+**Related.** `docs/Improvements.md` §1; v2.10 (FROST-Ed25519 — already provides aggregation in the threshold-randomness path but on curve25519, not BLS12-381); PRIV-3 curve-follows-profile precedent in v2.22-PRIVACY-SPEC.md; CRYPTO-C99-SPEC.md C99-11 profile bundling.
+
+**Note for v1.0 schema-shape decision.** If the project ever intends to adopt BLS aggregation in MODERN-profile deployments post-v1.0, the `signature_form` discriminator field must ship in the v1.0 block-header schema (default `SIG_KK_ED25519`). Without that field in v1.0 genesis, adding it later requires schema migration — forbidden under no-migrations. Decision is binary: either ship the discriminator pre-v1.0 (preserves future optionality) or close off BLS aggregation as a v3-only candidate (loses optionality but simpler v1.0 schema). Flag this choice for explicit decision before v1.0 schema freeze.
 
 ### 6.2 Quorum Liveness — 2F+1 BFT-threshold finalization (OPTIONAL deployment mode)
 
@@ -328,11 +336,11 @@ A separate design candidate document at `docs/Improvements.md` outlines four wir
 
 **Deferred reason.** Bandwidth saving is largest at high mempool size + low inter-peer overlap (worst-case mempool churn). At the throughput Determ targets (~hundreds of tx/sec sustained), raw 32-byte tx-hash arrays in Phase-1 contribs are well under per-message body caps (S-022) — the bandwidth saving is real but not load-bearing. IBLT / Minisketch decode failure modes (over-capacity sketch → undecidable) require careful parameterization + fallback to raw-array contrib; the implementation complexity is meaningful, the operational risk is non-trivial.
 
-**Classification.** Breaking (Phase-1 ContribMsg wire format change; new sketch primitive in net stack; new decode-failure fallback).
+**Classification.** Breaking (Phase-1 ContribMsg wire format change; new sketch primitive in net stack; new decode-failure fallback). **Could be downgraded to Additive** if v1.0 ships a `ContribMsg.contrib_msg_form` discriminator — see §7.5.
 
 **Dependencies.** Production-grade IBLT / Minisketch C99 implementation + audit; mempool-size measurements demonstrating the saving is load-bearing for real deployments; spec for sketch-decode-failure fallback (when peers' mempool delta exceeds sketch capacity).
 
-**Related.** `docs/Improvements.md` §4; v2.6 (gossip-out-of-lock — already addresses Phase-1 gossip latency, an adjacent concern); S-022 wire-format caps proof.
+**Related.** `docs/Improvements.md` §4; v2.6 (gossip-out-of-lock — already addresses Phase-1 gossip latency, an adjacent concern); S-022 wire-format caps proof; §7.5 schema-freeze decision.
 
 ### 6.5 Composition notes
 
@@ -352,7 +360,9 @@ Any improvement classified **Breaking** cannot ship post-v1.0 mainnet without on
 2. Explicit opening of a new protocol version (effectively v2.0; project-policy decision separate from current execution)
 3. Operation of an alternate chain alongside v1.0
 
-This means most items in §1.1, §1.2, §1.3, §1.8, §3.1, §3.2, §3.3, §4.1, §6.1, §6.3, §6.4 are *effectively v3 candidates* if pursued. Their planning horizon is years, not months. **Exception:** §6.2 (Quorum Liveness OPTIONAL) is classified Additive-via-opt-in because legacy K-of-K remains the default codepath — see its entry for the policy rationale.
+This means most items in §1.1, §1.2, §1.3, §1.8, §3.1, §3.2, §3.3, §4.1, §6.1 (MODERN variant), §6.3, §6.4 are *effectively v3 candidates* if pursued. Their planning horizon is years, not months. **Exceptions:**
+- §6.2 (Quorum Liveness OPTIONAL) is classified Additive-via-opt-in because legacy K-of-K remains the default codepath — see its entry for the policy rationale.
+- §6.1 (BLS aggregation) is split per profile: the MODERN-profile aggregation variant is Breaking (v3 candidate), but the FIPS-profile variant is Additive — FIPS deployments retain the v1.0 K-of-K Ed25519 array unchanged. The per-profile dispatch mirrors the PRIV-3 / C99-11 "curve follows profile" pattern. See §6.1 for the `signature_form` discriminator decision that must be made pre-v1.0 schema freeze to preserve MODERN-side optionality.
 
 ### 7.2 Additive improvements + opt-in defaults
 
@@ -382,6 +392,240 @@ When an item here becomes load-bearing (revisit trigger fires, or operator deman
 2. Add a decision-log entry capturing why now + what changed
 3. Classify against no-migrations constraint to determine if Additive (can ship) or Breaking (requires v3 protocol opening)
 4. Update IMPLEMENTATION-SEQUENCING.md if it joins a current bundle plan
+
+### 7.5 Pre-v1.0-schema-freeze optionality decisions — RESOLVED 2026-05-24
+
+Under the no-migrations constraint, several improvements classified as Breaking *could be downgraded to Additive* if the v1.0 schema includes a cheap discriminator or optional field that lets future protocol-mode dispatch happen without a schema change. The cost per discriminator is small (typically 1 byte per applicable record, or one optional field per Account). The cost of NOT shipping a discriminator is permanent foreclosure of the improvement under no-migrations.
+
+**All five discriminators resolved: SHIP in v1.0.** Maximum optionality preserved at minimal schema cost. Each is now a v1.0 implementation work item (not deferred).
+
+| # | Discriminator / field | Location | v1.0 default | Unlocks | v1.0 schema cost | Decision |
+|---|---|---|---|---|---|---|
+| **7.5.1** | `Block.signature_form: enum` | Block header | `SIG_KK_ED25519` | §6.1 BLS aggregation (MODERN-profile), §4.1 v2.8 PQ migration (both profiles via `SIG_DILITHIUM_KK`) | 1 byte/block | ✅ SHIP |
+| **7.5.2** | `Account.view_key_mechanism: enum` + optional `fs_view_pk` field | Account state | `OTPK_STREAM` | §1.1 FSE / forward-secure HIBE, §1.2 puncturable encryption | ~1 byte/Account + ~33 B if `fs_view_pk` populated (optional) | ✅ SHIP |
+| **7.5.3** | `Account.audit_model: enum` + optional `trusted_issuer_pubkey` field | Account state | `KEY_DISCLOSURE` (PRIV-4 dual-mode default) | §1.8 trusted-issuer audit + other future audit-model variants | ~1 byte/Account + ~33 B if `trusted_issuer_pubkey` populated (optional) | ✅ SHIP (overrides §7.5 heuristic of "don't ship discriminators that invite principle-rejected paths"; user chose optionality over discipline-preservation, accepting that future revisit of the trusted-issuer principle remains structurally possible) |
+| **7.5.4** | `manifest.randomness_aggregation_form: enum` | Beaconless v2 deployment manifest | `THRESHOLD_SIG_ACCUMULATOR` (BL-6) | §3.2 VRF-based aggregation | 1 byte/manifest | ✅ SHIP |
+| **7.5.5** | `ContribMsg.contrib_msg_form: enum` | Phase-1 ContribMsg | `TX_HASH_ARRAY` | §6.4 IBLT/Minisketch contrib | 1 byte/ContribMsg | ✅ SHIP |
+| **7.5.6** | `Transaction.sig_form: enum` | Every Transaction | `SIG_ED25519` | §4.1 PQ migration of tx-level sigs (Dilithium); future tx-level BLS use cases | 1 byte/tx | ✅ SHIP (added 2026-05-24 after gap analysis) |
+| **7.5.7** | `pubkey_form: enum` + variable-length pubkey encoding throughout | Every pubkey-bearing field: RegistryEntry.ed_pub, Transaction.from, Transaction.to, Account, ROTATE_KEY new_pubkey, DAppEntry.service_pubkey, view_master_pk, audit_view_master_pk, OTPK entries, etc. | `PUBKEY_ED25519` (fixed 32B encoded as variable-length with leading discriminator) | §4.1 PQ migration of pubkeys (Dilithium 1952B); §6.1 BLS aggregation per-creator pubkeys (BLS12-381 96B) | 1 byte/pubkey + variable-length encoding overhead; ~3-5 days v1.0 schema lift | ✅ SHIP (added 2026-05-24 after gap analysis) |
+
+**Effective reclassification.** The five Breaking entries above are now effectively Additive-via-discriminator-dispatch: their wire-format toggle ships in v1.0; the underlying mechanism can be added post-v1.0 without schema change as long as legacy validators handle unknown enum values gracefully (recommended: fail-closed on unknown discriminator values per profile-dispatch contract).
+
+**Implementation impact on v1.0 bundles** (work items to add to IMPLEMENTATION-SEQUENCING.md):
+- **Bundle 3 (v2.22)**: `view_key_mechanism` enum + optional `fs_view_pk` field on Account (7.5.2); `audit_model` enum + optional `trusted_issuer_pubkey` field on Account (7.5.3). ~1-2 days schema work; no validator logic for the unused enum values yet (fail-closed validators reject unknown enum values).
+- **Bundle 5 (Beaconless v2)**: `randomness_aggregation_form` field on deployment manifest (7.5.4). ~0.5 days. Manifest-validation `validate_manifest()` rejects unknown values per Q2.1 hard-invariant pattern.
+- **Foundation / v1.x stabilization**: `signature_form` enum on Block header (7.5.1) and `contrib_msg_form` enum on Phase-1 ContribMsg (7.5.5). ~1-2 days each. These touch block-level + gossip-level wire formats; should land before any of the review-week bundles to lock the genesis schema shape.
+
+**Cross-coupling preserved.** 7.5.1 `signature_form` covers both §6.1 BLS aggregation and §4.1 PQ migration with a single discriminator (enum values `SIG_KK_ED25519`, `SIG_BLS12_381_AGGREGATE`, `SIG_DILITHIUM_KK`, etc.). One field; two future improvement paths preserved.
+
+### 7.6 Discriminator-coherence resolutions
+
+After §7.5 decisions landed, the five discriminators were verified against existing review-week decisions (v2.10 FROST, PRIV-4 audit, PRIV-6 confidential_policy, v2.6 gossip-out-of-lock). All five resolve cleanly. Specific clarifications follow.
+
+#### 7.6.1 `signature_form` scope vs v2.10 FROST-Ed25519
+
+**Concern.** v2.10 (resolved in review week) ships FROST threshold sigs for per-shard epoch randomness aggregation. Does `signature_form` discriminate v2.10 FROST sigs too, or only the per-creator block sigs?
+
+**Resolution.** `signature_form` discriminates **only** the per-creator block-creator signature format (`Block.creator_sigs[]`). It does NOT discriminate v2.10's FROST epoch-randomness sig — that lives in a separate `Block.epoch_randomness_sig` field (optional, present at epoch boundary) with its own fixed format per v2.10 (FROST-Ed25519). The two are orthogonal: a block could simultaneously carry K-of-K per-creator Ed25519 sigs AND a FROST aggregate over epoch randomness, with different curve families.
+
+**Enum values for v1.0 + future:**
+- `SIG_KK_ED25519` (v1.0 default; status quo K-of-K per-creator Ed25519 array)
+- `SIG_BLS12_381_AGGREGATE` (future MODERN-profile per §6.1; single 96-byte aggregate)
+- `SIG_DILITHIUM_KK` (future both-profile per §4.1; K-of-K per-creator Dilithium array)
+- Reserved: 0xFF for forward-compat
+
+**Validator dispatch.** On block apply, read `signature_form` first; dispatch creator-sig verification by enum value. Reject unknown values (forward-incompat = fail-closed). FROST epoch-randomness sig verified independently per v2.10 spec, regardless of `signature_form`.
+
+#### 7.6.2 `audit_model = KEY_DISCLOSURE` semantics vs PRIV-4 dual-mode
+
+**Concern.** PRIV-4 specifies dual-mode disclosure (full `view_master_sk` OR per-epoch `vk_epoch_n`). The discriminator default `KEY_DISCLOSURE` — does it encompass dual-mode, or carve master vs per-epoch as separate values?
+
+**Resolution.** `KEY_DISCLOSURE` encompasses PRIV-4 dual-mode in full. The master-vs-per-epoch choice is a sub-mode chosen by the discloser at audit time (off-chain), not a chain-level discriminator value. The discriminator distinguishes the *broader audit mechanism class* (key-disclosure vs trusted-issuer vs ZK-based vs none), not the granularity within key-disclosure.
+
+**Enum values for v1.0 + future:**
+- `KEY_DISCLOSURE` (v1.0 default; PRIV-4 dual-mode; account holder discloses `view_master_sk` or `vk_epoch_n` off-chain when audited)
+- `TRUSTED_ISSUER` (future per §1.8; requires `trusted_issuer_pubkey` field populated; escrow infrastructure)
+- Reserved: `ZK_BASED_AUDIT`, `NO_AUDIT` for future use
+- Reserved: 0xFF for forward-compat
+
+**Interaction with `confidential_policy`.** For `confidential_policy = AUDITABLE_ONLY` or `MIXED`, `audit_model` is load-bearing (selects audit mechanism for AMT_AUDITABLE txs). For `confidential_policy = PFS_ONLY`, `audit_model` is structurally moot (no audit possible regardless of value); validator allows any value but no audit RPC will succeed.
+
+#### 7.6.3 `view_key_mechanism` orthogonality with `confidential_policy`
+
+**Concern.** PRIV-6 added `Account.confidential_policy: {AUDITABLE_ONLY, PFS_ONLY, MIXED}`. Adding `view_key_mechanism: {OTPK_STREAM, FSE, PUNCTURABLE}` creates a 3×3 cross-product. Which combinations are valid?
+
+**Resolution.** Orthogonal axes. Cross-product validity:
+
+| `confidential_policy` × `view_key_mechanism` | Validity |
+|---|---|
+| `AUDITABLE_ONLY` × any | Valid; `view_key_mechanism` unused (no PFS path) — validator allows default value |
+| `PFS_ONLY` × `OTPK_STREAM` | Valid; v1.0 mechanism |
+| `PFS_ONLY` × `FSE` | Valid; future mechanism (post-§1.1 maturation) |
+| `PFS_ONLY` × `PUNCTURABLE` | Valid; future mechanism (post-§1.2 maturation) |
+| `MIXED` × any | Valid; `view_key_mechanism` applies to AMT_PFS subset of mixed account |
+
+**Validator dispatch at v1.0:** since FSE and PUNCTURABLE aren't implemented yet, validator rejects any account-creation tx with `view_key_mechanism != OTPK_STREAM` (forward-compat fail-closed). For AUDITABLE_ONLY accounts, validator allows default value (OTPK_STREAM is fine even though unused).
+
+**Semantic intent.** `confidential_policy` answers *which modes does this account accept* (audit posture). `view_key_mechanism` answers *what crypto realizes the PFS path when used*. Independent dimensions; both immutable at account creation.
+
+#### 7.6.4 `contrib_msg_form` interaction with v2.6 gossip-out-of-lock
+
+**Concern.** v2.6 (shipped) moved gossip broadcast out of the global lock. Does `contrib_msg_form` discriminator dispatch interact with v2.6's lock semantics?
+
+**Resolution.** No interaction. v2.6 is broadcast-side (send path); `contrib_msg_form` is receive-side decode. Receiver reads the discriminator before any further processing — pure wire-format dispatch, no state mutation, no lock change. Compatible with all existing gossip code.
+
+**Validator dispatch at v1.0:** read `contrib_msg_form` first; if `TX_HASH_ARRAY` (v1.0 default), decode as tx-hash array per existing path. If unknown value, fail-closed reject the message. IBLT/Minisketch decode path lands post-v1.0 if §6.4 is ever pursued.
+
+#### 7.6.5 Asymmetric pinning (per-record vs manifest-pinned) — verified consistent
+
+**Concern.** Four discriminators are per-record (block / Account / ContribMsg); `randomness_aggregation_form` is manifest-pinned (deployment-wide). Cross-checks needed?
+
+**Resolution.** Asymmetry is correct and required by the underlying mechanisms:
+
+| Discriminator | Pinning | Why this granularity |
+|---|---|---|
+| `signature_form` | per-block | Allows per-block flexibility (e.g., shard-by-shard migration if future-MODERN profile adopts BLS while FIPS retains Ed25519); per-creator sig forms must be in the block anyway |
+| `view_key_mechanism` | per-Account | Each account independently picks PFS mechanism; account-creation-time immutable |
+| `audit_model` | per-Account | Each account independently picks audit mechanism |
+| `contrib_msg_form` | per-ContribMsg | Per-message decoding flexibility; aligns with v2.6 broadcast-side independence |
+| `randomness_aggregation_form` | per-manifest | Cross-shard randomness MUST agree on aggregation; deployment-wide pinning enforces consistency at manifest-validation time (per Q2.1 hard-invariant pattern) |
+
+**Required cross-check (currently absent; flagged for future Theme 9 review-completion).** No per-record discriminator currently needs to be cross-checked against `randomness_aggregation_form` (they're orthogonal subsystems). If a future improvement adds manifest-pinned discriminators that constrain per-record values, validator must enforce compatibility at apply time. Add this constraint to the manifest-validation discipline in `Beaconless-v2-SPEC.md §Q2.1` if/when such constraints emerge.
+
+#### 7.6.6 `Transaction.sig_form` coherence (added 2026-05-24)
+
+**Concern.** Tx-level sigs need their own discriminator to enable PQ migration; how does `Transaction.sig_form` interact with `Block.signature_form` (7.5.1)?
+
+**Resolution.** Orthogonal. `Block.signature_form` discriminates per-creator BLOCK signatures (consensus-level). `Transaction.sig_form` discriminates per-tx signatures (user-level). A block could carry mixed-form txs (some Ed25519, some Dilithium during transition) under a single block-level sig form, or homogeneous (all-Ed25519, all-Dilithium) — both are valid.
+
+**Enum values for v1.0 + future:**
+- `SIG_ED25519` (v1.0 default; all current txs)
+- `SIG_DILITHIUM` (future PQ migration)
+- `SIG_BLS12_381` (future if tx-level BLS use cases emerge)
+- Reserved: 0xFF for forward-compat
+
+**Validator dispatch at v1.0:** read `Transaction.sig_form` first; if `SIG_ED25519` (only allowed value at v1.0), verify per existing path. Fail-closed reject unknown values.
+
+**Embedded sigs in tx payloads** (e.g., v2.26 ROTATE_KEY's `old_key_sig`, F2 reveal sigs, multi-sig aux_sigs): these are payload-internal and follow tx-level `sig_form` (homogeneous within a tx). A `SIG_DILITHIUM` tx has its outer sig + all embedded sigs in Dilithium form. This avoids combinatorial form-mixing within a single tx and keeps validation simple.
+
+#### 7.6.7 `pubkey_form` coherence + variable-length pubkey encoding (added 2026-05-24)
+
+**Concern.** Variable-length pubkey encoding is a non-trivial schema lift; how does it compose with all existing pubkey-bearing fields?
+
+**Resolution.** Single discriminator+encoding pattern applied uniformly to every pubkey-bearing field. Wire-format pattern:
+
+```
+PubKey = {
+    pubkey_form: u8     // discriminator
+    body_len:    u16    // length of body in bytes (0 for fixed-size known forms)
+    body:        bytes  // pubkey bytes
+}
+```
+
+For fixed-size known forms (Ed25519 32B, BLS12-381 96B, Dilithium 1952B), `body_len` is implicit from `pubkey_form` and can be elided in encoding (use form-dispatch-derived size). Including `body_len` explicitly costs 2 bytes per pubkey but adds forward-compat for arbitrary-size future pubkey forms.
+
+**Enum values for v1.0 + future:**
+- `PUBKEY_ED25519` (v1.0 default; 32-byte body)
+- `PUBKEY_BLS12_381` (future; 96-byte compressed body)
+- `PUBKEY_DILITHIUM` (future; 1952-byte body for Dilithium-3)
+- Reserved: 0xFF for forward-compat
+
+**Fields affected** (every existing PubKey32 usage):
+- `RegistryEntry.ed_pub`
+- `Transaction.from`, `Transaction.to`
+- `Account` (various pubkey fields per PRIV-6, PRIV-6.1)
+- `view_master_pk`, `audit_view_master_pk`, optional `trusted_issuer_pubkey`, optional `fs_view_pk`
+- `OtpkEntry.otpk_pk`
+- `DAppEntry.service_pubkey`
+- v2.26 ROTATE_KEY `new_pubkey`, implicit `old_pubkey` (from registry)
+- Multi-sig (v2.15) signer pubkeys when that ships
+
+**Validator dispatch at v1.0:** all pubkey reads dispatch on `pubkey_form`. `PUBKEY_ED25519` is the only accepted value at v1.0. Fail-closed reject unknown forms. Variable-length decoding is uniform across all pubkey fields.
+
+**Address derivation.** Determ addresses today derive from pubkeys (or domains). For Ed25519, derivation is `address = some_hash(pubkey_32B || ...)`. With pubkey_form discriminator, derivation becomes `address = some_hash(pubkey_form || pubkey_body || ...)` — the discriminator MUST be in the address-derivation preimage to prevent address collision across pubkey forms. This is a v1.0 design lock-in: getting it wrong now forecloses PQ pubkey migration even with the discriminator present.
+
+**Interaction with v2.10 FROST-Ed25519.** FROST uses Ed25519 internally; per-shard threshold keys are Ed25519 pubkeys per v2.10 spec. With `pubkey_form` discriminator, FROST shares store Ed25519 pubkeys as `(PUBKEY_ED25519, 32B body)`. No interaction with FROST's internal math; just wire-format wrapping.
+
+**Interaction with `Transaction.sig_form` (7.5.6).** The pubkey used to verify a `Transaction.sig_form = SIG_X` signature MUST have `pubkey_form = PUBKEY_X` (matching curve family). Validator enforces this consistency at sig-verification time. Mismatch (e.g., `SIG_ED25519` + `PUBKEY_DILITHIUM`) is a hard reject.
+
+#### 7.6.8 Summary — all seven discriminators coherent
+
+| # | Coherence concern | Resolution |
+|---|---|---|
+| 7.6.1 | `signature_form` vs v2.10 FROST | Scope limited to per-creator block sigs; FROST sig is a separate orthogonal field |
+| 7.6.2 | `audit_model = KEY_DISCLOSURE` semantics | Encompasses PRIV-4 dual-mode; master-vs-per-epoch is off-chain sub-mode choice |
+| 7.6.3 | `view_key_mechanism` × `confidential_policy` cross-product | Orthogonal; all 9 combinations meaningful; v1.0 validator enforces `view_key_mechanism = OTPK_STREAM` until future mechanisms implemented |
+| 7.6.4 | `contrib_msg_form` vs v2.6 | No interaction; v2.6 is send-side, discriminator is receive-side decode |
+| 7.6.5 | Per-record vs manifest-pinned asymmetry | Correct by design; each discriminator at appropriate granularity for its subsystem |
+| 7.6.6 | `Transaction.sig_form` vs `Block.signature_form` | Orthogonal; embedded sigs within a tx are homogeneous (follow tx-level sig_form) |
+| 7.6.7 | `pubkey_form` + variable-length encoding + address derivation | Uniform encoding across all pubkey-bearing fields; discriminator MUST be in address-derivation preimage to prevent collision; sig_form↔pubkey_form curve-family consistency enforced at verify time |
+
+**Action items for v1.0 implementation threads.**
+- All seven discriminators use the documented enum spaces above; reserve 0xFF for forward-compat in each.
+- Validator dispatches on enum value with fail-closed unknown-value handling (forward-incompat = reject).
+- `view_key_mechanism = OTPK_STREAM` enforced at v1.0 for account-creation accepting AMT_PFS or MIXED.
+- `signature_form = SIG_KK_ED25519` enforced at v1.0 for all blocks.
+- `audit_model = KEY_DISCLOSURE` enforced at v1.0 for all accounts (TRUSTED_ISSUER requires the field-pubkey infrastructure not in v1.0 scope).
+- `randomness_aggregation_form = THRESHOLD_SIG_ACCUMULATOR` enforced at v1.0 in `validate_manifest()` (per Beaconless-v2-SPEC.md §Q2.1 hard-invariant pattern).
+- `contrib_msg_form = TX_HASH_ARRAY` enforced at v1.0 for all Phase-1 ContribMsgs.
+- `Transaction.sig_form = SIG_ED25519` enforced at v1.0 for all txs; embedded sigs within tx payloads follow tx-level sig_form.
+- `pubkey_form = PUBKEY_ED25519` enforced at v1.0 for all pubkey-bearing fields; variable-length encoding applied uniformly; discriminator IS in address-derivation preimage; sig_form↔pubkey_form curve-family consistency enforced at sig verification.
+
+**Aggregate cost of all seven discriminators in v1.0 (now committed).**
+- Per block: ~1 byte (`signature_form`)
+- Per Account: ~2 bytes (two enums; optional fields cost only when populated)
+- Per manifest: 1 byte (one-time deployment-wide)
+- Per ContribMsg: 1 byte
+- Per tx: 1 byte (`sig_form`)
+- Per pubkey: 1 byte discriminator + variable-length encoding overhead (Ed25519 stays 32B body; future Dilithium 1952B body; future BLS 96B body)
+- **Per-record discriminators are trivial relative to existing record sizes. The variable-length pubkey encoding (7.5.7) is a substantive ~3-5 day v1.0 schema lift — touches every consumer of pubkey data (sig verification, address derivation, serialization). This is the only material v1.0 implementation cost in the §7.5 set; everything else is wire-format scaffolding.**
+
+**Items that CANNOT be cheaply downgraded** (Breaking remains Breaking; no v1.0 schema addition would help):
+
+- **§1.3 stealth addresses** — restructures tx-level recipient indication; the whole TRANSFER tx format would change, not just a discriminator dispatch. Future stealth-address adoption requires v3 protocol opening regardless of v1.0 schema choices.
+- **§3.1 sharding-of-sharding** — fundamental restructuring of inter-shard architecture; not amenable to discriminator dispatch.
+- **§3.3 merritt_k operator-override** — deliberately rejected on principle (operator who wants weaker tolerance can run a fork). No schema addition would change that disposition.
+- **§6.3 dedup `deduplicated_tx_root`** — discriminator alone is insufficient because the FA2 censorship-evidence-surface loss requires a *proof reformulation*, not just wire-format dispatch. Even if a `tx_root_form` discriminator existed in v1.0, the FA2 proof would still need reworking before §6.3 could be enabled — making the optionality cost not load-bearing.
+
+**Heuristic that was applied (preserved for future reference).**
+
+The §7.5 review used the following heuristic:
+
+- If the relevant improvement is classified **Research** and waiting for a primitive maturation that may take years (§1.1 FSE, §1.2 puncturable, §4.1 PQ): **ship the discriminator** — optionality is high-value because the primitive will mature eventually. *Applied: 7.5.2, 7.5.1.*
+- If the relevant improvement is classified **Breaking** but has clear strategic motivation (§6.1 MODERN BLS aggregation, §3.2 VRF): **ship the discriminator** — strategic alternative paths should not be foreclosed by an oversight. *Applied: 7.5.1, 7.5.4.*
+- If the improvement is rejected on principle (§1.8 trusted-issuer for centralization, §3.3 merritt_k override): **don't ship the discriminator** — adding it would invite the rejected path. *Override for 7.5.3: user chose to ship anyway, accepting that future revisit remains structurally possible.*
+- If the improvement is in scope but cost-tier-marginal (§6.4 IBLT): **operator preference** — ship if the project anticipates mempool-sizing pressure; skip if not. *Applied: 7.5.5 shipped consistent with the broader "preserve all optionality" stance.*
+
+**Outcome.** All five discriminators ship in v1.0. Reclassifies the five Breaking entries listed above to effectively-Additive-via-discriminator-dispatch. Trusted-issuer audit (§1.8) remains principle-rejected at the *implementation* level — the discriminator slot exists but the trusted-issuer enum value is not implemented in v1.0; a future revisit would add the value to the enum and implement the escrow infrastructure.
+
+---
+
+---
+
+## 8. Post-v1.0 DApp roadmap (not chain-level work)
+
+Items that V2-DESIGN.md originally framed as chain-level substrate but were reclassified as post-v1.0 chain-aware DApps. These ship on top of the v1.0 v2.18 + v2.19 + v2.26 substrate without requiring chain-level work.
+
+### 8.1 v2.25 DSSO substrate — reclassified as DApp (2026-05-24)
+
+**Improvement.** Distributed identity provider with K-of-K mutual-distrust posture, T-OPAQUE authentication, signed assertions for relying parties.
+
+**Original V2-DESIGN.md framing.** Chain-level substrate; T-OPAQUE on K committee members; FROST-Ed25519 threshold-signed assertions verified against on-chain committee pubkey set.
+
+**Reclassified as.** Chain-aware DApp registered via v2.18 DAPP_REGISTER. K DApp instances run BY committee members; T-OPAQUE coordination via DAPP_CALL; assertion signing via chain's FROST primitive (when applicable) or per-instance signing verified against DApp registry.
+
+**Reclassification rationale.** ~80% of substrate's security properties recoverable at the DApp level; ~8-12 weeks of v1.0 critical-path work eliminated; DSSO iterates post-mainnet without no-migrations constraints; federation by design (multiple DSSO providers can coexist). See `DECISION-LOG.md` 2026-05-24 entry "DSSO architecture (v2.25): DApp, not substrate".
+
+**Classification.** Post-v1.0 DApp (Theme 7 application). Not Breaking, not Additive at chain level — entirely DApp-level. Ships when DApp infrastructure for committee-instance hosting is built and v2.26 (chain-level key rotation precondition per V2-DESIGN.md §v2.25) is shipped.
+
+**Dependencies (DApp-side, post-v1.0):**
+- v2.18 DAPP_REGISTER (✅ shipped)
+- v2.19 DAPP_CALL (✅ shipped)
+- v2.26 on-chain key rotation (in Theme 9 review-track; v1.0 critical path)
+- v2.10 FROST threshold sigs for assertion-signing path (✅ in review-week bundle 1)
+- Committee-instance DApp-hosting infrastructure (post-v1.0; new DApp pattern not previously deployed)
+
+**Related.** Memory `dlt-dsso-as-dapp`; V2-DESIGN.md §v2.25 (original substrate design — preserved for historical reference but supplanted by this reclassification); `DECISION-LOG.md` 2026-05-24 entry.
 
 ---
 

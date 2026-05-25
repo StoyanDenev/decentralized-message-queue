@@ -4,6 +4,8 @@
 
 **Audience.** Implementation threads picking up bundles from `IMPLEMENTATION-SEQUENCING.md`. The team executes review-week decisions as 4-32 parallel Opus 4.7 threads (per memory `dlt-team-composition`); no thread carries tacit deliberation context across sessions. This file is the only deliberation source. Without it, threads will re-litigate closed decisions or make downstream choices incompatible with the rejected-alternative reasoning.
 
+**Sibling artifact.** `Improvements.md` is the forward-looking complement to this log. Rejected alternatives and deferred items captured here are also catalogued there with classification (Additive / Breaking / Research / Process), dependencies, and revisit triggers. When an implementation thread proposes a feature that was previously rejected, both this log (for the rejection reasoning) and `Improvements.md` (for the future-revisit conditions) are relevant.
+
 **Convention.** Append entries with date + spec reference. Do not modify or delete existing entries (history is the audit trail). If a decision is later revised, append a new entry referencing the prior one — do not edit the original.
 
 **Format.** Each entry: question → options considered → choice → why others were rejected → cross-decision implications worth flagging.
@@ -268,6 +270,126 @@ Hardcoding any one of them either ships defaults that don't fit some deployments
 **Implications for review-week decisions.** None invalidated. The "pre-mainnet, no migration" disposition is now the *permanent* extension forward through v1.0 launch — no review-week decision needs re-design. All 5 bundles must complete before mainnet; BL-7/BL-8 sequencing stands.
 
 **Future-evolution discipline established.** Implementation threads proposing post-mainnet wire/state/consensus changes must: (a) push into v1.0 scope, (b) restructure as additive-only, or (c) escalate as security-critical hard-fork candidate. Default answer to "can we change X post-mainnet?" is **no**. See memory `dlt-no-migrations-constraint` for the canonical statement.
+
+---
+
+---
+
+## 2026-05-24 — Improvements.md §7.5 (pre-v1.0-schema-freeze optionality)
+
+### Five discriminator fields shipped in v1.0 to preserve post-mainnet optionality under no-migrations
+
+**Question.** Under [[dlt-no-migrations-constraint]], several Breaking improvements in Improvements.md could be downgraded to Additive if the v1.0 schema includes cheap discriminator enums or optional fields enabling future protocol-mode dispatch without a schema change. Which discriminators ship in v1.0?
+
+**Background.** Triage of Improvements.md identified 5 Breaking entries that could be made additive via discriminator dispatch: §6.1 BLS aggregation, §4.1 PQ migration, §1.1/§1.2 FSE/puncturable encryption, §1.8 trusted-issuer audit, §3.2 VRF aggregation, §6.4 IBLT contrib. The default-deny posture (skip all discriminators) would permanently foreclose all five paths under no-migrations. The cost of shipping all five is trivial (~5 bytes total across block/Account/manifest/ContribMsg).
+
+**Choices made.**
+- **7.5.1 `Block.signature_form` enum**: SHIP. Covers BLS aggregation + PQ migration with one discriminator. Default `SIG_KK_ED25519`. 1 byte/block.
+- **7.5.2 `Account.view_key_mechanism` enum + optional `fs_view_pk`**: SHIP. Preserves FSE / puncturable encryption optionality. Default `OTPK_STREAM`. ~2 B/Account.
+- **7.5.3 `Account.audit_model` enum + optional `trusted_issuer_pubkey`**: SHIP — overrides heuristic. Heuristic said "don't ship discriminators that invite principle-rejected paths" (trusted-issuer was principle-rejected for centralization in PRIV-4). User chose to ship anyway: discriminator slot preserved (also enables non-trusted-issuer audit variants like NO_AUDIT or future ZK-audit), accepting that future revisit of the trusted-issuer principle is structurally possible. Default `KEY_DISCLOSURE`.
+- **7.5.4 `manifest.randomness_aggregation_form` enum**: SHIP. Preserves VRF-aggregation optionality. Default `THRESHOLD_SIG_ACCUMULATOR`. 1 byte/manifest.
+- **7.5.5 `ContribMsg.contrib_msg_form` enum**: SHIP. Preserves IBLT/Minisketch optionality. Default `TX_HASH_ARRAY`. 1 byte/ContribMsg.
+
+**Why "ship all five" over selective shipping.** The trivial aggregate cost (~5 bytes per applicable record) makes selective shipping cost-time-marginal: the saved bytes don't matter; the foreclosed options do. Default-deny only makes sense if the project is highly confident specific paths will never be revisited — confidence not warranted for items with research/maturation dependencies measured in years (FSE, puncturable, PQ-FROST).
+
+**Important consequence.** Five Breaking improvements (§6.1, §1.1, §1.2, §1.8, §3.2, §6.4) are now reclassified as effectively Additive-via-discriminator-dispatch. Their underlying mechanism can ship post-v1.0 without schema migration as long as legacy validators fail-closed on unknown enum values. Only §1.3 stealth addresses, §3.1 sharding-of-sharding, §3.3 merritt_k override, and §6.3 dedup remain unambiguously Breaking / v3-only.
+
+**Implementation work added to v1.0 bundles.**
+- Bundle 3 (v2.22): adds 7.5.2 + 7.5.3 Account-state fields (~1-2 days)
+- Bundle 5 (Beaconless v2): adds 7.5.4 manifest field (~0.5 days; integrates with Q2.1 `validate_manifest`)
+- Foundation / pre-bundle: adds 7.5.1 Block-header field + 7.5.5 ContribMsg field (~1-2 days each); must land before any review-week bundle to lock genesis schema shape
+
+**Generalization for future threads.** When proposing a feature classified Breaking post-v1.0, first check whether a v1.0 discriminator would have made it Additive. If yes — and the discriminator was shipped per §7.5 — the feature is implementable. If no, or the discriminator wasn't shipped, the feature is v3-only.
+
+---
+
+---
+
+## 2026-05-24 — Improvements.md §7.6 (discriminator-coherence verification)
+
+### Five §7.5 discriminators verified coherent with existing review-week decisions
+
+**Question.** After committing to ship five v1.0 schema discriminators (§7.5), do they integrate cleanly with already-resolved decisions (v2.10 FROST, PRIV-4 audit, PRIV-6 confidential_policy, v2.6 gossip-out-of-lock)? Or are there conflicts that would render the discriminators non-functional?
+
+**Method.** Walked each discriminator against the relevant review-week decisions; documented enum spaces, validator dispatch, and orthogonality / interaction with existing fields.
+
+**Findings.** All five coherent. Specific clarifications captured in `Improvements.md §7.6`:
+
+- **7.6.1** `signature_form` scope: per-creator block sigs only; v2.10 FROST epoch-randomness sig is a separate orthogonal field with fixed format. Avoids combinatorial-explosion enum.
+- **7.6.2** `audit_model = KEY_DISCLOSURE` encompasses PRIV-4 dual-mode in full; master-vs-per-epoch is off-chain sub-mode choice, not chain-level enum. Discriminator distinguishes broader mechanism classes (key-disclosure vs trusted-issuer vs ZK-based).
+- **7.6.3** `view_key_mechanism` × `confidential_policy` are orthogonal axes; all 9 combinations meaningful. v1.0 validator enforces `view_key_mechanism = OTPK_STREAM` until §1.1/§1.2 future mechanisms implemented.
+- **7.6.4** `contrib_msg_form` has no interaction with v2.6 gossip-out-of-lock (v2.6 is send-side; discriminator is receive-side decode).
+- **7.6.5** Per-record vs manifest-pinned asymmetry is correct by design; no current cross-checks needed.
+
+**Why this matters.** Without verification, the discriminators committed in §7.5 could have been scaffolding that wouldn't actually function as intended — undermining the multi-year optionality just bought. The coherence check cost ~1 hour; the cost of catching mid-Bundle-3 would have been rework of foundational schema decisions.
+
+**Generalization.** When future improvements add schema fields with intended optionality, run a coherence check against ALL existing schema fields before committing. The cost-asymmetry favors pre-commit verification by orders of magnitude.
+
+---
+
+---
+
+## 2026-05-24 — DSSO architecture (v2.25): DApp, not substrate
+
+### Reclassify v2.25 from chain-level substrate to post-v1.0 DApp
+
+**Question.** V2-DESIGN.md §v2.25 designed DSSO as a chain-level substrate (T-OPAQUE on K committee members; threshold-signed assertions; light-client-verifiable against on-chain committee). Was the DApp-based alternative considered?
+
+**Background.** V2-DESIGN.md picked substrate based on four properties: (1) K-of-K mutual-distrust requires committee specifically, (2) assertion sigs verifiable against on-chain committee pubkeys, (3) v2.10 FROST composition presupposes committee, (4) committee continuity ↔ identity continuity. The DApp alternative wasn't explicitly considered.
+
+**Analysis (raised during Theme 9 review prep).** DSSO-as-DApp variant: register DSSO via v2.18 DAPP_REGISTER; the K DApp instances are run BY committee members; T-OPAQUE coordination via DAPP_CALL; assertion signing via chain's FROST primitive when ready OR per-DApp-instance signing verified via DApp registry. Reconstructs ~80% of the substrate's properties at additional DApp-internal complexity.
+
+**Choice.** DApp. DSSO ships post-v1.0 as a chain-aware Theme 7 application; v2.25 leaves v1.0 critical path entirely.
+
+**Why DApp over substrate.**
+- Trade-off accepted: ~20% security-posture reconstruction-debt at DApp level vs ~4-6 weeks v1.0 critical-path work + ~4-6 weeks deliberation eliminated
+- DSSO iterates post-mainnet without no-migrations constraints (DApp-level changes are not chain-level)
+- Federation by design — multiple DSSO providers can coexist (one DApp per provider)
+- Matches V2-DESIGN.md §God-protocol "everything else is a DApp" philosophy explicitly
+- v2.18 + v2.19 substrate already shipped, so DApp path is fully unblocked today
+
+**Why not substrate.** The substrate's strongest argument (cleanest cryptographic posture) doesn't outweigh the v1.0 schedule cost when the DApp path can reconstruct most of the desired properties.
+
+**Why not hybrid.** Would require partial v1.0 chain work plus full DApp work, getting most of substrate's cost without most of its benefit.
+
+**Implications.**
+- Theme 9 review-track scope reduces from {v2.25 + v2.26} to {v2.26 only}.
+- Phase D entry gate (per BL-8) becomes "v2 + v2.26 substantially shipped" rather than "v2 + Theme 9 substantially shipped".
+- §4.2 blocking-feature checklist drops the DSSO half.
+- v2.25 enters `Improvements.md` as a post-v1.0 DApp roadmap item (new §8, see).
+- Calendar: ~4-6 weeks of deliberation + ~4-6 weeks of implementation removed from v1.0 critical path. Net horizon reduction substantial.
+- §7.5/7.6 discriminator concerns about DSSO assertions become moot at chain level (DApp-internal wire format is DApp's concern, not v1.0 chain schema).
+- Memory `dlt-dsso-as-dapp` added to project memory.
+
+**Generalization for future scope reviews.** When V2-DESIGN.md items describe new chain-level substrate primitives, explicitly evaluate whether a chain-aware DApp variant could deliver ~80% of the properties at substantially lower v1.0 critical-path cost. Default-to-DApp when the existing substrate (v2.18 + v2.19) admits the construction; default-to-substrate only when the chain-level integration is genuinely structural (e.g., consensus rules, validator gates, randomness, key rotation primitives).
+
+---
+
+---
+
+## 2026-05-24 — Improvements.md §7.5 completion (7.5.6 + 7.5.7)
+
+### Tx-level + pubkey-form discriminators added after §7.5 incompleteness gap analysis
+
+**Question.** The original §7.5 sweep (block / Account / manifest / ContribMsg discriminators) was incomplete for §4.1 PQ migration and §6.1 BLS aggregation: it covered block-level signatures but missed tx-level signatures AND pubkey-format optionality. Without tx sig + pubkey discriminators, post-v1.0 PQ migration is structurally blocked even with §7.5.1 in place.
+
+**Choice.** Ship both:
+- **7.5.6 `Transaction.sig_form` discriminator** — per-tx sig form (default `SIG_ED25519`). Cost: 1 byte/tx.
+- **7.5.7 `pubkey_form` discriminator + variable-length pubkey encoding** — uniformly applied to every pubkey-bearing field (default `PUBKEY_ED25519`, 32B body). Cost: ~3-5 days v1.0 schema lift (substantive — touches every consumer of pubkey data including sig verification, address derivation, serialization).
+
+**Why both.** Foreclosing PQ migration under no-migrations would be the worst possible optionality loss given the known eventual quantum-adversary horizon. The cost-asymmetry (~3-5 days v1.0 lift vs. permanent foreclosure across decade-scale horizon) favors shipping both decisively.
+
+**Why not just 7.5.6.** Tx sig migration without pubkey migration is structurally incoherent — Ed25519 pubkeys can't verify Dilithium sigs. Half-PQ is no PQ.
+
+**Key coherence resolutions (§7.6.6 + §7.6.7).**
+- `Transaction.sig_form` is orthogonal to `Block.signature_form`; embedded sigs within a tx are homogeneous (all follow tx-level form), avoiding combinatorial complexity.
+- `pubkey_form` is uniformly applied to every pubkey-bearing field; variable-length encoding pattern is `{form:u8, body_len:u16, body:bytes}` (body_len elidable for known fixed-size forms).
+- **Address-derivation preimage MUST include `pubkey_form` discriminator** — getting this wrong now permanently forecloses PQ pubkey migration even with the discriminator present. v1.0 design lock-in.
+- `sig_form` ↔ `pubkey_form` curve-family consistency enforced at sig verification (mismatch is hard reject).
+
+**Implementation impact.** Pre-bundle critical-path work in IMPLEMENTATION-SEQUENCING.md updated from ~2-4 days to ~6-10 days. 7.5.7 dominates the lift (~3-5 days alone); the others remain cheap.
+
+**Generalization.** When evaluating whether a Breaking improvement can be downgraded to Additive via discriminator dispatch, check ALL affected wire-format fields, not just the most obvious one. Tx-level + pubkey-level + address-derivation all need consistent treatment for crypto-scheme migrations to be coherent post-v1.0.
 
 ---
 

@@ -95,6 +95,12 @@ Three categories chosen 2026-05-24. Partner-activity-threshold deliberately NOT 
 - **Not a substitute for judgment.** Criteria are inputs to a human decision, not a replacement for it. Authority may decline to declare even if all criteria green; may defer if confidence is otherwise lacking.
 - **Not a partner-facing artifact.** Internal tracking only; partner communications about beta progress should not reference this doc directly.
 
+**Related artifacts.**
+- `IMPLEMENTATION-SEQUENCING.md` — execution plan that produces the code this doc evaluates
+- `DECISION-LOG.md` — rationale for criteria choices (DSF Byzantine + bug-finding + zero-bug windows; partner-activity deliberately omitted)
+- `Improvements.md` §5 — rejected-alternative criteria (stability gate, external audit, public bug bounty) preserved for future revisit
+- Memory `dlt-no-migrations-constraint` — the constraint that makes this readiness gate load-bearing (declaration is one-way)
+
 ---
 
 *End of readiness tracking artifact. Updated by integration threads through beta; reviewed by sole authority at convergence.*

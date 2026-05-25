@@ -1446,7 +1446,8 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
 - v2.10 active: **~3-4 weeks** (threshold randomness aggregation incl. DKG infrastructure per Option C, plan.md A11 / `docs/proofs/v2.10-DKG-SPEC.md`)
-- v2.25 + v2.26 added to design (Theme 9 DSSO — distributed IdP w/ T-OPAQUE; depends on v2.10 + v2.14)
+- v2.26 added to design (Theme 9 — chain-level key rotation primitive; ROTATE_KEY tx + rotation-aware sig verify; ~1 week)
+- v2.25 added to design (Theme 9 DSSO — distributed IdP w/ T-OPAQUE; reclassified 2026-05-24 as **post-v1.0 chain-aware DApp** on top of v2.18 + v2.19 + v2.26 substrate per `docs/proofs/Improvements.md §8.1`)
 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
 1. ~~Track A small items~~ — **complete in-session**.

@@ -5,6 +5,10 @@
 **Companion documents:**
 - `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved)
 - `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md` — sibling spec docs that this plan executes against
+- `DECISION-LOG.md` — backward-looking deliberation history for the decisions this plan executes
+- `Improvements.md` — forward-looking enhancement queue (post-v1.0 items deferred from this plan; rejected alternatives; research items)
+- `MAINNET_READINESS.md` — readiness-criteria tracking artifact gating mainnet declaration
+- `PFS_DEPLOYMENT_GUIDANCE.md` — operator-facing PFS regulatory framework
 
 ---
 
@@ -39,6 +43,21 @@ Foundation (mostly shipped)
                               │
         Bundle 5: Beaconless v2 (after v2 + Theme 9 substantially shipped)
 ```
+
+### Pre-bundle schema discriminators (RESOLVED 2026-05-24 via Improvements.md §7.5)
+
+Seven v1.0 schema discriminators must land **before any review-week bundle** to lock the genesis schema shape and preserve post-v1.0 optionality under no-migrations. Per `Improvements.md §7.5` + §7.6 coherence resolutions:
+
+| Discriminator | Location | v1.0 default | Effort | Notes |
+|---|---|---|---|---|
+| `Block.signature_form` | Block header | `SIG_KK_ED25519` | ~1-2 days | Unlocks future BLS aggregation (MODERN) + PQ migration of block sigs |
+| `ContribMsg.contrib_msg_form` | Phase-1 ContribMsg | `TX_HASH_ARRAY` | ~1-2 days | Unlocks future IBLT/Minisketch contrib |
+| `Transaction.sig_form` | Every Transaction | `SIG_ED25519` | ~1-2 days | Unlocks future PQ migration of tx sigs; tx-payload embedded sigs follow tx-level form (homogeneous) |
+| `pubkey_form` + variable-length pubkey encoding | Every pubkey-bearing field (RegistryEntry.ed_pub, Transaction.from/to, Account fields, DAppEntry, OTPK, etc.) | `PUBKEY_ED25519` (32B body) | **~3-5 days** | Unlocks future PQ pubkey migration (Dilithium 1952B) + BLS pubkey adoption (96B). **MUST include discriminator in address-derivation preimage** to prevent address collision across pubkey forms. Substantive v1.0 schema lift — touches every consumer of pubkey data. |
+
+Combined effort: **~6-10 days** (substantially larger than the original 5-discriminator estimate due to 7.5.7 variable-length pubkey encoding). Validator behavior: fail-closed on unknown enum values (forward-compat). No additional logic needed in v1.0 for the unused discriminator values — wire-format scaffolding only — but the pubkey-encoding lift is real implementation work touching sig verification, address derivation, serialization, deserialization throughout.
+
+The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit_model`, `manifest.randomness_aggregation_form`) land inside Bundle 3 and Bundle 5 respectively — see those bundles.
 
 ### Bundle 0: Foundation (mostly shipped pre-review-week)
 
@@ -175,24 +194,27 @@ These cannot be answered from the design specs alone; they require team-knowledg
 
 **Wall-clock with this capacity model.** Phase B/C completion ≈ max(Bundle 1, Bundle 2, Bundle 3, Bundle 4) ≈ Bundle 3 at ~3-3.5 months. Phase D = Bundle 5 at ~3-4 months. Total review-week implementation horizon: **~6-7.5 months** from start, gated on coordination quality rather than headcount.
 
-### 4.2 "v2 + Theme 9 substantially shipped" — completion criterion for Phase D
+### 4.2 "v2 + v2.26 substantially shipped" — completion criterion for Phase D
 
-**Approach: named-feature checklist (Option C).** Phase D opens when an explicit list of must-have features from v2 + Theme 9 has landed (merged + tests passing). No separate stability gate — code-complete on the blocking subset is the trigger. Non-blocking v2 / Theme 9 work may continue in parallel with Phase D.
+**REVISED 2026-05-24:** Theme 9 scope reduced. DSSO (v2.25) reclassified as a DApp (chain-aware DApp on top of v2.18 + v2.19 + v2.26 substrate; ships post-v1.0 as Theme 7 application). Theme 9 chain-level work reduces to v2.26 (on-chain key rotation) only. Phase D gate updated accordingly.
+
+**Approach: named-feature checklist (Option C).** Phase D opens when an explicit list of must-have features from v2 + v2.26 has landed (merged + tests passing). No separate stability gate — code-complete on the blocking subset is the trigger. Non-blocking v2 work may continue in parallel with Phase D.
 
 The checklist itself has two halves to be populated by team:
 
 **v2 blocking features (must land before Phase D):**
 - _to be filled by team_
 
-**Theme 9 (DSSO) blocking features (must land before Phase D):**
-- _to be filled by team_
+**v2.26 (on-chain key rotation) blocking features (must land before Phase D):**
+- _to be filled by team after v2.26 review-track deliberation completes_
 
 **Explicitly non-blocking (may run in parallel with Phase D):**
-- _to be filled by team — list items that do NOT gate Phase D so it's clear what's deferrable_
+- v2.25 DSSO substrate — reclassified as DApp (ships post-v1.0 as Theme 7 application, not chain-level work)
+- _other items to be filled by team — list items that do NOT gate Phase D so it's clear what's deferrable_
 
 **Decision authority for Phase D opening:** _to be filled by team_ (recommend: single technical decision-maker — eng lead or architect — to avoid committee deadlock).
 
-**Why no stability gate.** Per Option C as picked: code-complete on the blocking subset is the trigger. Stability emerges from continued operation post-Phase-D-start; if a blocking feature regresses after Phase D opens, Bundle 5 work doesn't unwind — fixes land in parallel.
+**Why no stability gate.** Per Option C as picked: code-complete on the blocking subset is the trigger. Stability emerges from continued operation post-Phase-D-start; if a blocking feature regresses after Phase D opens, Bundle 5 work doesn't unwind — fixes land in parallel. The rejected stability-gate alternative is preserved in `Improvements.md §5.1` for future revisit.
 
 ### 4.4 QA strategy — Closed-beta partner program (Option A)
 
@@ -239,7 +261,7 @@ Specific numeric thresholds populated pre-beta. Tracking artifact: `MAINNET_READ
 - Mainnet launch: declared when internal team + beta partners confident; no calendar prediction
 - **Net horizon to beta start: ~6-7.5 months. Net horizon to mainnet: unbounded (driven by confidence rather than schedule).**
 
-**Residual risk acknowledgment.** No-external-audit + closed-beta only (no public bug-bounty) concentrates QA confidence in the internal team's judgment + partner-observed behavior. If a bug escapes beta into mainnet, the no-migrations constraint binds — only security-critical hard fork available as remediation. This is accepted as a risk profile, not a gap to mitigate.
+**Residual risk acknowledgment.** No-external-audit + closed-beta only (no public bug-bounty) concentrates QA confidence in the internal team's judgment + partner-observed behavior. If a bug escapes beta into mainnet, the no-migrations constraint binds — only security-critical hard fork available as remediation. This is accepted as a risk profile, not a gap to mitigate. Mitigation options not adopted are preserved in `Improvements.md §5.2` (external multi-firm audit), `§5.3` (public bug bounty pre-mainnet), `§5.4` (Option C public pre-mainnet releases) for future revisit if the risk posture changes.
 
 ---
 

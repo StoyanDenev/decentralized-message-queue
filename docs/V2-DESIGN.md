@@ -34,10 +34,10 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. **MODERN crypto profile only** (unavailable in FIPS profiles: `tactical` + `cluster`). Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over secp256k1 via libsecp256k1-zkp, ephemeral X25519 DH for amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
 | v2.24 Audit / compliance hooks | ⏳ spec resolved, implementation pending | Theme 8. Spec deepened in §v2.24 below: `ROTATE_AUDIT_KEY` (TxType 12) + `LOG_AUDIT_ACCESS` (TxType 13) + `audit_view_master_pk` field + audit-mode RPC (`audit_decrypt_tx` / `audit_decrypt_master` / `audit_list_access_log`) + state-root `u:`/`g:`/`l:` namespaces + FIPS-profile clear-amount fallback + snapshot-restore gate (mirrors S-037/S-038 closure). ~2-3 weeks MODERN, ~1.5 weeks FIPS-only |
-| v2.25 Distributed identity provider (DSSO) | ⏳ not started | Theme 9. Mutual-distrust IdP framework with T-OPAQUE replacing the original SRP primitive; depends on v2.10 + v2.14 |
+| v2.25 Distributed identity provider (DSSO) | 🔄 reclassified as post-v1.0 DApp (2026-05-24) | Theme 9 originally framed DSSO as chain-level substrate; reclassified as a chain-aware DApp on top of v2.18 + v2.19 + v2.26 substrate per `proofs/DECISION-LOG.md` 2026-05-24 entry and `proofs/Improvements.md §8.1`. Substrate spec below preserved as historical reference. |
 | v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
-**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 11. Deferred: 3 (v2.9, v2.13, v2.21+).**
+**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 10. Reclassified: 1 (v2.25 → post-v1.0 DApp per 2026-05-24). Deferred: 3 (v2.9, v2.13, v2.21+).**
 
 For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
@@ -1603,6 +1603,12 @@ The framework is exogenous; the substitution choice (and most of the engineering
 
 ### v2.25 — Distributed identity provider (DSSO substrate)
 
+> **🔄 Reclassified 2026-05-24 — preserved as historical reference.**
+>
+> This substrate design is **supplanted** by the DSSO-as-DApp reclassification documented in `proofs/Improvements.md §8.1` + `proofs/DECISION-LOG.md` 2026-05-24 entry. DSSO ships as a post-v1.0 chain-aware DApp on top of v2.18 + v2.19 + v2.26 — K DApp instances run by committee members; T-OPAQUE coordination via DAPP_CALL; assertion signing via the chain's FROST primitive (when applicable) or per-instance signing verified against the DApp registry. The reclassification recovers ~80% of substrate's security properties at the DApp level while eliminating ~8-12 weeks of v1.0 critical-path work and removing DSSO from the Phase D gate (see `proofs/IMPLEMENTATION-SEQUENCING.md §4.2`).
+>
+> The substrate text below documents the rejected alternative; it is retained so future deliberators understand the trade-off space and so cross-references elsewhere in this doc (v2.8 §post-quantum, v2.10 §curve-family rationale, v2.22 §shared-curve infrastructure, v2.24 §audit-trail composition, v2.26 §identity continuity, Phase C sequencing) remain readable. Implementation should follow the DApp reclassification, not this section.
+
 **Motivation.** Today there is no Determ-native authentication primitive for off-chain services. Operators wanting to use Determ identities (registered domain or anon address) as the trust anchor for an off-chain service have to roll their own challenge-response protocol against a single Determ node — which centralises trust on whichever node they happen to query. For permissionless DApp deployment the absence of a federated authentication primitive is the missing piece between "Determ as a chain" and "Determ as a usable identity substrate."
 
 A distributed-IdP framework with the K-of-K committee as the operator group + T-OPAQUE as the PAKE gives Determ users a SIWE-class sign-in flow ("Sign-In With Determ") that:
@@ -2019,20 +2025,27 @@ Defer indefinitely: v2.23 Bitcoin SPV bridge (2 months, low priority), v2.23 Eth
 
 **Phase-B exit criterion:** Confidential payments + Determ-to-Determ + Cosmos IBC + audit hooks shipped. Determ becomes commercially deployable for regulated payment workloads.
 
-### Phase C — Theme 9 DSSO (6-9 weeks, after preconditions land in Phase A)
+### Phase C — Theme 9 (v2.26 key rotation; v2.25 DSSO reclassified) — ~1 week, after preconditions land in Phase A
 
-Strictly sequential after Phase A. v2.26 ships first as a v2.25 prerequisite (key rotation is irrecoverable-loss mitigation for DSSO).
+**REVISED 2026-05-24.** Theme 9 scope reduced: v2.25 DSSO **reclassified as post-v1.0 DApp** (see §v2.25 banner above + `proofs/Improvements.md §8.1` + `proofs/DECISION-LOG.md` 2026-05-24 entry). Phase C chain-level work reduces to v2.26 (on-chain key rotation) only. The DSSO DApp ships **after** v1.0 mainnet declaration on top of the v2.18 + v2.19 + v2.26 substrate; it does NOT gate Phase D opening (see `proofs/IMPLEMENTATION-SEQUENCING.md §4.2`).
 
 | Order | Item | Effort | Why this order |
 |---|---|---|---|
-| C.1 | v2.26 on-chain key rotation | ~1 week | Identity-continuity precondition for v2.25 production posture. |
-| C.2 | v2.25 DSSO substrate — T-OPAQUE adapter | 1-2 weeks | Vendor + harden T-OPRF + T-OPAQUE library. Reuses single-server OPAQUE adapter shape from v2.14. |
-| C.3 | v2.25 wallet client + committee-side share handler | ~2 weeks | Wallet side overlaps with v2.14's single-server work. |
-| C.4 | v2.25 signed-assertion protocol + token format | ~1 week | JWT-compatible vs custom binary — decide at start of C.4. |
-| C.5 | v2.25 reference RP DApp + integration test | ~1 week | Validates the end-to-end flow via Theme-7 DAPP_REGISTER + DAPP_CALL substrate. |
-| C.6 | v2.25 spec doc + threat-model write-up | ~3-5 days | DSSO-SPEC.md, mirrors F2-SPEC.md style. |
+| C.1 | v2.26 on-chain key rotation | ~1 week | Identity-continuity primitive. Required by post-v1.0 DSSO DApp deployment but ships in Phase C as a chain-level prerequisite regardless. |
 
-**Phase-C exit criterion:** Determ becomes a usable federated-identity anchor for off-chain services without trust in any single Determ node.
+**Phase-C exit criterion (revised):** v2.26 ROTATE_KEY tx + rotation-aware sig verification shipped + tests pass. Identity continuity for validator operators and wallet users restored (single-key-loss = rotation-event, not identity-loss). v2.26 unblocks the post-v1.0 DSSO DApp's deployment posture but the DApp itself is out of scope for Phase C.
+
+**DSSO DApp (post-v1.0, not in Phase C):**
+
+| Item | Effort | Notes |
+|---|---|---|
+| DSSO DApp — T-OPAQUE coordination via DAPP_CALL | 1-2 weeks | Post-v1.0. K DApp instances run by committee members; T-OPRF + T-OPAQUE library vendored at DApp level, not chain level. |
+| DSSO DApp — wallet client | ~2 weeks | Post-v1.0. Wallet-side OPAQUE flow + per-RP assertion verification. |
+| DSSO DApp — signed-assertion protocol + token format | ~1 week | Post-v1.0. Assertion signing via the chain's FROST primitive (when applicable) or per-instance signing verified against DApp registry. |
+| DSSO DApp — reference RP integration test | ~1 week | Post-v1.0. Validates DApp-level flow end-to-end. |
+| DSSO DApp — spec doc + threat-model write-up | ~3-5 days | Post-v1.0. DSSO-as-DApp design note; references `proofs/Improvements.md §8.1` reclassification. |
+
+Aggregate post-v1.0 DSSO DApp effort: ~6-7 weeks (unchanged from original substrate estimate; the work moves from chain to DApp layer, not the workload). Eliminates ~8-12 weeks from the v1.0 critical path (substrate vendoring + chain-state binding + light-client verification of committee pubkey set) — the DApp inherits all of those from the v1.0 substrate.
 
 ### Phase D — Beaconless v2 architecture (~3-4 months, after Phase A/B/C ship)
 
@@ -2041,7 +2054,7 @@ The largest single architectural effort in Determ's roadmap. Removes the beacon 
 **Status: spec resolved per Option A** in `docs/proofs/Beaconless-v2-SPEC.md`. All 6 interlinked foundational sub-questions formally resolved (cross-shard validation architecture, trust anchor, committee continuity, cross-shard receipts, decentralized merge detection, randomness mixing). Implementation pending pre-implementation review (8-point checklist in spec §8).
 
 **Prerequisites:**
-- v2 + Theme 9 substantially shipped (Beaconless v2 builds on v2.1 state Merkle root, v2.2 light-client proofs, v2.10 FROST-Ed25519 threshold infrastructure)
+- v2 + v2.26 substantially shipped (Beaconless v2 builds on v2.1 state Merkle root, v2.2 light-client proofs, v2.10 FROST-Ed25519 threshold infrastructure, v2.26 on-chain key rotation). **REVISED 2026-05-24:** prerequisite originally read "v2 + Theme 9 substantially shipped" but Theme 9 chain-level scope reduced to v2.26 only per the DSSO-as-DApp reclassification — see `proofs/IMPLEMENTATION-SEQUENCING.md §4.2`. The DSSO DApp itself does NOT gate Phase D.
 - ~~Deterministic-simulation framework (S-035 Option 2)~~ — **already shipped from Phase 0** (promoted ahead of Phase A); Phase D inherits the DSF coverage built up during Phases A through C.
 
 | Order | Item | Effort | Why this order |

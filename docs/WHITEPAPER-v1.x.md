@@ -539,9 +539,10 @@ These are intentional non-goals, not roadmap items.
 - Stake-weighted creator selection — design item, parallel-representation analysis required first.
 - v2.8 Post-quantum signature migration (Dilithium / Falcon) — ⏳ not started.
 - v2.14 OPAQUE wallet recovery (real `libopaque`) — ⏳ not started; gated on the MSVC porting of upstream VLAs.
-- v2.25 + v2.26 Distributed identity provider (DSSO) — ⏳ Theme 9 new; depends on v2.10 + v2.14.
+- v2.26 On-chain key rotation — ⏳ Theme 9 chain-level work; identity-continuity primitive (ROTATE_KEY tx + rotation-aware sig verify).
+- v2.25 Distributed identity provider (DSSO) — 🔄 **reclassified 2026-05-24 as post-v1.0 DApp** (was: chain-level substrate). Ships on top of v2.18 + v2.19 + v2.26 as a chain-aware DApp; T-OPAQUE coordination via DAPP_CALL; ~6-7 weeks DApp-level effort post-mainnet. See `docs/proofs/Improvements.md §8.1` + `docs/proofs/DECISION-LOG.md` 2026-05-24 entry. Substrate spec in `docs/V2-DESIGN.md §v2.25` preserved as historical reference.
 
-The v2 themes cover Theme 1 (Trust minimization), Theme 2 (Scale + concurrency), Theme 3 (Cryptographic hardening), Theme 4 (Liveness + randomness), Theme 5 (Composability), Theme 6 (Wallet + operator UX), Theme 7 (DApp layer — v2.18 / v2.19 shipped), Theme 8 (Privacy + interop — v2.22 / v2.23 / v2.24), Theme 9 (DSSO — v2.25 / v2.26).
+The v2 themes cover Theme 1 (Trust minimization), Theme 2 (Scale + concurrency), Theme 3 (Cryptographic hardening), Theme 4 (Liveness + randomness), Theme 5 (Composability), Theme 6 (Wallet + operator UX), Theme 7 (DApp layer — v2.18 / v2.19 shipped; v2.25 DSSO reclassified into this theme as post-v1.0 DApp per 2026-05-24), Theme 8 (Privacy + interop — v2.22 / v2.23 / v2.24), Theme 9 (now v2.26 chain-level key rotation only; v2.25 substrate scope reclassified into Theme 7).
 
 ### 12.3 Network partition behavior
 
