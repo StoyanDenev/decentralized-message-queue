@@ -219,6 +219,7 @@ add_executable(determ-light
   light/trustless_read.cpp
   light/keyfile.cpp
   light/sign_tx.cpp
+  light/watch.cpp
   # Reused from src/ (explicit list — no glob):
   src/crypto/merkle.cpp
   src/crypto/keys.cpp

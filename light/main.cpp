@@ -38,6 +38,7 @@
 #include "trustless_read.hpp"
 #include "keyfile.hpp"
 #include "sign_tx.hpp"
+#include "watch.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -102,6 +103,12 @@ void print_usage() {
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
         "                    --to <addr> --amount <N> --fee <N> [--out <file>]\n"
         "      Composite: nonce-trustless + sign-tx + submit-tx.\n"
+        "\n"
+        "Monitoring:\n"
+        "  watch-head --rpc-port <N> --genesis <file> [--count <N>] [--interval <s>]\n"
+        "      Anchor genesis once + poll the daemon's head every <s> seconds.\n"
+        "      Verifies committee sigs each tick; prints a structured progress\n"
+        "      line per tick. Exits on SIGINT or after --count ticks.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -634,6 +641,39 @@ int cmd_verify_and_submit(int argc, char** argv) {
     }
 }
 
+// ────────────────────────── watch-head ────────────────────────────────
+
+int cmd_watch_head(int argc, char** argv) {
+    WatchOptions opts;
+    bool have_port = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            opts.rpc_port = parse_u16("--rpc-port", argv[++i]);
+            have_port = true;
+        } else if (a == "--genesis"  && i + 1 < argc) {
+            opts.genesis_path = argv[++i];
+        } else if (a == "--count"    && i + 1 < argc) {
+            opts.count = parse_u64("--count", argv[++i]);
+        } else if (a == "--interval" && i + 1 < argc) {
+            opts.interval_secs = parse_u64("--interval", argv[++i]);
+        } else {
+            std::cerr << "watch-head: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || opts.genesis_path.empty()) {
+        std::cerr << "watch-head: --rpc-port and --genesis are required\n";
+        return 1;
+    }
+    try {
+        return run_watch_head(opts);
+    } catch (const std::exception& e) {
+        std::cerr << "watch-head: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -664,6 +704,7 @@ int main(int argc, char** argv) {
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
+        if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
