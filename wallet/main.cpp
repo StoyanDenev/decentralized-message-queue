@@ -4002,6 +4002,407 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     return 0;
 }
 
+// ── keyfile-reencrypt — passphrase rotation w/o keypair change ─────────────
+//
+// Operator hygiene workflow: an operator who suspects their passphrase may
+// be weak or compromised rotates it WITHOUT generating a new keypair (which
+// would change their on-chain identity). The Ed25519 seed stays identical;
+// only the at-rest AES-256-GCM + PBKDF2 encryption envelope changes — fresh
+// random salt + fresh nonce under the NEW passphrase.
+//
+// This is a deliberately ergonomic sibling of `keyfile-rotate`: where
+// keyfile-rotate takes the general `--{old,new}-passphrase-from <src>`
+// source specifier (file:/env:/prompt) and adds atomic in-place staging +
+// a same-passphrase guard, keyfile-reencrypt takes BARE environment-variable
+// NAMES via `--old-passphrase-env` / `--new-passphrase-env`. The env-only
+// shape suits CI / orchestration contexts (Vault, systemd LoadCredential,
+// k8s secrets) where the passphrase is injected as an environment variable
+// and never appears on a command line or in a file. Internally we route the
+// var name through the same `passphrase_from_source("env:<NAME>")` helper so
+// the empty-value rejection + diagnostics stay identical to every other
+// keyfile-* command.
+//
+// Command shape:
+//   determ-wallet keyfile-reencrypt
+//       --in <keyfile> --out <keyfile>
+//       --old-passphrase-env OLD_VAR --new-passphrase-env NEW_VAR
+//       [--force] [--json]
+//
+// Inputs:
+//   --in <file>                : existing encrypted DWE1 keyfile produced by
+//                                 keyfile-create (canonical 2-line shape:
+//                                 "DETERM-NODE-V1 <pubkey_hex>" + blob).
+//   --out <file>               : destination for the re-encrypted keyfile.
+//                                 Refuses to overwrite an existing file
+//                                 without --force.
+//   --old-passphrase-env NAME  : environment variable holding the OLD
+//                                 (current) passphrase. Unset/empty rejected.
+//   --new-passphrase-env NAME  : environment variable holding the NEW
+//                                 passphrase. Unset/empty rejected.
+//   [--force]                  : permit overwriting an existing --out file.
+//   [--json]                   : emit a one-line JSON summary on stdout.
+//
+// Flow (no plaintext ever touches disk):
+//   1. Read --in; parse the 2-line canonical format (header + blob).
+//   2. Validate header magic (DETERM-NODE-V1) + pubkey shape (64 hex).
+//   3. Read OLD + NEW passphrases from their named env vars.
+//   4. Deserialize the DWE1 envelope blob.
+//   5. envelope::decrypt with OLD passphrase + AAD = header pubkey bytes.
+//      AEAD tag mismatch → exit 2 "old passphrase wrong or corrupted
+//      keyfile" (indistinguishable; an attacker probing passphrases must
+//      not learn the structural state).
+//   6. Parse + validate the decrypted plaintext as canonical
+//      {"pubkey","priv_seed"} JSON. Verify inner pubkey == header pubkey
+//      (defense-in-depth — same checks as keyfile-decrypt / keyfile-rotate).
+//   7. envelope::encrypt the plaintext under the NEW passphrase. The
+//      envelope library draws a fresh 16-byte salt + fresh 12-byte nonce
+//      per call (RAND_bytes) — two reencrypts of the same input under the
+//      same new passphrase therefore produce byte-distinct outputs.
+//   8. Self-test round-trip: deserialize + decrypt the freshly-emitted
+//      envelope with the new passphrase BEFORE any file is touched.
+//   9. Write the canonical 2-line file to --out (header preserved byte-for-
+//      byte — same pubkey, so the on-chain identity is provably unchanged).
+//  10. Zero every plaintext + key buffer via sodium_memzero on every exit
+//      path (success + every error branch), mirroring keyfile-rotate.
+//
+// Address invariance: the header pubkey is preserved verbatim and the inner
+// pubkey is re-verified against it after decrypt, so the recovered address
+// (0x + pubkey_hex) is identical pre/post by construction. It is printed in
+// both human + --json output so callers can assert on it.
+//
+// Diagnostic policy (matches keyfile-decrypt / keyfile-rotate):
+//   * Wrong OLD passphrase OR tampered envelope OR mismatched AAD →
+//     **exit 2** "old passphrase wrong or corrupted keyfile" (no --out
+//     written; the decrypt happens before --out is opened).
+//   * Structural problems with --in (wrong header magic, malformed blob,
+//     unparseable/incomplete plaintext JSON, mismatched pubkey) → **exit 1**
+//     with a specific diagnostic.
+//   * Missing required flags, missing/empty env var, can't open --in, --out
+//     exists without --force → **exit 1**.
+int cmd_keyfile_reencrypt(int argc, char** argv) {
+    std::string in_path, out_path, old_env, new_env;
+    bool force    = false;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"                  && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--out"                 && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--old-passphrase-env"  && i + 1 < argc) old_env  = argv[++i];
+        else if (a == "--new-passphrase-env"  && i + 1 < argc) new_env  = argv[++i];
+        else if (a == "--force")                               force    = true;
+        else if (a == "--json")                                json_out = true;
+        else {
+            std::cerr << "keyfile-reencrypt: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet keyfile-reencrypt --in <file> --out <file> "
+                         "--old-passphrase-env OLD_VAR --new-passphrase-env NEW_VAR "
+                         "[--force] [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty() || out_path.empty()
+        || old_env.empty() || new_env.empty()) {
+        std::cerr << "Usage: determ-wallet keyfile-reencrypt --in <file> --out <file> "
+                     "--old-passphrase-env OLD_VAR --new-passphrase-env NEW_VAR "
+                     "[--force] [--json]\n";
+        return 1;
+    }
+
+    // ── Read --in and parse the canonical 2-line format ────────────────────
+    std::string header_line, blob_line;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "keyfile-reencrypt: cannot open --in: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, header_line)) {
+            std::cerr << "keyfile-reencrypt: --in is empty: " << in_path << "\n";
+            return 1;
+        }
+        if (!std::getline(f, blob_line)) {
+            std::cerr << "keyfile-reencrypt: --in is missing the envelope-blob "
+                         "line (expected 2-line format: header + blob): "
+                      << in_path << "\n";
+            return 1;
+        }
+        while (!header_line.empty()
+               && (header_line.back() == '\r' || header_line.back() == '\n'))
+            header_line.pop_back();
+        while (!blob_line.empty()
+               && (blob_line.back() == '\r' || blob_line.back() == '\n'))
+            blob_line.pop_back();
+    }
+
+    const std::string header_magic = "DETERM-NODE-V1 ";
+    if (header_line.rfind(header_magic, 0) != 0) {
+        std::cerr << "keyfile-reencrypt: --in header does not start with "
+                     "'DETERM-NODE-V1 ' (not a canonical encrypted node "
+                     "keyfile)\n";
+        return 1;
+    }
+    std::string header_pubkey_hex = header_line.substr(header_magic.size());
+    if (header_pubkey_hex.size() != 64) {
+        std::cerr << "keyfile-reencrypt: --in header pubkey must be 64 hex "
+                     "chars (32-byte Ed25519 pubkey); got "
+                  << header_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    try { (void)from_hex(header_pubkey_hex); }
+    catch (std::exception& e) {
+        std::cerr << "keyfile-reencrypt: --in header pubkey is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (blob_line.empty()) {
+        std::cerr << "keyfile-reencrypt: --in envelope blob line is empty\n";
+        return 1;
+    }
+
+    // Display-canonical anon-address ("0x" + lowercase hex(pub)); matches
+    // src/main.cpp::make_anon_address. Printed so the caller can assert the
+    // address is unchanged by the rotation. The AAD binding uses the bytes
+    // exactly as they appear in the file header — do NOT mutate that source.
+    std::string anon_address = "0x" + header_pubkey_hex;
+
+    // ── Read OLD + NEW passphrases from their named env vars ───────────────
+    // Route the bare var name through the shared passphrase_from_source
+    // "env:<NAME>" path so the unset/empty rejection + diagnostics stay
+    // identical to keyfile-create / -decrypt / -rotate.
+    std::string err;
+    std::string old_passphrase = passphrase_from_source("env:" + old_env, err);
+    if (old_passphrase.empty()) {
+        std::cerr << "keyfile-reencrypt: (old passphrase) " << err
+                  << "\n  (set the OLD passphrase in environment variable "
+                  << old_env << ")\n";
+        // No secrets in scope yet; safe to return without zeroization.
+        return 1;
+    }
+    std::string new_passphrase = passphrase_from_source("env:" + new_env, err);
+    if (new_passphrase.empty()) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        std::cerr << "keyfile-reencrypt: (new passphrase) " << err
+                  << "\n  (set the NEW passphrase in environment variable "
+                  << new_env << ")\n";
+        return 1;
+    }
+
+    // ── --out preconditions: parent dir exists; file absent (or --force) ───
+    {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            std::cerr << "keyfile-reencrypt: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            std::cerr << "keyfile-reencrypt: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to override)\n";
+            return 1;
+        }
+    }
+
+    // ── Deserialize the envelope blob ──────────────────────────────────────
+    auto env_opt = envelope::deserialize(blob_line);
+    if (!env_opt) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        std::cerr << "keyfile-reencrypt: --in envelope blob is malformed "
+                     "(not a valid DWE1 serialization)\n";
+        return 1;
+    }
+
+    // ── Decrypt with the OLD passphrase ────────────────────────────────────
+    // AAD = ASCII bytes of header_pubkey_hex (matches keyfile-create). A
+    // wrong OLD passphrase / tampered envelope / substituted blob all fail
+    // here with the SAME exit 2 + diagnostic — indistinguishable to a
+    // plaintext-recovering oracle. No --out has been opened yet, so a
+    // failure here leaves zero output on disk (assertion: no file written).
+    std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
+    auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);
+    if (!pt_opt) {
+        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        std::cerr << "keyfile-reencrypt: old passphrase wrong or corrupted "
+                     "keyfile\n";
+        return 2;
+    }
+
+    // pt_bytes carries the decrypted node_key.json plaintext (contains the
+    // 32-byte Ed25519 seed). Zeroed via sodium_memzero on every exit path
+    // below through the secure_zero_all closure-defer.
+    std::vector<uint8_t> pt_bytes = std::move(*pt_opt);
+    auto secure_zero_all = [&]() {
+        if (!pt_bytes.empty())
+            sodium_memzero(pt_bytes.data(), pt_bytes.size());
+        if (!old_passphrase.empty())
+            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        if (!new_passphrase.empty())
+            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+    };
+
+    // ── Validate decrypted plaintext is canonical {"pubkey","priv_seed"} ───
+    std::string pt_str(pt_bytes.begin(), pt_bytes.end());
+    nlohmann::json keyfile_json;
+    try {
+        keyfile_json = nlohmann::json::parse(pt_str);
+    } catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: decrypted plaintext is not valid JSON "
+                     "(this is not a canonical encrypted node keyfile): "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!keyfile_json.is_object()
+        || !keyfile_json.contains("pubkey")
+        || !keyfile_json.contains("priv_seed")
+        || !keyfile_json["pubkey"].is_string()
+        || !keyfile_json["priv_seed"].is_string()) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: decrypted plaintext is missing the "
+                     "required 'pubkey' / 'priv_seed' string fields\n";
+        return 1;
+    }
+    std::string inner_pubkey_hex = keyfile_json["pubkey"].get<std::string>();
+    std::string priv_seed_hex    = keyfile_json["priv_seed"].get<std::string>();
+    if (inner_pubkey_hex.size() != 64) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: inner 'pubkey' must be 64 hex chars; "
+                     "got " << inner_pubkey_hex.size() << "\n";
+        return 1;
+    }
+    if (priv_seed_hex.size() != 64) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: inner 'priv_seed' must be 64 hex "
+                     "chars; got " << priv_seed_hex.size() << "\n";
+        return 1;
+    }
+    try { (void)from_hex(inner_pubkey_hex); (void)from_hex(priv_seed_hex); }
+    catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: inner JSON contains invalid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    // Address-invariance anchor: the inner pubkey must equal the header
+    // pubkey. By construction the rotation preserves the header verbatim,
+    // so this guarantees the recovered address is unchanged pre/post.
+    if (inner_pubkey_hex != header_pubkey_hex) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: inner 'pubkey' (" << inner_pubkey_hex
+                  << ") does not match header pubkey (" << header_pubkey_hex
+                  << "); the encrypted blob was not produced by the "
+                     "canonical keyfile-create path\n";
+        return 1;
+    }
+
+    // ── Encrypt under the NEW passphrase (fresh salt + fresh nonce) ────────
+    // envelope::encrypt draws a fresh 16-byte salt + fresh 12-byte nonce per
+    // call (RAND_bytes) — re-encrypting the same input under the same new
+    // passphrase twice produces byte-distinct envelopes by construction.
+    std::string blob;
+    try {
+        auto new_env_blob = envelope::encrypt(pt_bytes, new_passphrase, aad);
+        blob              = envelope::serialize(new_env_blob);
+    } catch (std::exception& e) {
+        secure_zero_all();
+        std::cerr << "keyfile-reencrypt: envelope encrypt failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    // ── Self-test round-trip: decrypt the freshly-encrypted envelope ───────
+    // Catches any encrypt/decrypt path drift BEFORE we write --out.
+    {
+        auto rt_env = envelope::deserialize(blob);
+        if (!rt_env) {
+            secure_zero_all();
+            std::cerr << "keyfile-reencrypt: internal: just-emitted envelope "
+                         "blob fails deserialize\n";
+            return 1;
+        }
+        auto rt_pt = envelope::decrypt(*rt_env, new_passphrase, aad);
+        if (!rt_pt) {
+            secure_zero_all();
+            std::cerr << "keyfile-reencrypt: internal: just-emitted envelope "
+                         "fails decrypt round-trip with the new passphrase\n";
+            return 1;
+        }
+        bool rt_match = (*rt_pt == pt_bytes);
+        sodium_memzero(rt_pt->data(), rt_pt->size());
+        if (!rt_match) {
+            secure_zero_all();
+            std::cerr << "keyfile-reencrypt: internal: round-trip plaintext "
+                         "mismatch under new passphrase\n";
+            return 1;
+        }
+    }
+
+    // ── Write the canonical 2-line file (header preserved byte-for-byte) ───
+    {
+        std::ofstream f(out_path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            secure_zero_all();
+            std::cerr << "keyfile-reencrypt: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        f << "DETERM-NODE-V1 " << header_pubkey_hex << "\n";
+        f << blob << "\n";
+        f.flush();
+        f.close();
+        if (!f) {
+            secure_zero_all();
+            std::cerr << "keyfile-reencrypt: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+
+    // 0600 permissions tightening — best-effort on Windows.
+    {
+        std::error_code perm_ec;
+        std::filesystem::permissions(
+            out_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            perm_ec);
+        (void)perm_ec;
+    }
+
+    // ── Zero all plaintext + key buffers BEFORE emitting the summary ───────
+    // The summary line carries only public information (pubkey, anon_address,
+    // file paths, env-var names) — no plaintext leaves the binary.
+    secure_zero_all();
+
+    if (json_out) {
+        nlohmann::json r;
+        r["reencrypted"]            = true;
+        r["anon_address"]           = anon_address;
+        r["ed_pub_hex"]             = header_pubkey_hex;
+        r["in"]                     = in_path;
+        r["out"]                    = out_path;
+        r["old_passphrase_env"]     = old_env;
+        r["new_passphrase_env"]     = new_env;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "keyfile-reencrypt: decrypted --in with old passphrase "
+                     "(from $" << old_env << ")\n";
+        std::cout << "keyfile-reencrypt: re-encrypted under new passphrase "
+                     "(from $" << new_env << "; fresh nonce + fresh salt)\n";
+        std::cout << "keyfile_reencrypted=YES (anon=" << anon_address
+                  << " ed_pub_hex=" << header_pubkey_hex
+                  << " in=" << in_path << " out=" << out_path << ")\n";
+    }
+    return 0;
+}
+
 // ── keyfile-recover — high-level T-of-N backup recovery CLI ────────────────
 //
 // `keyfile-recover` is the operator inverse of `backup-create`. It composes
@@ -15254,6 +15655,24 @@ void print_usage() {
         "                                             (still produces a fresh nonce+salt when\n"
         "                                             that flag is set). Wrong old passphrase\n"
         "                                             exits 2; structural errors exit 1.\n"
+        "  keyfile-reencrypt --in <file>              Passphrase rotation WITHOUT a keypair\n"
+        "                 --out <file>                change (on-chain identity unchanged). Reads\n"
+        "                 --old-passphrase-env OLD    the encrypted --in keyfile, decrypts with\n"
+        "                 --new-passphrase-env NEW    the OLD passphrase (from env var OLD),\n"
+        "                 [--force] [--json]          re-encrypts under the NEW passphrase (from\n"
+        "                                             env var NEW) with a fresh 12-byte nonce +\n"
+        "                                             16-byte salt, and writes --out. Same Ed25519\n"
+        "                                             seed in/out; only the at-rest envelope\n"
+        "                                             changes. Like keyfile-rotate but takes BARE\n"
+        "                                             env-var NAMES (suits CI / secret-injection\n"
+        "                                             contexts). No plaintext-on-disk window: the\n"
+        "                                             decrypted seed lives only in memory, zeroed\n"
+        "                                             via sodium_memzero on every exit path. The\n"
+        "                                             recovered pubkey/address is verified +\n"
+        "                                             printed. Refuses to overwrite an existing\n"
+        "                                             --out without --force. Wrong old passphrase\n"
+        "                                             exits 2; structural errors / missing or\n"
+        "                                             empty env var exit 1.\n"
         "  keyfile-recover --backup-shares <file>     High-level T-of-N recovery CLI: composes\n"
         "                  --backup-envelopes <file>  envelope::decrypt + shamir::combine into a\n"
         "                  --keyholders <file>        single call. Reads the (shares, envelopes)\n"
@@ -15846,6 +16265,7 @@ int main(int argc, char** argv) {
     if (cmd == "keyfile-create")  return cmd_keyfile_create (argc - 2, argv + 2);
     if (cmd == "keyfile-decrypt") return cmd_keyfile_decrypt(argc - 2, argv + 2);
     if (cmd == "keyfile-rotate")  return cmd_keyfile_rotate (argc - 2, argv + 2);
+    if (cmd == "keyfile-reencrypt") return cmd_keyfile_reencrypt(argc - 2, argv + 2);
     if (cmd == "keyfile-recover") return cmd_keyfile_recover(argc - 2, argv + 2);
     if (cmd == "account-recover") return cmd_account_recover(argc - 2, argv + 2);
     if (cmd == "keyfile-info")    return cmd_keyfile_info   (argc - 2, argv + 2);
