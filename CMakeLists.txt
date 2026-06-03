@@ -223,6 +223,7 @@ add_executable(determ-light
   light/export.cpp
   light/verify_archive.cpp
   light/account_history.cpp
+  light/verify_tx_inclusion.cpp
   # Reused from src/ (explicit list — no glob):
   src/crypto/merkle.cpp
   src/crypto/keys.cpp

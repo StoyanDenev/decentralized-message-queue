@@ -26,6 +26,7 @@
 //   watch-head               Periodic trust-minimized head monitor
 //   export-headers           Verifiable header archive (FETCH+VERIFY+WRITE)
 //   verify-archive           OFFLINE re-verify of an export-headers archive
+//   verify-tx-inclusion      Prove tx H is (not) in block B vs committee sigs
 //   help / version
 //
 // Trust-model invariants:
@@ -46,6 +47,7 @@
 #include "export.hpp"
 #include "verify_archive.hpp"
 #include "account_history.hpp"
+#include "verify_tx_inclusion.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -138,6 +140,20 @@ void print_usage() {
         "      re-verifies committee sigs when the archive retained them\n"
         "      (--include-committee-sigs at export). --require-sigs makes a\n"
         "      sigs-stripped archive fail.\n"
+        "\n"
+        "Trustless inclusion proof (--genesis required):\n"
+        "  verify-tx-inclusion --rpc-port <N> --genesis <file>\n"
+        "                      --tx-hash <hex> --height <B> [--json]\n"
+        "      Prove (or disprove) that tx <hex> is in block <B>. Anchors\n"
+        "      genesis, fetches block B's full body, verifies its committee\n"
+        "      sigs over the block digest (which binds tx_root +\n"
+        "      creator_tx_lists), recomputes tx_root from the committed hash\n"
+        "      lists, cross-checks the returned body against that set, then\n"
+        "      reports INCLUDED / NOT-INCLUDED. A body that doesn't match the\n"
+        "      committee-signed hash set is reported UNVERIFIABLE (never a\n"
+        "      false INCLUDED). Inclusion is cryptographically anchored: any\n"
+        "      historical block is verifiable (its committee sigs travel with\n"
+        "      it), unlike state-proofs which the daemon serves head-only.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -797,6 +813,104 @@ int cmd_verify_archive(int argc, char** argv) {
     return run_verify_archive(opts);
 }
 
+// ──────────────────────── verify-tx-inclusion ──────────────────────────
+
+const char* verdict_str(InclusionVerdict v) {
+    switch (v) {
+        case InclusionVerdict::INCLUDED:     return "INCLUDED";
+        case InclusionVerdict::NOT_INCLUDED: return "NOT-INCLUDED";
+        case InclusionVerdict::UNVERIFIABLE: return "UNVERIFIABLE";
+    }
+    return "UNVERIFIABLE";
+}
+
+int cmd_verify_tx_inclusion(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, tx_hash;
+    uint64_t height = 0;
+    bool have_port = false, have_height = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--tx-hash" && i + 1 < argc) tx_hash      = argv[++i];
+        else if   (a == "--height"  && i + 1 < argc) {
+            height = parse_u64("--height", argv[++i]); have_height = true;
+        } else if (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-tx-inclusion: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || tx_hash.empty() || !have_height) {
+        std::cerr << "verify-tx-inclusion: --rpc-port, --genesis, --tx-hash, "
+                     "--height are required\n";
+        return 1;
+    }
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-tx-inclusion: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        auto r = verify_tx_inclusion(rpc, committee_seed, genesis,
+                                     height, tx_hash);
+
+        bool included = (r.verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",           included},
+                {"verdict",            verdict_str(r.verdict)},
+                {"height",             r.height},
+                {"tx_hash",            r.tx_hash_hex},
+                {"tx_root",            r.tx_root_hex},
+                {"block_hash",         r.block_hash_hex},
+                {"committee_verified", r.committee_verified},
+                {"sigs_verified",      r.sigs_verified},
+                {"committee_size",     r.committee_size},
+                {"tx_count",           r.tx_count},
+            };
+            if (!r.detail.empty()) out["detail"] = r.detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(r.verdict) << "\n"
+                      << "  genesis pin:        matches (" << genesis_hash_hex << ")\n"
+                      << "  tx_hash:            " << r.tx_hash_hex << "\n"
+                      << "  height:             " << r.height << "\n";
+            if (r.committee_verified) {
+                if (r.height == 0) {
+                    // Genesis is anchored by hash (it has no committee
+                    // sigs — see verify_tx_inclusion); say so explicitly.
+                    std::cout << "  anchor:             genesis hash "
+                                 "(block 0 has no committee sigs)\n";
+                } else {
+                    std::cout << "  committee sigs:     " << r.sigs_verified
+                              << " of " << r.committee_size << " verified\n";
+                }
+                std::cout << "  tx_root (signed):   " << r.tx_root_hex << "\n"
+                          << "  block tx count:     " << r.tx_count << "\n";
+            }
+            if (!r.detail.empty())
+                std::cout << "  detail:             " << r.detail << "\n";
+        }
+
+        // Exit codes: INCLUDED → 0; NOT-INCLUDED → 0 (a sound, verified
+        // negative answer is success); UNVERIFIABLE → 3 (we refused to
+        // answer because the committee binding broke / daemon tampered).
+        if (r.verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-tx-inclusion: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -831,6 +945,7 @@ int main(int argc, char** argv) {
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
         if (cmd == "export-headers")        return cmd_export_headers(sub_argc, sub_argv);
         if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);
+        if (cmd == "verify-tx-inclusion")   return cmd_verify_tx_inclusion(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
