@@ -1,6 +1,6 @@
 # TxInclusionProofSoundness — trustless transaction-inclusion verification soundness (`determ-light verify-tx-inclusion`)
 
-This document formalizes the soundness of the **`determ-light verify-tx-inclusion`** subcommand (sibling E3, landing in parallel with this proof). The subcommand answers a single question without trusting the daemon that serves the data:
+This document formalizes the soundness of the **`determ-light verify-tx-inclusion`** subcommand (sibling E3, now shipped — `light/verify_tx_inclusion.cpp` / `.hpp`, regression `tools/test_light_verify_tx_inclusion.sh`). The subcommand answers a single question without trusting the daemon that serves the data:
 
 > Is transaction `H` (identified by its 32-byte hash) included in the committee-signed block at height `B`, or is it provably *not* included?
 
@@ -365,7 +365,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 
 | Theorem / step | Function | File:lines | Role |
 |---|---|---|---|
-| Pipeline (E3) | `verify-tx-inclusion` subcommand | `light/verify_tx_inclusion.cpp` (E3, this round) | Anchor → header trust → tx-root recompute → membership decision; emits INCLUDED / NOT-INCLUDED / UNVERIFIABLE. |
+| Pipeline (E3) | `verify-tx-inclusion` subcommand | `light/verify_tx_inclusion.cpp` / `.hpp`; `light/main.cpp::cmd_verify_tx_inclusion` | Anchor → header trust → tx-root recompute → membership decision; emits INCLUDED / NOT-INCLUDED / UNVERIFIABLE. |
 | Step 1 (T-L1) | `anchor_genesis` | `light/trustless_read.cpp:52-79` | Genesis-hash anchor (reused; `LightClientThreatModel.md` T-L1). |
 | Step 2 (T-L2) | `verify_block_sigs` | `light/verify.cpp:190-283` | Per-block Ed25519 sig-set verify over the recomputed digest. |
 | Step 2 (T-L2) | `verify_headers` | `light/verify.cpp:104-188` | prev_hash continuity binding block `B` to the genesis-anchored prefix. |
@@ -384,7 +384,7 @@ Integration test:
 
 | Test script | Theorem coverage |
 |---|---|
-| `tools/test_light_verify_tx_inclusion.sh` (E3, this round) | TI-1 (real tx in block `B` → INCLUDED), TI-2 (absent tx → NOT-INCLUDED), TI-3 (tampered body / omitted tx → UNVERIFIABLE, no false verdict), and the §6.4 committee caveat (creator not in seed map → UNVERIFIABLE). |
+| `tools/test_light_verify_tx_inclusion.sh` (E3, shipped) | TI-1 (real tx in block `B` → INCLUDED), TI-2 (absent tx → NOT-INCLUDED), TI-3 (tampered body / omitted tx → UNVERIFIABLE, no false verdict), and the §6.4 committee caveat (creator not in seed map → UNVERIFIABLE). |
 | `tools/test_light_verify_block_sigs.sh` | Lemma L-2 tripwire (§4.4): a digest/light-digest divergence that dropped `tx_root` would surface as a sig-verify failure on a real producer block. |
 
 ---
@@ -392,7 +392,7 @@ Integration test:
 ## 8. Status
 
 - **Spec.** Complete (this document).
-- **Implementation.** `determ-light verify-tx-inclusion` shipping in sibling E3 this round (`light/verify_tx_inclusion.cpp`); this proof cites the verification steps at the spec level per the round design and tags the E3-landing specifics accordingly. The reused primitives (`anchor_genesis`, `verify_headers`, `verify_block_sigs`, `light_compute_block_digest`) are already shipped (`LightClientThreatModel.md` commits `f597c44` + `5e74097`).
+- **Implementation.** `determ-light verify-tx-inclusion` shipped in sibling E3 (`light/verify_tx_inclusion.cpp` / `.hpp`; dispatched from `light/main.cpp::cmd_verify_tx_inclusion`; regression `tools/test_light_verify_tx_inclusion.sh`). The reused primitives (`anchor_genesis`, `verify_headers`, `verify_block_sigs`, `light_compute_block_digest`) were already shipped (`LightClientThreatModel.md` commits `f597c44` + `5e74097`).
 - **Regime (the headline finding).** **STRONG.** The committee-signed `compute_block_digest` binds `tx_root` (`producer.cpp:581`, mirrored light-side at `verify.cpp:51`); `tx_root` is the validator-enforced union-tx-root commitment to the transaction-hash set (`producer.cpp:262-270`, `validator.cpp:161-167`); and the verifier recomputes `tx_root` from the served body and gates on the match (TI-3). TI-1 (sound positive inclusion) and TI-2 (sound non-inclusion) hold, reducing to A1 (committee-sig unforgeability) + A2 (collision resistance). TI-4 (degraded daemon-trust regime) is **not** Determ's case; it is documented as a regression tripwire and an honesty boundary.
 - **Cryptographic assumptions used.** A1 (Ed25519 EUF-CMA, `Preliminaries.md` §2.2), A2 (SHA-256 collision resistance, §2.1), and transitively A3 (second-preimage on the tx-hash content-binding, TI-1 note). **A4** (CSPRNG) is not used by the inclusion verifier.
 - **Adversary model.** `A_daemon` (malicious single daemon controlling RPC), reused from `LightClientThreatModel.md` §2.1. Out of scope: `A_crypto`, `A_local`, `A_net`, `A_genesis`.
