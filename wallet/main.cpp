@@ -11139,6 +11139,499 @@ int cmd_validate_tx(int argc, char** argv) {
     return overall_valid ? 0 : 2;
 }
 
+// ── verify-batch — batch signature/envelope verification (read-dual of
+//    tx-batch-sign) ─────────────────────────────────────────────────────────
+//
+// An operator or auditor receives a batch of signed envelopes (e.g. the
+// output of `determ-wallet tx-batch-sign`, or a payroll / airdrop tool)
+// and wants to verify EVERY signature + canonical-envelope consistency in
+// ONE process invocation before `determ submit-tx` — without N subprocess
+// spawns. verify-batch is the read/verify dual of tx-batch-sign (which
+// SIGNS N txs); it consumes the same per-record output shape tx-batch-sign
+// emits ({type, from, to, amount, fee, nonce, payload, sig, hash}) and
+// emits a per-tx verdict.
+//
+// For each record it performs the SAME checks the single-tx validate-tx
+// path does (no reimplementation of the crypto — the byte-for-byte
+// signing_bytes layout, the anon-address pubkey derivation, the Ed25519
+// crypto_sign_verify_detached call, and the case-insensitive hash-match
+// are all distilled from cmd_validate_tx's Phase-1/2 logic into the shared
+// verify_one_envelope helper below):
+//   (a) structural shape checks (type/from/to/amount/nonce/payload/sig/hash)
+//   (b) canonical signing_bytes recomputation
+//   (c) Ed25519 signature verification (anon-address senders; the pubkey is
+//       derived from the `from` field — domain senders are flagged invalid
+//       since the wallet has no chain registry to look the pubkey up)
+//   (d) tx_hash stored-vs-recomputed match (catches body-tamper-after-sign)
+//
+// Output report (optional --out): JSON array
+//   [{index, hash, valid:bool, reason?}]
+// where `reason` is present iff valid==false.
+//
+// Exit semantics:
+//   * Empty input array → empty report, exit 0.
+//   * Without --strict: exit 0 always; per-tx failures are reported in the
+//     verdict array (the operator inspects valid:false entries). This is
+//     the "report-only" audit mode.
+//   * With --strict: exit 3 if ANY record is invalid (CI / gate mode);
+//     exit 0 iff every record is valid.
+//   * Malformed top-level input (non-array, unparseable JSON, IO error):
+//     exit 1 (args/IO error — distinct from a well-formed batch that
+//     happens to contain invalid txs). A malformed *element* (non-object /
+//     missing field) is NOT a global abort — that index reports
+//     valid:false with a reason, so one bad record never masks the
+//     verdicts of its siblings.
+
+// verify_one_envelope — single-record verify primitive shared by
+// verify-batch. Returns true iff the envelope is valid (structural + sig +
+// hash, plus --strict TRANSFER gates when `strict`). On return, `out_hash`
+// holds the envelope's stored `hash` field (lowercased, or "" if absent)
+// and, when the return is false, `out_reason` holds a one-line diagnostic.
+// Mirrors cmd_validate_tx's checks byte-for-byte — DO NOT diverge the
+// signing_bytes layout here; both must track src/chain/block.cpp
+// Transaction::signing_bytes.
+static bool verify_one_envelope(const nlohmann::json& j,
+                                bool strict,
+                                std::string& out_hash,
+                                std::string& out_reason) {
+    out_hash.clear();
+    out_reason.clear();
+
+    if (!j.is_object()) {
+        out_reason = "record is not a JSON object";
+        return false;
+    }
+
+    auto type_mnemonic_to_int = [](const std::string& s) -> int {
+        if (s == "TRANSFER")         return 0;
+        if (s == "REGISTER")         return 1;
+        if (s == "DEREGISTER")       return 2;
+        if (s == "STAKE")            return 3;
+        if (s == "UNSTAKE")          return 4;
+        if (s == "REGION_CHANGE")    return 5;
+        if (s == "PARAM_CHANGE")     return 6;
+        if (s == "MERGE_EVENT")      return 7;
+        if (s == "COMPOSABLE_BATCH") return 8;
+        if (s == "DAPP_REGISTER")    return 9;
+        if (s == "DAPP_CALL")        return 10;
+        return -1;
+    };
+
+    // ── Phase 1: structural fields ────────────────────────────────────────
+    int         tx_type_int = -1;
+    std::string from_str, to_str, payload_hex, sig_hex, hash_hex;
+    uint64_t    amount = 0, fee = 0, nonce = 0;
+
+    if (!j.contains("type")) {
+        out_reason = "missing required field 'type'";
+        return false;
+    } else if (j["type"].is_number()) {
+        tx_type_int = j["type"].get<int>();
+        if (tx_type_int < 0 || tx_type_int > 10) {
+            out_reason = "unknown 'type' enum value " +
+                         std::to_string(tx_type_int) + " (expected 0..10)";
+            return false;
+        }
+    } else if (j["type"].is_string()) {
+        const std::string s = j["type"].get<std::string>();
+        tx_type_int = type_mnemonic_to_int(s);
+        if (tx_type_int < 0) {
+            out_reason = "unknown 'type' mnemonic '" + s + "'";
+            return false;
+        }
+    } else {
+        out_reason = "'type' must be an integer or an upper-case mnemonic "
+                     "string";
+        return false;
+    }
+
+    if (!j.contains("from") || !j["from"].is_string()) {
+        out_reason = "missing/wrong-typed 'from' (expected string)";
+        return false;
+    }
+    from_str = j["from"].get<std::string>();
+    if (!j.contains("to") || !j["to"].is_string()) {
+        out_reason = "missing/wrong-typed 'to' (expected string)";
+        return false;
+    }
+    to_str = j["to"].get<std::string>();
+
+    if (!j.contains("amount") || !j["amount"].is_number()) {
+        out_reason = "missing/wrong-typed 'amount' (expected integer)";
+        return false;
+    }
+    amount = j["amount"].is_number_unsigned()
+        ? j["amount"].get<uint64_t>()
+        : static_cast<uint64_t>(j["amount"].get<int64_t>());
+
+    if (!j.contains("nonce") || !j["nonce"].is_number()) {
+        out_reason = "missing/wrong-typed 'nonce' (expected integer)";
+        return false;
+    }
+    nonce = j["nonce"].is_number_unsigned()
+        ? j["nonce"].get<uint64_t>()
+        : static_cast<uint64_t>(j["nonce"].get<int64_t>());
+
+    // fee optional (defaults 0; matches Transaction::from_json).
+    if (j.contains("fee")) {
+        if (!j["fee"].is_number()) {
+            out_reason = "'fee' present but not a number";
+            return false;
+        }
+        fee = j["fee"].is_number_unsigned()
+            ? j["fee"].get<uint64_t>()
+            : static_cast<uint64_t>(j["fee"].get<int64_t>());
+    }
+
+    if (!j.contains("payload") || !j["payload"].is_string()) {
+        out_reason = "missing/wrong-typed 'payload' (expected hex string)";
+        return false;
+    }
+    payload_hex = j["payload"].get<std::string>();
+
+    // sig / signature: accept either field name (matches validate-tx
+    // tolerance + the tx-batch-sign `sig` output shape).
+    if (j.contains("sig") && j["sig"].is_string()) {
+        sig_hex = j["sig"].get<std::string>();
+    } else if (j.contains("signature") && j["signature"].is_string()) {
+        sig_hex = j["signature"].get<std::string>();
+    } else {
+        out_reason = "missing 'sig' (or 'signature') field — expected 128 "
+                     "hex chars";
+        return false;
+    }
+    if (sig_hex.size() != 128) {
+        out_reason = "'sig'/'signature' must be 128 hex chars; got " +
+                     std::to_string(sig_hex.size());
+        return false;
+    }
+
+    if (!j.contains("hash") || !j["hash"].is_string()) {
+        out_reason = "missing/wrong-typed 'hash' (expected 64 hex chars)";
+        return false;
+    }
+    hash_hex = j["hash"].get<std::string>();
+    if (hash_hex.size() != 64) {
+        out_reason = "'hash' must be 64 hex chars; got " +
+                     std::to_string(hash_hex.size());
+        return false;
+    }
+
+    // ── Phase 2: signing_bytes + hash match + Ed25519 verify ──────────────
+    std::vector<uint8_t> payload_bytes;
+    try { payload_bytes = from_hex(payload_hex); }
+    catch (std::exception& e) {
+        out_reason = std::string("invalid 'payload' hex: ") + e.what();
+        return false;
+    }
+    std::vector<uint8_t> sig_bytes;
+    try { sig_bytes = from_hex(sig_hex); }
+    catch (std::exception& e) {
+        out_reason = std::string("invalid 'sig' hex: ") + e.what();
+        return false;
+    }
+    if (sig_bytes.size() != 64) {
+        out_reason = "decoded sig is " + std::to_string(sig_bytes.size()) +
+                     " bytes (expected 64)";
+        return false;
+    }
+
+    // Build signing_bytes — byte-for-byte identical to
+    // src/chain/block.cpp Transaction::signing_bytes (same encoder
+    // cmd_validate_tx / cmd_tx_batch_sign / derive-tx-hash all share).
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24
+               + payload_bytes.size());
+    sb.push_back(static_cast<uint8_t>(tx_type_int));
+    sb.insert(sb.end(), from_str.begin(), from_str.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    for (int i = 7; i >= 0; --i) sb.push_back((amount >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((fee    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce  >> (i * 8)) & 0xFF);
+    sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
+
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+    const std::string recomputed = to_hex(sb_sha);
+
+    // Case-insensitive hash compare (some tools emit upper-case; chain
+    // emits lower). out_hash returns the lowercased stored value.
+    std::string stored_lc = hash_hex;
+    for (auto& c : stored_lc) if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+    out_hash = stored_lc;
+    if (stored_lc != recomputed) {
+        out_reason = "tx_hash mismatch: envelope.hash=" + stored_lc +
+                     " != recomputed_signing_bytes_sha256=" + recomputed +
+                     " (envelope body was modified after signing OR encoder "
+                     "didn't re-hash before storing)";
+        return false;
+    }
+
+    // Signature verification. Anon-address senders (anon_address ==
+    // "0x"+hex(ed_pub)) carry the pubkey in the `from` field, so no out-of-
+    // band trust anchor is needed. Domain-name senders cannot be verified
+    // in-wallet (no chain registry) — flagged invalid here rather than
+    // silently skipped, because a batch-verify gate that passes an
+    // unverifiable record would defeat its own purpose.
+    auto is_anon_shape = [](const std::string& s) -> bool {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    if (!is_anon_shape(from_str)) {
+        out_reason = "sender '" + from_str + "' is not an anon-address; "
+                     "pubkey lookup requires chain registry (cannot verify "
+                     "in-wallet — use validate-tx --rpc-port or tx-sign-"
+                     "verify --pubkey for domain senders)";
+        return false;
+    }
+    if (!primitives::init_libsodium()) {
+        out_reason = "libsodium init failed";
+        return false;
+    }
+    std::string addr_lower = from_str;
+    for (auto& c : addr_lower) if (c >= 'A' && c <= 'F') c = c - 'A' + 'a';
+    std::vector<uint8_t> pub_bytes;
+    try { pub_bytes = from_hex(addr_lower.substr(2)); }
+    catch (std::exception& e) {
+        out_reason = std::string("from-address hex decode failed: ")
+                     + e.what();
+        return false;
+    }
+    if (pub_bytes.size() != 32) {
+        out_reason = "from-address does not decode to a 32-byte pubkey";
+        return false;
+    }
+    int rc = crypto_sign_verify_detached(
+        sig_bytes.data(), sb.data(), sb.size(), pub_bytes.data());
+    if (rc != 0) {
+        out_reason = "Ed25519 signature does NOT verify under from-derived "
+                     "pubkey (sig forged, body modified, or wrong key)";
+        return false;
+    }
+
+    // ── --strict TRANSFER-specific gates (mirror validate-tx) ─────────────
+    if (strict && tx_type_int == 0) {
+        if (to_str.empty()) {
+            out_reason = "strict: TRANSFER with empty 'to' (chain rejects)";
+            return false;
+        }
+        if (amount == 0) {
+            out_reason = "strict: TRANSFER with amount == 0 (chain rejects)";
+            return false;
+        }
+        // S-028: anon-shape `from`/`to` must be canonical lowercase. (We
+        // already verified the sig above against the lowercased pubkey, but
+        // the chain's rpc_submit_tx rejects a non-canonical anon address
+        // outright, so flag it under --strict.)
+        auto noncanonical_anon = [&](const std::string& s) -> bool {
+            if (!is_anon_shape(s)) return false;  // domain name; opaque
+            for (size_t i = 2; i < s.size(); ++i)
+                if (s[i] >= 'A' && s[i] <= 'F') return true;
+            return false;
+        };
+        if (noncanonical_anon(from_str)) {
+            out_reason = "strict: 'from' is anon-shape but not canonical "
+                         "lowercase (S-028)";
+            return false;
+        }
+        if (noncanonical_anon(to_str)) {
+            out_reason = "strict: 'to' is anon-shape but not canonical "
+                         "lowercase (S-028)";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+int cmd_verify_batch(int argc, char** argv) {
+    std::string in_path, out_path;
+    bool strict = false;
+    bool force  = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"    && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--out"   && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--strict")                strict   = true;
+        else if (a == "--force")                 force    = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet verify-batch --in <signed-array.json|->\n"
+                "                                  [--out <report.json>]\n"
+                "                                  [--strict] [--force]\n"
+                "\n"
+                "  Batch signature/envelope verification — the read/verify\n"
+                "  dual of tx-batch-sign. Reads a JSON ARRAY of signed\n"
+                "  envelopes (the tx-batch-sign output shape) and verifies\n"
+                "  every record in one process invocation: structural shape,\n"
+                "  canonical signing_bytes recompute, Ed25519 signature\n"
+                "  (anon-address senders — pubkey derived from `from`), and\n"
+                "  tx_hash stored-vs-recomputed match (catches body-tamper-\n"
+                "  after-sign). One pass, N verifications, no per-tx\n"
+                "  subprocess spawn cost.\n"
+                "\n"
+                "  Per-record input shape (accepts `sig` or `signature`):\n"
+                "    {\"type\":<int>|\"TRANSFER\", \"from\":\"0x...\",\n"
+                "     \"to\":\"...\", \"amount\":N, \"fee\":N, \"nonce\":N,\n"
+                "     \"payload\":\"\", \"sig\":\"<128 hex>\",\n"
+                "     \"hash\":\"<64 hex>\"}\n"
+                "\n"
+                "  Per-record verdict (written to --out as a JSON array):\n"
+                "    {\"index\":i, \"hash\":\"<64 hex>\", \"valid\":bool,\n"
+                "     \"reason\":\"...\"}   (reason present iff !valid)\n"
+                "\n"
+                "  Pass `-` to --in to read the array from stdin.\n"
+                "\n"
+                "  --strict adds TRANSFER-specific gates (S-028 anon\n"
+                "  canonicalization, tx.to non-empty, amount > 0) AND makes\n"
+                "  the command exit non-zero when ANY record is invalid\n"
+                "  (CI / pre-submit gate mode). Without --strict the command\n"
+                "  exits 0 and reports per-tx failures in the verdict array\n"
+                "  (report-only audit mode).\n"
+                "\n"
+                "  Empty input array → empty report, exit 0.\n"
+                "\n"
+                "  --out refuses to overwrite an existing file without\n"
+                "  --force. Report is also printed to stdout (compact JSON)\n"
+                "  when --out is omitted.\n"
+                "\n"
+                "  Exit: 0 all valid (or report-only mode), 1 args/IO/parse\n"
+                "  error (non-array input, unparseable JSON), 3 --strict and\n"
+                "  >=1 record invalid.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "verify-batch: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet verify-batch --in "
+                         "<signed-array.json|-> [--out <report.json>] "
+                         "[--strict] [--force]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ-wallet verify-batch --in "
+                     "<signed-array.json|-> [--out <report.json>] "
+                     "[--strict] [--force]\n"
+                     "  (--in is required; pass `-` for stdin)\n";
+        return 1;
+    }
+
+    // ── Read + parse --in as a JSON array ────────────────────────────────
+    nlohmann::json in_j;
+    try {
+        if (in_path == "-") {
+            in_j = nlohmann::json::parse(std::cin);
+        } else {
+            std::ifstream f(in_path);
+            if (!f) {
+                std::cerr << "verify-batch: cannot open --in: " << in_path
+                          << "\n";
+                return 1;
+            }
+            f >> in_j;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "verify-batch: --in is not valid JSON: " << e.what()
+                  << "\n";
+        return 1;
+    }
+    if (!in_j.is_array()) {
+        std::cerr << "verify-batch: --in must be a top-level JSON array "
+                     "(got "
+                  << (in_j.is_object() ? "object" : "non-array scalar")
+                  << ")\n";
+        return 1;
+    }
+
+    // ── --out preconditions (refuse overwrite without --force) ────────────
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "verify-batch: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "verify-batch: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to "
+                         "override)\n";
+            return 1;
+        }
+    }
+
+    // ── Per-record verify loop ────────────────────────────────────────────
+    nlohmann::json report = nlohmann::json::array();
+    size_t valid_count = 0, invalid_count = 0;
+    const size_t N = in_j.size();
+    for (size_t idx = 0; idx < N; ++idx) {
+        std::string hash, reason;
+        bool ok = verify_one_envelope(in_j[idx], strict, hash, reason);
+        nlohmann::json verdict = {
+            {"index", idx},
+            {"hash",  hash},
+            {"valid", ok},
+        };
+        if (!ok) {
+            verdict["reason"] = reason;
+            ++invalid_count;
+        } else {
+            ++valid_count;
+        }
+        report.push_back(std::move(verdict));
+    }
+
+    const std::string report_text = report.dump();
+
+    // ── Write --out (if requested) ────────────────────────────────────────
+    if (!out_path.empty()) {
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "verify-batch: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << report_text << "\n";
+        if (!of) {
+            std::cerr << "verify-batch: write failed on --out: " << out_path
+                      << "\n";
+            return 1;
+        }
+        // Status line to stdout so the operator sees the tally even when the
+        // verdict array went to a file.
+        nlohmann::json status = {
+            {"status",  "ok"},
+            {"count",   N},
+            {"valid",   valid_count},
+            {"invalid", invalid_count},
+            {"out",     out_path},
+        };
+        std::cout << status.dump() << "\n";
+    } else {
+        // No --out: emit the verdict array on stdout (compact JSON).
+        std::cout << report_text << "\n";
+    }
+
+    // ── Exit code ─────────────────────────────────────────────────────────
+    // --strict: any invalid record fails the gate (exit 3). Without
+    // --strict: report-only — exit 0 regardless (failures are in the
+    // verdict array). Empty array trivially exits 0 either way.
+    if (strict && invalid_count > 0) return 3;
+    return 0;
+}
+
 // ── derive-tx-hash ───────────────────────────────────────────────────────────
 //
 // Recompute the canonical tx_hash from a signed tx envelope. The chain
@@ -17168,6 +17661,35 @@ void print_usage() {
         "                                             overall_valid}. Exit 0 overall_valid,\n"
         "                                             1 args/parse/IO error, 2 invalid (sig\n"
         "                                             failure, hash mismatch, structural).\n"
+        "  verify-batch --in <signed-array.json|->    BATCH signature/envelope verification — the\n"
+        "               [--out <report.json>]         read/verify dual of tx-batch-sign. Reads a\n"
+        "               [--strict] [--force]          JSON ARRAY of signed envelopes (the tx-batch-\n"
+        "                                             sign output shape: {type, from, to, amount,\n"
+        "                                             fee, nonce, payload, sig, hash}) and verifies\n"
+        "                                             every record in one process invocation —\n"
+        "                                             structural shape, canonical signing_bytes\n"
+        "                                             recompute, Ed25519 signature (anon-address\n"
+        "                                             senders; pubkey derived from `from`), and\n"
+        "                                             tx_hash stored-vs-recomputed match. One pass,\n"
+        "                                             N verifications, no per-tx subprocess spawn\n"
+        "                                             cost. Use cases: an operator / auditor\n"
+        "                                             verifying a payroll / airdrop batch before\n"
+        "                                             submit. Emits a per-record verdict array\n"
+        "                                             [{index, hash, valid, reason?}] to --out (and\n"
+        "                                             a {status,count,valid,invalid,out} tally to\n"
+        "                                             stdout); with --out omitted the verdict array\n"
+        "                                             is printed to stdout. --in `-` reads from\n"
+        "                                             stdin. --strict adds TRANSFER gates (S-028\n"
+        "                                             anon canonicalization, tx.to non-empty,\n"
+        "                                             amount > 0) AND exits non-zero when >=1 record\n"
+        "                                             is invalid (CI / pre-submit gate); without\n"
+        "                                             --strict the command exits 0 and reports per-\n"
+        "                                             tx failures in the verdict array (report-only\n"
+        "                                             audit mode). Empty input array → empty report,\n"
+        "                                             exit 0. --out refuses to overwrite without\n"
+        "                                             --force. Exit 0 all valid / report-only, 1\n"
+        "                                             args/IO/parse error (non-array input), 3\n"
+        "                                             --strict + >=1 invalid.\n"
         "  derive-tx-hash --tx-json <file|->          Recompute the canonical tx_hash from a\n"
         "                 [--field hash|signing_bytes|both]\n"
         "                 [--check] [--json]\n"
@@ -17531,6 +18053,7 @@ int main(int argc, char** argv) {
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "tx-batch-sign")   return cmd_tx_batch_sign  (argc - 2, argv + 2);
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
+    if (cmd == "verify-batch")    return cmd_verify_batch   (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
