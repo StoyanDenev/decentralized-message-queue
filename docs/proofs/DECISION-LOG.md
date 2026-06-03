@@ -393,4 +393,53 @@ Hardcoding any one of them either ships defaults that don't fit some deployments
 
 ---
 
+---
+
+## 2026-05-24 — v2.26-ROTATION-SPEC.md (Theme 9 v2.26 review-track complete)
+
+### 12 decisions resolved for on-chain key rotation (post-DSSO-as-DApp scope)
+
+**Question.** Theme 9 scope reduced earlier today to just v2.26 (DSSO substrate reclassified as DApp per memory `dlt-dsso-as-dapp`). v2.26 needed formal deliberation; V2-DESIGN.md §v2.26 had substantial design but 5 §5 open questions and the DSSO-as-DApp pivot elevated KR-10's importance.
+
+**Choices.**
+
+| # | Decision | Disposition |
+|---|---|---|
+| KR-1 | Wire format with dual-key PoP | Accept as V2-DESIGN.md, with §7.5.6/§7.5.7 discriminator composition |
+| KR-2 | 5 genesis-pinned constants | Accept |
+| KR-3 | Revoke-only escape valve | Accept |
+| KR-4 | Dual-validity window | Accept |
+| KR-5 | Cross-epoch DKG guard | Accept |
+| KR-6 | Multi-sig (v2.15) gating from day one | Accept |
+| KR-7 | Genesis-validator cooldown from block 0 | Accept |
+| KR-8 | Domain history RPC | Revise to Option C — lightweight RPC + `RegistryEntry.last_rotation_height: u64` (8 B) |
+| KR-9 | Multi-sig cooldown | Revise to Option C — per-account `cooldown_blocks: u16` clamped [8, 1024]; matches §7.5 discriminator-philosophy |
+| KR-10 | REGISTER vs DAPP_REGISTER unification | Revise to Option A — unify under ROTATE_KEY via `key_target` enum byte; DSSO DApp service_pubkey rotation inherits all v2.26 protections |
+| KR-11 | Hardware wallet support | Defer to v3 — no v1.0 chain-level commitment; standard Ed25519 hashed-envelope sign keeps existing HW wallets wire-compatible |
+| KR-12 | Total key loss recovery | Accept — via v2.14 OPAQUE / v2.15 multi-sig / DSSO-DApp recovery flow |
+
+**Key revisions from V2-DESIGN.md:**
+- **KR-8 (revise to Option C)** — V2-DESIGN.md recommended this; deliberation confirmed against alternatives (skip RPC entirely / richer materialized history / RPC without on-chain field). DSSO-as-DApp use case (post-rotation assertion staleness check) made the on-chain field load-bearing.
+- **KR-9 (revise to Option C, per-account configurable)** — V2-DESIGN.md originally rejected multi-sig cooldown bypass. Revised disposition matches §7.5 discriminator-philosophy: trivial per-account state cost preserves operator flexibility. Multi-sig accounts can pick rapid-response cooldown (KR-12 v2.15-multi-sig recovery path no longer rate-limited by global cooldown).
+- **KR-10 (revise to Option A, unify under ROTATE_KEY)** — V2-DESIGN.md recommended documenting asymmetry. Revised disposition driven by DSSO-as-DApp: DSSO DApp instances each have service_pubkeys; unification gets them v2.26 protections (PoP, dual-validity, cooldown, audit trail). `ROTATE_KEY.key_target` enum byte enables this without tx-type proliferation; future-extensible to v2.22 audit-key rotation (`key_target=2`).
+- **KR-11 (defer to v3)** — V2-DESIGN.md described HW-wallet UX commitments. Reclassified to post-v1.0 wallet-ecosystem concern; chain stays HW-wallet-compatible by accident (standard Ed25519 hashed-envelope signing).
+
+**Composition with prior decisions:**
+- §7.5.6 `Transaction.sig_form` discriminator covers outer Transaction.sig + embedded old_key_sig (homogeneous within tx per §7.6.6)
+- §7.5.7 `pubkey_form` variable-length encoding covers `new_pubkey` field + registry's existing pubkey
+- v2.10 FROST: KR-5 cross-epoch DKG guard composes; activates automatically post-v2.10 (no flag-day)
+- v2.15 multi-sig: KR-6 gating ships day one; KR-9 per-account cooldown lets multi-sig accounts pick rapid-response
+- v2.22: ROTATE_VIEW_MASTER + ROTATE_AUDIT_KEY follow the v2.26 pattern; future ROTATE_AUDIT_KEY can fold into ROTATE_KEY via key_target=2
+- DSSO-as-DApp: DSSO DApp instance rotations via ROTATE_KEY/key_target=1 (post-v1.0)
+
+**Implications.**
+- Theme 9 chain-level review-track now complete: v2.26 ✅. DSSO (v2.25) remains post-v1.0 DApp per earlier reclassification.
+- v2.26 spec doc produced: `v2.26-ROTATION-SPEC.md`.
+- IMPLEMENTATION-SEQUENCING.md §4.2 blocking-feature checklist now populatable from v2.26 spec.
+- Effort estimate: ~10-11 days (slight increase from V2-DESIGN.md's ~9-10 due to KR-9 + KR-10).
+
+**Generalization.** When a reclassification (e.g., DSSO-as-DApp) elevates the cross-cutting importance of a decision (e.g., KR-10 rotation unification), re-evaluate the original V2-DESIGN.md disposition under the new lens. Three of v2.26's 5 open-question resolutions changed from V2-DESIGN.md's original recommendations once DSSO-as-DApp + §7.5 discriminator-philosophy + KR-12 recovery-path emphasis were in scope.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

@@ -280,6 +280,18 @@
 
 **Related.** `DECISION-LOG.md` → IMPLEMENTATION-SEQUENCING → Bundle release cadence; memory `dlt-no-migrations-constraint`.
 
+### 5.5 Hardware wallet ecosystem support for ROTATE_KEY (v3 — deferred from v2.26 per KR-11)
+
+**Improvement.** First-class hardware wallet (Ledger / Trezor / etc.) support for v2.26 ROTATE_KEY UX. Device firmware shows "Rotate operator key for domain X to new key Y" before signing; multi-sig co-flow UX; recovery-flow integration.
+
+**Deferred reason.** V2-DESIGN.md §v2.26 originally included HW-wallet UX commitments. KR-11 reclassified to post-v1.0 ecosystem concern: the chain's wire format remains HW-wallet-compatible (standard Ed25519 sign over hashed envelope works with existing firmware), but explicit certification + UX commitments are wallet-ecosystem-facing work, not chain-design work.
+
+**Classification.** Process (ecosystem partnership + certification).
+
+**Dependencies.** Wallet-ecosystem partner engagement; device-firmware update cycles per vendor; multi-sig (v2.15) shipped first so HW wallet support covers both single-sig and multi-sig rotation flows.
+
+**Related.** `DECISION-LOG.md` → v2.26 v2.26-ROTATION-SPEC.md → KR-11; `v2.26-ROTATION-SPEC.md §2 KR-11`.
+
 ---
 
 ## 6. Post-v2 architectural optimizations (from `docs/Improvements.md` C99 spec)

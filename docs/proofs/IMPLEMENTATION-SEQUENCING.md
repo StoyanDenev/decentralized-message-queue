@@ -3,12 +3,14 @@
 **Status:** planning artifact. Resolves the execution sequence for the 41 design decisions + 4 spec amendments resolved during pre-implementation review week (May 2026). Approach C (bundled releases): each bundle ships as a discrete release; related decisions land together rather than incrementally.
 
 **Companion documents:**
+- `../MOTIVATION.md` — project's public-interest mandate linking design decisions to the originating problem (per `docs/Confrontation_against_public_unjustice_i.odt`)
 - `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved)
-- `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md` — sibling spec docs that this plan executes against
+- `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md`, `v2.26-ROTATION-SPEC.md` — sibling spec docs that this plan executes against
 - `DECISION-LOG.md` — backward-looking deliberation history for the decisions this plan executes
-- `Improvements.md` — forward-looking enhancement queue (post-v1.0 items deferred from this plan; rejected alternatives; research items)
+- `Improvements.md` — forward-looking enhancement queue (post-v1.0 items deferred from this plan; rejected alternatives; research items; pre-v1.0-schema-freeze discriminator decisions per §7.5)
 - `MAINNET_READINESS.md` — readiness-criteria tracking artifact gating mainnet declaration
 - `PFS_DEPLOYMENT_GUIDANCE.md` — operator-facing PFS regulatory framework
+- `DAPP_SDK_GUIDANCE.md` — DApp-developer-facing browser-side crypto strategy per profile
 
 ---
 
@@ -192,7 +194,31 @@ These cannot be answered from the design specs alone; they require team-knowledg
 4. **Bundle-boundary verification**: at bundle completion, dedicated thread runs end-to-end integration test exercising every decision in the bundle (e.g., for Bundle 3: full confidential-amount transfer with both AMT_AUDITABLE and AMT_PFS paths, audit-mode disclosure, reconciliation, padding).
 5. **Specs as canonical source**: when threads disagree on intent, the spec text wins. If the spec is ambiguous, freeze and resolve before resuming parallel work.
 
-**Wall-clock with this capacity model.** Phase B/C completion ≈ max(Bundle 1, Bundle 2, Bundle 3, Bundle 4) ≈ Bundle 3 at ~3-3.5 months. Phase D = Bundle 5 at ~3-4 months. Total review-week implementation horizon: **~6-7.5 months** from start, gated on coordination quality rather than headcount.
+**Wall-clock with this capacity model (REFRESHED 2026-05-24 post-DSSO-as-DApp + v2.26 + pre-bundle discriminators).**
+
+Sequential pre-bundle work (cannot parallelize with bundles):
+- Pre-bundle schema discriminators (§7.5.1 signature_form + §7.5.5 contrib_msg_form + §7.5.6 sig_form + §7.5.7 pubkey_form variable-length encoding): **~6-10 days** (7.5.7 dominates the lift)
+
+Phase B/C parallel bundles (gated on pre-bundle completion):
+- Bundle 1 (v2.10 DKG): ~2-3 weeks
+- Bundle 2 (F2): ~3-4 days
+- Bundle 3 (v2.22 incl. PRIV-6 + 6.1 + 6.2): ~5-6.5 weeks
+- Bundle 4 (DSF): ~3-4 weeks
+
+Phase B/C wall-clock ≈ max(Bundles 1-4) ≈ Bundle 3 at **~3-3.5 months**.
+
+Phase D (gated on Phase B/C + v2 + v2.26 substantially shipped + DSF):
+- Bundle 5 (Beaconless v2): ~3-4 months
+- v2.26 (chain-level key rotation): ~10-11 days (parallelizable with Bundle 5)
+- Phase D wall-clock ≈ Bundle 5 at **~3-4 months** (v2.26 fits within)
+
+**Total review-week implementation horizon: ~6.5-8 months** from start to Phase D completion. Plus open-ended beta (per §4.4 QA strategy) → mainnet declaration when MAINNET_READINESS criteria converge.
+
+Net change vs. pre-DSSO-as-DApp estimate:
+- DSSO substrate (v2.25) removed from critical path: saves ~6-9 weeks
+- v2.26 added explicitly to Phase D: adds ~10-11 days (within Bundle 5 envelope)
+- Pre-bundle discriminators added: adds ~6-10 days sequential
+- **Net effect: comparable horizon (~6.5-8 months vs ~6-7.5 months prior estimate); DSSO-as-DApp savings offset by explicit v2.26 + discriminator work.**
 
 ### 4.2 "v2 + v2.26 substantially shipped" — completion criterion for Phase D
 
@@ -206,7 +232,20 @@ The checklist itself has two halves to be populated by team:
 - _to be filled by team_
 
 **v2.26 (on-chain key rotation) blocking features (must land before Phase D):**
-- _to be filled by team after v2.26 review-track deliberation completes_
+
+Per `v2.26-ROTATION-SPEC.md` §5 (work units totaling ~10-11 days):
+- TxType::ROTATE_KEY = 11 + binary codec
+- Validator gate (KR-1 dual-key PoP, KR-3 revoke escape valve, KR-5 cross-epoch DKG guard, KR-6 multi-sig threshold check, KR-9 per-account cooldown, KR-10 key_target dispatch)
+- PendingRotation struct + pending_rotations_ map + recent_rotations_ ringbuffer
+- Apply path: deferred pointer flip in on_block_apply_end (KR-4 dual-validity window, KR-10 key_target dispatch)
+- RegistryEntry field additions (KR-8 last_rotation_height, KR-9 cooldown_blocks)
+- Snapshot serialize/restore + new "o:" state-root namespace
+- rotation_history RPC (KR-8)
+- Wallet CLI (`determ wallet rotate-key`)
+- Regression tests covering each KR decision
+- Documentation refresh (PROTOCOL.md, SECURITY.md, README.md, DAPP_SDK_GUIDANCE.md DSSO-DApp rotation reference)
+
+**Pre-bundle schema discriminator dependencies (must land before v2.26):** §7.5.6 `Transaction.sig_form` + §7.5.7 `pubkey_form` variable-length encoding — v2.26 ROTATE_KEY tx payload references both.
 
 **Explicitly non-blocking (may run in parallel with Phase D):**
 - v2.25 DSSO substrate — reclassified as DApp (ships post-v1.0 as Theme 7 application, not chain-level work)
@@ -255,11 +294,11 @@ Specific numeric thresholds populated pre-beta. Tracking artifact: `MAINNET_READ
 | No external audit | All QA confidence comes from internal team output (DSF + thread review + closed-beta partner findings). No independent validation event. This is a deliberate trade-off; documented as accepted. |
 | Bug-fix freedom during beta | Beta state is discardable → bugs caught in beta can be fixed by any means including breaking changes. The "no migrations" constraint only kicks in at mainnet declaration. |
 
-**Calendar implications.**
-- Pre-beta development: ~6-7.5 months (bundle implementation; unchanged)
+**Calendar implications (REFRESHED 2026-05-24).**
+- Pre-beta development: ~6.5-8 months (per §4.1 refresh: pre-bundle discriminators + Bundle 3 critical path + Phase D Bundle 5 + v2.26)
 - Beta period: open-ended (no audit window inserted; partner ramp begins as soon as Bundle 5 feature-complete)
 - Mainnet launch: declared when internal team + beta partners confident; no calendar prediction
-- **Net horizon to beta start: ~6-7.5 months. Net horizon to mainnet: unbounded (driven by confidence rather than schedule).**
+- **Net horizon to beta start: ~6.5-8 months. Net horizon to mainnet: unbounded (driven by confidence rather than schedule).**
 
 **Residual risk acknowledgment.** No-external-audit + closed-beta only (no public bug-bounty) concentrates QA confidence in the internal team's judgment + partner-observed behavior. If a bug escapes beta into mainnet, the no-migrations constraint binds — only security-critical hard fork available as remediation. This is accepted as a risk profile, not a gap to mitigate. Mitigation options not adopted are preserved in `Improvements.md §5.2` (external multi-firm audit), `§5.3` (public bug bounty pre-mainnet), `§5.4` (Option C public pre-mainnet releases) for future revisit if the risk posture changes.
 
