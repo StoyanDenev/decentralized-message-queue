@@ -10492,6 +10492,382 @@ int cmd_batch_nonce_assign(int argc, char** argv) {
     return 0;
 }
 
+// ── tx-batch-summary — read-only aggregate analytics over a tx array ─────────
+//
+// The pre-broadcast sanity-check companion to the batch-payroll flow:
+//
+//   batch-nonce-assign → tx-batch-sign → verify-batch → tx-batch-summary
+//
+// Reads a JSON array of tx records — signed envelopes OR unsigned inputs,
+// interchangeably — and emits a one-glance aggregate summary so an operator
+// can eyeball a 50k-tx payroll batch BEFORE broadcast and catch fat-fingers
+// (wrong grand total, duplicated recipients, nonce gaps):
+//
+//   "1000 TRANSFERs totaling 5,000,000 + 1,000 in fees, 1 distinct sender,
+//    1000 distinct recipients, nonces 7..1006 (contiguous)."
+//
+// Distinct from the PER-TX analytics commands (inspect-tx / validate-tx /
+// derive-tx-hash) which each operate on a single envelope — this is the
+// BATCH aggregate. Pure data analysis: no keys, no signing, no Ed25519
+// verify, no daemon round-trip. (For per-record signature validity, run
+// verify-batch / validate-tx; this command never inspects `sig`.)
+//
+// Record-shape tolerance: `type` is accepted as an int (Transaction::to_json
+// shape, e.g. 0 / 3 / 4) OR an upper-case mnemonic string (tx-batch-sign
+// input shape, e.g. "TRANSFER" / "STAKE" / "UNSTAKE") — so the SAME command
+// summarizes both the pre-sign input array and the post-sign envelope array.
+// `fee` is optional (defaults to 0, matching inspect-tx tolerance); a
+// missing/wrong-typed required field (type/from/to/amount/nonce) does not
+// abort the whole run — the record is counted in `records_missing_fields`
+// and excluded from the numeric aggregates (count / sums / per-type /
+// distinct / nonce-range) so a single malformed row in a 50k batch is
+// surfaced as a metric rather than killing the summary. A NON-object array
+// element, by contrast, IS a hard structural error (exit 1) — that's a
+// malformed file, not a recoverable per-record data issue.
+//
+// Reported metrics:
+//   * total_records           — array length (includes malformed records).
+//   * counted_records         — records that passed required-field checks
+//                               and contributed to the aggregates below.
+//   * records_missing_fields  — records skipped from aggregates (missing or
+//                               wrong-typed required field).
+//   * per_type                — counts keyed by mnemonic; TRANSFER / STAKE /
+//                               UNSTAKE called out explicitly, everything
+//                               else folded into `other` (with the raw
+//                               type ints listed under `other_types`).
+//   * total_amount / total_fee — u64 sums over counted records.
+//   * distinct_from / distinct_to — distinct-sender / distinct-recipient
+//                               counts (empty `to`, e.g. STAKE/UNSTAKE, is a
+//                               valid distinct value and counts as one).
+//   * nonce_min / nonce_max   — over counted records (null when none).
+//   * nonce_contiguous        — true iff the counted-record nonces form the
+//                               full gap-free integer range [min..max] with
+//                               no duplicates (so {7,8,9}→true, {7,9}→false,
+//                               {7,7,8}→false). null when no counted records.
+//
+// Exit codes: 0 success (including the empty-array zero-counts case),
+//             1 args / IO / parse / non-array / non-object-element error.
+int cmd_tx_batch_summary(int argc, char** argv) {
+    std::string in_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in" && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--json")               json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet tx-batch-summary --in <tx-array.json>\n"
+                "                                      [--json]\n"
+                "\n"
+                "  READ-ONLY aggregate analytics over a JSON array of tx\n"
+                "  records — the pre-broadcast sanity check for the batch-\n"
+                "  payroll flow (batch-nonce-assign -> tx-batch-sign ->\n"
+                "  verify-batch -> tx-batch-summary). One-glance totals so an\n"
+                "  operator can catch a wrong grand total, duplicate\n"
+                "  recipients, or a nonce gap BEFORE submitting a 50k-tx\n"
+                "  batch. No keys, no signing, no Ed25519 verify, no daemon.\n"
+                "\n"
+                "  --in <file|->  REQUIRED. Path to a JSON array of tx\n"
+                "                 records, or `-` for stdin. Accepts SIGNED\n"
+                "                 envelopes ({type:int,...,sig,hash}) and\n"
+                "                 UNSIGNED inputs ({type:\"TRANSFER\",...})\n"
+                "                 interchangeably (type as int OR mnemonic).\n"
+                "  --json         One-line machine-readable JSON summary.\n"
+                "                 Default is a human-readable table.\n"
+                "\n"
+                "  Per-record shape (all but `fee` required; `fee` -> 0):\n"
+                "    {\"type\":<int|mnemonic>, \"from\":\"0x..\",\n"
+                "     \"to\":\"..\", \"amount\":N, \"fee\":N, \"nonce\":N}\n"
+                "\n"
+                "  Reported: total_records, counted_records,\n"
+                "  records_missing_fields, per_type (TRANSFER/STAKE/UNSTAKE/\n"
+                "  other), total_amount, total_fee, distinct_from,\n"
+                "  distinct_to, nonce_min, nonce_max, nonce_contiguous\n"
+                "  (gap/duplicate detection over the counted nonces).\n"
+                "\n"
+                "  A record missing a required field is counted under\n"
+                "  records_missing_fields and excluded from the aggregates\n"
+                "  (one bad row doesn't kill the summary). A non-object array\n"
+                "  element or non-array top level is a hard error (exit 1).\n"
+                "\n"
+                "  Empty array -> all-zero counts, exit 0.\n"
+                "\n"
+                "  Exit: 0 success, 1 args/IO/parse/structural error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "tx-batch-summary: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet tx-batch-summary --in "
+                         "<tx-array.json> [--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "Usage: determ-wallet tx-batch-summary --in "
+                     "<tx-array.json> [--json]\n"
+                     "  (--in is required; pass `-` for stdin)\n";
+        return 1;
+    }
+
+    // ── Read + parse --in as a JSON array ────────────────────────────────
+    nlohmann::json in_j;
+    try {
+        if (in_path == "-") {
+            in_j = nlohmann::json::parse(std::cin);
+        } else {
+            std::ifstream f(in_path);
+            if (!f) {
+                std::cerr << "tx-batch-summary: cannot open --in: "
+                          << in_path << "\n";
+                return 1;
+            }
+            f >> in_j;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "tx-batch-summary: --in is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!in_j.is_array()) {
+        std::cerr << "tx-batch-summary: --in must be a top-level JSON array "
+                     "(got "
+                  << (in_j.is_object() ? "object" : "non-array scalar")
+                  << ")\n";
+        return 1;
+    }
+
+    // Mnemonic table — identical ordering to inspect-tx / validate-tx
+    // (include/determ/chain/block.hpp TxType).
+    auto int_to_type_mnemonic = [](int t) -> const char* {
+        switch (t) {
+            case 0:  return "TRANSFER";
+            case 1:  return "REGISTER";
+            case 2:  return "DEREGISTER";
+            case 3:  return "STAKE";
+            case 4:  return "UNSTAKE";
+            case 5:  return "REGION_CHANGE";
+            case 6:  return "PARAM_CHANGE";
+            case 7:  return "MERGE_EVENT";
+            case 8:  return "COMPOSABLE_BATCH";
+            case 9:  return "DAPP_REGISTER";
+            case 10: return "DAPP_CALL";
+            default: return "UNKNOWN";
+        }
+    };
+    auto type_mnemonic_to_int = [](const std::string& s) -> int {
+        if (s == "TRANSFER")         return 0;
+        if (s == "REGISTER")         return 1;
+        if (s == "DEREGISTER")       return 2;
+        if (s == "STAKE")            return 3;
+        if (s == "UNSTAKE")          return 4;
+        if (s == "REGION_CHANGE")    return 5;
+        if (s == "PARAM_CHANGE")     return 6;
+        if (s == "MERGE_EVENT")      return 7;
+        if (s == "COMPOSABLE_BATCH") return 8;
+        if (s == "DAPP_REGISTER")    return 9;
+        if (s == "DAPP_CALL")        return 10;
+        return -1;
+    };
+
+    // ── Aggregate accumulators ─────────────────────────────────────────────
+    const size_t total_records = in_j.size();
+    size_t counted_records = 0;
+    size_t records_missing_fields = 0;
+    uint64_t total_amount = 0;
+    uint64_t total_fee    = 0;
+    size_t   transfer_ct = 0, stake_ct = 0, unstake_ct = 0, other_ct = 0;
+    std::set<std::string> distinct_from;
+    std::set<std::string> distinct_to;
+    std::set<int>         other_types;   // raw ints folded into `other`
+    std::set<uint64_t>    nonces;        // DISTINCT nonces for contiguity
+    bool     nonce_dup_seen = false;     // any nonce appeared more than once
+    bool     have_nonce = false;
+    uint64_t nonce_min = 0, nonce_max = 0;
+
+    // Read `type` from a record as an int (accepting int OR mnemonic).
+    // Returns false if absent/wrong-typed/unknown-mnemonic.
+    auto read_type_int = [&](const nlohmann::json& rec, int& out) -> bool {
+        if (!rec.contains("type")) return false;
+        const auto& t = rec["type"];
+        if (t.is_number_integer() || t.is_number_unsigned()) {
+            int64_t v = t.is_number_unsigned()
+                ? static_cast<int64_t>(t.get<uint64_t>())
+                : t.get<int64_t>();
+            if (v < 0 || v > 255) return false;
+            out = static_cast<int>(v);
+            return true;
+        }
+        if (t.is_string()) {
+            int mapped = type_mnemonic_to_int(t.get<std::string>());
+            if (mapped < 0) return false;
+            out = mapped;
+            return true;
+        }
+        return false;
+    };
+    // Read a non-negative u64 numeric field. Returns false if
+    // absent/non-numeric/negative.
+    auto read_u64 = [](const nlohmann::json& rec, const char* key,
+                       uint64_t& out) -> bool {
+        if (!rec.contains(key) || !rec[key].is_number()) return false;
+        const auto& v = rec[key];
+        if (v.is_number_integer() && !v.is_number_unsigned()
+            && v.get<int64_t>() < 0) {
+            return false;
+        }
+        out = v.is_number_unsigned()
+            ? v.get<uint64_t>()
+            : static_cast<uint64_t>(v.get<int64_t>());
+        return true;
+    };
+
+    for (size_t idx = 0; idx < total_records; ++idx) {
+        const auto& rec = in_j[idx];
+        // Non-object element is a hard structural error (malformed file),
+        // not a recoverable per-record data issue.
+        if (!rec.is_object()) {
+            std::cerr << "tx-batch-summary: input[" << idx
+                      << "] is not a JSON object\n";
+            return 1;
+        }
+
+        // Required fields: type/from/to/amount/nonce. `fee` is optional.
+        int      tx_type_int = -1;
+        uint64_t amount = 0, nonce = 0;
+        const bool ok_type   = read_type_int(rec, tx_type_int);
+        const bool ok_from   = rec.contains("from") && rec["from"].is_string();
+        const bool ok_to     = rec.contains("to")   && rec["to"].is_string();
+        const bool ok_amount = read_u64(rec, "amount", amount);
+        const bool ok_nonce  = read_u64(rec, "nonce",  nonce);
+        if (!(ok_type && ok_from && ok_to && ok_amount && ok_nonce)) {
+            ++records_missing_fields;
+            continue;
+        }
+        // `fee` optional — default 0 when absent. A present-but-wrong-typed
+        // (or negative) fee is treated as a missing required-field failure
+        // (it's data corruption, not an intentional omission).
+        uint64_t fee = 0;
+        if (rec.contains("fee")) {
+            if (!read_u64(rec, "fee", fee)) {
+                ++records_missing_fields;
+                continue;
+            }
+        }
+
+        // ── Counted record — fold into the aggregates ──────────────────────
+        ++counted_records;
+        total_amount += amount;
+        total_fee    += fee;
+        distinct_from.insert(rec["from"].get<std::string>());
+        distinct_to.insert(rec["to"].get<std::string>());
+        switch (tx_type_int) {
+            case 0:  ++transfer_ct; break;
+            case 3:  ++stake_ct;    break;
+            case 4:  ++unstake_ct;  break;
+            default: ++other_ct; other_types.insert(tx_type_int); break;
+        }
+        if (!nonces.insert(nonce).second) nonce_dup_seen = true;
+        if (!have_nonce) {
+            nonce_min = nonce_max = nonce;
+            have_nonce = true;
+        } else {
+            if (nonce < nonce_min) nonce_min = nonce;
+            if (nonce > nonce_max) nonce_max = nonce;
+        }
+    }
+
+    // Nonce contiguity: the counted nonces form a clean, gap-free,
+    // duplicate-free sequence iff every value in [min..max] appears EXACTLY
+    // once. Two independent failure modes, both must be absent:
+    //   (1) a gap   — some value in [min..max] is missing, so the DISTINCT
+    //                 count < span+1 (e.g. {7,9} → distinct 2, span 2);
+    //   (2) a duplicate — a nonce repeated across records (e.g. {7,7,8}),
+    //                 caught at insert time via nonce_dup_seen since a
+    //                 std::set silently collapses repeats and would
+    //                 otherwise mask the dup.
+    // distinct == span+1 rules out (1); !nonce_dup_seen rules out (2).
+    // We compare (distinct - 1) == span to sidestep a +1 overflow on the
+    // (unrealistic) u64-max edge; the set is non-empty here so size ≥ 1.
+    bool nonce_contiguous = false;
+    if (have_nonce) {
+        const uint64_t span = nonce_max - nonce_min;        // ≥ 0
+        nonce_contiguous = !nonce_dup_seen
+                        && ((nonces.size() - 1) == span);
+    }
+
+    // ── Emit ────────────────────────────────────────────────────────────
+    if (json_out) {
+        nlohmann::json per_type;
+        per_type["TRANSFER"] = transfer_ct;
+        per_type["STAKE"]    = stake_ct;
+        per_type["UNSTAKE"]  = unstake_ct;
+        per_type["other"]    = other_ct;
+        nlohmann::json other_types_j = nlohmann::json::array();
+        for (int t : other_types) {
+            other_types_j.push_back(
+                nlohmann::json{{"type", t},
+                               {"mnemonic", int_to_type_mnemonic(t)}});
+        }
+
+        nlohmann::json r;
+        r["total_records"]          = total_records;
+        r["counted_records"]        = counted_records;
+        r["records_missing_fields"] = records_missing_fields;
+        r["per_type"]               = per_type;
+        r["other_types"]            = other_types_j;
+        r["total_amount"]           = total_amount;
+        r["total_fee"]              = total_fee;
+        r["distinct_from"]          = distinct_from.size();
+        r["distinct_to"]            = distinct_to.size();
+        if (have_nonce) {
+            r["nonce_min"]        = nonce_min;
+            r["nonce_max"]        = nonce_max;
+            r["nonce_contiguous"] = nonce_contiguous;
+        } else {
+            r["nonce_min"]        = nullptr;
+            r["nonce_max"]        = nullptr;
+            r["nonce_contiguous"] = nullptr;
+        }
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "total_records:          " << total_records << "\n";
+        std::cout << "counted_records:        " << counted_records << "\n";
+        std::cout << "records_missing_fields: " << records_missing_fields
+                  << "\n";
+        std::cout << "per_type:\n";
+        std::cout << "  TRANSFER: " << transfer_ct << "\n";
+        std::cout << "  STAKE:    " << stake_ct    << "\n";
+        std::cout << "  UNSTAKE:  " << unstake_ct  << "\n";
+        std::cout << "  other:    " << other_ct;
+        if (!other_types.empty()) {
+            std::cout << "  (types:";
+            for (int t : other_types) {
+                std::cout << " " << t << "=" << int_to_type_mnemonic(t);
+            }
+            std::cout << ")";
+        }
+        std::cout << "\n";
+        std::cout << "total_amount:           " << total_amount << "\n";
+        std::cout << "total_fee:              " << total_fee    << "\n";
+        std::cout << "distinct_from:          " << distinct_from.size()
+                  << "\n";
+        std::cout << "distinct_to:            " << distinct_to.size() << "\n";
+        if (have_nonce) {
+            std::cout << "nonce_range:            " << nonce_min << ".."
+                      << nonce_max << "\n";
+            std::cout << "nonce_contiguous:       "
+                      << (nonce_contiguous ? "true" : "false");
+            if (!nonce_contiguous) std::cout << "  (gap or duplicate)";
+            std::cout << "\n";
+        } else {
+            std::cout << "nonce_range:            (none — no counted "
+                         "records)\n";
+            std::cout << "nonce_contiguous:       (n/a)\n";
+        }
+    }
+    return 0;
+}
+
 // ── RPC socket helpers (used by cmd_validate_tx --rpc-port AND by
 //    cmd_anon_batch_balance / cmd_bulk_send below). Originally lived near
 //    cmd_anon_batch_balance (first consumer); promoted here so the
@@ -17983,6 +18359,30 @@ void print_usage() {
         "                                             machine envelope; default is a human block.\n"
         "                                             --tx-json `-` reads from stdin. Exit 0\n"
         "                                             success, 1 args/parse/IO error.\n"
+        "  tx-batch-summary --in <tx-array.json>      READ-ONLY aggregate analytics over a JSON\n"
+        "                   [--json]                  array of tx records (signed envelopes OR\n"
+        "                                             unsigned inputs; type as int OR mnemonic).\n"
+        "                                             The pre-broadcast sanity check for the\n"
+        "                                             batch-payroll flow (batch-nonce-assign ->\n"
+        "                                             tx-batch-sign -> verify-batch -> tx-batch-\n"
+        "                                             summary): one-glance totals to catch a\n"
+        "                                             wrong grand total, duplicate recipients,\n"
+        "                                             or a nonce gap before submitting a 50k-tx\n"
+        "                                             batch. Reports total_records, counted_\n"
+        "                                             records, records_missing_fields, per_type\n"
+        "                                             (TRANSFER/STAKE/UNSTAKE/other), total_\n"
+        "                                             amount, total_fee, distinct_from,\n"
+        "                                             distinct_to, nonce_min/max, and nonce_\n"
+        "                                             contiguous (gap + duplicate detection). A\n"
+        "                                             record missing a required field is counted\n"
+        "                                             under records_missing_fields and excluded\n"
+        "                                             from the aggregates; a non-object element\n"
+        "                                             or non-array top level is a hard error. No\n"
+        "                                             keys, no signing, no verify, no daemon.\n"
+        "                                             --in `-` reads stdin; --json emits a one-\n"
+        "                                             line machine summary (default is a human\n"
+        "                                             table). Empty array -> all-zero, exit 0.\n"
+        "                                             Exit 0 success, 1 args/IO/parse/structural.\n"
         "  sign-arbitrary --priv-keyfile <path>\n"
         "                 (--msg <str> | --msg-file <path>)\n"
         "                 [--out <file>] [--detached | --bundle]\n"
@@ -18298,6 +18698,7 @@ int main(int argc, char** argv) {
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "tx-batch-sign")   return cmd_tx_batch_sign  (argc - 2, argv + 2);
+    if (cmd == "tx-batch-summary") return cmd_tx_batch_summary(argc - 2, argv + 2);
     if (cmd == "batch-nonce-assign") return cmd_batch_nonce_assign(argc - 2, argv + 2);
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "verify-batch")    return cmd_verify_batch   (argc - 2, argv + 2);
