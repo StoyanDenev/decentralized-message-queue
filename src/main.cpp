@@ -560,6 +560,13 @@ Additional in-process tests:
   determ test-merge-state                     Chain merge_state read API +
                                               R4 threshold setters
                                               (merge/revert/grace) round-trip
+  determ test-merge-state-determinism         R7 merge_state JSON round-trip +
+                                              deterministic eviction-order +
+                                              m:-namespace state_root binding
+                                              (sorted-by-ShardId iteration;
+                                              empty-set wire-schema stable;
+                                              partner_id + refugee_region both
+                                              bind into state_root)
   determ test-chain-apply-block               Chain::append / apply_transactions
                                               central state-transition surface
                                               — genesis bootstrap, TRANSFER /
@@ -32207,6 +32214,304 @@ int main(int argc, char** argv) {
         std::fputs("\n  ", stdout);
         std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
         std::fputs(": merge-event-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    // R7 under-quorum-merge merge_state JSON round-trip + eviction-
+    // order pin. test-merge-event-determinism (above) covers the
+    // MergeEvent wire encoding + apply-time mutation; this companion
+    // pins the snapshot-side merge_state JSON structure invariants
+    // independent of the apply-time wire payload:
+    //   (1) Fixture-driven round-trip: serialize_state →
+    //       restore_from_snapshot →  re-serialize_state produces
+    //       bytewise-identical "merge_state" JSON. This is the
+    //       "JSON is the canonical interchange form for the m:
+    //       namespace" contract — any future addition to
+    //       MergePartnerInfo that isn't reflected in BOTH halves of
+    //       serialize_state/restore would silently break here.
+    //   (2) Empty merge_state: chains with no refugee entries
+    //       serialize an empty "merge_state" JSON array (not
+    //       missing field, not null) so the snapshot wire schema is
+    //       stable for fast-bootstrap peers.
+    //   (3) Distinct fixtures → distinct serialized JSON: two
+    //       merge_states differing in any single (shard, partner,
+    //       region) component produce non-equal "merge_state" JSON.
+    //       Defense against a silent fold where two distinct refugee
+    //       sets serialize to the same bytes (would break peer
+    //       gossip equality / Merkle binding indirectly).
+    //   (4) Deterministic ordering: merge_state_ is a
+    //       std::map<ShardId, ...> in chain.hpp, so iteration is
+    //       sorted-ascending-by-ShardId. The "merge_state" JSON
+    //       array preserves that order on every serialize_state
+    //       call regardless of insertion order. This is the
+    //       "iteration order is stable across builds" contract
+    //       feeding the m: namespace into state_root.
+    //   (5) state_root inclusion via the m: namespace: toggling a
+    //       single field of a single merge_state entry (partner_id
+    //       or refugee_region) MUST change compute_state_root().
+    //       Mirrors the m:-namespace coverage in
+    //       test-state-root-namespaces but pins it specifically at
+    //       the merge_state surface — the apply path and the read
+    //       path share build_state_leaves so the m: leaf-encoding
+    //       drift here would silently break both.
+    //
+    // Companion to:
+    //   - test-merge-event-determinism (event wire + apply + state_root)
+    //   - test-merge-state (read-API on the in-memory map)
+    //   - test-state-root-namespaces (m: namespace coverage)
+    //   - test-snapshot-roundtrip (whole-chain snapshot)
+    //
+    // 7 assertions across 5 scenarios.
+    if (cmd == "test-merge-state-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Shared genesis fixture: alice registered with stake so any
+        // chain that needs an apply path has a valid signer. The
+        // accounts aren't strictly required for the merge_state-only
+        // scenarios but keep the fixture interchangeable with the
+        // sibling tests that exercise apply.
+        auto make_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "merge-state-determinism-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c};
+            return cfg;
+        };
+
+        // Helper: inject a merge_state entry directly into a snapshot
+        // JSON. We bypass the apply path because the goal here is the
+        // JSON round-trip surface, not the MERGE_EVENT apply state
+        // machine (that's test-merge-event-apply's job). We build a
+        // baseline chain, snapshot it, splice synthetic merge_state
+        // entries into the JSON, restore from the spliced snapshot,
+        // and assert restore_from_snapshot reproduces the bytes.
+        // This route exercises every field of
+        // serialize_state's merge_arr loop + restore's
+        // merge_state-reading loop without depending on apply path
+        // mutations.
+        auto build_chain_with_merge = [&](
+                const std::vector<std::tuple<ShardId, ShardId, std::string>>& entries) {
+            // Start with a snapshot that omits merge_state, then
+            // inject entries. The serialize_state always emits the
+            // "merge_state" field as an array (per chain.cpp), so we
+            // overwrite it with our synthetic entries before
+            // round-tripping through restore_from_snapshot.
+            Chain baseline;
+            baseline.append(make_genesis_block(make_cfg()));
+            json snap = baseline.serialize_state(16);
+            // Replace merge_state with our synthetic entries.
+            json merge_arr = json::array();
+            for (auto& [s, p, region] : entries) {
+                merge_arr.push_back({
+                    {"shard_id",       s},
+                    {"partner_id",     p},
+                    {"refugee_region", region},
+                });
+            }
+            snap["merge_state"] = merge_arr;
+            return Chain::restore_from_snapshot(snap);
+        };
+
+        // === Scenario 1: Fixture round-trip is byte-identical ===
+        //
+        // Build a chain with two refugee regions, snapshot it,
+        // restore from the snapshot, and re-snapshot. The
+        // "merge_state" sub-JSON of both snapshots MUST be
+        // structurally identical (nlohmann::json::operator==). Any
+        // field drift (silent drop in serialize_state, missing field
+        // in restore_from_snapshot) would diverge here. The two-
+        // entry fixture is chosen deliberately so iteration order
+        // can be observed in the assertion.
+        //
+        // 2 assertions: round-trip equality on the array; the
+        // restored chain has 2 entries with the source fields
+        // preserved.
+        {
+            Chain c1 = build_chain_with_merge({
+                {ShardId{1}, ShardId{2}, std::string{"us-east"}},
+                {ShardId{3}, ShardId{0}, std::string{"eu-west"}},
+            });
+            json snap1 = c1.serialize_state(16);
+            Chain c2 = Chain::restore_from_snapshot(snap1);
+            json snap2 = c2.serialize_state(16);
+            check(snap1["merge_state"] == snap2["merge_state"],
+                  "(1) Round-trip: serialize_state → "
+                  "restore_from_snapshot → serialize_state produces "
+                  "bytewise-identical 'merge_state' JSON (every "
+                  "MergePartnerInfo field round-trips through the "
+                  "snapshot)");
+            check(c2.merge_state().size() == 2
+                  && c2.merge_state().count(ShardId{1}) == 1
+                  && c2.merge_state().count(ShardId{3}) == 1
+                  && c2.merge_state().at(ShardId{1}).partner_id
+                         == ShardId{2}
+                  && c2.merge_state().at(ShardId{1}).refugee_region
+                         == "us-east"
+                  && c2.merge_state().at(ShardId{3}).partner_id
+                         == ShardId{0}
+                  && c2.merge_state().at(ShardId{3}).refugee_region
+                         == "eu-west",
+                  "(1) Round-trip: restored chain has the same "
+                  "MergePartnerInfo entries as the source — every "
+                  "(shard_id, partner_id, refugee_region) tuple "
+                  "preserved field-for-field");
+        }
+
+        // === Scenario 2: Empty merge_state ===
+        //
+        // A chain with no merge entries must emit "merge_state" as
+        // an empty JSON array (not absent, not null, not a scalar).
+        // This is the wire-schema-stability contract: peers parsing
+        // the snapshot can always rely on the field being an
+        // iterable array, even when zero refugees are present.
+        //
+        // 1 assertion: empty chain produces empty "merge_state"
+        // array.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            json snap = c.serialize_state(16);
+            check(snap.contains("merge_state")
+                  && snap["merge_state"].is_array()
+                  && snap["merge_state"].empty(),
+                  "(2) Empty merge_state: chain with no refugee "
+                  "regions serializes 'merge_state' as an empty JSON "
+                  "array (wire-schema stable; not absent / not null)");
+        }
+
+        // === Scenario 3: Distinct fixtures → distinct JSON ===
+        //
+        // Build two chains with merge_states differing in exactly
+        // one field (partner_id) and assert their serialized
+        // "merge_state" JSON arrays differ. This is the "no silent
+        // fold" contract — every field of every entry must
+        // contribute to the serialized form.
+        //
+        // 1 assertion: any field-level difference in MergePartnerInfo
+        // produces a different "merge_state" JSON.
+        {
+            Chain c_a = build_chain_with_merge({
+                {ShardId{1}, ShardId{2}, std::string{"us-east"}},
+            });
+            Chain c_b = build_chain_with_merge({
+                {ShardId{1}, ShardId{99}, std::string{"us-east"}},
+            });
+            json snap_a = c_a.serialize_state(16);
+            json snap_b = c_b.serialize_state(16);
+            check(snap_a["merge_state"] != snap_b["merge_state"],
+                  "(3) Distinct fixtures: two chains differing only "
+                  "in partner_id produce non-equal 'merge_state' "
+                  "JSON (no silent field-fold in serialize_state)");
+        }
+
+        // === Scenario 4: Deterministic iteration order ===
+        //
+        // merge_state_ is std::map<ShardId, MergePartnerInfo> so
+        // iteration is sorted-ascending by ShardId. We build two
+        // chains with the SAME logical merge_state but constructed
+        // via different snapshot-input orders, snapshot both, and
+        // assert byte-identical "merge_state" JSON arrays. The
+        // restore_from_snapshot loop inserts in input-array order,
+        // but the underlying std::map re-sorts; so the second
+        // serialize_state emits the sorted form regardless of input
+        // permutation.
+        //
+        // 1 assertion: serialized form is invariant under input
+        // permutation (sorted-by-ShardId order locked in).
+        {
+            // Build with shard ids in one order...
+            Chain c_a = build_chain_with_merge({
+                {ShardId{3}, ShardId{0}, std::string{"eu-west"}},
+                {ShardId{1}, ShardId{2}, std::string{"us-east"}},
+                {ShardId{7}, ShardId{4}, std::string{"ap-south"}},
+            });
+            // ...and the same logical set with shard ids permuted.
+            Chain c_b = build_chain_with_merge({
+                {ShardId{1}, ShardId{2}, std::string{"us-east"}},
+                {ShardId{7}, ShardId{4}, std::string{"ap-south"}},
+                {ShardId{3}, ShardId{0}, std::string{"eu-west"}},
+            });
+            json snap_a = c_a.serialize_state(16);
+            json snap_b = c_b.serialize_state(16);
+            check(snap_a["merge_state"] == snap_b["merge_state"]
+                  && snap_a["merge_state"].size() == 3
+                  // First entry must be the smallest ShardId (1)
+                  // by sorted-iteration semantics of std::map.
+                  && snap_a["merge_state"][0]["shard_id"]
+                         == ShardId{1}
+                  && snap_a["merge_state"][1]["shard_id"]
+                         == ShardId{3}
+                  && snap_a["merge_state"][2]["shard_id"]
+                         == ShardId{7},
+                  "(4) Deterministic ordering: 'merge_state' JSON is "
+                  "ascending-by-ShardId regardless of restore-input "
+                  "order (std::map iteration order is stable across "
+                  "input permutations — the m:-namespace contribution "
+                  "to state_root is permutation-invariant)");
+        }
+
+        // === Scenario 5: state_root binding ===
+        //
+        // The merge_state contributes to the Merkle root via the m:
+        // namespace per PROTOCOL.md §4.1.1 (key = "m:" + shard_id_be4,
+        // value-hash over partner_id + refugee_region). Toggling any
+        // field of any merge_state entry MUST change
+        // compute_state_root(). Two assertions: (a) toggling
+        // partner_id changes the root; (b) toggling refugee_region
+        // changes the root. Both fields contribute to the value-hash
+        // per build_state_leaves' SHA256Builder sequence; this pin
+        // ensures no field is silently dropped from the m: leaf
+        // encoding.
+        //
+        // 2 assertions: state_root binds to partner_id;
+        // state_root binds to refugee_region.
+        {
+            // Baseline.
+            Chain c_base = build_chain_with_merge({
+                {ShardId{1}, ShardId{2}, std::string{"us-east"}},
+            });
+            Hash root_base = c_base.compute_state_root();
+
+            // Toggle partner_id from 2 → 99 (single-field perturb).
+            Chain c_p = build_chain_with_merge({
+                {ShardId{1}, ShardId{99}, std::string{"us-east"}},
+            });
+            check(c_p.compute_state_root() != root_base,
+                  "(5) state_root binding: toggling partner_id "
+                  "(2→99) changes compute_state_root() — partner_id "
+                  "contributes to the m:-namespace value-hash "
+                  "(PROTOCOL.md §4.1.1)");
+
+            // Toggle refugee_region from "us-east" → "us-west".
+            Chain c_r = build_chain_with_merge({
+                {ShardId{1}, ShardId{2}, std::string{"us-west"}},
+            });
+            check(c_r.compute_state_root() != root_base,
+                  "(5) state_root binding: toggling refugee_region "
+                  "('us-east'→'us-west') changes "
+                  "compute_state_root() — refugee_region "
+                  "contributes to the m:-namespace value-hash");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": merge-state-determinism ", stdout);
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
