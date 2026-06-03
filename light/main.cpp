@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (14 total + help / version):
+// Subcommands (15 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -24,6 +24,7 @@
 //   verify-and-submit        Composite: trustless nonce + sign + submit
 //   watch-head               Periodic trust-minimized head monitor
 //   export-headers           Verifiable header archive (FETCH+VERIFY+WRITE)
+//   verify-archive           OFFLINE re-verify of an export-headers archive
 //   help / version
 //
 // Trust-model invariants:
@@ -42,6 +43,7 @@
 #include "sign_tx.hpp"
 #include "watch.hpp"
 #include "export.hpp"
+#include "verify_archive.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -119,6 +121,13 @@ void print_usage() {
         "      Fetch + verify headers [H1, H1+M) + write a self-contained\n"
         "      verifiable archive to <file>. Re-verifiable offline at any\n"
         "      later date via verify-headers --in <file>.\n"
+        "  verify-archive --in <archive> --genesis <file> [--require-sigs]\n"
+        "      OFFLINE re-verification of an export-headers archive (no\n"
+        "      daemon, no RPC). Anchors genesis (compute_genesis_hash ==\n"
+        "      archive.genesis_hash), re-checks the prev_hash chain, and\n"
+        "      re-verifies committee sigs when the archive retained them\n"
+        "      (--include-committee-sigs at export). --require-sigs makes a\n"
+        "      sigs-stripped archive fail.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -717,6 +726,27 @@ int cmd_export_headers(int argc, char** argv) {
     return run_export_headers(opts);
 }
 
+// ──────────────────────── verify-archive ───────────────────────────────
+
+int cmd_verify_archive(int argc, char** argv) {
+    VerifyArchiveOptions opts;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"      && i + 1 < argc) opts.in_path      = argv[++i];
+        else if (a == "--genesis" && i + 1 < argc) opts.genesis_path = argv[++i];
+        else if (a == "--require-sigs")            opts.require_sigs  = true;
+        else {
+            std::cerr << "verify-archive: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (opts.in_path.empty() || opts.genesis_path.empty()) {
+        std::cerr << "verify-archive: --in and --genesis are required\n";
+        return 1;
+    }
+    return run_verify_archive(opts);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -749,6 +779,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
         if (cmd == "export-headers")        return cmd_export_headers(sub_argc, sub_argv);
+        if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
