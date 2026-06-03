@@ -12,7 +12,7 @@ The protocol-level architecture and design rationale lives in the top-level [`RE
 
 ## Behavioral test suite
 
-`tools/test_*.sh` currently holds **237 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
+`tools/test_*.sh` currently holds **238 shell-driven regression tests** spanning the protocol surface — every protocol feature, security closure, and economic primitive has at least one paired test. Representative items:
 
 | Test | Asserts |
 |---|---|
@@ -157,7 +157,7 @@ for t in tools/test_*.sh; do bash "$t"; done
 
 Note: multi-node tests share fixed ports (7771-3 / 8771-3 / 779x / 8830 / etc.) and have a documented Windows TIME_WAIT flake on back-to-back runs. In-process tests (state_root, atomic_scope, composable_batch, dapp_register, chain_integrity, s018_json_validation) are deterministic and complete in under 5 seconds each.
 
-**Portability (S-035 Path 3 — shipped).** Every test sources `tools/common.sh` which platform-detects the determ + determ-wallet + determ-light binaries (Windows MSVC multi-config, Linux/Mac single-config) and resolves `PROJECT_ROOT` to a Windows-style absolute path on Git Bash via `pwd -W`. Override via `DETERM_BIN` / `DETERM_WALLET_BIN` / `DETERM_LIGHT_BIN` env vars for CI runners with custom build layouts. The 237-test suite is now runnable on Linux/Mac/Windows from the repo root with no per-platform editing.
+**Portability (S-035 Path 3 — shipped).** Every test sources `tools/common.sh` which platform-detects the determ + determ-wallet + determ-light binaries (Windows MSVC multi-config, Linux/Mac single-config) and resolves `PROJECT_ROOT` to a Windows-style absolute path on Git Bash via `pwd -W`. Override via `DETERM_BIN` / `DETERM_WALLET_BIN` / `DETERM_LIGHT_BIN` env vars for CI runners with custom build layouts. The 238-test suite is now runnable on Linux/Mac/Windows from the repo root with no per-platform editing.
 
 **Binaries (three).** Determ ships three executables. `determ` is the full daemon (consensus producer + validator + RPC server). `determ-wallet` is the account-management binary (anon-account generation, offline signing, snapshot inspection — never talks to a daemon). `determ-light` is the trust-minimized light-client wallet — verifies every RPC response from a daemon against a pinned genesis hash + committee-signed `state_root` + chain-of-hashes anchors, so even a malicious daemon cannot mislead an honest light-client. The 12 paired `test_light_*.sh` scripts (`test_light_verify_headers.sh`, `test_light_verify_block_sigs.sh`, `test_light_verify_state_proof.sh`, `test_light_verify_chain.sh`, `test_light_balance_trustless.sh`, `test_light_nonce_trustless.sh`, `test_light_sign_tx.sh`, `test_light_verify_and_submit.sh`, `test_light_genesis_anchor.sh`, `test_light_watch_head.sh`, `test_light_export_headers.sh`, `test_light_verify_archive.sh`) exercise the verification primitives + composite trustless reads + end-to-end TRANSFER landing + R39+1 periodic head + committee-sig monitoring + R39+2 verifiable header-archive capture + R39+3 offline archive re-verification. See [CLI-REFERENCE.md](CLI-REFERENCE.md) for the full surface.
 
