@@ -763,6 +763,12 @@ Additional in-process tests:
                                               debit + dst inbound credit;
                                               src_outbound == dst_inbound;
                                               net supply across pair conserved.
+)" << R"(  determ test-cross-shard-supply-invariant    A1 unitary-supply across a full
+                                              cross-shard cycle — K-shard
+                                              aggregate (balances + staked +
+                                              outbound-in-flight) + slashed ==
+                                              expected_total; dup-inbound no-op;
+                                              serialize/restore determinism.
   determ test-chain-ctor-bootstrap            Chain() + Chain(genesis) ctor
                                               variants produce equivalent state;
                                               head()/at() empty-chain throw
@@ -26782,6 +26788,358 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": cross-shard-atomicity "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // R40 D1: A1 unitary-supply invariant pinned across a FULL cross-shard
+    // transfer cycle, at the K-shard aggregate level.
+    //
+    // test-cross-shard-atomicity (above) models a 2-Chain pair and asserts
+    // each shard's *own* A1 (expected == live) plus src_outbound ==
+    // dst_inbound. This test goes one level up: it builds a K=3 shard set,
+    // funds a STAKED account on the source shard, runs the outbound debit
+    // on S and the inbound credit on D, and verifies the GLOBAL accounting
+    // identity directly:
+    //
+    //   Σ_shards (balances + staked + outbound-in-flight)  +  Σ slashed
+    //     ==  Σ expected_total_at_genesis
+    //
+    // The "outbound-in-flight" term is each shard's accumulated_outbound_
+    // — value that has left a shard's live supply (debited) but whose
+    // credit lands on the destination shard. Counting it on the source
+    // side closes the books: a coin in flight is neither created nor
+    // destroyed, just in transit. Once D credits it (accumulated_inbound
+    // ticks up there), the SAME coin appears as a live balance on D, and
+    // the source still carries it as outbound-in-flight — that would
+    // double-count, EXCEPT the global identity is anchored on the
+    // genesis-time expected_total sum, and the apply-layer per-shard A1
+    // (expected == live) holds on BOTH shards independently. The aggregate
+    // we pin here is the conservation law that ties them together:
+    //
+    //   Σ live_total_supply(shard)
+    //     == Σ genesis_total(shard)  +  net_inbound  -  net_outbound  ...
+    //
+    // and across a CLOSED cycle (one outbound matched by exactly one
+    // inbound) the net cross-shard flow is zero, so Σ live is invariant.
+    //
+    // What this defends that the pair test does not:
+    //   - K=3 (not 2) shards — the aggregate sum is over the whole set.
+    //   - a non-zero STAKED term in the aggregate (atomicity used stake=0).
+    //   - duplicate-inbound is a no-op (FA-Apply-9 dedup) and does NOT
+    //     inflate dst supply — the catastrophic double-credit failure mode.
+    //   - serialize_state → restore_from_snapshot → re-derive yields a
+    //     byte-identical state_root and identical supply totals (the
+    //     atomicity test only replays from genesis; this also exercises
+    //     the snapshot round-trip, which back-solves genesis_total).
+    //
+    // Proofs: FA7 (CrossShardReceipts.md), FA-Apply-13
+    // (CrossShardOutboundApply.md), FA-Apply-9 (CrossShardReceiptDedup.md).
+    if (cmd == "test-cross-shard-supply-invariant") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // K = 3 shards. Same chain-wide routing salt on every shard.
+        const uint32_t kShards = 3;
+        Hash salt{};  // zero salt (chain-wide constant)
+
+        // Source shard S funds a creator "alice" with both a balance and a
+        // non-zero stake, so the aggregate "staked" term is exercised.
+        const uint64_t kAliceBal   = 1000;
+        const uint64_t kAliceStake = 500;
+        const uint64_t kAmount     = 100;
+        const uint64_t kFee        = 1;
+
+        auto make_shard_cfg = [&](ShardId my_id, bool fund_alice) {
+            GenesisConfig cfg;
+            cfg.chain_id = "cross-shard-supply-invariant-test";
+            cfg.chain_role = ChainRole::SHARD;
+            cfg.shard_id = my_id;
+            cfg.initial_shard_count = kShards;
+            // Every shard registers a creator so blocks can be applied
+            // (apply credits fees to creators); only the source shard
+            // funds alice with a balance + stake.
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = fund_alice ? kAliceStake : 0;
+            cfg.initial_creators = {alice_c};
+            if (fund_alice) {
+                GenesisAllocation alice_bal;
+                alice_bal.domain = "alice"; alice_bal.balance = kAliceBal;
+                cfg.initial_balances = {alice_bal};
+            }
+            return cfg;
+        };
+
+        // Find a recipient address that routes to a shard != source so the
+        // TRANSFER is genuinely cross-shard, and capture its destination.
+        auto find_cross_shard_address = [&](ShardId src_id) {
+            for (int i = 0; i < 512; ++i) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "rcpt%03x", i);
+                std::string addr = buf;
+                auto routed = crypto::shard_id_for_address(addr, kShards, salt);
+                if (routed != src_id) return std::make_pair(addr, routed);
+            }
+            return std::make_pair(std::string{}, ShardId{0});
+        };
+
+        // Build the K-shard set. Shard 0 is the source (alice funded);
+        // shards 1..K-1 are unfunded peers in the aggregate. We materialize
+        // all K so the aggregate sum is genuinely over the whole set; the
+        // destination shard is whichever the recipient routes to.
+        const ShardId kSrcShard = 0;
+        auto [remote, kDstShard] = find_cross_shard_address(kSrcShard);
+        check(!remote.empty() && kDstShard != kSrcShard,
+              "setup: found a cross-shard recipient (routes off the source shard)");
+
+        std::vector<Chain> shards;
+        shards.reserve(kShards);
+        for (uint32_t s = 0; s < kShards; ++s) {
+            Chain c;
+            c.append(make_genesis_block(make_shard_cfg(ShardId{s},
+                                                       s == kSrcShard)));
+            c.set_shard_routing(kShards, salt, ShardId{s});
+            shards.push_back(std::move(c));
+        }
+        Chain& src = shards[kSrcShard];
+        Chain& dst = shards[kDstShard];
+
+        // K-shard aggregate accounting helper. The conservation quantity
+        // is, summed over all shards:
+        //   live_total_supply (= balances + staked)
+        //     + accumulated_outbound (value in flight off this shard)
+        //     + accumulated_slashed  (value burned by forfeiture)
+        //     - accumulated_inbound  (value credited from another shard;
+        //         it is already counted in this shard's live balances, so
+        //         to avoid double-counting against the genesis baseline we
+        //         net it back out)
+        //     - accumulated_subsidy  (newly minted; also already in live)
+        // This must always equal Σ genesis_total over the set, regardless
+        // of how many cross-shard transfers have flowed. It is the global
+        // form of the per-shard expected_total == live_total_supply law.
+        // int64_t (not __int128) for portability — MSVC has no __int128,
+        // and the magnitudes here are tiny (≤ a few thousand), so a signed
+        // 64-bit accumulator cannot overflow. Terms can net negative on a
+        // shard that has received more than it sent; the total is a non-
+        // negative value equal to the genesis baseline by construction.
+        auto aggregate_conserved = [&]() {
+            int64_t acc = 0;
+            for (auto& c : shards) {
+                acc += (int64_t)c.live_total_supply();
+                acc += (int64_t)c.accumulated_outbound();
+                acc += (int64_t)c.accumulated_slashed();
+                acc -= (int64_t)c.accumulated_inbound();
+                acc -= (int64_t)c.accumulated_subsidy();
+            }
+            return acc;
+        };
+        auto aggregate_genesis = [&]() {
+            int64_t g = 0;
+            for (auto& c : shards) g += (int64_t)c.genesis_total();
+            return g;
+        };
+
+        // === 1. Genesis: per-shard A1 + aggregate identity ===
+
+        for (uint32_t s = 0; s < kShards; ++s) {
+            check(shards[s].expected_total() == shards[s].live_total_supply(),
+                  "genesis: per-shard A1 holds (expected == live)");
+        }
+        check(src.genesis_total() == kAliceBal + kAliceStake,
+              "genesis: source-shard genesis_total == balance + stake");
+        const int64_t kGenesisAggregate = aggregate_genesis();
+        check(aggregate_conserved() == kGenesisAggregate,
+              "genesis: K-shard aggregate conservation == Σ genesis_total");
+
+        // === 2. Source shard: outbound TRANSFER debit ===
+
+        // alice → remote (cross-shard). On S: debit alice (amount + fee);
+        // fee accrues to creators on S; accumulated_outbound += amount;
+        // remote is NOT credited on S.
+        Hash src_block1_hash{};
+        {
+            uint64_t alice_before = src.balance("alice");
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = kAmount; tx.fee = kFee; tx.nonce = 0;
+
+            Block b;
+            b.index = 1; b.prev_hash = src.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            src.append(b);
+            src_block1_hash = src.head().compute_hash();
+
+            // alice debited amount + fee. (fee is redistributed to the
+            // single creator "alice" in the same block, so her NET change
+            // is the amount that left the shard, plus dust handling — we
+            // assert the strict accounting via accumulated_outbound below,
+            // and that her balance dropped by at least the amount.)
+            check(src.balance("alice") == alice_before - kAmount - kFee + kFee,
+                  "src: alice debited amount+fee (fee returns to sole creator)");
+            check(src.balance(remote) == 0,
+                  "src: remote NOT credited on the source shard (cross-shard)");
+            check(src.accumulated_outbound() == kAmount,
+                  "src: accumulated_outbound += amount (outbound receipt queued)");
+            check(src.expected_total() == src.live_total_supply(),
+                  "src: per-shard A1 still holds after outbound debit");
+        }
+
+        // The coin is now in flight: aggregate must STILL equal the
+        // genesis baseline (outbound-in-flight is counted on the source).
+        check(aggregate_conserved() == kGenesisAggregate,
+              "in-flight: aggregate conservation holds (coin debited, not yet credited)");
+
+        // === 3. Destination shard: inbound receipt credit ===
+
+        auto make_receipt = [&]() {
+            CrossShardReceipt r;
+            r.src_shard = kSrcShard; r.dst_shard = kDstShard;
+            r.src_block_index = 1;
+            r.src_block_hash = src_block1_hash;
+            r.tx_hash = Hash{}; r.tx_hash[0] = 0xAB; r.tx_hash[1] = 0xCD;
+            r.from = "alice"; r.to = remote;
+            r.amount = kAmount; r.fee = 0; r.nonce = 0;
+            return r;
+        };
+        {
+            CrossShardReceipt r = make_receipt();
+            Block b;
+            b.index = 1; b.prev_hash = dst.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(r);
+            dst.append(b);
+
+            check(dst.balance(remote) == kAmount,
+                  "dst: remote credited the cross-shard amount");
+            check(dst.accumulated_inbound() == kAmount,
+                  "dst: accumulated_inbound += amount");
+            check(dst.inbound_receipt_applied(r.src_shard, r.tx_hash),
+                  "dst: dedup set marks the applied inbound receipt");
+            check(dst.expected_total() == dst.live_total_supply(),
+                  "dst: per-shard A1 still holds after inbound credit");
+        }
+
+        // === 4. The invariant: closed cycle conserves K-shard supply ===
+
+        // Outbound on S exactly matched by inbound on D.
+        check(src.accumulated_outbound() == dst.accumulated_inbound(),
+              "cycle: src outbound debit == dst inbound credit (no value lost/created)");
+        // The K-shard aggregate identity still equals the genesis baseline:
+        // no supply created or destroyed anywhere in the set.
+        check(aggregate_conserved() == kGenesisAggregate,
+              "cycle: K-shard aggregate supply identity == Σ genesis_total (A1)");
+        // And the unsigned live sum across all shards is unchanged from
+        // genesis (closed cycle ⇒ net cross-shard flow is zero).
+        {
+            int64_t live_now = 0, live_gen = 0;
+            for (auto& c : shards) live_now += (int64_t)c.live_total_supply();
+            // genesis live == genesis_total on each shard (proved at #1).
+            live_gen = kGenesisAggregate;
+            check(live_now == live_gen,
+                  "cycle: Σ live_total_supply across shards unchanged (closed cycle, net flow = 0)");
+        }
+
+        // === 5. Determinism: serialize → restore → re-derive ===
+
+        // Snapshot the destination shard, restore it, and confirm the
+        // restored chain has a byte-identical state_root and identical
+        // supply totals. restore_from_snapshot back-solves genesis_total
+        // if absent; we verify it lands on the same expected/live values.
+        {
+            nlohmann::json snap = dst.serialize_state();
+            Chain restored = Chain::restore_from_snapshot(snap);
+            check(restored.compute_state_root() == dst.compute_state_root(),
+                  "determinism: restored dst state_root is byte-identical");
+            check(restored.live_total_supply() == dst.live_total_supply(),
+                  "determinism: restored dst live_total_supply identical");
+            check(restored.expected_total() == dst.expected_total(),
+                  "determinism: restored dst expected_total identical");
+            check(restored.accumulated_inbound() == dst.accumulated_inbound(),
+                  "determinism: restored dst accumulated_inbound identical");
+        }
+
+        // Replay the SAME cross-shard block sequence on a fresh K-shard set
+        // and confirm byte-identical resulting state_roots on src + dst.
+        {
+            std::vector<Chain> r;
+            r.reserve(kShards);
+            for (uint32_t s = 0; s < kShards; ++s) {
+                Chain c;
+                c.append(make_genesis_block(make_shard_cfg(ShardId{s},
+                                                           s == kSrcShard)));
+                c.set_shard_routing(kShards, salt, ShardId{s});
+                r.push_back(std::move(c));
+            }
+            // Source outbound.
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = remote;
+            tx.amount = kAmount; tx.fee = kFee; tx.nonce = 0;
+            Block sb;
+            sb.index = 1; sb.prev_hash = r[kSrcShard].head().compute_hash();
+            sb.creators = {"alice"};
+            sb.transactions.push_back(tx);
+            r[kSrcShard].append(sb);
+            // Destination inbound (receipt references the replayed src
+            // block hash, which must equal the original by determinism).
+            CrossShardReceipt rr = make_receipt();
+            rr.src_block_hash = r[kSrcShard].head().compute_hash();
+            Block db;
+            db.index = 1; db.prev_hash = r[kDstShard].head().compute_hash();
+            db.creators = {"alice"};
+            db.inbound_receipts.push_back(rr);
+            r[kDstShard].append(db);
+
+            check(r[kSrcShard].head().compute_hash() == src_block1_hash,
+                  "determinism: replayed source block hash matches original");
+            check(r[kSrcShard].compute_state_root() == src.compute_state_root(),
+                  "determinism: replayed source state_root matches original");
+            check(r[kDstShard].compute_state_root() == dst.compute_state_root(),
+                  "determinism: replayed destination state_root matches original");
+        }
+
+        // === 6. Bonus: duplicate inbound receipt is a no-op (FA-Apply-9) ===
+
+        // Re-applying the SAME (src_shard, tx_hash) receipt on D must NOT
+        // credit remote again and must NOT inflate accumulated_inbound or
+        // live supply. The dedup guard makes apply idempotent under replay.
+        {
+            uint64_t remote_before  = dst.balance(remote);
+            uint64_t inbound_before = dst.accumulated_inbound();
+            uint64_t live_before    = dst.live_total_supply();
+            int64_t agg_before      = aggregate_conserved();
+
+            CrossShardReceipt dup = make_receipt();  // identical key
+            Block b;
+            b.index = 2; b.prev_hash = dst.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(dup);
+            dst.append(b);
+
+            check(dst.balance(remote) == remote_before,
+                  "dedup: duplicate inbound receipt does NOT re-credit remote");
+            check(dst.accumulated_inbound() == inbound_before,
+                  "dedup: duplicate inbound does NOT tick accumulated_inbound");
+            check(dst.live_total_supply() == live_before,
+                  "dedup: duplicate inbound does NOT inflate live supply");
+            check(dst.expected_total() == dst.live_total_supply(),
+                  "dedup: per-shard A1 still holds after duplicate-receipt block");
+            check(aggregate_conserved() == agg_before,
+                  "dedup: K-shard aggregate supply identity unchanged (no double-credit)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": cross-shard-supply-invariant "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
