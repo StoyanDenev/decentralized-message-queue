@@ -13,8 +13,11 @@
 //      and cross-checks the daemon's cleartext (the load-bearing proof).
 //   5. For each sampled height h in {from, from+step, …, <=to}:
 //        a. Fetch header[h] via rpc_headers.
-//        b. Verify the prev_hash chain from the genesis anchor up to h
-//           (a single bounded page-walk, reusing verify_headers).
+//        b. Advance the incremental prev_hash chain walk to h. Because the
+//           sampled heights increase monotonically, the chain from genesis
+//           is verified ONCE across the whole range (each header fetched at
+//           most once for the chain check), reusing verify_headers — not
+//           re-walked from index 0 per sample.
 //        c. Verify header[h]'s committee sigs (reusing verify_block_sigs;
 //           MD mode with BFT fallback, matching verify_chain_to_head).
 //        d. Record (h, state_root_h). Balance/nonce are Merkle-verified
@@ -119,41 +122,78 @@ std::string verify_header_state_root_at(RpcClient& rpc,
     return h.value("state_root", std::string{});
 }
 
-// Verify the prev_hash chain from the genesis anchor up through block
-// index `target_idx` (inclusive). Reuses verify_headers page-by-page so
-// each sampled height is bound by an unbroken hash chain back to the
-// pinned genesis — not just an isolated committee-signed header. This is
-// what makes a forged "header at height h with a fabricated state_root"
-// detectable: it would have to chain to genesis AND carry K-of-K sigs.
-void verify_prev_hash_chain_to(RpcClient& rpc,
-                               const std::string& genesis_hash_hex,
-                               uint64_t target_idx) {
-    constexpr uint32_t PAGE = 256;
-    std::string prev_anchor;   // empty on the first page (uses genesis)
-    uint64_t want_total = target_idx + 1;   // indices [0, target_idx]
-    for (uint64_t cursor = 0; cursor < want_total; cursor += PAGE) {
-        uint32_t want = static_cast<uint32_t>(
-            std::min<uint64_t>(PAGE, want_total - cursor));
-        auto page = rpc.call("headers",
-            {{"from", cursor}, {"count", want}});
-        if (!page.contains("headers") || !page["headers"].is_array()
-            || page["headers"].empty()) {
-            throw std::runtime_error(
-                "account-history: empty header page at from="
-                + std::to_string(cursor)
-                + " while chaining to index " + std::to_string(target_idx));
+// Incrementally verifies the prev_hash chain from the pinned genesis,
+// advancing a monotonic frontier. account-history samples STRICTLY
+// INCREASING heights ({from, from+step, …}), so the chain from genesis is
+// walked exactly ONCE across the whole range — each header is fetched at
+// most once for the chain check — instead of re-walking [0, h] for every
+// sample (which was O(N·H) header fetches for N samples over a range up
+// to H). The last verified block_hash is carried as the prev-anchor
+// between advances, exactly as verify_chain_to_head threads it across
+// pages in trustless_read.cpp.
+//
+// Invariant preserved (identical to the prior per-sample re-walk): after
+// advance_to(h) returns, every block index in [0, h] has been bound to
+// the pinned genesis by an unbroken prev_hash chain — genesis-anchored on
+// the first page, prev_anchor-threaded on every page after. So a forged
+// "header at height h with a fabricated state_root" is still detectable:
+// it would have to chain to genesis AND (via the separate per-height
+// verify_header_state_root_at below) carry K-of-K committee sigs.
+class IncrementalChainWalker {
+public:
+    IncrementalChainWalker(RpcClient& rpc, std::string genesis_hash_hex)
+        : rpc_(rpc), genesis_hash_hex_(std::move(genesis_hash_hex)) {}
+
+    // Verify the prev_hash chain up through block index `target_idx`
+    // (inclusive). No-op when target_idx is already behind the frontier,
+    // so repeated / non-advancing calls are safe (account-history only
+    // ever advances, but the guard keeps the helper order-robust).
+    void advance_to(uint64_t target_idx) {
+        constexpr uint32_t PAGE = 256;
+        while (next_from_ <= target_idx) {
+            uint32_t want = static_cast<uint32_t>(
+                std::min<uint64_t>(PAGE, target_idx + 1 - next_from_));
+            auto page = rpc_.call("headers",
+                {{"from", next_from_}, {"count", want}});
+            if (!page.contains("headers") || !page["headers"].is_array()
+                || page["headers"].empty()) {
+                throw std::runtime_error(
+                    "account-history: empty header page at from="
+                    + std::to_string(next_from_)
+                    + " while chaining to index "
+                    + std::to_string(target_idx));
+            }
+            // First page (frontier still at 0) is genesis-anchored; every
+            // page after threads the prior page's last verified block_hash.
+            VerifyResult vh = (next_from_ == 0)
+                ? verify_headers(page, genesis_hash_hex_, "")
+                : verify_headers(page, "", prev_anchor_);
+            if (!vh.ok) {
+                throw std::runtime_error(
+                    "account-history: prev_hash chain verification failed at "
+                    "page from=" + std::to_string(next_from_) + ": "
+                    + vh.detail);
+            }
+            if (vh.count == 0) {
+                // Defensive: a verified-but-empty page would not advance
+                // the frontier and could spin the while-loop. Treat a
+                // daemon that returns zero verifiable headers as a fault.
+                throw std::runtime_error(
+                    "account-history: header page at from="
+                    + std::to_string(next_from_)
+                    + " verified zero headers");
+            }
+            prev_anchor_ = vh.block_hash_hex;
+            next_from_  += vh.count;   // frontier = lowest unverified index
         }
-        VerifyResult vh = (cursor == 0)
-            ? verify_headers(page, genesis_hash_hex, "")
-            : verify_headers(page, "", prev_anchor);
-        if (!vh.ok) {
-            throw std::runtime_error(
-                "account-history: prev_hash chain verification failed at "
-                "page from=" + std::to_string(cursor) + ": " + vh.detail);
-        }
-        prev_anchor = vh.block_hash_hex;
     }
-}
+
+private:
+    RpcClient&  rpc_;
+    std::string genesis_hash_hex_;
+    std::string prev_anchor_;     // empty until the first page is verified
+    uint64_t    next_from_{0};    // lowest index not yet verified (frontier)
+};
 
 } // namespace
 
@@ -222,13 +262,20 @@ int run_account_history(const AccountHistoryOptions& opts) {
 
         // 5. Walk the sampled heights. For each h: chain to genesis +
         //    committee-verify header[h] -> trustless state_root_h.
+        //    The prev_hash chain is verified by a SINGLE incremental pass
+        //    (IncrementalChainWalker): because sampled heights increase
+        //    monotonically, advancing the frontier from one sample to the
+        //    next fetches each header at most once for the chain check,
+        //    instead of re-walking [0, h] from genesis on every sample.
+        IncrementalChainWalker chain_walker(rpc, genesis_hash_hex);
         std::vector<HistoryRow> rows;
         for (uint64_t h = opts.from; h <= opts.to; h += opts.step) {
             HistoryRow row;
             row.height = h;
 
-            // Bind h to genesis via an unbroken prev_hash chain.
-            verify_prev_hash_chain_to(rpc, genesis_hash_hex, h);
+            // Bind h to genesis via an unbroken prev_hash chain, advancing
+            // the incremental frontier from the previous sample up to h.
+            chain_walker.advance_to(h);
 
             // Committee-verify the header at h -> its state_root.
             row.state_root_hex =
