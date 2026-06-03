@@ -37,7 +37,7 @@ The structural and tamper-detection behavior proved here is pinned by three regr
 - **`determ test-merkle-proof-tampering`** (`src/main.cpp:28555-28934`, 15 scenarios) — exhaustive proof-tamper detection across balanced + heavily-padded (5-leaf, 7-leaf, 16-leaf) trees, including the **key-binding** scenarios #14 (cross-key value swap rejected) and #15 (in-place key tamper rejected) and the **S-040 `leaf_count` caller-trust limitation** pinned by scenario #12. Driven by `tools/test_merkle_proof_tampering.sh`.
 - **`tools/test_verify_state_proof.sh`** (9 assertions) — the end-to-end light-client demonstrator: a 3-node cluster, `determ state-proof` fetch, `determ verify-state-proof` local verification, including the external-`--state-root` light-client mode (assertion 6) and the mismatched-root rejection (assertion 9).
 
-> **Note on test naming.** The task brief referenced an 8-assertion `determ test-merkle-tree-balanced` command and a `light/verify.cpp::verify_state_proof` source unit. Neither exists in this tree: the balanced/unbalanced structural assertions live inside `determ test-merkle` (assertions 4–5, 10) and `determ test-merkle-proof-tampering` (scenarios #12–#13), and the light-client verifier is the `determ verify-state-proof` CLI in `src/main.cpp` calling `crypto::merkle_verify` directly (there is no `light/` subtree). This document cites the surfaces that actually ship. A planned `LightClientThreatModel.md` (T-L3) is referenced below as a forward pointer, not a present cross-reference.
+> **Note on test naming.** The task brief referenced an 8-assertion `determ test-merkle-tree-balanced` command and a `light/verify.cpp::verify_state_proof` source unit. Neither exists in this tree: the balanced/unbalanced structural assertions live inside `determ test-merkle` (assertions 4–5, 10) and `determ test-merkle-proof-tampering` (scenarios #12–#13), and the light-client verifier is the `determ verify-state-proof` CLI in `src/main.cpp` calling `crypto::merkle_verify` directly (there is no `light/` subtree). This document cites the surfaces that actually ship. `LightClientThreatModel.md` (T-L3) — shipped (R39+1 A7) — is cross-referenced below as the end-to-end light-client composition that consumes MT-4 as its inclusion-proof-soundness core.
 
 ### 1.3 Out of scope
 
@@ -226,7 +226,7 @@ Therefore a passing verification with a non-member leaf yields a collision; cont
 
 **Light-client composition.** In `determ verify-state-proof` (`main.cpp:5537-5566`), the operator may supply `--state-root` (an independently-trusted root). The CLI verifies against *that* root, not the server-reported one (`main.cpp:5537`: `Hash verify_root = claimed_root;` overridden by the supplied root at 5546), and warns loudly on mismatch (5552-5562). MT-4 then says: a `true` result proves the entry is committed under the *trusted* root. The end-to-end demonstrator `tools/test_verify_state_proof.sh` pins both the positive case (assertion 6: matching external root verifies) and the attack case (assertion 9: a fabricated `--state-root` of all-`a` makes verification fail — a malicious node cannot fabricate a root to make its tampered proof self-consistent against a client that already trusts a different root). Tamper-rejection on `value_hash` and sibling hashes is pinned by assertions 7–8 and by `determ test-merkle-proof-tampering` scenarios #2–#3.
 
-> **Forward reference.** When the planned `LightClientThreatModel.md` lands, its T-L3 (inclusion-proof soundness against a malicious responding node) should cite MT-4 as its cryptographic core, and its anchor-trust precondition should cite §6.2 (S-040) as the operational obligation on where `state_root` *and* `leaf_count` are sourced.
+> **Cross-reference.** `LightClientThreatModel.md` (shipped, R39+1 A7) T-L3 (inclusion-proof soundness against a malicious responding node) cites MT-4 as its cryptographic core, and its anchor-trust precondition rests on §6.2 (S-040) as the operational obligation on where `state_root` *and* `leaf_count` are sourced.
 
 ### MT-5 (Non-membership: actual capability — positive only)
 
@@ -256,7 +256,7 @@ By **MT-3**, two *different* post-apply states (any divergence in any namespace 
 
 ### 5.4 MT-4 ⇒ trustworthy light-client state-proofs
 
-By **MT-4**, a light client holding a committee-signed `state_root` can verify any single state entry returned by an untrusted full node: a passing `merkle_verify` proves the entry is committed under that root (the committee-signed `Block.state_root` is bound into the block hash via `signing_bytes`, which is in turn bound by the K-of-K creator signatures — `PROTOCOL.md §4.1` + `BlockchainStateIntegrity.md` §2.3). The chain of trust is: committee signatures (A1) → `block_hash` → `state_root` (when non-zero) → [MT-4] → leaf membership. The `determ verify-state-proof` CLI is the shipped local-verifier; the planned `LightClientThreatModel.md` T-L3 will formalize the end-to-end light-client trust composition with MT-4 as its core.
+By **MT-4**, a light client holding a committee-signed `state_root` can verify any single state entry returned by an untrusted full node: a passing `merkle_verify` proves the entry is committed under that root (the committee-signed `Block.state_root` is bound into the block hash via `signing_bytes`, which is in turn bound by the K-of-K creator signatures — `PROTOCOL.md §4.1` + `BlockchainStateIntegrity.md` §2.3). The chain of trust is: committee signatures (A1) → `block_hash` → `state_root` (when non-zero) → [MT-4] → leaf membership. The `determ verify-state-proof` CLI is the shipped local-verifier; `LightClientThreatModel.md` (shipped, R39+1 A7) T-L3 formalizes the end-to-end light-client trust composition with MT-4 as its core.
 
 ### 5.5 Cross-reference to BlockchainStateIntegrity.md
 
@@ -362,7 +362,7 @@ For `n = 1`, `MR({(k,v)}) = LH(k, v)` with an empty proof (§2.5). A light clien
 - `docs/proofs/AccountStateInvariants.md` (FA-Apply-1) — apply determinism; supplies the same-multiset precondition MT-1 consumes (§5.2).
 - `docs/proofs/SnapshotEquivalence.md` (FA-Apply-2) — snapshot-pathway sibling; reuses MT-1 for round-trip soundness.
 - `docs/proofs/SelectiveAbort.md` (FA3) — cited only to disambiguate: FA3 is *selective-abort resistance*, NOT SHA-256 collision resistance; reductions in this document target A2, not FA3.
-- *(forward)* `LightClientThreatModel.md` (planned) — T-L3 should cite MT-4 as its inclusion-proof-soundness core.
+- `LightClientThreatModel.md` (shipped, R39+1 A7) — T-L3 cites MT-4 as its inclusion-proof-soundness core; `LightClientArchiveSoundness.md` (R39+3 C7) §5.2 composes MT-4 for the future offline archive→state-proof membership extension.
 
 ### Tests
 - `tools/test_merkle.sh` + `determ test-merkle` (10 assertions) — MT-1, MT-2, base cases.
