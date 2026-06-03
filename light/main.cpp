@@ -14,6 +14,7 @@
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
+//   verify-state-root        Report the committee-verified state_root at H
 //   fetch-headers            Fetch headers from the daemon's RPC
 //   fetch-state-proof        Fetch a state-proof from the daemon's RPC
 //   verify-chain             Composite: anchor + verify all to head
@@ -48,6 +49,7 @@
 #include "verify_archive.hpp"
 #include "account_history.hpp"
 #include "verify_tx_inclusion.hpp"
+#include "verify_state_root.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -110,6 +112,17 @@ void print_usage() {
         "      balance/next_nonce are Merkle-verified at the head (the\n"
         "      daemon's state_proof RPC serves the head only). --step\n"
         "      defaults to 1; --to must be <= the daemon's head index.\n"
+        "  verify-state-root --rpc-port <N> --genesis <file> --height <H> [--json]\n"
+        "      Report the committee-verified state_root at height H. Anchors\n"
+        "      genesis, chains header[H] back to block 0, verifies header[H]'s\n"
+        "      K-of-K (MD) / ceil(2K/3) (BFT) committee sigs, and prints the\n"
+        "      committee-attested state_root + committee size + sig count.\n"
+        "      Distinct from verify-state-proof (which checks a Merkle PROOF\n"
+        "      against a GIVEN root): this verifies the ROOT ITSELF is\n"
+        "      genuinely committee-signed at H. Genesis (H=0) is anchored by\n"
+        "      compute_genesis_hash (no committee sigs by construction). A\n"
+        "      header whose sigs don't verify fails closed (non-zero exit) —\n"
+        "      never a bare daemon-reported root.\n"
         "\n"
         "Sign + submit:\n"
         "  sign-tx --keyfile <path> --type {TRANSFER|STAKE|UNSTAKE}\n"
@@ -551,6 +564,90 @@ int cmd_account_history(int argc, char** argv) {
     }
 }
 
+// ──────────────────────── verify-state-root ────────────────────────────
+
+int cmd_verify_state_root(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path;
+    uint64_t height = 0;
+    bool have_port = false, have_height = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--height"  && i + 1 < argc) {
+            height = parse_u64("--height", argv[++i]); have_height = true;
+        } else if (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-state-root: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_height) {
+        std::cerr << "verify-state-root: --rpc-port, --genesis, --height "
+                     "are required\n";
+        return 1;
+    }
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-state-root: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        auto r = verify_state_root_at(rpc, committee_seed,
+                                      genesis_hash_hex, height);
+
+        if (json_out) {
+            json out = {
+                {"height",             r.height},
+                {"state_root",         r.state_root_hex},
+                {"committee_size",     r.committee_size},
+                {"sigs_verified",      r.sigs_verified},
+                {"committee_verified", r.committee_verified},
+            };
+            if (!r.detail.empty()) out["detail"] = r.detail;
+            std::cout << out.dump() << "\n";
+        } else if (r.ok) {
+            std::cout << "OK\n"
+                      << "  genesis pin:        matches (" << genesis_hash_hex << ")\n"
+                      << "  height:             " << r.height << "\n";
+            if (r.height == 0) {
+                // Genesis is anchored by hash — it has no committee sigs.
+                std::cout << "  anchor:             genesis hash "
+                             "(block 0 has no committee sigs)\n";
+            } else {
+                std::cout << "  committee sigs:     " << r.sigs_verified
+                          << " of " << r.committee_size << " verified\n";
+            }
+            std::cout << "  block_hash:         " << r.block_hash_hex << "\n";
+            if (r.state_root_present)
+                std::cout << "  state_root:         " << r.state_root_hex << "\n";
+            else
+                std::cout << "  state_root:         (not populated — "
+                             "pre-S-033 chain)\n";
+        } else {
+            // Verification failed (chain break, sig failure, out-of-range,
+            // malformed reply). Fail closed: print the diagnostic, exit
+            // non-zero, NEVER emit a bare daemon-reported root.
+            std::cerr << "verify-state-root: " << r.detail << "\n";
+            return 1;
+        }
+
+        // Exit code: ok → 0; not-ok (in --json mode the diagnostic is in
+        // the object, but the command still failed) → 1.
+        return r.ok ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-state-root: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────────── sign-tx ──────────────────────────────────
 
 int cmd_sign_tx(int argc, char** argv) {
@@ -939,6 +1036,7 @@ int main(int argc, char** argv) {
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
+        if (cmd == "verify-state-root")     return cmd_verify_state_root(sub_argc, sub_argv);
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
