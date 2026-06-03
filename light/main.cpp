@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (15 total + help / version):
+// Subcommands (16 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -19,6 +19,7 @@
 //   verify-chain             Composite: anchor + verify all to head
 //   balance-trustless        Composite: verify chain + state-proof balance
 //   nonce-trustless          Composite: verify chain + state-proof nonce
+//   account-history          Composite: verified balance/nonce over a range
 //   sign-tx                  Offline signed TRANSFER/STAKE/UNSTAKE
 //   submit-tx                Submit a pre-signed tx to the daemon
 //   verify-and-submit        Composite: trustless nonce + sign + submit
@@ -44,6 +45,7 @@
 #include "watch.hpp"
 #include "export.hpp"
 #include "verify_archive.hpp"
+#include "account_history.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -98,6 +100,14 @@ void print_usage() {
         "      Verified chain + state-proof + cross-check daemon's cleartext.\n"
         "  nonce-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
         "      Same as balance-trustless but extracts next_nonce.\n"
+        "  account-history --rpc-port <N> --genesis <file> --domain <D>\n"
+        "                  --from <H1> --to <H2> [--step <S>] [--json]\n"
+        "      Verified balance/nonce trajectory over a height range. For\n"
+        "      each sampled height the row's state_root is read from a\n"
+        "      committee-verified header chained back to the pinned genesis;\n"
+        "      balance/next_nonce are Merkle-verified at the head (the\n"
+        "      daemon's state_proof RPC serves the head only). --step\n"
+        "      defaults to 1; --to must be <= the daemon's head index.\n"
         "\n"
         "Sign + submit:\n"
         "  sign-tx --keyfile <path> --type {TRANSFER|STAKE|UNSTAKE}\n"
@@ -485,6 +495,46 @@ int cmd_account_trustless(int argc, char** argv,
     }
 }
 
+// ──────────────────────── account-history ──────────────────────────────
+
+int cmd_account_history(int argc, char** argv) {
+    AccountHistoryOptions opts;
+    bool have_port = false, have_from = false, have_to = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            opts.rpc_port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) {
+            opts.genesis_path = argv[++i];
+        } else if (a == "--domain"  && i + 1 < argc) {
+            opts.domain = argv[++i];
+        } else if (a == "--from"    && i + 1 < argc) {
+            opts.from = parse_u64("--from", argv[++i]); have_from = true;
+        } else if (a == "--to"      && i + 1 < argc) {
+            opts.to = parse_u64("--to", argv[++i]); have_to = true;
+        } else if (a == "--step"    && i + 1 < argc) {
+            opts.step = parse_u64("--step", argv[++i]);
+        } else if (a == "--json") {
+            opts.json_out = true;
+        } else {
+            std::cerr << "account-history: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || opts.genesis_path.empty() || opts.domain.empty()
+        || !have_from || !have_to) {
+        std::cerr << "account-history: --rpc-port, --genesis, --domain, "
+                     "--from, --to are required\n";
+        return 1;
+    }
+    try {
+        return run_account_history(opts);
+    } catch (const std::exception& e) {
+        std::cerr << "account-history: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────────── sign-tx ──────────────────────────────────
 
 int cmd_sign_tx(int argc, char** argv) {
@@ -774,6 +824,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-chain")          return cmd_verify_chain(sub_argc, sub_argv);
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
+        if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
         if (cmd == "submit-tx")             return cmd_submit_tx(sub_argc, sub_argv);
         if (cmd == "verify-and-submit")     return cmd_verify_and_submit(sub_argc, sub_argv);
