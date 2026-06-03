@@ -632,6 +632,13 @@ The `headers` + `state_proof` + `block` methods are designed to support trust-mi
   "suspension_slash":            10,
   "unstake_delay":               20,
 
+  // R7 merge-detection thresholds (k: namespace — see §4.1.1; emitted +
+  // restored by the S-041 closure so non-default-merge-threshold chains
+  // survive snapshot bootstrap without a state_root mismatch)
+  "merge_threshold_blocks":      100,
+  "revert_threshold_blocks":     200,
+  "merge_grace_blocks":          10,
+
   // Sharding posture
   "shard_count": 1,
   "shard_salt":  "<hex>",
@@ -670,6 +677,8 @@ The `headers` + `state_proof` + `block` methods are designed to support trust-mi
 ```
 
 > **S-037 closure (shipped).** `serialize_state` + `restore_from_snapshot` now persist and restore `dapp_registry_` with all fields that contribute to the `d:`-namespace value-hash (`service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`). Pre-v2.18 snapshots without the field load via the missing-field guard (`if (snap.contains("dapp_registry"))`). Regression test: `tools/test_dapp_snapshot.sh` exercises register-on-donor → snapshot → restore-on-receiver → verify `dapp-info` + `dapp-list` return the entry post-restore.
+
+> **S-041 closure (shipped).** The three R7 merge-detection thresholds (`merge_threshold_blocks`, `revert_threshold_blocks`, `merge_grace_blocks`) contribute `k:`-namespace `state_root` leaves (§4.1.1) but were previously omitted from `serialize_state` / `restore_from_snapshot` — an S-037-class gap invisible under the genesis defaults (100 / 200 / 10), because restore's fallback re-supplied the same values. A chain with **non-default** merge thresholds would recompute a divergent `state_root` on restore and fail the S-033 gate. Now emitted + restored (with genesis-default fallbacks for pre-fix snapshots). Regression: `test-snapshot-roundtrip` (case #10b) and `test-snapshot-full-determinism` both carry non-default thresholds (137 / 311 / 29) through the JSON round-trip and assert `state_root` identity.
 
 ### 11.1 `restore_from_snapshot` verification
 

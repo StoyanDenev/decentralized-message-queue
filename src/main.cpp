@@ -17561,6 +17561,35 @@ int main(int argc, char** argv) {
                   "restore: compute_state_root preserved (S-033/S-038 contract)");
         }
 
+        // 10b. R7 merge-detection thresholds round-trip — the S-037-class
+        //      regression guard. These three k:-namespace scalars
+        //      (merge_threshold_blocks / revert_threshold_blocks /
+        //      merge_grace_blocks) contribute state_root leaves via
+        //      build_state_leaves but were previously omitted from
+        //      serialize_state + restore_from_snapshot. With the genesis
+        //      DEFAULTS (100/200/10) the gap was invisible — restore's
+        //      fallback re-supplied the same defaults, so compute_state_root
+        //      matched trivially (cf. test #10, which uses populate() with
+        //      default thresholds). This case sets NON-default values, so a
+        //      regressed serialize/restore would drop them and recompute a
+        //      divergent state_root — exactly the S-033 gate failure the fix
+        //      prevents.
+        {
+            Chain c = populate();
+            c.set_merge_threshold_blocks(137);
+            c.set_revert_threshold_blocks(311);
+            c.set_merge_grace_blocks(29);
+            Hash root_before = c.compute_state_root();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.merge_threshold_blocks() == 137
+                  && r.revert_threshold_blocks() == 311
+                  && r.merge_grace_blocks() == 29,
+                  "restore: non-default merge thresholds (137/311/29) preserved");
+            check(root_before == r.compute_state_root(),
+                  "restore: state_root preserved with non-default merge thresholds (S-037-class)");
+        }
+
         // === Rejection + back-compat ===
 
         // 11. Wrong version rejected with clear diagnostic.
@@ -17741,6 +17770,20 @@ int main(int argc, char** argv) {
         // reused by every scenario below.
         auto build_full = [&]() {
             Chain base = base_chain();
+            // Carry NON-default R7 merge-detection thresholds through the
+            // full fixture so the k: namespace's merge-threshold scalars
+            // are exercised by the all-10-namespace round-trip. With the
+            // genesis defaults (100/200/10) a serialize/restore omission of
+            // these scalars is invisible (restore's fallback re-supplies
+            // the same defaults); non-default values make the S-037-class
+            // gap observable in both the byte-identical and state_root
+            // assertions below. Merge thresholds drive merge DETECTION only
+            // — they do not affect the m: merge_state splice or any other
+            // namespace's serialize/restore, so this is orthogonal to the
+            // spliced fixtures.
+            base.set_merge_threshold_blocks(137);
+            base.set_revert_threshold_blocks(311);
+            base.set_merge_grace_blocks(29);
             json snap = base.serialize_state(16);
 
             // d: dapp_registry — one entry owned by alice.

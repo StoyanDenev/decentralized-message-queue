@@ -1603,6 +1603,14 @@ json Chain::serialize_state(uint32_t header_count) const {
     // Snapshot fields preserve pre-A5 defaults when absent.
     snap["suspension_slash"] = suspension_slash_;
     snap["unstake_delay"]    = unstake_delay_;
+    // R7 merge-detection thresholds. These contribute state_root leaves
+    // via build_state_leaves (k: namespace) but were omitted here before
+    // — a non-default-merge-threshold chain would lose them on restore
+    // and recompute a divergent state_root, tripping the S-033 gate
+    // (S-037-class gap; closed mirroring the dapp_registry / S-037 fix).
+    snap["merge_threshold_blocks"]  = merge_threshold_blocks_;
+    snap["revert_threshold_blocks"] = revert_threshold_blocks_;
+    snap["merge_grace_blocks"]      = merge_grace_blocks_;
     snap["shard_count"]   = shard_count_;
     snap["shard_salt"]    = to_hex(shard_salt_);
     snap["shard_id"]      = my_shard_id_;
@@ -1717,6 +1725,13 @@ Chain Chain::restore_from_snapshot(const json& snap) {
     c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
     c.suspension_slash_ = snap.value("suspension_slash", uint64_t{10});
     c.unstake_delay_    = snap.value("unstake_delay",    uint64_t{1000});
+    // R7 merge-detection thresholds (S-037-class closure). Restore from
+    // the snapshot with a fallback to the GenesisConfig defaults
+    // (100 / 200 / 10) for backward-compat with pre-fix snapshots that
+    // lack these keys — matches the member initializers in chain.hpp.
+    c.merge_threshold_blocks_  = snap.value("merge_threshold_blocks",  uint32_t{100});
+    c.revert_threshold_blocks_ = snap.value("revert_threshold_blocks", uint32_t{200});
+    c.merge_grace_blocks_      = snap.value("merge_grace_blocks",      uint32_t{10});
     c.shard_count_   = snap.value("shard_count",   uint32_t{1});
     c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
     c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",
