@@ -337,9 +337,15 @@ The `determ-light` binary is a trust-minimized light-client wallet. Unlike `dete
 # Pure offline cryptographic re-check against the pinned genesis only.
 ./build/Release/determ-light verify-archive \
   --in headers_archive.json --genesis genesis.json
+
+# Step 7 (R40 D3): verified balance trajectory over an epoch.
+# Each sampled height's state_root is committee-verified; balance/nonce
+# are Merkle-verified at head (the state_proof RPC is head-only).
+./build/Release/determ-light account-history \
+  --rpc-port 7778 --genesis genesis.json --domain alice --from 100 --to 200 --step 10
 ```
 
-The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `verify-state-proof`, `fetch-headers`, `fetch-state-proof`, `verify-chain`, `balance-trustless`, `nonce-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `watch-head`, `export-headers`, `verify-archive`, `version`.
+The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `verify-state-proof`, `fetch-headers`, `fetch-state-proof`, `verify-chain`, `balance-trustless`, `nonce-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `watch-head`, `export-headers`, `verify-archive`, `account-history`, `version`.
 
 ## 13. Under-quorum merge (R4, EXTENDED mode only)
 
@@ -376,5 +382,5 @@ See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN
 - `README.md` §18.5 — wallet recovery (A2).
 - `README.md` §19 — formal verification (FA-track + FB-track).
 - `README.md` §17 — explicit non-goals (no smart contracts, no bridges, no oracles).
-- `tools/` — behavioral tests of every protocol feature (230 regression suites; `docs/README.md` has a representative table).
+- `tools/` — behavioral tests of every protocol feature (234 regression suites; `docs/README.md` has a representative table).
 - `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12 + FA-Apply-1..FA-Apply-16 + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest + S007OverflowProtection + S012SnapshotStateRootGate + S031ConcurrencyComposition + S036UnderQuorumMerge + S013PerSignerCap + S020CommitteeSelection + S008BoundedMempool + S027InfoLeakage + S026TcpKeepalive + F2ApplyComposition + S015AsyncSavePersistence + S024EpochBlocks + S009DelayHashRemoval + S025BFTEscalationSoundness + S005PassphraseKeyfile + UnitTestCoverageMap + S014RateLimiterDDOSResistance + S022WireFormatCapsCompleteness + S016InboundReceiptTimeOrdered + S019DAppEndpointSpoof + S023NodeKeyfileEncryption + F2RPCAuthEnvComposition analytic, plus FB1–FB42 TLA+ specs).
