@@ -350,9 +350,15 @@ The `determ-light` binary is a trust-minimized light-client wallet. Unlike `dete
 # gates on the committee-signed value (STRONG regime — no daemon trust).
 ./build/Release/determ-light verify-tx-inclusion \
   --rpc-port 7778 --genesis genesis.json --tx-hash <hex> --height <B>
+
+# Step 9 (R40 F3): anchor the committee-verified state_root at a height.
+# Reports the state_root committed at <H>, committee-signed (not daemon-
+# asserted), bound to the pinned genesis — feed it to verify-state-proof
+# --state-root to verify a state field against a trust-anchored root.
+determ-light verify-state-root --rpc-port 7778 --genesis genesis.json --height 150
 ```
 
-The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `verify-state-proof`, `fetch-headers`, `fetch-state-proof`, `verify-chain`, `balance-trustless`, `nonce-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `watch-head`, `export-headers`, `verify-archive`, `account-history`, `verify-tx-inclusion`, `version`.
+The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `verify-state-proof`, `fetch-headers`, `fetch-state-proof`, `verify-chain`, `balance-trustless`, `nonce-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `watch-head`, `export-headers`, `verify-archive`, `account-history`, `verify-tx-inclusion`, `verify-state-root`, `version`.
 
 ## 13. Under-quorum merge (R4, EXTENDED mode only)
 
@@ -389,5 +395,5 @@ See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN
 - `README.md` §18.5 — wallet recovery (A2).
 - `README.md` §19 — formal verification (FA-track + FB-track).
 - `README.md` §17 — explicit non-goals (no smart contracts, no bridges, no oracles).
-- `tools/` — behavioral tests of every protocol feature (238 regression suites; `docs/README.md` has a representative table).
+- `tools/` — behavioral tests of every protocol feature (242 regression suites; `docs/README.md` has a representative table).
 - `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12 + FA-Apply-1..FA-Apply-17 + FrostVerifyDelegation + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest + S007OverflowProtection + S012SnapshotStateRootGate + S031ConcurrencyComposition + S036UnderQuorumMerge + S013PerSignerCap + S020CommitteeSelection + S008BoundedMempool + S027InfoLeakage + S026TcpKeepalive + F2ApplyComposition + S015AsyncSavePersistence + S024EpochBlocks + S009DelayHashRemoval + S025BFTEscalationSoundness + S005PassphraseKeyfile + UnitTestCoverageMap + S014RateLimiterDDOSResistance + S022WireFormatCapsCompleteness + S016InboundReceiptTimeOrdered + S019DAppEndpointSpoof + S023NodeKeyfileEncryption + F2RPCAuthEnvComposition analytic, plus FB1–FB42 TLA+ specs).

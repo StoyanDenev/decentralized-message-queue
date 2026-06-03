@@ -274,7 +274,9 @@ The threshold `required = k` (MD) or `ceil(2k/3)` (BFT) means the adversary must
 
 ### 4.3 Theorem T-L3 (state-proof correctness)
 
-**Statement.** Under (A2) SHA-256 collision resistance + a committee-signed state_root anchor `R := r_signed_by_K_h`, an adversarial daemon `A_daemon` cannot present a forged state-proof for a value not actually committed under `R`.
+**Statement.** Under (A2) SHA-256 collision resistance + a committee-anchored state_root `R := state_root(h)`, an adversarial daemon `A_daemon` cannot present a forged state-proof for a value not actually committed under `R`.
+
+> **Precise binding of `R` to the committee (mechanism note).** "Committee-anchored" here is *transitive-forward*, not a direct signature: the committee directly Ed25519-signs `compute_block_digest` (which carries `index, prev_hash, tx_root, …` but **NOT** `state_root`); `state_root(h)` is bound into `Block::signing_bytes(h)` and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`. So `R = state_root(h)` is committee-certified via the *successor* block's signature — `state_root(h) ∈ signing_bytes(h) ∈ block_hash(h) = prev_hash(h+1) ∈ digest(h+1)`. This is the standalone sub-lemma `StateRootAnchorSoundness.md` (F6 R40) SR-1 proves; T-L4 below performs exactly this anchoring inline at `trustless_read.cpp:226-307`. **Head-block boundary:** the chain head's `state_root` has no signed successor yet, so it is committee-certified only once a successor block is produced; full nodes enforce the head's root meanwhile via the apply-layer S-033 gate (`StateRootAnchorSoundness.md` §3.4 + §6.3). T-L3 below proves the Merkle-path soundness *given* such an `R`; the committee-binding of `R` itself is T-L2 + SR-1.
 
 **Adversary game.**
 
