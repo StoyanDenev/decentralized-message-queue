@@ -10270,6 +10270,228 @@ int cmd_tx_batch_sign(int argc, char** argv) {
     return 0;
 }
 
+// ── batch-nonce-assign — sequential nonce assignment for the payroll /
+//    airdrop batch flow ──────────────────────────────────────────────────
+// Prep step BEFORE tx-batch-sign (which signs but does NOT assign nonces).
+// An operator with N transfers from one account needs each to carry a
+// distinct, sequential nonce. The compose chain is:
+//
+//   account nonce            → fetch the account's current on-chain nonce
+//   batch-nonce-assign --start <n>
+//                            → set record[i].nonce = n + i (THIS command)
+//   tx-batch-sign            → sign the nonce-assigned array
+//   verify-batch / validate-tx
+//                            → confirm sigs
+//
+// This is a PURE DATA TRANSFORM: no keys, no signing, no crypto. It reads
+// a JSON array of unsigned tx records, overwrites each element's `nonce`
+// field with start+i (in INPUT ORDER), and writes the array back. Every
+// other field on each record is passed through verbatim so the output is
+// drop-in for tx-batch-sign's input shape. Determinism: the only mutation
+// is the nonce field and nlohmann::json preserves insertion / key order
+// for object members, so same input + same --start → byte-identical out.
+int cmd_batch_nonce_assign(int argc, char** argv) {
+    std::string in_path, out_path;
+    std::string start_str;
+    bool have_start = false;
+    bool force = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"    && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--out"   && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--start" && i + 1 < argc) { start_str = argv[++i];
+                                                   have_start = true; }
+        else if (a == "--force")                 force    = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet batch-nonce-assign --in <json-array> "
+                "--start <N> --out <json-array>\n"
+                "                                        [--force]\n"
+                "\n"
+                "  Sequential nonce assignment — the prep step before\n"
+                "  tx-batch-sign in the payroll / airdrop batch flow.\n"
+                "  tx-batch-sign signs a batch but does NOT assign nonces;\n"
+                "  this command stamps each record with a distinct\n"
+                "  sequential nonce so the operator doesn't hand-edit N\n"
+                "  records.\n"
+                "\n"
+                "  Reads a JSON array of unsigned tx records. For each\n"
+                "  element i in 0..len-1, sets record[i].nonce = start + i\n"
+                "  (OVERWRITING any pre-existing nonce field), preserving\n"
+                "  input order and every other field verbatim. Writes the\n"
+                "  nonce-assigned array — drop-in for tx-batch-sign --in.\n"
+                "\n"
+                "  Compose:\n"
+                "    determ account nonce ...                 (fetch current)\n"
+                "    determ-wallet batch-nonce-assign --start <n> ...\n"
+                "    determ-wallet tx-batch-sign ...          (sign)\n"
+                "    determ-wallet validate-tx ...            (verify)\n"
+                "\n"
+                "  PURE DATA TRANSFORM: no keyfile, no signing, no crypto.\n"
+                "\n"
+                "  Validation: --in must be a top-level JSON array; --start\n"
+                "  must be a non-negative integer; each element must be a\n"
+                "  JSON object.\n"
+                "\n"
+                "  Empty input array → empty output array (exit 0).\n"
+                "\n"
+                "  Determinism: same input + same --start → byte-identical\n"
+                "  output (only the nonce field is mutated; key order is\n"
+                "  preserved).\n"
+                "\n"
+                "  --out refuses to overwrite without --force.\n"
+                "\n"
+                "  Exit: 0 array written, 1 args/IO/validation error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "batch-nonce-assign: unknown argument '" << a
+                      << "'\n";
+            std::cerr << "Usage: determ-wallet batch-nonce-assign --in "
+                         "<json-array> --start <N> --out <json-array> "
+                         "[--force]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty() || out_path.empty() || !have_start) {
+        std::cerr << "Usage: determ-wallet batch-nonce-assign --in "
+                     "<json-array> --start <N> --out <json-array> "
+                     "[--force]\n"
+                     "  (--in / --start / --out are all required)\n";
+        return 1;
+    }
+
+    // ── Parse --start as a non-negative integer ──────────────────────────
+    // Reject anything that isn't a clean run of decimal digits (leading
+    // sign, hex, floats, trailing junk all fail). This is stricter than
+    // std::stoull (which would silently accept "12abc" / "-1" → huge u64).
+    if (start_str.empty()) {
+        std::cerr << "batch-nonce-assign: --start must be a non-negative "
+                     "integer (got empty string)\n";
+        return 1;
+    }
+    for (char c : start_str) {
+        if (c < '0' || c > '9') {
+            std::cerr << "batch-nonce-assign: --start must be a non-negative "
+                         "integer (got '" << start_str
+                      << "'; only decimal digits allowed — no sign, "
+                         "hex, or decimal point)\n";
+            return 1;
+        }
+    }
+    uint64_t start = 0;
+    try {
+        start = std::stoull(start_str);
+    } catch (std::exception& e) {
+        std::cerr << "batch-nonce-assign: --start out of range for a 64-bit "
+                     "nonce: '" << start_str << "' (" << e.what() << ")\n";
+        return 1;
+    }
+
+    // ── Read + parse --in as a JSON array ────────────────────────────────
+    nlohmann::json in_j;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            std::cerr << "batch-nonce-assign: cannot open --in: " << in_path
+                      << "\n";
+            return 1;
+        }
+        try { f >> in_j; }
+        catch (std::exception& e) {
+            std::cerr << "batch-nonce-assign: --in is not valid JSON: "
+                      << e.what() << "\n";
+            return 1;
+        }
+    }
+    if (!in_j.is_array()) {
+        std::cerr << "batch-nonce-assign: --in must be a top-level JSON "
+                     "array (got "
+                  << (in_j.is_object() ? "object" : "non-array scalar")
+                  << ")\n";
+        return 1;
+    }
+
+    // ── --out preconditions ──────────────────────────────────────────────
+    {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "batch-nonce-assign: --out parent directory does "
+                         "not exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p) && !force) {
+            std::cerr << "batch-nonce-assign: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; pass --force to "
+                         "override)\n";
+            return 1;
+        }
+    }
+
+    // ── Overflow guard: start + (N-1) must fit in u64 ────────────────────
+    // A pathological --start near UINT64_MAX with a large array would wrap.
+    // Catch it up front with a clean diagnostic rather than emitting
+    // wrapped nonces.
+    const size_t N = in_j.size();
+    if (N > 0) {
+        const uint64_t last_index = static_cast<uint64_t>(N - 1);
+        if (start > UINT64_MAX - last_index) {
+            std::cerr << "batch-nonce-assign: --start (" << start
+                      << ") + array length (" << N
+                      << ") overflows a 64-bit nonce\n";
+            return 1;
+        }
+    }
+
+    // ── Assign sequential nonces in INPUT ORDER ──────────────────────────
+    // Each element must be an object. We mutate in place: record["nonce"]
+    // is set to start + idx, overwriting any pre-existing value. All other
+    // members are untouched, and nlohmann preserves their order.
+    nlohmann::json out_arr = nlohmann::json::array();
+    for (size_t idx = 0; idx < N; ++idx) {
+        nlohmann::json rec = in_j[idx];  // copy so we can mutate + move
+        if (!rec.is_object()) {
+            std::cerr << "batch-nonce-assign: input[" << idx
+                      << "] is not a JSON object\n";
+            return 1;
+        }
+        rec["nonce"] = start + static_cast<uint64_t>(idx);
+        out_arr.push_back(std::move(rec));
+    }
+
+    // ── Write --out ──────────────────────────────────────────────────────
+    // Compact dump (no whitespace) for byte-stable output across runs —
+    // matches the tx-batch-sign determinism contract so the two compose
+    // cleanly.
+    const std::string out_text = out_arr.dump();
+    {
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "batch-nonce-assign: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << out_text << "\n";
+        if (!of) {
+            std::cerr << "batch-nonce-assign: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+
+    nlohmann::json status = {
+        {"status", "ok"},
+        {"count",  N},
+        {"start",  start},
+        {"out",    out_path},
+    };
+    std::cout << status.dump() << "\n";
+    return 0;
+}
+
 // ── RPC socket helpers (used by cmd_validate_tx --rpc-port AND by
 //    cmd_anon_batch_balance / cmd_bulk_send below). Originally lived near
 //    cmd_anon_batch_balance (first consumer); promoted here so the
@@ -17629,6 +17851,30 @@ void print_usage() {
         "                                             written, 1 args/IO/validation error, 2\n"
         "                                             crypto failure (libsodium init / decrypt /\n"
         "                                             sign).\n"
+        "  batch-nonce-assign --in <json-array> --start <N> --out <json-array>\n"
+        "                     [--force]\n"
+        "                                             PREP step before tx-batch-sign in the payroll\n"
+        "                                             / airdrop batch flow. tx-batch-sign signs but\n"
+        "                                             does NOT assign nonces; this stamps each record\n"
+        "                                             with a distinct sequential nonce. Reads a JSON\n"
+        "                                             array of unsigned tx records and, for each\n"
+        "                                             element i, sets record[i].nonce = start + i\n"
+        "                                             (OVERWRITING any pre-existing nonce),\n"
+        "                                             preserving input order + every other field\n"
+        "                                             verbatim. Output is drop-in for tx-batch-sign\n"
+        "                                             --in. Compose: `account nonce` (fetch current)\n"
+        "                                             → batch-nonce-assign --start <n> → tx-batch-\n"
+        "                                             sign → validate-tx. PURE DATA TRANSFORM — no\n"
+        "                                             keyfile, no signing, no crypto. --start must be\n"
+        "                                             a non-negative integer; --in must be a JSON\n"
+        "                                             array; each element must be an object. Empty\n"
+        "                                             input array → empty output array (exit 0).\n"
+        "                                             Deterministic (only the nonce field is mutated;\n"
+        "                                             key order preserved) so same input + same\n"
+        "                                             --start → byte-identical output. Refuses to\n"
+        "                                             overwrite --out without --force. Status line on\n"
+        "                                             stdout: {status:ok, count:N, start, out}. Exit\n"
+        "                                             0 array written, 1 args/IO/validation error.\n"
         "  validate-tx --tx-json <file|->             OFFLINE validation of an already-signed tx\n"
         "              [--strict] [--rpc-port <N>] [--json]\n"
         "                                             envelope. Performs (a) JSON shape +\n"
@@ -18052,6 +18298,7 @@ int main(int argc, char** argv) {
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "tx-batch-sign")   return cmd_tx_batch_sign  (argc - 2, argv + 2);
+    if (cmd == "batch-nonce-assign") return cmd_batch_nonce_assign(argc - 2, argv + 2);
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "verify-batch")    return cmd_verify_batch   (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
