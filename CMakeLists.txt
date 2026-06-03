@@ -222,6 +222,7 @@ add_executable(determ-light
   light/watch.cpp
   light/export.cpp
   light/verify_archive.cpp
+  light/verify_state_root.cpp
   # Reused from src/ (explicit list — no glob):
   src/crypto/merkle.cpp
   src/crypto/keys.cpp
