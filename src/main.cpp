@@ -577,6 +577,14 @@ Additional in-process tests:
                                               — account/stake/registry state,
                                               A1 counters, state_root preserved
                                               (S-033/S-037/S-038 contract)
+  determ test-snapshot-full-determinism       comprehensive all-10-namespace
+                                              snapshot round-trip determinism
+                                              (a:/s:/r:/d:/i:/b:/m:/p:/k:/c:)
+                                              — byte-identical serialize→
+                                              restore→serialize, state_root
+                                              preserved, per-namespace field
+                                              survival, every namespace binds
+                                              the root (FA-Apply-2 at breadth)
   determ test-state-proof                     Chain::state_proof Merkle
                                               inclusion proof primitive (v2.2
                                               light-client) — proof+verify,
@@ -17610,6 +17618,419 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": snapshot-roundtrip " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // FA-Apply-2 SnapshotEquivalence at full breadth — comprehensive
+    // all-namespace snapshot round-trip determinism. The narrower
+    // siblings each pin ONE namespace's round-trip:
+    //   - test-snapshot-roundtrip       (a:/s:/r:/k:/c: + state_root)
+    //   - test-applied-receipt-restore  (i:)
+    //   - test-dapp-registry-determinism(d:)
+    //   - test-merge-state-determinism  (m:)
+    //   - test-snapshot-then-apply      (post-restore apply equivalence)
+    // This test populates EVERY state-root namespace non-trivially in a
+    // SINGLE chain, then asserts serialize_state → restore_from_snapshot
+    // → serialize_state is byte-identical AND compute_state_root() is
+    // preserved across the full namespace set at once. The all-at-once
+    // angle guards the S-037-class "namespace silently omitted from
+    // serialize_state / restore_from_snapshot" bug for every namespace
+    // simultaneously — a per-namespace test can pass while a
+    // cross-namespace ordering or aggregate-omission bug ships.
+    //
+    // The 10 state-root namespaces (PROTOCOL.md §4.1.1 + chain.cpp
+    // build_state_leaves):
+    //   a: accounts        s: stakes          r: registrants
+    //   d: dapp_registry   i: applied-inbound-receipts
+    //   b: abort_records   m: merge_state     p: pending_param_changes
+    //   k: constants       c: supply counters
+    //
+    // a:/s:/r:/k:/c: are populated via the real apply path (genesis +
+    // TRANSFER + STAKE). The five "Phase-2A-only" namespaces
+    // (d:/i:/b:/m:/p:) are populated by splicing canonical entries into
+    // the serialized JSON then restoring — the same technique
+    // test-merge-state-determinism uses, because driving all of them
+    // through their respective apply state-machines in one fixture is
+    // brittle and orthogonal to the round-trip-determinism contract
+    // under test here. The spliced chain IS a fully-valid restored
+    // Chain; its state_root and snapshot are exactly what an
+    // apply-built chain in the same state would emit.
+    if (cmd == "test-snapshot-full-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // ── Base fixture: genesis + apply blocks populate a:/s:/r:/k:/c:.
+        // alice + bob are REGISTER'd creators with balances; block 1 is a
+        // TRANSFER alice→bob (advances next_nonce + balances), block 2 is
+        // a STAKE by bob (adds a second stakes_ entry). Every block sets
+        // creators={"alice"} so fees route back and the A1 invariant holds
+        // (see test-chain-apply-block gotcha).
+        auto base_chain = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "snapshot-full-determinism-test";
+            GenesisCreator alice_c, bob_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            alice_c.region = "us-east";
+            bob_c.domain = "bob";
+            for (size_t i = 0; i < bob_c.ed_pub.size(); ++i)
+                bob_c.ed_pub[i] = uint8_t(0x20 + i);
+            bob_c.initial_stake = 500;
+            bob_c.region = "eu-west";
+            cfg.initial_creators = {alice_c, bob_c};
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal};
+
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            // Block 1: TRANSFER alice → bob (fee back to alice).
+            Transaction t1;
+            t1.type = TxType::TRANSFER;
+            t1.from = "alice"; t1.to = "bob";
+            t1.amount = 100; t1.fee = 1; t1.nonce = 0;
+            Block b1;
+            b1.index = 1;
+            b1.prev_hash = c.head().compute_hash();
+            b1.timestamp = 1;
+            b1.creators = {"alice"};
+            b1.transactions.push_back(t1);
+            c.append(b1);
+
+            // Block 2: STAKE by bob (adds a fresh stakes_ delta; A5
+            // suspension_slash etc. stay genesis-pinned).
+            Transaction t2;
+            t2.type = TxType::STAKE;
+            t2.from = "bob";
+            t2.amount = 50; t2.fee = 1; t2.nonce = 0;
+            Block b2;
+            b2.index = 2;
+            b2.prev_hash = c.head().compute_hash();
+            b2.timestamp = 2;
+            b2.creators = {"alice"};
+            b2.transactions.push_back(t2);
+            c.append(b2);
+            return c;
+        };
+
+        // ── Canonical splice payloads for the Phase-2A-only namespaces.
+        // Each mirrors exactly the field set serialize_state emits +
+        // restore_from_snapshot reads, so the restored chain reproduces
+        // the same d:/i:/b:/m:/p: leaves an apply-built chain would.
+        const std::string DAPP_SVC_HEX(64, 'a');     // 32-byte svc pubkey
+        const std::string RECEIPT_TX_HEX(64, 'b');   // 32-byte inbound tx hash
+        const ShardId      RECEIPT_SRC = ShardId{7};
+        // PARAM_CHANGE value is 8-byte LE (MIN_STAKE = 4096) — hex of the
+        // raw value bytes, matching serialize_state's to_hex(value).
+        const std::string  PARAM_VALUE_HEX = "0010000000000000";  // 4096 LE
+
+        // Splice all five Phase-2A namespaces into a base snapshot and
+        // restore. The result is the canonical all-10-namespace fixture
+        // reused by every scenario below.
+        auto build_full = [&]() {
+            Chain base = base_chain();
+            json snap = base.serialize_state(16);
+
+            // d: dapp_registry — one entry owned by alice.
+            json dapps = json::array();
+            json topics = json::array();
+            topics.push_back("chat");
+            topics.push_back("pay");
+            dapps.push_back({
+                {"domain",         "alice"},
+                {"service_pubkey", DAPP_SVC_HEX},
+                {"endpoint_url",   "https://alice.example"},
+                {"topics",         topics},
+                {"retention",      0},
+                {"metadata",       std::string("deadbeef")},  // 4 metadata bytes
+                {"registered_at",  1},
+                {"active_from",    2},
+                {"inactive_from",  UINT64_MAX},
+            });
+            snap["dapp_registry"] = dapps;
+
+            // i: applied_inbound_receipts — one credited cross-shard tx.
+            json receipts = json::array();
+            receipts.push_back({
+                {"src_shard", RECEIPT_SRC},
+                {"tx_hash",   RECEIPT_TX_HEX},
+            });
+            snap["applied_inbound_receipts"] = receipts;
+
+            // b: abort_records — one suspension accumulator (S-032 cache).
+            json aborts = json::array();
+            aborts.push_back({
+                {"domain",     "bob"},
+                {"count",      3},
+                {"last_block", 2},
+            });
+            snap["abort_records"] = aborts;
+
+            // m: merge_state — one refugee entry.
+            json merges = json::array();
+            merges.push_back({
+                {"shard_id",       ShardId{1}},
+                {"partner_id",     ShardId{2}},
+                {"refugee_region", "us-east"},
+            });
+            snap["merge_state"] = merges;
+
+            // p: pending_param_changes — one staged MIN_STAKE change.
+            json pendings = json::array();
+            json entries = json::array();
+            entries.push_back({
+                {"name",  "MIN_STAKE"},
+                {"value", PARAM_VALUE_HEX},
+            });
+            pendings.push_back({
+                {"effective_height", 1000},
+                {"entries",          entries},
+            });
+            snap["pending_param_changes"] = pendings;
+
+            return Chain::restore_from_snapshot(snap);
+        };
+
+        // ── 0. Sanity: every namespace is actually populated in the
+        //    fixture. If any of these is empty the determinism assertions
+        //    below would vacuously pass — this guards the test itself.
+        {
+            Chain c = build_full();
+            bool all_present =
+                  c.accounts().size() >= 2                 // a:
+               && !c.stakes().empty()                      // s:
+               && !c.registrants().empty()                 // r:
+               && !c.dapp_registry().empty()               // d:
+               && c.inbound_receipt_applied(                // i:
+                       RECEIPT_SRC, from_hex_arr<32>(RECEIPT_TX_HEX))
+               && !c.abort_records().empty()               // b:
+               && !c.merge_state().empty()                 // m:
+               && !c.pending_param_changes().empty();      // p:
+            // k: (constants) + c: (counters) are unconditionally present
+            // in build_state_leaves (fixed-key leaves regardless of
+            // value), confirmed here by a non-zero k: constant (min_stake,
+            // genesis default 1000) and a non-zero c: counter (genesis_total,
+            // set from the initial balances + stakes).
+            check(all_present
+                  && c.min_stake() != 0         // a k: constant is set
+                  && c.genesis_total() != 0,    // a c: counter is set
+                  "(0) fixture populates all 10 namespaces non-trivially "
+                  "(a:/s:/r:/d:/i:/b:/m:/p: have entries; k:/c: fixed-key "
+                  "leaves present with non-zero genesis values)");
+        }
+
+        // ── 1. Whole-snapshot byte-identical round-trip.
+        //    serialize_state(orig) == serialize_state(restore(that)).
+        //    This is the comprehensive SnapshotEquivalence pin: ALL
+        //    namespaces survive the round-trip together with identical
+        //    JSON bytes (nlohmann::json::operator== is a deep structural
+        //    compare). A namespace dropped on either serialize or restore
+        //    diverges here.
+        {
+            Chain c = build_full();
+            json snap1 = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap1);
+            json snap2 = r.serialize_state(16);
+            check(snap1 == snap2,
+                  "(1) whole-snapshot round-trip is byte-identical across "
+                  "all 10 namespaces (serialize → restore → serialize "
+                  "produces structurally-equal JSON — FA-Apply-2 "
+                  "SnapshotEquivalence at full breadth)");
+        }
+
+        // ── 2. compute_state_root preserved across the full round-trip.
+        //    The load-bearing S-033 determinism assertion over every
+        //    namespace at once: the restored chain commits to the exact
+        //    same Merkle root, so the post-restore validator accepts the
+        //    next block (S-038 closure scenario) for a chain touching
+        //    every namespace.
+        {
+            Chain c = build_full();
+            Hash root_before = c.compute_state_root();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.compute_state_root() == root_before,
+                  "(2) compute_state_root() preserved across full "
+                  "all-namespace round-trip (S-033 determinism over the "
+                  "complete 10-namespace leaf set)");
+        }
+
+        // ── 3. Per-namespace field-for-field survival. Spot-check the
+        //    load-bearing fields of a:/s:/r:/d:/m:/p: (+ i:/b: presence
+        //    and counts) so a round-trip that preserves the aggregate
+        //    root but corrupts an individual field is still caught.
+        {
+            Chain c = build_full();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+
+            // a: accounts — balance + next_nonce of both domains.
+            bool a_ok = r.balance("alice") == c.balance("alice")
+                     && r.balance("bob")   == c.balance("bob")
+                     && r.next_nonce("alice") == c.next_nonce("alice")
+                     && r.next_nonce("bob")   == c.next_nonce("bob");
+            // s: stakes — both staking domains' locked amount.
+            bool s_ok = r.stake("alice") == c.stake("alice")
+                     && r.stake("bob")   == c.stake("bob");
+            // r: registrants — ed_pub + region for alice.
+            auto cra = c.registrant("alice"); auto rra = r.registrant("alice");
+            bool r_ok = cra.has_value() && rra.has_value()
+                     && cra->ed_pub == rra->ed_pub
+                     && cra->region == rra->region;
+            // d: dapp_registry — service_pubkey + endpoint + topics.
+            bool d_ok = r.dapp_registry().count("alice") == 1
+                     && r.dapp_registry().at("alice").endpoint_url
+                            == "https://alice.example"
+                     && r.dapp_registry().at("alice").topics.size() == 2
+                     && r.dapp_registry().at("alice").topics
+                            == c.dapp_registry().at("alice").topics
+                     && r.dapp_registry().at("alice").service_pubkey
+                            == c.dapp_registry().at("alice").service_pubkey;
+            // i: applied_inbound_receipts — the credited (src, tx) pair.
+            bool i_ok = r.inbound_receipt_applied(
+                            RECEIPT_SRC, from_hex_arr<32>(RECEIPT_TX_HEX));
+            // b: abort_records — count + last_block for bob.
+            bool b_ok = r.abort_records().count("bob") == 1
+                     && r.abort_records().at("bob").count == 3
+                     && r.abort_records().at("bob").last_block == 2;
+            // m: merge_state — partner_id + refugee_region for shard 1.
+            bool m_ok = r.merge_state().count(ShardId{1}) == 1
+                     && r.merge_state().at(ShardId{1}).partner_id == ShardId{2}
+                     && r.merge_state().at(ShardId{1}).refugee_region
+                            == "us-east";
+            // p: pending_param_changes — staged MIN_STAKE at height 1000.
+            bool p_ok = r.pending_param_changes().count(1000) == 1
+                     && r.pending_param_changes().at(1000).size() == 1
+                     && r.pending_param_changes().at(1000)[0].first
+                            == "MIN_STAKE";
+
+            check(a_ok && s_ok && r_ok && d_ok && i_ok && b_ok
+                  && m_ok && p_ok,
+                  "(3) per-namespace field-for-field survival: a:(balance"
+                  "+nonce) s:(stake) r:(ed_pub+region) d:(svc_pubkey+url"
+                  "+topics) i:(receipt) b:(count+last_block) m:(partner"
+                  "+region) p:(MIN_STAKE@1000) all preserved");
+        }
+
+        // ── 4. Double round-trip is idempotent. restore→serialize→
+        //    restore→serialize yields the same JSON as the first
+        //    serialize. Proves the round-trip reaches a stable fixed
+        //    point for the full namespace set (no slow field drift that
+        //    only manifests on the second pass).
+        {
+            Chain c = build_full();
+            json snap1 = c.serialize_state(16);
+            Chain r1 = Chain::restore_from_snapshot(snap1);
+            json snap2 = r1.serialize_state(16);
+            Chain r2 = Chain::restore_from_snapshot(snap2);
+            json snap3 = r2.serialize_state(16);
+            check(snap1 == snap2 && snap2 == snap3
+                  && r1.compute_state_root() == r2.compute_state_root(),
+                  "(4) double round-trip idempotent: serialize bytes + "
+                  "state_root stable across two restore→serialize cycles "
+                  "(fixed point reached over all namespaces)");
+        }
+
+        // ── 5. Every namespace contributes to the root (S-037-class
+        //    guard, all-namespaces edition). For each namespace, perturb
+        //    exactly ONE field in the snapshot JSON, restore, and assert
+        //    compute_state_root() changes. If a namespace were silently
+        //    dropped from build_state_leaves the perturbation would be
+        //    invisible and the root would NOT change — this catches that
+        //    for all 8 mutable namespaces in one scenario, plus k:/c:.
+        {
+            Chain c = build_full();
+            Hash root_base = c.compute_state_root();
+            json base = c.serialize_state(16);
+
+            // Helper: apply a JSON mutation, restore, return new root.
+            auto root_with = [&](std::function<void(json&)> mutate) {
+                json s = base;          // deep copy
+                mutate(s);
+                return Chain::restore_from_snapshot(s).compute_state_root();
+            };
+
+            bool a_binds = root_with([](json& s){
+                s["accounts"][0]["balance"] =
+                    s["accounts"][0]["balance"].get<uint64_t>() + 1;
+            }) != root_base;
+            bool s_binds = root_with([](json& s){
+                s["stakes"][0]["locked"] =
+                    s["stakes"][0]["locked"].get<uint64_t>() + 1;
+            }) != root_base;
+            bool r_binds = root_with([](json& s){
+                s["registrants"][0]["region"] = "zz-flip";
+            }) != root_base;
+            bool d_binds = root_with([](json& s){
+                s["dapp_registry"][0]["endpoint_url"] = "https://flipped";
+            }) != root_base;
+            bool i_binds = root_with([](json& s){
+                s["applied_inbound_receipts"][0]["src_shard"] = ShardId{42};
+            }) != root_base;
+            bool b_binds = root_with([](json& s){
+                s["abort_records"][0]["count"] =
+                    s["abort_records"][0]["count"].get<uint64_t>() + 1;
+            }) != root_base;
+            bool m_binds = root_with([](json& s){
+                s["merge_state"][0]["partner_id"] = ShardId{99};
+            }) != root_base;
+            bool p_binds = root_with([](json& s){
+                s["pending_param_changes"][0]["entries"][0]["value"] =
+                    std::string("0020000000000000");  // 8192 LE
+            }) != root_base;
+            // k: constant (block_subsidy) and c: counter (genesis_total).
+            bool k_binds = root_with([](json& s){
+                s["block_subsidy"] = s["block_subsidy"].get<uint64_t>() + 1;
+            }) != root_base;
+            bool c_binds = root_with([](json& s){
+                s["genesis_total"] = s["genesis_total"].get<uint64_t>() + 1;
+            }) != root_base;
+
+            check(a_binds && s_binds && r_binds && d_binds && i_binds
+                  && b_binds && m_binds && p_binds && k_binds && c_binds,
+                  "(5) every namespace binds into state_root: perturbing "
+                  "one field of a:/s:/r:/d:/i:/b:/m:/p:/k:/c: each changes "
+                  "compute_state_root() (S-037-class omission guard across "
+                  "all 10 namespaces)");
+        }
+
+        // ── 6. A1 unitary-supply invariant holds identically pre/post
+        //    restore. The five c:-namespace counters round-trip such that
+        //    expected_total() == live_total_supply() on both the original
+        //    and the restored chain, and the two chains agree on the
+        //    invariant's value.
+        {
+            Chain c = build_full();
+            bool inv_before = c.expected_total() == c.live_total_supply();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            bool inv_after = r.expected_total() == r.live_total_supply();
+            check(inv_before && inv_after
+                  && r.expected_total()    == c.expected_total()
+                  && r.live_total_supply() == c.live_total_supply(),
+                  "(7) A1 unitary-supply invariant holds identically "
+                  "pre/post restore (expected==live on both chains; "
+                  "c:-namespace counters round-trip exactly)");
+        }
+
+        std::fputs("\n  ", stdout);
+        std::fputs(fail == 0 ? "PASS" : "FAIL", stdout);
+        std::fputs(": snapshot-full-determinism ", stdout);
+        std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
+        std::fputs("\n", stdout);
+        std::fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: Chain::state_proof — the v2.2 light-client
