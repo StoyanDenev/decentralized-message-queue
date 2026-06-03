@@ -601,6 +601,11 @@ Additional in-process tests:
                                               one block, activate at
                                               effective_height; chain field
                                               mutation + hook invocation
+  determ test-governance-param-determinism    FA-Apply-8 PARAM_CHANGE
+                                              determinism — insertion-order
+                                              resolution, validator-config
+                                              forwarding, snapshot-restore
+                                              idempotence, A1 supply invariance
   determ test-subsidy-distribution            Subsidy distribution apply —
                                               FLAT, E3 LOTTERY (jackpot seed),
                                               E4 finite pool drain, A1 mint
@@ -18869,6 +18874,289 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": param-change-apply " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // FA-Apply-8 (GovernanceParamChange.md, T-G1..T-G8): determinism of
+    // the A5 PARAM_CHANGE governance flow. test-param-change-apply pins
+    // the basic stage→activate path; this test pins the DETERMINISM
+    // properties that the proof series rely on:
+    //   T-G4 — intra-block insertion-order resolution: two PARAM_CHANGE
+    //          entries staged at the SAME effective_height, applied in
+    //          opposite orders on two chains, converge to identical
+    //          param state + identical state_root. (Apply iterates the
+    //          per-height bucket vector in push_back order; activation
+    //          re-assigns the named field per entry, so for distinct
+    //          names order is irrelevant and for the same name the
+    //          last writer wins — deterministically, given a fixed
+    //          block-application order.)
+    //   T-G6 — validator-config forwarding: a chain-storage param
+    //          (MIN_STAKE) updates BOTH the chain field AND the
+    //          Node-installed param_changed_hook (the validator-config
+    //          mirror), and a validator-only param (BFT_ESCALATION_
+    //          THRESHOLD) forwards via the hook with NO chain mutation.
+    //          This is the critical chain/validator sync: consensus
+    //          uses the new value next block.
+    //   T-G2 — off-whitelist name: silently activated as a chain no-op
+    //          (the validator enforces the whitelist at validate time;
+    //          at apply an unknown name means a future-version chain —
+    //          fail-soft). No chain-storage field changes.
+    //   T-G5+T-G7 — snapshot round-trip mid-staging
+    //          (serialize_state → restore_from_snapshot) preserves
+    //          pending entries across intervening blocks; activation
+    //          still fires correctly + idempotently post-restore.
+    //   T-G8 — A1 unitary-supply invariance: PARAM_CHANGE mutates
+    //          protocol params but NO balance/stake/receipt field —
+    //          live_total_supply() is unchanged across the whole flow.
+    //   state_root binding (bonus): the p: namespace contributes to
+    //          compute_state_root — toggling a pending entry changes
+    //          the root.
+    if (cmd == "test-governance-param-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "gov-param-determinism-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Encode u64 as 8-byte LE (the apply-side numeric param format
+        // parsed by activate_pending_params::parse_u64).
+        auto le8 = [](uint64_t v) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i) p[i] = uint8_t((v >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        // Append empty blocks until the chain reaches target height,
+        // triggering activate_pending_params() at each apply entry.
+        auto advance_to = [&](Chain& c, uint64_t target_h) {
+            while (c.height() < target_h + 1) {  // height = block count
+                Block b;
+                b.index = c.height();
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+        };
+
+        // === T-G4: intra-block insertion-order resolution ===
+
+        // 1. Two DISTINCT params staged at the SAME effective_height in
+        //    OPPOSITE orders on two chains converge to identical param
+        //    state + identical state_root after activation. (For
+        //    distinct names, apply order can't affect the final field
+        //    values — the proof's deterministic-resolution claim.)
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            // c1: MIN_STAKE then SUSPENSION_SLASH.
+            c1.stage_param_change(3, "MIN_STAKE",        le8(7777));
+            c1.stage_param_change(3, "SUSPENSION_SLASH", le8(42));
+            // c2: reversed insertion order at the same height.
+            c2.stage_param_change(3, "SUSPENSION_SLASH", le8(42));
+            c2.stage_param_change(3, "MIN_STAKE",        le8(7777));
+            advance_to(c1, 3);
+            advance_to(c2, 3);
+            check(c1.min_stake() == 7777 && c1.suspension_slash() == 42,
+                  "T-G4: c1 distinct params both activated");
+            check(c1.min_stake() == c2.min_stake()
+                  && c1.suspension_slash() == c2.suspension_slash(),
+                  "T-G4: opposite intra-height order → identical param state");
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "T-G4: insertion-order-independent → identical state_root");
+        }
+
+        // 2. Same NAME staged twice at the same height: last-in-bucket
+        //    wins, deterministically (apply iterates the vector in
+        //    push_back order; the second entry overwrites the first).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            c.stage_param_change(2, "MIN_STAKE", le8(1111));
+            c.stage_param_change(2, "MIN_STAKE", le8(2222));
+            advance_to(c, 2);
+            check(c.min_stake() == 2222,
+                  "T-G4: same name same height → last bucket entry wins");
+        }
+
+        // === T-G6: validator-config forwarding (chain/validator sync) ===
+
+        // 3. A chain-storage param (MIN_STAKE) updates BOTH the chain
+        //    field AND the forwarded validator config (captured via the
+        //    Node-installed hook — the validator-side mirror that lets
+        //    consensus use the new value next block).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            // Stand-in for the Node's validator-config mirror.
+            std::map<std::string, uint64_t> validator_cfg;
+            int hook_calls = 0;
+            c.set_param_changed_hook(
+                [&](const std::string& name,
+                    const std::vector<uint8_t>& value) {
+                    hook_calls++;
+                    if (value.size() == 8) {
+                        uint64_t v = 0;
+                        for (int i = 0; i < 8; ++i)
+                            v |= uint64_t(value[i]) << (8 * i);
+                        validator_cfg[name] = v;
+                    }
+                });
+            c.stage_param_change(2, "MIN_STAKE", le8(5555));
+            advance_to(c, 2);
+            check(c.min_stake() == 5555,
+                  "T-G6: chain-storage field updated (chain side)");
+            check(hook_calls == 1
+                  && validator_cfg.count("MIN_STAKE") == 1
+                  && validator_cfg["MIN_STAKE"] == 5555,
+                  "T-G6: same value forwarded to validator config (mirror)");
+            check(c.min_stake() == validator_cfg["MIN_STAKE"],
+                  "T-G6: chain field == forwarded validator value (sync)");
+        }
+
+        // 4. A validator-ONLY param (no chain-storage field) forwards
+        //    via the hook with NO chain mutation — the Node wires it to
+        //    a validator field (e.g. bft_escalation_threshold). Chain
+        //    storage stays at genesis defaults.
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            std::map<std::string, uint64_t> validator_cfg;
+            c.set_param_changed_hook(
+                [&](const std::string& name,
+                    const std::vector<uint8_t>& value) {
+                    if (value.size() == 8) {
+                        uint64_t v = 0;
+                        for (int i = 0; i < 8; ++i)
+                            v |= uint64_t(value[i]) << (8 * i);
+                        validator_cfg[name] = v;
+                    }
+                });
+            uint64_t ms_before = c.min_stake();
+            uint64_t ss_before = c.suspension_slash();
+            uint64_t ud_before = c.unstake_delay();
+            c.stage_param_change(1, "BFT_ESCALATION_THRESHOLD", le8(9));
+            advance_to(c, 1);
+            check(validator_cfg.count("BFT_ESCALATION_THRESHOLD") == 1
+                  && validator_cfg["BFT_ESCALATION_THRESHOLD"] == 9,
+                  "T-G6: validator-only param forwarded via hook");
+            check(c.min_stake() == ms_before
+                  && c.suspension_slash() == ss_before
+                  && c.unstake_delay() == ud_before,
+                  "T-G6: validator-only param → no chain-storage mutation");
+        }
+
+        // === T-G2: off-whitelist name → silent chain no-op ===
+
+        // 5. An unknown/off-whitelist param name activates as a no-op on
+        //    chain storage (all three chain-storage fields unchanged).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            uint64_t ms_before = c.min_stake();
+            uint64_t ss_before = c.suspension_slash();
+            uint64_t ud_before = c.unstake_delay();
+            auto root_before = c.compute_state_root();
+            c.stage_param_change(1, "NOT_A_REAL_PARAM", le8(123456));
+            advance_to(c, 1);
+            check(c.min_stake() == ms_before
+                  && c.suspension_slash() == ss_before
+                  && c.unstake_delay() == ud_before,
+                  "T-G2: off-whitelist name → no chain-storage change");
+            // The pending entry drained at activation, so the p:
+            // namespace returns to empty — root reverts to baseline.
+            check(c.compute_state_root() == root_before,
+                  "T-G2: off-whitelist drained → state_root back to baseline");
+        }
+
+        // === T-G5 + T-G7: snapshot round-trip mid-staging + idempotence ===
+
+        // 6. Stage at a FUTURE height, snapshot mid-staging (before the
+        //    activation height), restore, advance past intervening
+        //    blocks → activation still fires post-restore with the same
+        //    result an un-snapshotted replay would produce (idempotent).
+        {
+            // Reference chain: stage at height 4, advance straight to 4.
+            Chain ref; ref.append(make_genesis_block(cfg));
+            ref.stage_param_change(4, "MIN_STAKE", le8(4444));
+            advance_to(ref, 4);
+
+            // Snapshot chain: stage at height 4, advance to height 2
+            // (mid-staging — entry still pending), serialize, restore,
+            // then advance the RESTORED chain to height 4.
+            Chain snap_src; snap_src.append(make_genesis_block(cfg));
+            snap_src.stage_param_change(4, "MIN_STAKE", le8(4444));
+            advance_to(snap_src, 2);
+            check(snap_src.pending_param_changes().size() == 1,
+                  "T-G5: pending entry survives to mid-staging height");
+
+            json snap = snap_src.serialize_state();
+            Chain restored = Chain::restore_from_snapshot(snap);
+            check(restored.pending_param_changes().count(4) == 1,
+                  "T-G5: pending entry preserved across snapshot round-trip");
+            check(restored.min_stake() == 1000,
+                  "T-G5: restored chain pre-activation field still default");
+
+            advance_to(restored, 4);
+            check(restored.min_stake() == 4444,
+                  "T-G7: activation fires post-restore (idempotent)");
+            check(restored.min_stake() == ref.min_stake(),
+                  "T-G7: post-restore param state == un-snapshotted replay");
+        }
+
+        // === T-G8: A1 unitary-supply invariance ===
+
+        // 7. PARAM_CHANGE mutates protocol params but touches NO
+        //    balance/stake/receipt field — live_total_supply() is
+        //    invariant across staging, activation, and validator
+        //    forwarding.
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            uint64_t supply0 = c.live_total_supply();
+            c.set_param_changed_hook(
+                [&](const std::string&, const std::vector<uint8_t>&) {});
+            c.stage_param_change(2, "MIN_STAKE",        le8(8888));
+            c.stage_param_change(2, "SUSPENSION_SLASH", le8(77));
+            uint64_t supply_staged = c.live_total_supply();
+            advance_to(c, 2);
+            uint64_t supply_after = c.live_total_supply();
+            check(supply0 == supply_staged,
+                  "T-G8: staging leaves live_total_supply invariant");
+            check(supply0 == supply_after,
+                  "T-G8: activation leaves live_total_supply invariant");
+            // Genesis seeded 1000 balance + 500 stake for alice.
+            check(supply_after == 1500,
+                  "T-G8: supply == genesis total (1000 bal + 500 stake)");
+        }
+
+        // === state_root binding (bonus): p: namespace ===
+
+        // 8. The pending-param-changes p: namespace contributes to
+        //    compute_state_root — staging a pending entry changes the
+        //    root relative to an otherwise-identical chain with none.
+        {
+            Chain empty_c; empty_c.append(make_genesis_block(cfg));
+            Chain staged_c; staged_c.append(make_genesis_block(cfg));
+            auto root_empty = empty_c.compute_state_root();
+            check(empty_c.compute_state_root() == staged_c.compute_state_root(),
+                  "bonus: identical chains pre-staging share state_root");
+            staged_c.stage_param_change(99, "MIN_STAKE", le8(1234));
+            check(staged_c.compute_state_root() != root_empty,
+                  "bonus: staging a p: entry changes compute_state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": governance-param-determinism "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
