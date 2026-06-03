@@ -323,11 +323,11 @@ model from `docs/proofs/Preliminaries.md` §3.2:
   Layer C's `submit_tx` handler (S-002 sig-verify). An attacker without
   the from-account's private key cannot forge a signature over arbitrary
   `signing_bytes`.
-- **A3 (SHA-256 collision resistance, equivalently H1 in the proof's
+- **A2 (SHA-256 collision resistance, equivalently H1 in the proof's
   notation).** Underlies Layer E's HMAC-SHA-256 binding to the
   canonical `method ‖ "|" ‖ params.dump()` bytes. An attacker without
   the operator's `auth_secret_` cannot forge a valid HMAC value (see
-  RpcAuthHmacSoundness T-1, reduces to A3 + uniform-key sampling).
+  RpcAuthHmacSoundness T-1, reduces to A2 + uniform-key sampling).
 - **H1 (honest validators).** The K-of-K apply path's re-validation
   (T-5) assumes at least one validator in `V \ F` exists at every
   height. Under Determ's K-of-K mutual-distrust safety, T-5's bound
@@ -728,7 +728,7 @@ calls across the asio worker-thread pool. This is documented in
 
 Direct from `RpcAuthHmacSoundness.md` T-1: an adversary without
 `auth_secret_` produces a forgery with probability ≤ negligible under
-HMAC-SHA-256 PRF security (which reduces to A3 + uniform-key sampling
+HMAC-SHA-256 PRF security (which reduces to A2 + uniform-key sampling
 from Preliminaries §2.1 + §2.3).
 
 Layer E is a no-op when `auth_secret_.empty()` — the closure narrative

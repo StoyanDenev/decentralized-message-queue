@@ -34,7 +34,7 @@ The selector is the same deterministic function from F0 §6; only its input doma
 
 **Theorem T-8 (Per-shard safety under regional pinning).** For any shard `s ∈ S`, under:
 
-- **(A1) EUF-CMA** (F0 §2.2) + **(A3) SHA-256 CR** (F0 §2.1)
+- **(A1) EUF-CMA** (F0 §2.2) + **(A2) SHA-256 CR** (F0 §2.1)
 - **(H1) Honest behavior** restricted to `Pool_s`
 - **(R-safety)** `Pool_s \ F_s ≠ ∅` for every epoch (at least one honest validator in the region's pool)
 

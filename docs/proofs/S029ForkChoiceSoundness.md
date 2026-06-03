@@ -20,7 +20,7 @@ Define:
 
 Let `resolve_fork(A, B)` denote `Chain::resolve_fork(A, B)` — a binary function returning `const Block&` (a reference to either `A` or `B`).
 
-**Theorem T-1 (Deterministic Tiebreak).** For every pair of valid blocks `A, B` at the same height `h` against the same chain prefix, `resolve_fork(A, B)` returns the *same* block regardless of which node evaluates it, provided both nodes have observed both `A` and `B`. Formally: for any two honest node instances `n_1, n_2` with `A, B ∈ observed_blocks(n_1) ∩ observed_blocks(n_2)`, `resolve_fork^{n_1}(A, B) ≡ resolve_fork^{n_2}(A, B)` where ≡ denotes "is a reference to the same `Block` value (byte-equal)". The proof proceeds by exhaustive case analysis on the three-criterion comparator (heaviest-sigs > / = ; fewer-aborts > / = ; smallest-hash) and reduces the leaf cases to A1 Ed25519 EUF-CMA + A3 SHA-256 collision resistance.
+**Theorem T-1 (Deterministic Tiebreak).** For every pair of valid blocks `A, B` at the same height `h` against the same chain prefix, `resolve_fork(A, B)` returns the *same* block regardless of which node evaluates it, provided both nodes have observed both `A` and `B`. Formally: for any two honest node instances `n_1, n_2` with `A, B ∈ observed_blocks(n_1) ∩ observed_blocks(n_2)`, `resolve_fork^{n_1}(A, B) ≡ resolve_fork^{n_2}(A, B)` where ≡ denotes "is a reference to the same `Block` value (byte-equal)". The proof proceeds by exhaustive case analysis on the three-criterion comparator (heaviest-sigs > / = ; fewer-aborts > / = ; smallest-hash) and reduces the leaf cases to A1 Ed25519 EUF-CMA + A2 SHA-256 collision resistance.
 
 **Theorem T-2 (Pairwise-Reduction Confluence).** For every set of `N ≥ 2` competing blocks `{B_1, ..., B_N}` at the same height `h` against the same chain prefix, and every pair of reduction orderings `π_1, π_2` over `{1, ..., N}`, the iterated pairwise reduction:
 
@@ -133,7 +133,7 @@ return a; // identical
 
 `Hash` is `std::array<uint8_t, 32>` (per `types.hpp`). The compare is byte-wise from index 0 (most-significant for big-endian interpretation), short-circuiting on the first differing byte. This produces a strict total order on 32-byte hashes: ha < hb iff at the first differing index, ha[i] < hb[i].
 
-`Block::compute_hash` is a SHA-256 of `signing_bytes(B)` ∪ all committee sigs ∪ (S-033) state_root ∪ delay_output (per the WireFormatBackwardCompat.md backward-compat extension). Two blocks that differ in any of these fields have, with overwhelming probability (≥ 1 − 2⁻¹²⁸), distinct compute_hash values per A3 SHA-256 collision resistance. Two byte-identical blocks have identical compute_hash by SHA-256's deterministic function property.
+`Block::compute_hash` is a SHA-256 of `signing_bytes(B)` ∪ all committee sigs ∪ (S-033) state_root ∪ delay_output (per the WireFormatBackwardCompat.md backward-compat extension). Two blocks that differ in any of these fields have, with overwhelming probability (≥ 1 − 2⁻¹²⁸), distinct compute_hash values per A2 SHA-256 collision resistance. Two byte-identical blocks have identical compute_hash by SHA-256's deterministic function property.
 
 ### 3.4 Test harness — `src/main.cpp:11909–12062`
 
@@ -167,7 +167,7 @@ The comparator is invoked at the chain's receive-side block-admission paths. Per
 
 - `sig_count(blk)` reads `blk.creator_block_sigs` (a field of the `Block` argument) and compares each entry against a default-constructed `Signature` (a compile-time zero buffer). No per-node randomness, no clock reads, no chain-state lookups.
 - `a.abort_events.size()` and `b.abort_events.size()` are `Block`-field reads.
-- `a.compute_hash()` and `b.compute_hash()` are deterministic functions of the block's content; per SHA-256's deterministic property (A3 / FIPS 180-4), `compute_hash(B) == compute_hash(B')` iff the SHA-256 input — `signing_bytes(B)` ∪ committee sigs ∪ state_root ∪ delay_output etc. — is byte-identical. So the hash is a pure function of the `Block` value.
+- `a.compute_hash()` and `b.compute_hash()` are deterministic functions of the block's content; per SHA-256's deterministic property (A2 / FIPS 180-4), `compute_hash(B) == compute_hash(B')` iff the SHA-256 input — `signing_bytes(B)` ∪ committee sigs ∪ state_root ∪ delay_output etc. — is byte-identical. So the hash is a pure function of the `Block` value.
 
 All three criteria are pure-function reads of the `Block` arguments. The comparator's control flow is a deterministic dispatch on these reads:
 
@@ -178,7 +178,7 @@ All three criteria are pure-function reads of the `Block` arguments. The compara
 
 Each branch is a total order on the criterion (size_t < / > or byte-wise hash compare), so the dispatch resolves to a single branch per `(A, B)` pair. Two different node instances `n_1, n_2` evaluating `resolve_fork(A, B)` against byte-identical `A, B` values execute the same branch and return references to the same block.
 
-The byte-identical case (`compute_hash(a) == compute_hash(b)`) returns `a` by convention. Per A3 SHA-256 collision resistance, the case requires `signing_bytes(A) = signing_bytes(B)` ∪ identical sigs, which means `A` and `B` are byte-equal blocks. Returning `a` vs returning `b` makes no observable difference (the returned reference points to a block byte-equal to the other argument).
+The byte-identical case (`compute_hash(a) == compute_hash(b)`) returns `a` by convention. Per A2 SHA-256 collision resistance, the case requires `signing_bytes(A) = signing_bytes(B)` ∪ identical sigs, which means `A` and `B` are byte-equal blocks. Returning `a` vs returning `b` makes no observable difference (the returned reference points to a block byte-equal to the other argument).
 
 Hence `resolve_fork^{n_1}(A, B) ≡ resolve_fork^{n_2}(A, B)` over the byte-equal equivalence class. ∎
 
@@ -219,7 +219,7 @@ Hence the iterated fold over `S` yields byte-identical winners regardless of red
 
 ### 4.3 Proof of T-3 (Safety Composition with K-of-K)
 
-**Claim.** Under H1..H4 + A1 + A3, any two honest nodes `n_1, n_2` observing both `B` and `B'` at the same height converge on the same canonical tip.
+**Claim.** Under H1..H4 + A1 + A2, any two honest nodes `n_1, n_2` observing both `B` and `B'` at the same height converge on the same canonical tip.
 
 **Proof.** Case-split on consensus mode:
 
@@ -352,7 +352,7 @@ The post-reconnect tip-swap is observable to chain extensions: a node that was o
 
 - `creator_block_sigs[]` size ≠ `|K_h|`: V8 rejects the block (the sigs vector size is part of the validity predicate).
 - `abort_events[]` pathologically large: per S-022 message-size caps, the block's serialized form is capped at 4 MB; an over-large abort_events list pushes the block over the cap and the wire-level reject fires.
-- SHA-256 collision: by A3 collision resistance, no PPT attacker can find a collision with probability > 2⁻¹²⁸. The comparator's final `return a` in the byte-identical case is structurally safe (returning either argument is observationally equivalent to the caller).
+- SHA-256 collision: by A2 collision resistance, no PPT attacker can find a collision with probability > 2⁻¹²⁸. The comparator's final `return a` in the byte-identical case is structurally safe (returning either argument is observationally equivalent to the caller).
 
 Hence the comparator's preconditions are upstream-enforced. The function cannot be tricked into producing inconsistent outputs across nodes by constructing pathological inputs.
 
@@ -438,7 +438,7 @@ The current regression-test surface for `resolve_fork` is in-process only (singl
 
 ## 8. Status
 
-**Mitigated in-session.** `Chain::resolve_fork` at `src/chain/chain.cpp:1516–1537` implements the three-criterion lexicographic comparator (heaviest sigs → fewest aborts → smallest hash). The function is `static`, pure, and deterministic. T-1 (deterministic tiebreak), T-2 (pairwise confluence), T-3 (composition with K-of-K), T-4 (termination), and T-5 (compositional with BFT escalation) hold under H1..H4 + A1 + A3.
+**Mitigated in-session.** `Chain::resolve_fork` at `src/chain/chain.cpp:1516–1537` implements the three-criterion lexicographic comparator (heaviest sigs → fewest aborts → smallest hash). The function is `static`, pure, and deterministic. T-1 (deterministic tiebreak), T-2 (pairwise confluence), T-3 (composition with K-of-K), T-4 (termination), and T-5 (compositional with BFT escalation) hold under H1..H4 + A1 + A2.
 
 `docs/SECURITY.md` classifies S-029 as Mitigated (Medium → Mitigated). The regression-test surface is `tools/test_resolve_fork.sh` + `determ test-resolve-fork` (10 assertions, all PASS). Six identified gaps (F-1 hash-grinding economic feasibility, F-2 BFT-mode Q-vs-K boundary observation, F-3 identical-blocks return convention, F-4 different-height composition, F-5 endian convention, F-6 hash recompute on every call) are documented as either acknowledged-no-issue or future-optimization opportunities — none affect the comparator's safety or convergence guarantees.
 
@@ -457,7 +457,7 @@ The S-029 closure composes cleanly with FA1 (MD-mode K-of-K safety, where `resol
 - `src/main.cpp:11909–12062` — in-process `test-resolve-fork` unit harness (10 assertions).
 - `src/main.cpp:427–431` — `determ help` text describing the test subcommand.
 - `tools/test_resolve_fork.sh` — wrapper script for the unit harness.
-- `docs/proofs/Preliminaries.md` — F0 notation; H1..H4 honest-validator assumptions; A1 Ed25519 EUF-CMA; A3 SHA-256 collision resistance; V8 K-of-K validity predicate.
+- `docs/proofs/Preliminaries.md` — F0 notation; H1..H4 honest-validator assumptions; A1 Ed25519 EUF-CMA; A2 SHA-256 collision resistance; V8 K-of-K validity predicate.
 - `docs/proofs/Safety.md` — FA1 MD-mode unconditional safety theorem; §6 "no fork-choice rule" observation referring to MD mode only.
 - `docs/proofs/BFTSafety.md` — FA5 BFT-mode conditional safety; quorum-intersection lemmas; §4 slashing-recovery corollary citing the resolve_fork heaviest-sig-set rule.
 - `docs/proofs/Censorship.md` — FA2 censorship resistance; §3 fork-choice composition with union-tx-root.

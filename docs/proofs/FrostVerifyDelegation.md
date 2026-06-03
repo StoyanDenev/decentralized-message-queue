@@ -4,7 +4,7 @@ This document proves that Determ's `frost_verify` — the first FROST-Ed25519 pr
 
 The proof is mechanical: RFC 9591 §3 defines aggregation such that the canonical output `(R, z)` satisfies the standard Ed25519 verify equation, and §6.6 fixes the Ed25519 ciphersuite. The Determ implementation adapts array tags (`FrostSig`/`Point` are typedefs of the same bytewise shape as `Signature`/`PubKey`) and forwards the call. Soundness follows in two lemmas.
 
-**Companion documents:** `Preliminaries.md` (F0) for notation, assumption A2 (Ed25519 EUF-CMA in §2.2), and the validator predicate that the eventual v2.10 randomness path will inherit; `EquivocationSlashing.md` (FA6) for the citation conventions and the prior soundness-style proof against an Ed25519-backed property; `v2.10-DKG-SPEC.md` for the DKG ceremony that produces `group_pubkey` and the t-of-K share set; `F2-V210-IMPLEMENTATION-PLAN.md` Phase A for the work-order status (`frost_verify` shipped; keygen/sign/aggregate scaffolded).
+**Companion documents:** `Preliminaries.md` (F0) for notation, assumption A1 (Ed25519 EUF-CMA in §2.2), and the validator predicate that the eventual v2.10 randomness path will inherit; `EquivocationSlashing.md` (FA6) for the citation conventions and the prior soundness-style proof against an Ed25519-backed property; `v2.10-DKG-SPEC.md` for the DKG ceremony that produces `group_pubkey` and the t-of-K share set; `F2-V210-IMPLEMENTATION-PLAN.md` Phase A for the work-order status (`frost_verify` shipped; keygen/sign/aggregate scaffolded).
 
 ---
 
@@ -24,7 +24,7 @@ where `FrostSig = std::array<uint8_t, 64>` and `Point = std::array<uint8_t, 32>`
 
 **Theorem T-1 (Soundness of `frost_verify` via Ed25519 delegation).** Under:
 
-- **(A2) Ed25519 EUF-CMA** (Preliminaries §2.2): `Verify(pk, m, σ)` is the RFC 8032 Ed25519 verify predicate; no polynomial-time adversary forges signatures by an honest key with non-negligible probability.
+- **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2): `Verify(pk, m, σ)` is the RFC 8032 Ed25519 verify predicate; no polynomial-time adversary forges signatures by an honest key with non-negligible probability.
 - **(R3) RFC 9591 §3 aggregation** (this document §2.1): for any valid `(t, K)` FROST-Ed25519 partial-signature set `{s_i}` over `msg` under `group_pubkey`, the canonical aggregate `(R, z) := aggregate({s_i})` satisfies the standard Ed25519 verify equation `Verify(group_pubkey, msg, R ‖ z) = 1`.
 - **(C6) RFC 9591 §6.6 ciphersuite** (this document §2.2): the FROST-Ed25519 ciphersuite fixes the curve (Ed25519), the cofactor handling, the H1..H5 sub-hash domain separators, and the canonical signature encoding `R ‖ z` — all matching RFC 8032 Ed25519.
 
@@ -130,21 +130,21 @@ determ::crypto::verify(pub, data, len, sig) = 1
 
 *Proof.* Forward direction (⇐): suppose `sig = R ‖ z` was produced by a valid t-of-K FROST aggregation over `msg` under `group_pubkey`. By L-1, the RFC 8032 §5.1.7 verify equation holds for `(group_pubkey, msg, sig)`. By L-2, `determ::crypto::verify(group_pubkey, msg, msg.size(), sig) = 1`. Inspecting `src/crypto/frost.cpp:101–118` (this document §4): `frost_verify` adapts `FrostSig → Signature` and `Point → PubKey` via bytewise copy (both type pairs are 64-byte and 32-byte arrays respectively; the `static_assert`s on lines 108 and 113 pin this), then returns the wrapper call. So `frost_verify(sig, group_pubkey, msg) = determ::crypto::verify(pub, data, len, sig) = 1`. ✓
 
-Backward direction (⇒): suppose `frost_verify(sig, group_pubkey, msg) = 1`. By the same code-trace, this means `determ::crypto::verify(group_pubkey, msg, msg.size(), sig) = 1`. By L-2, the RFC 8032 §5.1.7 verify equation holds for `(group_pubkey, msg, sig)`. Under A2 (Ed25519 EUF-CMA), the only ways for the verify equation to hold are: (a) `sig` was produced by signing `msg` with the secret key matching `group_pubkey` (which in the threshold setting is the master secret, computable only by t-of-K cooperating committee members per the DKG output; see `v2.10-DKG-SPEC.md` §2.2 Q2 trustless dealer), or (b) the adversary forged the signature (probability `≤ 2⁻¹²⁸` per attempt by A2). In case (a), by RFC 9591 §3 Theorem 1's completeness direction (RFC 9591 §5.1, second half of the proof), `sig` must equal the canonical aggregate of some valid t-of-K partial-signature set. Case (b) is the negligible branch. ✓
+Backward direction (⇒): suppose `frost_verify(sig, group_pubkey, msg) = 1`. By the same code-trace, this means `determ::crypto::verify(group_pubkey, msg, msg.size(), sig) = 1`. By L-2, the RFC 8032 §5.1.7 verify equation holds for `(group_pubkey, msg, sig)`. Under A1 (Ed25519 EUF-CMA), the only ways for the verify equation to hold are: (a) `sig` was produced by signing `msg` with the secret key matching `group_pubkey` (which in the threshold setting is the master secret, computable only by t-of-K cooperating committee members per the DKG output; see `v2.10-DKG-SPEC.md` §2.2 Q2 trustless dealer), or (b) the adversary forged the signature (probability `≤ 2⁻¹²⁸` per attempt by A1). In case (a), by RFC 9591 §3 Theorem 1's completeness direction (RFC 9591 §5.1, second half of the proof), `sig` must equal the canonical aggregate of some valid t-of-K partial-signature set. Case (b) is the negligible branch. ✓
 
 Combining: `frost_verify(sig, group_pubkey, msg) = 1` iff `sig` was produced by a valid t-of-K FROST aggregation over `msg` under `group_pubkey`, except with probability `≤ 2⁻¹²⁸` per adversarial forgery attempt. ∎
 
 ### Corollary T-1.1 (tampered-sig)
 
-*Proof.* Let `sig'` differ from `sig` in any byte. If `frost_verify(sig', group_pubkey, msg) = 1`, then by the backward direction of T-1, `sig'` is the canonical aggregate of some valid partial-signature set over `msg` under `group_pubkey`. But the aggregate is bytewise-deterministic given the partial-signature set (RFC 9591 §5.1: `R` and `z` are explicit sums in fixed-precision arithmetic, mod `L` for `z`), so two distinct aggregates over the same `(msg, group_pubkey)` correspond to distinct partial-signature sets. Producing `sig' ≠ sig` that still verifies under `group_pubkey` therefore requires either (i) knowledge of t-of-K shares (defeated by the DKG's mutual-distrust property in `v2.10-DKG-SPEC.md` §2.2; not a property of `frost_verify` itself, but a property of the wider system), or (ii) an Ed25519 forgery against `group_pubkey`, probability `≤ 2⁻¹²⁸` by A2. ∎
+*Proof.* Let `sig'` differ from `sig` in any byte. If `frost_verify(sig', group_pubkey, msg) = 1`, then by the backward direction of T-1, `sig'` is the canonical aggregate of some valid partial-signature set over `msg` under `group_pubkey`. But the aggregate is bytewise-deterministic given the partial-signature set (RFC 9591 §5.1: `R` and `z` are explicit sums in fixed-precision arithmetic, mod `L` for `z`), so two distinct aggregates over the same `(msg, group_pubkey)` correspond to distinct partial-signature sets. Producing `sig' ≠ sig` that still verifies under `group_pubkey` therefore requires either (i) knowledge of t-of-K shares (defeated by the DKG's mutual-distrust property in `v2.10-DKG-SPEC.md` §2.2; not a property of `frost_verify` itself, but a property of the wider system), or (ii) an Ed25519 forgery against `group_pubkey`, probability `≤ 2⁻¹²⁸` by A1. ∎
 
 ### Corollary T-1.2 (wrong-key)
 
-*Proof.* Let `pk' ≠ group_pubkey`. If `frost_verify(sig, pk', msg) = 1`, then by L-2 the verify equation holds for `(pk', msg, sig)`. But by hypothesis `sig` was constructed against `group_pubkey`, not `pk'`, so the same signature verifying under two distinct keys would imply `pk' = group_pubkey` (the verify equation is a deterministic function of the public key — see RFC 8032 §5.1.7) or that the adversary produced a forgery against `pk'`. The first is contradicted by hypothesis; the second has probability `≤ 2⁻¹²⁸` by A2 against the `pk'` key's secret. ∎
+*Proof.* Let `pk' ≠ group_pubkey`. If `frost_verify(sig, pk', msg) = 1`, then by L-2 the verify equation holds for `(pk', msg, sig)`. But by hypothesis `sig` was constructed against `group_pubkey`, not `pk'`, so the same signature verifying under two distinct keys would imply `pk' = group_pubkey` (the verify equation is a deterministic function of the public key — see RFC 8032 §5.1.7) or that the adversary produced a forgery against `pk'`. The first is contradicted by hypothesis; the second has probability `≤ 2⁻¹²⁸` by A1 against the `pk'` key's secret. ∎
 
 ### Corollary T-1.3 (tampered-message)
 
-*Proof.* Let `msg' ≠ msg`. If `frost_verify(sig, group_pubkey, msg') = 1`, then by L-2 the verify equation holds for `(group_pubkey, msg', sig)`. But the verify equation embeds `msg'` in the challenge `c = H2(R ‖ group_pubkey ‖ msg') mod L`; under SHA-512's collision resistance (a consequence of Preliminaries §2.1 SHA-256-style assumptions applied to SHA-512 with `2⁻²⁵⁶` collision bound), `c(msg') ≠ c(msg)` with probability `≥ 1 - 2⁻²⁵⁶`. So the verify equation cannot hold for both `(msg, sig)` and `(msg', sig)` simultaneously except in the negligible collision case. Producing `sig` that verifies under `(msg', group_pubkey)` therefore requires either an Ed25519 forgery (`≤ 2⁻¹²⁸` per A2) or a SHA-512 collision (`≤ 2⁻²⁵⁶`). ∎
+*Proof.* Let `msg' ≠ msg`. If `frost_verify(sig, group_pubkey, msg') = 1`, then by L-2 the verify equation holds for `(group_pubkey, msg', sig)`. But the verify equation embeds `msg'` in the challenge `c = H2(R ‖ group_pubkey ‖ msg') mod L`; under SHA-512's collision resistance (a consequence of Preliminaries §2.1 SHA-256-style assumptions applied to SHA-512 with `2⁻²⁵⁶` collision bound), `c(msg') ≠ c(msg)` with probability `≥ 1 - 2⁻²⁵⁶`. So the verify equation cannot hold for both `(msg, sig)` and `(msg', sig)` simultaneously except in the negligible collision case. Producing `sig` that verifies under `(msg', group_pubkey)` therefore requires either an Ed25519 forgery (`≤ 2⁻¹²⁸` per A1) or a SHA-512 collision (`≤ 2⁻²⁵⁶`). ∎
 
 ---
 
@@ -186,8 +186,8 @@ The function body is purely a type adaptation (bytewise copy `FrostSig → Signa
 
 The proof handles three adversarial surfaces, each closed by an Ed25519 EUF-CMA reduction:
 
-- **Tampered signature** (T-1.1) — flipping any byte of `sig` corresponds to forging an Ed25519 signature against `group_pubkey`. Probability `≤ 2⁻¹²⁸` per attempt by A2.
-- **Wrong public key** (T-1.2) — substituting `pk' ≠ group_pubkey` corresponds to producing an Ed25519 signature that simultaneously verifies under two distinct keys; this requires forging against `pk'`. Probability `≤ 2⁻¹²⁸` per attempt by A2.
+- **Tampered signature** (T-1.1) — flipping any byte of `sig` corresponds to forging an Ed25519 signature against `group_pubkey`. Probability `≤ 2⁻¹²⁸` per attempt by A1.
+- **Wrong public key** (T-1.2) — substituting `pk' ≠ group_pubkey` corresponds to producing an Ed25519 signature that simultaneously verifies under two distinct keys; this requires forging against `pk'`. Probability `≤ 2⁻¹²⁸` per attempt by A1.
 - **Tampered message** (T-1.3) — substituting `msg' ≠ msg` invokes SHA-512 collision resistance on the challenge derivation `c = H2(R ‖ group_pubkey ‖ msg')`. Probability bounded by SHA-512 collision (`≤ 2⁻²⁵⁶`) or Ed25519 EUF-CMA forgery (`≤ 2⁻¹²⁸`).
 
 Each surface is exercised by `test-view-root` scenario 27 (the real round-trip test that ships with the implementation):
@@ -224,8 +224,8 @@ Downstream consumers of v2.10 (block-validation path under the future `randomnes
 |---|---|
 | RFC 9591 (May 2024) | §3 aggregation definition (this proof §2.1, L-1); §5.1 line-by-line aggregate equation; §6.6 Ed25519 ciphersuite (this proof §2.2) |
 | RFC 8032 | §5.1.7 cofactored Ed25519 verify equation (this proof §2.2, L-2); §5.1.7 low-order-point rejection (Preliminaries §2.2) |
-| Brendel-Cremers-Jackson-Zhao "The Provable Security of Ed25519" (USENIX 2021) | A2 EUF-CMA citation chain (Preliminaries §2.2) |
-| `docs/proofs/Preliminaries.md` | A2 Ed25519 EUF-CMA (§2.2); A1 SHA-256 / SHA-512 collision resistance (§2.1); citation conventions (§11) |
+| Brendel-Cremers-Jackson-Zhao "The Provable Security of Ed25519" (USENIX 2021) | A1 EUF-CMA citation chain (Preliminaries §2.2) |
+| `docs/proofs/Preliminaries.md` | A1 Ed25519 EUF-CMA (§2.2); A2 SHA-256 / SHA-512 collision resistance (§2.1); citation conventions (§11) |
 | `docs/proofs/v2.10-DKG-SPEC.md` | DKG ceremony producing `group_pubkey`; trustless-dealer assumption (§2.2 Q2); FROST-Ed25519 library choice (§2.5 Q5) |
 | `docs/proofs/F2-V210-IMPLEMENTATION-PLAN.md` | Phase A status (`frost_verify` shipped; rest scaffolded) |
 | `src/crypto/frost.cpp` | `frost_verify` implementation (§4) |

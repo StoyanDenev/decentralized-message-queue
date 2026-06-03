@@ -56,7 +56,7 @@ This proof formalizes the structural invariants that the S-008 closure establish
 - The memory bound `total_bytes(mempool_) ≤ MEMPOOL_MAX_TXS × max_message_bytes(MsgType::TRANSACTION) + O(index_overhead)`.
 - The compositional property with S-014 — together they bound the dual surfaces of ingress rate (S-014) and storage occupancy (S-008).
 
-Out of scope: the upstream sig-verify gate (S-002 proof — treated here as a precondition for admission), the apply-time nonce monotonicity invariant (FA-Apply-3 proof — covers the post-mempool surface), the cryptographic strength of the tx_hash (collision-resistance assumption A3 — see Preliminaries.md §2.1), the fee-market dynamics under sustained pressure (a separate economic-analysis question; this proof addresses only the admission-gate's correctness, not the equilibrium-price properties).
+Out of scope: the upstream sig-verify gate (S-002 proof — treated here as a precondition for admission), the apply-time nonce monotonicity invariant (FA-Apply-3 proof — covers the post-mempool surface), the cryptographic strength of the tx_hash (collision-resistance assumption A2 — see Preliminaries.md §2.1), the fee-market dynamics under sustained pressure (a separate economic-analysis question; this proof addresses only the admission-gate's correctness, not the equilibrium-price properties).
 
 ---
 

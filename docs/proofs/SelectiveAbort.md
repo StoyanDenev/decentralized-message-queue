@@ -26,9 +26,9 @@ Let `v_i ∈ K_h` be a **deciding member** — a possibly-Byzantine validator wh
 
 **Theorem T-3 (Selective-abort defense).** Under the assumptions:
 
-- **(A1) SHA-256 preimage resistance** (Preliminaries §2.1): an adversary's probability of recovering `x` from `H(x)` for uniform `x ∈ {0,1}²⁵⁶` is ≤ `2⁻²⁵⁶` (negligible).
+- **(A3) SHA-256 preimage resistance** (Preliminaries §2.1): an adversary's probability of recovering `x` from `H(x)` for uniform `x ∈ {0,1}²⁵⁶` is ≤ `2⁻²⁵⁶` (negligible).
 - **(A2) SHA-256 collision resistance** (Preliminaries §2.1): probability of `H(x) = H(y)` for `x ≠ y` is ≤ `2⁻¹²⁸`.
-- **(A3) ROM** (random oracle model on `H`) — for the clean version of the proof. The standard-model variant follows in §4.
+- **(A3-ROM)** ROM (random oracle model on `H`, the A3 SHA-256 idealization) — for the clean version of the proof. The standard-model variant follows in §4.
 - **(A4) CSPRNG uniformity** (Preliminaries §2.3): honest secrets `s_j` for `j ≠ i` are uniform on `{0,1}²⁵⁶`.
 
 Let `s_i^*` be `v_i`'s "selective" Phase-1 secret choice (an arbitrary function of public protocol state including the other commits). Let `s_i^{ref}` be a uniformly random reference choice independent of public state. Then for any polynomial-time-computable utility `U`:
@@ -55,7 +55,7 @@ The proof goes through three hybrids. Each transitions to the next by replacing 
 
 For honest member `v_j` and uniform `s_j`, the commitment `c_j = SHA256(s_j ‖ pk_j)` is computationally indistinguishable from `c_j^{rand} = SHA256(s_j^{rand} ‖ pk_j)` for any other uniform `s_j^{rand}`, with distinguishing advantage `≤ 2⁻²⁵⁶` per query in ROM.
 
-**Proof.** In ROM, `H = SHA256` is modeled as a random oracle. For uniform inputs `(s_j ‖ pk_j)` and `(s_j^{rand} ‖ pk_j)`, the oracle outputs are independently uniform on `{0,1}²⁵⁶`. The only way for a distinguisher to gain information is to query `H` on the secret directly — i.e., to compute the preimage from the commitment. By A1, this succeeds with probability `≤ 2⁻²⁵⁶` per query.
+**Proof.** In ROM, `H = SHA256` is modeled as a random oracle. For uniform inputs `(s_j ‖ pk_j)` and `(s_j^{rand} ‖ pk_j)`, the oracle outputs are independently uniform on `{0,1}²⁵⁶`. The only way for a distinguisher to gain information is to query `H` on the secret directly — i.e., to compute the preimage from the commitment. By A3, this succeeds with probability `≤ 2⁻²⁵⁶` per query.
 
 After `Q` distinguisher queries, the cumulative advantage is `≤ Q · 2⁻²⁵⁶`, which is `≤ 2⁻¹²⁸` for any `Q ≤ 2¹²⁸`.
 
@@ -142,12 +142,12 @@ which is negligible. Substituting `λ = 256` and accounting for polynomial query
 
 The proof above relies on ROM. The standard-model variant proves a similar (but quantitatively weaker) claim without assuming SHA-256 is a random oracle.
 
-**Setup change.** Replace ROM (A3) with:
-- **(A3')** SHA-256 is a one-way function with pseudorandom output: for uniform input `x`, the output `H(x)` is computationally indistinguishable from a fresh uniform `y ∈ {0,1}²⁵⁶` (PRF / PRG-like assumption).
+**Setup change.** Replace ROM (A3-ROM) with:
+- **(A3-PRG)** SHA-256 is a one-way function with pseudorandom output: for uniform input `x`, the output `H(x)` is computationally indistinguishable from a fresh uniform `y ∈ {0,1}²⁵⁶` (PRF / PRG-like assumption).
 
-**Theorem T-3' (Selective-abort, standard model).** Under (A1), (A2), (A3'), (A4): same conclusion, but distinguishing advantage `≤ 2⁻λ/2 = 2⁻¹²⁸` instead of `≤ 2⁻²⁵⁶` (the PRG-distinguishing bound is the bottleneck).
+**Theorem T-3' (Selective-abort, standard model).** Under (A3), (A2), (A3-PRG), (A4): same conclusion, but distinguishing advantage `≤ 2⁻λ/2 = 2⁻¹²⁸` instead of `≤ 2⁻²⁵⁶` (the PRG-distinguishing bound is the bottleneck).
 
-**Proof sketch.** Replace L-3.1's ROM argument with a PRG-distinguisher reduction: an adversary distinguishing `c_j` from a fresh uniform `c_j^{rand}` would yield a PRG distinguisher against SHA-256. By A3', this distinguisher's advantage is `≤ 2⁻¹²⁸`. Other hybrids carry through unchanged, with the bound replaced.
+**Proof sketch.** Replace L-3.1's ROM argument with a PRG-distinguisher reduction: an adversary distinguishing `c_j` from a fresh uniform `c_j^{rand}` would yield a PRG distinguisher against SHA-256. By A3-PRG, this distinguisher's advantage is `≤ 2⁻¹²⁸`. Other hybrids carry through unchanged, with the bound replaced.
 
 This gives a weaker but standard-model-clean version of T-3. The qualitative claim is identical.
 

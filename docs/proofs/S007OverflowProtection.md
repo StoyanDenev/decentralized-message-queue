@@ -65,7 +65,7 @@ The left-hand side is `Chain::live_total_supply()` at `chain.cpp:548–553`; the
 
 **A9 atomic-apply** (FA-Apply-1 I-1, sketched in `chain.cpp:646–670` + `1489–1501`): a `StateSnapshot __snapshot = create_state_snapshot()` is captured at apply entry; the entire apply body runs inside `try { ... } catch (...) { restore_state_snapshot(std::move(__snapshot)); throw; }`. Any throw anywhere in the apply body — including from `checked_add_u64`'s caller — leaves the chain byte-identical to apply-entry.
 
-**Cryptographic assumptions** (from `Preliminaries.md` §2): A1 Ed25519 EUF-CMA + A3 SHA-256 collision resistance. S-007 itself is arithmetic, not cryptographic; the dependency is indirect: cross-shard receipts (T-4) are signed under A1 + bound under A3, so an A_cross_shard_forger must break A1 or A3 before the runtime overflow surface even becomes reachable.
+**Cryptographic assumptions** (from `Preliminaries.md` §2): A1 Ed25519 EUF-CMA + A2 SHA-256 collision resistance. S-007 itself is arithmetic, not cryptographic; the dependency is indirect: cross-shard receipts (T-4) are signed under A1 + bound under A2, so an A_cross_shard_forger must break A1 or A2 before the runtime overflow surface even becomes reachable.
 
 ---
 

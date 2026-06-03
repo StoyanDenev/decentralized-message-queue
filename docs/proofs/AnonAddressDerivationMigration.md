@@ -134,7 +134,7 @@ inline std::string make_anon_address(uint8_t pubkey_form,
 
 | Criterion | Verdict |
 |---|---|
-| C1 §7.6.7 | **Satisfied.** `pubkey_form` is in the preimage; SHA-256 collision resistance (A3 in `Preliminaries.md §2.1`) makes cross-form aliasing infeasible (2⁻¹²⁸ per attempt). |
+| C1 §7.6.7 | **Satisfied.** `pubkey_form` is in the preimage; SHA-256 collision resistance (A2 in `Preliminaries.md §2.1`) makes cross-form aliasing infeasible (2⁻¹²⁸ per attempt). |
 | C2 recoverability | **BROKEN.** SHA-256 is one-way; the pubkey CANNOT be recovered from the address. |
 | C3 fixed-length | **Satisfied.** Always 66 chars — a Dilithium-3 1952-byte body still produces a 66-char address. |
 

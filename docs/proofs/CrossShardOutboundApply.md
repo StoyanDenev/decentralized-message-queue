@@ -263,7 +263,7 @@ The theorems above target the source-side apply branch in isolation. They do not
 
 | Reference | Role |
 |---|---|
-| `Preliminaries.md` (F0) | Validator predicate V12 (cross-shard receipt binding); A3 (SHA-256 collision resistance) underpins `shard_id_for_address` routing determinism; F-15 (transaction-apply rules). |
+| `Preliminaries.md` (F0) | Validator predicate V12 (cross-shard receipt binding); A2 (SHA-256 collision resistance) underpins `shard_id_for_address` routing determinism; F-15 (transaction-apply rules). |
 | `AccountStateInvariants.md` (FA-Apply) | I-5 debit-channel decomposition (cross-shard TRANSFER source is one of the named debit channels); I-6 A1 closure consuming `accumulated_outbound_`. |
 | `CrossShardReceipts.md` (FA7) | Upstream protocol-level atomicity theorems T-7 / T-7' / T-7.1; L-7.1 V12 receipt-tx binding; L-7.3 source-debit-precedes-emission (the present proof formalizes this mechanically); L-7.4 K-of-K source-block ratification. |
 | `CrossShardReceiptDedup.md` (FA-Apply-9) | Symmetric destination-side proof. T-R1 (fresh receipt credits), T-R2 (duplicate silent skip), T-R5 (A1 invariance under dedup) — composed with T-O6 for cross-shard A1 atomicity in §3. |

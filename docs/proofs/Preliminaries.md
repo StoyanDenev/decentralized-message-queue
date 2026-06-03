@@ -50,6 +50,25 @@ The chain is parameterized by `inclusion_model ∈ {STAKE, DOMAIN}`. STAKE-mode 
 
 Theorems below are proved under the following standard concrete-security assumptions. All bounds are concrete-security (concrete probability of adversarial success per CPU step), not asymptotic.
 
+### 2.0 Canonical assumption labels
+
+The proof series references the base cryptographic assumptions defined in this section by the following **canonical labels**. Every proof document MUST use these labels consistently; cross-document references resolve through this table.
+
+| Label | Assumption | Defined in |
+|-------|-----------|-----------|
+| **A1** | Ed25519 EUF-CMA | §2.2 |
+| **A2** | SHA-256 collision resistance | §2.1 |
+| **A3** | SHA-256 preimage / second-preimage resistance | §2.1 |
+| **A4** | CSPRNG uniform secret sampling (`RAND_bytes`) | §2.3 |
+
+**Derived / out-of-band labels (NOT base primitives of this section, retained where already in use):**
+- **A6** — HMAC-SHA-256 PRF assumption. Used only by the RPC-auth + keyfile-at-rest proofs (`S001RpcAuthSoundness.md`, `S004KeyfileAtRest.md`, `S023NodeKeyfileEncryption.md`). HMAC's PRF security reduces to SHA-256's compression-function properties but is cited separately as `A6` for clarity; it is not renumbered.
+
+**Distinct namespaces that re-use the letter "A" and must NOT be confused with the assumption labels above:**
+- The **"A1 unitary-supply invariant"** in the apply-layer proofs (`AccountStateInvariants.md` / the `FA-Apply-*` series) is an *accounting invariant* (`live_total_supply + accumulated_slashed = expected_total`), unrelated to assumption A1 (Ed25519 EUF-CMA).
+- **`FA1`–`FA12`** and **`FA-Apply-*`** are *per-property theorem* indices (see `README.md`), not primitive-assumption labels.
+- **`A9`** in some docs denotes an apply-phase; **adversary models** are written `A_outside` / `A_offline` / `A_msg` / `A_flood` / etc. (subscripted), never as bare `A<digit>`.
+
 ### 2.1 SHA-256
 
 **Collision resistance.** No polynomial-time adversary can find `x, y` with `x ≠ y` and `H(x) = H(y)` with probability non-negligibly better than `2⁻¹²⁸` (birthday bound on a 256-bit output). Citation: NIST FIPS 180-4; see Bellare & Rogaway "Introduction to Modern Cryptography" §5.3 for a textbook treatment.
