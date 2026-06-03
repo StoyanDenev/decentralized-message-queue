@@ -618,6 +618,9 @@ Additional in-process tests:
   determ test-dapp-state-transition           DApp registry lifecycle —
                                               register (op=0) → update → deactivate
                                               (op=1 deferred via grace window)
+  determ test-dapp-registry-determinism       DApp registry d:-namespace
+                                              serialize/restore round-trip +
+                                              state_root binding (guards S-037/S-038)
   determ test-overflow-paths                  S-007 overflow protection —
                                               TRANSFER + inbound receipt
                                               overflow → throw + Phase-1
@@ -19909,6 +19912,374 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": dapp-state-transition " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-037 / S-038 guard: DApp registry (`d:` state-root namespace)
+    // serialize/restore round-trip + state_root binding. S-037 fixed a
+    // latent bug where dapp_registry_ contributed to compute_state_root()
+    // via the `d:` namespace (build_state_leaves, chain.cpp) but was
+    // absent from Chain::serialize_state / restore_from_snapshot — so a
+    // DApp-active chain failed the S-033 state_root gate on snapshot
+    // restore. S-038 closed the paired producer-side gap (body.state_root
+    // population). tools/test_dapp_snapshot.sh covers the integration
+    // (cluster) surface; THIS test pins the focused in-process unit
+    // contract: the d:-namespace serialize/restore round-trip is byte-
+    // stable, deterministically ordered, and the state_root genuinely
+    // incorporates every DAppEntry field that build_state_leaves hashes.
+    //
+    // 12 assertions across 6 scenarios.
+    if (cmd == "test-dapp-registry-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        // fputs (not std::cout) to bypass MSVC Release stdout-buffering
+        // under bash subshell capture — same workaround other in-process
+        // tests use.
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        // Shared genesis: alice + bob are REGISTER'd creators (a DApp's
+        // owning domain must already be a registrant_); both get a
+        // balance to pay DAPP_REGISTER fees.
+        auto make_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "dapp-registry-determinism-test";
+            GenesisCreator alice_c, bob_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 500;
+            bob_c.domain = "bob";
+            for (size_t i = 0; i < bob_c.ed_pub.size(); ++i)
+                bob_c.ed_pub[i] = uint8_t(0x20 + i);
+            bob_c.initial_stake = 500;
+            cfg.initial_creators = {alice_c, bob_c};
+            GenesisAllocation alice_bal, bob_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+            cfg.initial_balances = {alice_bal, bob_bal};
+            return cfg;
+        };
+
+        // Pack a DAPP_REGISTER op=0 (create/update) payload — byte layout
+        // mirrors the apply-path decoder in chain.cpp (TxType::DAPP_REGISTER).
+        auto pack_register = [](const PubKey& svc_pk,
+                                  const std::string& url,
+                                  const std::vector<std::string>& topics,
+                                  uint8_t retention,
+                                  const std::vector<uint8_t>& metadata) {
+            std::vector<uint8_t> p;
+            p.push_back(0);  // op = create/update
+            p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+            p.push_back(uint8_t(url.size()));
+            p.insert(p.end(), url.begin(), url.end());
+            p.push_back(uint8_t(topics.size()));
+            for (auto& t : topics) {
+                p.push_back(uint8_t(t.size()));
+                p.insert(p.end(), t.begin(), t.end());
+            }
+            p.push_back(retention);
+            uint16_t mlen = uint16_t(metadata.size());
+            p.push_back(uint8_t(mlen & 0xff));
+            p.push_back(uint8_t((mlen >> 8) & 0xff));
+            p.insert(p.end(), metadata.begin(), metadata.end());
+            return p;
+        };
+
+        // Append a one-tx block at the next chain height (alice produces).
+        auto apply_block = [](Chain& c, const Transaction& tx) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // Build a DAPP_REGISTER tx for `from` with the given fields.
+        auto register_tx = [&](const std::string& from, uint64_t nonce,
+                                 const PubKey& svc, const std::string& url,
+                                 const std::vector<std::string>& topics,
+                                 uint8_t retention,
+                                 const std::vector<uint8_t>& metadata) {
+            Transaction tx;
+            tx.type    = TxType::DAPP_REGISTER;
+            tx.from    = from;
+            tx.fee     = 1;
+            tx.nonce   = nonce;
+            tx.payload = pack_register(svc, url, topics, retention, metadata);
+            return tx;
+        };
+
+        // Patterned 32-byte service pubkey from a single seed byte.
+        auto svc_key = [](uint8_t seed) {
+            PubKey k{};
+            for (size_t i = 0; i < k.size(); ++i) k[i] = uint8_t(seed + i);
+            return k;
+        };
+
+        // Extract the `dapp_registry` array from a serialize_state JSON
+        // (dumped to a canonical string) for byte-identity comparison.
+        auto dapp_json_str = [](const nlohmann::json& snap) {
+            return snap.contains("dapp_registry")
+                       ? snap.at("dapp_registry").dump()
+                       : std::string{"<absent>"};
+        };
+
+        // === Scenario 1: serialize → restore → serialize round-trip is
+        // byte-identical for the d:-namespace JSON. ===
+        //
+        // Register two DApps (alice + bob) via the apply path, snapshot,
+        // restore from that snapshot, re-snapshot, and assert the
+        // dapp_registry JSON is byte-for-byte identical. This is the core
+        // S-037 closure guard: a dropped/added/reordered field would make
+        // the second snapshot diverge from the first.
+        //
+        // 2 assertions: round-trip dapp_registry JSON identical;
+        // restored chain's compute_state_root() == source state_root.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            apply_block(c, register_tx("alice", 0, svc_key(0xA0),
+                                        "https://alice.example.com",
+                                        {"chat", "video"}, 1,
+                                        std::vector<uint8_t>{0x01, 0x02, 0x03}));
+            apply_block(c, register_tx("bob", 0, svc_key(0xC0),
+                                        "https://bob.example.com",
+                                        {"news"}, 0,
+                                        std::vector<uint8_t>{}));
+            check(c.dapp_registry().size() == 2,
+                  "(1) Round-trip: two DApps registered via apply path "
+                  "(alice + bob) before snapshot");
+
+            nlohmann::json snap1 = c.serialize_state(16);
+            Chain restored = Chain::restore_from_snapshot(snap1);
+            nlohmann::json snap2 = restored.serialize_state(16);
+            check(dapp_json_str(snap1) == dapp_json_str(snap2),
+                  "(1) Round-trip: serialize → restore → serialize yields "
+                  "byte-identical dapp_registry JSON (no field drop / "
+                  "reorder across the d:-namespace snapshot path)");
+            check(restored.compute_state_root() == c.compute_state_root(),
+                  "(1) Round-trip: restored chain's compute_state_root() "
+                  "EXACTLY matches the source (d: leaves reproduced — the "
+                  "S-033 gate accepts a DApp-active snapshot; S-037 guard)");
+        }
+
+        // === Scenario 2: empty registry → stable empty serialization. ===
+        //
+        // A chain with NO DApps must serialize a stable, empty
+        // dapp_registry array, and round-trip without inventing entries.
+        //
+        // 2 assertions: empty array on a fresh chain; round-trip stays
+        // empty + state_root stable.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            check(c.dapp_registry().empty(),
+                  "(2) Empty: fresh chain has no DApp entries");
+            nlohmann::json snap = c.serialize_state(16);
+            Chain restored = Chain::restore_from_snapshot(snap);
+            check(restored.dapp_registry().empty()
+                  && dapp_json_str(snap) == "[]"
+                  && restored.compute_state_root() == c.compute_state_root(),
+                  "(2) Empty: empty registry serializes to [] and round-"
+                  "trips empty with stable state_root (no phantom d: leaf)");
+        }
+
+        // === Scenario 3: two registries differing by ONE field →
+        // distinct serialized JSON. ===
+        //
+        // Build two otherwise-identical chains where alice's DApp differs
+        // only by endpoint_url (then only by service_pubkey). The
+        // serialized dapp_registry JSON must differ in each case — proving
+        // each field reaches the snapshot.
+        //
+        // 2 assertions: endpoint_url difference visible in JSON;
+        // service_pubkey difference visible in JSON.
+        {
+            auto build_with = [&](const PubKey& svc, const std::string& url) {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                apply_block(c, register_tx("alice", 0, svc, url,
+                                            {"chat"}, 1,
+                                            std::vector<uint8_t>{0xAA}));
+                return c.serialize_state(16);
+            };
+            nlohmann::json base = build_with(svc_key(0xA0),
+                                              "https://alice.example.com");
+            nlohmann::json diff_url = build_with(svc_key(0xA0),
+                                                  "https://other.example.com");
+            check(dapp_json_str(base) != dapp_json_str(diff_url),
+                  "(3) Field sensitivity: endpoint_url difference produces "
+                  "distinct dapp_registry JSON (url reaches the snapshot)");
+            nlohmann::json diff_svc = build_with(svc_key(0xB0),
+                                                  "https://alice.example.com");
+            check(dapp_json_str(base) != dapp_json_str(diff_svc),
+                  "(3) Field sensitivity: service_pubkey difference produces "
+                  "distinct dapp_registry JSON (service key reaches the "
+                  "snapshot)");
+        }
+
+        // === Scenario 4: deterministic ordering — entries serialize
+        // sorted by domain key. ===
+        //
+        // dapp_registry_ is a std::map<std::string, DAppEntry> (chain.hpp),
+        // so iteration in both build_state_leaves and serialize_state is
+        // ascending-by-domain regardless of intra-block REGISTER tx order.
+        // We register BOTH DApps in a SINGLE block (so registered_at /
+        // active_from are identical — height is the same), varying only
+        // the order of the two DAPP_REGISTER txs within the block's tx
+        // vector. Assert (a) the serialized array is sorted (alice before
+        // bob) when bob's tx came first, and (b) the OPPOSITE intra-block
+        // tx order produces the identical snapshot JSON + state_root.
+        //
+        // Note: we deliberately co-locate both REGISTER txs in one block
+        // rather than across two blocks — registered_at/active_from bind
+        // to the block height by design, so across-block ordering would
+        // legitimately diverge the d: values (that is correct protocol
+        // behavior, not a map-ordering property).
+        //
+        // 2 assertions: serialized domains ascending; intra-block tx-order-
+        // independent snapshot + state_root.
+        {
+            auto build_order = [&](bool bob_first) {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                Transaction t_alice = register_tx("alice", 0, svc_key(0xA0),
+                                                    "https://alice.example.com",
+                                                    {"chat"}, 1,
+                                                    std::vector<uint8_t>{0x11});
+                Transaction t_bob = register_tx("bob", 0, svc_key(0xC0),
+                                                  "https://bob.example.com",
+                                                  {"news"}, 0,
+                                                  std::vector<uint8_t>{0x22});
+                Block b;
+                b.index = c.height();
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                if (bob_first) { b.transactions = {t_bob, t_alice}; }
+                else           { b.transactions = {t_alice, t_bob}; }
+                c.append(b);
+                return c;
+            };
+            Chain c_bob_first = build_order(/*bob_first=*/true);
+            nlohmann::json snap = c_bob_first.serialize_state(16);
+            const auto& arr = snap.at("dapp_registry");
+            bool ascending = arr.size() == 2
+                && arr[0].at("domain").get<std::string>() == "alice"
+                && arr[1].at("domain").get<std::string>() == "bob";
+            check(ascending,
+                  "(4) Ordering: dapp_registry serializes sorted by domain "
+                  "(alice before bob) even when bob's REGISTER tx came first "
+                  "in the block (std::map ascending iteration — deterministic)");
+            Chain c_alice_first = build_order(/*bob_first=*/false);
+            check(dapp_json_str(snap)
+                      == dapp_json_str(c_alice_first.serialize_state(16))
+                  && c_bob_first.compute_state_root()
+                      == c_alice_first.compute_state_root(),
+                  "(4) Ordering: intra-block REGISTER tx order does NOT "
+                  "affect the snapshot JSON or state_root (order-independent "
+                  "d: namespace commitment at a fixed height)");
+        }
+
+        // === Scenario 5: state_root binding (S-038 guard). ===
+        //
+        // Toggling a DAppEntry field must change compute_state_root() —
+        // proving the d:-namespace value-hash actually incorporates the
+        // field (build_state_leaves hashes service_pubkey, registered_at,
+        // active_from, inactive_from, endpoint_url, topics, retention,
+        // metadata). Two chains identical except for one DApp field must
+        // have distinct state_roots; the producer's body.state_root (S-038)
+        // therefore genuinely commits to DApp state.
+        //
+        // 2 assertions: endpoint_url toggle changes state_root; metadata
+        // toggle changes state_root.
+        {
+            auto root_with = [&](const std::string& url,
+                                   const std::vector<uint8_t>& meta) {
+                Chain c;
+                c.append(make_genesis_block(make_cfg()));
+                apply_block(c, register_tx("alice", 0, svc_key(0xA0),
+                                            url, {"chat"}, 1, meta));
+                return c.compute_state_root();
+            };
+            Hash base = root_with("https://alice.example.com",
+                                   std::vector<uint8_t>{0x01});
+            Hash url2 = root_with("https://alice-v2.example.com",
+                                   std::vector<uint8_t>{0x01});
+            check(base != url2,
+                  "(5) state_root binding: toggling endpoint_url changes "
+                  "compute_state_root() (d: value-hash incorporates url — "
+                  "S-038 producer commitment is real, not dormant)");
+            Hash meta2 = root_with("https://alice.example.com",
+                                    std::vector<uint8_t>{0x99, 0x98});
+            check(base != meta2,
+                  "(5) state_root binding: toggling metadata changes "
+                  "compute_state_root() (d: value-hash incorporates the "
+                  "metadata bytes)");
+        }
+
+        // === Scenario 6: round-trip preserves EVERY DAppEntry field. ===
+        //
+        // After restore_from_snapshot, every field of the restored
+        // DAppEntry must match the source field-for-field: service_pubkey,
+        // endpoint_url, topics (ordered), retention, metadata,
+        // registered_at, active_from, inactive_from. This is the
+        // structural completeness of the S-037 serialize/restore wiring.
+        //
+        // 2 assertions: alice's entry field-equal after restore; bob's
+        // entry field-equal after restore.
+        {
+            Chain c;
+            c.append(make_genesis_block(make_cfg()));
+            apply_block(c, register_tx("alice", 0, svc_key(0xA0),
+                                        "https://alice.example.com",
+                                        {"chat", "video"}, 3,
+                                        std::vector<uint8_t>{0xDE, 0xAD, 0xBE, 0xEF}));
+            apply_block(c, register_tx("bob", 0, svc_key(0xC0),
+                                        "https://bob.example.com",
+                                        {}, 0,
+                                        std::vector<uint8_t>{}));
+
+            nlohmann::json snap = c.serialize_state(16);
+            Chain restored = Chain::restore_from_snapshot(snap);
+
+            auto field_equal = [](const DAppEntry& x, const DAppEntry& y) {
+                return x.service_pubkey == y.service_pubkey
+                    && x.endpoint_url   == y.endpoint_url
+                    && x.topics         == y.topics
+                    && x.retention      == y.retention
+                    && x.metadata       == y.metadata
+                    && x.registered_at  == y.registered_at
+                    && x.active_from    == y.active_from
+                    && x.inactive_from  == y.inactive_from;
+            };
+            auto a_src = c.dapp("alice");
+            auto a_dst = restored.dapp("alice");
+            check(a_src.has_value() && a_dst.has_value()
+                  && field_equal(*a_src, *a_dst),
+                  "(6) Field completeness: alice's DAppEntry survives "
+                  "restore field-for-field (service_pubkey, endpoint_url, "
+                  "topics, retention, metadata, registered_at, active_from, "
+                  "inactive_from)");
+            auto b_src = c.dapp("bob");
+            auto b_dst = restored.dapp("bob");
+            check(b_src.has_value() && b_dst.has_value()
+                  && field_equal(*b_src, *b_dst),
+                  "(6) Field completeness: bob's DAppEntry (empty topics + "
+                  "empty metadata) survives restore field-for-field (empty "
+                  "containers are not silently dropped or fabricated)");
+        }
+
+        fputs(fail == 0 ? "\n  PASS: dapp-registry-determinism all assertions\n"
+                        : "\n  FAIL: dapp-registry-determinism had failures\n",
+              stdout);
+        fflush(stdout);
         return fail == 0 ? 0 : 1;
     }
     // S-035 Option 1: S-007 overflow-protection paths. apply_transactions
