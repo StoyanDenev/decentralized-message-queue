@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (18 total + help / version):
+// Subcommands (17 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -21,7 +21,6 @@
 //   balance-trustless        Composite: verify chain + state-proof balance
 //   nonce-trustless          Composite: verify chain + state-proof nonce
 //   stake-trustless          Composite: verify chain + state-proof stake
-//   supply-trustless         Composite: verify chain + state-proof c: counters
 //   account-history          Composite: verified balance/nonce over a range
 //   sign-tx                  Offline signed TRANSFER/STAKE/UNSTAKE
 //   submit-tx                Submit a pre-signed tx to the daemon
@@ -36,9 +35,9 @@
 //   * Every command that touches the daemon's RPC takes --genesis to
 //     pin the chain identity on first connection.
 //   * Composite read commands (balance-trustless, nonce-trustless,
-//     stake-trustless, supply-trustless) DO NOT trust the daemon's
-//     `account` / `stake_info` / `chain_summary` reply unless the cleartext
-//     hashes to the value_hash in a verified state-proof.
+//     stake-trustless) DO NOT trust the daemon's `account` / `stake_info`
+//     reply unless the cleartext hashes to the value_hash in a verified
+//     state-proof.
 //   * verify-and-submit fetches the verified nonce via nonce-trustless
 //     (not the daemon's raw `account` reply) before signing.
 
@@ -114,18 +113,6 @@ void print_usage() {
         "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
         "      bonded). A domain with no stake leaf fails closed (the daemon's\n"
         "      state_proof returns not_found) — never a bare zero.\n"
-        "  supply-trustless --rpc-port <N> --genesis <file> [--json]\n"
-        "      Verified chain + state-proof (c: namespace) for the five A1\n"
-        "      supply counters (genesis_total, accumulated_subsidy,\n"
-        "      accumulated_slashed, accumulated_inbound, accumulated_outbound).\n"
-        "      Each counter is Merkle-verified against the committee-signed\n"
-        "      state_root and its cleartext (from the daemon's `chain_summary`)\n"
-        "      is hash-checked against the proof's value_hash. Reports the five\n"
-        "      committee-verified counters AND whether the chain-wide A1 supply\n"
-        "      identity (expected_total = genesis_total + accumulated_subsidy\n"
-        "      + accumulated_inbound - accumulated_slashed - accumulated_outbound)\n"
-        "      is well-formed (no under/overflow) among them. Fails closed on\n"
-        "      any verification failure — never a bare daemon-reported counter.\n"
         "  account-history --rpc-port <N> --genesis <file> --domain <D>\n"
         "                  --from <H1> --to <H2> [--step <S>] [--json]\n"
         "      Verified balance/nonce trajectory over a height range. For\n"
@@ -779,342 +766,6 @@ int cmd_stake_trustless(int argc, char** argv) {
     }
 }
 
-// ─────────────────────────── supply-trustless ──────────────────────────
-//
-// Composite trust-minimized read of the A1 supply-counter ("c:")
-// namespace — the exact analogue of read_stake_trustless ("s:") and
-// read_account_trustless ("a:"). Five genesis-pinned counters live under
-// the "c:" namespace in chain.cpp::build_state_leaves (the const_leaf
-// calls prefix "k:" onto each "c:<name>", so the committed leaf key is
-// "k:c:<name>"; the daemon's state_proof RPC reconstructs that internally
-// when handed namespace="c" + key="<name>" — see node.cpp::rpc_state_proof
-// "ns == c" branch). Each counter's committed value_hash is
-// SHA256(u64_be(value)) — the same single-u64 const_leaf encoding the
-// "k:" constants use, NOT the two-u64 (locked||unlock) form the stakes
-// branch uses.
-//
-// The chain-wide A1 identity these five counters satisfy (chain.hpp
-// ::expected_total + the post-apply assertion in chain.cpp) is
-//
-//   expected_total = genesis_total
-//                  + accumulated_subsidy
-//                  + accumulated_inbound
-//                  - accumulated_slashed
-//                  - accumulated_outbound
-//
-// and at the head of every applied block expected_total == the live sum
-// (Σ accounts.balance + Σ stakes.locked). The light client cannot walk
-// the live sum without every account+stake leaf, so it reports the A1
-// LEFT-HAND SIDE computed entirely from the five committee-verified
-// counters, and flags whether that combination is well-formed (no
-// uint64 under/overflow — i.e. the additive terms don't overflow and the
-// subtractive terms don't drive the running total below zero). A daemon
-// that lies about any counter is caught by the per-counter value_hash
-// cross-check (cleartext from `chain_summary`) BEFORE we ever combine
-// them, so a malformed A1 combination here means a genuinely inconsistent
-// chain, not a lying daemon.
-
-struct SupplyView {
-    uint64_t    genesis_total{0};
-    uint64_t    accumulated_subsidy{0};
-    uint64_t    accumulated_slashed{0};
-    uint64_t    accumulated_inbound{0};
-    uint64_t    accumulated_outbound{0};
-    bool        a1_ok{false};        // A1 LHS well-formed (no under/overflow)
-    uint64_t    expected_total{0};   // A1 LHS, valid only when a1_ok
-    std::string state_root_hex;      // head header's state_root the proofs verified
-    uint64_t    height{0};           // head block index this view is anchored at
-};
-
-SupplyView read_supply_trustless(
-    RpcClient& rpc,
-    const std::map<std::string, PubKey>& committee_seed,
-    const determ::chain::GenesisConfig& genesis) {
-
-    SupplyView sv;
-
-    // 1. Anchor genesis (fail-closed if block 0 != compute_genesis_hash).
-    std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
-
-    // 2. Verify the header chain end-to-end (prev_hash continuity +
-    //    per-block committee sigs), capturing the head's state_root.
-    auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
-
-    if (vc.head_state_root.empty()) {
-        throw std::runtime_error(
-            "supply-trustless: chain has not activated state_root (S-033) — "
-            "head header carries no state_root, so state-proofs can't be "
-            "anchored. Use the daemon's `chain_summary` RPC directly for "
-            "chains without S-033 active.");
-    }
-
-    // Pre-build the committee JSON once (reused across all five anchor
-    // re-verifications when the chain advances during the round-trip).
-    json committee_json;
-    {
-        json arr = json::array();
-        for (auto& [domain_, pk] : committee_seed) {
-            arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
-        }
-        committee_json = json{{"members", arr}};
-    }
-
-    // Anchor a single state-proof's claimed root to a committee-signed
-    // header. Identical chain-advanced-during-round-trip logic that
-    // read_stake_trustless step 5 uses, lifted into a lambda so all five
-    // counter proofs share it (and so the verified head — vc — advances
-    // monotonically as later proofs are served from a taller chain).
-    auto anchor_proof_to_committee = [&](const json& proof,
-                                         const char* counter_name) {
-        uint64_t proof_height = proof.value("height", uint64_t{0});
-        std::string proof_root = proof.value("state_root", std::string{});
-        if (proof_height < vc.height) {
-            throw std::runtime_error(
-                std::string("supply-trustless: proof.height=")
-                + std::to_string(proof_height)
-                + " for counter '" + counter_name
-                + "' is BEFORE verified-chain head=" + std::to_string(vc.height)
-                + " — daemon is serving stale state");
-        }
-        if (proof_height > vc.height) {
-            uint64_t anchor_index = proof_height - 1;
-            auto pg = rpc.call("headers",
-                {{"from", anchor_index}, {"count", 1}});
-            if (!pg.contains("headers") || !pg["headers"].is_array()
-                || pg["headers"].empty()) {
-                throw std::runtime_error(
-                    std::string("supply-trustless: cannot fetch header at index=")
-                    + std::to_string(anchor_index)
-                    + " (proof.height=" + std::to_string(proof_height) + ")");
-            }
-            auto& h = pg["headers"][0];
-            std::string hdr_root = h.value("state_root", std::string{});
-            if (hdr_root != proof_root) {
-                throw std::runtime_error(
-                    std::string("supply-trustless: proof.state_root=") + proof_root
-                    + " does not match header[" + std::to_string(anchor_index)
-                    + "].state_root=" + hdr_root);
-            }
-            auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
-            if (!vbs.ok) {
-                vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
-            }
-            if (!vbs.ok) {
-                throw std::runtime_error(
-                    std::string("supply-trustless: header[")
-                    + std::to_string(anchor_index)
-                    + "] committee-sig check failed: " + vbs.detail);
-            }
-            if (anchor_index >= vc.height) {
-                auto walk = rpc.call("headers",
-                    {{"from", vc.height - 1},
-                     {"count", proof_height - vc.height + 2}});
-                auto vh = verify_headers(walk, "", "");
-                if (!vh.ok) {
-                    throw std::runtime_error(
-                        std::string("supply-trustless: prev_hash walk "
-                                    "vc.height→proof.height: ") + vh.detail);
-                }
-            }
-            vc.head_state_root = proof_root;
-            vc.height = proof_height;
-            vc.head_block_hash = h.value("block_hash", std::string{});
-        } else if (proof_root != vc.head_state_root) {
-            throw std::runtime_error(
-                std::string("supply-trustless: proof.state_root=") + proof_root
-                + " does not match verified head state_root="
-                + vc.head_state_root);
-        }
-    };
-
-    // 3-5. For each of the five A1 counters: fetch the state-proof in the
-    //      "c:" namespace, verify the Merkle inclusion self-consistently,
-    //      anchor its claimed root to a committee-signed header, and
-    //      recompute the committed value_hash = SHA256(u64_be(value)) from
-    //      the daemon's `chain_summary` cleartext. The cleartext is fetched
-    //      ONCE (chain_summary with last_n=0 — no block list, just the
-    //      counter surface) and reused for all five hash cross-checks.
-    auto summary = rpc.call("chain_summary", {{"last_n", uint32_t{0}}});
-    if (summary.contains("error") && !summary["error"].is_null()) {
-        throw std::runtime_error(
-            "supply-trustless: chain_summary RPC error: "
-            + summary["error"].dump());
-    }
-
-    struct CounterSpec { const char* key; uint64_t SupplyView::* field; };
-    const CounterSpec specs[] = {
-        {"genesis_total",        &SupplyView::genesis_total},
-        {"accumulated_subsidy",  &SupplyView::accumulated_subsidy},
-        {"accumulated_slashed",  &SupplyView::accumulated_slashed},
-        {"accumulated_inbound",  &SupplyView::accumulated_inbound},
-        {"accumulated_outbound", &SupplyView::accumulated_outbound},
-    };
-
-    for (const auto& spec : specs) {
-        // 3. Fetch the state-proof for ("c", <counter>). A well-formed
-        //    chain ALWAYS has all five counter leaves (build_state_leaves
-        //    emits them unconditionally), so not_found here is itself a
-        //    fail-closed signal — never a fabricated zero.
-        auto proof = rpc.call("state_proof",
-            {{"namespace", "c"}, {"key", std::string(spec.key)}});
-        if (proof.contains("error") && !proof["error"].is_null()) {
-            throw std::runtime_error(
-                std::string("supply-trustless: state_proof RPC error for "
-                            "counter '") + spec.key + "': "
-                + proof["error"].dump());
-        }
-
-        // 4. Verify the proof self-consistently (Merkle siblings roll up
-        //    to the proof's claimed state_root).
-        auto vsp = verify_state_proof(proof, {});
-        if (!vsp.ok) {
-            throw std::runtime_error(
-                std::string("supply-trustless: counter '") + spec.key
-                + "': " + vsp.detail);
-        }
-
-        // 5. Anchor the proof's root to a committee-signed header (handles
-        //    chain-advanced-during-round-trip; advances vc monotonically).
-        anchor_proof_to_committee(proof, spec.key);
-
-        // 6. Recompute the committed leaf hash from the cleartext counter
-        //    and confirm it matches the verified value_hash. Encoding
-        //    matches build_state_leaves' const_leaf exactly:
-        //    SHA256(u64_be(value)).
-        if (!summary.contains(spec.key) || !summary[spec.key].is_number()) {
-            throw std::runtime_error(
-                std::string("supply-trustless: chain_summary reply is missing "
-                            "numeric counter '") + spec.key + "'");
-        }
-        uint64_t value = summary[spec.key].get<uint64_t>();
-
-        determ::crypto::SHA256Builder b;
-        b.append(value);
-        Hash computed_value_hash = b.finalize();
-
-        Hash proof_value_hash = from_hex_arr<32>(
-            proof["value_hash"].get<std::string>());
-
-        if (computed_value_hash != proof_value_hash) {
-            throw std::runtime_error(
-                std::string("supply-trustless: TAMPERED — daemon's "
-                            "`chain_summary` counter '") + spec.key
-                + "'=" + std::to_string(value)
-                + " hashes to " + to_hex(computed_value_hash)
-                + " but state-proof's value_hash is "
-                + to_hex(proof_value_hash)
-                + " — daemon is lying about either the cleartext OR the proof");
-        }
-
-        sv.*(spec.field) = value;
-    }
-
-    // 7. Compute the A1 identity LHS from the five committee-verified
-    //    counters, with explicit uint64 under/overflow guards. The chain's
-    //    own apply-path assertion (chain.cpp) guarantees this is well-formed
-    //    on any honest chain; a malformed combination here means a genuinely
-    //    inconsistent counter set (NOT a lying daemon — the per-counter
-    //    hash cross-checks above already ruled that out).
-    //   expected = genesis_total + accumulated_subsidy + accumulated_inbound
-    //              - accumulated_slashed - accumulated_outbound
-    {
-        uint64_t add_terms = 0;
-        bool ok = true;
-        // genesis_total + accumulated_subsidy + accumulated_inbound
-        if (sv.genesis_total > UINT64_MAX - sv.accumulated_subsidy) ok = false;
-        else add_terms = sv.genesis_total + sv.accumulated_subsidy;
-        if (ok && add_terms > UINT64_MAX - sv.accumulated_inbound) ok = false;
-        else if (ok) add_terms += sv.accumulated_inbound;
-        // - accumulated_slashed - accumulated_outbound (no underflow)
-        uint64_t sub_terms = 0;
-        if (ok) {
-            if (sv.accumulated_slashed > UINT64_MAX - sv.accumulated_outbound)
-                ok = false;
-            else sub_terms = sv.accumulated_slashed + sv.accumulated_outbound;
-        }
-        if (ok && sub_terms > add_terms) ok = false;
-        sv.a1_ok = ok;
-        sv.expected_total = ok ? (add_terms - sub_terms) : 0;
-    }
-
-    sv.state_root_hex = vc.head_state_root;
-    sv.height = vc.height;
-    return sv;
-}
-
-int cmd_supply_trustless(int argc, char** argv) {
-    uint16_t port = 0;
-    std::string genesis_path;
-    bool have_port = false, json_out = false;
-    for (int i = 0; i < argc; ++i) {
-        std::string a = argv[i];
-        if      (a == "--rpc-port" && i + 1 < argc) {
-            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
-        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
-        else if   (a == "--json")                    json_out     = true;
-        else {
-            std::cerr << "supply-trustless: unknown arg '" << a << "'\n";
-            return 1;
-        }
-    }
-    if (!have_port || genesis_path.empty()) {
-        std::cerr << "supply-trustless: "
-                     "--rpc-port and --genesis are required\n";
-        return 1;
-    }
-    try {
-        auto genesis = load_genesis(genesis_path);
-        auto committee_seed = build_genesis_committee(genesis);
-        RpcClient rpc(port);
-        if (!rpc.open()) {
-            std::cerr << "supply-trustless: " << rpc.last_error() << "\n";
-            return 1;
-        }
-        auto view = read_supply_trustless(rpc, committee_seed, genesis);
-        if (json_out) {
-            json out = {
-                {"genesis_total",        view.genesis_total},
-                {"accumulated_subsidy",  view.accumulated_subsidy},
-                {"accumulated_slashed",  view.accumulated_slashed},
-                {"accumulated_inbound",  view.accumulated_inbound},
-                {"accumulated_outbound", view.accumulated_outbound},
-                {"a1_identity_holds",    view.a1_ok},
-                {"expected_total",       view.expected_total},
-                {"height",               view.height},
-                {"state_root",           view.state_root_hex},
-                {"verified",             true},
-            };
-            std::cout << out.dump() << "\n";
-        } else {
-            std::cout
-                << "supply (committee-verified via state-proof at height "
-                << view.height << ", state_root "
-                << view.state_root_hex.substr(0, 16) << "...):\n"
-                << "  genesis_total:        " << view.genesis_total        << "\n"
-                << "  accumulated_subsidy:  " << view.accumulated_subsidy  << "\n"
-                << "  accumulated_slashed:  " << view.accumulated_slashed  << "\n"
-                << "  accumulated_inbound:  " << view.accumulated_inbound  << "\n"
-                << "  accumulated_outbound: " << view.accumulated_outbound << "\n"
-                << "  A1 identity:          "
-                << (view.a1_ok ? "holds" : "MALFORMED")
-                << " (expected_total = genesis_total + accumulated_subsidy"
-                   " + accumulated_inbound - accumulated_slashed"
-                   " - accumulated_outbound";
-            if (view.a1_ok)
-                std::cout << " = " << view.expected_total << ")\n";
-            else
-                std::cout << " under/overflows)\n";
-        }
-        // A1 well-formedness is part of the verification contract: a
-        // malformed counter combination (which an honest chain can never
-        // produce, given the apply-path assertion) fails closed.
-        return view.a1_ok ? 0 : 1;
-    } catch (const std::exception& e) {
-        std::cerr << "supply-trustless: " << e.what() << "\n";
-        return 1;
-    }
-}
-
 // ──────────────────────── account-history ──────────────────────────────
 
 int cmd_account_history(int argc, char** argv) {
@@ -1627,7 +1278,6 @@ int main(int argc, char** argv) {
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
-        if (cmd == "supply-trustless")      return cmd_supply_trustless(sub_argc, sub_argv);
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
         if (cmd == "verify-state-root")     return cmd_verify_state_root(sub_argc, sub_argv);
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
