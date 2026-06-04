@@ -614,6 +614,13 @@ Additional in-process tests:
                                               resolution, validator-config
                                               forwarding, snapshot-restore
                                               idempotence, A1 supply invariance
+  determ test-pending-param-change-determinism  p:-namespace dedicated —
+                                              field-for-field snapshot round-
+                                              trip of multi-height pending
+                                              entries, state_root preserved
+                                              while pending (S-033/S-038),
+                                              order-independent height-triggered
+                                              activation + idempotent restore
   determ test-subsidy-distribution            Subsidy distribution apply —
                                               FLAT, E3 LOTTERY (jackpot seed),
                                               E4 finite pool drain, A1 mint
@@ -19620,6 +19627,313 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": governance-param-determinism "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // FA-Apply-8 (p: namespace, dedicated). The siblings each touch the
+    // pending_param_changes p: namespace from one angle:
+    //   - test-pending-param-changes        in-memory stage API + map shape
+    //   - test-param-change-apply           stage → activate at apply entry
+    //   - test-governance-param-determinism  insertion-order + validator
+    //                                        forwarding + one snapshot case
+    //   - test-snapshot-full-determinism     p: as 1 of 10 namespaces (one
+    //                                        spliced entry)
+    // None pins the p: namespace's SNAPSHOT contract field-for-field over
+    // MULTIPLE staged entries at MULTIPLE effective_heights, nor asserts
+    // compute_state_root() is EXACTLY preserved across serialize →
+    // restore while the entries are still pending (the on-the-wire
+    // snapshot-tail-header invariant the S-033/S-038 gate consumes), nor
+    // that height-triggered activation is order-INDEPENDENT (two chains
+    // that stage the same entries in opposite insertion order across
+    // DIFFERENT heights reach identical final field values AND identical
+    // state_root after activation). This test is the dedicated p:
+    // round-trip + activation-determinism pin covering exactly that
+    // uncovered triad.
+    if (cmd == "test-pending-param-change-determinism") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "pending-param-change-determinism-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // Encode u64 as 8-byte LE — the apply-side numeric param wire
+        // format parsed by activate_pending_params::parse_u64 and the
+        // exact bytes serialize_state hex-encodes for the p: namespace.
+        auto le8 = [](uint64_t v) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i) p[i] = uint8_t((v >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        // Append empty blocks until the chain reaches `target_h`,
+        // triggering activate_pending_params() at each apply entry
+        // (height == block count; apply runs for every b.index > 0).
+        auto advance_to = [&](Chain& c, uint64_t target_h) {
+            while (c.height() < target_h + 1) {
+                Block b;
+                b.index = c.height();
+                b.prev_hash = c.head().compute_hash();
+                b.creators = {"alice"};
+                c.append(b);
+            }
+        };
+
+        // Stage a canonical multi-height fixture onto a fresh genesis
+        // chain: three DISTINCT params at one height (1000) plus a single
+        // param at a second, EARLIER height (500). Mixed heights + a
+        // multi-entry bucket exercise both std::map (by-height) ordering
+        // and per-bucket vector ordering in serialize/restore.
+        auto stage_fixture = [&](Chain& c) {
+            c.stage_param_change(1000, "MIN_STAKE",        le8(7777));
+            c.stage_param_change(1000, "SUSPENSION_SLASH", le8(42));
+            c.stage_param_change(1000, "UNSTAKE_DELAY",    le8(333));
+            c.stage_param_change(500,  "MIN_STAKE",        le8(4096));
+        };
+
+        // ── 0. Fixture sanity: the p: namespace is non-trivially
+        //    populated (2 height buckets; the 1000-bucket has 3 entries).
+        //    Without this, the round-trip assertions could pass vacuously.
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            stage_fixture(c);
+            check(c.pending_param_changes().size() == 2
+                  && c.pending_param_changes().count(500) == 1
+                  && c.pending_param_changes().count(1000) == 1
+                  && c.pending_param_changes().at(1000).size() == 3
+                  && c.pending_param_changes().at(500).size() == 1,
+                  "(0) fixture: p: namespace has 2 height buckets "
+                  "(500:1 entry, 1000:3 entries)");
+        }
+
+        // ── 1. serialize_state → restore_from_snapshot restores the p:
+        //    namespace FIELD-FOR-FIELD: every (effective_height, name,
+        //    value-bytes) tuple survives, in the same per-bucket order.
+        //    This is the load-bearing snapshot contract the other p:
+        //    tests don't pin (they only check a bucket count / single
+        //    spliced entry).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            stage_fixture(c);
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+
+            // Same set of height buckets, same per-bucket sizes.
+            bool shape_ok =
+                  r.pending_param_changes().size()
+                      == c.pending_param_changes().size()
+               && r.pending_param_changes().count(500) == 1
+               && r.pending_param_changes().count(1000) == 1
+               && r.pending_param_changes().at(500).size() == 1
+               && r.pending_param_changes().at(1000).size() == 3;
+
+            // Field-for-field: name + value bytes match index-for-index
+            // across every bucket (the whole map deep-equals).
+            bool fields_ok =
+                  r.pending_param_changes() == c.pending_param_changes();
+
+            // Explicit value-byte spot checks (guards against an equal-
+            // operator false positive if the type ever changes).
+            auto& b500  = r.pending_param_changes().at(500);
+            auto& b1000 = r.pending_param_changes().at(1000);
+            bool bytes_ok =
+                  b500[0].first  == "MIN_STAKE"        && b500[0].second  == le8(4096)
+               && b1000[0].first == "MIN_STAKE"        && b1000[0].second == le8(7777)
+               && b1000[1].first == "SUSPENSION_SLASH" && b1000[1].second == le8(42)
+               && b1000[2].first == "UNSTAKE_DELAY"    && b1000[2].second == le8(333);
+
+            check(shape_ok && fields_ok && bytes_ok,
+                  "(1) p: round-trip is field-for-field: every "
+                  "(eff_height, name, value-bytes) tuple preserved in "
+                  "per-bucket order across serialize → restore");
+        }
+
+        // ── 2. compute_state_root() is EXACTLY preserved across the
+        //    round-trip WHILE the p: entries are still pending (no
+        //    intervening blocks). This is the snapshot-tail-header
+        //    invariant the S-033/S-038 state_root gate consumes: a
+        //    snapshot-bootstrapped node must commit to the identical root
+        //    a replayed node holds, so the next block validates.
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            stage_fixture(c);
+            Hash root_before = c.compute_state_root();
+            json snap = c.serialize_state(16);
+            Chain r = Chain::restore_from_snapshot(snap);
+            check(r.compute_state_root() == root_before,
+                  "(2) compute_state_root() preserved across p: snapshot "
+                  "round-trip while entries pending (S-033/S-038 contract)");
+        }
+
+        // ── 3. The p: namespace BINDS into state_root: perturbing one
+        //    pending entry's value in the snapshot JSON changes the
+        //    restored root (S-037-class omission guard — if p: were
+        //    dropped from build_state_leaves the change would be
+        //    invisible). Also: an extra staged entry changes the root.
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            stage_fixture(c);
+            Hash root_base = c.compute_state_root();
+            json base = c.serialize_state(16);
+
+            // Flip the value of the 500-bucket entry (4096 → 8192 LE).
+            json mutated = base;  // deep copy
+            for (auto& bkt : mutated["pending_param_changes"]) {
+                if (bkt.value("effective_height", uint64_t{0}) == 500)
+                    bkt["entries"][0]["value"] = std::string("0020000000000000");
+            }
+            Hash root_mut =
+                Chain::restore_from_snapshot(mutated).compute_state_root();
+
+            // A chain with one MORE staged entry has a different root.
+            Chain c2; c2.append(make_genesis_block(cfg));
+            stage_fixture(c2);
+            c2.stage_param_change(750, "UNSTAKE_DELAY", le8(999));
+
+            check(root_mut != root_base
+                  && c2.compute_state_root() != root_base,
+                  "(3) p: binds into state_root: perturbing a pending "
+                  "value OR adding an entry changes compute_state_root()");
+        }
+
+        // ── 4. Staging is INSERTION-ORDER-INDEPENDENT across DISTINCT
+        //    (height, name) keys: two chains that stage the same four
+        //    entries in opposite orders produce an identical
+        //    pending_param_changes map, identical serialized snapshot,
+        //    and identical state_root. (The std::map sorts by height; the
+        //    per-name buckets here have distinct names, so the only
+        //    repeated key — MIN_STAKE — lands in different height buckets
+        //    and can't collide.)
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            // c1: forward fixture order.
+            c1.stage_param_change(1000, "MIN_STAKE",        le8(7777));
+            c1.stage_param_change(1000, "SUSPENSION_SLASH", le8(42));
+            c1.stage_param_change(1000, "UNSTAKE_DELAY",    le8(333));
+            c1.stage_param_change(500,  "MIN_STAKE",        le8(4096));
+            // c2: reversed across heights (500 entry first, 1000 bucket
+            // in reverse name order).
+            c2.stage_param_change(500,  "MIN_STAKE",        le8(4096));
+            c2.stage_param_change(1000, "UNSTAKE_DELAY",    le8(333));
+            c2.stage_param_change(1000, "SUSPENSION_SLASH", le8(42));
+            c2.stage_param_change(1000, "MIN_STAKE",        le8(7777));
+
+            check(c1.pending_param_changes() == c2.pending_param_changes(),
+                  "(4) distinct-key staging order-independent: identical "
+                  "pending_param_changes map");
+            check(c1.serialize_state(16) == c2.serialize_state(16),
+                  "(4) distinct-key staging order-independent: identical "
+                  "serialized snapshot (byte-equal)");
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "(4) distinct-key staging order-independent: identical "
+                  "state_root");
+        }
+
+        // ── 5. Height-triggered activation is DETERMINISTIC and
+        //    order-independent: drive both order-variant chains from
+        //    block 1 past BOTH activation heights (500 then 1000). They
+        //    reach identical final field values AND identical state_root.
+        //    The earlier-height (500) MIN_STAKE=4096 activates first, then
+        //    the later-height (1000) MIN_STAKE=7777 OVERRIDES it — so the
+        //    final ordering across heights is what fixes the result, not
+        //    insertion order. (advance_to to a modest height; the
+        //    activation predicate is effective_height <= current_height.)
+        {
+            auto build_variant = [&](bool reversed) {
+                Chain c; c.append(make_genesis_block(cfg));
+                if (!reversed) {
+                    c.stage_param_change(2, "MIN_STAKE",        le8(7777));
+                    c.stage_param_change(2, "SUSPENSION_SLASH", le8(42));
+                    c.stage_param_change(2, "UNSTAKE_DELAY",    le8(333));
+                    c.stage_param_change(1, "MIN_STAKE",        le8(4096));
+                } else {
+                    c.stage_param_change(1, "MIN_STAKE",        le8(4096));
+                    c.stage_param_change(2, "UNSTAKE_DELAY",    le8(333));
+                    c.stage_param_change(2, "SUSPENSION_SLASH", le8(42));
+                    c.stage_param_change(2, "MIN_STAKE",        le8(7777));
+                }
+                advance_to(c, 2);  // past both activation heights (1, 2)
+                return c;
+            };
+            Chain fwd = build_variant(false);
+            Chain rev = build_variant(true);
+
+            // Height-1 MIN_STAKE=4096 fires first, height-2 MIN_STAKE=7777
+            // overrides → final MIN_STAKE is 7777 for BOTH variants.
+            check(fwd.min_stake() == 7777
+                  && fwd.suspension_slash() == 42
+                  && fwd.unstake_delay() == 333,
+                  "(5) activation: later-height override wins "
+                  "(MIN_STAKE 4096→7777); other fields activated");
+            check(fwd.pending_param_changes().empty()
+                  && rev.pending_param_changes().empty(),
+                  "(5) activation drains the p: map for both variants");
+            check(fwd.min_stake()        == rev.min_stake()
+                  && fwd.suspension_slash() == rev.suspension_slash()
+                  && fwd.unstake_delay()    == rev.unstake_delay(),
+                  "(5) activation order-independent: identical final "
+                  "param fields across opposite staging orders");
+            check(fwd.compute_state_root() == rev.compute_state_root(),
+                  "(5) activation order-independent: identical state_root "
+                  "post-activation");
+        }
+
+        // ── 6. Snapshot-restore mid-staging then activate is IDEMPOTENT:
+        //    a chain snapshotted while the p: entries are still pending,
+        //    restored, and advanced past the activation heights reaches
+        //    the SAME final field state + state_root as a chain that was
+        //    never snapshotted. (Closes the loop: round-trip preserves
+        //    p: AND the restored chain activates identically.)
+        {
+            // Reference: stage at heights 1 + 2, advance straight to 2.
+            Chain ref; ref.append(make_genesis_block(cfg));
+            ref.stage_param_change(1, "MIN_STAKE",        le8(4096));
+            ref.stage_param_change(2, "MIN_STAKE",        le8(7777));
+            ref.stage_param_change(2, "SUSPENSION_SLASH", le8(42));
+            advance_to(ref, 2);
+
+            // Snapshot chain: same staging, but serialize at genesis
+            // (entries still pending), restore, THEN advance to 2.
+            Chain src; src.append(make_genesis_block(cfg));
+            src.stage_param_change(1, "MIN_STAKE",        le8(4096));
+            src.stage_param_change(2, "MIN_STAKE",        le8(7777));
+            src.stage_param_change(2, "SUSPENSION_SLASH", le8(42));
+            json snap = src.serialize_state(16);
+            Chain restored = Chain::restore_from_snapshot(snap);
+            check(restored.min_stake() == 1000
+                  && restored.pending_param_changes().size() == 2,
+                  "(6) restored chain pre-activation: fields default, "
+                  "p: entries still pending");
+
+            advance_to(restored, 2);
+            check(restored.min_stake() == ref.min_stake()
+                  && restored.suspension_slash() == ref.suspension_slash()
+                  && restored.unstake_delay() == ref.unstake_delay(),
+                  "(6) post-restore activation == un-snapshotted replay "
+                  "(field-for-field)");
+            check(restored.compute_state_root() == ref.compute_state_root(),
+                  "(6) post-restore activation == un-snapshotted replay "
+                  "(state_root)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": pending-param-change-determinism "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
