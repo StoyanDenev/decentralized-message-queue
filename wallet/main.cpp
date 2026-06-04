@@ -16780,6 +16780,312 @@ int cmd_account_balance_history(int argc, char** argv) {
     return 0;
 }
 
+// ── supply-audit --snapshot <file> [--in <file>] [--json] ───────────────────
+// OFFLINE recompute of the A1 "unitary-supply" balance identity from a
+// snapshot JSON. The chain asserts this invariant after every block apply
+// (src/chain/chain.cpp::apply_transactions, ~line 1397):
+//
+//     expected_total = genesis_total
+//                    + accumulated_subsidy
+//                    + accumulated_inbound
+//                    - accumulated_slashed
+//                    - accumulated_outbound        (chain.hpp::expected_total)
+//
+//     live_total     = Σ accounts[].balance + Σ stakes[].locked
+//                                              (chain.cpp::live_total_supply)
+//
+//     INVARIANT:  live_total == expected_total
+//
+// determ-wallet does NOT link the chain library (TCB separation — see the
+// file-top comment + CMakeLists.txt determ-wallet target, which links only
+// crypto/sodium/nlohmann_json, never the chain lib). So we cannot call
+// Chain::expected_total() / live_total_supply() directly; instead we parse
+// the snapshot JSON produced by Chain::serialize_state and replicate the
+// arithmetic over the raw fields. The summed leaves (accounts[].balance,
+// stakes[].locked) and the five `c:` counter scalars are exactly the values
+// the chain folds into the same identity.
+//
+// Underflow note: expected_total mixes additions and subtractions in uint64.
+// On an honest balanced snapshot, expected_total never underflows (the
+// subtrahends are bounded by what was previously added). But on a CORRUPT
+// snapshot — the precise case this audit exists to catch — accumulated_slashed
+// + accumulated_outbound could exceed the additive side and wrap. So we
+// decide balance via the algebraically-equivalent ALL-ADDITIVE comparison
+//
+//     genesis_total + accumulated_subsidy + accumulated_inbound + live_total_rhs
+//          ==  live_total + accumulated_slashed + accumulated_outbound
+//
+// which has no subtraction and therefore cannot underflow-mask a violation.
+// We ALSO report the chain's exact modular-uint64 expected_total value (with
+// the same wraparound the chain would compute) for fidelity to what the node
+// would have asserted. No RPC, no network, no chain restore — pure file read.
+int cmd_supply_audit(int argc, char** argv) {
+    std::string in_path;
+    bool json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--snapshot" && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--in"       && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--json")                     json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet supply-audit --snapshot <file> [--json]\n"
+                "       (--in <file> is accepted as an alias for --snapshot)\n"
+                "\n"
+                "  OFFLINE recompute of the A1 unitary-supply balance identity\n"
+                "  from a snapshot JSON (as produced by `determ snapshot create`\n"
+                "  / Chain::serialize_state). No daemon RPC, no network, no chain\n"
+                "  restore — pure local-file accounting. The wallet binary does\n"
+                "  NOT link the chain library (TCB separation), so the identity is\n"
+                "  recomputed by parsing the snapshot fields directly rather than\n"
+                "  by calling Chain::expected_total().\n"
+                "\n"
+                "  Identity checked (mirrors src/chain/chain.cpp's post-apply\n"
+                "  assertion exactly):\n"
+                "\n"
+                "    live_total = Σ accounts[].balance + Σ stakes[].locked\n"
+                "    expected   = genesis_total + accumulated_subsidy\n"
+                "               + accumulated_inbound - accumulated_slashed\n"
+                "               - accumulated_outbound\n"
+                "    BALANCED  <=>  live_total == expected\n"
+                "\n"
+                "  The comparison is performed in an underflow-safe all-additive\n"
+                "  form so a corrupt snapshot whose slashed+outbound exceed the\n"
+                "  additive side is reported VIOLATED rather than silently\n"
+                "  wrapping. The chain's exact modular-uint64 expected value is\n"
+                "  still reported for fidelity.\n"
+                "\n"
+                "  --snapshot <file>   Required. Path to a snapshot JSON file.\n"
+                "  --in <file>         Alias for --snapshot.\n"
+                "  --json              Emit one-line machine-readable JSON.\n"
+                "\n"
+                "  JSON shape:\n"
+                "    { snapshot, block_index, balanced,\n"
+                "      live_total, expected_total,\n"
+                "      sum_account_balance, sum_stake_locked,\n"
+                "      account_count, stake_count,\n"
+                "      genesis_total, accumulated_subsidy, accumulated_slashed,\n"
+                "      accumulated_inbound, accumulated_outbound,\n"
+                "      additive_lhs, additive_rhs, delta,\n"
+                "      exit_reason: \"balanced\" | \"violated\"\n"
+                "                 | \"invalid_snapshot\" }\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  identity balanced\n"
+                "    1  args / file-unreadable / JSON parse error\n"
+                "    2  identity VIOLATED (supply not conserved)\n";
+            return 0;
+        }
+        else {
+            std::cerr << "supply-audit: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet supply-audit --snapshot <file> "
+                         "[--json]\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "supply-audit: --snapshot <file> is required "
+                     "(--in <file> accepted as alias)\n";
+        return 1;
+    }
+
+    // Load + parse. On any IO/parse failure → exit 1 (operator error), NOT
+    // exit 2 (which is reserved for a genuine identity violation).
+    nlohmann::json snap;
+    {
+        std::ifstream f(in_path);
+        if (!f) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",    in_path},
+                    {"balanced",    false},
+                    {"exit_reason", "file_unreadable"},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "supply-audit: cannot open '" << in_path << "'\n";
+            }
+            return 1;
+        }
+        try {
+            snap = nlohmann::json::parse(f);
+        } catch (const std::exception& e) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",    in_path},
+                    {"balanced",    false},
+                    {"exit_reason", "invalid_snapshot"},
+                    {"reason",      std::string("JSON parse failed: ") + e.what()},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "supply-audit: JSON parse failed for '" << in_path
+                          << "': " << e.what() << "\n";
+            }
+            return 1;
+        }
+        if (!snap.is_object()) {
+            if (json_out) {
+                nlohmann::json err = {
+                    {"snapshot",    in_path},
+                    {"balanced",    false},
+                    {"exit_reason", "invalid_snapshot"},
+                    {"reason",      "top-level JSON is not an object"},
+                };
+                std::cout << err.dump() << "\n";
+            } else {
+                std::cerr << "supply-audit: '" << in_path
+                          << "' top-level JSON is not an object "
+                             "(expected a snapshot envelope)\n";
+            }
+            return 1;
+        }
+    }
+
+    // ── live_total = Σ accounts[].balance + Σ stakes[].locked ────────────────
+    // Mirrors Chain::live_total_supply(). Sum in uint64 exactly as the chain
+    // does. A pathological snapshot summing past 2^64 would wrap here just as
+    // it would in the node — fidelity over false safety.
+    uint64_t sum_account_balance = 0;
+    size_t   account_count = 0;
+    if (snap.contains("accounts") && snap["accounts"].is_array()) {
+        for (const auto& a : snap["accounts"]) {
+            if (!a.is_object()) continue;
+            sum_account_balance += a.value("balance", uint64_t{0});
+            ++account_count;
+        }
+    }
+    uint64_t sum_stake_locked = 0;
+    size_t   stake_count = 0;
+    if (snap.contains("stakes") && snap["stakes"].is_array()) {
+        for (const auto& s : snap["stakes"]) {
+            if (!s.is_object()) continue;
+            sum_stake_locked += s.value("locked", uint64_t{0});
+            ++stake_count;
+        }
+    }
+    uint64_t live_total = sum_account_balance + sum_stake_locked;
+
+    // ── A1 counters (the `c:` namespace scalars). ───────────────────────────
+    uint64_t genesis_total        = snap.value("genesis_total",        uint64_t{0});
+    uint64_t accumulated_subsidy  = snap.value("accumulated_subsidy",  uint64_t{0});
+    uint64_t accumulated_slashed  = snap.value("accumulated_slashed",  uint64_t{0});
+    uint64_t accumulated_inbound  = snap.value("accumulated_inbound",  uint64_t{0});
+    uint64_t accumulated_outbound = snap.value("accumulated_outbound", uint64_t{0});
+
+    // expected_total: the chain's EXACT modular-uint64 form (chain.hpp:443).
+    // Reported verbatim so the operator sees what the node would have
+    // asserted, wraparound and all.
+    uint64_t expected_total = genesis_total
+                            + accumulated_subsidy
+                            + accumulated_inbound
+                            - accumulated_slashed
+                            - accumulated_outbound;
+
+    // Balance decision via the underflow-safe all-additive rearrangement of
+    //   live_total == genesis + subsidy + inbound - slashed - outbound
+    // ⇔ live_total + slashed + outbound == genesis + subsidy + inbound
+    // Neither side can underflow (only additions). A 128-bit accumulator
+    // also removes any overflow ambiguity in the comparison itself.
+    // Use __int128 when available for an exact, wrap-free comparison; fall
+    // back to uint64 (matching the chain's own width) otherwise.
+#if defined(__SIZEOF_INT128__)
+    __uint128_t additive_lhs = (__uint128_t)live_total
+                             + accumulated_slashed
+                             + accumulated_outbound;
+    __uint128_t additive_rhs = (__uint128_t)genesis_total
+                             + accumulated_subsidy
+                             + accumulated_inbound;
+    bool balanced = (additive_lhs == additive_rhs);
+    // Signed delta (rhs - lhs) for diagnostics, clamped into int64 range by
+    // representing it as a string when out of range.
+    bool delta_negative = additive_lhs > additive_rhs;
+    __uint128_t delta_mag = delta_negative ? (additive_lhs - additive_rhs)
+                                           : (additive_rhs - additive_lhs);
+#else
+    // Pure-uint64 fallback (same width the chain uses). Compare the additive
+    // forms directly; equality is exact whenever neither side overflows,
+    // which holds for every honest snapshot.
+    uint64_t additive_lhs = live_total + accumulated_slashed
+                          + accumulated_outbound;
+    uint64_t additive_rhs = genesis_total + accumulated_subsidy
+                          + accumulated_inbound;
+    bool balanced = (additive_lhs == additive_rhs);
+    bool delta_negative = additive_lhs > additive_rhs;
+    uint64_t delta_mag = delta_negative ? (additive_lhs - additive_rhs)
+                                        : (additive_rhs - additive_lhs);
+#endif
+
+    uint64_t block_index = snap.value("block_index", uint64_t{0});
+
+    // Render the 128-bit additive operands + delta as decimal strings so JSON
+    // consumers get exact values even past 2^64.
+    auto u128_to_dec = [](auto v) -> std::string {
+        if (v == 0) return "0";
+        std::string out;
+        while (v > 0) { out.push_back(char('0' + int(v % 10))); v /= 10; }
+        std::reverse(out.begin(), out.end());
+        return out;
+    };
+    std::string lhs_str   = u128_to_dec(additive_lhs);
+    std::string rhs_str   = u128_to_dec(additive_rhs);
+    std::string delta_str = (delta_negative ? std::string("-") : std::string())
+                          + u128_to_dec(delta_mag);
+
+    if (json_out) {
+        nlohmann::json out = {
+            {"snapshot",             in_path},
+            {"block_index",          block_index},
+            {"balanced",             balanced},
+            {"live_total",           live_total},
+            {"expected_total",       expected_total},
+            {"sum_account_balance",  sum_account_balance},
+            {"sum_stake_locked",     sum_stake_locked},
+            {"account_count",        account_count},
+            {"stake_count",          stake_count},
+            {"genesis_total",        genesis_total},
+            {"accumulated_subsidy",  accumulated_subsidy},
+            {"accumulated_slashed",  accumulated_slashed},
+            {"accumulated_inbound",  accumulated_inbound},
+            {"accumulated_outbound", accumulated_outbound},
+            {"additive_lhs",         lhs_str},
+            {"additive_rhs",         rhs_str},
+            {"delta",                delta_str},
+            {"exit_reason",          balanced ? "balanced" : "violated"},
+        };
+        std::cout << out.dump() << "\n";
+    } else {
+        std::cout << "supply-audit: " << in_path << "\n";
+        std::cout << "  block_index:          " << block_index << "\n";
+        std::cout << "  accounts:             " << account_count
+                  << " (Σ balance = " << sum_account_balance << ")\n";
+        std::cout << "  stakes:               " << stake_count
+                  << " (Σ locked = " << sum_stake_locked << ")\n";
+        std::cout << "  live_total:           " << live_total << "\n";
+        std::cout << "  ---- A1 counters (c: namespace) ----\n";
+        std::cout << "  genesis_total:        " << genesis_total << "\n";
+        std::cout << "  accumulated_subsidy:  " << accumulated_subsidy << "\n";
+        std::cout << "  accumulated_inbound:  " << accumulated_inbound << "\n";
+        std::cout << "  accumulated_slashed:  " << accumulated_slashed << "\n";
+        std::cout << "  accumulated_outbound: " << accumulated_outbound << "\n";
+        std::cout << "  expected_total:       " << expected_total
+                  << "  (genesis + subsidy + inbound - slashed - outbound)\n";
+        std::cout << "  ---- identity check (underflow-safe additive form) ----\n";
+        std::cout << "  lhs (live+slashed+outbound):       " << lhs_str << "\n";
+        std::cout << "  rhs (genesis+subsidy+inbound):     " << rhs_str << "\n";
+        std::cout << "  delta (rhs - lhs):                 " << delta_str << "\n";
+        if (balanced) {
+            std::cout << "  RESULT: balanced — A1 unitary supply identity holds\n";
+        } else {
+            std::cout << "  RESULT: VIOLATED — A1 unitary supply identity broken "
+                         "(supply not conserved)\n";
+        }
+    }
+
+    return balanced ? 0 : 2;
+}
+
 int cmd_diff_snapshots(int argc, char** argv) {
     std::string from_path, to_path;
     std::string group = "all";
@@ -19087,6 +19393,30 @@ void print_usage() {
         "                                             args/file-unreadable/subprocess error,\n"
         "                                             2 invalid snapshot OR expectation\n"
         "                                             mismatch.\n"
+        "  supply-audit --snapshot <file>             OFFLINE recompute of the A1 unitary-\n"
+        "               [--in <file>]                 supply balance identity from a snapshot\n"
+        "               [--json]                      JSON. Sums accounts[].balance +\n"
+        "                                             stakes[].locked (live_total) and the five\n"
+        "                                             c:-namespace counters, then checks the\n"
+        "                                             SAME identity the chain asserts after\n"
+        "                                             every block apply: live_total ==\n"
+        "                                             genesis_total + accumulated_subsidy +\n"
+        "                                             accumulated_inbound - accumulated_slashed\n"
+        "                                             - accumulated_outbound. The wallet does\n"
+        "                                             NOT link the chain lib (TCB separation),\n"
+        "                                             so the identity is replicated by direct\n"
+        "                                             JSON parsing, not Chain::expected_total().\n"
+        "                                             Comparison uses an underflow-safe all-\n"
+        "                                             additive rearrangement so a corrupt\n"
+        "                                             snapshot is reported VIOLATED rather than\n"
+        "                                             silently wrapping. --in is an alias for\n"
+        "                                             --snapshot. No RPC, no network. Output\n"
+        "                                             (JSON): {snapshot, block_index, balanced,\n"
+        "                                             live_total, expected_total, ...,\n"
+        "                                             exit_reason: balanced|violated|\n"
+        "                                             invalid_snapshot}. Exit 0 balanced, 1\n"
+        "                                             args/file/parse error, 2 identity\n"
+        "                                             VIOLATED.\n"
         "  param-change-build --name <P>              OFFLINE constructor for a canonical A5\n"
         "                     (--value <N> |          governance PARAM_CHANGE transaction body.\n"
         "                      --value-hex <hex>)      Assembles the PARAM_CHANGE payload + the\n"
@@ -19184,6 +19514,7 @@ int main(int argc, char** argv) {
     if (cmd == "account-balance-history") return cmd_account_balance_history(argc - 2, argv + 2);
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
+    if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
