@@ -5,6 +5,14 @@ Determ whose build + test is **sufficient on Minix 3** — i.e. no C++, no heavy
 external dependencies, only ISO C99 + POSIX/BSD sockets + vendored crypto, built
 with a plain `Makefile`.
 
+**Sequencing (decided 2026-06):** Ubuntu/Linux (WSL2) is the working build + CI
+environment for all development from here on. The C99 reimplementation lands against
+the frozen spec on Ubuntu first; **Minix bring-up + validation is deferred to after
+v3** — Minix is the eventual portability *proof*, not a day-one build constraint. The
+code is written to the C99 / no-heavy-deps discipline throughout (so Minix stays
+reachable), but "builds + tests on Minix" is verified as a post-v3 milestone, not
+gating earlier work.
+
 This is a **clean-room reimplementation guided by the existing spec**, *not* a port
 of the C++17 tree. The current implementation (`src/`, `wallet/`, `light/`) stays as
 the **reference oracle**: the C99 build is validated byte-for-byte against it at every
