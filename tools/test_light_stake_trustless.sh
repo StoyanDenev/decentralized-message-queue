@@ -41,6 +41,7 @@ TABS=$PROJECT_ROOT/$T
 declare -a NODE_PIDS
 
 cleanup() {
+  rc=$?
   for pid in "${NODE_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
   done
@@ -48,6 +49,10 @@ cleanup() {
   for pid in "${NODE_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
   done
+  # Preserve the script's real exit status — the kill -9 of an
+  # already-dead PID returns non-zero and would otherwise clobber a
+  # passing run's exit 0.
+  return $rc
 }
 trap cleanup EXIT INT
 
