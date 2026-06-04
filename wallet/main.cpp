@@ -17790,6 +17790,448 @@ int cmd_snapshot_verify(int argc, char** argv) {
     return exit_code;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// param-change-build --name <P> (--value <N> | --value-hex <hex>)
+//                    --effective-height <H> --nonce <N> --from <domain-or-addr>
+//                    [--fee <N>] [--out <file> | --allow-stdout] [--json]
+//
+// OFFLINE constructor for a canonical A5 governance PARAM_CHANGE transaction
+// body. Mirrors the tx-builder pattern of sign-anon-tx / validate-tx but for
+// the governance path: it assembles the PARAM_CHANGE payload + the chain's
+// canonical Transaction::signing_bytes (src/chain/block.cpp), computes the
+// tx hash = SHA-256(signing_bytes), and emits the UNSIGNED canonical tx JSON
+// (type=6 numeric, matching Transaction::to_json) ready for the keyholder
+// multisig to be appended out-of-band.
+//
+// Why "build" and not "sign": PARAM_CHANGE authentication is a K-of-K
+// multisig over the governance `param_keyholders` set (validator.cpp), NOT a
+// single from-key signature. The keyholders are typically distinct cold
+// signers; this tool produces the exact byte-preimage each keyholder must
+// sign (emitted as `keyholder_sig_message_hex`) plus the assembled tx body
+// with an empty (sig_count=0) signature vector and a 128-zero-hex tx-level
+// `sig` placeholder. Operators collect the keyholder sigs separately, splice
+// them into the payload (each = [keyholder_index:u16 LE][ed_sig:64B], with
+// sig_count incremented), and re-derive the hash before submit. Pure offline,
+// no RPC, no secret material consumed.
+//
+// PARAM_CHANGE payload wire format (canonical, per validator.cpp / block.hpp):
+//   [name_len: u8][name: utf8]
+//   [value_len: u16 LE][value: bytes]
+//   [effective_height: u64 LE]
+//   [sig_count: u8]                       (this tool emits 0)
+//   sig_count × { [keyholder_index: u16 LE][ed_sig: 64B] }
+//
+// Value encoding:
+//   --value <N>     decimal uint64 → 8-byte little-endian. This is the form
+//                   the chain's activate_pending_params expects for the
+//                   numeric on-chain params (MIN_STAKE, SUSPENSION_SLASH,
+//                   UNSTAKE_DELAY — each requires value.size()==8).
+//   --value-hex <h> raw bytes verbatim (for non-numeric params whose value
+//                   is interpreted by the Node-installed param_changed_hook,
+//                   e.g. param_keyholders). Mutually exclusive with --value.
+//
+// The whitelist is enforced up front (matches validator.cpp's kWhitelist) so
+// an operator can't build a tx the chain will reject on validate.
+//
+// Exit codes:
+//   0  built OK
+//   1  args / validation error
+//   2  (reserved for crypto failure; none on this path — kept for parity)
+int cmd_param_change_build(int argc, char** argv) {
+    std::string name, value_dec, value_hex, from_str, out_path;
+    int64_t  eff_height = -1;
+    int64_t  nonce      = -1;
+    int64_t  fee        = 0;
+    bool     have_eff   = false, have_nonce = false;
+    bool     have_value_dec = false, have_value_hex = false;
+    bool     allow_stdout = false;
+    bool     json_out     = false;  // accepted for parity; output is always JSON
+
+    auto parse_u64 = [&](const char* flag, const std::string& v,
+                         int64_t& dst, bool& flag_set) -> bool {
+        try {
+            size_t pos = 0;
+            long long n = std::stoll(v, &pos);
+            if (pos != v.size()) throw std::invalid_argument("trailing chars");
+            if (n < 0) {
+                std::cerr << "param-change-build: " << flag
+                          << " must be non-negative; got " << v << "\n";
+                return false;
+            }
+            dst = n;
+            flag_set = true;
+            return true;
+        } catch (std::exception&) {
+            std::cerr << "param-change-build: " << flag
+                      << " must be a non-negative integer; got '" << v << "'\n";
+            return false;
+        }
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--name"  && i + 1 < argc) name     = argv[++i];
+        else if (a == "--value" && i + 1 < argc) { value_dec = argv[++i]; have_value_dec = true; }
+        else if (a == "--value-hex" && i + 1 < argc) { value_hex = argv[++i]; have_value_hex = true; }
+        else if (a == "--effective-height" && i + 1 < argc) {
+            bool tmp = false;
+            if (!parse_u64("--effective-height", argv[++i], eff_height, tmp)) return 1;
+            have_eff = true;
+        }
+        else if (a == "--nonce" && i + 1 < argc) {
+            if (!parse_u64("--nonce", argv[++i], nonce, have_nonce)) return 1;
+        }
+        else if (a == "--fee" && i + 1 < argc) {
+            bool tmp = false;
+            if (!parse_u64("--fee", argv[++i], fee, tmp)) return 1;
+        }
+        else if (a == "--from" && i + 1 < argc) from_str = argv[++i];
+        else if (a == "--out"  && i + 1 < argc) out_path = argv[++i];
+        else if (a == "--allow-stdout")         allow_stdout = true;
+        else if (a == "--json")                 json_out     = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet param-change-build --name <P>\n"
+                "                                        (--value <N> | --value-hex <hex>)\n"
+                "                                        --effective-height <H>\n"
+                "                                        --nonce <N> --from <domain-or-addr>\n"
+                "                                        [--fee <N>]\n"
+                "                                        [--out <file> | --allow-stdout]\n"
+                "                                        [--json]\n"
+                "\n"
+                "  OFFLINE constructor for a canonical A5 governance\n"
+                "  PARAM_CHANGE transaction body. Assembles the PARAM_CHANGE\n"
+                "  payload + the chain's canonical signing_bytes (per\n"
+                "  src/chain/block.cpp Transaction::signing_bytes), computes\n"
+                "  tx_hash = SHA-256(signing_bytes), and emits the UNSIGNED\n"
+                "  canonical tx JSON (numeric type=6, matching\n"
+                "  Transaction::to_json). No network, no RPC, no secret\n"
+                "  material consumed.\n"
+                "\n"
+                "  PARAM_CHANGE auth is a K-of-K multisig over the governance\n"
+                "  `param_keyholders` set (NOT a single from-key signature),\n"
+                "  so this tool BUILDS the body and emits the exact byte\n"
+                "  preimage each keyholder must sign (keyholder_sig_message_hex)\n"
+                "  with an empty (sig_count=0) signature vector. Operators\n"
+                "  collect keyholder sigs out-of-band, splice them into the\n"
+                "  payload, and re-derive the hash before submit.\n"
+                "\n"
+                "  --name <P>            REQUIRED. Governance parameter name.\n"
+                "                        Must be on the on-chain whitelist:\n"
+                "                          tx_commit_ms, block_sig_ms,\n"
+                "                          abort_claim_ms, bft_escalation_threshold,\n"
+                "                          SUSPENSION_SLASH, MIN_STAKE, UNSTAKE_DELAY,\n"
+                "                          param_keyholders, param_threshold.\n"
+                "  --value <N>           Decimal uint64; encoded as 8-byte LE.\n"
+                "                        Use this for the numeric on-chain params\n"
+                "                        (MIN_STAKE / SUSPENSION_SLASH / UNSTAKE_DELAY\n"
+                "                        each require an 8-byte value on the chain).\n"
+                "  --value-hex <hex>     Raw value bytes verbatim (even hex len);\n"
+                "                        for non-numeric params interpreted by the\n"
+                "                        Node hook. Mutually exclusive with --value.\n"
+                "  --effective-height H  REQUIRED. Block height at which the change\n"
+                "                        activates (u64 LE in the payload).\n"
+                "  --nonce <N>           REQUIRED. Sender nonce.\n"
+                "  --from <domain-or-addr> REQUIRED. Sender identity (the fee\n"
+                "                        payer). Anon-shape (0x+64-hex) must be\n"
+                "                        canonical lowercase (S-028); domain names\n"
+                "                        pass through verbatim.\n"
+                "  --fee <N>             Optional sender fee (default 0).\n"
+                "  --out <file>          Write the tx JSON to file (0600; refuses\n"
+                "                        overwrite). Default: refuses stdout unless\n"
+                "                        --allow-stdout (mirrors sign-anon-tx — the\n"
+                "                        body is non-secret here, but the default\n"
+                "                        keeps tx artifacts off the terminal).\n"
+                "  --allow-stdout        Emit the tx JSON on stdout.\n"
+                "  --json                Accepted for parity; output is always JSON.\n"
+                "\n"
+                "  Output (one-line JSON):\n"
+                "    {\"type\":6,\"type_name\":\"PARAM_CHANGE\",\"from\":\"...\",\n"
+                "     \"to\":\"\",\"amount\":0,\"fee\":N,\"nonce\":N,\n"
+                "     \"payload\":\"<hex>\",\"sig\":\"<128 zero-hex>\",\n"
+                "     \"hash\":\"<64 hex>\",\"param_name\":\"...\",\n"
+                "     \"value_hex\":\"<hex>\",\"effective_height\":H,\n"
+                "     \"sig_count\":0,\"keyholder_sig_message_hex\":\"<hex>\"}\n"
+                "\n"
+                "  Exit codes: 0 built, 1 args / validation error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "param-change-build: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet param-change-build --name <P> "
+                         "(--value <N> | --value-hex <hex>) --effective-height <H> "
+                         "--nonce <N> --from <domain-or-addr> [--fee <N>] "
+                         "(--out <file> | --allow-stdout) [--json]\n";
+            return 1;
+        }
+    }
+    (void)json_out;
+
+    // ── Required-flag presence ────────────────────────────────────────────
+    if (name.empty() || from_str.empty() || !have_eff || !have_nonce) {
+        std::cerr << "Usage: determ-wallet param-change-build --name <P> "
+                     "(--value <N> | --value-hex <hex>) --effective-height <H> "
+                     "--nonce <N> --from <domain-or-addr> [--fee <N>] "
+                     "(--out <file> | --allow-stdout) [--json]\n";
+        std::cerr << "  (--name / --effective-height / --nonce / --from are "
+                     "required)\n";
+        return 1;
+    }
+    if (have_value_dec && have_value_hex) {
+        std::cerr << "param-change-build: --value and --value-hex are mutually "
+                     "exclusive\n";
+        return 1;
+    }
+    if (!have_value_dec && !have_value_hex) {
+        std::cerr << "param-change-build: one of --value <N> or --value-hex "
+                     "<hex> is required\n";
+        return 1;
+    }
+    if (out_path.empty() && !allow_stdout) {
+        std::cerr << "param-change-build: --out is required unless --allow-stdout "
+                     "is supplied (refusing to write the tx artifact to stdout by "
+                     "default; pass --allow-stdout to override)\n";
+        return 1;
+    }
+
+    // ── Whitelist enforcement (matches validator.cpp kWhitelist) ──────────
+    // Build the tx the chain will actually accept — reject off-list names
+    // here rather than producing a tx that fails on validate.
+    static const std::set<std::string> kWhitelist = {
+        "tx_commit_ms", "block_sig_ms", "abort_claim_ms",
+        "bft_escalation_threshold", "SUSPENSION_SLASH",
+        "MIN_STAKE", "UNSTAKE_DELAY",
+        "param_keyholders", "param_threshold",
+    };
+    if (kWhitelist.find(name) == kWhitelist.end()) {
+        std::cerr << "param-change-build: parameter '" << name
+                  << "' is not on the governance whitelist\n"
+                     "  (allowed: tx_commit_ms, block_sig_ms, abort_claim_ms, "
+                     "bft_escalation_threshold, SUSPENSION_SLASH, MIN_STAKE, "
+                     "UNSTAKE_DELAY, param_keyholders, param_threshold)\n";
+        return 1;
+    }
+    // name_len is a u8 — names are short whitelist entries, but guard anyway.
+    if (name.size() > 255) {
+        std::cerr << "param-change-build: --name too long (max 255 bytes)\n";
+        return 1;
+    }
+
+    // ── S-028: anon-shape --from must be canonical lowercase ──────────────
+    // Same convention as sign-anon-tx — domain names pass through verbatim,
+    // only "0x"+64-hex shapes are case-checked. The hash binds the exact
+    // `from` string, so silently mutating it would produce a tx the operator
+    // can't reproduce from their own records.
+    auto is_anon_shape = [](const std::string& s) -> bool {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto is_canonical_anon = [&](const std::string& s) -> bool {
+        if (!is_anon_shape(s)) return false;
+        for (size_t i = 2; i < s.size(); ++i) {
+            char c = s[i];
+            if (c >= 'A' && c <= 'F') return false;
+        }
+        return true;
+    };
+    if (is_anon_shape(from_str) && !is_canonical_anon(from_str)) {
+        std::cerr << "param-change-build: --from is anon-shape but not canonical "
+                     "lowercase (S-028); got '" << from_str << "'\n"
+                     "  (pass the lowercase form — the chain rejects non-canonical "
+                     "anon addresses)\n";
+        return 1;
+    }
+
+    // ── Resolve the value bytes ───────────────────────────────────────────
+    std::vector<uint8_t> value;
+    if (have_value_dec) {
+        // Decimal uint64 → 8-byte little-endian (the on-chain numeric form).
+        uint64_t v = 0;
+        try {
+            size_t pos = 0;
+            unsigned long long parsed = std::stoull(value_dec, &pos);
+            if (pos != value_dec.size())
+                throw std::invalid_argument("trailing chars");
+            v = static_cast<uint64_t>(parsed);
+        } catch (std::exception&) {
+            std::cerr << "param-change-build: --value must be a non-negative "
+                         "uint64; got '" << value_dec << "'\n";
+            return 1;
+        }
+        value.resize(8);
+        for (int i = 0; i < 8; ++i)
+            value[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
+    } else {
+        // Raw hex bytes verbatim.
+        try { value = from_hex(value_hex); }
+        catch (std::exception& e) {
+            std::cerr << "param-change-build: --value-hex is not valid hex: "
+                      << e.what() << "\n";
+            return 1;
+        }
+    }
+    // value_len is a u16 LE in the payload — cap accordingly.
+    if (value.size() > 0xFFFF) {
+        std::cerr << "param-change-build: value too long (max 65535 bytes)\n";
+        return 1;
+    }
+
+    const uint64_t eff_u   = static_cast<uint64_t>(eff_height);
+    const uint64_t nonce_u = static_cast<uint64_t>(nonce);
+    const uint64_t fee_u   = static_cast<uint64_t>(fee);
+
+    // ── --out preconditions (mirror sign-anon-tx) ─────────────────────────
+    if (!out_path.empty()) {
+        std::filesystem::path p(out_path);
+        auto parent = p.parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent)) {
+            std::cerr << "param-change-build: --out parent directory does not "
+                         "exist: " << parent.string()
+                      << "\n  (operator must pre-create; no mkdirp)\n";
+            return 1;
+        }
+        if (std::filesystem::exists(p)) {
+            std::cerr << "param-change-build: --out file already exists: "
+                      << out_path
+                      << "\n  (refusing to overwrite; remove the existing file "
+                         "to rebuild)\n";
+            return 1;
+        }
+    }
+
+    // ── Assemble the PARAM_CHANGE payload ─────────────────────────────────
+    //   [name_len:u8][name][value_len:u16 LE][value]
+    //   [effective_height:u64 LE][sig_count:u8 = 0]
+    const uint16_t vlen = static_cast<uint16_t>(value.size());
+    std::vector<uint8_t> payload;
+    payload.reserve(1 + name.size() + 2 + value.size() + 8 + 1);
+    payload.push_back(static_cast<uint8_t>(name.size()));
+    payload.insert(payload.end(), name.begin(), name.end());
+    payload.push_back(static_cast<uint8_t>(vlen & 0xFF));
+    payload.push_back(static_cast<uint8_t>((vlen >> 8) & 0xFF));
+    payload.insert(payload.end(), value.begin(), value.end());
+    for (int i = 0; i < 8; ++i)
+        payload.push_back(static_cast<uint8_t>((eff_u >> (8 * i)) & 0xFF));
+    payload.push_back(0);  // sig_count = 0 (keyholder sigs appended later)
+
+    // ── Canonical keyholder sig-message (the preimage each keyholder signs).
+    //    Per validator.cpp: [name_len:u8][name][value_len:u16 LE][value]
+    //    [effective_height:u64 LE] — i.e. the payload header WITHOUT the
+    //    sig_count/sig tail. Emit as an operator aid.
+    std::vector<uint8_t> sig_msg;
+    sig_msg.reserve(1 + name.size() + 2 + value.size() + 8);
+    sig_msg.push_back(static_cast<uint8_t>(name.size()));
+    sig_msg.insert(sig_msg.end(), name.begin(), name.end());
+    sig_msg.push_back(static_cast<uint8_t>(vlen & 0xFF));
+    sig_msg.push_back(static_cast<uint8_t>((vlen >> 8) & 0xFF));
+    sig_msg.insert(sig_msg.end(), value.begin(), value.end());
+    for (int i = 0; i < 8; ++i)
+        sig_msg.push_back(static_cast<uint8_t>((eff_u >> (8 * i)) & 0xFF));
+
+    // ── Canonical Transaction::signing_bytes (src/chain/block.cpp) ────────
+    //   u8(type=PARAM_CHANGE=6)
+    //   from || 0x00
+    //   to   || 0x00              (to is empty for governance txs)
+    //   u64_be(amount=0)
+    //   u64_be(fee)
+    //   u64_be(nonce)
+    //   payload bytes
+    const std::string to_str;  // PARAM_CHANGE carries no recipient
+    std::vector<uint8_t> sb;
+    sb.reserve(1 + from_str.size() + 1 + to_str.size() + 1 + 24 + payload.size());
+    sb.push_back(static_cast<uint8_t>(6));  // TxType::PARAM_CHANGE == 6
+    sb.insert(sb.end(), from_str.begin(), from_str.end());
+    sb.push_back(0);
+    sb.insert(sb.end(), to_str.begin(), to_str.end());
+    sb.push_back(0);
+    for (int i = 7; i >= 0; --i) sb.push_back((uint64_t{0} >> (i * 8)) & 0xFF);  // amount
+    for (int i = 7; i >= 0; --i) sb.push_back((fee_u    >> (i * 8)) & 0xFF);
+    for (int i = 7; i >= 0; --i) sb.push_back((nonce_u  >> (i * 8)) & 0xFF);
+    sb.insert(sb.end(), payload.begin(), payload.end());
+
+    // tx_hash = SHA-256(signing_bytes) — matches Transaction::compute_hash.
+    std::array<uint8_t, 32> sb_sha{};
+    SHA256(sb.data(), sb.size(), sb_sha.data());
+
+    // ── Build the unsigned canonical tx JSON ──────────────────────────────
+    // numeric type=6 + field name "sig" (128 zero-hex placeholder) so the
+    // envelope round-trips through chain Transaction::from_json once the
+    // keyholder sigs are spliced into the payload and the hash re-derived.
+    nlohmann::json tx_doc = {
+        {"type",             6},
+        {"type_name",        "PARAM_CHANGE"},
+        {"from",             from_str},
+        {"to",               to_str},
+        {"amount",           0},
+        {"fee",              fee_u},
+        {"nonce",            nonce_u},
+        {"payload",          to_hex(payload)},
+        {"sig",              std::string(128, '0')},
+        {"hash",             to_hex(sb_sha)},
+        // Decoded-field echo + operator aids:
+        {"param_name",                 name},
+        {"value_hex",                  to_hex(value)},
+        {"effective_height",           eff_u},
+        {"sig_count",                  0},
+        {"keyholder_sig_message_hex",  to_hex(sig_msg)},
+    };
+
+    std::string tx_text = tx_doc.dump();
+
+    if (out_path.empty()) {
+        // --allow-stdout: tx JSON on stdout, status on stderr (same stream
+        // discipline as sign-anon-tx so pipes get a clean envelope).
+        std::cout << tx_text << "\n";
+        nlohmann::json status = {
+            {"status",      "ok"},
+            {"tx_hash_hex", to_hex(sb_sha)},
+            {"out",         "<stdout>"},
+        };
+        std::cerr << status.dump() << "\n";
+        return 0;
+    }
+
+    {
+        std::ofstream of(out_path);
+        if (!of) {
+            std::cerr << "param-change-build: cannot open --out for write: "
+                      << out_path << "\n";
+            return 1;
+        }
+        of << tx_text << "\n";
+        if (!of) {
+            std::cerr << "param-change-build: write failed on --out: "
+                      << out_path << "\n";
+            return 1;
+        }
+    }
+    // 0600 — owner-only. POSIX semantic; Windows no-op (same convention as
+    // every other file-emitting wallet command).
+    std::error_code perm_ec;
+    std::filesystem::permissions(
+        out_path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace,
+        perm_ec);
+    (void)perm_ec;
+
+    nlohmann::json status = {
+        {"status",      "ok"},
+        {"tx_hash_hex", to_hex(sb_sha)},
+        {"out",         out_path},
+    };
+    std::cout << status.dump() << "\n";
+    return 0;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -18645,6 +19087,33 @@ void print_usage() {
         "                                             args/file-unreadable/subprocess error,\n"
         "                                             2 invalid snapshot OR expectation\n"
         "                                             mismatch.\n"
+        "  param-change-build --name <P>              OFFLINE constructor for a canonical A5\n"
+        "                     (--value <N> |          governance PARAM_CHANGE transaction body.\n"
+        "                      --value-hex <hex>)      Assembles the PARAM_CHANGE payload + the\n"
+        "                     --effective-height <H>   chain's canonical signing_bytes (per\n"
+        "                     --nonce <N>              src/chain/block.cpp), computes tx_hash =\n"
+        "                     --from <domain-or-addr>  SHA-256(signing_bytes), and emits the\n"
+        "                     [--fee <N>]              UNSIGNED canonical tx JSON (numeric\n"
+        "                     [--out <file> |          type=6, matching Transaction::to_json).\n"
+        "                      --allow-stdout]         PARAM_CHANGE auth is a K-of-K multisig\n"
+        "                     [--json]                 over the governance param_keyholders set\n"
+        "                                             (NOT a single from-key sig), so this tool\n"
+        "                                             BUILDS the body with an empty (sig_count=0)\n"
+        "                                             signature vector + a 128-zero-hex tx-level\n"
+        "                                             `sig` placeholder, and emits the exact\n"
+        "                                             keyholder_sig_message_hex preimage each\n"
+        "                                             keyholder must sign out-of-band. --name is\n"
+        "                                             whitelist-checked (tx_commit_ms,\n"
+        "                                             block_sig_ms, abort_claim_ms,\n"
+        "                                             bft_escalation_threshold, SUSPENSION_SLASH,\n"
+        "                                             MIN_STAKE, UNSTAKE_DELAY, param_keyholders,\n"
+        "                                             param_threshold). --value <N> encodes a\n"
+        "                                             decimal uint64 as 8-byte LE (the on-chain\n"
+        "                                             numeric form); --value-hex takes raw bytes.\n"
+        "                                             Anon-shape --from must be canonical\n"
+        "                                             lowercase (S-028). No network, no RPC, no\n"
+        "                                             secret material. Exit 0 built, 1 args/\n"
+        "                                             validation error.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -18715,6 +19184,7 @@ int main(int argc, char** argv) {
     if (cmd == "account-balance-history") return cmd_account_balance_history(argc - 2, argv + 2);
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
+    if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
