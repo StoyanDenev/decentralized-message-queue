@@ -69,6 +69,17 @@
 set -u
 cd "$(dirname "$0")/.."
 
+# Daemon hygiene: reap any stray determ-family daemons before the suite.
+# Cluster tests boot determ.exe nodes; their per-PID kill traps are
+# unreliable on Windows/Git-Bash (wrong PID captured, trap skipped on
+# timeout/interrupt), so leaked nodes can accumulate across runs, peg the
+# CPU, and lock build-output binaries. Reaping by image name gives a clean
+# slate. No-op if none are running; never fails the suite. Opt out with
+# REAP_DAEMONS=0 (e.g. if you intentionally run a daemon alongside the suite).
+if [ "${REAP_DAEMONS:-1}" = "1" ]; then
+    bash "$(dirname "$0")/reap_daemons.sh" 2>/dev/null || true
+fi
+
 # Verify binaries are findable before iterating (saves running 49
 # tests just to see them all fail on the same missing binary).
 source tools/common.sh
