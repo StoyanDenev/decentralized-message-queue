@@ -19812,36 +19812,42 @@ int main(int argc, char** argv) {
         }
 
         // ── 4. Staging is INSERTION-ORDER-INDEPENDENT across DISTINCT
-        //    (height, name) keys: two chains that stage the same four
-        //    entries in opposite orders produce an identical
-        //    pending_param_changes map, identical serialized snapshot,
-        //    and identical state_root. (The std::map sorts by height; the
-        //    per-name buckets here have distinct names, so the only
-        //    repeated key — MIN_STAKE — lands in different height buckets
-        //    and can't collide.)
+        //    height buckets. pending_param_changes_ is a
+        //    std::map<height, vector<(name,value)>>: the map canonically
+        //    sorts by effective_height, so staging the height-500 entry
+        //    before vs. after the height-1000 bucket yields the same map,
+        //    snapshot, and state_root.
+        //    NOTE: within a SINGLE height the bucket is an insertion-ordered
+        //    vector, so same-height order is NOT order-independent and is
+        //    deliberately not asserted here — in consensus that order is
+        //    fixed by block tx order, identical on every honest node (see
+        //    ParamChangeDeterminism.md PC-1: same multiset + apply-order).
+        //    Both chains therefore stage the three height-1000 entries in
+        //    the SAME relative order; only the cross-height order differs.
         {
             Chain c1; c1.append(make_genesis_block(cfg));
             Chain c2; c2.append(make_genesis_block(cfg));
-            // c1: forward fixture order.
+            // c1: the height-1000 bucket first, then the height-500 entry.
             c1.stage_param_change(1000, "MIN_STAKE",        le8(7777));
             c1.stage_param_change(1000, "SUSPENSION_SLASH", le8(42));
             c1.stage_param_change(1000, "UNSTAKE_DELAY",    le8(333));
             c1.stage_param_change(500,  "MIN_STAKE",        le8(4096));
-            // c2: reversed across heights (500 entry first, 1000 bucket
-            // in reverse name order).
+            // c2: the height-500 entry FIRST, then the same height-1000
+            // bucket in the SAME relative order — only the cross-height
+            // staging order differs, which the std::map canonicalizes away.
             c2.stage_param_change(500,  "MIN_STAKE",        le8(4096));
-            c2.stage_param_change(1000, "UNSTAKE_DELAY",    le8(333));
-            c2.stage_param_change(1000, "SUSPENSION_SLASH", le8(42));
             c2.stage_param_change(1000, "MIN_STAKE",        le8(7777));
+            c2.stage_param_change(1000, "SUSPENSION_SLASH", le8(42));
+            c2.stage_param_change(1000, "UNSTAKE_DELAY",    le8(333));
 
             check(c1.pending_param_changes() == c2.pending_param_changes(),
-                  "(4) distinct-key staging order-independent: identical "
+                  "(4) cross-height staging order-independent: identical "
                   "pending_param_changes map");
             check(c1.serialize_state(16) == c2.serialize_state(16),
-                  "(4) distinct-key staging order-independent: identical "
+                  "(4) cross-height staging order-independent: identical "
                   "serialized snapshot (byte-equal)");
             check(c1.compute_state_root() == c2.compute_state_root(),
-                  "(4) distinct-key staging order-independent: identical "
+                  "(4) cross-height staging order-independent: identical "
                   "state_root");
         }
 
