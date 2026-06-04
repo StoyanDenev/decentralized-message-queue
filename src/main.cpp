@@ -635,6 +635,11 @@ Additional in-process tests:
                                               lifecycle (subsidy mint, TRANSFER,
                                               STAKE, slash, DEREGISTER, UNSTAKE)
                                               + identity formula
+  determ test-supply-invariant-fuzz           A1 unitary-supply identity stress —
+                                              deterministic counter-seeded random
+                                              TRANSFER/STAKE/UNSTAKE blocks + fees
+                                              + subsidy, asserts A1 after each, then
+                                              snapshot→restore mid-sequence survives
   determ test-dapp-state-transition           DApp registry lifecycle —
                                               register (op=0) → update → deactivate
                                               (op=1 deferred via grace window)
@@ -20782,6 +20787,345 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": supply-lifecycle " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // A1 unitary-supply identity FUZZER. test-supply-lifecycle walks one
+    // hand-scripted interleaving; this one stress-tests the SAME invariant
+    //   genesis_total + accumulated_subsidy + accumulated_inbound
+    //     - accumulated_slashed - accumulated_outbound == live_total_supply
+    // (i.e. Chain::expected_total() == Chain::live_total_supply()) across a
+    // long, deterministic pseudo-random sequence of valid TRANSFER / STAKE /
+    // UNSTAKE blocks, each carrying a fee and minting block subsidy. The PRNG
+    // is a self-contained SplitMix64 driven by a counter (fixed in-code seed,
+    // NO std::random_device / time / Math.random) so the run is byte-for-byte
+    // reproducible. After EVERY applied block we re-assert A1 (the apply path
+    // also throws on violation; the explicit check here gives a PASS line and
+    // a clean per-block failure point). Mid-sequence we snapshot via
+    // serialize_state, restore via restore_from_snapshot, and assert the five
+    // A1 counters + live supply survive the round-trip exactly AND that the
+    // restored chain still satisfies the invariant — the uncovered angle vs.
+    // test-supply-lifecycle (no fuzz, no snapshot) and test-cross-shard-
+    // supply-invariant (scripted, cross-shard) and test-snapshot-roundtrip
+    // (single TRANSFER, no fuzz loop).
+    //
+    // Block-authoring model: ONE stable creator ("alice") authors EVERY
+    // block, so the subsidy + fee always has a same-shard payee and the
+    // committee never empties. The fuzz SUBJECTS are "bob" and "carol".
+    // A genuine stake→balance UNSTAKE requires a finite unlock_height, which
+    // (per chain.cpp) only DEREGISTER sets — a never-deregistered staker's
+    // unlock_height is UINT64_MAX and UNSTAKE just refunds the fee. So we
+    // weave a real DEREGISTER(bob) → advance-past-unlock → UNSTAKE(bob)
+    // sub-sequence after the random TRANSFER/STAKE loop, mirroring how
+    // test-supply-lifecycle reaches a live UNSTAKE. A1 is asserted after
+    // every block across all three phases.
+    if (cmd == "test-supply-invariant-fuzz") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // --- Deterministic counter-seeded PRNG (SplitMix64). ----------------
+        // Fixed seed; advanced by an explicit counter. Reproducible forever.
+        // No std::random / random_device / time — pure arithmetic on a u64.
+        uint64_t rng_state = 0x9E3779B97F4A7C15ULL;  // golden-ratio seed
+        auto next_rand = [&]() -> uint64_t {
+            rng_state += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = rng_state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
+        };
+        auto rand_in = [&](uint64_t lo, uint64_t hi) -> uint64_t {
+            // inclusive [lo, hi]; callers guarantee hi >= lo.
+            return lo + (next_rand() % (hi - lo + 1));
+        };
+
+        // little-endian u64 amount payload (STAKE / UNSTAKE encoding), same
+        // as test-supply-lifecycle's encode_amount.
+        auto encode_amount = [](uint64_t amount) {
+            std::vector<uint8_t> p(8);
+            for (int i = 0; i < 8; ++i)
+                p[i] = uint8_t((amount >> (8 * i)) & 0xff);
+            return p;
+        };
+
+        // --- Genesis fixture: alice authors every block; bob + carol are the
+        // fuzz subjects (each funded with a balance + a stake so STAKE and
+        // UNSTAKE both have room to move value).
+        GenesisConfig cfg;
+        cfg.chain_id = "supply-invariant-fuzz-test";
+        std::vector<std::string> who = {"alice", "bob", "carol"};
+        std::vector<uint64_t> gen_bal   = {5000, 3000, 2000};
+        std::vector<uint64_t> gen_stake = {2000, 1000,  500};
+        for (size_t i = 0; i < who.size(); ++i) {
+            GenesisCreator gc;
+            gc.domain = who[i];
+            for (size_t j = 0; j < gc.ed_pub.size(); ++j)
+                gc.ed_pub[j] = uint8_t(0x10 * (i + 1) + j);
+            gc.initial_stake = gen_stake[i];
+            cfg.initial_creators.push_back(gc);
+            GenesisAllocation ga;
+            ga.domain = who[i]; ga.balance = gen_bal[i];
+            cfg.initial_balances.push_back(ga);
+        }
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        c.set_block_subsidy(50);   // mint per block
+        c.set_unstake_delay(1);    // short post-DEREGISTER unlock delay
+        c.set_min_stake(1);        // permit small STAKE deltas in the fuzz loop
+
+        const uint64_t kGenesisTotal =
+            5000 + 3000 + 2000 + 2000 + 1000 + 500; // 13500
+        check(c.genesis_total() == kGenesisTotal,
+              "setup: genesis_total == Σ(balances + stakes) == 13500");
+        check(c.expected_total() == c.live_total_supply(),
+              "A1: invariant holds at genesis baseline");
+
+        // per-domain monotonic nonce tracker (apply requires strictly
+        // increasing nonces per sender).
+        std::map<std::string, uint64_t> nonce;
+        for (auto& w : who) nonce[w] = 0;
+
+        // Re-usable per-block assertion. Builds an alice-authored block,
+        // applies it, and asserts A1 holds afterward. Returns false (and
+        // bumps fail) on apply throw or invariant violation so callers can
+        // stop the run early. `fill` populates the block body.
+        int n_transfer = 0, n_stake = 0, n_unstake = 0, n_empty = 0;
+        auto apply_block = [&](const std::function<void(Block&)>& fill,
+                               const char* where) -> bool {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.timestamp = c.height();          // strictly increasing
+            b.creators = {"alice"};            // stable sole author
+            // varied cumulative_rand so any DEREGISTER delay derivation is
+            // well-defined; harmless for the other tx kinds.
+            for (size_t i = 0; i < b.cumulative_rand.size(); ++i)
+                b.cumulative_rand[i] = uint8_t(next_rand() & 0xff);
+            fill(b);
+            try {
+                c.append(b);
+            } catch (const std::exception& e) {
+                std::cout << "  FAIL: apply threw at " << where
+                          << " (block " << b.index << "): " << e.what() << "\n";
+                fail++;
+                return false;
+            }
+            if (c.expected_total() != c.live_total_supply()) {
+                std::cout << "  FAIL: A1 violated at " << where
+                          << " (block " << b.index
+                          << ") expected=" << c.expected_total()
+                          << " live=" << c.live_total_supply() << "\n";
+                fail++;
+                return false;
+            }
+            return true;
+        };
+
+        // --- Phase 1: randomized TRANSFER / STAKE loop over bob + carol. ---
+        // Mid-loop we capture a snapshot for the round-trip test.
+        const int kBlocks = 64;
+        const int mid_block = kBlocks / 2;
+        json mid_snapshot;
+        uint64_t mid_expected = 0, mid_live = 0;
+        uint64_t mid_gen = 0, mid_sub = 0, mid_slash = 0, mid_in = 0, mid_out = 0;
+        bool snapshot_taken = false;
+        bool aborted = false;
+
+        std::vector<std::string> subjects = {"bob", "carol"};
+        for (int blk = 0; blk < kBlocks && !aborted; ++blk) {
+            const std::string& sub = subjects[next_rand() % subjects.size()];
+            const std::string& dst = (sub == "bob") ? "carol" : "bob";
+            uint64_t sbal = c.balance(sub);
+            uint64_t sstk = c.stake(sub);
+            bool do_stake = (next_rand() & 1) != 0;
+
+            bool ok = apply_block([&](Block& b) {
+                uint64_t fee = (sbal > 8) ? rand_in(1, 3) : 0;
+                if (sbal <= fee + 1) { n_empty++; return; }  // subsidy-only block
+                uint64_t amount = rand_in(1, sbal - fee - 1);
+                Transaction tx;
+                tx.from = sub; tx.fee = fee; tx.nonce = nonce[sub]++;
+                if (do_stake) {
+                    tx.type = TxType::STAKE;
+                    tx.payload = encode_amount(amount);
+                    n_stake++;
+                } else {
+                    tx.type = TxType::TRANSFER;
+                    tx.to = dst; tx.amount = amount;
+                    n_transfer++;
+                }
+                b.transactions.push_back(tx);
+            }, "phase1");
+            if (!ok) { aborted = true; break; }
+            (void)sstk;
+
+            if (blk == mid_block && !snapshot_taken) {
+                mid_snapshot = c.serialize_state(16);
+                mid_expected = c.expected_total();
+                mid_live     = c.live_total_supply();
+                mid_gen   = c.genesis_total();
+                mid_sub   = c.accumulated_subsidy();
+                mid_slash = c.accumulated_slashed();
+                mid_in    = c.accumulated_inbound();
+                mid_out   = c.accumulated_outbound();
+                snapshot_taken = true;
+            }
+        }
+
+        check(!aborted,
+              "phase1: A1 held after every randomized TRANSFER/STAKE block");
+        check(snapshot_taken,
+              "phase1: mid-sequence snapshot captured");
+        check(n_transfer > 0 && n_stake > 0,
+              "phase1 coverage: both TRANSFER and STAKE exercised");
+
+        // --- Phase 2: genuine stake→balance UNSTAKE for bob. ---
+        // DEREGISTER(bob) → advance past the derived unlock_height (alice
+        // authors the advance blocks) → UNSTAKE(bob). This is the only path
+        // that makes UNSTAKE actually move value (vs. a fee-refund no-op).
+        uint64_t bob_stake_before_unstake = 0;
+        uint64_t bob_bal_before_unstake = 0;
+        uint64_t unstake_amount = 0;
+        if (!aborted) {
+            // DEREGISTER bob. fee=0 so charge_fee always succeeds regardless
+            // of how phase 1 left bob's balance (a skipped DEREGISTER would
+            // leave unlock_height at UINT64_MAX and block the UNSTAKE below).
+            bool ok = apply_block([&](Block& b) {
+                Transaction tx;
+                tx.type = TxType::DEREGISTER;
+                tx.from = "bob"; tx.fee = 0; tx.nonce = nonce["bob"]++;
+                b.transactions.push_back(tx);
+            }, "phase2/deregister");
+            aborted = !ok;
+        }
+        if (!aborted) {
+            uint64_t unlock_at = c.stake_unlock_height("bob");
+            check(unlock_at != UINT64_MAX,
+                  "phase2: DEREGISTER set a finite unlock_height for bob");
+            // Advance (alice-authored, subsidy-only) until height > unlock_at.
+            int guard = 0;
+            while (c.height() <= unlock_at && !aborted && guard < 4096) {
+                aborted = !apply_block([&](Block&) { n_empty++; },
+                                       "phase2/advance");
+                guard++;
+            }
+            check(c.height() > unlock_at,
+                  "phase2: advanced chain height past bob's unlock_height");
+        }
+        uint64_t unstake_fee = 0;
+        if (!aborted) {
+            bob_stake_before_unstake = c.stake("bob");
+            bob_bal_before_unstake   = c.balance("bob");
+            // UNSTAKE a strict sub-amount of bob's locked stake.
+            unstake_amount = bob_stake_before_unstake > 1
+                ? (bob_stake_before_unstake / 2) : bob_stake_before_unstake;
+            // Fee is paid from balance; charge 1 only if bob can afford it,
+            // else 0 (heavy phase-1 staking may have drained bob's balance).
+            // A fee bob can't cover would make charge_fee skip the UNSTAKE,
+            // leaving the stake unmoved — so we keep the fee coverable.
+            unstake_fee = (bob_bal_before_unstake >= 1) ? 1 : 0;
+            check(bob_stake_before_unstake > 0 && unstake_amount > 0,
+                  "phase2: bob has locked stake available to UNSTAKE");
+            bool ok = apply_block([&](Block& b) {
+                Transaction tx;
+                tx.type = TxType::UNSTAKE;
+                tx.from = "bob"; tx.fee = unstake_fee; tx.nonce = nonce["bob"]++;
+                tx.payload = encode_amount(unstake_amount);
+                b.transactions.push_back(tx);
+                n_unstake++;
+            }, "phase2/unstake");
+            aborted = !ok;
+        }
+        if (!aborted) {
+            // The UNSTAKE genuinely moved stake→balance (value-conserving):
+            // locked dropped by exactly `unstake_amount`; balance rose by
+            // `unstake_amount` minus the fee that was charged. alice (not
+            // bob) is the block creator, so bob's fee is NOT refunded back to
+            // bob — it leaves bob's balance and accrues to alice. Net A1 over
+            // the whole chain is still conserved (asserted via apply_block).
+            check(c.stake("bob") == bob_stake_before_unstake - unstake_amount,
+                  "phase2: UNSTAKE reduced bob.locked by exactly the amount");
+            check(c.balance("bob")
+                      == bob_bal_before_unstake + unstake_amount - unstake_fee,
+                  "phase2: UNSTAKE credited bob.balance by amount (minus the fee)");
+        }
+
+        check(n_unstake > 0,
+              "coverage: a genuine stake->balance UNSTAKE was applied");
+        check(c.accumulated_subsidy() > 0,
+              "fuzz: block subsidy minted across the run (accumulated_subsidy > 0)");
+        check(c.accumulated_inbound() == 0 && c.accumulated_outbound() == 0,
+              "fuzz: single-shard run — no inbound/outbound cross-shard value");
+        // No slashing was induced (no abort/equivocation events), so the
+        // slashed counter must be exactly zero — A1's negative terms stay 0.
+        check(c.accumulated_slashed() == 0,
+              "fuzz: no slashing induced — accumulated_slashed == 0");
+
+        // Explicit closed-form A1 identity on the final chain state.
+        {
+            uint64_t computed = c.genesis_total()
+                              + c.accumulated_subsidy()
+                              + c.accumulated_inbound()
+                              - c.accumulated_slashed()
+                              - c.accumulated_outbound();
+            check(computed == c.live_total_supply(),
+                  "A1 identity: genesis + subsidy + inbound - slashed - outbound == live (final)");
+        }
+
+        // === Phase 3: snapshot → restore round-trip survives the invariant. ===
+        if (snapshot_taken) {
+            Chain r = Chain::restore_from_snapshot(mid_snapshot);
+            // 1. Restored chain itself satisfies A1.
+            check(r.expected_total() == r.live_total_supply(),
+                  "round-trip: restored chain satisfies A1 (expected == live)");
+            // 2. Every A1 counter restored byte-exact to the snapshot point.
+            check(r.genesis_total()        == mid_gen
+                  && r.accumulated_subsidy()  == mid_sub
+                  && r.accumulated_slashed()  == mid_slash
+                  && r.accumulated_inbound()  == mid_in
+                  && r.accumulated_outbound() == mid_out,
+                  "round-trip: all 5 A1 counters preserved across snapshot/restore");
+            // 3. Live supply + expected_total reproduce the snapshot point.
+            check(r.live_total_supply() == mid_live
+                  && r.expected_total() == mid_expected,
+                  "round-trip: live_total_supply + expected_total match snapshot point");
+            // 4. The restored chain can keep applying and A1 still holds —
+            //    proves the restore left the supply-accounting state usable,
+            //    not merely readable. One alice-authored subsidy-only block.
+            {
+                Block b;
+                b.index = r.height();
+                b.prev_hash = r.head().compute_hash();
+                b.timestamp = r.height();
+                b.creators = {"alice"};
+                uint64_t pre = r.live_total_supply();
+                try {
+                    r.append(b);
+                    check(r.expected_total() == r.live_total_supply(),
+                          "round-trip: A1 still holds after applying a block post-restore");
+                    check(r.live_total_supply() == pre + 50,
+                          "round-trip: post-restore subsidy mint adds exactly 50 to supply");
+                } catch (const std::exception& e) {
+                    std::cout << "  FAIL: post-restore apply threw: "
+                              << e.what() << "\n";
+                    fail++;
+                }
+            }
+        }
+
+        std::cout << "\n  fuzz mix: " << n_transfer << " TRANSFER, "
+                  << n_stake << " STAKE, " << n_unstake << " UNSTAKE, "
+                  << n_empty << " subsidy-only blocks\n";
+        std::cout << "  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": supply-invariant-fuzz "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
