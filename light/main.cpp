@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (16 total + help / version):
+// Subcommands (17 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -20,6 +20,7 @@
 //   verify-chain             Composite: anchor + verify all to head
 //   balance-trustless        Composite: verify chain + state-proof balance
 //   nonce-trustless          Composite: verify chain + state-proof nonce
+//   stake-trustless          Composite: verify chain + state-proof stake
 //   account-history          Composite: verified balance/nonce over a range
 //   sign-tx                  Offline signed TRANSFER/STAKE/UNSTAKE
 //   submit-tx                Submit a pre-signed tx to the daemon
@@ -33,9 +34,10 @@
 // Trust-model invariants:
 //   * Every command that touches the daemon's RPC takes --genesis to
 //     pin the chain identity on first connection.
-//   * Composite read commands (balance-trustless, nonce-trustless) DO
-//     NOT trust the daemon's `account` reply unless the cleartext
-//     hashes to the value_hash in a verified state-proof.
+//   * Composite read commands (balance-trustless, nonce-trustless,
+//     stake-trustless) DO NOT trust the daemon's `account` / `stake_info`
+//     reply unless the cleartext hashes to the value_hash in a verified
+//     state-proof.
 //   * verify-and-submit fetches the verified nonce via nonce-trustless
 //     (not the daemon's raw `account` reply) before signing.
 
@@ -53,6 +55,7 @@
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
+#include <determ/crypto/sha256.hpp>
 #include <determ/types.hpp>
 #include <nlohmann/json.hpp>
 
@@ -104,6 +107,12 @@ void print_usage() {
         "      Verified chain + state-proof + cross-check daemon's cleartext.\n"
         "  nonce-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
         "      Same as balance-trustless but extracts next_nonce.\n"
+        "  stake-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
+        "      Verified chain + state-proof (s: namespace) + cross-check the\n"
+        "      daemon's `stake_info` cleartext. Prints the committee-verified\n"
+        "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
+        "      bonded). A domain with no stake leaf fails closed (the daemon's\n"
+        "      state_proof returns not_found) — never a bare zero.\n"
         "  account-history --rpc-port <N> --genesis <file> --domain <D>\n"
         "                  --from <H1> --to <H2> [--step <S>] [--json]\n"
         "      Verified balance/nonce trajectory over a height range. For\n"
@@ -520,6 +529,239 @@ int cmd_account_trustless(int argc, char** argv,
         return 0;
     } catch (const std::exception& e) {
         std::cerr << cmd_name << ": " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ─────────────────────────── stake-trustless ───────────────────────────
+//
+// Composite trust-minimized read of the stakes ("s:") namespace, the
+// exact analogue of read_account_trustless (light/trustless_read.cpp)
+// for the accounts ("a:") namespace. Because the trustless-read helper
+// in trustless_read.* hard-codes the "a" namespace + `account` RPC +
+// (balance, next_nonce) decode, and that lane is closed to this change,
+// the stake variant is implemented here in terms of the SAME exported
+// verify/anchor primitives (anchor_genesis, verify_chain_to_head,
+// verify_state_proof, verify_block_sigs, verify_headers). Only three
+// things differ from the account path: the namespace is "s", the
+// cleartext cross-check RPC is `stake_info`, and the committed leaf
+// encoding is value_hash = SHA256(u64_be(locked) || u64_be(unlock_height))
+// (see chain.cpp::build_state_leaves, "stakes_" branch — it mirrors the
+// accounts_ branch field-for-field with locked/unlock_height in place of
+// balance/next_nonce).
+
+struct StakeView {
+    uint64_t    locked{0};
+    uint64_t    unlock_height{0};
+    std::string state_root_hex;  // head header's state_root the proof verified
+    uint64_t    height{0};       // head block index this view is anchored at
+};
+
+StakeView read_stake_trustless(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    const std::string& domain) {
+
+    StakeView sv;
+
+    // 1. Anchor genesis (fail-closed if block 0 != compute_genesis_hash).
+    std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+    // 2. Verify the header chain end-to-end (prev_hash continuity +
+    //    per-block committee sigs), capturing the head's state_root.
+    auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+
+    if (vc.head_state_root.empty()) {
+        throw std::runtime_error(
+            "stake-trustless: chain has not activated state_root (S-033) — "
+            "head header carries no state_root, so state-proofs can't be "
+            "anchored. Use the daemon's `stake_info` RPC directly for "
+            "chains without S-033 active.");
+    }
+
+    // 3. Fetch the state-proof for ("s:", domain). A domain with no stake
+    //    leaf yields {"error":"not_found"} here — we fail closed rather
+    //    than fabricate a zero.
+    auto proof = rpc.call("state_proof",
+        {{"namespace", "s"}, {"key", domain}});
+    if (proof.contains("error") && !proof["error"].is_null()) {
+        throw std::runtime_error(
+            "stake-trustless: state_proof RPC error (domain has no verified "
+            "stake leaf?): " + proof["error"].dump());
+    }
+
+    // 4. Verify the proof self-consistently (Merkle siblings roll up to
+    //    the proof's claimed state_root).
+    auto vsp = verify_state_proof(proof, {});
+    if (!vsp.ok) {
+        throw std::runtime_error("stake-trustless: " + vsp.detail);
+    }
+
+    // 5. Anchor the proof's claimed state_root to a committee-signed
+    //    header. The chain may have advanced during the round-trip, so
+    //    proof.height can be > vc.height; bind the proof root to the
+    //    header at proof.height - 1 and re-verify its committee sigs.
+    //    This is the identical anchoring logic read_account_trustless
+    //    uses (kept in lock-step so both namespaces enjoy the same
+    //    chain-advanced-during-round-trip guarantee).
+    uint64_t proof_height = proof.value("height", uint64_t{0});
+    std::string proof_root = proof.value("state_root", std::string{});
+    if (proof_height < vc.height) {
+        throw std::runtime_error(
+            "stake-trustless: proof.height=" + std::to_string(proof_height)
+            + " is BEFORE verified-chain head=" + std::to_string(vc.height)
+            + " — daemon is serving stale state");
+    }
+    if (proof_height > vc.height) {
+        json committee_json;
+        {
+            json arr = json::array();
+            for (auto& [domain_, pk] : committee_seed) {
+                arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
+            }
+            committee_json = json{{"members", arr}};
+        }
+        uint64_t anchor_index = proof_height - 1;
+        auto pg = rpc.call("headers",
+            {{"from", anchor_index}, {"count", 1}});
+        if (!pg.contains("headers") || !pg["headers"].is_array()
+            || pg["headers"].empty()) {
+            throw std::runtime_error(
+                "stake-trustless: cannot fetch header at index="
+                + std::to_string(anchor_index)
+                + " (proof.height=" + std::to_string(proof_height) + ")");
+        }
+        auto& h = pg["headers"][0];
+        std::string hdr_root = h.value("state_root", std::string{});
+        if (hdr_root != proof_root) {
+            throw std::runtime_error(
+                "stake-trustless: proof.state_root=" + proof_root
+                + " does not match header[" + std::to_string(anchor_index)
+                + "].state_root=" + hdr_root);
+        }
+        auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
+        if (!vbs.ok) {
+            vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
+        }
+        if (!vbs.ok) {
+            throw std::runtime_error(
+                "stake-trustless: header[" + std::to_string(anchor_index)
+                + "] committee-sig check failed: " + vbs.detail);
+        }
+        if (anchor_index >= vc.height) {
+            auto walk = rpc.call("headers",
+                {{"from", vc.height - 1}, {"count", proof_height - vc.height + 2}});
+            auto vh = verify_headers(walk, "", "");
+            if (!vh.ok) {
+                throw std::runtime_error(
+                    "stake-trustless: prev_hash walk vc.height→proof.height: "
+                    + vh.detail);
+            }
+        }
+        vc.head_state_root = proof_root;
+        vc.height = proof_height;
+        vc.head_block_hash = h.value("block_hash", std::string{});
+    } else if (proof_root != vc.head_state_root) {
+        throw std::runtime_error(
+            "stake-trustless: proof.state_root=" + proof_root
+            + " does not match verified head state_root="
+            + vc.head_state_root);
+    }
+
+    // 6. Fetch the cleartext (locked, unlock_height) via `stake_info`,
+    //    recompute the committed leaf hash, and confirm it matches the
+    //    verified value_hash. This is the load-bearing cross-check: a
+    //    daemon could serve an honest proof for some OTHER stake pair
+    //    while lying in the cleartext; the hash recomputation forces
+    //    consistency. Encoding matches build_state_leaves exactly:
+    //    SHA256(u64_be(locked) || u64_be(unlock_height)).
+    auto si = rpc.call("stake_info", {{"domain", domain}});
+    if (si.contains("error") && !si["error"].is_null()) {
+        throw std::runtime_error(
+            "stake-trustless: stake_info RPC error: " + si["error"].dump());
+    }
+    uint64_t locked = si.value("locked",        uint64_t{0});
+    uint64_t unlock = si.value("unlock_height", uint64_t{0});
+
+    determ::crypto::SHA256Builder b;
+    b.append(locked);
+    b.append(unlock);
+    Hash computed_value_hash = b.finalize();
+
+    Hash proof_value_hash = from_hex_arr<32>(
+        proof["value_hash"].get<std::string>());
+
+    if (computed_value_hash != proof_value_hash) {
+        throw std::runtime_error(
+            "stake-trustless: TAMPERED — daemon's `stake_info` reply "
+            "(locked=" + std::to_string(locked)
+            + ", unlock_height=" + std::to_string(unlock)
+            + ") hashes to " + to_hex(computed_value_hash)
+            + " but state-proof's value_hash is "
+            + to_hex(proof_value_hash)
+            + " — daemon is lying about either the cleartext OR the proof");
+    }
+
+    sv.locked = locked;
+    sv.unlock_height = unlock;
+    sv.state_root_hex = vc.head_state_root;
+    sv.height = vc.height;
+    return sv;
+}
+
+int cmd_stake_trustless(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "stake-trustless: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "stake-trustless: "
+                     "--rpc-port, --genesis, --domain are required\n";
+        return 1;
+    }
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "stake-trustless: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string canon_domain = normalize_anon_address(domain);
+        auto view = read_stake_trustless(rpc, committee_seed, genesis,
+                                         canon_domain);
+        if (json_out) {
+            json out = {
+                {"domain",        canon_domain},
+                {"locked",        view.locked},
+                {"unlock_height", view.unlock_height},
+                {"height",        view.height},
+                {"state_root",    view.state_root_hex},
+                {"verified",      true},
+            };
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << canon_domain << ": locked=" << view.locked
+                      << " unlock_height=" << view.unlock_height
+                      << " (verified via state-proof at height "
+                      << view.height << ", state_root "
+                      << view.state_root_hex.substr(0, 16) << "...)\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "stake-trustless: " << e.what() << "\n";
         return 1;
     }
 }
@@ -1035,6 +1277,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-chain")          return cmd_verify_chain(sub_argc, sub_argv);
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
+        if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
         if (cmd == "verify-state-root")     return cmd_verify_state_root(sub_argc, sub_argv);
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);
