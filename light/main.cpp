@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (21 total + help / version):
+// Subcommands (26 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -34,6 +34,7 @@
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
+//   shard-route              OFFLINE genesis-pinned address-to-shard routing
 //   committee-at-height      Report committee-verified creators at block H
 //   decode-wire              OFFLINE decode + validate a binary wire frame
 //   help / version
@@ -307,6 +308,27 @@ void print_usage() {
         "      can never be PROVEN here. A malformed event / bad hex / unknown\n"
         "      domain is a usage error (exit 1). Read the event from stdin with\n"
         "      --in -.\n"
+        "\n"
+        "Sharding (offline, no daemon):\n"
+        "  shard-route --genesis <file> --address <addr|domain> [--json]\n"
+        "      Report which shard OWNS <addr> on the chain pinned by\n"
+        "      <genesis>. Reads BOTH routing parameters (initial_shard_count\n"
+        "      + shard_address_salt) FROM the genesis — they are CSPRNG-fixed\n"
+        "      at build time and bound into compute_genesis_hash, so the home\n"
+        "      shard of any address is a function of the chain identity alone.\n"
+        "      Re-implements crypto::shard_id_for_address independently of the\n"
+        "      daemon's codec (SHA256(salt || \"shard-route\" || addr) folded\n"
+        "      to a u64 mod shard_count; shard_count <= 1 routes everything to\n"
+        "      shard 0). Anon-form addresses are normalized to canonical\n"
+        "      lowercase first (S-028), so 0xABC... and 0xabc... route\n"
+        "      identically; domains route on their exact bytes. Prints the\n"
+        "      locally computed genesis hash so the operator can confirm the\n"
+        "      routing is anchored to the expected chain (a wrong-genesis file\n"
+        "      yields a different hash AND, in general, a different shard).\n"
+        "      Pure local computation — no RPC. Distinct from `determ where-is`\n"
+        "      (which takes count + salt as raw flags): shard-route binds them\n"
+        "      to a pinned chain. Exit 0 on a routing; exit 1 on usage /\n"
+        "      genesis-parse error.\n"
         "\n"
         "Wire-format tooling (offline, no daemon):\n"
         "  decode-wire --in <file> [--expect-type <NAME>] [--json]\n"
@@ -2600,6 +2622,125 @@ int cmd_verify_equivocation(int argc, char** argv) {
     }
 }
 
+// ────────────────────────── shard-route ────────────────────────────────
+//
+// shard-route — OFFLINE genesis-pinned address-to-shard routing oracle.
+//
+// Pure offline reader: no daemon, no RPC. Given a pinned genesis JSON and an
+// address (anon-form `0x...64hex` or a registered domain), it reports which
+// shard OWNS that address on THIS chain. Unlike the daemon's `where-is`
+// diagnostic — which takes the shard count + salt as raw operator-supplied
+// flags — shard-route reads BOTH routing parameters FROM THE GENESIS itself
+// (initial_shard_count + shard_address_salt). Both are CSPRNG-fixed at build
+// time and bound into compute_genesis_hash, so they are immutable for the
+// chain's lifetime (see crypto/random.hpp): the home shard of any address is
+// a function of the chain identity alone. The command prints the locally
+// computed genesis hash so the operator can confirm the routing is anchored
+// to the chain they expect — a wrong-genesis file (a different chain) yields
+// a different hash AND, in general, a different home shard.
+//
+// The routing math is re-implemented INDEPENDENTLY of the daemon's codec
+// (the light-client never links crypto/random.cpp), byte-for-byte matching
+// crypto::shard_id_for_address:
+//   shard_count <= 1            -> shard 0 (unsharded; no salt mixing)
+//   otherwise  h = SHA256(shard_address_salt || "shard-route" || addr)
+//              shard = fold_be8(h[0..7]) % shard_count
+// Because the test producer (`determ where-is`) and this decoder are written
+// from the SAME spec in DIFFERENT code paths, an agreeing run is a genuine
+// cross-implementation conformance check on the v1.x routing primitive.
+//
+// Anon-form addresses are normalized to canonical lowercase (S-028) before
+// routing, mirroring how the chain canonicalizes a TRANSFER's `to` before it
+// computes is_cross_shard — so `0xABC...` and `0xabc...` route identically.
+// Domain names and other shapes route on their exact bytes (routing is
+// case-sensitive on non-anon inputs; upstream address validation is the
+// caller's responsibility, exactly as in the daemon).
+//
+// Exit 0 on a successful routing; exit 1 on a usage / genesis-parse error.
+// There is no UNVERIFIABLE state: the genesis IS the trust anchor, so a
+// parseable genesis always yields a sound, deterministic home shard.
+int cmd_shard_route(int argc, char** argv) {
+    std::string genesis_path, address;
+    bool have_address = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--address" && i + 1 < argc) {
+            address = argv[++i]; have_address = true;
+        } else if (a == "--json")                  json_out     = true;
+        else {
+            std::cerr << "shard-route: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (genesis_path.empty() || !have_address) {
+        std::cerr << "shard-route: --genesis and --address are required\n";
+        return 1;
+    }
+    try {
+        // The genesis IS the trust anchor. load_genesis applies the S-018
+        // schema guards (shard_address_salt, if present, must be 64-char
+        // hex), so a malformed file fails fast before any routing.
+        auto genesis = load_genesis(genesis_path);
+
+        // Pin the chain identity locally so the operator can confirm the
+        // routing is anchored to the chain they expect (a different genesis
+        // file -> a different hash here).
+        Hash genesis_hash = determ::chain::compute_genesis_hash(genesis);
+
+        uint32_t shard_count = genesis.initial_shard_count;
+
+        // Normalize anon-shape addresses to canonical lowercase (S-028),
+        // matching the chain's pre-routing canonicalization. Non-anon shapes
+        // (domain names) pass through unchanged.
+        std::string routed_addr = normalize_anon_address(address);
+
+        // Compute the home shard INDEPENDENTLY of crypto::shard_id_for_address,
+        // byte-for-byte matching its algorithm (random.cpp). shard_count <= 1
+        // short-circuits to shard 0 with no salt mixing.
+        uint64_t shard = 0;
+        if (shard_count > 1) {
+            determ::crypto::SHA256Builder hb;
+            hb.append(genesis.shard_address_salt);
+            hb.append(std::string("shard-route"));
+            hb.append(routed_addr);
+            Hash h = hb.finalize();
+            uint64_t v = 0;
+            for (int i = 0; i < 8; ++i)
+                v = (v << 8) | h[i];
+            shard = v % shard_count;
+        }
+
+        bool anon = is_anon_address(address);
+        if (json_out) {
+            json out = {
+                {"address",      address},
+                {"routed_address", routed_addr},
+                {"anon",         anon},
+                {"shard",        shard},
+                {"shard_count",  shard_count},
+                {"genesis_hash", to_hex(genesis_hash)},
+            };
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << routed_addr << " -> shard " << shard
+                      << " (of " << shard_count << ")\n"
+                      << "  genesis pin: " << to_hex(genesis_hash) << "\n";
+            if (shard_count <= 1)
+                std::cout << "  note:        chain is unsharded "
+                             "(initial_shard_count=" << shard_count
+                          << ") — every address routes to shard 0\n";
+            if (anon && routed_addr != address)
+                std::cout << "  note:        anon address normalized to "
+                             "canonical lowercase (S-028)\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "shard-route: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────── supply-trustless ─────────────────────────────
 
 // Tri-state for the A1 unitary-supply conservation check, mirroring the
@@ -3731,6 +3872,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
+        if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
         if (cmd == "decode-wire")           return cmd_decode_wire(sub_argc, sub_argv);
     } catch (const std::exception& e) {

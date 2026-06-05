@@ -638,6 +638,15 @@ Additional in-process tests:
                                               quorum-merge state machine
                                               (BEGIN inserts, END removes,
                                               partner-ring constraint)
+  determ test-merge-ring-topology             R7 ring-pairing topology law —
+                                              partner == (shard+1) % shard_count
+                                              as the SOLE accepted pairing
+                                              (per-shard uniqueness, wraparound,
+                                              direction, single Hamiltonian
+                                              cycle, no fixed point,
+                                              shards_absorbed_by bijection,
+                                              single-shard + END ring-gating,
+                                              salt-independence)
   determ test-cross-shard-outbound-apply      Cross-shard outbound TRANSFER
                                               apply — local debit + no local
                                               credit + A1 accumulated_outbound
@@ -39542,6 +39551,328 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": equivocation-evidence "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // R7 under-quorum-merge RING-PAIRING TOPOLOGY law. The MERGE_EVENT
+    // apply path (chain.cpp:1020) admits a merge only when
+    //     partner_id == (shard_id + 1) % shard_count
+    // — a single fixed modular-successor rule. This is the structural
+    // contract that makes the merge state machine deterministic and
+    // collision-free across shards: every shard has EXACTLY ONE valid
+    // absorber, the (shard → partner) map is a single Hamiltonian cycle
+    // over all shards, and the inverse (partner → refugee) map is a
+    // bijection. test-merge-event-apply spot-checks a couple of pairings
+    // and the wrong-partner rejection at one shard; test-merge-event-
+    // codec pins the byte layout. NEITHER pins the ring LAW as a whole:
+    // that for a ring of size N, exactly one of the N candidate partners
+    // is accepted at every shard, the accepted set forms one cycle that
+    // visits all N shards (no sub-cycles, no fixed points for N≥2), and
+    // shards_absorbed_by inverts it exactly. A regression that swapped
+    // the rule to (shard-1), or dropped the `% shard_count` wraparound,
+    // or admitted any partner, would slip past the existing spot-checks
+    // but fail here. Pure in-process (Chain apply + read API only).
+    if (cmd == "test-merge-ring-topology") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Minimal single-creator genesis — MERGE_EVENT txs only mutate
+        // merge_state_; no balances/stakes needed beyond the fee payer.
+        GenesisConfig cfg;
+        cfg.chain_id = "merge-ring-topology-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 100000;
+        cfg.initial_balances = {alice_bal};
+
+        // Build a MERGE_EVENT tx (BEGIN or END) for (shard → partner).
+        auto make_merge_tx = [](uint8_t event_type, ShardId shard_id,
+                                  ShardId partner_id, const std::string& region,
+                                  uint64_t nonce) {
+            MergeEvent ev;
+            ev.event_type = event_type;
+            ev.shard_id   = shard_id;
+            ev.partner_id = partner_id;
+            ev.effective_height = 100;
+            ev.evidence_window_start = 0;
+            ev.merging_shard_region = region;
+            Transaction tx;
+            tx.type = TxType::MERGE_EVENT;
+            tx.from = "alice"; tx.fee = 1; tx.nonce = nonce;
+            tx.payload = ev.encode();
+            return tx;
+        };
+
+        auto apply_block = [&](Chain& c, const std::vector<Transaction>& txs) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions = txs;
+            c.append(b);
+        };
+
+        // === 1. Modular-successor is the SOLE accepted partner ===
+        //
+        // For a ring of shard_count=5, drive a BEGIN at shard s with each
+        // of the 5 candidate partners 0..4 on a freshly-constructed chain.
+        // Exactly one — partner == (s+1)%5 — must be admitted (merge_state
+        // gains the entry); every other candidate must be a silent no-op.
+        // This is the per-shard uniqueness half of the topology law.
+        {
+            const uint32_t N = 5;
+            bool every_shard_unique = true;
+            for (ShardId s = 0; s < N; ++s) {
+                int admitted = 0;
+                ShardId admitted_partner = 99;
+                for (ShardId p = 0; p < N; ++p) {
+                    Chain c;
+                    c.append(make_genesis_block(cfg));
+                    Hash salt{};
+                    c.set_shard_routing(N, salt, ShardId{0});
+                    apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                                  s, p, "r", 0)});
+                    if (c.merge_state().count(s) == 1) {
+                        admitted++;
+                        admitted_partner = p;
+                    }
+                }
+                if (admitted != 1 || admitted_partner != ((s + 1) % N))
+                    every_shard_unique = false;
+            }
+            check(every_shard_unique,
+                  "ring(5): each shard admits EXACTLY ONE partner, "
+                  "and it is the modular successor (s+1)%5");
+        }
+
+        // === 2. Wraparound: the last shard pairs with shard 0 ===
+        //
+        // The `% shard_count` is what closes the ring. For shard_count=4,
+        // shard 3's only valid partner is (3+1)%4 == 0 — NOT 4 (out of
+        // range) and NOT a no-op. A regression dropping the modulo would
+        // leave shard 3 with no admissible partner.
+        {
+            const uint32_t N = 4;
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(N, salt, ShardId{0});
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{3}, ShardId{0}, "wrap", 0)});
+            check(c.merge_state().count(ShardId{3}) == 1
+                  && c.merge_state().at(ShardId{3}).partner_id == ShardId{0},
+                  "ring(4): wraparound — shard 3 pairs with shard 0 "
+                  "(=(3+1)%4), closing the cycle");
+        }
+
+        // === 3. The off-by-one inverse rule (s-1) is rejected ===
+        //
+        // A plausible regression is pairing with the modular PREDECESSOR
+        // instead of the successor. For shard_count=4, shard 2's
+        // predecessor is 1; the law's successor is 3. A BEGIN(2 → 1)
+        // must be a no-op; BEGIN(2 → 3) must be admitted. Both on the
+        // same ring size pin the DIRECTION of the cycle.
+        {
+            const uint32_t N = 4;
+            Chain c_pred;
+            c_pred.append(make_genesis_block(cfg));
+            Hash salt{};
+            c_pred.set_shard_routing(N, salt, ShardId{0});
+            apply_block(c_pred, {make_merge_tx(MergeEvent::BEGIN,
+                                               ShardId{2}, ShardId{1}, "", 0)});
+            bool pred_rejected = c_pred.merge_state().empty();
+
+            Chain c_succ;
+            c_succ.append(make_genesis_block(cfg));
+            c_succ.set_shard_routing(N, salt, ShardId{0});
+            apply_block(c_succ, {make_merge_tx(MergeEvent::BEGIN,
+                                               ShardId{2}, ShardId{3}, "", 0)});
+            bool succ_admitted = c_succ.merge_state().count(ShardId{2}) == 1;
+
+            check(pred_rejected && succ_admitted,
+                  "ring(4): direction pinned — predecessor (2→1) "
+                  "rejected, successor (2→3) admitted");
+        }
+
+        // === 4. Full ring is one Hamiltonian cycle (no sub-cycles) ===
+        //
+        // Open a BEGIN for EVERY shard on the same chain, each with its
+        // lawful successor partner. All N entries must coexist, and
+        // following partner pointers from any start must visit all N
+        // distinct shards before returning — i.e. the (shard → partner)
+        // map is a single N-cycle, not a union of disjoint shorter cycles.
+        {
+            const uint32_t N = 6;
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(N, salt, ShardId{0});
+            for (ShardId s = 0; s < N; ++s)
+                apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                              s, (s + 1) % N, "", s)});
+            check(c.merge_state().size() == N,
+                  "ring(6): all 6 lawful BEGINs coexist in merge_state");
+
+            // Walk the cycle from shard 0 following partner_id pointers.
+            // A single Hamiltonian cycle visits all N distinct shards
+            // exactly once and returns to the start; a sub-cycle would
+            // revisit a shard early or fail to cover all N.
+            std::vector<bool> visited(N, false);
+            uint32_t distinct = 0;
+            ShardId cur = 0;
+            bool walk_ok = true;
+            for (uint32_t step = 0; step < N; ++step) {
+                if (c.merge_state().count(cur) != 1 || visited[cur]) {
+                    walk_ok = false; break;
+                }
+                visited[cur] = true;
+                distinct++;
+                cur = c.merge_state().at(cur).partner_id;
+            }
+            check(walk_ok && distinct == N && cur == 0,
+                  "ring(6): partner pointers form ONE Hamiltonian cycle "
+                  "(visits all 6 shards, returns to start — no sub-cycles)");
+        }
+
+        // === 5. No fixed point — a shard never absorbs itself (N≥2) ===
+        //
+        // (s+1)%N == s has no solution for N >= 2, so BEGIN(s → s) is
+        // always rejected. A self-merge would be a degenerate state that
+        // the inverse-lookup + region-extension logic never expects.
+        {
+            const uint32_t N = 3;
+            bool no_self = true;
+            for (ShardId s = 0; s < N; ++s) {
+                Chain c;
+                c.append(make_genesis_block(cfg));
+                Hash salt{};
+                c.set_shard_routing(N, salt, ShardId{0});
+                apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                              s, s, "", 0)});
+                if (!c.merge_state().empty()) no_self = false;
+            }
+            check(no_self,
+                  "ring(3): no fixed point — BEGIN(s→s) rejected for "
+                  "every shard (s+1)%N != s when N>=2");
+        }
+
+        // === 6. shards_absorbed_by inverts the ring bijectively ===
+        //
+        // With the full ring open, every shard is the absorber of exactly
+        // one refugee — its modular PREDECESSOR. shards_absorbed_by(p)
+        // must return exactly { (p-1+N)%N }. This is the bijection half
+        // of the topology law and pins the inverse-lookup helper used by
+        // a partner producer to find which refugees it must absorb.
+        {
+            const uint32_t N = 5;
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(N, salt, ShardId{0});
+            for (ShardId s = 0; s < N; ++s)
+                apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                              s, (s + 1) % N, "", s)});
+            bool inverse_ok = true;
+            for (ShardId p = 0; p < N; ++p) {
+                auto absorbed = c.shards_absorbed_by(p);
+                ShardId expected_refugee = (p + N - 1) % N;
+                if (absorbed.size() != 1
+                    || absorbed[0].first != expected_refugee)
+                    inverse_ok = false;
+            }
+            check(inverse_ok,
+                  "ring(5): shards_absorbed_by(p) == {(p-1+5)%5} for "
+                  "every p — inverse map is a bijection");
+        }
+
+        // === 7. Single-shard ring has no admissible merge ===
+        //
+        // shard_count <= 1 short-circuits the whole rule (chain.cpp:1020
+        // guards on shard_count_ > 1). Even partner == (0+1)%1 == 0
+        // (which would self-pair) is rejected — a 1-shard ring can never
+        // merge. Pins the degenerate-ring boundary.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(1, salt, ShardId{0});
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{0}, ShardId{0}, "", 0)});
+            check(c.merge_state().empty(),
+                  "ring(1): single-shard ring admits no merge "
+                  "(shard_count>1 guard short-circuits)");
+        }
+
+        // === 8. END only un-pairs the lawful partner ===
+        //
+        // The same modular-successor rule gates END: an END(s → q) only
+        // erases the entry when q == (s+1)%N AND q matches the recorded
+        // partner. On a ring(4) BEGIN(1→2), an END(1→2) un-pairs but an
+        // END(1→0) (unlawful partner) leaves the cycle edge intact —
+        // the ring can't be torn at the wrong vertex.
+        {
+            const uint32_t N = 4;
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            Hash salt{};
+            c.set_shard_routing(N, salt, ShardId{0});
+            apply_block(c, {make_merge_tx(MergeEvent::BEGIN,
+                                          ShardId{1}, ShardId{2}, "us", 0)});
+            // Unlawful END (partner 0 != (1+1)%4) — no-op.
+            apply_block(c, {make_merge_tx(MergeEvent::END,
+                                          ShardId{1}, ShardId{0}, "", 1)});
+            bool edge_intact = c.merge_state().count(ShardId{1}) == 1;
+            // Lawful END (partner 2) — un-pairs.
+            apply_block(c, {make_merge_tx(MergeEvent::END,
+                                          ShardId{1}, ShardId{2}, "", 2)});
+            bool edge_removed = c.merge_state().empty();
+            check(edge_intact && edge_removed,
+                  "ring(4): END is ring-gated — unlawful (1→0) no-op, "
+                  "lawful (1→2) un-pairs the edge");
+        }
+
+        // === 9. Topology is shard-routing-salt-independent ===
+        //
+        // The ring law is pure modular arithmetic on shard ids; it does
+        // NOT depend on the address-routing salt (that salt only governs
+        // shard_id_for_address, a separate concern). Two chains with
+        // DIFFERENT salts but the same shard_count admit the same lawful
+        // pairing and reach the same merge_state — pins that the merge
+        // topology never accidentally folds in the routing salt.
+        {
+            const uint32_t N = 4;
+            Hash salt_a = SHA256Builder{}.append(std::string("salt-a")).finalize();
+            Hash salt_b = SHA256Builder{}.append(std::string("salt-b")).finalize();
+            Chain ca; ca.append(make_genesis_block(cfg));
+            Chain cb; cb.append(make_genesis_block(cfg));
+            ca.set_shard_routing(N, salt_a, ShardId{0});
+            cb.set_shard_routing(N, salt_b, ShardId{0});
+            apply_block(ca, {make_merge_tx(MergeEvent::BEGIN,
+                                           ShardId{2}, ShardId{3}, "x", 0)});
+            apply_block(cb, {make_merge_tx(MergeEvent::BEGIN,
+                                           ShardId{2}, ShardId{3}, "x", 0)});
+            check(salt_a != salt_b
+                  && ca.merge_state().size() == 1
+                  && cb.merge_state().size() == 1
+                  && ca.merge_state().at(ShardId{2}).partner_id
+                       == cb.merge_state().at(ShardId{2}).partner_id,
+                  "ring(4): topology is salt-independent — different "
+                  "routing salts admit the same lawful pairing");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": merge-ring-topology "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

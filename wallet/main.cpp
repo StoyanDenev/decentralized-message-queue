@@ -13385,6 +13385,309 @@ int cmd_receipt_key(int argc, char** argv) {
     return 0;
 }
 
+// ── shard-route ──────────────────────────────────────────────────────────────
+//
+// OFFLINE address-to-shard router. Reproduces the consensus routing rule
+// crypto::shard_id_for_address (src/crypto/random.cpp) byte-for-byte so an
+// operator can determine — with no daemon, no RPC, no network — which shard
+// OWNS a given address (a registered domain or an anonymous bearer wallet),
+// and (optionally) whether a transfer to it is cross-shard relative to a
+// stated home shard.
+//
+// This is the SAME deterministic map every node, beacon, and external wallet
+// agrees on (rev.9 B3). The chain consults it at src/chain/chain.cpp::
+// is_cross_shard to decide whether a TRANSFER debits locally or emits an
+// outbound CrossShardReceipt; an operator preparing a batch can use this
+// command up front to bucket destinations by owning shard and avoid
+// surprising cross-shard latency (CROSS_SHARD_RECEIPT_LATENCY).
+//
+// Routing rule (identical to crypto::shard_id_for_address):
+//
+//   if shard_count <= 1:  shard = 0  (unsharded — every address is local)
+//   else:
+//     h = SHA-256( salt[32] || "shard-route" || addr_bytes )
+//     v = big-endian fold of h[0..7] into a uint64
+//     shard = v % shard_count
+//
+// The SHA256Builder pre-image is the 32-byte salt, then the literal ASCII
+// "shard-route", then the address bytes (no separators, no length prefixes).
+// Folding takes the FIRST 8 bytes of the digest, most-significant byte
+// first. Bias is negligible at shard_count << 2^64.
+//
+// The salt + count come from the chain's immutable genesis (GenesisConfig::
+// shard_address_salt / initial_shard_count) and are fixed for the chain's
+// lifetime. Three ways to supply them:
+//   * --salt <hex64> --shard-count <N>   explicit (no file).
+//   * --genesis <file|->                 read shard_address_salt +
+//                                        initial_shard_count from a genesis
+//                                        JSON (Determ genesis schema).
+//   * --snapshot <file|->                read shard_salt + shard_count from a
+//                                        chain snapshot's constants block
+//                                        (Chain::serialize_state schema).
+// Explicit --salt / --shard-count override any file-supplied value.
+//
+// Optional --my-shard <N> reports cross_shard = (route != my_shard), the
+// exact predicate is_cross_shard applies (with the same shard_count<=1 =>
+// always-local short-circuit). Without --my-shard, cross_shard is omitted.
+//
+// Pure local computation: one SHA-256 plus a modulo. Deterministic — the
+// same address + salt + count always route to the same shard.
+//
+// Output fields:
+//   * address       — the input address (echoed).
+//   * shard_count   — the resolved shard count used.
+//   * shard         — the owning shard id (0 .. shard_count-1).
+//   * digest_hex    — the full SHA-256 of the routing pre-image (for audit).
+//   * my_shard      — echoed iff --my-shard supplied.
+//   * cross_shard   — true|false iff --my-shard supplied.
+//
+// Exit codes: 0 success, 1 args / parse / IO / range error.
+int cmd_shard_route(int argc, char** argv) {
+    std::string addr;
+    std::string salt_hex;
+    std::string genesis_path;
+    std::string snapshot_path;
+    bool        have_count   = false;
+    bool        have_myshard = false;
+    uint32_t    shard_count  = 0;
+    uint32_t    my_shard     = 0;
+    bool        json_out     = false;
+
+    auto parse_u32 = [](const std::string& flag, const char* raw,
+                        bool& ok) -> uint32_t {
+        try {
+            size_t pos = 0;
+            unsigned long long v = std::stoull(raw, &pos, 10);
+            if (pos != std::strlen(raw) || v > 0xffffffffULL) {
+                ok = false; (void)flag; return 0;
+            }
+            ok = true;
+            return static_cast<uint32_t>(v);
+        } catch (...) { ok = false; (void)flag; return 0; }
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--address" && i + 1 < argc) addr = argv[++i];
+        else if (a == "--salt"    && i + 1 < argc) salt_hex = argv[++i];
+        else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--snapshot" && i + 1 < argc) snapshot_path = argv[++i];
+        else if (a == "--shard-count" && i + 1 < argc) {
+            bool ok = false; shard_count = parse_u32(a, argv[++i], ok);
+            if (!ok) { std::cerr << "shard-route: --shard-count must be a "
+                                    "decimal u32\n"; return 1; }
+            have_count = true;
+        }
+        else if (a == "--my-shard" && i + 1 < argc) {
+            bool ok = false; my_shard = parse_u32(a, argv[++i], ok);
+            if (!ok) { std::cerr << "shard-route: --my-shard must be a "
+                                    "decimal u32\n"; return 1; }
+            have_myshard = true;
+        }
+        else if (a == "--json") json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet shard-route --address <addr>\n"
+                "         (--salt <hex64> --shard-count <N>\n"
+                "          | --genesis <file|-> | --snapshot <file|->)\n"
+                "         [--my-shard <N>] [--json]\n"
+                "\n"
+                "  OFFLINE address-to-shard router. Reproduces the consensus\n"
+                "  rule crypto::shard_id_for_address (src/crypto/random.cpp)\n"
+                "  byte-for-byte — the SAME deterministic map every node,\n"
+                "  beacon, and wallet agrees on (rev.9 B3). Tells you which\n"
+                "  shard OWNS an address, and optionally whether a transfer to\n"
+                "  it is cross-shard relative to a home shard (the predicate\n"
+                "  src/chain/chain.cpp::is_cross_shard applies). Pure local\n"
+                "  SHA-256 + modulo; no RPC, no network, no daemon. Deterministic.\n"
+                "\n"
+                "  Routing: shard_count<=1 => shard 0 (unsharded, all local).\n"
+                "  Else h = SHA-256(salt[32] || \"shard-route\" || addr); fold\n"
+                "  h[0..7] big-endian into a u64; shard = u64 % shard_count.\n"
+                "\n"
+                "  --address <addr>      REQUIRED. The address to route (a\n"
+                "                        registered domain or anon bearer wallet).\n"
+                "  --salt <hex64>        32-byte routing salt, 64 hex chars\n"
+                "                        (GenesisConfig::shard_address_salt).\n"
+                "  --shard-count <N>     Number of shards (decimal u32).\n"
+                "  --genesis <file|->    Read shard_address_salt +\n"
+                "                        initial_shard_count from a genesis JSON.\n"
+                "  --snapshot <file|->   Read shard_salt + shard_count from a\n"
+                "                        chain snapshot's constants block.\n"
+                "                        (Explicit --salt / --shard-count override\n"
+                "                        any file-supplied value.)\n"
+                "  --my-shard <N>        Also report cross_shard = (route != N),\n"
+                "                        the is_cross_shard predicate.\n"
+                "  --json                One-line JSON {address, shard_count,\n"
+                "                        shard, digest_hex, my_shard?, cross_shard?}.\n"
+                "\n"
+                "  Exit codes: 0 success, 1 args/parse/IO/range error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "shard-route: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet shard-route --address <addr> "
+                         "(--salt <hex64> --shard-count <N> | --genesis <file> "
+                         "| --snapshot <file>) [--my-shard <N>] [--json]\n";
+            return 1;
+        }
+    }
+
+    if (addr.empty()) {
+        std::cerr << "shard-route: --address is required\n";
+        return 1;
+    }
+
+    // ── Resolve salt + shard_count from a file when not given explicitly ──
+    // Genesis JSON uses {shard_address_salt, initial_shard_count}; a chain
+    // snapshot's constants block uses {shard_salt, shard_count}.
+    auto read_json = [](const std::string& path, const char* label,
+                        nlohmann::json& out) -> bool {
+        try {
+            if (path == "-") {
+                out = nlohmann::json::parse(std::cin);
+            } else {
+                std::ifstream f(path);
+                if (!f) {
+                    std::cerr << "shard-route: cannot open " << label
+                              << " file: " << path << "\n";
+                    return false;
+                }
+                f >> out;
+            }
+        } catch (std::exception& e) {
+            std::cerr << "shard-route: " << label << " is not valid JSON: "
+                      << e.what() << "\n";
+            return false;
+        }
+        if (!out.is_object()) {
+            std::cerr << "shard-route: " << label
+                      << " must be a JSON object\n";
+            return false;
+        }
+        return true;
+    };
+
+    if (!genesis_path.empty() && !snapshot_path.empty()) {
+        std::cerr << "shard-route: pass at most one of --genesis / --snapshot\n";
+        return 1;
+    }
+
+    if (!genesis_path.empty()) {
+        nlohmann::json gj;
+        if (!read_json(genesis_path, "--genesis", gj)) return 1;
+        if (salt_hex.empty() && gj.contains("shard_address_salt")
+            && gj["shard_address_salt"].is_string())
+            salt_hex = gj["shard_address_salt"].get<std::string>();
+        if (!have_count && gj.contains("initial_shard_count")
+            && gj["initial_shard_count"].is_number_unsigned()) {
+            shard_count = gj["initial_shard_count"].get<uint32_t>();
+            have_count  = true;
+        }
+    } else if (!snapshot_path.empty()) {
+        nlohmann::json sj;
+        if (!read_json(snapshot_path, "--snapshot", sj)) return 1;
+        // Snapshot may nest constants under a "constants" object or carry
+        // shard_salt / shard_count at the top level (Chain::serialize_state
+        // emits them at the constants level alongside the rest of the snap).
+        const nlohmann::json& src =
+            (sj.contains("constants") && sj["constants"].is_object())
+                ? sj["constants"] : sj;
+        if (salt_hex.empty() && src.contains("shard_salt")
+            && src["shard_salt"].is_string())
+            salt_hex = src["shard_salt"].get<std::string>();
+        if (!have_count && src.contains("shard_count")
+            && src["shard_count"].is_number_unsigned()) {
+            shard_count = src["shard_count"].get<uint32_t>();
+            have_count  = true;
+        }
+    }
+
+    if (!have_count) {
+        std::cerr << "shard-route: shard count not supplied "
+                     "(use --shard-count, or --genesis/--snapshot)\n";
+        return 1;
+    }
+
+    // ── Decode the 32-byte salt. Required only when shard_count > 1 (the
+    // unsharded short-circuit never touches the salt — match consensus). ──
+    std::array<uint8_t, 32> salt{};
+    if (shard_count > 1) {
+        if (salt_hex.empty()) {
+            std::cerr << "shard-route: --salt (or a salt-bearing file) is "
+                         "required when shard_count > 1\n";
+            return 1;
+        }
+        std::vector<uint8_t> sb;
+        try { sb = from_hex(salt_hex); }
+        catch (std::exception& e) {
+            std::cerr << "shard-route: --salt invalid hex: " << e.what()
+                      << "\n";
+            return 1;
+        }
+        if (sb.size() != 32) {
+            std::cerr << "shard-route: --salt must be exactly 32 bytes "
+                         "(64 hex chars); got " << sb.size() << " bytes\n";
+            return 1;
+        }
+        std::copy(sb.begin(), sb.end(), salt.begin());
+    }
+
+    // ── Route. Reproduce crypto::shard_id_for_address byte-for-byte. ──────
+    // Pre-image = salt[32] || "shard-route" || addr_bytes. Always compute
+    // the digest (even unsharded) so digest_hex is emitted for audit; the
+    // shard short-circuits to 0 when shard_count <= 1, exactly as consensus.
+    std::vector<uint8_t> preimage;
+    preimage.reserve(32 + 11 + addr.size());
+    preimage.insert(preimage.end(), salt.begin(), salt.end());
+    static const char kTag[] = "shard-route";       // 11 bytes, no NUL
+    preimage.insert(preimage.end(), kTag, kTag + 11);
+    preimage.insert(preimage.end(), addr.begin(), addr.end());
+
+    std::array<uint8_t, 32> digest{};
+    SHA256(preimage.data(), preimage.size(), digest.data());
+
+    uint32_t shard = 0;
+    if (shard_count > 1) {
+        // Fold first 8 bytes big-endian into a u64, then mod shard_count.
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i)
+            v = (v << 8) | digest[static_cast<size_t>(i)];
+        shard = static_cast<uint32_t>(v % shard_count);
+    }
+
+    const std::string digest_hex = to_hex(digest);
+
+    // is_cross_shard short-circuits to false when shard_count <= 1.
+    bool cross_shard = false;
+    if (have_myshard && shard_count > 1)
+        cross_shard = (shard != my_shard);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["address"]     = addr;
+        r["shard_count"] = shard_count;
+        r["shard"]       = shard;
+        r["digest_hex"]  = digest_hex;
+        if (have_myshard) {
+            r["my_shard"]    = my_shard;
+            r["cross_shard"] = cross_shard;
+        }
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "address:     " << addr        << "\n"
+                  << "shard_count: " << shard_count << "\n"
+                  << "shard:       " << shard       << "\n"
+                  << "digest_hex:  " << digest_hex  << "\n";
+        if (have_myshard) {
+            std::cout << "my_shard:    " << my_shard << "\n"
+                      << "cross_shard: "
+                      << (cross_shard ? "true" : "false") << "\n";
+        }
+    }
+    return 0;
+}
+
 // ── block-tx-root ────────────────────────────────────────────────────────────
 //
 // Recompute the canonical Block.tx_root from a block JSON's creator_tx_lists
@@ -21406,6 +21709,32 @@ void print_usage() {
         "                                             key_bytes for a hit, so the caller can bind a\n"
         "                                             proof to THIS leaf). --json emits a one-line\n"
         "                                             object. Exit 0 success, 1 args/range error.\n"
+        "  shard-route --address <addr>               OFFLINE address-to-shard router. Reproduces the\n"
+        "    (--salt <hex64> --shard-count <N>        consensus rule crypto::shard_id_for_address (src/\n"
+        "     | --genesis <file|-> | --snapshot <f|->)crypto/random.cpp) byte-for-byte — the SAME\n"
+        "    [--my-shard <N>] [--json]                deterministic map every node, beacon, and wallet\n"
+        "                                             agrees on (rev.9 B3). Tells you which shard OWNS\n"
+        "                                             an address (a registered domain or an anon\n"
+        "                                             bearer wallet), and optionally whether a transfer\n"
+        "                                             to it is cross-shard relative to a home shard\n"
+        "                                             (the src/chain/chain.cpp::is_cross_shard\n"
+        "                                             predicate). shard_count<=1 => shard 0 (unsharded,\n"
+        "                                             all local); else h = SHA-256(salt[32] ||\n"
+        "                                             \"shard-route\" || addr), fold h[0..7] big-endian\n"
+        "                                             into a u64, shard = u64 mod shard_count.\n"
+        "                                             salt +\n"
+        "                                             count come from genesis (shard_address_salt /\n"
+        "                                             initial_shard_count) and are fixed for the\n"
+        "                                             chain's lifetime; supply them explicitly, or read\n"
+        "                                             a genesis JSON (--genesis) or chain snapshot\n"
+        "                                             (--snapshot). Explicit --salt / --shard-count\n"
+        "                                             override file values. --my-shard reports\n"
+        "                                             cross_shard = (route != N). Pure local SHA-256 +\n"
+        "                                             modulo; no RPC, no network, no daemon.\n"
+        "                                             Deterministic. --json emits {address, shard_\n"
+        "                                             count, shard, digest_hex, my_shard?, cross_\n"
+        "                                             shard?}. Exit 0 success, 1 args/parse/IO/range\n"
+        "                                             error.\n"
         "  decode-wire-frame                          OFFLINE decoder + bounds-validator for ONE\n"
         "    (--in <hex> | --in-file <file|->)        inter-peer message body (the bytes inside the\n"
         "    [--json]                                 transport [u32 length BE] frame). Reproduces\n"
@@ -21889,6 +22218,7 @@ int main(int argc, char** argv) {
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "block-tx-root")   return cmd_block_tx_root  (argc - 2, argv + 2);
     if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
+    if (cmd == "shard-route")     return cmd_shard_route    (argc - 2, argv + 2);
     if (cmd == "decode-wire-frame") return cmd_decode_wire_frame(argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
