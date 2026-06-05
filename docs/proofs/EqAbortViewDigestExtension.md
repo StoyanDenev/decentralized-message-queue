@@ -1,6 +1,8 @@
 # EqAbortViewDigestExtension — closing the equivocation/abort dimension of S-030-D2 (v2.7 F2)
 
-**Status:** Design spec, implementation-ready. Not yet shipped.
+**Status: SHIPPED (commit `48c4b45`).** This document was the implementation-ready
+design spec; the GO recommendation was executed. The equivocation/abort dimension
+of S-030-D2 is now closed at the consensus layer, alongside the inbound dimension.
 **Scope:** Extend the shipped inbound F2 carry→reconcile→digest pattern to the
 `equivocation_events` and `abort_events` dimensions, using the **UNION**
 reconciliation rule (per F2-SPEC §Q1) instead of inbound's INTERSECTION.
@@ -8,6 +10,31 @@ reconciliation rule (per F2-SPEC §Q1) instead of inbound's INTERSECTION.
 The gossip-async safety gate is **passed** because reconciliation is a pure,
 deterministic function of the K signed Phase-1 commits, computed *before*
 digesting. This is the same property that makes the shipped inbound binding safe.
+
+> **Implementation note (two verified refinements made during the build — both
+> safer than the spec body below, which is preserved as the design record):**
+>
+> 1. **Validator uses SUBSET, not exact-cardinality, membership** (§2 step 6 wrote
+>    exact-cardinality). `hash_equivocation_event` / `hash_abort_event` include
+>    observer-dependent forensic fields (`shard_id` / `beacon_anchor_height`,
+>    recorded at *detection* time — see `node.cpp::on_contrib`), so the union can
+>    hold multiple witnesses for one misbehavior that no single assembler can
+>    materialize; exact-cardinality would **stall** under provenance disagreement.
+>    Subset still closes S-030-D2 (the digest binds the *included* set, so two
+>    instances with different evidence sets cannot share K-of-K signatures) and
+>    union persistence gives eventual-inclusion censorship-resistance. The §3.3
+>    materialization analysis already anticipated this; subset is its resolution.
+> 2. **Zero-root v1 sentinel handling in the validator.** `make_contrib` leaves a
+>    view root **zero** when all of a creator's views are empty (the v1 short-
+>    circuit), but `compute_view_root({})` is the *non-zero* empty-SHA-256. The
+>    validator (`check_eqabort_reconciliation`) treats a zero root as "no view"
+>    (empty list, contributes nothing) rather than recomputing it. Without this,
+>    every plain (no-evidence) F2 block — the common case — is rejected and the
+>    chain stalls at height 1. (The intersection-only inbound check never hits
+>    this because an admitted receipt forces every root non-zero.) Guarded by the
+>    new `tools/test_f2_eqabort_reconciliation.sh` (asserts zero `invalid block:
+>    F2:` across the committee). Verified: build clean; FAST 147/147; full
+>    cross-shard suite (7) green; full equivocation/abort suite (6) green.
 
 Companion docs:
 - `docs/proofs/S030-D2-Analysis.md` — the residual D2 gap and the inbound closure (§3.5, §4 item 7).

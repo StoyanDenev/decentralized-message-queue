@@ -41,10 +41,13 @@
 > appends a root over the sorted `hash_cross_shard_receipt` keys of
 > `inbound_receipts`, so the K-of-K signature binds the admitted SET (closing the
 > subset-only removal gap — a relayer can no longer STRIP an admitted receipt
-> after signing). Verified: the full cross-shard suite passes. Remaining for full
-> S-030-D2 hardening across ALL dimensions: extend the same carry+intersect+digest
-> pattern to the equivocation/abort view roots, plus the optional contrib-time
-> V21–V26 view-root passes.
+> after signing). Verified: the full cross-shard suite passes. **The
+> equivocation/abort dimensions are now also shipped (commit `48c4b45`)** via the
+> same carry→reconcile→digest pattern with the UNION rule (subset membership +
+> zero-root v1-sentinel handling — see `EqAbortViewDigestExtension.md`), so all
+> three pool-fed dimensions are consensus-layer-closed. Remaining S-030-D2 ✗ rows
+> are the non-pool fields (`cross_shard_receipts`, derived from the bound tx set;
+> `partner_subset_hash`; `timestamp`), plus the optional contrib-time V21–V26 passes.
 
 This document is the analytic companion to **FB22** (`docs/proofs/tla/F2ViewReconciliation.tla`). FB22 formalizes the v2.7 F2 view-reconciliation primitives + the validator-side passes V21..V26 in TLA+; the present document states and proves the same six algebraic invariants in plain prose, with line-by-line citations to the C++ implementation at `src/node/producer.cpp:335..496`.
 

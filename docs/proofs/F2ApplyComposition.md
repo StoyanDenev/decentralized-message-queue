@@ -27,10 +27,12 @@
 > keys of `inbound_receipts`, so the K-of-K Phase-2 signature binds the admitted
 > inbound SET directly (closing the subset-only removal gap). For the inbound
 > dimension the end-to-end digest-coverage claim is therefore no longer a
-> specification but live behavior. The remaining F2→apply digest-coverage work is
-> to extend the same carry+intersect+digest pattern to the equivocation/abort view
-> dimensions; the apply-side determinism the theorem consumes (S-033 state_root
-> over the reconciled inputs) holds for all three.
+> specification but live behavior. **The equivocation/abort dimensions are now also
+> shipped (commit `48c4b45`)** via the same carry→reconcile→digest pattern with the
+> UNION rule (subset membership + zero-root v1-sentinel handling — see
+> `EqAbortViewDigestExtension.md`), so the digest-coverage claim is live behavior
+> for all three pool-fed input fields. The apply-side determinism the theorem
+> consumes (S-033 state_root over the reconciled inputs) holds for all three.
 
 This document formalizes the **composition seam** between the v2.7 F2 view-reconciliation layer (consensus-side, per `F2ViewReconciliationAnalysis.md` + FB22) and the FA-Apply-1..16 apply-determinism sequence (apply-side, per `AccountStateInvariants.md`, `MultiEventComposition.md`, and the per-surface FA-Apply-N siblings). The two halves close S-030 D2 from opposite directions — F2 ensures every honest committee member commits, before any state mutation, to a canonical view of the three pool-fed input fields (`equivocation_events`, `abort_events`, `inbound_receipts`); FA-Apply-1..16 ensures the apply path consumes those inputs in a strictly serialized, byte-deterministic order producing a single post-apply state. The present document pins the joint claim: **the F2-committed view roots, once bound into the K-of-K Phase-2 signature surface, are sound inputs to the FA-Apply-1..16 sequence, in the sense that every honest receiver running the apply path against the F2-canonical inputs produces a byte-identical post-apply state and a byte-identical S-033 `state_root`**. The S-033 gate at `chain.cpp:1432–1444` is the apply-time observable that fires on any cross-node divergence, and (post-S-038) it fires on every production block.
 
