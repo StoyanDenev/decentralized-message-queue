@@ -13,12 +13,14 @@ GO/NO-GO.
 > to reconcile). The "validate-before-vendor" oracle has shipped (commit
 > `9d69f05`): `determ test-ed25519-vectors` pins the daemon's Ed25519 against the
 > RFC 8032 §7.1 known-answer vectors (24 assertions; FAST=1 148/148) — this is the
-> §Q9 byte-equal gate the forthcoming ref10 backend must pass. **The first
-> *vendored* C99 primitive has also shipped (commit `c349129`):** §3.1 SHA-256 /
-> SHA-512 (FIPS 180-4) in portable C99 at `src/crypto/sha2/`, validated by
-> `determ test-sha2-c99` byte-equal against OpenSSL over all length/padding
-> boundaries + the NIST KATs (FAST 149/149). SHA-512 is itself a prerequisite for
-> Ed25519 + the FROST H1..H5 hashes, so this is on the direct path. Remaining P0:
+> §Q9 byte-equal gate the forthcoming ref10 backend must pass. **The §3.1 work
+> unit is now complete (commits `c349129` + `1bd9011`):** SHA-256 / SHA-512 (FIPS
+> 180-4) + HMAC-SHA-256/512 (RFC 2104) + HKDF-SHA-256 (RFC 5869) in portable C99
+> at `src/crypto/sha2/`, validated by `determ test-sha2-c99` — byte-equal against
+> OpenSSL over all length/padding boundaries (SHA-2 + HMAC) + the NIST FIPS 180-4
+> and RFC 5869 KATs (12/12; FAST 149/149). SHA-512 is itself a prerequisite for
+> Ed25519 + the FROST H1..H5 hashes, and HMAC-SHA-256 already backs RPC auth
+> (S-001), so this is squarely on the libsodium-removal / v2.10 path. Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
