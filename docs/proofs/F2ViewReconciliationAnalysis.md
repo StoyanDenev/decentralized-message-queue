@@ -1,5 +1,26 @@
 # F2 view-reconciliation primitives — analytic invariants
 
+> **⚠ Implementation status (corrected 2026-06-05).** The reconciliation
+> *primitives* proven below (`compute_view_root` / `reconcile_union` /
+> `reconcile_intersection`) and the validator-side passes
+> (`validate_contrib_view_roots` V21–V24, `validate_view_reconciliation`
+> V25–V26) **exist, are unit-tested (`determ test-view-root`), and are
+> TLA-modeled (FB22) — but they are NOT yet wired into the live consensus
+> path.** Verified against the current tree: `Node::start_contrib_phase`
+> (`src/node/node.cpp`) calls `make_contrib` with NO view lists, so every
+> shipped `ContribMsg` carries empty view lists + zero view-roots (the v1
+> commit short-circuit fires); `compute_block_digest` (`src/node/producer.cpp`)
+> binds none of the view roots; `validator.cpp` never calls
+> `validate_view_reconciliation`; and the migration gate
+> `v2_7_f2_active_from_height` (`include/determ/chain/genesis.hpp`) has **zero
+> readers in `src/`**. The algebraic invariants below are therefore sound as a
+> **specification** of the intended wiring (tracked as the S-016 / v2.7 F2
+> closure), not a description of live behavior. The §6 claim that "S-030 D2 is
+> consensus-layer complete via F2" is premature: S-030 D2 is closed only at the
+> **apply layer** (S-033 `state_root` + S-038 producer wiring, which ARE
+> shipped); the consensus-layer view-binding described here is the remaining
+> open work. This banner is removed when sites 1–4 of the wiring land.
+
 This document is the analytic companion to **FB22** (`docs/proofs/tla/F2ViewReconciliation.tla`). FB22 formalizes the v2.7 F2 view-reconciliation primitives + the validator-side passes V21..V26 in TLA+; the present document states and proves the same six algebraic invariants in plain prose, with line-by-line citations to the C++ implementation at `src/node/producer.cpp:335..496`.
 
 The proof is short and structural. The three reconciliation primitives (`compute_view_root`, `reconcile_union`, `reconcile_intersection`) reduce to standard `std::set` semantics after the canonical-sort pre-step; the algebraic claims (monotonicity, anti-monotonicity, order-independence, idempotence, censorship-resistance lift, intersection-conservativeness) follow from set-theoretic axioms once the implementation's "set-coerce then deterministic-iterate" structure is made explicit. The proof exists so an external reviewer can confirm — without running TLC and without re-reading the C++ — that the validator's V25/V26 re-derivation produces exactly the canonical lists the producer commits to, regardless of which honest committee member assembled the block body.

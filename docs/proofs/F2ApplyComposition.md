@@ -1,5 +1,19 @@
 # F2ApplyComposition — v2.7 F2 view reconciliation + FA-Apply-1..16 composition + state_root binding
 
+> **⚠ Implementation status (corrected 2026-06-05).** The S-033 `state_root`
+> apply gate + S-038 producer wiring this proof composes against ARE shipped
+> (verified: `src/chain/chain.cpp` populates and checks `body.state_root`, and
+> the gate fires on production blocks). But the F2 **consensus-layer** premise —
+> that each committee member binds view roots for `equivocation_events` /
+> `abort_events` / `inbound_receipts` into the K-of-K signature surface — is NOT
+> yet live: `Node::start_contrib_phase` never populates the view lists and
+> `compute_block_digest` binds none of the view roots (see the status banner in
+> `F2ViewReconciliationAnalysis.md`). The end-to-end composition theorem below is
+> therefore a **specification** of the behavior once v2.7 F2 / S-016 is wired,
+> not a description of current behavior. Today S-030 D2 is closed only at the
+> apply layer (S-033 + S-038); the consensus-layer view-binding is open work.
+> This banner is removed when the F2 wiring (sites 1–4) lands.
+
 This document formalizes the **composition seam** between the v2.7 F2 view-reconciliation layer (consensus-side, per `F2ViewReconciliationAnalysis.md` + FB22) and the FA-Apply-1..16 apply-determinism sequence (apply-side, per `AccountStateInvariants.md`, `MultiEventComposition.md`, and the per-surface FA-Apply-N siblings). The two halves close S-030 D2 from opposite directions — F2 ensures every honest committee member commits, before any state mutation, to a canonical view of the three pool-fed input fields (`equivocation_events`, `abort_events`, `inbound_receipts`); FA-Apply-1..16 ensures the apply path consumes those inputs in a strictly serialized, byte-deterministic order producing a single post-apply state. The present document pins the joint claim: **the F2-committed view roots, once bound into the K-of-K Phase-2 signature surface, are sound inputs to the FA-Apply-1..16 sequence, in the sense that every honest receiver running the apply path against the F2-canonical inputs produces a byte-identical post-apply state and a byte-identical S-033 `state_root`**. The S-033 gate at `chain.cpp:1432–1444` is the apply-time observable that fires on any cross-node divergence, and (post-S-038) it fires on every production block.
 
 The proof is structural rather than cryptographic. The cryptographic content (Ed25519 EUF-CMA + SHA-256 collision-resistance underwriting the F2 commit-binding step and the S-033 Merkle binding) is folded in from the sibling proofs and invoked at named cite-points. The novel content here is the composition argument: F2's pre-apply commitment + FA-Apply-1..16's per-Phase determinism + S-033's apply-time gate compose into a single end-to-end soundness theorem ("F2-committed view roots ⇒ byte-identical post-apply state ⇒ byte-identical state_root ⇒ K-of-K signature surface stays self-consistent"). The composition is what makes S-030 D2 actually closed in operational terms: pre-F2 + pre-S-033, the K-of-K signature surface covered fewer fields than the apply path consumed, so two honest nodes could legitimately apply the same K-signed block to divergent states. F2 + S-033 + S-038 jointly close that gap. This proof names the closure as a composed theorem so future agents reading the proof stack do not have to reconstruct it from the per-layer sibling proofs.
