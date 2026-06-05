@@ -35,6 +35,20 @@ digesting. This is the same property that makes the shipped inbound binding safe
 >    new `tools/test_f2_eqabort_reconciliation.sh` (asserts zero `invalid block:
 >    F2:` across the committee). Verified: build clean; FAST 147/147; full
 >    cross-shard suite (7) green; full equivocation/abort suite (6) green.
+>
+> **Post-ship adversarial review (5 lenses, each confirmed against source; commit
+> `369c3f7`).** Subset-soundness, zero-root producer/validator consistency, the
+> digest-gate edge cases (BFT sentinels, cap truncation, pre-activation), and the
+> apply-time invariants (A1 supply / slashing determinism / abort reselection)
+> were all found **sound** — no stall, no divergence, no exploit. Two **LOW**
+> robustness/coverage items were confirmed and fixed: (a) `check_inbound_receipts`
+> now carries the same explicit zero-root v1-sentinel skip as
+> `check_eqabort_reconciliation` (it was safe only by the intersection rule forcing
+> non-zero roots — a cross-module coupling now made explicit; behavior-preserving);
+> (b) `tools/test_f2_eqabort_snapshot.sh` closes the S-037-class gap (no test had
+> exercised snapshot bootstrap on a chain carrying F2 eq/abort evidence — a donor
+> chain now slashes an equivocator, snapshots, and a bare receiver restores with a
+> matching state_root and the slash intact).
 
 Companion docs:
 - `docs/proofs/S030-D2-Analysis.md` — the residual D2 gap and the inbound closure (§3.5, §4 item 7).
