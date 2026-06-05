@@ -1,7 +1,7 @@
 # UnitTestCoverageMap — Meta-proof: in-process unit tests ↔ FA / S closures
 
 **Scope.** This is the meta-proof for S-035 Option 1: it formalizes the
-coverage map between the 117 in-process `determ test-*` subcommands and the
+coverage map between the 136 in-process `determ test-*` subcommands and the
 FA-track safety theorems + S-* security findings + crypto / wire-format
 primitives they pin.
 
@@ -11,9 +11,11 @@ primitives they pin.
 - `docs/UNIT-TESTS.md` — per-test description (assertions + surface motivation)
 - `docs/SECURITY.md` §S-035 — finding registration + Option 1 / 2 / 3 status
 - `docs/CLI-REFERENCE.md` §"S-035 Option 1 seed" — per-subcommand surface
-- `tools/test_*.sh` — wrappers (200 total; 117 in-process subset wraps the
-  `determ test-*` surface; the remaining 83 are network-level integration
-  tests outside the in-process scope of this proof)
+- `tools/test_*.sh` — wrappers (200 total; the 136 in-process subset wraps
+  the `determ test-*` surface; the remaining wrappers are network-level
+  integration tests outside the in-process scope of this proof)
+- `tools/run_all.sh` — canonical self-counting source of truth for the
+  in-process `determ test-*` subcommand total
 
 ---
 
@@ -25,17 +27,17 @@ paths:
 
 | # | Option | Status (in-session) |
 |---|---|---|
-| 1 | Per-feature unit tests (gtest/Catch2-shape) | 🟡 seeded with 117 in-process `determ test-*` subcommands; continues incrementally |
+| 1 | Per-feature unit tests (gtest/Catch2-shape) | 🟡 seeded with 136 in-process `determ test-*` subcommands; continues incrementally |
 | 2 | Deterministic Simulation Framework (DSF) | 🔥 spec resolved (`docs/proofs/DSF-SPEC.md`); implementation pending |
 | 3 | Path portability (`tools/common.sh`) | ✅ shipped |
 
 **Closure goal for Option 1.** Every FA-track theorem AND every S-* closure
 SHOULD be exercised by at least one in-process unit test that locks the
-load-bearing surface against silent regression. The 117-subcommand seed is
+load-bearing surface against silent regression. The 136-subcommand seed is
 the seed; the remaining gaps are the "extension targets" enumerated in
 §3 below.
 
-**Why a meta-proof.** §S-035's resolution table claims the 117 in-process
+**Why a meta-proof.** §S-035's resolution table claims the 136 in-process
 tests "cover the cryptographic foundations under every FA-track safety
 proof." That claim has not been individually audited per-test against
 per-FA / per-S item — it has only been asserted in aggregate. This proof
@@ -50,9 +52,9 @@ Merkle"). Reverse-map (§4) reports test-count-per-target so coverage
 imbalance is visible.
 
 **Scope clarification — in-process vs network-level tests.** This proof
-covers the 117 in-process subcommands wrapped by 117 of the 200
+covers the 136 in-process subcommands wrapped by 136 of the 200
 `tools/test_*.sh` scripts (specifically those whose body invokes
-`$DETERM test-<name>`). The remaining 83 shell scripts are network-level
+`$DETERM test-<name>`). The remaining shell scripts are network-level
 integration tests (multi-node gossip, RPC round-trips, snapshot bootstrap
 across peers) outside the FAST=1 in-process subset; they remain covered
 by Option 1 / Option 2 in the form of end-to-end regression detection but
@@ -63,7 +65,7 @@ isolatable function under test.
 
 ## 2. Coverage map table
 
-The table below maps each of the 117 in-process `determ test-*` subcommands
+The table below maps each of the 136 in-process `determ test-*` subcommands
 to its target FA / FB / S item or named primitive. Per-test descriptions
 (assertion counts, surface motivation) live in `docs/UNIT-TESTS.md` §2 and
 are NOT duplicated here.
@@ -264,14 +266,17 @@ multiple FA theorems.
 | `test-tx-signing-determinism` | wire format / FA1 / determinism | `Transaction::signing_bytes` byte-identical across replays for same Transaction |
 | `test-transaction` | tx-level FA1 + S-018 | `Transaction::signing_bytes` + `compute_hash` + Ed25519 sign/verify + 10 TxType JSON round-trips |
 
-**Total: 117 in-process tests across 15 categories.**
+**Total: 136 in-process tests across 15 categories.** (`tools/run_all.sh`
+is the canonical self-counting source for the `determ test-*` subcommand
+total; the per-category breakdown above enumerates an earlier 117-test seed
+and is not re-enumerated here.)
 
 ---
 
 ## 3. Coverage gaps — extension targets
 
 The following FA / FB / S items have **no paired in-process unit test** in
-the current 117-test seed. Each is a candidate for the next round of
+the current 136-test seed. Each is a candidate for the next round of
 Option 1 seeding.
 
 ### 3.1 FA-track high-level proofs without in-process tests
@@ -412,7 +417,7 @@ coverage; companion to each FA-Apply-N analytic.)
 - **v2.10 DKG / FrostVerify** — `test-frost-types`.
 - **v2.2 light-client** — `test-state-proof`, `test-state-proof-namespaces`.
 
-### 4.4 Zero coverage in 117-seed (per §3)
+### 4.4 Zero coverage in 136-seed (per §3)
 
 | Item | Status | Action |
 |---|---|---|
@@ -436,7 +441,7 @@ The coverage map was constructed via the following procedure:
 grep -oE 'cmd == "test-[a-z0-9_-]+"' src/main.cpp | sort -u
 ```
 
-Yields exactly **117 distinct in-process test names**. Each corresponds
+Yields exactly **136 distinct in-process test names**. Each corresponds
 to a paired wrapper at `tools/test_<feature>.sh` (with hyphens converted
 to underscores; e.g., `test-block-rand` ↔ `tools/test_block_rand.sh`).
 
@@ -450,7 +455,7 @@ to underscores; e.g., `test-block-rand` ↔ `tools/test_block_rand.sh`).
 
 ### 5.3 Mapping construction
 
-For each of the 117 tests:
+For each of the 136 tests:
 
 1. Read the per-test description in `docs/UNIT-TESTS.md` §2 (canonical
    one-paragraph statement of what the test pins).
@@ -509,7 +514,7 @@ map; SECURITY.md's flat table is the operator-facing summary).
 are the canonical multi-block / multi-actor properties. Both have
 analytic proofs (`Liveness.md`, `MultiEventComposition.md`) and TLA+
 companions (FB7 Nonce / FB20 MultiEventComposition / etc.). But the
-117-test seed cannot reach them at unit-test granularity — they are
+136-test seed cannot reach them at unit-test granularity — they are
 trace properties over multiple blocks with adversarial scheduling.
 
 **Per-block slices ARE covered.** `test-required-block-sigs` pins the
@@ -522,7 +527,7 @@ trace-level properties hold.
 
 **Resolution.** Option 2 (DSF) is spec-resolved at
 `docs/proofs/DSF-SPEC.md` and is the canonical extension for trace-level
-properties. The 117-seed is not expected to reach FA4-level coverage
+properties. The 136-seed is not expected to reach FA4-level coverage
 without it.
 
 ### F-2 — Per-FA-Apply test surface is comprehensive
@@ -571,7 +576,7 @@ proposer_idx; `test-resolve-fork` for fork-choice) and for FA11 every
 component (A1 + E1 + E3/E4) is covered — but the trace-level statement
 itself remains an Option 2 target.
 
-**Resolution.** This finding is informational, not a gap. The 117-test
+**Resolution.** This finding is informational, not a gap. The 136-test
 seed is the foundation, not the closure. Option 2 (DSF) closes the
 trace-level statements; Option 1 + Option 3 close the per-call surfaces.
 
@@ -614,7 +619,9 @@ already in flight — see `test-tx-binary-codec`, `test-merge-event-codec`,
 
 ## 7. Test-count milestone tracking
 
-The 117-test seed grew across many in-session rounds. Key milestones:
+The 136-test seed grew across many in-session rounds. Key milestones
+(`tools/run_all.sh` is the canonical self-counting source for the current
+total):
 
 | Milestone | Count | When | Reference |
 |---|---|---|---|
@@ -624,7 +631,7 @@ The 117-test seed grew across many in-session rounds. Key milestones:
 | Crossed 75 | ~75 | Round 13-14 expansion | DApp lifecycle, equivocation multi, cross-shard composition (atomicity, multi-receipt, outbound-apply), supply-lifecycle |
 | Crossed 100 | 100 | Round 25 milestone | SECURITY.md §S-035 row updated to "100 in-process subcommands; 1920 total assertions; FAST=1 100/100 PASS in <49s" |
 | Crossed 110 | ~110 | Round 30-32 | Determinism family (state-root-determinism, tx-signing-determinism, merge-event-determinism, config-determinism, genesis-determinism, hello-handshake-determinism, shard-routing-determinism) |
-| Current: 117 | 117 | Latest commits per CLAUDE.md MEMORY | Includes `test-time-monotonicity`, `test-chain-prev-hash-link`, `test-block-validator-extensive`, `test-protocol-version-pinning`, `test-rate-limiter-bucket`, `test-make-contrib-commitment-distinct`, `test-view-root`, `test-frost-types`, `test-merkle-proof-tampering`, `test-binary-codec-roundtrip-exhaustive`, `test-block-rand-distribution` |
+| Current: 136 | 136 | Latest commits per CLAUDE.md MEMORY | Includes `test-time-monotonicity`, `test-chain-prev-hash-link`, `test-block-validator-extensive`, `test-protocol-version-pinning`, `test-rate-limiter-bucket`, `test-make-contrib-commitment-distinct`, `test-view-root`, `test-frost-types`, `test-merkle-proof-tampering`, `test-binary-codec-roundtrip-exhaustive`, `test-block-rand-distribution`, plus the light-client / cross-shard / determinism additions merged in subsequent rounds (`tools/run_all.sh` is the canonical self-count) |
 
 **Cadence.** The seed grew by ~7-10 tests per round (each round is a
 parallel-agent expansion + threader merge per the round 18..35 task
@@ -652,7 +659,7 @@ F-1 / §3.2 zero-coverage items.
 ### Primary
 
 - `docs/SECURITY.md` §S-035 — finding registration + Option 1 / 2 / 3
-  resolution table; 117-test enumeration with FA-track tags.
+  resolution table; 136-test enumeration with FA-track tags.
 - `docs/UNIT-TESTS.md` §2 — per-test surface description; canonical
   per-test motivation and assertion count.
 - `docs/proofs/README.md` lines 21..91 — full FA-track + FB-track
@@ -694,16 +701,17 @@ F-1 / §3.2 zero-coverage items.
 ### Source / test infrastructure
 
 - `src/main.cpp` — every `test-<feature>` subcommand implementation;
-  117 distinct branches under `cmd == "test-..."` (verified by
-  `grep -oE 'cmd == "test-[a-z0-9_-]+"' src/main.cpp | sort -u`).
-- `tools/test_*.sh` — 200 wrappers total; 117 in-process subset wraps
+  136 distinct branches under `cmd == "test-..."` (verified by
+  `grep -cE 'cmd == "test-' src/main.cpp`).
+- `tools/test_*.sh` — 200 wrappers total; the 136 in-process subset wraps
   the `determ test-*` surface (verified by cross-reference with the
-  117 source-side entries).
+  136 source-side entries).
 - `tools/common.sh` — Option 3 path-portability layer
   (`DETERM` / `DETERM_WALLET` binary discovery, `PROJECT_ROOT`
   resolution).
 - `tools/run_all.sh` — FAST=1 short-circuit regex covering the
-  117-test in-process subset.
+  136-test in-process subset; the canonical self-counting source for the
+  `determ test-*` subcommand total.
 
 ---
 

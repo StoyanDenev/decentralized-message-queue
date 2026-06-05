@@ -389,7 +389,7 @@ Migration steps:
 5. Remove libsodium submodule
 6. Update documentation: SECURITY.md crypto-dependency list, WHITEPAPER §7 cryptographic primitives, V2-DESIGN.md cross-references
 
-**Validation:** existing 99 in-process `determ test-*` subcommands continue passing after migration. New `determ test-crypto-*` subcommands added per primitive.
+**Validation:** existing 136 in-process `determ test-*` subcommands continue passing after migration. New `determ test-crypto-*` subcommands added per primitive.
 
 ### Q10: Profile bundling — crypto choice tied to TimingProfile
 
@@ -576,7 +576,7 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 ### 3.15 Migration of existing callers (~5 days)
 
 - Refactor every libsodium call site to `determ::crypto::` API
-- Existing 99 in-process test subcommands continue passing
+- Existing 136 in-process test subcommands continue passing
 - New `determ test-crypto-*` subcommands added per primitive
 - libsodium removed from build
 
