@@ -316,6 +316,10 @@ In-process tests (deterministic, no network):
   determ test-committee-selection             Committee-selection primitives (S-020 hybrid
                                               select_m_creators + select_after_abort_m
                                               + epoch_committee_seed determinism)
+  determ test-abort-reselection               Post-abort committee re-selection contract —
+                                              select_after_abort_m pinned-first-index (S5
+                                              anti-cartel), abort_hash rotation, both
+                                              branches, chained-fallback sequence
   determ test-shard-routing                   shard_id_for_address (cross-shard routing
                                               salted-SHA-256; determinism, salt-sensitivity,
                                               distribution sanity)
@@ -6562,6 +6566,236 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": committee-selection " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1 seed: in-process unit test for the POST-ABORT
+    // committee re-selection contract — crypto::select_after_abort_m.
+    //
+    // test-committee-selection already pins the happy-path
+    // determinism/size/distinctness of this function on ONE
+    // rejection-branch fixture (K=3, N=20). This test fills in the
+    // safety-critical CONTRACT that the fallback re-selection must
+    // honor across the abort/BFT-escalation retry path:
+    //
+    //   * Pinned-first-index: result[0] == (indices[0] + offset) % N
+    //     where offset = hash_mod(abort_hash, N). This is the S5
+    //     anti-cartel-navigation defense — the lead proposer is shifted
+    //     by a deterministic, abort-hash-derived amount so a cartel
+    //     cannot pre-plan the post-abort committee.
+    //   * abort_hash sensitivity: a different abort hash rotates the
+    //     committee (the rotation mechanism that makes successive
+    //     abort retries unpredictable).
+    //   * In-range + distinct across BOTH branches (rejection at
+    //     2K ≤ N AND partial Fisher-Yates at 2K > N — the FY branch
+    //     of select_after_abort_m is otherwise never exercised).
+    //   * Chained-fallback sequence: a run of aborts folded through
+    //     chain_abort_hash drives successive re-selections, each
+    //     deterministic / distinct / in-range — the multi-round
+    //     fallback sequence a cartel must not be able to navigate.
+    //
+    // A regression here would either fork the post-abort committee
+    // across nodes (safety failure) or make the fallback sequence
+    // predictable (FA5 / S5 anti-cartel violation).
+    if (cmd == "test-abort-reselection") {
+        using namespace determ;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Deterministic seed builder (mirrors test-committee-selection).
+        auto seed = [](uint64_t i) {
+            SHA256Builder b; b.append(i); return b.finalize();
+        };
+
+        // Local re-implementation of random.cpp's static hash_u64 /
+        // hash_mod so we can independently DERIVE the offset the
+        // contract requires. Kept byte-identical to the source so the
+        // pinned-first-index assertion verifies the real formula, not
+        // a tautology.
+        auto hash_u64 = [](const Hash& h) -> uint64_t {
+            uint64_t v = 0;
+            for (int i = 0; i < 8; ++i) v = (v << 8) | h[i];
+            return v;
+        };
+        auto hash_mod = [&](const Hash& h, size_t n) -> size_t {
+            if (n == 0) return 0;
+            uint64_t v     = hash_u64(h);
+            uint64_t limit = (UINT64_MAX / n) * n;
+            if (v >= limit) {
+                Hash next = h;
+                uint64_t counter = 0;
+                while (v >= limit) {
+                    next = SHA256Builder{}.append(next).append(counter++).finalize();
+                    v = hash_u64(next);
+                }
+            }
+            return static_cast<size_t>(v % n);
+        };
+
+        // === Pinned-first-index contract (S5 anti-cartel) ===
+
+        // 1. result[0] == (indices[0] + hash_mod(abort_hash, N)) % N.
+        //    Exercised on the rejection branch (2K ≤ N: K=3, N=20).
+        {
+            auto original = select_m_creators(seed(7), 20, 3);
+            Hash abort_h  = compute_abort_hash(1, "node_x", 1234, seed(7));
+            auto shifted  = select_after_abort_m(original, abort_h, 20);
+            size_t offset = hash_mod(abort_h, 20);
+            size_t expect = (original[0] + offset) % 20;
+            check(shifted[0] == expect,
+                  "pinned-first-index: result[0] == (indices[0]+offset) % N (rejection branch)");
+        }
+
+        // 2. Same contract holds on the partial-FY branch (2K > N:
+        //    K=8, N=10). new_first is pinned at slot 0 before the
+        //    shuffle of positions 1..m, so the formula is identical.
+        {
+            auto original = select_m_creators(seed(11), 10, 8);
+            Hash abort_h  = compute_abort_hash(2, "node_y", 9999, seed(11));
+            auto shifted  = select_after_abort_m(original, abort_h, 10);
+            size_t offset = hash_mod(abort_h, 10);
+            size_t expect = (original[0] + offset) % 10;
+            check(shifted[0] == expect,
+                  "pinned-first-index: holds on partial-FY branch (2K>N)");
+        }
+
+        // === abort_hash sensitivity (rotation mechanism) ===
+
+        // 3. A different abort hash produces a different re-selection.
+        //    This is the rotation that makes successive abort retries
+        //    unpredictable to a cartel.
+        {
+            auto original = select_m_creators(seed(7), 20, 5);
+            Hash abort_a  = compute_abort_hash(1, "alice", 1000, seed(7));
+            Hash abort_b  = compute_abort_hash(1, "bob",   1000, seed(7));
+            auto sel_a = select_after_abort_m(original, abort_a, 20);
+            auto sel_b = select_after_abort_m(original, abort_b, 20);
+            check(sel_a != sel_b,
+                  "abort_hash sensitivity: different abort -> different committee");
+        }
+
+        // 4. The SAME abort hash re-selects identically (re-check of
+        //    purity, complementing test-committee-selection assertion 9).
+        {
+            auto original = select_m_creators(seed(3), 20, 4);
+            Hash abort_h  = compute_abort_hash(1, "carol", 4242, seed(3));
+            auto s1 = select_after_abort_m(original, abort_h, 20);
+            auto s2 = select_after_abort_m(original, abort_h, 20);
+            check(s1 == s2, "purity: identical inputs -> identical re-selection");
+        }
+
+        // === In-range + distinct invariants across both branches ===
+
+        // 5. Rejection branch (2K ≤ N): all indices in [0, N), all
+        //    distinct, exactly K returned.
+        {
+            auto original = select_m_creators(seed(21), 30, 6);
+            Hash abort_h  = compute_abort_hash(1, "dave", 7, seed(21));
+            auto shifted  = select_after_abort_m(original, abort_h, 30);
+            std::set<size_t> uniq(shifted.begin(), shifted.end());
+            bool ok = shifted.size() == 6 && uniq.size() == 6;
+            for (size_t i : shifted) if (i >= 30) { ok = false; break; }
+            check(ok, "rejection branch: K distinct in-range indices");
+        }
+
+        // 6. Partial-FY branch (2K > N): same invariants under the
+        //    FY path. K=9, N=10 forces 2K>N.
+        {
+            auto original = select_m_creators(seed(22), 10, 9);
+            Hash abort_h  = compute_abort_hash(1, "erin", 8, seed(22));
+            auto shifted  = select_after_abort_m(original, abort_h, 10);
+            std::set<size_t> uniq(shifted.begin(), shifted.end());
+            bool ok = shifted.size() == 9 && uniq.size() == 9;
+            for (size_t i : shifted) if (i >= 10) { ok = false; break; }
+            check(ok, "partial-FY branch: K distinct in-range indices (2K>N)");
+        }
+
+        // 7. K=N edge case: re-selection still covers exactly N distinct
+        //    indices (full-committee abort retry).
+        {
+            auto original = select_m_creators(seed(23), 5, 5);
+            Hash abort_h  = compute_abort_hash(1, "frank", 3, seed(23));
+            auto shifted  = select_after_abort_m(original, abort_h, 5);
+            std::set<size_t> uniq(shifted.begin(), shifted.end());
+            bool covers_all = shifted.size() == 5 && uniq.size() == 5;
+            for (size_t i = 0; i < 5; ++i)
+                if (uniq.count(i) != 1) { covers_all = false; break; }
+            check(covers_all, "K=N: re-selection covers every index 0..N-1");
+        }
+
+        // 8. Committee-size preservation: |re-selection| == |original|
+        //    across a span of K (sanity that no branch drops/duplicates
+        //    slots).
+        {
+            bool size_ok = true;
+            for (size_t k : {1u, 2u, 3u, 7u}) {
+                auto original = select_m_creators(seed(50 + k), 16, k);
+                Hash abort_h  = compute_abort_hash(1, "g", int64_t(k), seed(50 + k));
+                auto shifted  = select_after_abort_m(original, abort_h, 16);
+                if (shifted.size() != k) { size_ok = false; break; }
+            }
+            check(size_ok, "size preserved across K in {1,2,3,7} (N=16)");
+        }
+
+        // === Chained-fallback sequence (multi-round retry) ===
+
+        // 9. A run of aborts folded through chain_abort_hash drives a
+        //    sequence of re-selections. Each step is deterministic,
+        //    distinct, and in-range. This is the fallback sequence the
+        //    cartel must not be able to navigate ahead of time.
+        {
+            auto committee = select_m_creators(seed(7), 20, 4);
+            Hash prev_abort = compute_abort_hash(1, "node0", 1000, seed(7));
+            bool all_ok = true;
+            std::vector<std::vector<size_t>> history;
+            for (int round = 1; round <= 4 && all_ok; ++round) {
+                auto resel = select_after_abort_m(committee, prev_abort, 20);
+                std::set<size_t> uniq(resel.begin(), resel.end());
+                if (resel.size() != 4 || uniq.size() != 4) all_ok = false;
+                for (size_t i : resel) if (i >= 20) all_ok = false;
+                history.push_back(resel);
+                committee   = resel;  // next round re-selects from this one
+                prev_abort  = chain_abort_hash(prev_abort, uint8_t(round + 1),
+                                               "node0", 1000 + round);
+            }
+            check(all_ok,
+                  "chained fallback: every retry distinct + in-range (4 rounds)");
+            // 10. Successive rounds are not all identical — the chained
+            //     abort hash actually advances the committee.
+            bool advanced = history.size() == 4
+                            && !(history[0] == history[1]
+                                 && history[1] == history[2]
+                                 && history[2] == history[3]);
+            check(advanced,
+                  "chained fallback: chain_abort_hash advances the committee across rounds");
+        }
+
+        // 11. Full chained sequence is reproducible end-to-end: replaying
+        //     the same abort chain yields the identical fallback sequence
+        //     (consensus all nodes must agree on the fallback ordering).
+        {
+            auto run_chain = [&]() {
+                std::vector<std::vector<size_t>> hist;
+                auto committee = select_m_creators(seed(7), 20, 4);
+                Hash prev = compute_abort_hash(1, "node0", 1000, seed(7));
+                for (int round = 1; round <= 3; ++round) {
+                    auto resel = select_after_abort_m(committee, prev, 20);
+                    hist.push_back(resel);
+                    committee = resel;
+                    prev = chain_abort_hash(prev, uint8_t(round + 1), "node0", 1000 + round);
+                }
+                return hist;
+            };
+            check(run_chain() == run_chain(),
+                  "chained fallback: full sequence reproducible across replays");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": abort-reselection " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

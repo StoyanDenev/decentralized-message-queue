@@ -8620,6 +8620,265 @@ int cmd_committee_signature_verify(int argc, char** argv) {
     return pass ? 0 : 2;
 }
 
+// ── bft-quorum ───────────────────────────────────────────────────────────────
+//
+// Offline calculator for the two-level BFT committee/quorum arithmetic the
+// chain applies per round. Given a genesis committee size K (the configured
+// k_block_sigs) plus the round's abort/pool context, it reproduces — byte-
+// for-byte — the decisions made across three call sites in the daemon:
+//
+//   1. BFT escalation gate (src/node/node.cpp::start_new_round ~L771-780):
+//        k_bft = ceil(2K/3) = (2K+2)/3
+//        escalate  ⟺  pool < K
+//                  AND bft_enabled
+//                  AND aborts >= bft_escalation_threshold
+//                  AND pool >= k_bft
+//      When the gate fires the committee SHRINKS from K to k_bft and the
+//      round runs in BFT mode; otherwise it stays at K in MUTUAL_DISTRUST.
+//
+//   2. required_block_sigs (src/node/producer.cpp::required_block_sigs):
+//        MUTUAL_DISTRUST → Q = committee_size           (full K-of-K)
+//        BFT             → Q = ceil(2*committee_size/3) = (2*size+2)/3
+//      The committee_size passed in BFT mode is ALREADY the shrunk k_bft,
+//      so the effective signature floor is Q = ceil(2·k_bft/3) — the
+//      two-level shrinkage (K → k_bft → Q). At K=3 it is degenerate
+//      (k_bft=Q=2); at K=6 k_bft=4 Q=3 (1 sentinel slot); at K=9 k_bft=6
+//      Q=4 (2 sentinel slots).
+//
+//   3. validator accept gate (src/node/validator.cpp ~L403/L434): a block
+//      is accepted with exactly Q non-sentinel sigs; the SLACK = eff - Q is
+//      the maximum number of sentinel (abstention) slots a valid block may
+//      carry. MUTUAL_DISTRUST always has slack 0 (full K-of-K, no
+//      sentinels permitted).
+//
+// This is the pure-arithmetic, daemon-free counterpart to committee-
+// signature-verify (which verifies real Ed25519 sigs against a daemon-
+// pinned digest). bft-quorum needs NO block, NO committee file, NO crypto —
+// it answers "for this K and this round context, how many signatures does
+// the chain require, and how many sentinel slots are tolerated?" so an
+// operator can size a committee, predict escalation behavior, or audit a
+// block's sig count BEFORE fetching the block itself. Deterministic; no
+// RPC, no network, no daemon, no file IO.
+//
+// CLI:
+//   --committee-size <K>   REQUIRED. Genesis k_block_sigs (decimal, >= 1).
+//   --mode <md|bft>        Force a mode instead of evaluating the escalation
+//                          gate. md = MUTUAL_DISTRUST, bft = BFT. When set,
+//                          --aborts/--threshold/--pool/--bft-enabled are
+//                          ignored and the gate is reported as forced.
+//   --pool <P>             Available-domain pool size for the round
+//                          (default K — i.e. a full pool, gate cannot fire).
+//   --aborts <A>           Accumulated round aborts this epoch (default 0).
+//   --threshold <T>        bft_escalation_threshold (default 5, matching
+//                          genesis.cpp's default).
+//   --bft-enabled          Set the bft_enabled config flag (default off).
+//                          The escalation gate is inert unless this is set.
+//   --json                 One-line JSON.
+//
+// Output fields (JSON):
+//   committee_size_K, k_bft, pool, aborts, threshold, bft_enabled,
+//   mode_forced, escalated, effective_committee, consensus_mode,
+//   required_sigs (Q), sentinel_slack, escalation_gates{...}
+//
+// Exit codes:
+//   0  computed (always — this is a calculator, not a pass/fail gate)
+//   1  args / range error
+int cmd_bft_quorum(int argc, char** argv) {
+    bool        have_k        = false;
+    uint64_t    K             = 0;
+    bool        have_pool     = false;
+    uint64_t    pool          = 0;
+    uint64_t    aborts        = 0;
+    uint64_t    threshold     = 5;     // genesis.cpp default
+    bool        bft_enabled   = false;
+    std::string mode_force;            // "", "md", or "bft"
+    bool        json_out      = false;
+
+    auto parse_u64_arg = [](const char* raw, bool& ok) -> uint64_t {
+        try {
+            size_t pos = 0;
+            unsigned long long v = std::stoull(raw, &pos, 10);
+            if (pos != std::strlen(raw)) { ok = false; return 0; }
+            ok = true;
+            return static_cast<uint64_t>(v);
+        } catch (...) { ok = false; return 0; }
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--committee-size" && i + 1 < argc) {
+            bool ok = false; K = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "bft-quorum: --committee-size must be a "
+                                    "decimal u64\n"; return 1; }
+            have_k = true;
+        }
+        else if (a == "--pool" && i + 1 < argc) {
+            bool ok = false; pool = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "bft-quorum: --pool must be a decimal "
+                                    "u64\n"; return 1; }
+            have_pool = true;
+        }
+        else if (a == "--aborts" && i + 1 < argc) {
+            bool ok = false; aborts = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "bft-quorum: --aborts must be a decimal "
+                                    "u64\n"; return 1; }
+        }
+        else if (a == "--threshold" && i + 1 < argc) {
+            bool ok = false; threshold = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "bft-quorum: --threshold must be a "
+                                    "decimal u64\n"; return 1; }
+        }
+        else if (a == "--mode" && i + 1 < argc) {
+            mode_force = argv[++i];
+        }
+        else if (a == "--bft-enabled") bft_enabled = true;
+        else if (a == "--json")        json_out    = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet bft-quorum --committee-size <K>\n"
+                "         [--mode md|bft] [--pool <P>] [--aborts <A>]\n"
+                "         [--threshold <T>] [--bft-enabled] [--json]\n"
+                "\n"
+                "  OFFLINE calculator for the chain's two-level BFT committee\n"
+                "  and block-signature quorum arithmetic. Reproduces, with no\n"
+                "  daemon and no crypto, the decisions at:\n"
+                "    * node.cpp::start_new_round  (BFT escalation gate)\n"
+                "    * producer.cpp::required_block_sigs  (Q = sig floor)\n"
+                "    * validator.cpp accept gate  (sentinel slack = eff - Q)\n"
+                "\n"
+                "  --committee-size <K>  REQUIRED genesis k_block_sigs (>= 1).\n"
+                "  --mode <md|bft>       Force a mode; skips gate evaluation.\n"
+                "                        md = MUTUAL_DISTRUST, bft = BFT.\n"
+                "  --pool <P>            Round's available-domain pool size\n"
+                "                        (default = K; full pool, gate inert).\n"
+                "  --aborts <A>          Accumulated round aborts (default 0).\n"
+                "  --threshold <T>       bft_escalation_threshold (default 5).\n"
+                "  --bft-enabled         Set the bft_enabled flag (default off).\n"
+                "                        Escalation gate is inert without it.\n"
+                "  --json                One-line JSON output.\n"
+                "\n"
+                "  Formulae (match src/ byte-for-byte):\n"
+                "    k_bft = (2K + 2) / 3                  (ceil(2K/3))\n"
+                "    escalate ⟺ pool<K ∧ bft_enabled ∧ aborts>=T ∧ pool>=k_bft\n"
+                "    eff   = escalate ? k_bft : K\n"
+                "    Q     = (mode==bft) ? (2*eff+2)/3 : eff\n"
+                "    slack = eff - Q                       (sentinel slots)\n"
+                "\n"
+                "  Exit codes: 0 computed, 1 args/range error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "bft-quorum: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet bft-quorum --committee-size "
+                         "<K> (see --help)\n";
+            return 1;
+        }
+    }
+
+    if (!have_k) {
+        std::cerr << "bft-quorum: --committee-size <K> is required\n";
+        return 1;
+    }
+    if (K < 1) {
+        std::cerr << "bft-quorum: --committee-size must be >= 1 (got "
+                  << K << ")\n";
+        return 1;
+    }
+    if (!mode_force.empty() && mode_force != "md" && mode_force != "bft") {
+        std::cerr << "bft-quorum: --mode must be 'md' or 'bft' (got '"
+                  << mode_force << "')\n";
+        return 1;
+    }
+    if (!have_pool) pool = K;   // default: full pool, gate cannot fire.
+
+    // k_bft = ceil(2K/3)  (node.cpp::start_new_round; producer.cpp comment).
+    const uint64_t k_bft = (2 * K + 2) / 3;
+
+    // BFT escalation gate (node.cpp::start_new_round ~L774-780). Evaluated
+    // only when --mode is NOT forced.
+    const bool gate_pool_short = pool < K;
+    const bool gate_aborts     = aborts >= threshold;
+    const bool gate_pool_floor = pool >= k_bft;
+    const bool gate_all = gate_pool_short && bft_enabled
+                          && gate_aborts && gate_pool_floor;
+
+    bool mode_forced = !mode_force.empty();
+    bool escalated;
+    bool is_bft;
+    if (mode_forced) {
+        is_bft    = (mode_force == "bft");
+        escalated = false;            // forced — gate not consulted.
+    } else {
+        escalated = gate_all;
+        is_bft    = gate_all;
+    }
+
+    // Effective committee size: shrinks to k_bft only when escalation fires
+    // (or when --mode bft is forced, which models a round already in the
+    // shrunk committee — the chain passes k_bft as committee_size there).
+    const uint64_t eff = (escalated || (mode_forced && is_bft)) ? k_bft : K;
+
+    // Q = required_block_sigs(mode, eff). MUTUAL_DISTRUST → full K-of-K;
+    // BFT → ceil(2*eff/3) (producer.cpp::required_block_sigs byte-for-byte).
+    const uint64_t Q     = is_bft ? (2 * eff + 2) / 3 : eff;
+    const uint64_t slack = eff - Q;   // sentinel (abstention) slots allowed.
+    const char* mode_str = is_bft ? "BFT" : "MUTUAL_DISTRUST";
+
+    if (json_out) {
+        nlohmann::json r;
+        r["committee_size_K"]    = K;
+        r["k_bft"]               = k_bft;
+        r["pool"]                = pool;
+        r["aborts"]              = aborts;
+        r["threshold"]           = threshold;
+        r["bft_enabled"]         = bft_enabled;
+        r["mode_forced"]         = mode_forced;
+        r["escalated"]           = escalated;
+        r["effective_committee"] = eff;
+        r["consensus_mode"]      = mode_str;
+        r["required_sigs"]       = Q;
+        r["sentinel_slack"]      = slack;
+        r["escalation_gates"]    = nlohmann::json{
+            {"pool_below_K",        gate_pool_short},
+            {"bft_enabled",         bft_enabled},
+            {"aborts_at_threshold", gate_aborts},
+            {"pool_at_or_above_k_bft", gate_pool_floor},
+            {"all",                 gate_all}
+        };
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "committee_size_K:    " << K        << "\n"
+                  << "k_bft (ceil(2K/3)):  " << k_bft    << "\n"
+                  << "pool:                " << pool     << "\n"
+                  << "aborts:              " << aborts   << "\n"
+                  << "threshold:           " << threshold<< "\n"
+                  << "bft_enabled:         " << (bft_enabled ? "true" : "false")
+                  << "\n"
+                  << "mode_forced:         " << (mode_forced ? "true" : "false")
+                  << "\n"
+                  << "escalated:           " << (escalated ? "true" : "false")
+                  << "\n"
+                  << "effective_committee: " << eff      << "\n"
+                  << "consensus_mode:      " << mode_str  << "\n"
+                  << "required_sigs (Q):   " << Q         << "\n"
+                  << "sentinel_slack:      " << slack     << "\n";
+        if (!mode_forced) {
+            std::cout << "escalation_gates:\n"
+                      << "  pool < K:              "
+                      << (gate_pool_short ? "true" : "false") << "\n"
+                      << "  bft_enabled:           "
+                      << (bft_enabled ? "true" : "false") << "\n"
+                      << "  aborts >= threshold:   "
+                      << (gate_aborts ? "true" : "false") << "\n"
+                      << "  pool >= k_bft:         "
+                      << (gate_pool_floor ? "true" : "false") << "\n"
+                      << "  all (escalate):        "
+                      << (gate_all ? "true" : "false") << "\n";
+        }
+    }
+    return 0;
+}
+
 // determ-wallet cold-sign — Offline transaction signing for the
 // air-gapped cold-wallet workflow.
 //
@@ -19788,6 +20047,31 @@ void print_usage() {
         "                                             missing_count, abstention_count, required,\n"
         "                                             pass, signers:[{domain,sig_present,\n"
         "                                             valid}]}.\n"
+        "  bft-quorum --committee-size <K> [--mode md|bft]\n"
+        "             [--pool <P>] [--aborts <A>] [--threshold <T>]\n"
+        "             [--bft-enabled] [--json]\n"
+        "                                             OFFLINE calculator for the chain's two-level\n"
+        "                                             BFT committee + block-signature quorum\n"
+        "                                             arithmetic. No daemon, no crypto, no IO.\n"
+        "                                             Reproduces byte-for-byte: node.cpp\n"
+        "                                             start_new_round (BFT escalation gate),\n"
+        "                                             producer.cpp required_block_sigs (Q sig\n"
+        "                                             floor), and the validator accept gate\n"
+        "                                             (sentinel slack = eff - Q). k_bft =\n"
+        "                                             (2K+2)/3 = ceil(2K/3); escalate when\n"
+        "                                             pool<K AND --bft-enabled AND aborts>=\n"
+        "                                             threshold AND pool>=k_bft; eff = escalate\n"
+        "                                             ? k_bft : K; Q = (mode==bft)?(2*eff+2)/3:\n"
+        "                                             eff. --mode forces a mode and skips the\n"
+        "                                             gate. --pool defaults to K (full pool,\n"
+        "                                             gate inert); --threshold defaults to 5\n"
+        "                                             (genesis default). Exit 0 computed, 1\n"
+        "                                             args/range error. JSON output:\n"
+        "                                             {committee_size_K, k_bft, pool, aborts,\n"
+        "                                             threshold, bft_enabled, mode_forced,\n"
+        "                                             escalated, effective_committee,\n"
+        "                                             consensus_mode, required_sigs,\n"
+        "                                             sentinel_slack, escalation_gates}.\n"
         "  cold-sign --tx-json <file> --priv-keyfile <file>\n"
         "            (--out <file> | --allow-stdout)\n"
         "            [--force] [--json]\n"
@@ -20447,6 +20731,7 @@ int main(int argc, char** argv) {
     if (cmd == "decrypt-message") return cmd_decrypt_message(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
+    if (cmd == "bft-quorum")      return cmd_bft_quorum     (argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);
     if (cmd == "tx-batch-sign")   return cmd_tx_batch_sign  (argc - 2, argv + 2);

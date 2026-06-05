@@ -32,6 +32,7 @@
 //   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
+//   committee-at-height      Report committee-verified creators at block H
 //   help / version
 //
 // Trust-model invariants:
@@ -135,6 +136,23 @@ void print_usage() {
         "      compute_genesis_hash (no committee sigs by construction). A\n"
         "      header whose sigs don't verify fails closed (non-zero exit) —\n"
         "      never a bare daemon-reported root.\n"
+        "  committee-at-height --rpc-port <N> --genesis <file> --height <H>\n"
+        "                      [--member <D>] [--json]\n"
+        "      Report the committee-verified set of creators (consensus\n"
+        "      committee members) that produced block H, in selection order,\n"
+        "      each paired with its genesis-committee ed_pub + whether it\n"
+        "      signed the block (a sentinel-zero block-sig marks a BFT\n"
+        "      abstention). Anchors genesis, chains header[H] back to block 0,\n"
+        "      and verifies header[H]'s K-of-K (MD) / ceil(2K/3) (BFT)\n"
+        "      committee sigs over the block digest — which BINDS creators[],\n"
+        "      so the reported set is committee-attested, not merely\n"
+        "      daemon-asserted. Distinct from verify-block-sigs (which checks\n"
+        "      sigs against a committee YOU supply): this DERIVES the committee\n"
+        "      trustlessly from the chain. With --member <D>, prints a sound\n"
+        "      IN-COMMITTEE / NOT-IN-COMMITTEE verdict (plus the member's slot\n"
+        "      + sign status). Genesis (H=0) has no committee and is rejected\n"
+        "      with a diagnostic. A header whose sigs don't verify fails closed\n"
+        "      (non-zero exit) — never a bare daemon-reported committee.\n"
         "\n"
         "Sign + submit:\n"
         "  sign-tx --keyfile <path> --type {TRANSFER|STAKE|UNSTAKE}\n"
@@ -2325,6 +2343,257 @@ int cmd_verify_param_change(int argc, char** argv) {
     }
 }
 
+// ──────────────────────── committee-at-height ──────────────────────────
+
+// Tri-state for a --member membership query, mirroring the verify-* exit
+// policy: a sound verified answer (IN / NOT-IN) exits 0; a refusal to
+// assert exits 3; a transport/parse fault exits 1. Named distinctly from
+// the inclusion-proof verdicts so the output cannot be confused with a
+// state/tx membership proof.
+enum class CommitteeVerdict { IN_COMMITTEE, NOT_IN_COMMITTEE, UNVERIFIABLE };
+
+const char* committee_verdict_str(CommitteeVerdict v) {
+    switch (v) {
+        case CommitteeVerdict::IN_COMMITTEE:     return "IN-COMMITTEE";
+        case CommitteeVerdict::NOT_IN_COMMITTEE: return "NOT-IN-COMMITTEE";
+        case CommitteeVerdict::UNVERIFIABLE:     return "UNVERIFIABLE";
+    }
+    return "UNVERIFIABLE";
+}
+
+// committee-at-height — trustless committee-membership reader.
+//
+// Reports the committee-verified set of creators (consensus committee
+// members) that produced block H, optionally answering "is domain D a
+// member of the committee at H?" as a sound tri-state.
+//
+// ─── Distinct from verify-block-sigs ───────────────────────────────────
+//
+//   verify-block-sigs takes a committee file the OPERATOR supplies and
+//   checks that header H's sigs verify against THAT set — it cannot tell
+//   you who the committee is, only whether the sigs match a list you
+//   already trust. committee-at-height DERIVES the committee trustlessly
+//   from the chain: it anchors genesis, binds header[H] to block 0 via a
+//   prev_hash chain walk, verifies H's K-of-K (MD) / ceil(2K/3) (BFT)
+//   committee sigs over light_compute_block_digest(H), and only then
+//   reports creators[] — which is committee-attested because the digest
+//   the committee signed BINDS creators[] (see verify.cpp
+//   light_compute_block_digest: `for (auto& c : b.creators) h.append(c)`).
+//
+// A forged "header at H with a fabricated creator set" must therefore (a)
+// chain to the pinned genesis AND (b) carry committee sigs over a digest
+// that commits to that very creator set — both checked here. Genesis
+// (H=0) has no committee by construction (the deterministic
+// GenesisConfig->Block transform); it is rejected with a clear diagnostic
+// rather than reporting an empty committee.
+//
+// REUSE: the trustless anchor is verify_state_root_at (genesis pin +
+// bounded prev_hash walk + committee-sig verification). This command adds
+// NO new crypto — it re-fetches the now-attested header[H] and enumerates
+// creators[] paired with each member's genesis-committee pubkey + slot +
+// signature status (real sig vs BFT sentinel-zero abstention).
+int cmd_committee_at_height(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, member;
+    uint64_t height = 0;
+    bool have_port = false, have_height = false, have_member = false,
+         json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--height"  && i + 1 < argc) {
+            height = parse_u64("--height", argv[++i]); have_height = true;
+        } else if (a == "--member"  && i + 1 < argc) {
+            member = argv[++i]; have_member = true;
+        } else if (a == "--json")                    json_out = true;
+        else {
+            std::cerr << "committee-at-height: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_height) {
+        std::cerr << "committee-at-height: --rpc-port, --genesis, --height "
+                     "are required\n";
+        return 1;
+    }
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "committee-at-height: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // Genesis carries no committee by construction. Refuse rather than
+        // report an empty committee a caller might misread as "no members".
+        if (height == 0) {
+            std::cerr << "committee-at-height: height 0 (genesis) has no "
+                         "committee — it is the deterministic GenesisConfig->"
+                         "Block transform with no committee sigs; query a "
+                         "produced block (H >= 1)\n";
+            return 1;
+        }
+
+        // Trustless anchor: genesis pin + bounded prev_hash walk [0, H] +
+        // committee-sig verification of header[H]. On a sig failure or a
+        // height beyond head this returns ok=false (clean error), never a
+        // bare daemon-reported committee.
+        auto sr = verify_state_root_at(rpc, committee_seed,
+                                       genesis_hash_hex, height);
+        if (!sr.ok) {
+            std::cerr << "committee-at-height: " << sr.detail << "\n";
+            return 1;
+        }
+
+        // Re-fetch the now-committee-attested header[H] and parse it. The
+        // sigs verified above were computed over light_compute_block_digest,
+        // which binds creators[] AND creator_block_sigs[] — so the creator
+        // set + per-slot sig status read here is itself committee-attested.
+        auto page = rpc.call("headers", {{"from", height}, {"count", 1}});
+        if (!page.contains("headers") || !page["headers"].is_array()
+            || page["headers"].empty()) {
+            throw std::runtime_error(
+                "daemon returned no header at index "
+                + std::to_string(height));
+        }
+        json header_json = page["headers"][0];
+
+        // Bind the re-fetched header to the anchor: its block_hash must be
+        // the one verify_state_root_at just attested. A daemon that serves a
+        // different (forged) header on the second fetch is caught here.
+        std::string refetched_hash =
+            header_json.value("block_hash", std::string{});
+        if (refetched_hash != sr.block_hash_hex) {
+            throw std::runtime_error(
+                "re-fetched header[" + std::to_string(height)
+                + "].block_hash=" + refetched_hash
+                + " does not match the committee-attested block_hash="
+                + sr.block_hash_hex
+                + " (daemon served a different header on re-fetch)");
+        }
+
+        determ::chain::Block b =
+            determ::chain::Block::from_json(
+                pad_stripped_header(std::move(header_json)));
+
+        // creator_block_sigs is parallel to creators (verify_block_sigs
+        // already enforced this size equality during the anchor above, but
+        // re-check defensively before indexing).
+        bool sigs_parallel =
+            (b.creator_block_sigs.size() == b.creators.size());
+        Signature zero_sig{};
+
+        // Enumerate the committee. Each creator's pubkey is the
+        // genesis-committee key (validators must be genesis members; the
+        // anchor's verify_block_sigs already rejected any creator absent
+        // from committee_seed). A sentinel-zero block-sig marks a BFT
+        // abstention (slot signed in Phase 1 but not Phase 2).
+        json members = json::array();
+        for (size_t i = 0; i < b.creators.size(); ++i) {
+            const std::string& dom = b.creators[i];
+            std::string ed_pub;
+            auto it = committee_seed.find(dom);
+            if (it != committee_seed.end()) ed_pub = to_hex(it->second);
+            bool abstained = sigs_parallel
+                ? (b.creator_block_sigs[i] == zero_sig)
+                : false;
+            members.push_back({
+                {"slot",      i},
+                {"domain",    dom},
+                {"ed_pub",    ed_pub},
+                {"signed",    !abstained},
+            });
+        }
+
+        // Optional membership query. creators[] is committee-attested, so a
+        // membership decision over it is sound. We never emit UNVERIFIABLE
+        // here on the happy path (the anchor already succeeded); the
+        // tri-state exists to keep the exit-code contract uniform with the
+        // verify-* family and to leave room for fail-closed callers.
+        CommitteeVerdict verdict = CommitteeVerdict::UNVERIFIABLE;
+        int  member_slot = -1;
+        bool member_signed = false;
+        if (have_member) {
+            for (size_t i = 0; i < b.creators.size(); ++i) {
+                if (b.creators[i] == member) {
+                    verdict = CommitteeVerdict::IN_COMMITTEE;
+                    member_slot = static_cast<int>(i);
+                    member_signed = sigs_parallel
+                        ? !(b.creator_block_sigs[i] == zero_sig)
+                        : true;
+                    break;
+                }
+            }
+            if (member_slot < 0)
+                verdict = CommitteeVerdict::NOT_IN_COMMITTEE;
+        }
+
+        if (json_out) {
+            json out = {
+                {"height",            height},
+                {"block_hash",        sr.block_hash_hex},
+                {"committee_size",    sr.committee_size},
+                {"sigs_verified",     sr.sigs_verified},
+                {"committee_verified", true},
+                {"members",           members},
+            };
+            if (have_member) {
+                out["member"]  = member;
+                out["verdict"] = committee_verdict_str(verdict);
+                if (verdict == CommitteeVerdict::IN_COMMITTEE) {
+                    out["member_slot"]   = member_slot;
+                    out["member_signed"] = member_signed;
+                }
+            }
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << "OK\n"
+                      << "  genesis pin:        matches (" << genesis_hash_hex << ")\n"
+                      << "  height:             " << height << "\n"
+                      << "  block_hash:         " << sr.block_hash_hex << "\n"
+                      << "  committee sigs:     " << sr.sigs_verified
+                      << " of " << sr.committee_size << " verified\n"
+                      << "  committee (" << sr.committee_size << " members, "
+                         "selection order):\n";
+            for (auto& m : members) {
+                std::cout << "    [" << m["slot"].get<size_t>() << "] "
+                          << m["domain"].get<std::string>()
+                          << "  ed_pub=" << m["ed_pub"].get<std::string>()
+                          << "  " << (m["signed"].get<bool>()
+                                        ? "signed" : "abstained (BFT)")
+                          << "\n";
+            }
+            if (have_member) {
+                std::cout << "  member query:       " << member << " -> "
+                          << committee_verdict_str(verdict) << "\n";
+                if (verdict == CommitteeVerdict::IN_COMMITTEE) {
+                    std::cout << "    slot:             " << member_slot << "\n"
+                              << "    signed block:     "
+                              << (member_signed ? "yes" : "no (BFT abstain)")
+                              << "\n";
+                }
+            }
+        }
+
+        // Exit codes mirror the verify-* family. With --member: a sound
+        // IN / NOT-IN verdict exits 0; an (unreachable on the happy path)
+        // UNVERIFIABLE exits 3. Without --member the command is a pure
+        // committee dump and exits 0.
+        if (have_member && verdict == CommitteeVerdict::UNVERIFIABLE)
+            return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "committee-at-height: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2365,6 +2634,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
+        if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
