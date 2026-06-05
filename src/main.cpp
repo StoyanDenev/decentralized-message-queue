@@ -12,6 +12,7 @@
 #include <determ/crypto/merkle.hpp>
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
+#include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -401,6 +402,10 @@ In-process tests (deterministic, no network):
                                               canonical RFC 8032 §7.1 known-answer
                                               vectors (the C99 ref10 cross-val
                                               oracle per CRYPTO-C99-SPEC §Q7/§Q9)
+  determ test-sha2-c99                        v2.10 Phase 0: libsodium-free C99
+                                              SHA-256/512 (FIPS 180-4) byte-equal
+                                              vs OpenSSL over all length/padding
+                                              boundaries + NIST KATs (§Q9 gate)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -10744,6 +10749,87 @@ int main(int argc, char** argv) {
     // §3). Round-trip + tamper + wrong-key assertions exercise the real
     // path; the still-stubbed keygen/sign/aggregate primitives are
     // PIN-tested to throw their Phase-A diagnostic.
+    if (cmd == "test-sha2-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.1 first vendored primitive: validate
+        // the libsodium-free C99 SHA-256 / SHA-512 (src/crypto/sha2/) two ways —
+        // (1) byte-equal cross-validation against the daemon's current OpenSSL
+        // backend over EVERY message length across the block + padding boundaries
+        // (the §Q9 "C99 output == backend output, byte-equal" gate; needs no
+        // transcribed digest, so it is immune to KAT-transcription error), and
+        // (2) the canonical NIST FIPS 180-4 known-answer vectors as independent
+        // anchors. This module is additive — not yet wired into any call site.
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto to_hexs = [](const uint8_t* p, size_t n) {
+            static const char* H = "0123456789abcdef";
+            std::string s; s.reserve(n * 2);
+            for (size_t i = 0; i < n; i++) { s.push_back(H[p[i] >> 4]); s.push_back(H[p[i] & 0xf]); }
+            return s;
+        };
+
+        // (1) Cross-validation vs OpenSSL over lengths 0..300 (single-block,
+        // multi-block, and both padding edges: 55/56 for SHA-256, 111/112 for SHA-512).
+        bool s256_ok = true, s512_ok = true;
+        size_t s256_at = 0, s512_at = 0;
+        for (size_t len = 0; len <= 300 && (s256_ok || s512_ok); ++len) {
+            std::vector<uint8_t> buf(len);
+            for (size_t i = 0; i < len; i++) buf[i] = (uint8_t)((i * 131u + len * 17u + 7u) & 0xffu);
+            if (s256_ok) {
+                uint8_t c99[32]; determ_sha256(buf.data(), len, c99);
+                Hash ossl = crypto::sha256(buf.data(), len);
+                if (std::memcmp(c99, ossl.data(), 32) != 0) { s256_ok = false; s256_at = len; }
+            }
+            if (s512_ok) {
+                uint8_t c99[64]; determ_sha512(buf.data(), len, c99);
+                uint8_t ossl[64]; unsigned int ol = 64;
+                EVP_Digest(buf.data(), len, ossl, &ol, EVP_sha512(), nullptr);
+                if (std::memcmp(c99, ossl, 64) != 0) { s512_ok = false; s512_at = len; }
+            }
+        }
+        check(s256_ok, s256_ok ? "SHA-256 C99 == OpenSSL over lengths 0..300 (block + padding boundaries)"
+                               : "SHA-256 C99 diverges from OpenSSL at len=" + std::to_string(s256_at));
+        check(s512_ok, s512_ok ? "SHA-512 C99 == OpenSSL over lengths 0..300 (block + padding boundaries)"
+                               : "SHA-512 C99 diverges from OpenSSL at len=" + std::to_string(s512_at));
+
+        // (2) NIST FIPS 180-4 known-answer vectors (independent anchors).
+        { uint8_t d[32]; determ_sha256((const uint8_t*)"abc", 3, d);
+          check(to_hexs(d, 32) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "SHA-256(\"abc\") matches NIST KAT"); }
+        { uint8_t d[32]; determ_sha256((const uint8_t*)"", 0, d);
+          check(to_hexs(d, 32) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "SHA-256(\"\") matches NIST KAT"); }
+        { uint8_t d[64]; determ_sha512((const uint8_t*)"abc", 3, d);
+          check(to_hexs(d, 64) == "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                                  "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+                "SHA-512(\"abc\") matches NIST KAT"); }
+        { uint8_t d[64]; determ_sha512((const uint8_t*)"", 0, d);
+          check(to_hexs(d, 64) == "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+                                  "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+                "SHA-512(\"\") matches NIST KAT"); }
+
+        // (3) Long multi-block message (1 MiB) must still agree with OpenSSL.
+        {
+            std::vector<uint8_t> big(1u << 20, 0x5au);
+            uint8_t c99[32]; determ_sha256(big.data(), big.size(), c99);
+            Hash ossl = crypto::sha256(big.data(), big.size());
+            check(std::memcmp(c99, ossl.data(), 32) == 0, "SHA-256 C99 == OpenSSL on 1 MiB message");
+            uint8_t c99b[64]; determ_sha512(big.data(), big.size(), c99b);
+            uint8_t osslb[64]; unsigned int ol = 64;
+            EVP_Digest(big.data(), big.size(), osslb, &ol, EVP_sha512(), nullptr);
+            check(std::memcmp(c99b, osslb, 64) == 0, "SHA-512 C99 == OpenSSL on 1 MiB message");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": sha2-c99 "
+                  << (fail == 0 ? "all cross-validation + NIST KATs matched" : "had failures")
+                  << " (libsodium-free C99 SHA-2 vs OpenSSL backend — the §Q9 gate)\n";
+        return fail == 0 ? 0 : 1;
+    }
+
     if (cmd == "test-ed25519-vectors") {
         // v2.10 Phase-0 / CRYPTO-C99-SPEC §Q7 "validate before you vendor":
         // pin the daemon's Ed25519 (currently OpenSSL EVP_PKEY_ED25519, the only

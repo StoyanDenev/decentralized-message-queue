@@ -85,6 +85,13 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
 # the A2 Phase 1 secret-sharing primitive). Link it into the main
 # binary so the test command can call shamir::split / ::combine.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.1: the first vendored primitive of the
+# libsodium-free C99 crypto stack — SHA-256 / SHA-512 (FIPS 180-4) in portable
+# C99. The src/*.cpp glob above does not pick up .c files; list them explicitly.
+# Exercised by `determ test-sha2-c99` (byte-equal cross-validation vs OpenSSL +
+# NIST KATs). Not yet wired into any call site — additive, validated module.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
 
 add_executable(determ ${SOURCES})
 
