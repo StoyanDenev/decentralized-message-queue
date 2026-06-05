@@ -442,4 +442,155 @@ Hardcoding any one of them either ships defaults that don't fit some deployments
 
 ---
 
+---
+
+## 2026-06-03 — Casino-fee mechanism rejection + alternative monetization paths adopted
+
+### Tax-the-cryptographic-primitives proposal evaluated and rejected; 5 alternatives captured
+
+**Question.** A monetization proposal was raised: tax specific opcodes (VRF, ZK fairness receipts, atomic commit-reveal escrow) on the basis that "casinos will pay because evading destroys their cryptographic guarantees." Designed to capture value from gambling industry without taxing identity or burdening enterprise adoption.
+
+**Analysis.** Three substantive problems with the proposed mechanism:
+
+1. **Primitives are NOT casino-specific.** VRF (fair-ordering, elections, lottery, fraud sampling, A/B testing), ZK proofs (confidential audit, regulatory attestation, supply-chain provenance, source protection), atomic commit-reveal escrow (B2B settlement, milestone supply chains, cross-shard 2PC, conditional regulatory release) all have substantial non-casino legitimate uses. Pricing them taxes every cross-industry use that overlaps casino needs.
+
+2. **"Fairness receipt" doesn't add what's claimed.** Chain already provides per-tx ordering verifiability via v2.1 state_root + v2.2 light-client proofs. A separate ZK receipt only matters if it proves something state_root doesn't — but the claim ("no latency manipulation by sender") is unprovable because the chain can't observe sender-side pre-submission delays.
+
+3. **Game theory fails under scrutiny.** Casinos don't need the global Determ validator set; equivalents exist on every other chain (Ethereum L2s, Cosmos, Solana, Polygon); players overwhelmingly don't verify protocol-level cryptographic receipts (they trust operator brand/license). Pricing the cryptographic features doesn't lock casinos in; it pushes them to alternatives.
+
+Plus cross-cutting concerns: use-case pricing is a known anti-pattern in protocol design (Bitcoin/Ethereum deliberately price by resource); mismatches MOTIVATION.md framing (Determ's value prop is K-of-K mutual-distrust + Kerckhoffs, not specific high-margin opcodes); adverse selection (pricing pushes high-margin users away, leaving low-margin transit layer).
+
+**Decision.** Drop the proposal; do not adopt. Captured this rejection rationale here so future threads understand the reasoning and don't re-propose under similar framing.
+
+**Alternative monetization paths preserved as v3 research** (captured in `Improvements.md §9`):
+- **Option A** — Stake/bond requirements scaled by deployment tier (slashable misdeclaration); preserves Determ character
+- **Option B** — Application-layer (DApp) pricing; chain stays free; matches "everything else is a DApp"
+- **Option C** — Resource-based pricing with feature multipliers (gas-style)
+- **Option D** — Validator revenue sharing on premium operations
+- **Option E** — Foundation/SDK revenue model (off-protocol); Linux-Foundation pattern
+
+**Recommended for serious v3 deliberation:** Options A and B. They best preserve project character while addressing the legitimate goal.
+
+**Pre-v1.0-schema-freeze implications.** Option A requires `§7.5.8 RegistryEntry.deployment_tier` discriminator. Option C requires `§7.5.9 Block.gas_pricing_form` discriminator. Both flagged for schema-freeze review if either is a serious candidate.
+
+### Three v3-blocker unblocks captured
+
+Separately captured in `Improvements.md §10`:
+
+- **§10.1 §6.3 dedup reformulation** via per-creator Bloom/IBLT (already noted as alternative in §6.3 entry; ~1 week spec)
+- **§10.2 §1.6 stateless scheduled decoys** (sidesteps unforgeability research; ~3-5 days; Additive)
+- **§10.3 Operator-tier opt-in framework** as a v3 design pattern (generalizes §6.2 Quorum Liveness OPTIONAL pattern; unblocks §1.8, §5.2, §5.5, §9.1 as opt-in tiers; requires §7.5.10 schema decision pre-v1.0)
+
+**Generalization.** When evaluating a use-case-specific monetization proposal, check whether the named "use-case-only" features have substantial non-target legitimate users. If yes, the proposal taxes the wrong thing. Use-case pricing requires features genuinely unique to the target — vanishingly rare in cryptographic infrastructure where primitives are inherently general-purpose.
+
+---
+
+---
+
+## 2026-06-03 — Gas-style pricing rejected (Options 9.3 + 9.4 cascade)
+
+### Resource-based gas pricing and validator revenue share dropped from monetization candidates
+
+**Question.** Of the 5 monetization alternatives captured in `Improvements.md §9` (after the casino-fee rejection), are gas-style models (Option C resource-based pricing, Option D validator revenue share) viable v3 candidates?
+
+**Decision.** Both rejected.
+
+**Rationale (Option C — gas-style resource pricing).** "No gas-style" — explicit project-policy rejection. Reasoning:
+- Changes Determ's "free for enterprise" framing fundamentally
+- Adds substantial v3 infrastructure (gas accounting, mempool fee-priority, validator gas-metering, per-opcode cost schedule + governance for updates, gas-payment token model)
+- Shifts project character from primitive-free public-interest infrastructure toward fee-market substrate
+- Mismatches MOTIVATION.md framing (Determ as public-interest cryptographic substrate; gas pricing is the standard chain-economy model that the project deliberately departs from)
+
+**Rationale (Option D — validator revenue share).** Cascade-rejection from Option C: depended on the same gas-style accounting infrastructure that Option C was rejected for. Additionally suffers the same use-case-overlap problem as the originally-rejected casino-fee proposal (VRF/ZK/escrow primitives have non-casino legitimate users who would also pay).
+
+**Cascade decisions.**
+- §7.5.9 `Block.gas_pricing_form` discriminator REMOVED from the pre-v1.0-schema-freeze candidate list. Gas-style is closed as an Additive v3 path.
+- If gas-style is ever revisited post-v1.0, it becomes Breaking-only (would require v3 protocol opening or security-critical hard fork per the no-migrations constraint).
+- Live monetization candidates reduced to 3: Option A (tier-bonds), Option B (DApp-layer pricing), Option E (foundation services).
+
+**Pre-v1.0-schema-freeze candidates updated.** Only §7.5.8 `RegistryEntry.deployment_tier` (for Option A) and §7.5.10 `policy_tier_flags` (for operator-tier opt-in framework §10.3) remain candidates from this thread of decisions.
+
+**Generalization.** Project consistently rejects fee-market substrates that would make Determ "another smart-contract chain." The project's character — public-interest infrastructure, primitive-free chain, "everything else is a DApp" — is more load-bearing than monetization mechanics. Future monetization proposals should preserve this character.
+
+---
+
+---
+
+## 2026-06-03 — §7.5 sweep extension: 7.5.8 SKIP + 7.5.10 SHIP
+
+### Final two pre-v1.0-schema-freeze discriminators decided
+
+**Question.** After the casino-fee proposal rejection + gas-style rejection, two §7.5 discriminator candidates remained for explicit decision:
+- **7.5.8** `RegistryEntry.deployment_tier: enum` — preserves Option A tier-bond monetization optionality (1 byte/RegistryEntry)
+- **7.5.10** `manifest.policy_tier_flags: u32` bitset — preserves operator-tier opt-in framework cascading to §1.8 / §5.2 / §5.5 / §6.2 (4 bytes/manifest)
+
+**Decisions.**
+- **7.5.8 SKIP** — Option A monetization now Breaking-only post-v1.0 (would require v3 protocol opening to add tier-bonds)
+- **7.5.10 SHIP** — operator-tier opt-in framework becomes Additive; 4 deferred items now have opt-in activation paths
+
+**Rationale (7.5.8 skip).** Option A was one of three live monetization candidates (alongside §9.2 DApp-layer pricing and §9.5 foundation services). Skipping reduces live monetization candidates to 2; preserves chain-level character of "no per-account fee differentiation"; aligns with project philosophy of avoiding protocol-level monetization mechanisms that change chain economics. §7.5.10's `POLICY_TIER_BONDS_ENABLED` flag (bit 3) becomes vestigial but kept reserved to avoid bit-renumbering if Option A is ever revisited via v3 protocol opening.
+
+**Rationale (7.5.10 ship).** Massive unblock multiplier — single 4-byte field at the manifest level preserves Additive optionality for:
+- §1.8 trusted-issuer audit (was principle-rejected; now opt-in per deployment)
+- §5.2 external audit (was project-policy; now deployment-policy opt-in)
+- §5.5 HW wallet certification (was wallet-ecosystem-only; now chain-recognized tier)
+- §6.2 Quorum Liveness OPTIONAL (closes the gap flagged earlier in §6.2 — partial; per-block `quorum_bitset` field still needs separate decision)
+
+Best leverage of any §7.5 decision so far.
+
+**Cascade decisions.**
+- Live monetization candidates reduced to 2: §9.2 DApp-layer pricing, §9.5 foundation services
+- §10.3 operator-tier opt-in framework reclassified from "pending §7.5.10 decision" to "ENABLED in v1.0"
+- §6.2 Quorum Liveness OPTIONAL partially unblocked — manifest enablement flag exists but per-block `quorum_bitset` field is a residual gap (potential §7.5.11)
+- §1.8 trusted-issuer reclassified from "principle-rejected" to "deployment-opt-in" — chain doesn't endorse, but doesn't prevent operators from choosing
+- Pre-bundle schema discriminator count increased from 7 to 8 (the original 7 ship + 7.5.10 ship); 7.5.8 + 7.5.9 skipped explicitly
+- IMPLEMENTATION-SEQUENCING.md pre-bundle work updated to include 7.5.10 (~1-2 days)
+
+**Residual gap surfaced: per-block `quorum_bitset` field for §6.2.** The 7.5.10 manifest flag enables the BFT-threshold finalization mode at deployment level, but the per-block bitset indicating which committee members participated is a separate wire-format field that needs its own schema commitment. Could be a §7.5.11 candidate if §6.2 full enablement is wanted. Otherwise §6.2 is "enable-able by manifest but not actually implementable" — partial unblock only.
+
+**Generalization.** Operator-tier opt-in via per-deployment bitset (the §6.2 → §10.3 → §7.5.10 evolution) is now the canonical project pattern for "controversial features that some deployments want but project doesn't want chain-wide." Trusted-issuer audit (was principle-rejected at chain level) becomes deployment-policy via this pattern — chain stays clean, operators get optionality. Reusable for future policy-blocked items.
+
+---
+
+---
+
+## 2026-06-03 — 7.5.11 SHIP completes §6.2 Quorum Liveness unlock
+
+### Per-block `quorum_bitset` field shipped to complete the §7.5.10 cascade
+
+**Question.** After 7.5.10 shipped the manifest-level `POLICY_BFT_THRESHOLD_FINALIZATION` flag, §6.2 Quorum Liveness OPTIONAL was only partially unblocked — the manifest could opt in but no per-block field existed to record which committee members signed under BFT-threshold mode. Should the per-block `quorum_bitset` field ship as §7.5.11?
+
+**Decision.** SHIP. §6.2 now fully Additive-via-opt-in.
+
+**Rationale.** The whole purpose of shipping 7.5.10 was to unblock §6.2 (among other items). Skipping 7.5.11 would have made POLICY_BFT_THRESHOLD_FINALIZATION vestigial — same fate as POLICY_TIER_BONDS_ENABLED after 7.5.8 skip. Cost is meaningful but bounded (1-16 bytes/block depending on profile K, prunable). Coherent completion of the 7.5.10 ship decision.
+
+**Wire format.** Variable-length bitset per genesis K. For K=8 (tactical) = 1 byte; K=32 (cluster) = 4 bytes; K=64 (regional) = 8 bytes; K=128 (global) = 16 bytes. Default all-1s (matches unanimous_k mode); equivalent to current K-of-K behavior pre-v6.2-activation. Validator short-circuits BFT-check to K-of-K equality when bitset is all-1s.
+
+**Final §7.5 sweep state.** Nine discriminator candidates evaluated; 8 SHIP, 1 SKIP (7.5.8 deployment_tier), 1 REJECTED (7.5.9 gas_pricing_form).
+
+| # | Discriminator | Status |
+|---|---|---|
+| 7.5.1 | Block.signature_form | ✅ Ship |
+| 7.5.2 | Account.view_key_mechanism + fs_view_pk | ✅ Ship |
+| 7.5.3 | Account.audit_model + trusted_issuer_pubkey | ✅ Ship |
+| 7.5.4 | manifest.randomness_aggregation_form | ✅ Ship |
+| 7.5.5 | ContribMsg.contrib_msg_form | ✅ Ship |
+| 7.5.6 | Transaction.sig_form | ✅ Ship |
+| 7.5.7 | pubkey_form + variable-length encoding | ✅ Ship |
+| 7.5.8 | RegistryEntry.deployment_tier | ❌ Skip |
+| 7.5.9 | Block.gas_pricing_form | ❌ Rejected |
+| 7.5.10 | manifest.policy_tier_flags | ✅ Ship |
+| 7.5.11 | per-block quorum_bitset | ✅ Ship |
+
+**Cascade effects of §6.2 full unblock.**
+- §6.2 reclassified from "Breaking-via-Quorum-Liveness-OPTIONAL" / "best-specified post-v2 architectural optimization 60% ready" → fully Additive
+- The §10.3 operator-tier opt-in framework demonstrates its first complete cascade: §6.2 Quorum Liveness via POLICY_BFT_THRESHOLD_FINALIZATION + quorum_bitset
+- Pattern established: future opt-in features needing both manifest enablement AND per-block field can follow the §6.2 model
+
+**Pre-bundle schema work final tally.** 8 discriminators ship: 7.5.1, 7.5.2, 7.5.3, 7.5.4, 7.5.5, 7.5.6, 7.5.7, 7.5.10, 7.5.11. Plus the §7.5.7 variable-length pubkey encoding lift is the substantive item (~3-5 days). Combined pre-bundle critical-path: ~7-11 days before any review-week bundle starts. Trivial relative to ~6.5-8 month horizon.
+
+**Generalization.** Operator-tier opt-in features generally need TWO schema commitments: (1) manifest-level enablement flag (per 7.5.10), (2) per-record field for whatever the feature records per-record (per 7.5.11). The §6.2 + 7.5.10 + 7.5.11 triplet is the template for future deployments of this pattern.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

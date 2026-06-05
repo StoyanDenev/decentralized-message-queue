@@ -420,6 +420,9 @@ Under the no-migrations constraint, several improvements classified as Breaking 
 | **7.5.5** | `ContribMsg.contrib_msg_form: enum` | Phase-1 ContribMsg | `TX_HASH_ARRAY` | §6.4 IBLT/Minisketch contrib | 1 byte/ContribMsg | ✅ SHIP |
 | **7.5.6** | `Transaction.sig_form: enum` | Every Transaction | `SIG_ED25519` | §4.1 PQ migration of tx-level sigs (Dilithium); future tx-level BLS use cases | 1 byte/tx | ✅ SHIP (added 2026-05-24 after gap analysis) |
 | **7.5.7** | `pubkey_form: enum` + variable-length pubkey encoding throughout | Every pubkey-bearing field: RegistryEntry.ed_pub, Transaction.from, Transaction.to, Account, ROTATE_KEY new_pubkey, DAppEntry.service_pubkey, view_master_pk, audit_view_master_pk, OTPK entries, etc. | `PUBKEY_ED25519` (fixed 32B encoded as variable-length with leading discriminator) | §4.1 PQ migration of pubkeys (Dilithium 1952B); §6.1 BLS aggregation per-creator pubkeys (BLS12-381 96B) | 1 byte/pubkey + variable-length encoding overhead; ~3-5 days v1.0 schema lift | ✅ SHIP (added 2026-05-24 after gap analysis) |
+| **7.5.8** | `RegistryEntry.deployment_tier: enum` (per-account monetization tier) | RegistryEntry | `UNSTAKED` | §9.1 Option A tier-bond monetization | 1 byte/RegistryEntry | ❌ **SKIP 2026-06-03** — Option A monetization now Breaking-only post-v1.0; cascade: §9.6 candidate list reduced; POLICY_TIER_BONDS_ENABLED flag in §7.5.10 becomes vestigial |
+| **7.5.10** | `manifest.policy_tier_flags: u32` bitset (per-deployment opt-in policy framework) | Beaconless-v2 deployment manifest | `0x00000000` (all flags off — conservative) | Operator-tier opt-in framework (§10.3) cascading to §1.8 trusted-issuer audit, §5.2 external audit, §5.5 HW wallet certification, §6.2 Quorum Liveness OPTIONAL | 4 bytes/manifest; validated via Beaconless-v2 §Q2.1 hard-invariant (unknown bits = reject) | ✅ **SHIP 2026-06-03** — single 4-byte field unlocks 4 deferred items as Additive |
+| **7.5.11** | Per-block `quorum_bitset` field (variable-length per genesis K) | Block header | All-1s (matches unanimous_k mode; equivalent to current behavior) | §6.2 Quorum Liveness OPTIONAL — completes the unlock initiated by 7.5.10 (manifest flag + per-block bitset both required for full implementability) | 1-16 bytes/block depending on profile K (1B tactical K=8 → 16B global K=128); prunable under chain pruning | ✅ **SHIP 2026-06-03** — completes §6.2 unlock; coherent with 7.5.10 ship decision |
 
 **Effective reclassification.** The five Breaking entries above are now effectively Additive-via-discriminator-dispatch: their wire-format toggle ships in v1.0; the underlying mechanism can be added post-v1.0 without schema change as long as legacy validators handle unknown enum values gracefully (recommended: fail-closed on unknown discriminator values per profile-dispatch contract).
 
@@ -560,7 +563,50 @@ For fixed-size known forms (Ed25519 32B, BLS12-381 96B, Dilithium 1952B), `body_
 
 **Interaction with `Transaction.sig_form` (7.5.6).** The pubkey used to verify a `Transaction.sig_form = SIG_X` signature MUST have `pubkey_form = PUBKEY_X` (matching curve family). Validator enforces this consistency at sig-verification time. Mismatch (e.g., `SIG_ED25519` + `PUBKEY_DILITHIUM`) is a hard reject.
 
-#### 7.6.8 Summary — all seven discriminators coherent
+#### 7.6.8 `manifest.policy_tier_flags` coherence (7.5.10, added 2026-06-03)
+
+**Concern.** Per-deployment opt-in framework: how does the policy bitset interact with existing manifest fields and validation?
+
+**Resolution.** Orthogonal to existing manifest fields (`epoch_snapshot_interval` per BL-3, `merritt_k` per BL-5, `epoch_boundary_cutoff_blocks` per BL-6, `randomness_aggregation_form` per 7.5.4). Each bit is an independent policy opt-in for a specific post-v1.0 feature; multiple bits can be set per deployment.
+
+**Reserved bit allocation (v1.0):**
+- `POLICY_TRUSTED_ISSUER_AUDIT` (1 << 0) — enables §1.8 trusted-issuer audit as opt-in tier
+- `POLICY_EXTERNAL_AUDIT_REQUIRED` (1 << 1) — enables §5.2 external audit as deployment-policy opt-in
+- `POLICY_HW_WALLET_CERTIFIED` (1 << 2) — enables §5.5 HW wallet ecosystem certification tier
+- `POLICY_BFT_THRESHOLD_FINALIZATION` (1 << 4) — enables §6.2 Quorum Liveness OPTIONAL 2F+1 finalization
+- Reserved: bit 3 (was tentatively `POLICY_TIER_BONDS_ENABLED`; now vestigial since 7.5.8 skipped — kept reserved to avoid bit-renumbering if Option A revisited later)
+- Reserved: bits 5..31 for future policy opt-ins
+
+**Validator dispatch at v1.0.** `validate_manifest()` rejects manifests with any bits set other than 0 (only `0x00000000` accepted). Future activations land per-flag as the corresponding feature implementations ship.
+
+**Composition with §6.2 Quorum Liveness OPTIONAL.** The §6.2 entry originally noted that ship required a `Config::finalization_mode` knob + `quorum_bitset` block-header field. The `quorum_bitset` block-header field still needs to exist (it's per-block, not per-manifest); 7.5.10 only covers the manifest-level enablement flag. The block-header `quorum_bitset` field would need its own pre-v1.0 commitment — flagged as residual gap for §6.2 enablement (the manifest enables the mode but the per-block bitset must exist in the schema).
+
+**Composition with Beaconless-v2 §Q2.1.** Hard-invariant validation rejects unknown flag bits. Per the §Q2.1 hard/soft tier split, this validation is HARD (consensus-enforced) — operators cannot ship manifests with unrecognized bits.
+
+#### 7.6.9 7.5.8 skip cascade
+
+**Concern.** Skipping 7.5.8 (deployment_tier) closes Option A monetization. What other v3 paths are affected?
+
+**Resolution.** §9.1 Option A reclassified from "live candidate" to "Breaking-only post-v1.0" (would require v3 protocol opening to add). §7.5.10's `POLICY_TIER_BONDS_ENABLED` flag becomes vestigial (no per-account tier field to enforce against), but the bit position is reserved to avoid renumbering if Option A is ever revisited via v3 protocol opening. The reservation is documented but the flag has no current implementation path.
+
+#### 7.6.10 Per-block `quorum_bitset` coherence (7.5.11, added 2026-06-03)
+
+**Concern.** Per-block participation bitset is variable-length per genesis K; how does it interact with the existing block-header schema?
+
+**Resolution.** Variable-length encoding follows the same pattern as §7.5.7 pubkey_form: `{length: u8 (K_bytes), body: bytes}`. For K=8 the body is 1 byte; for K=128 it's 16 bytes. The length field is implicit from genesis K (K is genesis-pinned per deployment), so no per-block length-byte overhead is strictly needed — the body alone suffices when K is known.
+
+**Default at v1.0.** All-1s bitset (every committee member participated). Identical semantics to current unanimous_k mode. Validator's BFT-threshold check short-circuits to existing K-of-K equality check when bitset is all-1s.
+
+**Future activation.** Requires BOTH `manifest.policy_tier_flags & POLICY_BFT_THRESHOLD_FINALIZATION` (per 7.5.10) AND `manifest.finalization_mode == BFT_THRESHOLD_2F1` (additional manifest field for finalization mode selection — not currently spec'd as a separate discriminator; could be part of POLICY_BFT_THRESHOLD_FINALIZATION semantics).
+
+**Composition.**
+- Orthogonal to §7.5.1 `signature_form` (signature scheme vs. participation tracking)
+- Orthogonal to v2.10 FROST randomness sig (randomness layer vs. block finalization layer)
+- Logically dependent on §7.5.10 (manifest enablement flag) — without §7.5.10 the bitset can exist but the BFT-mode is not opt-in-able
+
+**Validator dispatch at v1.0.** Bitset validates as all-1s (mode=unanimous_k); fail-closed reject any other pattern. Post-v1.0, when POLICY_BFT_THRESHOLD_FINALIZATION is set, validator checks at least 2F+1 bits are set per the BFT threshold.
+
+#### 7.6.11 Summary — nine discriminators coherent (8 ship, 1 skip)
 
 | # | Coherence concern | Resolution |
 |---|---|---|
@@ -638,6 +684,139 @@ Items that V2-DESIGN.md originally framed as chain-level substrate but were recl
 - Committee-instance DApp-hosting infrastructure (post-v1.0; new DApp pattern not previously deployed)
 
 **Related.** Memory `dlt-dsso-as-dapp`; V2-DESIGN.md §v2.25 (original substrate design — preserved for historical reference but supplanted by this reclassification); `DECISION-LOG.md` 2026-05-24 entry.
+
+---
+
+---
+
+## 9. Monetization model research (v3 candidates)
+
+Captured 2026-06-03 after explicit rejection of a casino-fee proposal (per DECISION-LOG.md → "Casino-fee mechanism rejection (2026-06-03)"). The underlying goal — capture value from high-margin use cases without burdening general adoption — is legitimate. Five alternative models preserved as research candidates; none committed.
+
+**Common principle.** All five avoid the rejected proposal's anti-pattern of pricing general-purpose cryptographic primitives (VRF, ZK proofs, escrow) that have legitimate non-casino uses. Instead, they price either (a) resource consumption, (b) deployment posture, or (c) DApp-layer revenue capture — none of which tax the cryptographic substrate itself.
+
+### 9.1 Option A — Stake/bond requirements scaled by deployment tier
+
+**Mechanism.** Operators register at a tier (`UNSTAKED`, `ENTERPRISE`, `REGULATED`, `HIGH_RISK`) and post bond proportional to tier. Casinos in `HIGH_RISK` post substantial slashable bond; non-casino enterprises pay zero or token bonds. Tier-misdeclaration is slashable by governance.
+
+**Classification.** Breaking (registry schema change) — UNLESS captured via a §7.5-style discriminator in v1.0 (`RegistryEntry.deployment_tier: enum` with default `UNSTAKED`). Currently NOT preserved in §7.5; would need a new §7.5.8 if this path is pursued. Flag for pre-v1.0-schema-freeze review.
+
+**Dependencies.** Governance mechanism for tier validation + slashing; community/operator consensus on tier definitions; bond economic design.
+
+**Pro/Con.** Self-selecting via slashable misdeclaration; doesn't tax specific primitives; compatible with no-migrations if §7.5.8 discriminator ships. Con: requires governance teeth that v1.0 doesn't currently have.
+
+**Related.** §7.5 discriminator framework; §1.8 trusted-issuer (similar policy-driven shape); `DECISION-LOG.md` → "Casino-fee mechanism rejection".
+
+### 9.2 Option B — Application-layer pricing via DApp framework
+
+**Mechanism.** DApps charge their users for premium features (VRF, ZK proofs, atomic escrow) and pay protocol fees from revenue. Protocol stays primitive-free; DApps own pricing/billing.
+
+**Classification.** Additive (no chain-level change needed; DApps handle pricing in v2.18 + v2.19 substrate). No discriminator required.
+
+**Dependencies.** DApp framework guidance / SDK for fee handling; reference DApp showing pricing pattern.
+
+**Pro/Con.** Purest "everything else is a DApp" model; chain stays free; casinos naturally pay more via their DApp's pricing; no protocol-level revenue capture (foundation must monetize elsewhere). Matches V2-DESIGN.md §God-protocol philosophy.
+
+**Related.** `DAPP_SDK_GUIDANCE.md` (could add fee-handling guidance); `Improvements.md §8.1` DSSO-as-DApp (same pattern); v2.18/v2.19 substrate (already shipped).
+
+### 9.3 Option C — Resource-based pricing with feature multipliers (Ethereum-style gas) — REJECTED 2026-06-03
+
+**Status.** Rejected. "No gas-style" decision per `DECISION-LOG.md` 2026-06-03 entry "Gas-style pricing rejected".
+
+**Rationale for rejection.** Gas-style pricing changes Determ's "free for enterprise" framing fundamentally; adds substantial v3 infrastructure (gas accounting, mempool fee-priority, validator gas-metering, per-opcode cost schedule + governance for updates, gas-payment token model); shifts project's character from primitive-free public-interest infrastructure toward fee-market substrate. Explicit project-policy rejection.
+
+**Preserved for record (original mechanism description):** VRF opcode costs N gas-equivalent; ZK proof verify costs M; escrow state-hold costs storage rent. Standard chain-economy model. Would have required §7.5.9 `Block.gas_pricing_form: enum` discriminator pre-v1.0 to remain Additive — that discriminator is now NOT being added to §7.5 (rejection cascades to closing the discriminator slot).
+
+**Cascade.** This rejection also implicitly closes Option D (§9.4 validator revenue sharing) because Option D required the same gas-accounting infrastructure as Option C.
+
+### 9.4 Option D — Validator revenue sharing on premium operations — REJECTED 2026-06-03 (cascade)
+
+**Status.** Rejected. Cascade-rejection from §9.3: depended on the same gas-style accounting infrastructure that Option C was rejected for.
+
+**Rationale for rejection.** Cascades from §9.3 gas-style rejection (same per-tx fee accounting + validator fee-receipt mechanism). Additionally suffers the same use-case-overlap problem as the originally-rejected casino-fee proposal — VRF/ZK/escrow have substantial non-casino legitimate users who would also pay, taxing the wrong feature set.
+
+**Preserved for record (original mechanism description):** VRF/ZK/escrow opcodes pay validators directly (revenue share). Market-priced; self-balancing; validators capture their own value. But: requires gas-style infrastructure (rejected) AND taxes general-purpose primitives that have non-target legitimate users.
+
+**If pursued later under different framing:** would need to be restructured around non-gas-style flat fees or subscription model rather than per-tx revenue share. Different design than originally captured here.
+
+### 9.5 Option E — Foundation/SDK revenue model unrelated to protocol
+
+**Mechanism.** Protocol stays free. Determ Foundation monetizes via: enterprise support contracts, regulatory-compliance certification, ecosystem partnerships, training/certification programs.
+
+**Classification.** Process (no chain change; entirely off-protocol).
+
+**Dependencies.** Foundation entity establishment; service offerings; staff for support/certification.
+
+**Pro/Con.** Decouples protocol economics from use-case capture (cleanest mission alignment); validated model (Linux Foundation, CNCF, Apache Foundation, etc.). Con: no protocol-level revenue; slower revenue ramp than fee-based; requires building services org.
+
+**Related.** Memory `dlt-no-migrations-constraint` (foundation services don't affect chain immutability); aligns with MOTIVATION.md "transparent public-interest infrastructure" framing.
+
+### 9.6 Comparison summary (post-2026-06-03 rejections + 7.5.8 skip)
+
+| Option | Status | Chain change | Revenue capture | Aligned with project philosophy? |
+|---|---|---|---|---|
+| 9.1 Tier-bonds (A) | ⚠️ Breaking-only post-v1.0 (7.5.8 skipped 2026-06-03) | Would require v3 protocol opening | Protocol-level (stake economics) | ✅ matches K-of-K + slashable misconduct |
+| 9.2 DApp-layer pricing (B) | ✅ Candidate | None | None (DApp captures) | ✅ matches "everything else is a DApp" |
+| 9.3 Gas pricing (C) | ❌ Rejected 2026-06-03 | — | — | — |
+| 9.4 Validator revenue share (D) | ❌ Rejected 2026-06-03 (cascade from C) | — | — | — |
+| 9.5 Foundation services (E) | ✅ Candidate (fallback) | None | Off-protocol | ✅ cleanest mission alignment |
+
+**Live candidates for serious v3 deliberation:** Options B (DApp-layer pricing) and E (foundation services off-protocol). Reduced from three to two after 7.5.8 skip closed Option A's Additive path.
+
+**Pre-v1.0-schema-freeze status:** §7.5.8 SKIPPED 2026-06-03 (Option A monetization now Breaking-only). §7.5.10 SHIPPED 2026-06-03 (unrelated; operator-tier opt-in framework for §1.8 / §5.2 / §5.5 / §6.2).
+
+---
+
+## 10. Near-term v3-blocker unblocks (captured 2026-06-03)
+
+Three v3 items had blocker-alternative analysis indicating modest spec work could promote them from "blocked" to "spec-ready." Captured here for future activation; not currently scheduled.
+
+### 10.1 §6.3 dedup — reformulation via per-creator Bloom/IBLT
+
+**Improvement.** Replace the FA2 censorship-evidence-surface concern with a per-creator Bloom filter / IBLT commitment in the block header. Each creator commits to their proposed-tx set via a small commitment; FA2's "k-conjunction-of-creators-must-collude" argument carries through against the commitment witness rather than the raw per-creator list.
+
+**Status change.** Per `Improvements.md §6.3` original entry, blocker was "FA2 reformulation needed (not just discriminator)." Reformulation via per-creator Bloom/IBLT was already noted as an alternative inside that entry. Promoting from "research-stuck" to "Breaking but spec-ready" requires ~1 week of focused FA2 proof + wire-format design.
+
+**Classification.** Still Breaking (the dedup itself remains a block-header structural change) but no longer research-stuck.
+
+**Dependencies.** ~1 week design work for FA2 proof reformulation + per-creator commitment wire format.
+
+**Action.** Defer until §6.3 demand surfaces; spec-sketch then.
+
+### 10.2 §1.6 stateless scheduled decoys
+
+**Improvement.** Recipient publishes decoy OTPK batches on a fixed schedule, not based on actual usage. Observer sees uniform-but-not-cryptographically-unforgeable decoy pattern. ~80% of unforgeable-decoy benefit at trivial implementation cost.
+
+**Status change.** Per `Improvements.md §1.6` original entry, blocker was "decoy-unforgeability mechanism (commitment scheme or similar)." Stateless scheduled decoys sidestep that requirement entirely — accept slightly weaker privacy in exchange for ~3-5 day spec-sketch instead of multi-month commitment-scheme research.
+
+**Classification.** Additive (alongside PRIV-6.2 cadence padding); composes with existing OTPK stream.
+
+**Dependencies.** ~3-5 days spec work; wallet-side scheduler.
+
+**Action.** Could ship in v1.0 alongside PRIV-6.2 if wallet-team capacity permits — but classified Additive so post-v1.0 is also fine.
+
+### 10.3 Operator-tier opt-in framework as a v3 design pattern — ENABLED 2026-06-03 via 7.5.10
+
+**Improvement.** Generalize the §6.2 Quorum Liveness OPTIONAL pattern (operator-tier opt-in with default-conservative codepath) into a reusable v3 framework. Chain-level `manifest.policy_tier_flags` u32 bitset with per-flag opt-in lets multiple policy-blocked items ship as opt-in tiers without project-wide policy decisions.
+
+**Status: 7.5.10 shipped in v1.0** (per `Improvements.md §7.5` 2026-06-03 decision). Framework is now ENABLED — `manifest.policy_tier_flags` field exists in v1.0 schema; specific flag bits activate as their corresponding feature implementations ship post-v1.0.
+
+**Unblocked items (now Additive via opt-in flag):**
+- §1.8 trusted-issuer audit — via `POLICY_TRUSTED_ISSUER_AUDIT` (bit 0)
+- §5.2 external audit — via `POLICY_EXTERNAL_AUDIT_REQUIRED` (bit 1)
+- §5.5 HW wallet certification — via `POLICY_HW_WALLET_CERTIFIED` (bit 2)
+- §6.2 Quorum Liveness OPTIONAL — via `POLICY_BFT_THRESHOLD_FINALIZATION` (bit 4); see §6.2 residual gap below
+
+**Items that did NOT get unblocked:**
+- §9.1 tier-bond monetization — 7.5.8 was skipped, so even with this framework's `POLICY_TIER_BONDS_ENABLED` reservation (bit 3), there is no per-account tier field to enforce against. Reserved bit kept for renumbering safety if Option A is revisited via v3 protocol opening.
+
+**§6.2 Quorum Liveness OPTIONAL — FULLY UNBLOCKED 2026-06-03.** Both the manifest enablement flag (7.5.10) AND the per-block `quorum_bitset` field (7.5.11) ship in v1.0. §6.2 is now Additive-via-opt-in end-to-end: deployments set the policy flag in manifest at creation; per-block bitset records participation; validator's BFT-threshold check activates when flag is set. Best-specified post-v2 architectural optimization (was 60% ready per earlier audit) becomes a real implementable Additive path.
+
+**Implementation impact.**
+- v1.0 chain: ~1-2 days to add `policy_tier_flags` field to manifest schema + validate_manifest() check rejecting unknown bits
+- Per-flag enablement: each feature's implementation cost (separate from this framework) when activated
+
+**Action items now closed.** Framework spec lands inside Beaconless-v2-SPEC manifest section + §Q2.1 hard-invariant validation. Per-flag-bit reservations documented here.
 
 ---
 
