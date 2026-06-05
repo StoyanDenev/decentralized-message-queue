@@ -29,11 +29,16 @@
 > S-006 equivocation detection now compares the v1 CORE commit only (a member's
 > view legitimately varies across re-rounds). Verified: build + FAST 147/147 +
 > the full cross-shard suite (`test_cross_shard_transfer` credits B end-to-end).
-> STILL pending for full S-016 / S-030-D2 closure: **site 3** (build_body filters
-> `inbound_receipts` to `reconcile_intersection` of the committed views — block
-> content is still each node's local eligible set, so cross-committee
-> determinism is carried+validated but not yet ENFORCED), the V21–V26
-> contrib-view validator passes, and binding the reconciled roots into
+>
+> **UPDATE (commit c16d6c3): site 3 is now also LIVE — S-016 Option-1 is
+> functionally closed.** `build_body` filters `inbound_receipts` to
+> `reconcile_intersection` of the committee's committed inbound views, and the
+> validator ENFORCES it (`check_inbound_receipts` authenticates each list
+> against its signed root, then rejects any receipt whose key is outside the
+> intersection). So the admitted inbound set is the deterministic committee-wide
+> intersection, not the producer's local timing-dependent choice. Verified: the
+> full cross-shard suite passes. Remaining only for full S-030-D2 hardening: the
+> contrib-time V21–V26 view-root passes and binding the reconciled roots into
 > `compute_block_digest`.
 
 This document is the analytic companion to **FB22** (`docs/proofs/tla/F2ViewReconciliation.tla`). FB22 formalizes the v2.7 F2 view-reconciliation primitives + the validator-side passes V21..V26 in TLA+; the present document states and proves the same six algebraic invariants in plain prose, with line-by-line citations to the C++ implementation at `src/node/producer.cpp:335..496`.

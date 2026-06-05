@@ -17,11 +17,15 @@
 > **UPDATE (commit 850d2c3): the inbound-view commit-binding is now LIVE** — the
 > producer binds `view_inbound_root` into the Phase-1 commit, the block carries
 > per-creator view roots, and the validator recomputes the creator commit with
-> them (verified: full cross-shard suite + FAST 147/147). The F2→apply
-> composition theorem below still depends on the remaining pieces: **site 3**
-> (build_body intersection — block content is not yet the reconciled set) and
-> `compute_block_digest` binding the reconciled roots (the actual S-030-D2
-> step). So the end-to-end claim remains a specification until those land.
+> them (verified: full cross-shard suite + FAST 147/147). **Site 3 is now also
+> LIVE (commit c16d6c3):** build_body filters `inbound_receipts` to
+> `reconcile_intersection` of the committee's committed views and the validator
+> enforces it — so the inbound block content IS the reconciled committee-wide
+> set, and S-016 Option-1 is functionally closed. The F2→apply composition
+> theorem's one remaining dependency is `compute_block_digest` binding the
+> reconciled roots (the actual S-030-D2 step); until that lands the end-to-end
+> digest-coverage claim remains a specification, but the apply-side determinism
+> the theorem consumes (S-033 state_root over the reconciled inbound set) holds.
 
 This document formalizes the **composition seam** between the v2.7 F2 view-reconciliation layer (consensus-side, per `F2ViewReconciliationAnalysis.md` + FB22) and the FA-Apply-1..16 apply-determinism sequence (apply-side, per `AccountStateInvariants.md`, `MultiEventComposition.md`, and the per-surface FA-Apply-N siblings). The two halves close S-030 D2 from opposite directions — F2 ensures every honest committee member commits, before any state mutation, to a canonical view of the three pool-fed input fields (`equivocation_events`, `abort_events`, `inbound_receipts`); FA-Apply-1..16 ensures the apply path consumes those inputs in a strictly serialized, byte-deterministic order producing a single post-apply state. The present document pins the joint claim: **the F2-committed view roots, once bound into the K-of-K Phase-2 signature surface, are sound inputs to the FA-Apply-1..16 sequence, in the sense that every honest receiver running the apply path against the F2-canonical inputs produces a byte-identical post-apply state and a byte-identical S-033 `state_root`**. The S-033 gate at `chain.cpp:1432–1444` is the apply-time observable that fires on any cross-node divergence, and (post-S-038) it fires on every production block.
 

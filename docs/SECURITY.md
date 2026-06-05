@@ -47,7 +47,7 @@ Closed in-session (retained here for audit trail; see §3 bodies):
 - ~~S-021 Chain file integrity not cryptographically verified~~ — closed via wrapping chain.json with `head_hash` + load-time recompute + mismatch reject (O(1) tampering detection before replay).
 - ~~S-022 Permissive 16 MB message cap~~ — closed via per-message-type body-size limit applied after deserialize in `Peer::read_body`; 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT/CHAIN responses.
 - ~~S-026 No connection timeout / keepalive~~ — closed via `SO_KEEPALIVE` on every peer socket in `Peer::Peer`; dead connections reaped via OS-level keepalive probes through the existing on_close path.
-- 🟠 S-016 Inbound-receipts pool non-determinism — partially mitigated via Option 2 (time-ordered admission, 3-block soak); v2.7 F2 closes fully via Option 1 (Phase-1 intersection commitment).
+- 🟢 S-016 Inbound-receipts pool non-determinism — Option 1 (v2.7 F2 Phase-1 view intersection) now IMPLEMENTED + ENFORCED at block validation (commits 850d2c3 + c16d6c3): the admitted inbound set is the deterministic committee-wide intersection of the members' committed views. Option 2's 3-block soak retained as a liveness pre-filter. Residual S-030-D2 digest-binding hardening tracked under S-030.
 - ~~S-024 Deregistration timing predictability~~ — formally accepted per auditor's reclassification; 1-10 block grind window deemed acceptable in v1.x; v2.X enhancement noted.
 - ~~S-027 Info leakage in logs~~ — closed via audit-pass (no secret material in node/RPC logs; only chain-public state) + new `Config::log_quiet` flag for operator-side log-volume control.
 - ~~S-028 Hex parsing only accepts lowercase~~ — closed via case-insensitive `is_anon_address` + `normalize_anon_address` helper + apply at RPC read boundaries (`rpc_balance`, `rpc_send`); `rpc_submit_tx` rejects non-canonical with clear diagnostic (sig is over signing_bytes so server can't mutate).
@@ -788,9 +788,9 @@ Suggested external-bind defaults: `rate=500`, `burst=1000`. Healthy consensus is
 
 ---
 
-### S-016 — Inbound-receipts pool non-deterministic across committee — 🟠 Partially mitigated (Option 2)
+### S-016 — Inbound-receipts pool non-deterministic across committee — 🟢 Option 1 intersection enforced (S-030-D2 hardening residual)
 
-**Severity:** Medium (correctness-preserving latency) (was) • **Status:** 🟠 Partially mitigated (Option 2 shipped; Option 1 = v2.7 F2 closes fully) • **Sources:** OV-#5 (rev.9 addition; B3.4 commit message)
+**Severity:** Medium (correctness-preserving latency) (was) • **Status:** 🟢 Option 1 (v2.7 F2 Phase-1 view intersection) IMPLEMENTED + ENFORCED at block validation (commits `850d2c3` + `c16d6c3`). Each committee member commits its eligible inbound-receipt view into its Phase-1 commit; the block carries the per-creator view roots + lists; `BlockValidator` recomputes the creator commit with the roots (so the F2-bound sig verifies), authenticates each list against its root, and rejects any inbound receipt whose key is outside `reconcile_intersection` of the committee's views. So the admitted inbound set is the deterministic committee-wide intersection, not the producer's local timing — closing the inbound-determinism core. Option 2's 3-block soak is retained as a liveness pre-filter. Residual S-030-D2 hardening (contrib-time V21–V26 view-root passes + binding the reconciled roots into `compute_block_digest`) is tracked under S-030. Verified end-to-end by the full cross-shard cluster suite. • **Sources:** OV-#5 (rev.9 addition; B3.4 commit message)
 
 **Pre-fix description.** Each destination-shard committee member passes their *local* `pending_inbound_receipts_` snapshot to `build_body`. If pools differ momentarily during bundle gossip, members produce different tentative blocks → K-of-K fails → round retries. Documented in B3.4 commit. Not exploitable but adds avoidable latency.
 
