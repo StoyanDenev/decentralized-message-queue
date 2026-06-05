@@ -587,6 +587,21 @@ Hash compute_block_digest(const Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
+    // v2.7 F2 / S-016: bind the admitted inbound-receipt set into the digest so
+    // the K-of-K block signature attests to it. The per-creator sigs cover the
+    // view ROOTS but not the producer's chosen SET, and check_inbound_receipts'
+    // intersection test is subset-only — so without this a relayer could STRIP
+    // an inbound receipt after signing and the two versions would share a
+    // digest (the S-030-D2 removal gap). Bound via a single root over the sorted
+    // receipt keys; skipped (no append) when there are no inbound receipts, so
+    // non-cross-shard blocks keep a byte-identical v1 digest.
+    if (!b.inbound_receipts.empty()) {
+        std::vector<Hash> ikeys;
+        ikeys.reserve(b.inbound_receipts.size());
+        for (auto& r : b.inbound_receipts)
+            ikeys.push_back(hash_cross_shard_receipt(r));
+        h.append(compute_view_root(ikeys));
+    }
     return h.finalize();
 }
 
