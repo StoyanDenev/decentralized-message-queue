@@ -695,4 +695,39 @@ Both constraints remain load-bearing. Cannot relax.
 
 ---
 
+---
+
+## 2026-06-05 — AI-traffic-dominance monetization implications + §9 framing sharpening
+
+### "Live monetization model is §9.2 + §9.5; others are preserved-rejection-rationale, not parallel candidates"
+
+**Question.** By 2026, AI traffic has surpassed human traffic on the broader internet. What does this mean for the monetization candidates in `Improvements.md §9`?
+
+**Analysis.**
+
+- **Protocol-level pricing models (§9.1 tier-bonds, §9.3 gas-style, §9.4 validator revenue share) gain no new viability from AI-traffic-dominance.** The same blindness problem that rejected the casino-fee proposal applies: protocol cannot tell AI tx from human tx. Identity-classification at protocol level is structurally infeasible for AI vs human distinction same as it was for casino vs enterprise.
+- **DApp-layer pricing (§9.2) is where AI-aware monetization happens.** DApps have visibility into principal vs delegate, subscription tier, action context — they can price-discriminate legitimately. Per-principal subscriptions, per-action-with-cap, delegation-credential issuance fees, volume-tier discounts are all DApp-layer patterns that handle the AI-volume reality.
+- **Foundation services (§9.5) gain a sharpened positioning** as "AI-agent economy infrastructure provider" — Determ's design (K-of-K mutual-distrust, DSSO, PFS, ROTATE_KEY) genuinely fits the AI-agent-economy needs. Foundation services for support/certification/partnerships can target this market explicitly.
+- **S-010 stake-pricing assumes human-velocity account creation.** AI orchestration changes the Sybil cost calculus; review is warranted (captured as `Improvements.md §5.6`).
+
+**Sharpening decision.** User's follow-up question — "why do we need other pricing models?" — exposed that §9 was framed misleadingly as "5 candidates" when really §9.1, §9.3, §9.4 are rejection-rationale (preserved for record) and §9.2 + §9.5 are the live model. Sharpened §9.6 framing: "live monetization model is §9.2 + §9.5; nothing else." The two are orthogonal (DApp-layer captures application value; Foundation captures services value); they don't compete. Chain protocol itself stays free per project character (no per-tx fees; no gas; no per-account tier-bond differentiation).
+
+**Why §9.2 + §9.5 is sufficient.** 
+- Chain protocol stays free (matches MOTIVATION.md framing)
+- Validators are operators paid by deployment sponsors (sovereign-deployment model)
+- DApps capture application value via §9.2 patterns (per-principal subscription, delegation-credential fees, etc.)
+- Foundation captures non-deployment-specific value via §9.5 (support, certification, partnerships)
+- Three-layer architecture: chain (free) + DApp (captures app value) + Foundation (captures services value)
+
+**Generalization for future monetization proposals.** Any proposal that captures revenue at the protocol layer must answer: (a) does it require identity-classification (blindness problem)? (b) does it shift Determ's character toward fee-market substrate? If yes to either, the proposal goes against established project posture and joins §9.1/§9.3/§9.4 as rejection-rationale, not live candidate. DApp-layer and Foundation-layer captures don't suffer either problem.
+
+**Doc updates applied.**
+- `Improvements.md §9.6` — sharpened to explicit "live model is §9.2 + §9.5 only"
+- `Improvements.md §9.2.1` — new sub-section on DApp pricing patterns under AI-agent dominance
+- `Improvements.md §9.5.1` — new sub-section on Foundation services AI-agent-economy repositioning
+- `Improvements.md §5.6` — new entry: S-010 stake-pricing review under AI-volume assumptions
+- `DAPP_SDK_GUIDANCE.md §7` (new) — DApp pricing patterns under AI-agent economy dominance with composition notes vs Determ primitives
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

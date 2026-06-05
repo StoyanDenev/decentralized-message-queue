@@ -220,7 +220,54 @@ Items still needed (open ecosystem work, post-v1.0):
 
 ---
 
-## 7. What this doc is NOT
+## 7. DApp pricing patterns under AI-agent economy dominance (added 2026-06-05)
+
+By 2026 AI traffic has surpassed human traffic on the broader internet. DApps building on Determ should structure pricing for AI-mediated usage where principals delegate to AI agents that act at higher transaction velocity than the principal alone would. The chain protocol itself stays free (per `Improvements.md §9.6` final monetization model — no protocol-level discrimination); DApps absorb the pricing-design problem and discriminate at the application layer where they have visibility to do so legitimately.
+
+### 7.1 Why DApp-layer (not protocol-layer) pricing for AI traffic
+
+The protocol cannot tell an AI agent's tx from a human agent's tx — both look like signed messages from key holders. Trying to discriminate at protocol level creates the same gaming dynamics as the rejected casino-fee proposal (per `Improvements.md §9.3` / DECISION-LOG.md 2026-06-03). DApps, by contrast, can see:
+- Who is the principal (the human or organization the agent represents)
+- Whether the action is part of a delegated workflow
+- The principal's subscription tier / payment status
+
+DApps price-discriminate where they have legitimate visibility; the chain stays free.
+
+### 7.2 Recommended DApp pricing patterns
+
+| Pattern | Mechanism | When appropriate |
+|---|---|---|
+| **Per-principal subscription** | Principal pays one recurring bill covering self + all delegated AI agents' actions for the period | Default for principal-mediated use; predictable revenue; AI volume doesn't bankrupt principal |
+| **Per-action with principal-aggregate cap** | Per-tx pricing capped at a monthly per-principal maximum | Hybrid; per-action visibility + cap protection; matches "pay for what you use up to a cap" |
+| **Delegation-credential issuance fee** | One-time fee at the moment a principal grants DSSO-DApp delegation to an AI agent | Captures AI proliferation directly; self-selecting (humans without delegates pay nothing); composes with DSSO-as-DApp delegation flow |
+| **Volume-tier discounts scaling with AI orchestration** | Higher-volume principals pay less per-tx | Recognizes AI orchestration as legitimate; rewards consolidation under one principal vs proliferation of small accounts (which has Sybil implications) |
+
+### 7.3 Composition with Determ chain primitives
+
+| Primitive | AI-agent use |
+|---|---|
+| DSSO-as-DApp delegation (post-v1.0; `Improvements.md §8.1`) | Each AI agent is a DSSO-issued delegate of a principal; delegation credentials are the natural pricing unit |
+| v2.22 PFS (PRIV-6) | AI agents transacting on principal's behalf use PFS mode to protect principal's financial patterns from AI-system-operator surveillance |
+| v2.26 ROTATE_KEY (with KR-10 unified key_target) | Delegate revocation via ROTATE_KEY on the DApp service_pubkey for that delegate; principal can revoke specific AI agents without losing identity continuity |
+| v2.24 audit hooks | Principal can audit delegate-action history via PRIV-4 dual-mode disclosure to compliance officer |
+
+### 7.4 Practical guidance for DApp developers
+
+1. **Default to per-principal subscription** for new DApps unless a specific use case requires per-action pricing.
+2. **Use DSSO-as-DApp delegation credentials** (post-v1.0) as the unit of pricing for AI agents — one credential per agent; price the credential issuance, not the per-action stream.
+3. **Cap per-action billing aggressively** to prevent runaway AI usage from bankrupting principals.
+4. **Offer volume-tier discounts** to encourage principals to consolidate AI delegates under one account rather than proliferate Sybil-prone accounts (composes with §S-010 stake-pricing posture).
+5. **Make the principal-vs-delegate distinction visible** in DApp UX — humans should be able to see and revoke their AI agents' delegations easily (compose with v2.26 ROTATE_KEY).
+
+### 7.5 What this section is NOT
+
+- Not a chain-level monetization mechanism — per `Improvements.md §9.6`, the chain itself stays free regardless of AI vs human traffic.
+- Not a DSSO delegation protocol spec — that lives in `Improvements.md §8.1` as a post-v1.0 DApp.
+- Not enforceable at chain level — DApps choose their pricing model; the chain doesn't validate pricing compliance.
+
+---
+
+## 8. What this doc is NOT
 
 - **Not a chain-side crypto spec.** That's `CRYPTO-C99-SPEC.md`.
 - **Not a DApp protocol spec.** DApp protocols (DAPP_REGISTER, DAPP_CALL) are governed by Theme 7 specs.

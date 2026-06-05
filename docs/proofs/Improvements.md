@@ -268,6 +268,20 @@
 
 **Related.** `DECISION-LOG.md` → IMPLEMENTATION-SEQUENCING → Bundle release cadence; memory `dlt-no-migrations-constraint`.
 
+### 5.6 S-010 stake-pricing review under AI-volume assumptions (added 2026-06-05)
+
+**Improvement.** Review the S-010 stake-pricing formula (per `SECURITY.md §S-010`) under the assumption that AI orchestrators can spin up accounts at industrial rates rather than human-velocity rates. AI-traffic-dominance (2026 baseline: AI traffic > human traffic on broader internet) may change the Sybil-resistance assumptions S-010 relies on.
+
+**Why this matters now.** S-010's "economic argument for security" assumes Sybil cost grows linearly with attacker effort. AI orchestration changes that to "linearly with attacker capital" — potentially much lower per-account cost. Whether the existing formula still provides adequate Sybil-resistance depends on AI-orchestration-cost vs stake-cost ratios that weren't analyzed in the original S-010 work.
+
+**Deferred reason.** Not a chain-design change yet — it's an analytical review. May result in: (a) formula parameter tuning, (b) AI-orchestration cost modeling becoming a deployment-tier knob, (c) confirming current formula remains adequate.
+
+**Classification.** Process (analytical review, potentially leading to operator-facing parameter guidance).
+
+**Dependencies.** Empirical data on AI-orchestration cost economics; cryptographic-economist review; possibly DSF-based simulation of high-velocity Sybil scenarios.
+
+**Related.** `SECURITY.md §S-010` stake-pricing formula; §9.2.1 AI-agent economy patterns; memory `dlt-no-migrations-constraint` (any parameter change post-v1.0 must fit Additive constraints).
+
 ### 5.5 Hardware wallet ecosystem support for ROTATE_KEY (v3 — deferred from v2.26 per KR-11)
 
 **Improvement.** First-class hardware wallet (Ledger / Trezor / etc.) support for v2.26 ROTATE_KEY UX. Device firmware shows "Rotate operator key for domain X to new key Y" before signing; multi-sig co-flow UX; recovery-flow integration.
@@ -726,19 +740,58 @@ Captured 2026-06-03 after explicit rejection of a casino-fee proposal (per DECIS
 
 **Related.** Memory `dlt-no-migrations-constraint` (foundation services don't affect chain immutability); aligns with MOTIVATION.md "transparent public-interest infrastructure" framing.
 
-### 9.6 Comparison summary (post-2026-06-03 rejections + 7.5.8 skip)
+### 9.6 Final monetization model (post-2026-06-05 sharpening)
 
-| Option | Status | Chain change | Revenue capture | Aligned with project philosophy? |
-|---|---|---|---|---|
-| 9.1 Tier-bonds (A) | ⚠️ Breaking-only post-v1.0 (7.5.8 skipped 2026-06-03) | Would require v3 protocol opening | Protocol-level (stake economics) | ✅ matches K-of-K + slashable misconduct |
-| 9.2 DApp-layer pricing (B) | ✅ Candidate | None | None (DApp captures) | ✅ matches "everything else is a DApp" |
-| 9.3 Gas pricing (C) | ❌ Rejected 2026-06-03 | — | — | — |
-| 9.4 Validator revenue share (D) | ❌ Rejected 2026-06-03 (cascade from C) | — | — | — |
-| 9.5 Foundation services (E) | ✅ Candidate (fallback) | None | Off-protocol | ✅ cleanest mission alignment |
+**The live monetization model is §9.2 + §9.5. Nothing else.** §9.1, §9.3, §9.4 are preserved-rejection-rationale for record — NOT parallel candidates competing with §9.2/§9.5. The two live models are orthogonal (not competing) and together cover legitimate value-capture without protocol-level fee mechanics.
 
-**Live candidates for serious v3 deliberation:** Options B (DApp-layer pricing) and E (foundation services off-protocol). Reduced from three to two after 7.5.8 skip closed Option A's Additive path.
+| Option | Status | Layer | What it funds |
+|---|---|---|---|
+| **9.2 DApp-layer pricing (B)** | ✅ **Live model** | Application | DApp businesses (each DApp captures value from its users — including AI-delegate principals per §9.2.1 below) |
+| **9.5 Foundation services (E)** | ✅ **Live model** | Off-protocol | Foundation operations + reference deployments (support contracts, certification, ecosystem partnerships, training) — repositioned 2026-06-05 as "AI-agent economy infrastructure" provider |
+| 9.1 Tier-bonds (A) | ⛔ Skipped (7.5.8 not shipped 2026-06-03) | Protocol | (Would have funded chain via stake economics; rejected — not in v1.0) |
+| 9.3 Gas pricing (C) | ❌ Rejected 2026-06-03 | Protocol | (Would have funded chain via fee market; rejected on character grounds) |
+| 9.4 Validator revenue share (D) | ❌ Rejected 2026-06-03 (cascade from C) | Protocol | (Would have funded validators; cascade-rejected with C) |
 
-**Pre-v1.0-schema-freeze status:** §7.5.8 SKIPPED 2026-06-03 (Option A monetization now Breaking-only). §7.5.10 SHIPPED 2026-06-03 (unrelated; operator-tier opt-in framework for §1.8 / §5.2 / §5.5 / §6.2).
+**Why §9.2 + §9.5 alone is sufficient.**
+
+- **Chain protocol itself stays free.** No per-tx fees; no gas; no per-account tier-bond differentiation. Matches MOTIVATION.md framing (Determ as public-interest cryptographic substrate).
+- **Validators are operators** — paid by the deployment's sponsor (sovereign-deployment model: banks, governments, enterprises run their own deployments for their own benefit). Not paid by transaction fees.
+- **DApp ecosystem captures value via §9.2** — each DApp prices its application according to its market (per-action, per-principal-subscription, per-delegation-credential per §9.2.1). DApps that serve high-volume AI agents charge accordingly.
+- **Foundation captures value via §9.5** — services-org revenue funds non-deployment-specific work (chain maintenance, reference implementations, certification programs, AI-agent-economy positioning).
+
+**Why no other models are needed.** Protocol-level revenue capture (§9.1, §9.3, §9.4) was repeatedly rejected because (a) it requires identity-classification at protocol level which is structurally infeasible (blindness problem); (b) it changes Determ's character from primitive-free public-interest infrastructure toward fee-market substrate. The two-layer split (DApp + Foundation) preserves character while capturing legitimate value at the layers where it can be captured fairly.
+
+**Pre-v1.0-schema-freeze status:** §7.5.8 SKIPPED 2026-06-03 (Option A monetization now Breaking-only — kept in §9.1 row for rejection-rationale only). §7.5.10 SHIPPED 2026-06-03 (unrelated; operator-tier opt-in framework for §1.8 / §5.2 / §5.5 / §6.2).
+
+### 9.2.1 DApp-layer pricing patterns under AI-agent economy dominance (added 2026-06-05)
+
+By 2026 AI traffic has surpassed human traffic on the broader internet. DApps building on Determ should structure pricing for AI-mediated usage, where principals delegate to AI agents that act at higher transaction velocity than the principal alone would.
+
+**Recommended DApp pricing patterns:**
+
+| Pattern | When appropriate |
+|---|---|
+| **Per-principal subscription** (principal pays one bill covering self + delegated AI agents' actions) | Default for principal-mediated use; predictable revenue; AI volume doesn't bankrupt principal |
+| **Per-action with principal-aggregate cap** | Hybrid; per-action visibility + cap protection |
+| **Delegation-credential issuance fee** (each DSSO-as-DApp delegate credential carries one-time issuance fee) | Captures AI proliferation directly; self-selecting (humans without delegates pay nothing) |
+| **Volume-tier discounts that scale with AI orchestration** | High-volume principals pay less per-tx; recognizes AI orchestration as a legitimate use pattern |
+
+The chain protocol stays free for AI agents and humans alike (per §9.6 — no protocol-level discrimination). DApps absorb the pricing-design problem and price-discriminate at the application layer where they have the visibility to do so legitimately.
+
+**Authority for these patterns: DApp owners.** The chain provides primitives (DSSO-as-DApp delegation credentials, v2.22 PFS for principal-protection, v2.26 ROTATE_KEY for delegate revocation); DApps choose business models. `DAPP_SDK_GUIDANCE.md` will carry detailed pricing-pattern guidance for DApp developers.
+
+### 9.5.1 Foundation-services repositioning — AI-agent economy infrastructure (added 2026-06-05)
+
+Determ's design fits the AI-agent economy especially well — AI agents need K-of-K mutual-distrust, verifiable identity (DSSO), transaction confidentiality (PFS), and cryptographic accountability (ROTATE_KEY + audit hooks). The Foundation's §9.5 services can target this positioning explicitly:
+
+| Service | AI-agent-economy framing |
+|---|---|
+| Enterprise support contracts | "Run AI-agent infrastructure on verifiable cryptographic substrate; we support your AI-delegate deployment" |
+| Regulatory-compliance certification | "Certify your AI agents are operating under cryptographically auditable delegation per v2.26 + v2.22 PRIV-4" |
+| Ecosystem partnerships | "Integrate with leading AI-agent platforms via DSSO-as-DApp delegation primitives" |
+| Training/certification programs | "AI-agent-economy infrastructure operator certification" |
+
+No technical change; sharper positioning for foundation-services pitch. Aligns with the project's design fitness for the AI-agent economy.
 
 ---
 
