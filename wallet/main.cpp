@@ -13385,6 +13385,289 @@ int cmd_receipt_key(int argc, char** argv) {
     return 0;
 }
 
+// ── address-classify ─────────────────────────────────────────────────────────
+//
+// OFFLINE classifier + S-028 canonicalizer for one or more on-chain account
+// identifiers (anonymous bearer addresses and registered domain names). Pure
+// local string work — no SHA-256, no RPC, no network, no daemon, no file IO
+// unless an @file address list is supplied. Deterministic.
+//
+// The chain admits two account-identifier shapes (include/determ/types.hpp):
+//
+//   * anon bearer address:  "0x" + exactly 64 hex chars (the full Ed25519
+//     pubkey). Holds balance, sends/receives TRANSFER; cannot register,
+//     stake, or be selected as a creator. is_anon_address accepts EITHER
+//     case, but the CANONICAL storage form is always lowercase.
+//   * domain name: anything else the registry accepts (a non-0x-64-hex
+//     string). Domains route to a fixed shard and can register/stake.
+//
+// S-028 (SECURITY.md): a node MUST normalize_anon_address every incoming
+// identifier at the RPC/CLI boundary BEFORE storage or lookup; otherwise
+// "0xABC..." and "0xabc..." would land in different account-map entries and
+// fragment a single bearer wallet's balance across two keys. The canonical
+// form lowercases ONLY the 64-hex tail (digits 0-9 and the literal "0x"
+// prefix are untouched; A-F -> a-f). Domain names pass through verbatim.
+// `submit_tx` is STRICTER than normalize: it REJECTS a tx whose anon `from`
+// is non-canonical (mixed/upper case) rather than silently rewriting it, so
+// the operator-supplied signature stays bound to the bytes the operator
+// signed. This command reports `submit_tx_ok` = (anon AND already canonical)
+// OR (domain) so a batch can be screened for that strict gate offline.
+//
+// This command reproduces is_anon_address / normalize_anon_address from
+// include/determ/types.hpp byte-for-byte (the wallet TU does not include that
+// header — like its siblings cmd_validate_tx / cmd_sign_anon_tx it re-states
+// the S-028 contract locally). For each identifier it reports:
+//
+//   * input         — the identifier as supplied (echoed).
+//   * kind          — "anon" | "domain" | "invalid".
+//   * canonical     — the S-028 canonical form (lowercase tail for anon;
+//                     verbatim for domain; "" for invalid).
+//   * changed       — true iff canonical != input (the non-canonical case
+//                     submit_tx strict-rejects for an anon `from`).
+//   * submit_tx_ok  — true iff the chain's submit_tx anon strict gate would
+//                     admit this identifier as-is (always true for a domain).
+//   * pubkey_hex    — for anon only: the 64-hex Ed25519 pubkey the address
+//                     decodes to (lowercase canonical hex; the value
+//                     make_anon_address would re-derive the address from).
+//
+// "invalid" is reserved for a 0x-prefixed string that LOOKS like an anon
+// address attempt but is malformed — wrong length, or non-hex in the tail.
+// A bare empty string is "invalid" too (the chain rejects an empty `to` on
+// TRANSFER and an empty identifier has no account). Everything else (no 0x
+// prefix) is treated as a domain candidate, matching the chain's own
+// "not the unique 0x+64-hex shape => domain" disambiguation.
+//
+// Use cases: a payroll/airdrop operator screening a recipient list for the
+// submit_tx strict gate BEFORE signing (catching an upper-case paste that
+// would be rejected on submit); a wallet UI canonicalizing user-pasted
+// addresses for display + dedup; a CI fixture asserting the S-028 contract.
+//
+// --address may be repeated; --addresses takes a comma-separated list or
+// @<path> (one identifier per line; blank lines and # comments skipped).
+// Both may be combined; order is preserved. With exactly one identifier and
+// no --json the output is a human block; --json (or >1 identifier) emits a
+// one-line {count, results:[...], summary:{...}} object. The summary tallies
+// anon / domain / invalid / changed / submit_tx_ok counts for the batch.
+//
+// Exit codes:
+//   0  every identifier classified (anon or domain), none invalid.
+//   1  args / IO / parse error.
+//   2  at least one identifier is "invalid" (a malformed 0x-attempt or an
+//      empty identifier) — a screening signal for the caller.
+int cmd_address_classify(int argc, char** argv) {
+    std::vector<std::string> inputs;
+    bool json_out  = false;
+    bool have_addr = false;
+
+    auto load_list = [](const std::string& spec,
+                        std::vector<std::string>& out) -> bool {
+        if (!spec.empty() && spec[0] == '@') {
+            std::string path = spec.substr(1);
+            std::ifstream f(path);
+            if (!f) {
+                std::cerr << "address-classify: cannot open address file: "
+                          << path << "\n";
+                return false;
+            }
+            std::string line;
+            while (std::getline(f, line)) {
+                // Trim trailing CR (CRLF files) + surrounding whitespace.
+                while (!line.empty()
+                       && (line.back() == '\r' || line.back() == ' '
+                           || line.back() == '\t'))
+                    line.pop_back();
+                size_t b = line.find_first_not_of(" \t");
+                if (b == std::string::npos) continue;     // blank
+                line = line.substr(b);
+                if (line[0] == '#') continue;             // comment
+                out.push_back(line);
+            }
+            return true;
+        }
+        // Comma-separated inline list.
+        size_t start = 0;
+        while (start <= spec.size()) {
+            size_t comma = spec.find(',', start);
+            std::string tok = (comma == std::string::npos)
+                ? spec.substr(start)
+                : spec.substr(start, comma - start);
+            size_t b = tok.find_first_not_of(" \t");
+            size_t e = tok.find_last_not_of(" \t");
+            if (b != std::string::npos)
+                out.push_back(tok.substr(b, e - b + 1));
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        return true;
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--address"   && i + 1 < argc) {
+            inputs.push_back(argv[++i]); have_addr = true;
+        }
+        else if (a == "--addresses" && i + 1 < argc) {
+            if (!load_list(argv[++i], inputs)) return 1;
+            have_addr = true;
+        }
+        else if (a == "--json") json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet address-classify\n"
+                "         (--address <id> [--address <id> ...]\n"
+                "          | --addresses <id,id,...|@file>) [--json]\n"
+                "\n"
+                "  OFFLINE classifier + S-028 canonicalizer for on-chain account\n"
+                "  identifiers (anon bearer addresses + domain names). Pure local\n"
+                "  string work; no SHA-256, no RPC, no network, no daemon (only\n"
+                "  reads an @file when one is given). Deterministic.\n"
+                "\n"
+                "  Reproduces is_anon_address / normalize_anon_address from\n"
+                "  include/determ/types.hpp byte-for-byte. An anon address is\n"
+                "  \"0x\" + exactly 64 hex chars (case-insensitive on input); the\n"
+                "  canonical storage form lowercases ONLY the 64-hex tail. Domain\n"
+                "  names (anything not 0x+64-hex) pass through verbatim. A 0x-\n"
+                "  prefixed string that is malformed (wrong length / non-hex tail)\n"
+                "  or an empty identifier is reported \"invalid\".\n"
+                "\n"
+                "  Per identifier: input, kind (anon|domain|invalid), canonical\n"
+                "  (S-028 form), changed (canonical != input), submit_tx_ok (the\n"
+                "  chain's submit_tx anon strict gate would admit it as-is — it\n"
+                "  REJECTS a non-canonical anon `from` rather than rewriting it,\n"
+                "  to keep the signature bound; always true for a domain), and\n"
+                "  pubkey_hex (anon only — the 64-hex Ed25519 pubkey the address\n"
+                "  decodes to). Screen a payroll/airdrop list for the strict gate\n"
+                "  before signing; canonicalize user-pasted addresses for a UI.\n"
+                "\n"
+                "  --address <id>        An identifier to classify. Repeatable.\n"
+                "  --addresses <spec>    Comma-separated list (0xAbc,bob.v,...) or\n"
+                "                        @<path> (one per line; blank + # lines\n"
+                "                        skipped). May be combined with --address;\n"
+                "                        order is preserved.\n"
+                "  --json                One-line JSON {count, results:[...],\n"
+                "                        summary:{...}}. Auto-enabled for >1 id.\n"
+                "\n"
+                "  Exit codes: 0 all classified (anon/domain), 1 args/IO/parse\n"
+                "  error, 2 at least one identifier invalid.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "address-classify: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet address-classify "
+                         "(--address <id> ... | --addresses <list|@file>) "
+                         "[--json]\n";
+            return 1;
+        }
+    }
+
+    if (!have_addr || inputs.empty()) {
+        std::cerr << "address-classify: supply at least one identifier via "
+                     "--address or --addresses\n";
+        return 1;
+    }
+
+    // ── S-028 primitives, re-stated from include/determ/types.hpp ──────────
+    // is_anon_address: "0x" + exactly 64 hex chars (either case).
+    auto is_anon = [](const std::string& s) -> bool {
+        if (s.size() != 66) return false;
+        if (s[0] != '0' || s[1] != 'x') return false;
+        for (size_t i = 2; i < 66; ++i) {
+            char c = s[i];
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    // normalize_anon_address: lowercase ONLY the hex tail (A-F -> a-f).
+    auto normalize_anon = [](const std::string& s) -> std::string {
+        std::string out = s;
+        for (size_t i = 2; i < out.size(); ++i) {
+            char c = out[i];
+            if (c >= 'A' && c <= 'F')
+                out[i] = static_cast<char>(c - 'A' + 'a');
+        }
+        return out;
+    };
+    // A 0x-prefixed string that ISN'T a valid anon address is a malformed
+    // anon attempt, not a domain — flag it "invalid" so the caller catches
+    // a truncated / mistyped paste rather than routing it as a domain.
+    auto looks_like_anon_attempt = [](const std::string& s) -> bool {
+        return s.size() >= 2 && s[0] == '0' && s[1] == 'x';
+    };
+
+    nlohmann::json results = nlohmann::json::array();
+    uint64_t n_anon = 0, n_domain = 0, n_invalid = 0;
+    uint64_t n_changed = 0, n_submit_ok = 0;
+
+    for (const std::string& in : inputs) {
+        nlohmann::json r;
+        r["input"] = in;
+        if (is_anon(in)) {
+            std::string canon = normalize_anon(in);
+            bool changed = (canon != in);
+            r["kind"]         = "anon";
+            r["canonical"]    = canon;
+            r["changed"]      = changed;
+            // submit_tx strict-rejects a non-canonical anon `from`.
+            r["submit_tx_ok"] = !changed;
+            r["pubkey_hex"]   = canon.substr(2);   // already lowercase hex
+            ++n_anon;
+            if (changed)  ++n_changed;
+            if (!changed) ++n_submit_ok;
+        } else if (in.empty() || looks_like_anon_attempt(in)) {
+            // Empty identifier or a malformed 0x-attempt: no valid account.
+            r["kind"]         = "invalid";
+            r["canonical"]    = "";
+            r["changed"]      = false;
+            r["submit_tx_ok"] = false;
+            ++n_invalid;
+        } else {
+            // Domain candidate: passes through verbatim (no normalization).
+            r["kind"]         = "domain";
+            r["canonical"]    = in;
+            r["changed"]      = false;
+            r["submit_tx_ok"] = true;
+            ++n_domain;
+            ++n_submit_ok;
+        }
+        results.push_back(std::move(r));
+    }
+
+    const bool any_invalid = (n_invalid > 0);
+
+    if (json_out || inputs.size() > 1) {
+        nlohmann::json out;
+        out["count"]   = inputs.size();
+        out["results"] = std::move(results);
+        nlohmann::json summary;
+        summary["anon"]         = n_anon;
+        summary["domain"]       = n_domain;
+        summary["invalid"]      = n_invalid;
+        summary["changed"]      = n_changed;
+        summary["submit_tx_ok"] = n_submit_ok;
+        out["summary"] = std::move(summary);
+        std::cout << out.dump() << "\n";
+    } else {
+        const nlohmann::json& r = results[0];
+        std::cout << "input:        " << r["input"].get<std::string>() << "\n"
+                  << "kind:         " << r["kind"].get<std::string>()  << "\n"
+                  << "canonical:    " << r["canonical"].get<std::string>()
+                  << "\n"
+                  << "changed:      "
+                  << (r["changed"].get<bool>() ? "true" : "false") << "\n"
+                  << "submit_tx_ok: "
+                  << (r["submit_tx_ok"].get<bool>() ? "true" : "false")
+                  << "\n";
+        if (r.contains("pubkey_hex"))
+            std::cout << "pubkey_hex:   "
+                      << r["pubkey_hex"].get<std::string>() << "\n";
+    }
+
+    return any_invalid ? 2 : 0;
+}
+
 // ── shard-route ──────────────────────────────────────────────────────────────
 //
 // OFFLINE address-to-shard router. Reproduces the consensus routing rule
@@ -22674,6 +22957,35 @@ void print_usage() {
         "                                             count, shard, digest_hex, my_shard?, cross_\n"
         "                                             shard?}. Exit 0 success, 1 args/parse/IO/range\n"
         "                                             error.\n"
+        "  address-classify                           OFFLINE classifier + S-028 canonicalizer for\n"
+        "    (--address <id> [--address <id> ...]     on-chain account identifiers (anon bearer\n"
+        "     | --addresses <id,id,...|@file>)        addresses + domain names). Pure local string\n"
+        "    [--json]                                 work; no SHA-256, no RPC, no daemon (only reads\n"
+        "                                             an @file when one is given). Reproduces is_anon_\n"
+        "                                             address / normalize_anon_address (include/determ/\n"
+        "                                             types.hpp) byte-for-byte: an anon address is\n"
+        "                                             \"0x\"+64 hex (case-insensitive on input); the\n"
+        "                                             canonical form lowercases ONLY the 64-hex tail;\n"
+        "                                             domains (anything not 0x+64-hex) pass through\n"
+        "                                             verbatim; a malformed 0x-attempt or empty id is\n"
+        "                                             \"invalid\". Per id: input, kind (anon|domain|\n"
+        "                                             invalid), canonical, changed (canonical != input),\n"
+        "                                             submit_tx_ok (the chain's submit_tx anon strict\n"
+        "                                             gate would admit it as-is — it REJECTS a non-\n"
+        "                                             canonical anon `from` rather than rewriting it,\n"
+        "                                             keeping the signature bound; always true for a\n"
+        "                                             domain), and pubkey_hex (anon only — the 64-hex\n"
+        "                                             Ed25519 pubkey the address decodes to). --address\n"
+        "                                             repeatable; --addresses takes a comma list or\n"
+        "                                             @<path> (one per line, blank + # lines skipped);\n"
+        "                                             both combine, order preserved. --json (auto for\n"
+        "                                             >1 id) emits {count, results:[...], summary:{anon,\n"
+        "                                             domain, invalid, changed, submit_tx_ok}}. Use\n"
+        "                                             cases: screen a payroll/airdrop recipient list\n"
+        "                                             for the strict gate before signing; canonicalize\n"
+        "                                             user-pasted addresses for a UI. Exit 0 all\n"
+        "                                             classified (anon/domain), 1 args/IO/parse error,\n"
+        "                                             2 at least one identifier invalid.\n"
         "  decode-wire-frame                          OFFLINE decoder + bounds-validator for ONE\n"
         "    (--in <hex> | --in-file <file|->)        inter-peer message body (the bytes inside the\n"
         "    [--json]                                 transport [u32 length BE] frame). Reproduces\n"
@@ -23205,6 +23517,7 @@ int main(int argc, char** argv) {
     if (cmd == "block-tx-root")   return cmd_block_tx_root  (argc - 2, argv + 2);
     if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
     if (cmd == "shard-route")     return cmd_shard_route    (argc - 2, argv + 2);
+    if (cmd == "address-classify") return cmd_address_classify(argc - 2, argv + 2);
     if (cmd == "decode-wire-frame") return cmd_decode_wire_frame(argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);

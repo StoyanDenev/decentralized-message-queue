@@ -753,6 +753,25 @@ Additional in-process tests:
                                               trip, case-variant routes to
                                               same shard (S-028), local vs
                                               cross-shard TRANSFER, A1
+  determ test-anon-address-fragmentation      S-028 balance-fragmentation
+                                              hazard at the apply layer —
+                                              demonstrates the T3 threat from
+                                              proofs/S028AnonAddress
+                                              Normalization.md: two case-
+                                              variant spellings of the same
+                                              pubkey applied UNNORMALIZED land
+                                              in two distinct accounts_ entries
+                                              (balances SPLIT, canonical query
+                                              under-reports), while normalizing
+                                              at ingress consolidates into one
+                                              entry (sums to full total). Pins
+                                              that the split is bound into the
+                                              a:-namespace state_root (frag !=
+                                              cons), A1 holds in BOTH worlds
+                                              (misattribution, not mint/burn),
+                                              and anon-vs-domain account-map
+                                              distinctness + canonical-key
+                                              stability under repeat credit.
   determ test-merge-event-apply-edge          R7 merge edge cases — END w/o
                                               BEGIN, double BEGIN, cycle,
                                               self-merge rejection,
@@ -25902,6 +25921,206 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": anon-routing " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-035 Option 1: in-process apply-layer demonstration of the S-028
+    // balance-fragmentation hazard (proofs/S028AnonAddressNormalization.md
+    // §5.3 Threat T3) and the account-map keying contract for anon vs
+    // domain accounts. The existing anon tests cover the PRIMITIVES:
+    //   - test-anon-address          is_anon_address / normalize / parse
+    //   - test-anon-address-derivation  make_anon_address byte-identity
+    //   - test-anon-routing          make/parse + case-variant same-shard
+    //   - test-account-create-on-credit  TRANSFER/receipt auto-create
+    // None of them drive the FRAGMENTATION threat through Chain::append:
+    // the apply layer keys accounts_ on the RAW tx.to string (chain.cpp
+    // accounts_[tx.to]) and does NOT normalize internally — normalization
+    // is strictly an ingress (RPC/CLI/wallet) responsibility. This test
+    // pins, at the executable level, the exact behavior the S-028 proof
+    // describes in prose:
+    //   1. Two case-variant spellings of the SAME pubkey, applied without
+    //      normalization, land in TWO distinct account-map entries (the
+    //      hazard) — balances are SPLIT, not summed.
+    //   2. Applying both spellings normalized at ingress lands them in ONE
+    //      entry — balances are CONSOLIDATED (the fix).
+    //   3. The fragmented and consolidated chains produce DIFFERENT
+    //      state_roots — the split is observable in the a:-namespace
+    //      commitment, not just in a read-side query.
+    //   4. A1 unitary-supply holds in BOTH the fragmented and consolidated
+    //      worlds — fragmentation misattributes balance but never mints or
+    //      burns it.
+    //   5. An anon-address and a domain name that are NOT byte-identical
+    //      occupy distinct account slots (anon "0x…" never aliases a
+    //      domain), and the canonical anon form is a stable map key across
+    //      repeated credits.
+    // A regression that silently normalized inside apply (or, worse,
+    // failed to normalize a previously-normalized ingress) would flip one
+    // of these assertions — catching the kind of store-key drift that
+    // SECURITY.md S-028 calls out as a balance-loss bug.
+    if (cmd == "test-anon-address-fragmentation") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Patterned pubkey → deterministic anon address.
+        auto patterned_pubkey = [](uint8_t base) {
+            PubKey pk{};
+            for (size_t i = 0; i < pk.size(); ++i) pk[i] = uint8_t(base + i);
+            return pk;
+        };
+        // Uppercase the hex tail of an anon address, keeping the "0x"
+        // prefix lowercase (the wire/storage convention). This is the
+        // non-canonical spelling a checksum-style external wallet might
+        // emit — exactly the input the S-028 proof's T3 considers.
+        auto upper_hex_tail = [](const std::string& addr) {
+            std::string out = addr;
+            for (size_t i = 2; i < out.size(); ++i) {
+                char c = out[i];
+                if (c >= 'a' && c <= 'f') out[i] = char(c - 'a' + 'A');
+            }
+            return out;
+        };
+
+        // Shared single-shard genesis: alice is the only creator and holds
+        // the entire allocation; shard_count=1 so every TRANSFER routes
+        // locally and credits in-place (no cross-shard outbound siphon to
+        // confound the balance bookkeeping).
+        auto make_cfg = [&]() {
+            GenesisConfig cfg;
+            cfg.chain_id = "anon-fragmentation-test";
+            GenesisCreator alice_c;
+            alice_c.domain = "alice";
+            for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+                alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            alice_c.initial_stake = 0;
+            cfg.initial_creators = {alice_c};
+            GenesisAllocation alice_bal;
+            alice_bal.domain = "alice"; alice_bal.balance = 1000;
+            cfg.initial_balances = {alice_bal};
+            return cfg;
+        };
+        // Append one single-tx TRANSFER block from alice to `dst`.
+        auto transfer = [](Chain& c, const std::string& dst,
+                           uint64_t amount, uint64_t fee, uint64_t nonce) {
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = dst;
+            tx.amount = amount; tx.fee = fee; tx.nonce = nonce;
+            Block b;
+            b.index = c.head().index + 1;
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        };
+
+        // The canonical (lowercase) address and its non-canonical
+        // uppercase twin — same 32-byte pubkey, two spellings.
+        const PubKey pk     = patterned_pubkey(0x90);
+        const std::string canon = make_anon_address(pk);          // 0xabc…
+        const std::string upper = upper_hex_tail(canon);          // 0xABC…
+
+        // === Sanity: the two spellings are the SAME logical key but
+        //     DIFFERENT strings ===
+
+        // 1. Both spellings parse to the identical pubkey (S-028: parse is
+        //    case-insensitive), yet the raw strings differ byte-for-byte.
+        check(parse_anon_pubkey(canon) == parse_anon_pubkey(upper)
+                  && canon != upper,
+              "two spellings: same pubkey, distinct raw strings");
+
+        // 2. normalize_anon_address collapses the uppercase twin onto the
+        //    canonical lowercase form (the ingress fix).
+        check(normalize_anon_address(upper) == canon
+                  && normalize_anon_address(canon) == canon,
+              "normalize: uppercase twin → canonical lowercase form");
+
+        // === The FRAGMENTATION hazard: unnormalized mixed-case credits
+        //     split into two account-map entries ===
+
+        // 3. Credit the canonical spelling 100, then the uppercase spelling
+        //    100, WITHOUT normalizing. The apply layer keys accounts_ on
+        //    the raw string, so these land in two DISTINCT entries.
+        Chain frag; frag.append(make_genesis_block(make_cfg()));
+        size_t accts_genesis = frag.accounts().size();
+        transfer(frag, canon, 100, 1, 0);
+        transfer(frag, upper, 100, 1, 1);
+
+        check(frag.accounts().size() == accts_genesis + 2,
+              "fragmentation: two case-variant credits → +2 account entries");
+        check(frag.balance(canon) == 100 && frag.balance(upper) == 100,
+              "fragmentation: each spelling holds 100 (balances SPLIT)");
+        // The user "should" have 200 under their pubkey, but a query for
+        // the canonical address sees only 100 — the documented loss.
+        check(frag.balance(canon) != 200,
+              "fragmentation: canonical query under-reports (T3 loss)");
+
+        // === The FIX: normalizing at ingress consolidates into ONE
+        //     entry ===
+
+        // 4. Same two credits, but each destination is normalized at
+        //    ingress before append (what rpc_send / rpc_balance do). Both
+        //    land in the canonical slot; balance sums to 200.
+        Chain cons; cons.append(make_genesis_block(make_cfg()));
+        transfer(cons, normalize_anon_address(canon), 100, 1, 0);
+        transfer(cons, normalize_anon_address(upper), 100, 1, 1);
+
+        check(cons.accounts().size() == accts_genesis + 1,
+              "consolidation: normalized credits → +1 account entry");
+        check(cons.balance(canon) == 200,
+              "consolidation: canonical slot holds the full 200");
+        check(!cons.accounts().count(upper),
+              "consolidation: no uppercase entry exists post-normalize");
+
+        // === The split is observable in the a:-namespace state_root ===
+
+        // 5. The fragmented chain and the consolidated chain applied the
+        //    SAME total credit (200) from the SAME genesis but commit to
+        //    DIFFERENT account states — so their state_roots differ. The
+        //    hazard is not merely a read-side artifact; it is bound into
+        //    the chain commitment.
+        check(frag.compute_state_root() != cons.compute_state_root(),
+              "state_root: fragmented vs consolidated commitments differ");
+
+        // === A1 unitary supply holds in BOTH worlds ===
+
+        // 6. Fragmentation misattributes balance across two map slots but
+        //    neither mints nor burns: live supply still equals expected in
+        //    both the fragmented and consolidated chains.
+        check(frag.expected_total() == frag.live_total_supply(),
+              "A1: invariant holds under fragmented credits");
+        check(cons.expected_total() == cons.live_total_supply(),
+              "A1: invariant holds under consolidated credits");
+
+        // === Anon vs domain account-map distinctness + key stability ===
+
+        // 7. An anon-address ("0x…") and a domain name credited in the
+        //    same chain never alias: they occupy distinct slots even when
+        //    both are fresh recipients. The canonical anon form is also a
+        //    STABLE map key — a second credit to the same canonical
+        //    address sums in-place rather than forking a new entry.
+        {
+            Chain c; c.append(make_genesis_block(make_cfg()));
+            size_t base = c.accounts().size();
+            const std::string anon_dst = make_anon_address(patterned_pubkey(0xC5));
+            transfer(c, anon_dst,    40, 1, 0);   // fresh anon entry
+            transfer(c, "plaindom",  40, 1, 1);   // fresh domain entry
+            transfer(c, anon_dst,    10, 1, 2);   // same canonical anon → in-place
+            check(c.accounts().size() == base + 2,
+                  "distinctness: anon + domain create exactly 2 fresh slots");
+            check(c.balance(anon_dst) == 50,
+                  "key stability: repeat credit to canonical anon sums in-place");
+            check(c.balance("plaindom") == 40 && !is_anon_address("plaindom"),
+                  "distinctness: domain slot independent of the anon slot");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": anon-address-fragmentation "
+                  << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

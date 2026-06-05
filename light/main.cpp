@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (28 total + help / version):
+// Subcommands (29 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -34,6 +34,7 @@
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
 //   verify-dapp-registration Prove domain D is a registered DApp (d:)
+//   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
 //   committee-at-height      Report committee-verified creators at block H
@@ -308,6 +309,29 @@ void print_usage() {
         "      are sound verdicts anchored to the head height; any tamper,\n"
         "      cleartext/leaf mismatch, or daemon refusal → UNVERIFIABLE\n"
         "      (exit 3), never a false INCLUDED.\n"
+        "  verify-account --rpc-port <N> --genesis <file>\n"
+        "                 {--pubkey <64-hex> | --address <0x...>} [--json]\n"
+        "      Derive an anon-account's canonical address LOCALLY and prove\n"
+        "      whether it EXISTS on-chain. With --pubkey the address is\n"
+        "      `make_anon_address` of the 32-byte Ed25519 key (\"0x\" +\n"
+        "      lowercase-hex) — the SAME transform the chain uses for bearer\n"
+        "      wallets, so the operator never trusts the daemon to say which\n"
+        "      address a key controls. With --address the pubkey is re-derived\n"
+        "      and round-tripped to canonical lowercase (S-028), catching a\n"
+        "      case-mixed / malformed input locally. Anchors genesis, committee-\n"
+        "      verifies the header chain to head, and reports the account\n"
+        "      auto-creation lifecycle against the `a:` namespace: a committee-\n"
+        "      anchored `a:` Merkle proof → EXISTS (the verified balance +\n"
+        "      next_nonce are printed, hash-bound to the daemon's `account`\n"
+        "      cleartext); a sound state_proof not_found at the verified head →\n"
+        "      NOT-CREATED (the account has never been credited — its balance is\n"
+        "      a TRUE zero, not the daemon-fabricated zero the bare `account`\n"
+        "      RPC returns for any unknown address). Distinct from\n"
+        "      balance-trustless, which THROWS on a not_found leaf and cannot\n"
+        "      tell \"never created\" from \"created then drained\". EXISTS /\n"
+        "      NOT-CREATED → exit 0 (sound verified answer); any tamper,\n"
+        "      key/leaf mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
+        "      never a false EXISTS.\n"
         "\n"
         "Equivocation forensics (offline, no daemon):\n"
         "  verify-equivocation --in <event.json>\n"
@@ -2861,6 +2885,382 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
     }
 }
 
+// ──────────────────────────── verify-account ───────────────────────────
+
+// Tri-state for the anon-account existence check. EXISTS / NOT-CREATED are
+// sound committee-anchored verdicts (exit 0); UNVERIFIABLE is a refusal to
+// assert (exit 3); a transport / parse / usage fault exits 1. Named
+// distinctly from InclusionVerdict so the lifecycle semantics are explicit:
+// the question is whether the chain has ever MATERIALIZED an `a:` leaf for
+// this address, NOT membership in a logical set.
+enum class AccountExistVerdict { EXISTS, NOT_CREATED, UNVERIFIABLE };
+
+const char* account_exist_verdict_str(AccountExistVerdict v) {
+    switch (v) {
+        case AccountExistVerdict::EXISTS:       return "EXISTS";
+        case AccountExistVerdict::NOT_CREATED:  return "NOT-CREATED";
+        case AccountExistVerdict::UNVERIFIABLE: return "UNVERIFIABLE";
+    }
+    return "UNVERIFIABLE";
+}
+
+// verify-account — trustless anon-account derivation + lifecycle reader.
+//
+// THEME: anon-address derivation, normalization & account auto-creation.
+//
+// Given EITHER a raw Ed25519 public key (--pubkey <64-hex>) OR an
+// already-formed anon-address (--address <0x...>), this command:
+//
+//   1. DERIVES the canonical 0x anon-address LOCALLY. With --pubkey it
+//      mirrors make_anon_address (types.hpp): "0x" + lowercase-hex(pubkey),
+//      the SAME 32-byte→address transform the chain uses for bearer wallets;
+//      the operator never has to trust the daemon to tell them which address
+//      a key controls. With --address it re-derives the pubkey via
+//      parse_anon_pubkey and round-trips it back through make_anon_address,
+//      so a case-mixed or malformed input is caught locally (S-028).
+//   2. NORMALIZES to the lowercase-canonical storage form (S-028) so the
+//      query hits the SAME account-map entry the chain commits under — a
+//      0xABC… input and a 0xabc… input resolve to one leaf, never two.
+//   3. Anchors genesis, committee-verifies the header chain to head, and
+//      makes a sound verdict on the ACCOUNT-AUTO-CREATION lifecycle: an
+//      anon-address has NO `a:` state leaf until its first credit (TRANSFER
+//      in, an applied cross-shard receipt, or a DEREGISTER refund to a
+//      non-registrant) materializes one. So:
+//        • a committee-anchored `a:` Merkle proof  → EXISTS, and the
+//          verified (balance, next_nonce) are reported;
+//        • a sound state_proof `not_found` at the verified head → NOT-CREATED
+//          (the account has never been credited — its balance is a TRUE zero,
+//          not a daemon-fabricated one).
+//
+// ─── Why this is NOT balance-trustless ──────────────────────────────────
+//
+// balance-trustless THROWS on a not_found `a:` proof (it assumes the account
+// exists and treats absence as an error). That conflates two very different
+// chain states: "credited to zero" is impossible under auto-creation (a leaf
+// only exists once credited), but the daemon's `account` RPC returns a bare
+// balance=0 / next_nonce=0 for ANY unknown address WITHOUT erroring (see
+// node.cpp rpc_account — it defaults the fields when the address is absent
+// from the committed view). A naive client reading `account` alone cannot
+// tell "never created" from "created then drained", and would render a
+// fabricated zero as though it were chain-attested. verify-account closes
+// that gap: NOT-CREATED is a VERIFIED negative anchored to the committee-
+// signed state_root via the `a:` state_proof's not_found, never the daemon's
+// unverified cleartext zero. On EXISTS it additionally hash-binds the
+// daemon's `account` cleartext (SHA256(u64_be(balance) || u64_be(next_nonce))
+// per build_state_leaves' "a:" branch) to the proof's value_hash, so a
+// daemon lie about the balance of a real account is detected too.
+//
+// REUSE: the anchor is anchor_genesis + verify_chain_to_head +
+// verify_state_proof + the race-window header re-anchoring read_account_-
+// trustless uses; this command adds NO new crypto. It composes the existing
+// single-leaf `a:` read with local address derivation and the absence path.
+int cmd_verify_account(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, pubkey_hex, address_in;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--pubkey"  && i + 1 < argc) pubkey_hex   = argv[++i];
+        else if   (a == "--address" && i + 1 < argc) address_in   = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-account: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty()
+        || (pubkey_hex.empty() == address_in.empty())) {
+        std::cerr << "verify-account: --rpc-port, --genesis, and EXACTLY ONE "
+                     "of --pubkey <64-hex> / --address <0x...> are required\n";
+        return 1;
+    }
+
+    // ── Step 1+2: derive + normalize the canonical anon-address LOCALLY ──
+    // This is pure local computation — the daemon is never consulted to
+    // learn which address a key controls.
+    std::string canon_address;
+    PubKey pk{};
+    try {
+        if (!pubkey_hex.empty()) {
+            // make_anon_address path: "0x" + lowercase-hex(pubkey). from_hex_arr
+            // is case-insensitive and rejects non-64-hex with a throw.
+            if (pubkey_hex.size() != 64) {
+                std::cerr << "verify-account: --pubkey must be exactly 64 hex "
+                             "chars (a 32-byte Ed25519 public key); got "
+                          << pubkey_hex.size() << "\n";
+                return 1;
+            }
+            pk = from_hex_arr<32>(pubkey_hex);
+            canon_address = make_anon_address(pk);  // already lowercase
+        } else {
+            // --address path: must be a well-formed anon shape (either case),
+            // then re-derive the pubkey and round-trip to the canonical form.
+            // This catches a malformed / non-anon --address locally (S-028).
+            if (!is_anon_address(address_in)) {
+                std::cerr << "verify-account: --address is not an anon-address "
+                             "shape (expected \"0x\" + 64 hex chars): "
+                          << address_in << "\n";
+                return 1;
+            }
+            pk = parse_anon_pubkey(address_in);
+            canon_address = make_anon_address(pk);  // == normalize_anon_address
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "verify-account: address derivation failed: "
+                  << e.what() << "\n";
+        return 1;
+    }
+
+    AccountExistVerdict verdict = AccountExistVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+    uint64_t    balance = 0, next_nonce = 0;  // populated only on EXISTS
+
+    try {
+        // ── Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-account: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // Committee-verify the header chain end-to-end, capturing the head's
+        // state_root (the anchor for the `a:` Merkle proof / its absence).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `a:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `a:`-namespace state-proof for the canonical address.
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "a"}, {"key", canon_address}});
+
+        // not_found for our exact address → a sound NOT-CREATED (the chain
+        // has never materialized an account leaf for it). Any OTHER refusal →
+        // fail-closed UNVERIFIABLE (we will not assert either way).
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = AccountExistVerdict::NOT_CREATED;
+                detail  = "no `a:` leaf for '" + canon_address
+                        + "' at the committee-verified head — the account has "
+                          "never been credited (auto-creation has not fired); "
+                          "its balance is a TRUE zero, not a daemon-fabricated "
+                          "one";
+            } else {
+                verdict = AccountExistVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `a:` state-proof: " + err
+                        + " (cannot prove existence trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS address: its key_bytes must equal the
+            // locally-computed canonical key ("a:" || canonical-address).
+            std::vector<uint8_t> local_key;
+            local_key.reserve(2 + canon_address.size());
+            local_key.push_back('a'); local_key.push_back(':');
+            local_key.insert(local_key.end(),
+                             canon_address.begin(), canon_address.end());
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex =
+                to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = AccountExistVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical a: key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                // Fetch the cleartext (balance, next_nonce) via `account`,
+                // recompute the committed leaf value_hash, and confirm it
+                // matches. This is the load-bearing cross-check: a daemon
+                // could serve an honest proof for the right key while lying
+                // in the cleartext; the hash recomputation forces consistency.
+                // Encoding matches build_state_leaves' "a:" branch exactly:
+                // SHA256(u64_be(balance) || u64_be(next_nonce)).
+                auto acct = rpc.call("account", {{"address", canon_address}});
+                if (acct.contains("error") && !acct["error"].is_null()) {
+                    // state_proof served an `a:` leaf but `account` refuses
+                    // it — inconsistent daemon, fail closed.
+                    throw std::runtime_error(
+                        "state_proof served an `a:` leaf for '" + canon_address
+                        + "' but the account RPC refused it: "
+                        + acct["error"].dump() + " (inconsistent daemon)");
+                }
+                uint64_t bal = acct.value("balance",    uint64_t{0});
+                uint64_t nn  = acct.value("next_nonce", uint64_t{0});
+
+                determ::crypto::SHA256Builder hb;
+                hb.append(bal);
+                hb.append(nn);
+                Hash expected_value_hash = hb.finalize();
+
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = AccountExistVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match the recomputed hash of the "
+                              "account cleartext (balance="
+                            + std::to_string(bal) + ", next_nonce="
+                            + std::to_string(nn) + ")="
+                            + to_hex(expected_value_hash)
+                            + " — daemon is lying about the balance/nonce OR "
+                              "proving a different leaf";
+                } else {
+                    // Anchor the proof's claimed state_root to a committee-
+                    // signed header (the chain may have advanced during the
+                    // round-trip), the identical re-anchoring read_account_-
+                    // trustless / verify-dapp-registration use.
+                    uint64_t proof_height = proof.value("height", uint64_t{0});
+                    std::string proof_root =
+                        proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    if (proof_height > vc.height) {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pkc] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pkc)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        auto pg = rpc.call("headers",
+                            {{"from", anchor_index}, {"count", 1}});
+                        if (!pg.contains("headers")
+                            || !pg["headers"].is_array()
+                            || pg["headers"].empty()) {
+                            throw std::runtime_error(
+                                "cannot fetch header at index="
+                                + std::to_string(anchor_index)
+                                + " (proof.height="
+                                + std::to_string(proof_height) + ")");
+                        }
+                        auto& h = pg["headers"][0];
+                        std::string hdr_root =
+                            h.value("state_root", std::string{});
+                        if (hdr_root != proof_root) {
+                            throw std::runtime_error(
+                                "proof.state_root=" + proof_root
+                                + " does not match header["
+                                + std::to_string(anchor_index)
+                                + "].state_root=" + hdr_root);
+                        }
+                        auto vbs = verify_block_sigs(h, committee_json,
+                                                     /*bft=*/false);
+                        if (!vbs.ok)
+                            vbs = verify_block_sigs(h, committee_json,
+                                                    /*bft=*/true);
+                        if (!vbs.ok) {
+                            throw std::runtime_error(
+                                "header[" + std::to_string(anchor_index)
+                                + "] committee-sig check failed: "
+                                + vbs.detail);
+                        }
+                        if (anchor_index >= vc.height) {
+                            auto walk = rpc.call("headers",
+                                {{"from", vc.height - 1},
+                                 {"count", proof_height - vc.height + 2}});
+                            auto vh = verify_headers(walk, "", "");
+                            if (!vh.ok) {
+                                throw std::runtime_error(
+                                    "prev_hash walk vc.height->proof.height: "
+                                    + vh.detail);
+                            }
+                        }
+                        anchor_root = proof_root;
+                        anchor_at   = proof_height;
+                    } else if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+
+                    // Merkle-verify the proof against the committee-signed
+                    // root. key_bytes + value_hash are already bound to the
+                    // canonical account, so a pass here is a sound EXISTS.
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = AccountExistVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict        = AccountExistVerdict::EXISTS;
+                        balance        = bal;
+                        next_nonce     = nn;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        bool exists = (verdict == AccountExistVerdict::EXISTS);
+        if (json_out) {
+            json out = {
+                {"verdict",   account_exist_verdict_str(verdict)},
+                {"exists",    exists},
+                {"address",   canon_address},
+                {"pubkey",    to_hex(pk)},
+                {"namespace", "a"},
+            };
+            if (exists) {
+                out["balance"]    = balance;
+                out["next_nonce"] = next_nonce;
+            }
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << account_exist_verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         a (accounts)\n"
+                      << "  pubkey:            " << to_hex(pk) << "\n"
+                      << "  address:           " << canon_address << "\n";
+            if (verdict == AccountExistVerdict::EXISTS) {
+                std::cout << "  balance:           " << balance << "\n"
+                          << "  next_nonce:        " << next_nonce << "\n"
+                          << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        // Exit codes mirror verify-dapp-registration: EXISTS / NOT-CREATED → 0
+        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == AccountExistVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-account: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────── verify-equivocation ──────────────────────────
 
 // verify-equivocation — OFFLINE equivocation-evidence verifier (FA6).
@@ -4511,6 +4911,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
         if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
+        if (cmd == "verify-account")        return cmd_verify_account(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
         if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
