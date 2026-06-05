@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (30 total + help / version):
+// Subcommands (31 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -34,6 +34,7 @@
 //   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
+//   verify-param-value       Prove current effective consensus scalar (k:)
 //   verify-dapp-registration Prove domain D is a registered DApp (d:)
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
@@ -312,6 +313,33 @@ void print_usage() {
         "      the chain advances past <H> the same query flips INCLUDED back\n"
         "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
         "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
+        "  verify-param-value --rpc-port <N> --genesis <file>\n"
+        "                     --name <NAME> --value <U64> [--json]\n"
+        "      Prove (or disprove) that the CURRENT effective value of the\n"
+        "      governance-activated consensus scalar <NAME> equals <U64>, by\n"
+        "      Merkle-anchoring its committed `k:` (genesis-pinned constants)\n"
+        "      leaf to the committee-verified state_root. This is the ACTIVATED\n"
+        "      counterpart to verify-param-change: that command proves a change\n"
+        "      is still STAGED in `p:`; this command proves the value that is\n"
+        "      live RIGHT NOW after activate_pending_params has drained the\n"
+        "      bucket into the `k:` scalar. <NAME> is the build_state_leaves\n"
+        "      constant name (min_stake, suspension_slash, unstake_delay,\n"
+        "      block_subsidy, merge_threshold_blocks, ...), NOT the uppercase\n"
+        "      PARAM_CHANGE whitelist token (MIN_STAKE → min_stake). Anchors\n"
+        "      genesis, committee-verifies the header chain to head, fetches\n"
+        "      the `k:`-namespace state-proof (simple key: the daemon prepends\n"
+        "      \"k:\" to the raw name), and Merkle-verifies it against the\n"
+        "      committee-signed state_root. The proof's key_bytes must equal\n"
+        "      the locally-computed \"k:\"+name; its value_hash is checked\n"
+        "      against the locally-recomputed SHA256(u64_be(<U64>)). A match is\n"
+        "      a sound MATCH (the asserted value IS the live consensus scalar);\n"
+        "      a `k:` leaf that verifies for the key but whose value_hash does\n"
+        "      NOT equal SHA256(u64_be(<U64>)) is a sound MISMATCH (the asserted\n"
+        "      value is provably NOT the current effective value — distinct\n"
+        "      from UNVERIFIABLE because the leaf itself committee-verified).\n"
+        "      MATCH / MISMATCH → exit 0; any tamper, key mismatch, malformed\n"
+        "      proof, or daemon refusal → UNVERIFIABLE (exit 3), never a false\n"
+        "      MATCH.\n"
         "  verify-dapp-registration --rpc-port <N> --genesis <file>\n"
         "                          --domain <D> [--json]\n"
         "      Prove (or disprove) that domain <D> is CURRENTLY a registered\n"
@@ -2765,6 +2793,357 @@ int cmd_verify_param_change(int argc, char** argv) {
     }
 }
 
+// ─────────────────────── verify-param-value ────────────────────────────
+//
+// Trust-minimized MATCH / MISMATCH / UNVERIFIABLE verdict on whether the
+// CURRENT effective value of a governance-activated consensus scalar (a
+// genesis-pinned constant in the `k:` namespace) equals the value the
+// caller asserts, with the proof bound to the EXACT (name, value) pair.
+//
+// This is the ACTIVATED counterpart to verify-param-change. The two cover
+// the two halves of the governance parameter-change lifecycle:
+//
+//   * verify-param-change proves a change is still STAGED in the `p:`
+//     (pending_param_changes) namespace — scheduled for effective_height,
+//     not yet live. It is consumed at activation.
+//   * verify-param-value (this command) proves the value that is LIVE RIGHT
+//     NOW, after Chain::activate_pending_params has drained the matured
+//     `p:` bucket into the chain-instance scalar and build_state_leaves has
+//     re-committed it under `k:`. It reads the post-activation state, so it
+//     is the natural query AFTER effective_height has passed (where the
+//     same verify-param-change query flips to NOT-INCLUDED).
+//
+// The `k:` leaf encoding (see chain.cpp build_state_leaves const_leaf):
+//     key        = 'k' ':' || name                  // SIMPLE key
+//     value_hash = SHA256( u64_be(value) )           // one u64 scalar
+// The daemon's rpc_state_proof handles `k:` on the simple-key path — the
+// caller passes the bare constant NAME as `key` and the daemon prepends
+// "k:". `name` is the build_state_leaves constant name (lowercase:
+// min_stake, suspension_slash, unstake_delay, block_subsidy,
+// merge_threshold_blocks, …), NOT the uppercase PARAM_CHANGE whitelist
+// token (the validator whitelist uses MIN_STAKE; activate_pending_params
+// writes it into min_stake_, which build_state_leaves commits as
+// "k:min_stake"). Asserting the wrong name shape yields a sound MISMATCH
+// or UNVERIFIABLE, never a false MATCH.
+//
+// Verdict discipline (distinct from the i:/m:/p: INCLUDED/NOT-INCLUDED
+// readers, because every well-known `k:` constant ALWAYS has a leaf — a
+// value query is never a membership query):
+//
+//   MATCH        — the `k:` leaf committee-verifies for the canonical key
+//                  AND its value_hash equals SHA256(u64_be(value)). The
+//                  asserted value IS the live consensus scalar at the
+//                  anchored head. exit 0.
+//   MISMATCH     — the `k:` leaf committee-verifies for the canonical key
+//                  but its value_hash does NOT equal SHA256(u64_be(value)).
+//                  The asserted value is provably NOT the current effective
+//                  value. This is a SOUND NEGATIVE (the leaf itself Merkle-
+//                  verified against the committee-signed root), distinct
+//                  from UNVERIFIABLE. exit 0.
+//   UNVERIFIABLE — any tamper, key_bytes mismatch, malformed proof, stale
+//                  state, daemon refusal, or a `not_found` for the name
+//                  (an unknown / non-`k:` constant — the verifier cannot
+//                  assert a value for a leaf it cannot anchor). exit 3,
+//                  never a false MATCH.
+//
+// Because a MISMATCH still needs the daemon's committed value to Merkle-
+// verify the leaf, the actual on-chain value is reported alongside the
+// MISMATCH verdict (it is read from the daemon and then HASH-CHECKED
+// against the committee-signed leaf, so it is trustworthy: a daemon that
+// lies about the reported value produces a value_hash that fails the
+// Merkle verification → UNVERIFIABLE, not a false MISMATCH).
+enum class ParamValueVerdict { MATCH, MISMATCH, UNVERIFIABLE };
+
+const char* param_value_verdict_str(ParamValueVerdict v) {
+    switch (v) {
+        case ParamValueVerdict::MATCH:        return "MATCH";
+        case ParamValueVerdict::MISMATCH:     return "MISMATCH";
+        case ParamValueVerdict::UNVERIFIABLE: return "UNVERIFIABLE";
+    }
+    return "UNVERIFIABLE";
+}
+
+int cmd_verify_param_value(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, name;
+    uint64_t value = 0;
+    bool have_port = false, have_name = false, have_value = false,
+         json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--name"    && i + 1 < argc) {
+            name = argv[++i]; have_name = true;
+        } else if (a == "--value"   && i + 1 < argc) {
+            value = parse_u64("--value", argv[++i]); have_value = true;
+        } else if (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-param-value: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_name || !have_value) {
+        std::cerr << "verify-param-value: --rpc-port, --genesis, --name, "
+                     "--value are required\n";
+        return 1;
+    }
+    // The `k:` value leaf commits a single u64 scalar. Reject a name that
+    // carries the "c:" counter prefix or an embedded ':' — those are NOT
+    // simple `k:` constant names (counters are served under the `c`
+    // namespace, which encodes the "c:" sub-prefix daemon-side). Keeping the
+    // name a bare token prevents a malformed query from aliasing a different
+    // leaf shape.
+    if (name.find(':') != std::string::npos || name.empty()) {
+        std::cerr << "verify-param-value: --name must be a bare `k:` constant "
+                     "name (no ':'); counters live under the `c` namespace\n";
+        return 1;
+    }
+
+    ParamValueVerdict verdict = ParamValueVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+    uint64_t    onchain_value   = 0;   // committed value recovered from the leaf
+    bool        have_onchain    = false;
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-param-value: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // The committed leaf value for the ASSERTED scalar:
+        //   SHA256(u64_be(value))   (matches build_state_leaves' const_leaf).
+        determ::crypto::SHA256Builder mb;
+        mb.append(value);
+        Hash asserted_value_hash = mb.finalize();
+
+        // Committee-verify the header chain end-to-end, capturing the head's
+        // state_root (the anchor for the `k:` Merkle inclusion).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `k:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `k:`-namespace state-proof for the bare constant name.
+        // The daemon prepends "k:" to the raw `key` (simple-key path).
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "k"}, {"key", name}});
+
+        // A `not_found` for a `k:` name is treated as UNVERIFIABLE, NOT a
+        // sound negative: unlike a:/d: (where an absent leaf is a genuine
+        // "never created" verdict), every WELL-KNOWN consensus scalar always
+        // has a `k:` leaf, so a not_found means the caller named an unknown /
+        // non-`k:` constant — we cannot anchor a value for a leaf that is not
+        // in the committed tree, and refuse to assert either way.
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            verdict = ParamValueVerdict::UNVERIFIABLE;
+            if (err == "not_found") {
+                detail = "no `k:` leaf for constant '" + name
+                       + "' at the committee-verified head — not a known "
+                         "consensus scalar (check the build_state_leaves name; "
+                         "it is lowercase, e.g. min_stake, not MIN_STAKE)";
+            } else {
+                detail = "daemon refused the `k:` state-proof: " + err
+                       + " (cannot prove the effective value trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS constant: its key_bytes must equal the
+            // locally-computed canonical key ("k:" || name). A mismatch means
+            // the daemon served a proof for a different leaf → UNVERIFIABLE.
+            std::vector<uint8_t> local_key;
+            local_key.reserve(2 + name.size());
+            local_key.push_back('k'); local_key.push_back(':');
+            local_key.insert(local_key.end(), name.begin(), name.end());
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex =
+                to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = ParamValueVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical k: key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                // Anchor the proof's claimed state_root to a committee-signed
+                // header (the chain may have advanced during the round-trip),
+                // the identical re-anchoring verify-param-change /
+                // verify-account use.
+                uint64_t proof_height = proof.value("height", uint64_t{0});
+                std::string proof_root =
+                    proof.value("state_root", std::string{});
+                std::string anchor_root = vc.head_state_root;
+                uint64_t    anchor_at   = vc.height;
+
+                if (proof_height < vc.height) {
+                    throw std::runtime_error(
+                        "proof.height=" + std::to_string(proof_height)
+                        + " is BEFORE verified-chain head="
+                        + std::to_string(vc.height)
+                        + " — daemon is serving stale state");
+                }
+                if (proof_height > vc.height) {
+                    json committee_json;
+                    {
+                        json arr = json::array();
+                        for (auto& [domain_, pk] : committee_seed)
+                            arr.push_back({{"domain", domain_},
+                                           {"ed_pub", to_hex(pk)}});
+                        committee_json = json{{"members", arr}};
+                    }
+                    uint64_t anchor_index = proof_height - 1;
+                    auto pg = rpc.call("headers",
+                        {{"from", anchor_index}, {"count", 1}});
+                    if (!pg.contains("headers")
+                        || !pg["headers"].is_array()
+                        || pg["headers"].empty()) {
+                        throw std::runtime_error(
+                            "cannot fetch header at index="
+                            + std::to_string(anchor_index)
+                            + " (proof.height="
+                            + std::to_string(proof_height) + ")");
+                    }
+                    auto& h = pg["headers"][0];
+                    std::string hdr_root =
+                        h.value("state_root", std::string{});
+                    if (hdr_root != proof_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match header["
+                            + std::to_string(anchor_index)
+                            + "].state_root=" + hdr_root);
+                    }
+                    auto vbs = verify_block_sigs(h, committee_json,
+                                                 /*bft=*/false);
+                    if (!vbs.ok)
+                        vbs = verify_block_sigs(h, committee_json,
+                                                /*bft=*/true);
+                    if (!vbs.ok) {
+                        throw std::runtime_error(
+                            "header[" + std::to_string(anchor_index)
+                            + "] committee-sig check failed: "
+                            + vbs.detail);
+                    }
+                    if (anchor_index >= vc.height) {
+                        auto walk = rpc.call("headers",
+                            {{"from", vc.height - 1},
+                             {"count", proof_height - vc.height + 2}});
+                        auto vh = verify_headers(walk, "", "");
+                        if (!vh.ok) {
+                            throw std::runtime_error(
+                                "prev_hash walk vc.height->proof.height: "
+                                + vh.detail);
+                        }
+                    }
+                    anchor_root = proof_root;
+                    anchor_at   = proof_height;
+                } else if (proof_root != vc.head_state_root) {
+                    throw std::runtime_error(
+                        "proof.state_root=" + proof_root
+                        + " does not match verified head state_root="
+                        + vc.head_state_root);
+                }
+
+                // Merkle-verify the proof against the committee-signed root.
+                // verify_state_proof rolls the proof's key_bytes + value_hash
+                // up to anchor_root. A pass means the daemon's value_hash IS
+                // the committed leaf — so we can compare it against the
+                // asserted hash WITHOUT trusting the daemon's claim.
+                auto vsp = verify_state_proof(proof, anchor_root);
+                if (!vsp.ok) {
+                    verdict = ParamValueVerdict::UNVERIFIABLE;
+                    detail  = "merkle verification failed: " + vsp.detail;
+                } else {
+                    Hash proof_value_hash = from_hex_arr<32>(
+                        proof.value("value_hash", std::string{}));
+                    state_root_used = anchor_root;
+                    anchored_height = anchor_at;
+                    if (proof_value_hash == asserted_value_hash) {
+                        verdict       = ParamValueVerdict::MATCH;
+                        onchain_value = value;
+                        have_onchain  = true;
+                    } else {
+                        // The leaf committee-verified, but its committed value
+                        // is NOT the asserted one — a SOUND negative. The
+                        // value_hash is SHA256(u64_be(v)) for a single hidden
+                        // u64 v: it commits the live scalar but does not reveal
+                        // it (no preimage), so MISMATCH reports only that the
+                        // asserted value is provably wrong, not what the live
+                        // value is. A caller can binary-search the true value
+                        // by re-running with candidate --value's until MATCH,
+                        // or read the (untrusted) hint from `determ
+                        // pending-params` history. We deliberately do NOT echo
+                        // an unverified daemon claim here.
+                        verdict = ParamValueVerdict::MISMATCH;
+                        detail  = "the committee-verified `k:" + name
+                                + "` leaf does NOT commit value "
+                                + std::to_string(value)
+                                + " (its value_hash=" + to_hex(proof_value_hash)
+                                + " != SHA256(u64_be(" + std::to_string(value)
+                                + "))=" + to_hex(asserted_value_hash)
+                                + ") — the asserted value is provably NOT the "
+                                  "current effective scalar";
+                    }
+                }
+            }
+        }
+
+        bool matched = (verdict == ParamValueVerdict::MATCH);
+        if (json_out) {
+            json out = {
+                {"verdict",       param_value_verdict_str(verdict)},
+                {"match",         matched},
+                {"name",          name},
+                {"asserted_value", value},
+                {"namespace",     "k"},
+            };
+            if (have_onchain) out["onchain_value"] = onchain_value;
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << param_value_verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         k (consensus constants)\n"
+                      << "  name:              " << name << "\n"
+                      << "  asserted value:    " << value << "\n";
+            if (have_onchain)
+                std::cout << "  on-chain value:    " << onchain_value << "\n";
+            if (verdict == ParamValueVerdict::MATCH
+                || verdict == ParamValueVerdict::MISMATCH) {
+                std::cout << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        // Exit codes mirror the verify-* tri-state: MATCH / MISMATCH → 0
+        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == ParamValueVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-param-value: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ─────────────────────── verify-dapp-registration ──────────────────────
 //
 // Trustless reader for the `d:` (dapp_registry) namespace — the v2.18
@@ -5156,6 +5535,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
+        if (cmd == "verify-param-value")    return cmd_verify_param_value(sub_argc, sub_argv);
         if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
         if (cmd == "verify-account")        return cmd_verify_account(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
