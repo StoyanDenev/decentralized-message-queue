@@ -8245,6 +8245,304 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     return valid ? 0 : 2;
 }
 
+// determ-wallet verify-equivocation — OFFLINE verifier for an FA6
+// equivocation-evidence pair (the EquivocationEvent two-sig proof).
+//
+// An EquivocationEvent (include/determ/chain/block.hpp) records that a
+// single registered signer produced TWO Ed25519 signatures over TWO
+// distinct 32-byte digests at the SAME height — unambiguous proof the
+// signer equivocated. The chain slashes the equivocator's entire stake
+// and deregisters them when such an event is baked into a block; the
+// validator gate (src/node/validator.cpp::check_equivocation_events)
+// already verified the proof before inclusion.
+//
+// This command reproduces that gate's two-sig check byte-for-byte so
+// anyone holding the raw evidence — pulled from a block's
+// equivocation_events[], the EQUIVOCATION_EVIDENCE gossip message, or
+// the `b:` abort/equivocation state-proof namespace — can INDEPENDENTLY
+// confirm the slashing was justified BEFORE trusting the chain to have
+// applied it. It is the forensic counterpart to committee-signature-
+// verify: that command verifies a block's K-of-K sigs against ONE
+// digest; this one verifies that ONE key signed TWO conflicting digests.
+//
+// The four conditions mirror validator.cpp::check_equivocation_events
+// exactly (a real EquivocationEvent must satisfy ALL of them; failing
+// any means the evidence does NOT prove equivocation):
+//   (1) digest_a != digest_b      — same digest is not a conflict
+//   (2) sig_a    != sig_b         — same signature is not two messages
+//   (3) sig_a verifies over digest_a against the equivocator's key
+//   (4) sig_b verifies over digest_b against the equivocator's key
+//
+// The equivocator's Ed25519 key is supplied as --pubkey (the operator
+// pins it from the beacon-anchored registry: `determ validators --json`
+// or the equivocator's registry entry). No daemon, no RPC, no chain-
+// library link, no file IO required for the inline form — pure crypto.
+//
+// CLI:
+//   --pubkey  <hex64>   REQUIRED. Equivocator's 32-byte Ed25519 key.
+//   --digest-a <hex64>  REQUIRED. First signed 32-byte digest.
+//   --sig-a   <hex128>  REQUIRED. Ed25519 sig over digest-a.
+//   --digest-b <hex64>  REQUIRED. Second signed 32-byte digest.
+//   --sig-b   <hex128>  REQUIRED. Ed25519 sig over digest-b.
+//   --event   <file>    Alternative to the five hex args: an
+//                       EquivocationEvent JSON (EquivocationEvent::
+//                       to_json shape — equivocator/block_index/digest_a/
+//                       sig_a/digest_b/sig_b) OR a Block JSON whose
+//                       equivocation_events[0] is used. --pubkey is still
+//                       REQUIRED (the event JSON names the equivocator
+//                       domain but NOT its key; the key comes from the
+//                       registry, never from the untrusted evidence).
+//   --index   <N>       With --event on a Block JSON, pick
+//                       equivocation_events[N] (default 0).
+//   --json              One-line JSON.
+//
+// Output fields (JSON): proven, distinct_digests, distinct_sigs,
+//   sig_a_valid, sig_b_valid, pubkey_hex, digest_a_hex, digest_b_hex
+//   [, equivocator, block_index when sourced from --event].
+//
+// Exit codes:
+//   0  PROVEN — valid equivocation evidence (all four conditions hold)
+//   2  NOT PROVEN — structurally fine but the evidence does not prove
+//      equivocation (auth-style alert: a sig failed, or the two digests/
+//      sigs are identical). Distinct from arg errors so monitors can
+//      branch on "evidence rejected" vs "tooling broke."
+//   1  args / parse / IO error
+int cmd_verify_equivocation(int argc, char** argv) {
+    std::string pubkey_hex, digest_a_hex, sig_a_hex, digest_b_hex, sig_b_hex;
+    std::string event_path;
+    int  ev_index = 0;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--pubkey"   && i + 1 < argc) pubkey_hex   = argv[++i];
+        else if (a == "--digest-a" && i + 1 < argc) digest_a_hex = argv[++i];
+        else if (a == "--sig-a"    && i + 1 < argc) sig_a_hex    = argv[++i];
+        else if (a == "--digest-b" && i + 1 < argc) digest_b_hex = argv[++i];
+        else if (a == "--sig-b"    && i + 1 < argc) sig_b_hex    = argv[++i];
+        else if (a == "--event"    && i + 1 < argc) event_path   = argv[++i];
+        else if (a == "--index"    && i + 1 < argc) {
+            try { ev_index = std::stoi(argv[++i]); }
+            catch (std::exception&) {
+                std::cerr << "verify-equivocation: --index must be a "
+                             "non-negative integer\n";
+                return 1;
+            }
+            if (ev_index < 0) {
+                std::cerr << "verify-equivocation: --index must be a "
+                             "non-negative integer\n";
+                return 1;
+            }
+        }
+        else if (a == "--json") json_out = true;
+        else {
+            std::cerr << "verify-equivocation: unknown argument '" << a
+                      << "'\n";
+            std::cerr << "Usage: determ-wallet verify-equivocation "
+                         "--pubkey <hex64>\n"
+                         "         (--digest-a <hex64> --sig-a <hex128> "
+                         "--digest-b <hex64> --sig-b <hex128>\n"
+                         "          | --event <file> [--index <N>]) [--json]\n";
+            return 1;
+        }
+    }
+
+    // The equivocator's key is ALWAYS operator-supplied — never read from
+    // the untrusted evidence. A real EquivocationEvent names the domain
+    // but the key is bound by the beacon-anchored registry.
+    if (pubkey_hex.empty()) {
+        std::cerr << "Usage: determ-wallet verify-equivocation "
+                     "--pubkey <hex64>\n"
+                     "         (--digest-a <hex64> --sig-a <hex128> "
+                     "--digest-b <hex64> --sig-b <hex128>\n"
+                     "          | --event <file> [--index <N>]) [--json]\n"
+                     "\n"
+                     "  OFFLINE FA6 equivocation-evidence verifier. Confirms\n"
+                     "  ONE registered key signed TWO distinct digests at the\n"
+                     "  same height — the two-sig proof the chain slashes on.\n"
+                     "  Reproduces validator.cpp::check_equivocation_events:\n"
+                     "  digest_a != digest_b, sig_a != sig_b, and BOTH sigs\n"
+                     "  verify against --pubkey. No daemon, no chain link.\n"
+                     "  Exit 0 PROVEN, 2 NOT PROVEN, 1 args/parse/IO.\n";
+        return 1;
+    }
+
+    // Optional metadata carried through from an --event source (echoed
+    // into the output but NOT trusted for the crypto check).
+    std::string equivocator_meta;
+    bool        have_block_index = false;
+    uint64_t    block_index_meta = 0;
+
+    // If --event is supplied, pull the five hex fields out of it. The five
+    // explicit hex args and --event are mutually exclusive (an --event file
+    // is a self-contained record; mixing would be ambiguous).
+    if (!event_path.empty()) {
+        if (!digest_a_hex.empty() || !sig_a_hex.empty()
+            || !digest_b_hex.empty() || !sig_b_hex.empty()) {
+            std::cerr << "verify-equivocation: --event is mutually exclusive "
+                         "with --digest-a/--sig-a/--digest-b/--sig-b\n";
+            return 1;
+        }
+        nlohmann::json ej;
+        try {
+            std::ifstream ef(event_path);
+            if (!ef) {
+                std::cerr << "verify-equivocation: cannot open --event file: "
+                          << event_path << "\n";
+                return 1;
+            }
+            ej = nlohmann::json::parse(ef);
+        } catch (std::exception& e) {
+            std::cerr << "verify-equivocation: --event file is not valid "
+                         "JSON: " << e.what() << "\n";
+            return 1;
+        }
+        // Accept either a bare EquivocationEvent OR a Block whose
+        // equivocation_events[index] we extract. Unwrap a {"block":{...}}
+        // envelope first (matches committee-signature-verify's leniency).
+        if (ej.contains("block") && ej["block"].is_object()) ej = ej["block"];
+        nlohmann::json src;
+        if (ej.contains("equivocation_events")
+            && ej["equivocation_events"].is_array()) {
+            const auto& arr = ej["equivocation_events"];
+            if (static_cast<size_t>(ev_index) >= arr.size()) {
+                std::cerr << "verify-equivocation: --index " << ev_index
+                          << " out of range (block has " << arr.size()
+                          << " equivocation_events)\n";
+                return 1;
+            }
+            src = arr[ev_index];
+        } else {
+            src = ej;  // assume a bare EquivocationEvent object
+        }
+        if (!src.is_object()
+            || !src.contains("digest_a") || !src.contains("sig_a")
+            || !src.contains("digest_b") || !src.contains("sig_b")) {
+            std::cerr << "verify-equivocation: --event JSON is not an "
+                         "EquivocationEvent (needs digest_a/sig_a/digest_b/"
+                         "sig_b) nor a Block with equivocation_events\n";
+            return 1;
+        }
+        try {
+            digest_a_hex = src.at("digest_a").get<std::string>();
+            sig_a_hex    = src.at("sig_a").get<std::string>();
+            digest_b_hex = src.at("digest_b").get<std::string>();
+            sig_b_hex    = src.at("sig_b").get<std::string>();
+        } catch (std::exception& e) {
+            std::cerr << "verify-equivocation: --event field type error: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (src.contains("equivocator") && src["equivocator"].is_string())
+            equivocator_meta = src["equivocator"].get<std::string>();
+        if (src.contains("block_index") && src["block_index"].is_number_unsigned()) {
+            block_index_meta = src["block_index"].get<uint64_t>();
+            have_block_index = true;
+        }
+    }
+
+    // All five hex values must now be present (whether inline or from
+    // --event).
+    if (digest_a_hex.empty() || sig_a_hex.empty()
+        || digest_b_hex.empty() || sig_b_hex.empty()) {
+        std::cerr << "verify-equivocation: need all of --digest-a/--sig-a/"
+                     "--digest-b/--sig-b (or supply --event)\n";
+        return 1;
+    }
+
+    // Shape + hex-decode all four artifacts. Digests are 32 bytes
+    // (64 hex), sigs are 64 bytes (128 hex) — same widths the chain's
+    // EquivocationEvent::from_json enforces (json_require_hex 64 / 128).
+    auto decode_fixed = [](const std::string& label, const std::string& hex,
+                           size_t want_hex, size_t want_bytes,
+                           std::vector<uint8_t>& out) -> bool {
+        if (hex.size() != want_hex) {
+            std::cerr << "verify-equivocation: " << label << " must be "
+                      << want_hex << " hex chars (" << want_bytes
+                      << "-byte); got " << hex.size() << "\n";
+            return false;
+        }
+        try { out = from_hex(hex); }
+        catch (std::exception& e) {
+            std::cerr << "verify-equivocation: " << label
+                      << " hex parse error: " << e.what() << "\n";
+            return false;
+        }
+        if (out.size() != want_bytes) {
+            std::cerr << "verify-equivocation: " << label << " decoded to "
+                      << out.size() << " bytes (expected " << want_bytes
+                      << ")\n";
+            return false;
+        }
+        return true;
+    };
+
+    std::vector<uint8_t> pk, dig_a, sg_a, dig_b, sg_b;
+    if (!decode_fixed("--pubkey",   pubkey_hex,   64,  32, pk))    return 1;
+    if (!decode_fixed("--digest-a", digest_a_hex, 64,  32, dig_a)) return 1;
+    if (!decode_fixed("--sig-a",    sig_a_hex,    128, 64, sg_a))  return 1;
+    if (!decode_fixed("--digest-b", digest_b_hex, 64,  32, dig_b)) return 1;
+    if (!decode_fixed("--sig-b",    sig_b_hex,    128, 64, sg_b))  return 1;
+
+    if (!primitives::init_libsodium()) {
+        std::cerr << "verify-equivocation: libsodium init failed\n";
+        return 1;
+    }
+
+    // ── The four-condition FA6 proof (validator.cpp parity) ───────────────
+    // (1) + (2): the two digests and the two sigs must differ. A repeated
+    // digest or a repeated sig is NOT equivocation (a signer may sign the
+    // same thing twice harmlessly). Compare on the canonical lowercase hex
+    // so case differences never spoof "distinct."
+    bool distinct_digests = (dig_a != dig_b);
+    bool distinct_sigs    = (sg_a  != sg_b);
+
+    // (3) + (4): each sig must verify over its OWN digest against the
+    // equivocator's key. crypto_sign_verify_detached returns 0 on valid.
+    bool sig_a_valid = (crypto_sign_verify_detached(
+                            sg_a.data(), dig_a.data(), dig_a.size(),
+                            pk.data()) == 0);
+    bool sig_b_valid = (crypto_sign_verify_detached(
+                            sg_b.data(), dig_b.data(), dig_b.size(),
+                            pk.data()) == 0);
+
+    bool proven = distinct_digests && distinct_sigs
+               && sig_a_valid && sig_b_valid;
+
+    if (json_out) {
+        nlohmann::json r;
+        r["proven"]           = proven;
+        r["distinct_digests"] = distinct_digests;
+        r["distinct_sigs"]    = distinct_sigs;
+        r["sig_a_valid"]      = sig_a_valid;
+        r["sig_b_valid"]      = sig_b_valid;
+        r["pubkey_hex"]       = pubkey_hex;
+        r["digest_a_hex"]     = digest_a_hex;
+        r["digest_b_hex"]     = digest_b_hex;
+        if (!equivocator_meta.empty()) r["equivocator"] = equivocator_meta;
+        if (have_block_index)          r["block_index"] = block_index_meta;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << (proven ? "PROVEN" : "NOT PROVEN")
+                  << ": equivocation evidence\n";
+        std::cout << "  pubkey:           " << pubkey_hex   << "\n";
+        if (!equivocator_meta.empty())
+            std::cout << "  equivocator:      " << equivocator_meta << "\n";
+        if (have_block_index)
+            std::cout << "  block_index:      " << block_index_meta << "\n";
+        std::cout << "  digest_a:         " << digest_a_hex << "\n";
+        std::cout << "  digest_b:         " << digest_b_hex << "\n";
+        std::cout << "  distinct_digests: "
+                  << (distinct_digests ? "true" : "false") << "\n";
+        std::cout << "  distinct_sigs:    "
+                  << (distinct_sigs ? "true" : "false") << "\n";
+        std::cout << "  sig_a_valid:      "
+                  << (sig_a_valid ? "true" : "false") << "\n";
+        std::cout << "  sig_b_valid:      "
+                  << (sig_b_valid ? "true" : "false") << "\n";
+    }
+    return proven ? 0 : 2;
+}
+
 // determ-wallet committee-signature-verify — Offline verification of the
 // K-of-K committee Ed25519 signatures on a block, against an operator-
 // supplied block_digest.
@@ -20819,6 +21117,37 @@ void print_usage() {
         "                                             missing_count, abstention_count, required,\n"
         "                                             pass, signers:[{domain,sig_present,\n"
         "                                             valid}]}.\n"
+        "  verify-equivocation --pubkey <hex64>\n"
+        "                      (--digest-a <hex64> --sig-a <hex128>\n"
+        "                       --digest-b <hex64> --sig-b <hex128>\n"
+        "                       | --event <file> [--index <N>]) [--json]\n"
+        "                                             OFFLINE FA6 equivocation-evidence verifier.\n"
+        "                                             Confirms the EquivocationEvent two-sig proof:\n"
+        "                                             that ONE registered key (--pubkey, pinned\n"
+        "                                             from the beacon-anchored registry) signed TWO\n"
+        "                                             distinct 32-byte digests at the same height —\n"
+        "                                             the unambiguous proof the chain slashes the\n"
+        "                                             equivocator's full stake on. Reproduces\n"
+        "                                             validator.cpp check_equivocation_events byte-\n"
+        "                                             for-byte: PROVEN requires digest_a!=digest_b,\n"
+        "                                             sig_a!=sig_b, AND both sigs verify against\n"
+        "                                             --pubkey via crypto_sign_verify_detached.\n"
+        "                                             Forensic counterpart to committee-signature-\n"
+        "                                             verify (which checks K-of-K sigs over ONE\n"
+        "                                             digest; this checks ONE key over TWO digests)\n"
+        "                                             — lets anyone independently confirm a\n"
+        "                                             slashing was justified. Supply the five hex\n"
+        "                                             artifacts inline OR pass --event with an\n"
+        "                                             EquivocationEvent JSON (or a Block whose\n"
+        "                                             equivocation_events[N] is checked); --pubkey\n"
+        "                                             is ALWAYS required (never read from the\n"
+        "                                             untrusted evidence). No daemon, no chain\n"
+        "                                             link. Exit 0 PROVEN, 2 NOT PROVEN (auth-\n"
+        "                                             style alert), 1 args/parse/IO. JSON output:\n"
+        "                                             {proven, distinct_digests, distinct_sigs,\n"
+        "                                             sig_a_valid, sig_b_valid, pubkey_hex,\n"
+        "                                             digest_a_hex, digest_b_hex[, equivocator,\n"
+        "                                             block_index]}.\n"
         "  bft-quorum --committee-size <K> [--mode md|bft]\n"
         "             [--pool <P>] [--aborts <A>] [--threshold <T>]\n"
         "             [--bft-enabled] [--json]\n"
@@ -21548,6 +21877,7 @@ int main(int argc, char** argv) {
     if (cmd == "decrypt-message") return cmd_decrypt_message(argc - 2, argv + 2);
     if (cmd == "tx-sign-verify")  return cmd_tx_sign_verify (argc - 2, argv + 2);
     if (cmd == "committee-signature-verify") return cmd_committee_signature_verify(argc - 2, argv + 2);
+    if (cmd == "verify-equivocation") return cmd_verify_equivocation(argc - 2, argv + 2);
     if (cmd == "bft-quorum")      return cmd_bft_quorum     (argc - 2, argv + 2);
     if (cmd == "cold-sign")       return cmd_cold_sign      (argc - 2, argv + 2);
     if (cmd == "sign-anon-tx")    return cmd_sign_anon_tx   (argc - 2, argv + 2);

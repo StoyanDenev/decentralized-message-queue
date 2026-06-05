@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (20 total + help / version):
+// Subcommands (21 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -33,6 +33,7 @@
 //   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
+//   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   committee-at-height      Report committee-verified creators at block H
 //   decode-wire              OFFLINE decode + validate a binary wire frame
 //   help / version
@@ -61,6 +62,7 @@
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
+#include <determ/crypto/keys.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/types.hpp>
 #include <nlohmann/json.hpp>
@@ -281,6 +283,30 @@ void print_usage() {
         "      the chain advances past <H> the same query flips INCLUDED back\n"
         "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
         "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
+        "\n"
+        "Equivocation forensics (offline, no daemon):\n"
+        "  verify-equivocation --in <event.json>\n"
+        "                      {--pubkey <64-hex> | --committee <file>} [--json]\n"
+        "      OFFLINE re-verification of an EquivocationEvent (the FA6\n"
+        "      double-sign proof carried by the EQUIVOCATION_EVIDENCE gossip\n"
+        "      message + the submit_equivocation RPC). Re-runs the daemon's V11\n"
+        "      slash gate (BlockValidator::check_equivocation_events)\n"
+        "      INDEPENDENTLY: digest_a != digest_b, sig_a != sig_b, and BOTH\n"
+        "      Ed25519 signatures verify against the equivocator's registered\n"
+        "      key. Supply that key directly with --pubkey, or resolve it from\n"
+        "      a {domain, ed_pub}[] committee/genesis-committee file via\n"
+        "      --committee + the event's own `equivocator` domain (the key\n"
+        "      MUST come from a source YOU trust, never from the event). All\n"
+        "      four conditions holding is cryptographic proof the signer\n"
+        "      double-signed at one height — EQUIVOCATION-PROVEN (exit 0), a\n"
+        "      slash is justified. Any condition failing (equal digests, equal\n"
+        "      sigs, or a sig that does not verify) is NOT-EQUIVOCATION (exit\n"
+        "      3): the evidence does NOT prove a double-sign, fail-closed,\n"
+        "      never a false PROVEN. Per FA6 (EquivocationSlashing.md) this has\n"
+        "      no false positives under Ed25519 EUF-CMA — an honest validator\n"
+        "      can never be PROVEN here. A malformed event / bad hex / unknown\n"
+        "      domain is a usage error (exit 1). Read the event from stdin with\n"
+        "      --in -.\n"
         "\n"
         "Wire-format tooling (offline, no daemon):\n"
         "  decode-wire --in <file> [--expect-type <NAME>] [--json]\n"
@@ -2388,6 +2414,192 @@ int cmd_verify_param_change(int argc, char** argv) {
     }
 }
 
+// ──────────────────────── verify-equivocation ──────────────────────────
+
+// verify-equivocation — OFFLINE equivocation-evidence verifier (FA6).
+//
+// Pure offline forensic oracle: no daemon, no genesis, no RPC. Given an
+// EquivocationEvent JSON document (the wire shape emitted by
+// EquivocationEvent::to_json / carried by the EQUIVOCATION_EVIDENCE gossip
+// message + the submit_equivocation RPC) and the equivocator's registered
+// Ed25519 public key, it INDEPENDENTLY re-runs the V11 check the daemon's
+// BlockValidator::check_equivocation_events applies before a slash is
+// finalized:
+//
+//   1. digest_a != digest_b   (two DISTINCT signed values — not a replay)
+//   2. sig_a    != sig_b       (two distinct signatures)
+//   3. Verify(pk, digest_a, sig_a) == 1
+//   4. Verify(pk, digest_b, sig_b) == 1
+//
+// All four passing is cryptographic proof the holder of `pk` signed two
+// conflicting block_digests (or contrib commitments — V11 is digest-
+// agnostic) at the SAME block_index: a deliberate double-sign that
+// forfeits the equivocator's full stake on apply. FA6 (EquivocationSlashing.md)
+// proves this has no false positives under Ed25519 EUF-CMA: an honest
+// validator can NEVER be named here, because reproducing it would require
+// forging a signature by an honest key.
+//
+// The public key is supplied directly via --pubkey <64-hex> (the
+// equivocator's registered ed_pub) OR resolved from a committee/genesis
+// file via --committee <file> + the event's `equivocator` domain — the
+// same {domain, ed_pub} array shape parse_committee accepts. Supplying the
+// key from a SOURCE THE VERIFIER TRUSTS (not from the event itself) is what
+// makes the verdict sound: the event carries the two sigs, the operator
+// carries the key.
+//
+// Verdict discipline mirrors verify-tx-inclusion / decode-wire:
+//   EQUIVOCATION-PROVEN → exit 0 (all four V11 conditions hold; a slash
+//                         against this signer is cryptographically justified)
+//   NOT-EQUIVOCATION    → exit 3 (a V11 condition fails: equal digests,
+//                         equal sigs, or either sig does not verify — the
+//                         evidence does NOT prove a double-sign; fail-closed,
+//                         never a false PROVEN)
+//   I/O / usage error   → exit 1 (missing file, bad hex, unknown domain)
+//
+// This is the read-side counterpart to the daemon's detection +
+// apply path: an auditor, governance script, or counter-party can verify a
+// circulating EquivocationEvent BEFORE trusting that a slash was warranted,
+// without running a full node.
+enum class EquivVerdict { PROVEN, NOT_EQUIVOCATION };
+
+const char* equiv_verdict_str(EquivVerdict v) {
+    switch (v) {
+        case EquivVerdict::PROVEN:           return "EQUIVOCATION-PROVEN";
+        case EquivVerdict::NOT_EQUIVOCATION: return "NOT-EQUIVOCATION";
+    }
+    return "NOT-EQUIVOCATION";
+}
+
+int cmd_verify_equivocation(int argc, char** argv) {
+    std::string in_path, pubkey_hex, committee_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"        && i + 1 < argc) in_path        = argv[++i];
+        else if (a == "--pubkey"    && i + 1 < argc) pubkey_hex     = argv[++i];
+        else if (a == "--committee" && i + 1 < argc) committee_path = argv[++i];
+        else if (a == "--json")                      json_out       = true;
+        else {
+            std::cerr << "verify-equivocation: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "verify-equivocation: --in <event.json> is required "
+                     "(read from stdin with --in -)\n";
+        return 1;
+    }
+    if (pubkey_hex.empty() == committee_path.empty()) {
+        std::cerr << "verify-equivocation: exactly one of --pubkey <64-hex> "
+                     "or --committee <file> is required\n";
+        return 1;
+    }
+
+    try {
+        // Parse the EquivocationEvent via the canonical from_json. It already
+        // enforces the field-name + hex-length contract (digest_a/digest_b
+        // 64-hex, sig_a/sig_b 128-hex) and throws a clear S-018 diagnostic on
+        // a malformed document — those are usage errors (exit 1), not a
+        // NOT-EQUIVOCATION verdict.
+        json doc = (in_path == "-") ? json::parse(std::cin)
+                                    : read_json_file(in_path);
+        determ::chain::EquivocationEvent ev =
+            determ::chain::EquivocationEvent::from_json(doc);
+
+        // Resolve the equivocator's Ed25519 key from the trusted source.
+        // --pubkey takes the bare 64-hex key; --committee resolves it from a
+        // {domain, ed_pub}[] file by the event's own `equivocator` domain (an
+        // unknown domain is a usage error, not a soundness verdict).
+        PubKey pk{};
+        if (!pubkey_hex.empty()) {
+            pk = from_hex_arr<32>(pubkey_hex);
+        } else {
+            auto committee = parse_committee(read_json_file(committee_path));
+            auto it = committee.find(ev.equivocator);
+            if (it == committee.end()) {
+                std::cerr << "verify-equivocation: equivocator '"
+                          << ev.equivocator << "' not found in --committee "
+                          << committee_path << "\n";
+                return 1;
+            }
+            pk = it->second;
+        }
+
+        // V11, re-run independently of the daemon. Each clause that fails
+        // collapses the verdict to NOT-EQUIVOCATION with a precise reason —
+        // the evidence is structurally well-formed but does not prove a
+        // double-sign, so we fail closed rather than emit a false PROVEN.
+        EquivVerdict verdict = EquivVerdict::PROVEN;
+        std::string  reason;
+        bool digests_distinct = (ev.digest_a != ev.digest_b);
+        bool sigs_distinct     = (ev.sig_a   != ev.sig_b);
+        bool sig_a_ok = digests_distinct && determ::crypto::verify(
+            pk, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a);
+        bool sig_b_ok = digests_distinct && determ::crypto::verify(
+            pk, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b);
+
+        if (!digests_distinct) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "digest_a == digest_b (replay, not equivocation)";
+        } else if (!sigs_distinct) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "sig_a == sig_b (single signature, not two)";
+        } else if (!sig_a_ok) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "sig_a does not verify against the supplied key";
+        } else if (!sig_b_ok) {
+            verdict = EquivVerdict::NOT_EQUIVOCATION;
+            reason  = "sig_b does not verify against the supplied key";
+        }
+
+        bool proven = (verdict == EquivVerdict::PROVEN);
+        if (json_out) {
+            json out = {
+                {"verdict",      equiv_verdict_str(verdict)},
+                {"proven",       proven},
+                {"equivocator",  ev.equivocator},
+                {"block_index",  ev.block_index},
+                {"pubkey",       to_hex(pk)},
+                {"digest_a",     to_hex(ev.digest_a)},
+                {"digest_b",     to_hex(ev.digest_b)},
+                {"sig_a_valid",  sig_a_ok},
+                {"sig_b_valid",  sig_b_ok},
+            };
+            if (ev.shard_id != 0 || ev.beacon_anchor_height != 0) {
+                out["shard_id"]             = ev.shard_id;
+                out["beacon_anchor_height"] = ev.beacon_anchor_height;
+            }
+            if (!reason.empty()) out["reason"] = reason;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << equiv_verdict_str(verdict) << "\n"
+                      << "  equivocator:  " << ev.equivocator << "\n"
+                      << "  block_index:  " << ev.block_index << "\n"
+                      << "  pubkey:       " << to_hex(pk) << "\n"
+                      << "  digest_a:     " << to_hex(ev.digest_a)
+                      << "  (sig " << (sig_a_ok ? "VALID" : "INVALID") << ")\n"
+                      << "  digest_b:     " << to_hex(ev.digest_b)
+                      << "  (sig " << (sig_b_ok ? "VALID" : "INVALID") << ")\n";
+            if (ev.shard_id != 0 || ev.beacon_anchor_height != 0) {
+                std::cout << "  shard_id:     " << ev.shard_id << "\n"
+                          << "  beacon anchor: " << ev.beacon_anchor_height
+                          << "\n";
+            }
+            if (!reason.empty())
+                std::cout << "  reason:       " << reason << "\n";
+        }
+
+        // EQUIVOCATION-PROVEN → exit 0 (a slash here is cryptographically
+        // justified). NOT-EQUIVOCATION → exit 3 (sound refusal to assert a
+        // double-sign; fail-closed). A throw above (bad hex / missing field /
+        // I/O) lands in the catch as exit 1.
+        return proven ? 0 : 3;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-equivocation: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────── supply-trustless ─────────────────────────────
 
 // Tri-state for the A1 unitary-supply conservation check, mirroring the
@@ -3518,6 +3730,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
+        if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
         if (cmd == "decode-wire")           return cmd_decode_wire(sub_argc, sub_argv);
     } catch (const std::exception& e) {

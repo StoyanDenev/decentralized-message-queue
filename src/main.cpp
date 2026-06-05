@@ -602,6 +602,12 @@ Additional in-process tests:
                                               full stake forfeit +
                                               deregistration (inactive_from)
                                               + A1 invariant
+  determ test-equivocation-evidence           FA6 equivocation-evidence
+                                              VERIFICATION — two-sig double-
+                                              sign proof accept/reject arms
+                                              (real Ed25519), wrong-key
+                                              non-attribution, wire round-
+                                              trip, event-hash binding
   determ test-unstake-deregister-apply        UNSTAKE + DEREGISTER apply —
                                               stake-lifecycle complement;
                                               fee refund on failure; A1
@@ -39324,6 +39330,219 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": subsidy-pool-clamp "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // FA6 equivocation-evidence VERIFICATION (the detection-side
+    // predicate, distinct from the apply-side tests test-equivocation-
+    // apply / test-equivocation-multi which mutate stake/registry using
+    // pre-validated events with fake digests and default sigs).
+    //
+    // An EquivocationEvent is trustless proof that one Ed25519 key signed
+    // two DIFFERENT block_digests at the SAME block_index. The verifier
+    // (src/node/validator.cpp::check_equivocation_events) accepts the
+    // evidence iff ALL hold:
+    //   (a) digest_a != digest_b   (otherwise no contradiction),
+    //   (b) sig_a    != sig_b      (otherwise same signature, no double-sign),
+    //   (c) verify(key, digest_a, sig_a) AND verify(key, digest_b, sig_b)
+    //       both pass against the equivocator's REGISTERED key.
+    // Anyone — a full node, an offline auditor, or a light client holding
+    // only the equivocator's pubkey — can run this predicate with no chain
+    // state. This test rebuilds that predicate from the public crypto
+    // primitives (generate_node_key / sign / verify) and pins every
+    // accept/reject arm, plus the wire round-trip + hash binding that let
+    // the evidence travel (submit_equivocation RPC → block → forensic
+    // tooling) without losing soundness.
+    if (cmd == "test-equivocation-evidence") {
+        using namespace determ;
+        using namespace determ::chain;
+        using namespace determ::crypto;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // The offline verifier: the EXACT predicate the validator runs in
+        // check_equivocation_events, expressed against a caller-supplied
+        // pubkey (the equivocator's registered key). No chain, no registry
+        // lookup — just the two-sig contradiction proof. Returns true iff
+        // the evidence is sound.
+        auto verify_evidence = [](const EquivocationEvent& ev,
+                                  const PubKey& key) -> bool {
+            if (ev.digest_a == ev.digest_b) return false;  // (a)
+            if (ev.sig_a == ev.sig_b)       return false;  // (b)
+            if (!verify(key, ev.digest_a.data(), ev.digest_a.size(), ev.sig_a))
+                return false;                               // (c) first
+            if (!verify(key, ev.digest_b.data(), ev.digest_b.size(), ev.sig_b))
+                return false;                               // (c) second
+            return true;
+        };
+
+        // Deterministic distinct digests (stand in for two conflicting
+        // block_digests at the same height). Patterned, not zero, so a
+        // regression that zeroes them is visible.
+        auto patterned = [](uint8_t seed) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i)
+                h[i] = uint8_t(seed + i);
+            return h;
+        };
+
+        // The equivocator's single key signs BOTH conflicting digests —
+        // this is exactly what a double-signing validator does.
+        NodeKey culprit = generate_node_key();
+        Hash dA = patterned(0xA0);
+        Hash dB = patterned(0xB0);
+
+        // Build a genuine, well-formed equivocation proof.
+        auto make_genuine = [&]() {
+            EquivocationEvent ev;
+            ev.equivocator = "alice.tld";
+            ev.block_index = 7;
+            ev.digest_a = dA;
+            ev.sig_a    = sign(culprit, dA.data(), dA.size());
+            ev.digest_b = dB;
+            ev.sig_b    = sign(culprit, dB.data(), dB.size());
+            ev.shard_id = 0;
+            ev.beacon_anchor_height = 0;
+            return ev;
+        };
+
+        // === ACCEPT: genuine double-sign by one registered key ===
+
+        // 1. Two distinct digests, two real sigs from the same key, both
+        //    verify → evidence is sound.
+        {
+            EquivocationEvent ev = make_genuine();
+            check(verify_evidence(ev, culprit.pub),
+                  "genuine: distinct digests + both sigs verify under culprit key → ACCEPT");
+        }
+
+        // === REJECT (a): digest_a == digest_b is not a contradiction ===
+
+        // 2. If the two digests are equal, the key signed the SAME message
+        //    twice — Ed25519 is deterministic (test-ed25519 #6), so the two
+        //    sigs would even be byte-identical. No equivocation occurred.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.digest_b = ev.digest_a;
+            ev.sig_b    = sign(culprit, ev.digest_b.data(), ev.digest_b.size());
+            check(!verify_evidence(ev, culprit.pub),
+                  "equal digests: same message signed twice → REJECT (no contradiction)");
+        }
+
+        // === REJECT (b): sig_a == sig_b means one signature, not two ===
+
+        // 3. Even with distinct digest fields, identical signatures cannot
+        //    both be valid Ed25519 sigs over different messages under one
+        //    key; the gate rejects on the sig-equality check before crypto.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.sig_b = ev.sig_a;  // copy → equal sigs
+            check(!verify_evidence(ev, culprit.pub),
+                  "equal sigs: sig_a == sig_b → REJECT (one signature, no double-sign)");
+        }
+
+        // === REJECT (c): a forged signature does not verify ===
+
+        // 4. sig_b tampered (one bit flipped) → the EUF-CMA verify fails;
+        //    the evidence is not provably attributable to the culprit.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.sig_b[0] ^= 0xFF;
+            check(!verify_evidence(ev, culprit.pub),
+                  "tampered sig_b: forged signature fails verify → REJECT");
+        }
+
+        // 5. digest_a tampered after signing → sig_a no longer matches the
+        //    digest it accompanies. The signature binds the exact digest.
+        {
+            EquivocationEvent ev = make_genuine();
+            ev.digest_a[0] ^= 0xFF;
+            check(!verify_evidence(ev, culprit.pub),
+                  "tampered digest_a: sig no longer matches digest → REJECT");
+        }
+
+        // === REJECT (c): right proof, WRONG key (mis-attribution) ===
+
+        // 6. A genuine equivocation by `culprit` does NOT verify against a
+        //    different registered key. Slashing must attribute to the
+        //    actual double-signer, never to an innocent bystander whose
+        //    domain an attacker placed in `equivocator`.
+        {
+            EquivocationEvent ev = make_genuine();
+            NodeKey innocent = generate_node_key();
+            check(!verify_evidence(ev, innocent.pub),
+                  "wrong key: genuine culprit proof rejected under innocent key → no mis-attribution");
+        }
+
+        // === Both halves are independently required ===
+
+        // 7. Swapping which key signed only ONE of the two digests breaks
+        //    the proof: a valid double-sign needs BOTH sigs under the SAME
+        //    key. (sig_a from innocent, sig_b from culprit → neither key
+        //    verifies both.)
+        {
+            NodeKey innocent = generate_node_key();
+            EquivocationEvent ev = make_genuine();
+            ev.sig_a = sign(innocent, ev.digest_a.data(), ev.digest_a.size());
+            check(!verify_evidence(ev, culprit.pub),
+                  "split keys: sig_a under a different key → REJECT under culprit");
+            check(!verify_evidence(ev, innocent.pub),
+                  "split keys: sig_b under a different key → REJECT under innocent");
+        }
+
+        // === Wire round-trip preserves verifiability ===
+
+        // 8. The evidence survives JSON serialization (submit_equivocation
+        //    RPC → block body → forensic tooling) byte-exactly: the decoded
+        //    event still verifies under the same key.
+        {
+            EquivocationEvent ev = make_genuine();
+            EquivocationEvent back =
+                EquivocationEvent::from_json(ev.to_json());
+            check(back.equivocator == ev.equivocator
+                  && back.block_index == ev.block_index
+                  && back.digest_a == ev.digest_a && back.sig_a == ev.sig_a
+                  && back.digest_b == ev.digest_b && back.sig_b == ev.sig_b,
+                  "round-trip: every proof field survives to_json/from_json");
+            check(verify_evidence(back, culprit.pub),
+                  "round-trip: decoded evidence still ACCEPTS under culprit key");
+        }
+
+        // === hash_equivocation_event binds the verified material ===
+
+        // 9. The event hash (the leaf the block commits to) is sensitive to
+        //    BOTH conflicting signatures: an attacker cannot swap in a
+        //    different sig without changing the committed hash.
+        {
+            EquivocationEvent ev = make_genuine();
+            Hash h0 = node::hash_equivocation_event(ev);
+            EquivocationEvent ev2 = ev; ev2.sig_b[0] ^= 0xFF;
+            check(node::hash_equivocation_event(ev2) != h0,
+                  "hash binds sig_b: tampering the second signature changes the event hash");
+            EquivocationEvent ev3 = ev; ev3.equivocator = "mallory.tld";
+            check(node::hash_equivocation_event(ev3) != h0,
+                  "hash binds equivocator: re-attributing the proof changes the event hash");
+        }
+
+        // === Determinism: the verifier is a pure predicate ===
+
+        // 10. Running the verifier twice on the same evidence yields the
+        //     same verdict (no hidden state, no RNG) — required so every
+        //     honest node reaches the same slash/no-slash decision.
+        {
+            EquivocationEvent ev = make_genuine();
+            bool v1 = verify_evidence(ev, culprit.pub);
+            bool v2 = verify_evidence(ev, culprit.pub);
+            check(v1 && v2 && v1 == v2,
+                  "determinism: verifier is a pure predicate (same verdict twice)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": equivocation-evidence "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
