@@ -268,6 +268,43 @@
 
 **Related.** `DECISION-LOG.md` → IMPLEMENTATION-SEQUENCING → Bundle release cadence; memory `dlt-no-migrations-constraint`.
 
+### 5.7 Genesis-time validation for self-consistent economic configuration (added 2026-06-05)
+
+**Improvement.** Manifest-validity check at genesis (extends Beaconless-v2 §Q2.1 hard-invariant pattern) that rejects bad combinations of `block_subsidy` + `subsidy_pool_initial` + per-tx fee policy + sponsor-declaration. Prevents operator misconfiguration from creating chains with broken long-term validator economics.
+
+**The problem.** v1.x provides three economic primitives (block subsidy, subsidy pool cap, per-tx fees) configurable per deployment. Some combinations are self-consistent; others are not:
+
+| Configuration | Self-consistent? |
+|---|---|
+| `block_subsidy = 0` + non-zero fees + sponsor-deployment declaration | ✅ Sponsor pays validators directly; fees are minor revenue |
+| Permanent inflation (`block_subsidy > 0`, `subsidy_pool_initial = 0`) | ✅ Validators always paid via issuance |
+| Bootstrap (`subsidy_pool_initial > 0` + non-zero fee rate) | ✅ Subsidy initially, then fee market |
+| `block_subsidy = 0` + zero fees + no sponsor declaration | ❌ No one pays validators — chain dies |
+| Bootstrap (`subsidy_pool_initial > 0`) + zero fees | ❌ Cliff at pool exhaustion; chain economics break |
+
+Without genesis validation, operators can ship the broken combinations — and the failure mode surfaces post-launch when validators stop being compensated.
+
+**Proposed validation rule (manifest hard-invariant).**
+
+```
+post_exhaustion_funded := (per_tx_fee_rate > 0) OR (sponsor_deployment_declared = true)
+acceptable := (block_subsidy > 0 AND subsidy_pool_initial == 0)        // permanent inflation
+              OR (post_exhaustion_funded)                                // fees and/or sponsor
+              OR (block_subsidy == 0 AND post_exhaustion_funded)         // genesis-only inflation, then post-exhaustion funded
+```
+
+Manifest fails validation if `acceptable == false`. Operator must either (a) enable permanent inflation, (b) set non-zero fee rate, or (c) declare sponsor-deployment status (operator-attested; not chain-enforced beyond declaration).
+
+**Sponsor-declaration field.** Add `manifest.sponsor_declaration: enum { NONE, SOVEREIGN_OPERATOR, FOUNDATION_RUN, OTHER }` — operator attestation of how validators are funded off-chain. Validator does not enforce truthfulness (sponsor-attestation is honor-system), but the field makes economic-model intent explicit and unlocks the "no fees + sponsor-funded" acceptable path.
+
+**Classification.** Additive if shipped pre-v1.0 (genesis manifest schema addition); requires another §7.5-style discriminator (call it §7.5.12) preserved in v1.0 schema for forward compatibility.
+
+**Effort.** ~1-2 days: manifest field + validation rule + sponsor_declaration enum + DECISION-LOG entry. Minimal v1.0 schema lift.
+
+**Dependencies.** None — composes with existing Beaconless-v2 §Q2.1 manifest-validity framework.
+
+**Related.** `WHITEPAPER-v1.x.md §8.2-8.4` v1.x economic primitives; Beaconless-v2-SPEC.md §Q2.1 manifest-validity pattern; §9.6 monetization framing.
+
 ### 5.6 S-010 stake-pricing review under AI-volume assumptions (added 2026-06-05)
 
 **Improvement.** Review the S-010 stake-pricing formula (per `SECURITY.md §S-010`) under the assumption that AI orchestrators can spin up accounts at industrial rates rather than human-velocity rates. AI-traffic-dominance (2026 baseline: AI traffic > human traffic on broader internet) may change the Sybil-resistance assumptions S-010 relies on.
@@ -752,12 +789,25 @@ Captured 2026-06-03 after explicit rejection of a casino-fee proposal (per DECIS
 | 9.3 Gas pricing (C) | ❌ Rejected 2026-06-03 | Protocol | (Would have funded chain via fee market; rejected on character grounds) |
 | 9.4 Validator revenue share (D) | ❌ Rejected 2026-06-03 (cascade from C) | Protocol | (Would have funded validators; cascade-rejected with C) |
 
-**Why §9.2 + §9.5 alone is sufficient.**
+**Important framing correction (2026-06-05):** "Chain protocol stays free" earlier in this section was over-simplified. The chain protocol **already has** a per-tx fee mechanism + block subsidy mechanism in v1.x (per `WHITEPAPER-v1.x.md §8.2-8.4` and `PROTOCOL.md`). What's correct:
 
-- **Chain protocol itself stays free.** No per-tx fees; no gas; no per-account tier-bond differentiation. Matches MOTIVATION.md framing (Determ as public-interest cryptographic substrate).
-- **Validators are operators** — paid by the deployment's sponsor (sovereign-deployment model: banks, governments, enterprises run their own deployments for their own benefit). Not paid by transaction fees.
-- **DApp ecosystem captures value via §9.2** — each DApp prices its application according to its market (per-action, per-principal-subscription, per-delegation-credential per §9.2.1). DApps that serve high-volume AI agents charge accordingly.
-- **Foundation captures value via §9.5** — services-org revenue funds non-deployment-specific work (chain maintenance, reference implementations, certification programs, AI-agent-economy positioning).
+- **Chain protocol provides fee + subsidy mechanism**; per-deployment operator configures the rates (genesis-pinned `block_subsidy`, `subsidy_pool_initial`, `subsidy_mode`, plus per-tx `fee` field with operator-set rate). v1.x model is already complete for the chain-level economic primitive.
+- **§9 monetization research addresses ADDITIONAL revenue capture** beyond v1.x's existing fee + subsidy. Specifically: chain-level mechanisms that would tax use-case-specific patterns (rejected — §9.3 gas-style, §9.4 validator revenue share) OR alternative non-fee value-capture layers (live — §9.2 DApp-layer, §9.5 Foundation services).
+- **The rejected protocol-level proposals** (§9.1 tier-bonds, §9.3 gas-style, §9.4 validator revenue share) failed because they would have ADDED feature-discriminating or use-case-pricing mechanisms on top of the existing fee/subsidy primitive — the rejection wasn't "no fees ever" but "no use-case-specific fee discrimination."
+
+**Why §9.2 + §9.5 are sufficient as ADDITIONAL revenue layers beyond v1.x fees/subsidy.**
+
+- **Validators in sovereign-deployment model** are paid by the deployment's sponsor (banks, governments, enterprises run their own deployments for their own benefit). The v1.x fee + subsidy is bonus revenue offsetting sponsor's organizational cost; doesn't need additional layers.
+- **Validators in public/permissionless deployment model** are paid by v1.x's fee + subsidy mechanism — operator chooses configuration (permanent inflation, bootstrap+fees, fees-only) per their economic model. See §5.7 for the operator-config validation that prevents bad combinations like "pool-cap subsidy + zero fees + no sponsor."
+- **DApp ecosystem captures application value via §9.2** — orthogonal to chain-level fees; DApps price their applications (per-action, per-principal-subscription, per-delegation-credential per §9.2.1).
+- **Foundation captures non-deployment value via §9.5** — orthogonal to both; services-org revenue funds chain maintenance, reference implementations, certification.
+
+**Three independent layers:**
+1. Chain-level fee + subsidy (v1.x; operator configures per-deployment)
+2. DApp-layer application pricing (§9.2)
+3. Foundation services off-protocol (§9.5)
+
+Each layer captures legitimate value at its own granularity without interfering with the others.
 
 **Why no other models are needed.** Protocol-level revenue capture (§9.1, §9.3, §9.4) was repeatedly rejected because (a) it requires identity-classification at protocol level which is structurally infeasible (blindness problem); (b) it changes Determ's character from primitive-free public-interest infrastructure toward fee-market substrate. The two-layer split (DApp + Foundation) preserves character while capturing legitimate value at the layers where it can be captured fairly.
 

@@ -730,4 +730,41 @@ Both constraints remain load-bearing. Cannot relax.
 
 ---
 
+---
+
+## 2026-06-05 — §9 framing correction + economic-config validation entry
+
+### "Chain stays free" over-simplification corrected; v1.x fee + subsidy mechanism re-acknowledged
+
+**Question.** User raised: "If transactions have no fee, what happens when there is nothing more for block reward?" This is precisely the Bitcoin long-term-economics question. While exploring it, discovered that the §9 framing earlier said "Chain protocol itself stays free. No per-tx fees" — which contradicts v1.x's actual model.
+
+**The mistake.** When sharpening §9 framing (2026-06-05 prior entry "Live monetization model is §9.2 + §9.5"), I conflated two distinct claims:
+1. "No NEW chain-level monetization mechanism beyond v1.x" (correct — §9.3 gas-style, §9.4 validator revenue share rejected; §9.1 tier-bonds skipped)
+2. "No fees at all at protocol level" (INCORRECT — v1.x already has per-tx fees + block subsidy + subsidy pool cap + FLAT/LOTTERY distribution per WHITEPAPER-v1.x.md §8.2-8.4)
+
+The first claim is true; the second is wrong. v1.x has the chain-level economic primitive; per-deployment operator configures rates.
+
+**Correction applied.** §9.6 framing rewritten to make explicit:
+
+- **Chain protocol provides fee + subsidy mechanism** — `block_subsidy`, `subsidy_pool_initial`, `subsidy_mode`, per-tx `fee` field, all genesis-pinned per deployment
+- **§9 research addresses ADDITIONAL revenue capture** beyond v1.x's existing chain-level primitive
+- **Three independent layers**: (1) chain-level fee + subsidy [v1.x] (2) DApp-layer application pricing [§9.2] (3) Foundation services off-protocol [§9.5]
+
+**New improvement entry (§5.7): Genesis-time economic-config validation.** The user's question exposed that some combinations of v1.x economic primitives are not self-consistent (e.g., bootstrap subsidy with zero fees and no sponsor declaration = chain dies at pool exhaustion). Proposed manifest hard-invariant that rejects bad combinations, plus a new `manifest.sponsor_declaration` enum letting operators attest to off-chain validator funding. Composes with Beaconless-v2 §Q2.1 manifest-validity pattern. ~1-2 days implementation + would need §7.5.12 schema discriminator if pursued pre-v1.0.
+
+**Answer to user's specific question** (preserved for reference): "If transactions have no fee + subsidy pool exhausts, what funds validators?"
+
+- **Sovereign-deployment model** (banks, governments, enterprises — primary intended model per MOTIVATION.md): validators paid by sponsor's organizational budget; subsidy/fees are bonus revenue; subsidy exhaustion is non-existential.
+- **Public/permissionless model**: same Bitcoin post-2140 question. Determ's answer: operator chooses configuration (permanent inflation, bootstrap+fees, fees-only); §5.7 genesis validation prevents the broken combinations (e.g., pool-cap subsidy + zero fees + no sponsor).
+
+**Doc updates applied.**
+- `Improvements.md §9.6` — framing corrected (chain has v1.x fee + subsidy; §9 is ADDITIONAL layers)
+- `Improvements.md §5.7` (new) — Genesis-time economic-config validation entry
+- `DAPP_SDK_GUIDANCE.md §7.5` — DApp pricing composes with v1.x chain-level fees; three-layer framing explained
+- This DECISION-LOG entry — captures correction + generalization
+
+**Generalization.** When sharpening doc framing, verify against the actual implemented model. Over-simplifications that contradict existing code create real confusion downstream. "Chain stays free" was a shorthand for "no NEW protocol-level use-case-pricing mechanism beyond v1.x" — but stated unconditionally, it misled. Always qualify "stays free" with "of NEW mechanism" when the existing model already has chain-level economic primitives.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

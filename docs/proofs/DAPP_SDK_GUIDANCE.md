@@ -259,11 +259,28 @@ DApps price-discriminate where they have legitimate visibility; the chain stays 
 4. **Offer volume-tier discounts** to encourage principals to consolidate AI delegates under one account rather than proliferate Sybil-prone accounts (composes with §S-010 stake-pricing posture).
 5. **Make the principal-vs-delegate distinction visible** in DApp UX — humans should be able to see and revoke their AI agents' delegations easily (compose with v2.26 ROTATE_KEY).
 
-### 7.5 What this section is NOT
+### 7.5 Composition with v1.x chain-level fee + subsidy mechanism
 
-- Not a chain-level monetization mechanism — per `Improvements.md §9.6`, the chain itself stays free regardless of AI vs human traffic.
+**Important context (clarified 2026-06-05):** DApp-layer pricing is the SECOND layer of revenue capture, not the only one. v1.x already provides a chain-level fee + subsidy mechanism (per `WHITEPAPER-v1.x.md §8.2-8.4` + `PROTOCOL.md`):
+
+- Per-tx `fee` field on every transaction (sender pays; accumulates to block creators)
+- `block_subsidy: u64` per-block reward to K committee members
+- `subsidy_pool_initial: u64` optional cap on cumulative subsidy
+- `subsidy_mode: u8` FLAT vs LOTTERY distribution
+
+The chain-level rates are operator-configured per deployment via genesis-pinned constants. DApp-layer pricing in §7.2-7.4 is ADDITIONAL to v1.x chain-level fees, not a replacement.
+
+**Practical implication.** DApp developers should treat per-tx chain fees as a cost-of-goods that gets factored into per-principal subscriptions or per-action prices. The DApp's effective per-action cost = (its application-layer price) + (chain-level per-tx fee paid for the user's tx). Per-principal subscription bills should be calibrated to cover both layers.
+
+For sovereign-deployment chains (banks, governments, enterprises self-hosting), per-tx fees may be set to zero by the sponsor; DApp-layer pricing is the only layer. For public/permissionless chains, both layers apply.
+
+See `Improvements.md §9.6` for the full three-layer framing (chain-level + DApp-layer + Foundation-services).
+
+### 7.6 What this section is NOT
+
+- Not the only revenue layer — v1.x chain-level fee + subsidy is the first layer; DApp-layer is the second; Foundation services is the third. Per `Improvements.md §9.6` final framing.
 - Not a DSSO delegation protocol spec — that lives in `Improvements.md §8.1` as a post-v1.0 DApp.
-- Not enforceable at chain level — DApps choose their pricing model; the chain doesn't validate pricing compliance.
+- Not enforceable at chain level — DApps choose their application-layer pricing model; the chain doesn't validate DApp pricing compliance (the chain enforces only its own per-tx fee at the rate set by the deployment's genesis config).
 
 ---
 
