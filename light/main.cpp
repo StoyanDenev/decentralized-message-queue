@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (18 total + help / version):
+// Subcommands (19 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -21,6 +21,7 @@
 //   balance-trustless        Composite: verify chain + state-proof balance
 //   nonce-trustless          Composite: verify chain + state-proof nonce
 //   stake-trustless          Composite: verify chain + state-proof stake
+//   supply-trustless         Composite: verify 5 c: counters + A1 identity
 //   account-history          Composite: verified balance/nonce over a range
 //   sign-tx                  Offline signed TRANSFER/STAKE/UNSTAKE
 //   submit-tx                Submit a pre-signed tx to the daemon
@@ -117,6 +118,23 @@ void print_usage() {
         "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
         "      bonded). A domain with no stake leaf fails closed (the daemon's\n"
         "      state_proof returns not_found) — never a bare zero.\n"
+        "  supply-trustless --rpc-port <N> --genesis <file> [--json]\n"
+        "      Verified chain + the five A1 supply counters from the `c:`\n"
+        "      namespace (genesis_total, accumulated_subsidy/inbound/slashed/\n"
+        "      outbound), each Merkle-verified against the SAME committee-\n"
+        "      signed state_root and hash-bound to the daemon's chain_summary\n"
+        "      cleartext, then the closed-form A1 identity (genesis_total +\n"
+        "      subsidy + inbound - slashed - outbound) recomputed from the\n"
+        "      committed values. CONSERVED means the five committee-committed\n"
+        "      counters are internally consistent and equal the daemon's\n"
+        "      claimed total_supply; VIOLATED (exit 2) means the recomputed\n"
+        "      total disagrees; any tamper, split-root, or daemon refusal →\n"
+        "      UNVERIFIABLE (exit 3), never a false CONSERVED. Unlike the\n"
+        "      a:/s: single-leaf reads, this is a CROSS-LEAF invariant the\n"
+        "      verifier can re-check from committed values alone (it does NOT\n"
+        "      enumerate every account, so the daemon's live_total_supply is\n"
+        "      cross-checked, not independently re-derived — the S-040\n"
+        "      leaf_count boundary).\n"
         "  account-history --rpc-port <N> --genesis <file> --domain <D>\n"
         "                  --from <H1> --to <H2> [--step <S>] [--json]\n"
         "      Verified balance/nonce trajectory over a height range. For\n"
@@ -2343,6 +2361,441 @@ int cmd_verify_param_change(int argc, char** argv) {
     }
 }
 
+// ──────────────────────── supply-trustless ─────────────────────────────
+
+// Tri-state for the A1 unitary-supply conservation check, mirroring the
+// verify-* exit policy but named distinctly so the output cannot be
+// confused with a single-leaf inclusion proof. CONSERVED / VIOLATED are
+// sound verified verdicts (exit 0 / exit 2); UNVERIFIABLE is a refusal to
+// assert (exit 3); a transport/parse fault exits 1.
+enum class SupplyVerdict { CONSERVED, VIOLATED, UNVERIFIABLE };
+
+const char* supply_verdict_str(SupplyVerdict v) {
+    switch (v) {
+        case SupplyVerdict::CONSERVED:    return "CONSERVED";
+        case SupplyVerdict::VIOLATED:     return "VIOLATED";
+        case SupplyVerdict::UNVERIFIABLE: return "UNVERIFIABLE";
+    }
+    return "UNVERIFIABLE";
+}
+
+// supply-trustless — trustless A1 unitary-supply conservation reader.
+//
+// Reads the five A1 supply counters (genesis_total, accumulated_subsidy,
+// accumulated_inbound, accumulated_slashed, accumulated_outbound) from the
+// committee-verified `c:` namespace and recomputes the closed-form A1
+// identity entirely from committee-committed values:
+//
+//   expected_total = genesis_total + accumulated_subsidy
+//                  + accumulated_inbound - accumulated_slashed
+//                  - accumulated_outbound
+//
+// ─── Distinct from balance-trustless / stake-trustless ──────────────────
+//
+//   balance-trustless (a:) and stake-trustless (s:) each verify a SINGLE
+//   leaf in isolation; there is no cross-leaf invariant a verifier can
+//   re-check. The supply counters are different: the five values are
+//   bound by the closed-form A1 identity that the apply path enforces at
+//   every block (chain.cpp: `if (live_total_supply() != expected_total())
+//   throw`). supply-trustless is the observation that this identity is
+//   PUBLICLY RECOMPUTABLE from the five committed counters alone — the
+//   light client does not need live_total_supply() (the sum over every
+//   a:/s: leaf, which would require enumerating all accounts) to gain a
+//   meaningful consistency guarantee on the counters themselves.
+//
+// ─── Trust model ────────────────────────────────────────────────────────
+//
+// Anchors genesis, committee-verifies the header chain to head, and
+// captures the single committee-signed state_root R. For each of the five
+// counters it (1) computes the canonical leaf key ("k:c:" + name — note
+// the const_leaf double prefix in chain.cpp build_state_leaves; the daemon
+// reconstructs it from the bare counter name passed as the `c:`-namespace
+// `key`), (2) fetches the `c:` state-proof, (3) binds the proof to the
+// SAME R (rejecting any counter anchored to a different root — the
+// split-root attack), (4) Merkle-verifies it, and (5) cross-checks the
+// daemon's cleartext counter (from the `chain_summary` RPC) by recomputing
+// SHA256(u64_be(value)) against the proof's verified value_hash. A daemon
+// lying about a counter value while serving an honest proof must find a
+// SHA-256 second-preimage on a single u64 field — negligible.
+//
+// Once all five are verified against R, the A1 identity is recomputed from
+// the committed values and compared against the daemon's claimed
+// total_supply: CONSERVED means the five committee-committed counters are
+// internally consistent (and, when the daemon's cleartext total_supply is
+// available, equal it). Any tamper, mismatch, split-root, or daemon
+// refusal → UNVERIFIABLE, never a false CONSERVED.
+//
+// REUSE: the trustless anchor is verify_chain_to_head + verify_state_proof
+// + the race-window header-anchoring used by read_account_trustless; this
+// command adds NO new crypto — it repeats the single-leaf c: read five
+// times against one head and composes the public closed form.
+int cmd_supply_trustless(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "supply-trustless: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty()) {
+        std::cerr << "supply-trustless: --rpc-port, --genesis are required\n";
+        return 1;
+    }
+
+    // The five A1 supply counters, in the order build_state_leaves emits
+    // them. The bare name here is the `c:`-namespace `key` the daemon
+    // expects; it reconstructs the full leaf key as "k:c:" + name (see
+    // node.cpp rpc_state_proof's `ns == "c"` branch and chain.cpp's
+    // const_leaf("c:<name>", ...) calls, which prepend a second "k:").
+    static const char* kCounters[5] = {
+        "genesis_total", "accumulated_subsidy", "accumulated_inbound",
+        "accumulated_slashed", "accumulated_outbound"
+    };
+
+    SupplyVerdict verdict = SupplyVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+    // Committee-verified counter values, indexed by kCounters position.
+    uint64_t cval[5] = {0, 0, 0, 0, 0};
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "supply-trustless: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // Committee-verify the header chain end-to-end, capturing the
+        // head's state_root (the single anchor for ALL five c: proofs).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `c:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the daemon's cleartext counters once. chain_summary exposes
+        // all five accumulators plus total_supply (= live_total_supply).
+        // last_n=1 keeps the envelope light; we only read the counters.
+        // These are UNTRUSTED until each is hash-bound to a verified c:
+        // value_hash below.
+        auto summary = rpc.call("chain_summary", {{"last_n", uint32_t{1}}});
+        if (summary.contains("error") && !summary["error"].is_null()) {
+            throw std::runtime_error(
+                "chain_summary RPC error: " + summary["error"].dump());
+        }
+        // The cleartext value the daemon claims for each counter, in
+        // kCounters order. total_supply is the claimed live_total_supply.
+        uint64_t claimed[5] = {
+            summary.value("genesis_total",        uint64_t{0}),
+            summary.value("accumulated_subsidy",  uint64_t{0}),
+            summary.value("accumulated_inbound",  uint64_t{0}),
+            summary.value("accumulated_slashed",  uint64_t{0}),
+            summary.value("accumulated_outbound", uint64_t{0}),
+        };
+        uint64_t claimed_total = summary.value("total_supply", uint64_t{0});
+        bool have_claimed_total = summary.contains("total_supply");
+
+        // The single committee-anchored root every counter must commit to.
+        // Resolved lazily from the first counter's proof (which may anchor
+        // at a height ahead of vc.height if the chain advanced during the
+        // round-trip); thereafter every counter is required to match it,
+        // closing the split-root attack.
+        std::string anchor_root;       // empty until the first proof anchors
+        uint64_t    anchor_at = 0;
+
+        bool all_ok = true;
+        for (int ci = 0; ci < 5 && all_ok; ++ci) {
+            const std::string name = kCounters[ci];
+
+            // Canonical leaf key, byte-for-byte matching build_state_leaves:
+            //   "k:" + ("c:" + name)  ==  "k:c:" + name
+            std::vector<uint8_t> local_key;
+            {
+                std::string full = std::string("k:c:") + name;
+                local_key.assign(full.begin(), full.end());
+            }
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+
+            // Committed value for a counter is SHA256(u64_be(value)).
+            // Recompute it from the daemon's CLEARTEXT claim; the binding
+            // is the comparison against the proof's verified value_hash.
+            determ::crypto::SHA256Builder mb;
+            mb.append(claimed[ci]);
+            Hash expected_value_hash = mb.finalize();
+
+            // Fetch the `c:` state-proof. The `c:` namespace is a SIMPLE
+            // (ASCII-key) namespace: the daemon takes the bare counter
+            // name as `key` and rebuilds "k:c:" + name internally.
+            auto proof = rpc.call("state_proof",
+                {{"namespace", "c"}, {"key", name}});
+
+            if (proof.contains("error") && !proof["error"].is_null()) {
+                std::string err = proof["error"].is_string()
+                    ? proof["error"].get<std::string>()
+                    : proof["error"].dump();
+                // A counter leaf is ALWAYS present on an S-033 chain
+                // (const_leaf emits all five unconditionally), so a
+                // not_found here is itself anomalous — fail closed.
+                verdict = SupplyVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `c:` state-proof for counter '"
+                        + name + "': " + err
+                        + " (cannot verify supply trustlessly)";
+                all_ok = false;
+                break;
+            }
+
+            // Bind the proof to THIS counter: (1) key_bytes must equal the
+            // canonical "k:c:" + name key, (2) value_hash must equal the
+            // recomputed SHA256(u64_be(claimed value)). A key mismatch
+            // means the daemon served a proof for a different leaf; a
+            // value_hash mismatch means it is lying about the counter
+            // value while serving an honest proof. Either → UNVERIFIABLE.
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            if (proof_key_hex != local_key_hex) {
+                verdict = SupplyVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical counter key "
+                        + local_key_hex + " for '" + name
+                        + "' (daemon served a proof for a different leaf)";
+                all_ok = false;
+                break;
+            }
+            Hash proof_value_hash = from_hex_arr<32>(
+                proof.value("value_hash", std::string{}));
+            if (proof_value_hash != expected_value_hash) {
+                verdict = SupplyVerdict::UNVERIFIABLE;
+                detail  = "TAMPERED — daemon's chain_summary counter '" + name
+                        + "'=" + std::to_string(claimed[ci])
+                        + " hashes to " + to_hex(expected_value_hash)
+                        + " but the c: state-proof's value_hash is "
+                        + to_hex(proof_value_hash)
+                        + " — daemon is lying about the counter OR the proof";
+                all_ok = false;
+                break;
+            }
+
+            // Anchor the proof's claimed state_root to a committee-signed
+            // header. The first counter resolves the single anchor root
+            // (handling the race window where the chain advanced past
+            // vc.height during the round-trip); every later counter MUST
+            // match that exact root, closing the split-root attack.
+            uint64_t proof_height = proof.value("height", uint64_t{0});
+            std::string proof_root = proof.value("state_root", std::string{});
+
+            if (anchor_root.empty()) {
+                if (proof_height < vc.height) {
+                    throw std::runtime_error(
+                        "proof.height=" + std::to_string(proof_height)
+                        + " for '" + name + "' is BEFORE verified-chain head="
+                        + std::to_string(vc.height)
+                        + " — daemon is serving stale state");
+                }
+                if (proof_height > vc.height) {
+                    json committee_json;
+                    {
+                        json arr = json::array();
+                        for (auto& [domain_, pk] : committee_seed)
+                            arr.push_back({{"domain", domain_},
+                                           {"ed_pub", to_hex(pk)}});
+                        committee_json = json{{"members", arr}};
+                    }
+                    uint64_t anchor_index = proof_height - 1;
+                    auto pg = rpc.call("headers",
+                        {{"from", anchor_index}, {"count", 1}});
+                    if (!pg.contains("headers") || !pg["headers"].is_array()
+                        || pg["headers"].empty()) {
+                        throw std::runtime_error(
+                            "cannot fetch header at index="
+                            + std::to_string(anchor_index)
+                            + " (proof.height=" + std::to_string(proof_height)
+                            + ")");
+                    }
+                    auto& h = pg["headers"][0];
+                    std::string hdr_root = h.value("state_root", std::string{});
+                    if (hdr_root != proof_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match header["
+                            + std::to_string(anchor_index)
+                            + "].state_root=" + hdr_root);
+                    }
+                    auto vbs = verify_block_sigs(h, committee_json,
+                                                 /*bft=*/false);
+                    if (!vbs.ok)
+                        vbs = verify_block_sigs(h, committee_json,
+                                                /*bft=*/true);
+                    if (!vbs.ok) {
+                        throw std::runtime_error(
+                            "header[" + std::to_string(anchor_index)
+                            + "] committee-sig check failed: " + vbs.detail);
+                    }
+                    if (anchor_index >= vc.height) {
+                        auto walk = rpc.call("headers",
+                            {{"from", vc.height - 1},
+                             {"count", proof_height - vc.height + 2}});
+                        auto vh = verify_headers(walk, "", "");
+                        if (!vh.ok) {
+                            throw std::runtime_error(
+                                "prev_hash walk vc.height->proof.height: "
+                                + vh.detail);
+                        }
+                    }
+                    anchor_root = proof_root;
+                    anchor_at   = proof_height;
+                } else {
+                    if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+                    anchor_root = vc.head_state_root;
+                    anchor_at   = vc.height;
+                }
+            } else if (proof_root != anchor_root) {
+                // Split-root attack: this counter is anchored to a
+                // DIFFERENT root than the earlier counters. At most one
+                // root can equal the committee-verified head, so the five
+                // counters would not be a consistent snapshot. Fail closed.
+                verdict = SupplyVerdict::UNVERIFIABLE;
+                detail  = "counter '" + name + "' anchors to state_root="
+                        + proof_root + " but earlier counters anchored to "
+                        + anchor_root
+                        + " — daemon split the read across two states "
+                          "(cannot recompute the A1 identity over a single "
+                          "consistent snapshot)";
+                all_ok = false;
+                break;
+            }
+
+            // Merkle-verify the proof against the single anchored root.
+            auto vsp = verify_state_proof(proof, anchor_root);
+            if (!vsp.ok) {
+                verdict = SupplyVerdict::UNVERIFIABLE;
+                detail  = "merkle verification failed for counter '" + name
+                        + "': " + vsp.detail;
+                all_ok = false;
+                break;
+            }
+
+            // This counter is committee-committed under the single root.
+            cval[ci] = claimed[ci];
+        }
+
+        if (all_ok) {
+            // All five counters verified against the same committee-anchored
+            // root. Recompute the A1 closed-form identity entirely from the
+            // committed values (chain.hpp expected_total). Underflow-safe:
+            // the apply path maintains genesis_total + subsidy + inbound >=
+            // slashed + outbound at every block, but a malicious daemon
+            // could in principle present counters where it does not — guard
+            // explicitly so VIOLATED is reported rather than wrapping.
+            uint64_t pos = cval[0] + cval[1] + cval[2];   // gtotal+subsidy+inbound
+            uint64_t neg = cval[3] + cval[4];             // slashed+outbound
+            bool underflow = (neg > pos);
+            uint64_t expected_total = underflow ? 0 : (pos - neg);
+
+            state_root_used = anchor_root;
+            anchored_height = anchor_at;
+
+            if (underflow) {
+                // The five committee-committed counters do not satisfy the
+                // A1 non-negativity precondition — a genuine VIOLATED.
+                verdict = SupplyVerdict::VIOLATED;
+                detail  = "committed counters underflow the A1 identity "
+                          "(slashed+outbound > genesis+subsidy+inbound)";
+            } else if (have_claimed_total && claimed_total != expected_total) {
+                // The counters are individually committee-committed and
+                // internally well-formed, but the daemon's claimed
+                // total_supply disagrees with the closed form. The total
+                // is NOT itself leaf-committed (live_total_supply is the
+                // sum over a:/s: leaves, which we do not enumerate — the
+                // S-040 leaf_count boundary), so we report VIOLATED on the
+                // recomputed-vs-claimed mismatch.
+                verdict = SupplyVerdict::VIOLATED;
+                detail  = "recomputed expected_total="
+                        + std::to_string(expected_total)
+                        + " from committee-committed counters but daemon "
+                          "claims total_supply="
+                        + std::to_string(claimed_total)
+                        + " (A1 unitary-supply identity violated)";
+            } else {
+                verdict = SupplyVerdict::CONSERVED;
+            }
+        }
+
+        // Recompute the closed form for output (zero on a failed read).
+        uint64_t pos = cval[0] + cval[1] + cval[2];
+        uint64_t neg = cval[3] + cval[4];
+        uint64_t expected_total = (neg > pos) ? 0 : (pos - neg);
+        bool conserved = (verdict == SupplyVerdict::CONSERVED);
+
+        if (json_out) {
+            json out = {
+                {"conserved",            conserved},
+                {"verdict",              supply_verdict_str(verdict)},
+                {"namespace",            "c"},
+                {"genesis_total",        cval[0]},
+                {"accumulated_subsidy",  cval[1]},
+                {"accumulated_inbound",  cval[2]},
+                {"accumulated_slashed",  cval[3]},
+                {"accumulated_outbound", cval[4]},
+                {"expected_total",       expected_total},
+            };
+            if (have_claimed_total) out["claimed_total_supply"] = claimed_total;
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << supply_verdict_str(verdict) << "\n"
+                      << "  genesis pin:           matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:             c (A1 supply counters)\n";
+            if (verdict != SupplyVerdict::UNVERIFIABLE) {
+                std::cout << "  genesis_total:         " << cval[0] << "\n"
+                          << "  +accumulated_subsidy:  " << cval[1] << "\n"
+                          << "  +accumulated_inbound:  " << cval[2] << "\n"
+                          << "  -accumulated_slashed:  " << cval[3] << "\n"
+                          << "  -accumulated_outbound: " << cval[4] << "\n"
+                          << "  =expected_total:       " << expected_total << "\n";
+                if (have_claimed_total)
+                    std::cout << "  daemon total_supply:   " << claimed_total << "\n";
+                std::cout << "  state_root:            " << state_root_used << "\n"
+                          << "  anchored at H:         " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:                " << detail << "\n";
+        }
+
+        // Exit codes: CONSERVED → 0; VIOLATED → 2 (a sound verified
+        // violation, distinct from CONSERVED so a script can branch);
+        // UNVERIFIABLE → 3 (refused to assert). This mirrors the daemon's
+        // own `supply` command, which exits 2 on an A1 invariant violation.
+        if (verdict == SupplyVerdict::UNVERIFIABLE) return 3;
+        if (verdict == SupplyVerdict::VIOLATED)     return 2;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "supply-trustless: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────── committee-at-height ──────────────────────────
 
 // Tri-state for a --member membership query, mirroring the verify-* exit
@@ -2622,6 +3075,7 @@ int main(int argc, char** argv) {
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
+        if (cmd == "supply-trustless")      return cmd_supply_trustless(sub_argc, sub_argv);
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
         if (cmd == "verify-state-root")     return cmd_verify_state_root(sub_argc, sub_argv);
         if (cmd == "sign-tx")               return cmd_sign_tx(sub_argc, sub_argv);

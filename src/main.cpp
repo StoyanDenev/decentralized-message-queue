@@ -1126,6 +1126,24 @@ Additional in-process tests:
                                               half of the light-client argument
                                               that test-state-proof-namespaces
                                               (membership only) does not cover.
+  determ test-subsidy-pool-clamp              E4 finite-pool / E3 lottery
+                                              subsidy CLAMP accounting — the
+                                              partial-payment block where the
+                                              pool has fewer units left than
+                                              block_subsidy, so subsidy_this_
+                                              block = min(base, remaining). Pins
+                                              that the CLAMPED value (not the
+                                              literal block_subsidy) is what
+                                              splits to creators AND what ticks
+                                              accumulated_subsidy; dust on the
+                                              clamped total; post-drain "runs on
+                                              fees alone" (subsidy 0, fees still
+                                              split); LOTTERY jackpot truncated
+                                              by a finite pool (mode 1 + pool
+                                              together); A1 across the clamp
+                                              transition; and c:-namespace
+                                              state_root sensitivity to the
+                                              clamped accumulated_subsidy.
 )" << "\n";
 }
 
@@ -38701,6 +38719,261 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-proof-value-hash "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // E4 finite-pool / E3 lottery subsidy CLAMP accounting. The existing
+    // test-subsidy-distribution and test-fee-distribution-edge pin the FULL-
+    // payment split (each creator gets block_subsidy/N + dust); this test
+    // pins the PARTIAL-payment block — the one where the E4 pool has fewer
+    // units left than block_subsidy_, so chain.cpp:1267-1272 clamps
+    // subsidy_this_block = min(base_subsidy, remaining). The clamped value
+    // (not the literal block_subsidy_) is what flows to creators AND what
+    // ticks accumulated_subsidy_ (chain.cpp:1390-1391) — the equality that
+    // makes E4 A1-consistent. Also pins the un-tested LOTTERY×finite-pool
+    // interaction: a jackpot block_subsidy_*M truncated to `remaining`
+    // (subsidy_mode_==1 AND subsidy_pool_initial_!=0 simultaneously — both
+    // existing tests exercise these knobs in isolation). Plus the post-drain
+    // "runs on fees alone" contract (subsidy_this_block==0 but fees still
+    // split to creators), and c:-namespace state_root sensitivity to the
+    // accumulated_subsidy_ counter at the clamp boundary.
+    if (cmd == "test-subsidy-pool-clamp") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Two creators so the split (and the dust-to-creator[0] rule) is
+        // exercised at the clamp boundary, not just a single-creator credit.
+        GenesisConfig cfg;
+        cfg.chain_id = "subsidy-pool-clamp-test";
+        GenesisCreator alice_c, bob_c;
+        alice_c.domain = "alice"; bob_c.domain = "bob";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i) {
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+            bob_c.ed_pub[i]   = uint8_t(0x20 + i);
+        }
+        cfg.initial_creators = {alice_c, bob_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 1000;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // Helper: append an empty (fee-free) creator block at the chain tip.
+        auto mine = [&](Chain& c) {
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob"};
+            c.append(b);
+        };
+
+        // === Partial-payment block: per-creator credit reflects the CLAMP ===
+
+        // 1. Pool = 130, block_subsidy = 100. Block 1 pays full 100 (split
+        //    50/50, no dust). Block 2: only 30 left in the pool, so
+        //    subsidy_this_block clamps 100 -> 30. The 30 is split 15/15
+        //    (no dust). This is the assertion test-subsidy-distribution
+        //    case 6 omits — it only checks accumulated_subsidy(), never the
+        //    creators' actual credit during the clamped block.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            c.set_subsidy_pool_initial(130);
+
+            mine(c);  // block 1: full 100 -> 50/50
+            check(c.balance("alice") == 1050 && c.balance("bob") == 1050,
+                  "full block: 100 split 50/50 (no dust)");
+            check(c.accumulated_subsidy() == 100,
+                  "full block: accumulated_subsidy ticks by full 100");
+
+            uint64_t a_before = c.balance("alice");
+            uint64_t b_before = c.balance("bob");
+            mine(c);  // block 2: clamp 100 -> 30, split 15/15
+            check(c.balance("alice") == a_before + 15,
+                  "clamped block: alice credited 15 (= clamped 30 / 2), NOT 50");
+            check(c.balance("bob") == b_before + 15,
+                  "clamped block: bob credited 15 (clamp flows the SAME to both)");
+            check(c.accumulated_subsidy() == 130,
+                  "clamped block: accumulated_subsidy ticks by clamped 30 (not 100)");
+        }
+
+        // === Clamp leaves an ODD remainder: dust still routes to creator[0] ===
+
+        // 2. Pool = 25, block_subsidy = 100. First (and only) subsidy block
+        //    clamps 100 -> 25, split 12/12 + dust 1 to creator[0] (alice,
+        //    since creators are alphabetically ordered). Verifies the dust
+        //    rule (chain.cpp:1298-1304) fires on the CLAMPED total, not the
+        //    literal block_subsidy_.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            c.set_subsidy_pool_initial(25);
+
+            mine(c);  // clamp 100 -> 25, split 12/12 + dust 1
+            check(c.balance("alice") == 1000 + 12 + 1,
+                  "clamp-with-dust: alice 12 share + 1 dust = 1013 (creator[0])");
+            check(c.balance("bob") == 1000 + 12,
+                  "clamp-with-dust: bob 12 share, no dust = 1012");
+            check(c.accumulated_subsidy() == 25,
+                  "clamp-with-dust: accumulated_subsidy ticks by clamped 25");
+        }
+
+        // === Post-drain: subsidy_this_block == 0, chain runs on FEES ALONE ===
+
+        // 3. Pool = 40, block_subsidy = 40. Block 1 drains it exactly
+        //    (accumulated_subsidy 0 -> 40). Block 2 carries a fee-bearing
+        //    TRANSFER but the pool is empty: subsidy_this_block == 0, yet the
+        //    fee still splits to creators and accumulated_subsidy MUST NOT
+        //    tick (the "runs on fees alone" contract, chain.cpp:1240-1242).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(40);
+            c.set_subsidy_pool_initial(40);
+
+            mine(c);  // block 1: drains the pool exactly
+            check(c.accumulated_subsidy() == 40,
+                  "drain block: pool emptied (accumulated_subsidy == 40 == cap)");
+
+            // Block 2: a 20-unit fee, pool empty.
+            uint64_t a_before = c.balance("alice");
+            uint64_t b_before = c.balance("bob");
+            Transaction tx;
+            tx.type = TxType::TRANSFER;
+            tx.from = "alice"; tx.to = "bob";
+            tx.amount = 0; tx.fee = 20; tx.nonce = 0;
+            Block blk;
+            blk.index = c.height();
+            blk.prev_hash = c.head().compute_hash();
+            blk.creators = {"alice", "bob"};
+            blk.transactions.push_back(tx);
+            c.append(blk);
+
+            // fee 20 + subsidy 0 = 20 distributed -> 10/10 (no dust). alice
+            // paid the 20 fee then got her 10 creator share back.
+            check(c.balance("alice") == a_before - 20 + 10,
+                  "post-drain: alice -20 fee +10 creator share (fees-only split)");
+            check(c.balance("bob") == b_before + 10,
+                  "post-drain: bob +10 creator share from fee pool");
+            check(c.accumulated_subsidy() == 40,
+                  "post-drain: accumulated_subsidy STAYS 40 (0 mint, fees only)");
+        }
+
+        // === LOTTERY jackpot CLAMPED by the finite pool (untested combo) ===
+
+        // 4. subsidy_mode = LOTTERY, M = 4, block_subsidy = 50. A jackpot
+        //    block would pay 50*4 = 200, but the pool only holds 70. The
+        //    clamp must truncate the jackpot 200 -> 70 (min(jackpot,
+        //    remaining)). This is the subsidy_mode_==1 AND
+        //    subsidy_pool_initial_!=0 path that neither
+        //    test-subsidy-distribution nor test_lottery_subsidy.sh drives.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(50);
+            c.set_subsidy_mode(1);
+            c.set_lottery_jackpot_multiplier(4);
+            c.set_subsidy_pool_initial(70);
+
+            Block b;
+            b.index = c.height();
+            b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice", "bob"};
+            b.cumulative_rand = Hash{};  // all-zero u64 -> 0 % 4 == 0 -> jackpot
+            c.append(b);
+
+            check(c.accumulated_subsidy() == 70,
+                  "lottery jackpot clamped: 50*4=200 truncated to pool's 70");
+            // 70 split 35/35 (no dust).
+            check(c.balance("alice") == 1035 && c.balance("bob") == 1035,
+                  "lottery jackpot clamped: 70 split 35/35 to creators");
+        }
+
+        // === A1 invariant holds across the clamp transition ===
+
+        // 5. expected_total == live_total_supply at the full block, the
+        //    clamped block, and the drained block — the clamp must keep the
+        //    accumulated_subsidy_ counter in lockstep with the actual mint.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_block_subsidy(100);
+            c.set_subsidy_pool_initial(130);
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: holds at genesis baseline");
+
+            mine(c);  // full 100
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: holds after full-payment block");
+            mine(c);  // clamp -> 30
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: holds after clamped (partial-pool) block");
+            mine(c);  // pool drained -> 0
+            check(c.expected_total() == c.live_total_supply(),
+                  "A1: holds after drained (zero-subsidy) block");
+
+            // Closed-form identity at the end of the clamp sequence.
+            uint64_t computed = c.genesis_total()
+                              + c.accumulated_subsidy()
+                              + c.accumulated_inbound()
+                              - c.accumulated_slashed()
+                              - c.accumulated_outbound();
+            check(computed == c.live_total_supply(),
+                  "A1 identity: genesis + subsidy(clamped) + in - slashed - out == live");
+            // Total minted across the 3 blocks is exactly the pool cap (130),
+            // never block_subsidy_*3 = 300 — the clamp is the only mint cap.
+            check(c.accumulated_subsidy() == 130,
+                  "clamp cap: total mint == pool cap 130 (never 3*100=300)");
+        }
+
+        // === state_root is sensitive to the clamped accumulated_subsidy ===
+
+        // 6. Two chains with DIFFERENT pool caps diverge in their
+        //    accumulated_subsidy_ after a clamping block, so their state_root
+        //    (the c:accumulated_subsidy leaf, chain.cpp:405) must differ even
+        //    though every other input is identical.
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            c1.set_block_subsidy(100); c1.set_subsidy_pool_initial(30);  // clamps to 30
+            c2.set_block_subsidy(100); c2.set_subsidy_pool_initial(70);  // clamps to 70
+            mine(c1);
+            mine(c2);
+            check(c1.accumulated_subsidy() != c2.accumulated_subsidy(),
+                  "divergent clamp: 30 != 70 accumulated_subsidy");
+            check(c1.compute_state_root() != c2.compute_state_root(),
+                  "state_root sensitive to clamped accumulated_subsidy (c: leaf)");
+        }
+
+        // === Determinism: same clamp sequence -> identical state_root ===
+
+        // 7. Two chains driven through the SAME clamp sequence land on a
+        //    byte-identical state_root — the clamp is a pure function of
+        //    (block_subsidy_, subsidy_pool_initial_, accumulated_subsidy_).
+        {
+            Chain c1; c1.append(make_genesis_block(cfg));
+            Chain c2; c2.append(make_genesis_block(cfg));
+            for (auto* cp : {&c1, &c2}) {
+                cp->set_block_subsidy(100);
+                cp->set_subsidy_pool_initial(130);
+                mine(*cp);  // full
+                mine(*cp);  // clamp -> 30
+            }
+            check(c1.accumulated_subsidy() == c2.accumulated_subsidy(),
+                  "determinism: identical clamp sequence -> identical accumulated_subsidy");
+            check(c1.compute_state_root() == c2.compute_state_root(),
+                  "determinism: identical clamp sequence -> identical state_root");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": subsidy-pool-clamp "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

@@ -17539,6 +17539,431 @@ int cmd_account_balance_history(int argc, char** argv) {
     return 0;
 }
 
+// ── subsidy-schedule --block-subsidy <S> --to-height <H> [...] [--json] ──────
+// OFFLINE forward projection of the FLAT / E4 block-subsidy emission curve
+// from genesis-pinned parameters alone. No daemon, no snapshot, no RPC — a
+// pure deterministic calculator over the chain's per-block subsidy rule
+// (src/chain/chain.cpp::apply_transactions, ~line 1250-1272):
+//
+//     base_subsidy      = block_subsidy_              (FLAT mode)
+//     subsidy_this_block = (pool_initial == 0)
+//                          ? base_subsidy
+//                          : min(base_subsidy, pool_initial - accumulated_subsidy)
+//     accumulated_subsidy += subsidy_this_block       (A1 mint counter)
+//
+// This command answers the forward-looking question the snapshot-only
+// `supply-audit` cannot: given block_subsidy S and (optional E4) finite
+// fund P, HOW MUCH subsidy is minted by some target height, WHEN does the
+// finite fund drain to zero, and what total supply results. It is the
+// dual of supply-audit — supply-audit verifies a captured snapshot's A1
+// conservation identity backward; subsidy-schedule projects the issuance
+// schedule forward.
+//
+// Emission model (FLAT / E4 only — see note on E3 lottery below):
+//   * Perpetual (P == 0): every projected block mints exactly S. Cumulative
+//     over N blocks = N * S; the fund never drains.
+//   * Finite (P  > 0): the fund holds `remaining = P - from_accumulated`.
+//     Each block mints min(S, remaining_at_that_block). The first
+//     floor(remaining / S) blocks each mint the full S; the next single
+//     block mints the partial tail `remaining % S` (when non-zero) and
+//     exhausts the fund; every block thereafter mints 0 and the chain
+//     runs on transaction fees alone. The drain height is the index of
+//     that last paying block, counted from `from_height`.
+//
+// E3 LOTTERY note: subsidy_mode == 1 keeps the SAME total issuance schedule
+// (genesis pins expected per-block value == FLAT S; chain.hpp comment at
+// subsidy_mode_). It only redistributes WHICH blocks pay (jackpot variance),
+// not how much is minted in expectation. A deterministic projector cannot —
+// and by design must not — predict the per-block lottery draw (it is seeded
+// by each block's commit-reveal cumulative_rand, unknown ahead of time). So
+// this tool projects the SCHEDULED / EXPECTED emission, which is identical
+// under FLAT and LOTTERY; the cumulative + drain figures hold in expectation
+// for LOTTERY and exactly for FLAT.
+//
+// determ-wallet does NOT link the chain library (TCB separation); the rule
+// is replicated here over plain integers. All accumulation is done in
+// __uint128_t (where available) so a long horizon * large subsidy cannot
+// silently wrap the way a uint64 chain counter could — the human/JSON
+// output carries an `overflows_u64` flag when the projected cumulative or
+// total exceeds 2^64-1, since the node's own uint64 counters WOULD wrap
+// there (fidelity: the projector flags the condition rather than hiding it).
+//
+// CLI:
+//   --block-subsidy <S>     REQUIRED. Per-block FLAT subsidy (genesis
+//                           GenesisConfig.block_subsidy). 0 is legal
+//                           (subsidy disabled — fees only) and projects a
+//                           flat-zero schedule.
+//   --to-height <H>         REQUIRED. Projection horizon (block index,
+//                           inclusive). Cumulative is computed over the
+//                           paying blocks in (from_height, to_height].
+//   --from-height <F>       Starting block index (default 0). The genesis
+//                           block (index 0) pays no subsidy in apply terms
+//                           (no creators), so emission is credited for the
+//                           H - F blocks AFTER from_height through to_height.
+//   --from-accumulated <A>  Subsidy already minted as of from_height
+//                           (default 0). Source it from a snapshot's
+//                           `accumulated_subsidy` to project forward from a
+//                           live chain. Only meaningful for the finite-pool
+//                           drain math; ignored for cumulative-FROM-here.
+//   --pool-initial <P>      E4 finite subsidy fund (default 0 = unlimited /
+//                           perpetual). Non-zero hard-caps total cumulative
+//                           subsidy ever minted at P (GenesisConfig.
+//                           subsidy_pool_initial).
+//   --genesis-total <G>     Genesis money supply (default 0). When given,
+//                           the projected total supply (G + cumulative
+//                           subsidy at the horizon) is reported. Mirrors
+//                           the A1 identity's additive subsidy term.
+//   --json                  One-line machine-readable JSON.
+//
+// JSON shape:
+//   { block_subsidy, from_height, to_height, blocks_projected,
+//     from_accumulated, pool_initial, perpetual,
+//     subsidy_per_block_now, cumulative_subsidy_at_horizon,
+//     accumulated_subsidy_at_horizon, pool_remaining_at_horizon,
+//     drains: bool, drain_height (when drains), drain_in_blocks,
+//     final_partial_subsidy, genesis_total, projected_total_supply,
+//     overflows_u64 }
+//
+// Exit codes:
+//   0  schedule projected
+//   1  args / range error (missing required flag, to-height < from-height)
+int cmd_subsidy_schedule(int argc, char** argv) {
+    bool     have_subsidy = false;
+    uint64_t block_subsidy = 0;
+    bool     have_to       = false;
+    uint64_t to_height     = 0;
+    uint64_t from_height   = 0;
+    uint64_t from_accum    = 0;
+    uint64_t pool_initial  = 0;
+    bool     have_genesis  = false;
+    uint64_t genesis_total = 0;
+    bool     json_out      = false;
+
+    auto parse_u64_arg = [](const char* raw, bool& ok) -> uint64_t {
+        try {
+            size_t pos = 0;
+            unsigned long long v = std::stoull(raw, &pos, 10);
+            if (pos != std::strlen(raw)) { ok = false; return 0; }
+            ok = true;
+            return static_cast<uint64_t>(v);
+        } catch (...) { ok = false; return 0; }
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--block-subsidy" && i + 1 < argc) {
+            bool ok = false; block_subsidy = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "subsidy-schedule: --block-subsidy must be "
+                                    "a decimal u64\n"; return 1; }
+            have_subsidy = true;
+        }
+        else if (a == "--to-height" && i + 1 < argc) {
+            bool ok = false; to_height = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "subsidy-schedule: --to-height must be a "
+                                    "decimal u64\n"; return 1; }
+            have_to = true;
+        }
+        else if (a == "--from-height" && i + 1 < argc) {
+            bool ok = false; from_height = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "subsidy-schedule: --from-height must be a "
+                                    "decimal u64\n"; return 1; }
+        }
+        else if (a == "--from-accumulated" && i + 1 < argc) {
+            bool ok = false; from_accum = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "subsidy-schedule: --from-accumulated must "
+                                    "be a decimal u64\n"; return 1; }
+        }
+        else if (a == "--pool-initial" && i + 1 < argc) {
+            bool ok = false; pool_initial = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "subsidy-schedule: --pool-initial must be a "
+                                    "decimal u64\n"; return 1; }
+        }
+        else if (a == "--genesis-total" && i + 1 < argc) {
+            bool ok = false; genesis_total = parse_u64_arg(argv[++i], ok);
+            if (!ok) { std::cerr << "subsidy-schedule: --genesis-total must be "
+                                    "a decimal u64\n"; return 1; }
+            have_genesis = true;
+        }
+        else if (a == "--json") json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet subsidy-schedule --block-subsidy <S>\n"
+                "         --to-height <H> [--from-height <F>]\n"
+                "         [--from-accumulated <A>] [--pool-initial <P>]\n"
+                "         [--genesis-total <G>] [--json]\n"
+                "\n"
+                "  OFFLINE forward projection of the FLAT / E4 block-subsidy\n"
+                "  emission curve from genesis-pinned parameters. No daemon,\n"
+                "  no snapshot, no RPC — pure deterministic arithmetic over\n"
+                "  the chain's per-block subsidy rule\n"
+                "  (src/chain/chain.cpp::apply_transactions ~L1250-1272):\n"
+                "\n"
+                "    subsidy_this_block = (pool_initial == 0)\n"
+                "        ? block_subsidy\n"
+                "        : min(block_subsidy, pool_initial - accumulated_subsidy)\n"
+                "\n"
+                "  The forward dual of `supply-audit` (which verifies a\n"
+                "  captured snapshot's A1 identity backward): subsidy-schedule\n"
+                "  projects how much subsidy is minted by a target height,\n"
+                "  WHEN an E4 finite fund drains to zero, and the resulting\n"
+                "  total supply (genesis_total + cumulative subsidy).\n"
+                "\n"
+                "  --block-subsidy <S>     REQUIRED. Per-block FLAT subsidy\n"
+                "                          (GenesisConfig.block_subsidy; 0 ok).\n"
+                "  --to-height <H>         REQUIRED. Projection horizon (block\n"
+                "                          index, inclusive). Must be >= from.\n"
+                "  --from-height <F>       Start block index (default 0). The\n"
+                "                          H - F blocks after F are credited.\n"
+                "  --from-accumulated <A>  Subsidy already minted as of F\n"
+                "                          (default 0). Source it from a\n"
+                "                          snapshot's accumulated_subsidy.\n"
+                "  --pool-initial <P>      E4 finite fund (default 0 =\n"
+                "                          unlimited / perpetual). Caps total\n"
+                "                          cumulative subsidy at P.\n"
+                "  --genesis-total <G>     Genesis supply (default 0). Reports\n"
+                "                          projected_total_supply = G + cum.\n"
+                "  --json                  One-line JSON output.\n"
+                "\n"
+                "  E3 LOTTERY: subsidy_mode==1 keeps the SAME expected\n"
+                "  issuance schedule (expected per-block == FLAT S); this tool\n"
+                "  projects the scheduled/expected emission (exact for FLAT,\n"
+                "  in-expectation for LOTTERY — the per-block draw is seeded\n"
+                "  by unpredictable commit-reveal randomness and cannot be\n"
+                "  projected deterministically).\n"
+                "\n"
+                "  Accumulation is __uint128_t-wide where available; an\n"
+                "  `overflows_u64` flag is set when the projected cumulative\n"
+                "  or total exceeds 2^64-1 (where the node's uint64 counter\n"
+                "  would itself wrap).\n"
+                "\n"
+                "  Exit codes: 0 projected, 1 args/range error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "subsidy-schedule: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet subsidy-schedule --block-subsidy "
+                         "<S> --to-height <H> (see --help)\n";
+            return 1;
+        }
+    }
+
+    if (!have_subsidy) {
+        std::cerr << "subsidy-schedule: --block-subsidy <S> is required\n";
+        return 1;
+    }
+    if (!have_to) {
+        std::cerr << "subsidy-schedule: --to-height <H> is required\n";
+        return 1;
+    }
+    if (to_height < from_height) {
+        std::cerr << "subsidy-schedule: --to-height (" << to_height
+                  << ") must be >= --from-height (" << from_height << ")\n";
+        return 1;
+    }
+
+    // Blocks that mint subsidy in the projected window: the H - F blocks
+    // after from_height through to_height (genesis block 0 has no creators,
+    // so emission is credited per applied block AFTER the start anchor).
+    const uint64_t blocks_projected = to_height - from_height;
+
+    // Finite-pool remaining at from_height (E4). When pool_initial == 0 the
+    // fund is unlimited and the perpetual branch applies.
+    const bool perpetual = (pool_initial == 0);
+    uint64_t pool_remaining_at_start = 0;
+    if (!perpetual) {
+        pool_remaining_at_start = pool_initial > from_accum
+                                ? pool_initial - from_accum : 0;
+    }
+
+    // Drain math (finite pool only). full_blocks = floor(remaining / S) blocks
+    // each mint the full S; one more block mints the partial tail
+    // (remaining % S) when non-zero, exhausting the fund. drain_in_blocks is
+    // the count of paying blocks from from_height; the drain HEIGHT is
+    // from_height + that count (the index of the last paying block).
+    bool     drains            = false;
+    uint64_t drain_in_blocks   = 0;   // paying blocks until fund exhausted
+    uint64_t drain_height      = 0;
+    uint64_t final_partial     = 0;   // amount minted by the last paying block
+    uint64_t paying_blocks_capped = blocks_projected;  // within the window
+
+    if (!perpetual) {
+        if (block_subsidy == 0) {
+            // Degenerate: zero subsidy never drains a non-zero fund (and a
+            // zero fund is already drained). Report no paying blocks.
+            paying_blocks_capped = 0;
+        } else {
+            uint64_t full_blocks = pool_remaining_at_start / block_subsidy;
+            uint64_t tail        = pool_remaining_at_start % block_subsidy;
+            // Total blocks that pay a non-zero amount before the fund hits 0.
+            uint64_t total_paying = full_blocks + (tail != 0 ? 1 : 0);
+            drains            = true;
+            drain_in_blocks   = total_paying;
+            drain_height      = from_height + total_paying;
+            final_partial     = (tail != 0) ? tail
+                              : (full_blocks != 0 ? block_subsidy : 0);
+            // Within THIS projection window, only min(total_paying,
+            // blocks_projected) blocks actually pay.
+            paying_blocks_capped =
+                std::min<uint64_t>(total_paying, blocks_projected);
+        }
+    }
+
+    // Cumulative subsidy minted across the projection window. 128-bit
+    // accumulation so a long horizon * large subsidy is exact and the
+    // u64-overflow condition can be flagged rather than silently wrapped.
+#if defined(__SIZEOF_INT128__)
+    using acc_t = __uint128_t;
+#else
+    using acc_t = uint64_t;
+#endif
+    acc_t cumulative;
+    uint64_t subsidy_per_block_now = block_subsidy;  // FLAT rate at from_height
+    if (perpetual) {
+        cumulative = (acc_t)block_subsidy * (acc_t)blocks_projected;
+    } else if (block_subsidy == 0) {
+        cumulative = 0;
+        subsidy_per_block_now = 0;
+    } else {
+        // full-S blocks within the window + the partial tail iff it falls
+        // inside the window. paying_blocks_capped already bounds to the
+        // window; reconstruct the cumulative exactly.
+        uint64_t full_blocks = pool_remaining_at_start / block_subsidy;
+        uint64_t tail        = pool_remaining_at_start % block_subsidy;
+        uint64_t full_in_window = std::min<uint64_t>(full_blocks,
+                                                     blocks_projected);
+        cumulative = (acc_t)block_subsidy * (acc_t)full_in_window;
+        // The single tail block pays `tail`; it is in the window iff the
+        // window extends past all the full blocks AND a tail exists.
+        if (tail != 0 && blocks_projected > full_blocks) {
+            cumulative += (acc_t)tail;
+        }
+        // Subsidy rate at from_height itself: full S if the fund still has
+        // at least S available there, else whatever remains (the tail), else 0.
+        if (pool_remaining_at_start >= block_subsidy) {
+            subsidy_per_block_now = block_subsidy;
+        } else {
+            subsidy_per_block_now = (uint64_t)pool_remaining_at_start;
+        }
+    }
+
+    // accumulated_subsidy at the horizon = from_accumulated + cumulative,
+    // capped at pool_initial for the finite-pool case (it can never exceed
+    // the fund). pool_remaining at horizon follows.
+    acc_t accumulated_at_horizon = (acc_t)from_accum + cumulative;
+    acc_t pool_remaining_at_horizon = 0;
+    if (!perpetual) {
+        if ((acc_t)pool_initial > accumulated_at_horizon) {
+            pool_remaining_at_horizon =
+                (acc_t)pool_initial - accumulated_at_horizon;
+        } else {
+            pool_remaining_at_horizon = 0;
+        }
+    }
+
+    // projected_total_supply = genesis_total + cumulative subsidy at horizon.
+    // (Mirrors the A1 additive subsidy term; ignores inbound/slashed/outbound,
+    // which are not part of an emission-schedule projection.)
+    acc_t projected_total = (acc_t)genesis_total + cumulative;
+
+    // u64-overflow flags: where the node's own uint64 counters would wrap.
+    const acc_t U64_MAX_ACC = (acc_t)UINT64_MAX;
+    bool overflows_u64 =
+        (cumulative > U64_MAX_ACC) ||
+        (accumulated_at_horizon > U64_MAX_ACC) ||
+        (projected_total > U64_MAX_ACC);
+
+    // Render 128-bit accumulators as exact decimal strings for JSON / human
+    // output (values can exceed 2^64 under a pathological projection).
+    auto acc_to_dec = [](acc_t v) -> std::string {
+        if (v == 0) return "0";
+        std::string out;
+        while (v > 0) { out.push_back(char('0' + int(v % 10))); v /= 10; }
+        std::reverse(out.begin(), out.end());
+        return out;
+    };
+    std::string cumulative_str   = acc_to_dec(cumulative);
+    std::string accum_horizon_str = acc_to_dec(accumulated_at_horizon);
+    std::string pool_remaining_str = perpetual
+        ? std::string("unlimited") : acc_to_dec(pool_remaining_at_horizon);
+    std::string total_supply_str = acc_to_dec(projected_total);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["block_subsidy"]                  = block_subsidy;
+        r["from_height"]                    = from_height;
+        r["to_height"]                      = to_height;
+        r["blocks_projected"]               = blocks_projected;
+        r["from_accumulated"]               = from_accum;
+        r["pool_initial"]                   = pool_initial;
+        r["perpetual"]                      = perpetual;
+        r["subsidy_per_block_now"]          = subsidy_per_block_now;
+        r["cumulative_subsidy_at_horizon"]  = cumulative_str;
+        r["accumulated_subsidy_at_horizon"] = accum_horizon_str;
+        r["pool_remaining_at_horizon"]      = pool_remaining_str;
+        r["drains"]                         = drains;
+        if (drains) {
+            r["drain_height"]               = drain_height;
+            r["drain_in_blocks"]            = drain_in_blocks;
+            r["final_partial_subsidy"]      = final_partial;
+        }
+        r["paying_blocks_in_window"]        = paying_blocks_capped;
+        r["genesis_total"]                  = genesis_total;
+        r["projected_total_supply"]         = total_supply_str;
+        r["overflows_u64"]                  = overflows_u64;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "subsidy-schedule (FLAT / E4 emission projection)\n";
+        std::cout << "  block_subsidy:                 " << block_subsidy << "\n";
+        std::cout << "  from_height:                   " << from_height << "\n";
+        std::cout << "  to_height:                     " << to_height << "\n";
+        std::cout << "  blocks_projected:              "
+                  << blocks_projected << "\n";
+        std::cout << "  from_accumulated:              " << from_accum << "\n";
+        std::cout << "  pool_initial:                  "
+                  << (perpetual ? std::string("0 (perpetual / unlimited)")
+                                : std::to_string(pool_initial)) << "\n";
+        std::cout << "  subsidy_per_block_now:         "
+                  << subsidy_per_block_now << "\n";
+        std::cout << "  ---- projection at horizon ----\n";
+        std::cout << "  cumulative_subsidy:            "
+                  << cumulative_str << "\n";
+        std::cout << "  accumulated_subsidy:           "
+                  << accum_horizon_str << "\n";
+        std::cout << "  pool_remaining:                "
+                  << pool_remaining_str << "\n";
+        std::cout << "  paying_blocks_in_window:       "
+                  << paying_blocks_capped << "\n";
+        if (drains) {
+            std::cout << "  ---- E4 finite-fund drain ----\n";
+            std::cout << "  drains:                        yes\n";
+            std::cout << "  drain_height:                  "
+                      << drain_height << "\n";
+            std::cout << "  drain_in_blocks (from start):  "
+                      << drain_in_blocks << "\n";
+            std::cout << "  final_partial_subsidy:         "
+                      << final_partial << "\n";
+        } else if (!perpetual) {
+            std::cout << "  drains:                        no "
+                         "(zero subsidy or empty fund)\n";
+        } else {
+            std::cout << "  drains:                        no (perpetual)\n";
+        }
+        if (have_genesis) {
+            std::cout << "  ---- projected total supply ----\n";
+            std::cout << "  genesis_total:                 "
+                      << genesis_total << "\n";
+            std::cout << "  projected_total_supply:        "
+                      << total_supply_str
+                      << "  (genesis_total + cumulative subsidy)\n";
+        }
+        if (overflows_u64) {
+            std::cout << "  NOTE: projection exceeds 2^64-1 — the node's "
+                         "uint64 counters WOULD wrap at this horizon\n";
+        }
+    }
+    return 0;
+}
+
 // ── supply-audit --snapshot <file> [--in <file>] [--json] ───────────────────
 // OFFLINE recompute of the A1 "unitary-supply" balance identity from a
 // snapshot JSON. The chain asserts this invariant after every block apply
@@ -20654,6 +21079,23 @@ void print_usage() {
         "                                             invalid_snapshot}. Exit 0 balanced, 1\n"
         "                                             args/file/parse error, 2 identity\n"
         "                                             VIOLATED.\n"
+        "  subsidy-schedule                           OFFLINE forward projection of the FLAT /\n"
+        "    --block-subsidy <S>                      E4 block-subsidy emission curve from\n"
+        "    --to-height <H>                          genesis-pinned params (no daemon, no\n"
+        "    [--from-height <F>]                      snapshot, no RPC). The forward dual of\n"
+        "    [--from-accumulated <A>]                 supply-audit: projects cumulative subsidy\n"
+        "    [--pool-initial <P>]                     minted by a target height, the E4 finite-\n"
+        "    [--genesis-total <G>]                    fund drain height, and the resulting total\n"
+        "    [--json]                                 supply (genesis_total + cumulative). Rule\n"
+        "                                             replicated from chain.cpp apply: subsidy_\n"
+        "                                             this_block = pool_initial==0 ? S :\n"
+        "                                             min(S, pool_initial - accumulated). E3\n"
+        "                                             LOTTERY keeps the SAME expected schedule,\n"
+        "                                             so the projection is exact for FLAT and\n"
+        "                                             in-expectation for LOTTERY. 128-bit\n"
+        "                                             accumulation; sets overflows_u64 when the\n"
+        "                                             projection exceeds 2^64-1. Exit 0\n"
+        "                                             projected, 1 args/range error.\n"
         "  param-change-build --name <P>              OFFLINE constructor for a canonical A5\n"
         "                     (--value <N> |          governance PARAM_CHANGE transaction body.\n"
         "                      --value-hex <hex>)      Assembles the PARAM_CHANGE payload + the\n"
@@ -20756,6 +21198,7 @@ int main(int argc, char** argv) {
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
     if (cmd == "state-proof-verify") return cmd_state_proof_verify(argc - 2, argv + 2);
     if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
+    if (cmd == "subsidy-schedule") return cmd_subsidy_schedule(argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
