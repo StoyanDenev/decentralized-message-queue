@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (29 total + help / version):
+// Subcommands (30 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -21,6 +21,7 @@
 //   balance-trustless        Composite: verify chain + state-proof balance
 //   nonce-trustless          Composite: verify chain + state-proof nonce
 //   stake-trustless          Composite: verify chain + state-proof stake
+//   verify-unstake-eligibility Verdict: is s: stake unlockable at head (S-017)
 //   supply-trustless         Composite: verify 5 c: counters + A1 identity
 //   account-history          Composite: verified balance/nonce over a range
 //   sign-tx                  Offline signed TRANSFER/STAKE/UNSTAKE
@@ -127,6 +128,30 @@ void print_usage() {
         "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
         "      bonded). A domain with no stake leaf fails closed (the daemon's\n"
         "      state_proof returns not_found) — never a bare zero.\n"
+        "  verify-unstake-eligibility --rpc-port <N> --genesis <file>\n"
+        "                             --domain <D> [--json]\n"
+        "      Prove whether <D>'s locked stake is CURRENTLY eligible to be\n"
+        "      unstaked — i.e. whether an UNSTAKE tx mined at the committee-\n"
+        "      verified head height H would pass the S-017 chain/producer/\n"
+        "      validator gate. Composes stake-trustless (anchor genesis +\n"
+        "      committee-verify the header chain to head + Merkle-verify the\n"
+        "      s:-namespace leaf + hash-bind the daemon's `stake_info`\n"
+        "      cleartext) and then re-runs the SAME predicate the validator\n"
+        "      enforces in BlockValidator::check_tx (`b.index >= unlock_height`,\n"
+        "      where b.index is the next-block height H+1 at the verified head\n"
+        "      H) over the committee-attested unlock_height — never the\n"
+        "      daemon's raw claim. Both inputs (the head height AND the\n"
+        "      unlock_height) are committee-anchored, so the verdict cannot be\n"
+        "      faked by a lying daemon. Four sound verdicts (exit 0): ELIGIBLE\n"
+        "      (locked>0 and an unlock_height <= H+1 has matured), LOCKED\n"
+        "      (locked>0 but H+1 < unlock_height — blocks_remaining reported),\n"
+        "      BONDED (locked>0 but unlock_height==UINT64_MAX — no unlock has\n"
+        "      been scheduled; DEREGISTER first), and NO-STAKE (locked==0 or no\n"
+        "      s: leaf — nothing to unstake). Any tamper, cleartext/leaf\n"
+        "      mismatch, or daemon refusal → UNVERIFIABLE (exit 3), never a\n"
+        "      false ELIGIBLE. Distinct from stake-trustless, which reports the\n"
+        "      raw (locked, unlock_height) pair but does NOT compute the\n"
+        "      height-relative eligibility verdict.\n"
         "  supply-trustless --rpc-port <N> --genesis <file> [--json]\n"
         "      Verified chain + the five A1 supply counters from the `c:`\n"
         "      namespace (genesis_total, accumulated_subsidy/inbound/slashed/\n"
@@ -1024,6 +1049,226 @@ int cmd_stake_trustless(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "stake-trustless: " << e.what() << "\n";
         return 1;
+    }
+}
+
+// ──────────────────── verify-unstake-eligibility ───────────────────────
+//
+// THEME (R11): staking lifecycle & stake-unlock accounting. A novel
+// stake-lifecycle trustless reader — distinct from stake-trustless (which
+// reports the raw committed (locked, unlock_height) pair) in that it
+// computes the height-RELATIVE eligibility verdict: would an UNSTAKE tx
+// mined at the committee-verified head be ACCEPTED?
+//
+// ─── The predicate it re-enforces ───────────────────────────────────────
+//
+// The chain admits an UNSTAKE only when the spending block's height has
+// reached the staker's unlock_height. The validator's S-017 gate
+// (src/node/validator.cpp::BlockValidator::check_tx) rejects the tx when
+//     b.index < chain.stake_unlock_height(tx.from)
+// and the producer's build_body filter (src/node/producer.cpp) and the
+// chain apply path (chain.cpp::apply_transactions) enforce the identical
+// `b.index < unlock_height` test. A tx submitted now would land in the
+// NEXT block, whose index is H+1 for a verified head at H. So the
+// eligibility predicate this reader re-runs over the COMMITTEE-ATTESTED
+// unlock_height is exactly:
+//     eligible  ⟺  locked > 0  ∧  unlock_height ≠ UINT64_MAX
+//                                ∧  (H + 1) ≥ unlock_height
+//
+// ─── Why this is trustless (and not a stake_info wrapper) ────────────────
+//
+// BOTH inputs to the predicate are committee-anchored, never daemon-
+// asserted: (1) the head height H comes from verify_chain_to_head (every
+// header's prev_hash continuity + per-block committee sigs checked back to
+// the pinned genesis); (2) the unlock_height comes from read_stake_trustless,
+// which Merkle-verifies the s:-namespace leaf against the committee-signed
+// state_root AND hash-binds the daemon's `stake_info` cleartext
+// (SHA256(u64_be(locked) || u64_be(unlock_height))) to the proof's
+// value_hash. A daemon that lies about either the head height or the
+// unlock_height is caught by stake-trustless's existing fail-closed paths
+// (→ UNVERIFIABLE), so a false ELIGIBLE is unreachable. This adds NO new
+// crypto: it composes the existing single-leaf s: read with the validator's
+// own arithmetic.
+//
+// ─── Verdicts ───────────────────────────────────────────────────────────
+//   ELIGIBLE     locked>0, a matured unlock_height ≤ H+1  → exit 0
+//   LOCKED       locked>0, H+1 < unlock_height (< MAX)     → exit 0 (+blocks)
+//   BONDED       locked>0, unlock_height == UINT64_MAX     → exit 0
+//                  (genesis/active stake with no unlock scheduled; the
+//                   operator must DEREGISTER first to start the timer)
+//   NO-STAKE     locked==0 (or no s: leaf)                 → exit 0
+//   UNVERIFIABLE any tamper / mismatch / daemon refusal    → exit 3
+// All four positive verdicts are SOUND committee-anchored answers (exit 0);
+// only a refusal-to-assert is non-zero (exit 3). A transport / parse / usage
+// fault exits 1, matching the rest of the binary.
+
+enum class UnstakeVerdict { ELIGIBLE, LOCKED, BONDED, NO_STAKE, UNVERIFIABLE };
+
+const char* unstake_verdict_str(UnstakeVerdict v) {
+    switch (v) {
+        case UnstakeVerdict::ELIGIBLE:     return "ELIGIBLE";
+        case UnstakeVerdict::LOCKED:       return "LOCKED";
+        case UnstakeVerdict::BONDED:       return "BONDED";
+        case UnstakeVerdict::NO_STAKE:     return "NO-STAKE";
+        case UnstakeVerdict::UNVERIFIABLE: return "UNVERIFIABLE";
+    }
+    return "UNVERIFIABLE";
+}
+
+int cmd_verify_unstake_eligibility(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-unstake-eligibility: unknown arg '"
+                      << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "verify-unstake-eligibility: "
+                     "--rpc-port, --genesis, --domain are required\n";
+        return 1;
+    }
+
+    UnstakeVerdict verdict = UnstakeVerdict::UNVERIFIABLE;
+    uint64_t locked = 0, unlock_height = 0, head_height = 0;
+    uint64_t spend_height = 0;       // H + 1: the height an UNSTAKE would land at
+    uint64_t blocks_remaining = 0;   // for LOCKED: unlock_height - spend_height
+    std::string state_root_hex, canon_domain, detail;
+
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-unstake-eligibility: "
+                      << rpc.last_error() << "\n";
+            return 1;
+        }
+        canon_domain = normalize_anon_address(domain);
+
+        // The committee-anchored (locked, unlock_height, head height) read.
+        // A domain with no s: leaf throws inside read_stake_trustless (the
+        // daemon's state_proof returns not_found); we treat that ONE case as
+        // a sound NO-STAKE — there is nothing to unstake — and let every
+        // other failure (sig break, root mismatch, cleartext/leaf tamper)
+        // surface as UNVERIFIABLE so a lying daemon can never coerce a false
+        // ELIGIBLE.
+        bool have_stake = true;
+        try {
+            auto sv = read_stake_trustless(rpc, committee_seed, genesis,
+                                           canon_domain);
+            locked        = sv.locked;
+            unlock_height = sv.unlock_height;
+            head_height   = sv.height;
+            state_root_hex = sv.state_root_hex;
+        } catch (const std::exception& e) {
+            std::string msg = e.what();
+            if (msg.find("not_found") != std::string::npos
+                || msg.find("no verified") != std::string::npos) {
+                have_stake = false;          // sound NO-STAKE
+            } else {
+                throw;                       // sig/root/tamper → UNVERIFIABLE
+            }
+        }
+
+        if (!have_stake || locked == 0) {
+            verdict = UnstakeVerdict::NO_STAKE;
+            detail = have_stake
+                ? "stake leaf present but locked == 0 — nothing to unstake"
+                : "no committee-verified s: leaf for domain — never staked";
+        } else {
+            // A tx submitted now mines into the NEXT block: height H + 1.
+            // S-017 admits the UNSTAKE iff (H + 1) >= unlock_height. Guard
+            // the +1 against the bonded sentinel (UINT64_MAX) so we report
+            // BONDED rather than overflow the spend height.
+            spend_height = (head_height == UINT64_MAX)
+                ? UINT64_MAX : head_height + 1;
+            if (unlock_height == UINT64_MAX) {
+                verdict = UnstakeVerdict::BONDED;
+                detail = "unlock_height == UINT64_MAX — stake is bonded with "
+                         "no unlock scheduled; DEREGISTER to start the timer";
+            } else if (spend_height >= unlock_height) {
+                verdict = UnstakeVerdict::ELIGIBLE;
+                detail = "spend_height (H+1) has reached unlock_height — an "
+                         "UNSTAKE at the verified head would pass the S-017 gate";
+            } else {
+                verdict = UnstakeVerdict::LOCKED;
+                blocks_remaining = unlock_height - spend_height;
+                detail = "spend_height (H+1) is below unlock_height — the "
+                         "S-017 gate would reject an UNSTAKE for "
+                         + std::to_string(blocks_remaining) + " more block(s)";
+            }
+        }
+
+        const char* tag = unstake_verdict_str(verdict);
+        if (json_out) {
+            json out = {
+                {"domain",        canon_domain},
+                {"verdict",       tag},
+                {"locked",        locked},
+                {"unlock_height", unlock_height},
+                {"head_height",   head_height},
+                {"spend_height",  spend_height},
+                {"verified",      true},
+            };
+            if (verdict == UnstakeVerdict::LOCKED)
+                out["blocks_remaining"] = blocks_remaining;
+            if (!state_root_hex.empty())
+                out["state_root"] = state_root_hex;
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << canon_domain << ": " << tag << "\n";
+            std::cout << "  locked:         " << locked << "\n";
+            if (verdict != UnstakeVerdict::NO_STAKE) {
+                std::cout << "  unlock_height:  ";
+                if (unlock_height == UINT64_MAX)
+                    std::cout << "UINT64_MAX (bonded — no unlock scheduled)\n";
+                else
+                    std::cout << unlock_height << "\n";
+                std::cout << "  head_height:    " << head_height << "\n";
+                std::cout << "  spend_height:   " << spend_height
+                          << " (H+1 — where an UNSTAKE would land)\n";
+                if (verdict == UnstakeVerdict::LOCKED)
+                    std::cout << "  blocks_remaining: " << blocks_remaining
+                              << "\n";
+                std::cout << "  state_root:     " << state_root_hex << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:         " << detail << "\n";
+        }
+
+        // Exit codes match verify-account: every sound verdict (ELIGIBLE /
+        // LOCKED / BONDED / NO-STAKE) → 0; UNVERIFIABLE → 3 (refused to
+        // assert). Note UNVERIFIABLE only reaches here via --json's catch;
+        // the non-json path below maps a thrown exception to exit 1.
+        if (verdict == UnstakeVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        // A sig break / root mismatch / cleartext-leaf tamper rethrown from
+        // read_stake_trustless lands here. Fail closed: report UNVERIFIABLE,
+        // NEVER a bare daemon-reported eligibility.
+        if (json_out) {
+            json out = {
+                {"domain",   canon_domain.empty() ? domain : canon_domain},
+                {"verdict",  "UNVERIFIABLE"},
+                {"verified", false},
+                {"detail",   e.what()},
+            };
+            std::cout << out.dump() << "\n";
+            return 3;
+        }
+        std::cerr << "verify-unstake-eligibility: " << e.what() << "\n";
+        return 3;
     }
 }
 
@@ -4897,6 +5142,7 @@ int main(int argc, char** argv) {
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
+        if (cmd == "verify-unstake-eligibility") return cmd_verify_unstake_eligibility(sub_argc, sub_argv);
         if (cmd == "supply-trustless")      return cmd_supply_trustless(sub_argc, sub_argv);
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
         if (cmd == "verify-state-root")     return cmd_verify_state_root(sub_argc, sub_argv);

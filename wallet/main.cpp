@@ -21490,6 +21490,536 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// verify-stake-unlock --proof <proof.json> --entry <entry.json>
+//                     --root <hex64> --head-height <H> [--json]
+//
+// OFFLINE trustless verifier for an account's stake-unlock eligibility — the
+// `s:`-namespace sibling of verify-dapp-registration (d:). Binds a
+// committee-signed state_root to a concrete stake-table row, then evaluates
+// the UNSTAKE unlock-height gate at a chosen head height. It re-derives the
+// s:-namespace key_bytes + value_hash from the entry's claimed fields, refuses
+// unless they match the proof, Merkle-verifies against --root, then computes
+// eligibility = (head_height >= unlock_height) — the exact rule the chain
+// enforces in Chain::apply (src/chain/chain.cpp UNSTAKE: rejects when
+// `height < unlock_height`) and the producer/validator gate (S-017). In-process
+// SHA-256; no RPC, no network, no subprocess.
+//
+// Why a dedicated reader: the existing stake balance read (determ-light
+// stake-trustless) proves how much an account has LOCKED. This proves WHEN it
+// can move it — the unlock_height accounting from the DEREGISTER cascade
+// (unlock_height = inactive_from + UNSTAKE_DELAY). A counterparty settling
+// against a validator's bond, or the operator planning an exit, can prove
+// trustlessly that an UNSTAKE submitted at head H would (or would not) clear
+// the gate, without trusting the queried node.
+//
+// s:-namespace leaf encoding (build_state_leaves, byte-for-byte):
+//   key_bytes  = "s:" + domain           (ASCII)
+//   value_hash = SHA-256( u64_be(locked) || u64_be(unlock_height) )
+// SHA256Builder::append(uint64_t) emits 8 bytes big-endian (src/crypto/
+// sha256.cpp). unlock_height == 2^64-1 (UINT64_MAX) is the sentinel for "no
+// deregistration pending" — the stake is locked indefinitely while the domain
+// is still registered, so it is NEVER eligible at any finite head height.
+//
+// Exit codes:
+//   0  VALID (proof verifies against --root; entry re-derives the committed
+//      key_bytes + value_hash). Eligibility is reported, not a failure: a
+//      committed-but-locked stake is still a VALID proof.
+//   1  args / file-unreadable / malformed-proof / malformed-entry
+//   2  INVALID (merkle rejected OR key/value-hash mismatch OR proof.state_root
+//      disagrees with --root)
+int cmd_verify_stake_unlock(int argc, char** argv) {
+    std::string proof_path, entry_path, root_hex;
+    int64_t head_height = -1;
+    bool json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--proof" && i + 1 < argc) proof_path = argv[++i];
+        else if (a == "--entry" && i + 1 < argc) entry_path = argv[++i];
+        else if (a == "--root"  && i + 1 < argc) root_hex   = argv[++i];
+        else if (a == "--head-height" && i + 1 < argc) {
+            try { head_height = std::stoll(argv[++i]); }
+            catch (...) { head_height = -1; }
+        }
+        else if (a == "--json")                  json_out   = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet verify-stake-unlock\n"
+                "                      --proof <proof.json>\n"
+                "                      --entry <entry.json>\n"
+                "                      --root <hex64>\n"
+                "                      --head-height <H> [--json]\n"
+                "\n"
+                "  OFFLINE trustless verifier for an account's stake-unlock\n"
+                "  eligibility — the `s:`-namespace sibling of verify-dapp-\n"
+                "  registration. Binds a committee-signed state_root to a concrete\n"
+                "  stake-table row, then evaluates the UNSTAKE unlock-height gate\n"
+                "  at --head-height: re-derives the s:-namespace key_bytes +\n"
+                "  value_hash from the entry's claimed fields, refuses unless they\n"
+                "  match the proof, Merkle-verifies against --root, then computes\n"
+                "  eligible = (head_height >= unlock_height). In-process SHA-256;\n"
+                "  no RPC, no network, no subprocess.\n"
+                "\n"
+                "  --proof <proof.json>\n"
+                "      Required. A `state_proof` RPC result for the s: namespace\n"
+                "      (PROTOCOL.md §10.2). Required fields: key_bytes (hex),\n"
+                "      value_hash (hex64), target_index (uint), leaf_count (uint),\n"
+                "      proof (array of hex64 siblings). Optional state_root (hex64)\n"
+                "      + height (uint) are used if present.\n"
+                "\n"
+                "  --entry <entry.json>\n"
+                "      Required. The stake-table row to verify, in the stakes-\n"
+                "      snapshot / stake_bulk_query return shape: domain (string),\n"
+                "      locked (uint), unlock_height (uint). This entry is UNTRUSTED\n"
+                "      input: its value_hash is re-derived locally and must match\n"
+                "      the committed proof. unlock_height = 18446744073709551615\n"
+                "      (UINT64_MAX) is the 'no deregistration pending' sentinel.\n"
+                "\n"
+                "  --root <hex64>\n"
+                "      Required. The 32-byte (64 hex) state_root trust anchor.\n"
+                "      Source it from a committee-signed header / snapshot tail /\n"
+                "      `determ-light verify-state-root` output. The proof is\n"
+                "      recomputed against THIS root, not the proof's self-claim.\n"
+                "\n"
+                "  --head-height <H>\n"
+                "      Required. The committee-verified head height at which to\n"
+                "      evaluate the unlock gate. Pin it to the SAME head whose\n"
+                "      state_root you pass via --root (an UNSTAKE is applied in a\n"
+                "      block building on that head). eligible = H >= unlock_height.\n"
+                "\n"
+                "  --json\n"
+                "      One-line machine-readable JSON. Shape:\n"
+                "        { proof, entry, root, head_height, valid, domain,\n"
+                "          namespace, key_bytes, expected_key_bytes, key_matches,\n"
+                "          value_hash, derived_value_hash, value_hash_matches,\n"
+                "          target_index, leaf_count, proof_len, height,\n"
+                "          proof_state_root, root_matches_proof,\n"
+                "          locked, unlock_height, unlock_pending,\n"
+                "          eligible, blocks_until_unlock,\n"
+                "          exit_reason: \"valid\" | \"invalid\"\n"
+                "                     | \"invalid_args\" | \"malformed_proof\"\n"
+                "                     | \"malformed_entry\" }\n"
+                "\n"
+                "  Eligibility is derived from the BOUND entry against --head-\n"
+                "  height (informational, never a failure): eligible = head_height\n"
+                "  >= unlock_height. unlock_pending = (unlock_height != UINT64_MAX)\n"
+                "  flags whether a DEREGISTER has armed the unlock cascade.\n"
+                "  blocks_until_unlock = unlock_height - head_height when still\n"
+                "  locked (0 once eligible; absent when unlock_pending is false,\n"
+                "  since no finite countdown exists).\n"
+                "\n"
+                "  S-040 note: leaf_count is NOT bound into the Merkle hashes.\n"
+                "  Source the proof AND its leaf_count from a path anchored to the\n"
+                "  same committee-signed state_root you pass via --root.\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  VALID (proof verifies against --root; entry re-derives the\n"
+                "       committed key_bytes + value_hash). Eligibility is reported,\n"
+                "       NOT a failure: a committed-but-locked stake is still VALID.\n"
+                "    1  args / file-unreadable / malformed-proof / malformed-entry\n"
+                "    2  INVALID (merkle rejected OR key/value-hash mismatch OR\n"
+                "       proof.state_root disagrees with --root)\n";
+            return 0;
+        }
+        else {
+            std::cerr << "verify-stake-unlock: unknown argument '"
+                      << a << "'\n";
+            std::cerr << "Usage: determ-wallet verify-stake-unlock "
+                         "--proof <proof.json> --entry <entry.json> "
+                         "--root <hex64> --head-height <H> [--json]\n";
+            return 1;
+        }
+    }
+
+    // emit_err: uniform diagnostic for the arg/parse failure family (exit 1).
+    auto emit_err = [&](const std::string& reason,
+                        const std::string& exit_reason) -> int {
+        if (json_out) {
+            nlohmann::json err = {
+                {"proof",       proof_path},
+                {"entry",       entry_path},
+                {"root",        root_hex},
+                {"valid",       false},
+                {"exit_reason", exit_reason},
+                {"reason",      reason},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "verify-stake-unlock: " << reason << "\n";
+        }
+        return 1;
+    };
+
+    if (proof_path.empty())
+        return emit_err("--proof <proof.json> is required", "invalid_args");
+    if (entry_path.empty())
+        return emit_err("--entry <entry.json> is required", "invalid_args");
+    if (root_hex.empty())
+        return emit_err("--root <hex64> is required", "invalid_args");
+    if (head_height < 0)
+        return emit_err("--head-height <H> is required (non-negative integer)",
+                        "invalid_args");
+    uint64_t head_h = static_cast<uint64_t>(head_height);
+
+    auto is_hex_str = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s) {
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto lower_hex = [](std::string s) {
+        for (char& c : s)
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+        return s;
+    };
+    if (root_hex.size() != 64 || !is_hex_str(root_hex))
+        return emit_err("--root must be 64 hex chars (32 bytes)", "invalid_args");
+    root_hex = lower_hex(root_hex);
+
+    // ── Read + parse the proof JSON (s: namespace state_proof). ──
+    std::ifstream pf(proof_path);
+    if (!pf)
+        return emit_err("cannot open --proof '" + proof_path + "'",
+                        "invalid_args");
+    nlohmann::json proof;
+    try {
+        proof = nlohmann::json::parse(pf);
+    } catch (const std::exception& e) {
+        return emit_err(std::string("--proof JSON parse failed: ") + e.what(),
+                        "malformed_proof");
+    }
+    if (!proof.is_object())
+        return emit_err("--proof top-level JSON is not an object",
+                        "malformed_proof");
+    if (proof.contains("error") && !proof["error"].is_null())
+        return emit_err("proof carries an error field: " + proof["error"].dump(),
+                        "malformed_proof");
+
+    std::string proof_key_hex, proof_value_hash, proof_state_root, ns;
+    uint64_t target_index = 0, leaf_count = 0, height = 0;
+    std::vector<std::string> sib_hex;
+    try {
+        if (!proof.contains("key_bytes") || !proof["key_bytes"].is_string())
+            return emit_err("proof missing string field 'key_bytes'",
+                            "malformed_proof");
+        proof_key_hex = lower_hex(proof["key_bytes"].get<std::string>());
+
+        if (!proof.contains("value_hash") || !proof["value_hash"].is_string())
+            return emit_err("proof missing string field 'value_hash'",
+                            "malformed_proof");
+        proof_value_hash = lower_hex(proof["value_hash"].get<std::string>());
+
+        if (!proof.contains("target_index") || !proof["target_index"].is_number())
+            return emit_err("proof missing numeric field 'target_index'",
+                            "malformed_proof");
+        target_index = proof["target_index"].get<uint64_t>();
+
+        if (!proof.contains("leaf_count") || !proof["leaf_count"].is_number())
+            return emit_err("proof missing numeric field 'leaf_count'",
+                            "malformed_proof");
+        leaf_count = proof["leaf_count"].get<uint64_t>();
+
+        if (!proof.contains("proof") || !proof["proof"].is_array())
+            return emit_err("proof missing array field 'proof'",
+                            "malformed_proof");
+        for (auto& h : proof["proof"]) {
+            if (!h.is_string())
+                return emit_err("proof[] contains a non-string sibling",
+                                "malformed_proof");
+            sib_hex.push_back(lower_hex(h.get<std::string>()));
+        }
+
+        if (proof.contains("state_root") && proof["state_root"].is_string())
+            proof_state_root = lower_hex(proof["state_root"].get<std::string>());
+        if (proof.contains("namespace") && proof["namespace"].is_string())
+            ns = proof["namespace"].get<std::string>();
+        if (proof.contains("height") && proof["height"].is_number())
+            height = proof["height"].get<uint64_t>();
+    } catch (const std::exception& e) {
+        return emit_err(std::string("malformed proof: ") + e.what(),
+                        "malformed_proof");
+    }
+
+    if (proof_value_hash.size() != 64 || !is_hex_str(proof_value_hash))
+        return emit_err("proof 'value_hash' must be 64 hex chars (32 bytes)",
+                        "malformed_proof");
+    if (!proof_key_hex.empty()
+        && (proof_key_hex.size() % 2 != 0 || !is_hex_str(proof_key_hex)))
+        return emit_err("proof 'key_bytes' must be even-length hex",
+                        "malformed_proof");
+    for (const auto& s : sib_hex) {
+        if (s.size() != 64 || !is_hex_str(s))
+            return emit_err("each proof[] sibling must be 64 hex chars",
+                            "malformed_proof");
+    }
+
+    // ── Read + parse the entry JSON (stakes-snapshot shape). ──
+    std::ifstream ef(entry_path);
+    if (!ef)
+        return emit_err("cannot open --entry '" + entry_path + "'",
+                        "invalid_args");
+    nlohmann::json entry;
+    try {
+        entry = nlohmann::json::parse(ef);
+    } catch (const std::exception& e) {
+        return emit_err(std::string("--entry JSON parse failed: ") + e.what(),
+                        "malformed_entry");
+    }
+    if (!entry.is_object())
+        return emit_err("--entry top-level JSON is not an object",
+                        "malformed_entry");
+    if (entry.contains("error") && !entry["error"].is_null())
+        return emit_err("entry carries an error field: " + entry["error"].dump(),
+                        "malformed_entry");
+
+    std::string domain;
+    uint64_t e_locked = 0, e_unlock_height = 0;
+    try {
+        if (!entry.contains("domain") || !entry["domain"].is_string())
+            return emit_err("entry missing string field 'domain'",
+                            "malformed_entry");
+        domain = entry["domain"].get<std::string>();
+        if (domain.empty())
+            return emit_err("entry 'domain' must be non-empty", "malformed_entry");
+
+        if (!entry.contains("locked") || !entry["locked"].is_number())
+            return emit_err("entry missing numeric field 'locked'",
+                            "malformed_entry");
+        e_locked = entry["locked"].get<uint64_t>();
+
+        if (!entry.contains("unlock_height") || !entry["unlock_height"].is_number())
+            return emit_err("entry missing numeric field 'unlock_height'",
+                            "malformed_entry");
+        e_unlock_height = entry["unlock_height"].get<uint64_t>();
+    } catch (const std::exception& e) {
+        return emit_err(std::string("malformed entry: ") + e.what(),
+                        "malformed_entry");
+    }
+
+    // ── Re-derive the s:-namespace value_hash from the entry fields. ──
+    // Reproduces build_state_leaves (src/chain/chain.cpp) byte-for-byte:
+    //   value_hash = SHA-256( u64_be(locked) || u64_be(unlock_height) )
+    // SHA256Builder::append(uint64_t) emits 8 bytes big-endian
+    // (src/crypto/sha256.cpp).
+    auto u64_be = [](std::vector<uint8_t>& buf, uint64_t v) {
+        for (int i = 7; i >= 0; --i)
+            buf.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+    };
+    std::vector<uint8_t> vbuf;
+    u64_be(vbuf, e_locked);
+    u64_be(vbuf, e_unlock_height);
+    std::array<uint8_t, 32> derived_vh{};
+    SHA256(vbuf.data(), vbuf.size(), derived_vh.data());
+    std::string derived_value_hash = to_hex(derived_vh);
+
+    // Re-derive key_bytes = "s:" + domain (ASCII) for THIS domain.
+    std::vector<uint8_t> exp_key;
+    exp_key.push_back('s'); exp_key.push_back(':');
+    exp_key.insert(exp_key.end(), domain.begin(), domain.end());
+    std::string expected_key_hex = to_hex(exp_key);
+
+    bool key_matches        = (proof_key_hex == expected_key_hex);
+    bool value_hash_matches = (proof_value_hash == derived_value_hash);
+
+    // ── Merkle walk (in-process; identical to the state-proof-verify path). ──
+    auto sha256 = [](const std::vector<uint8_t>& in) {
+        std::array<uint8_t, 32> out{};
+        SHA256(in.data(), in.size(), out.data());
+        return out;
+    };
+    auto leaf_hash = [&](const std::vector<uint8_t>& key,
+                         const std::array<uint8_t, 32>& vh) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 4 + key.size() + 32);
+        buf.push_back(0x00);
+        uint32_t kl = static_cast<uint32_t>(key.size());
+        buf.push_back(static_cast<uint8_t>((kl >> 24) & 0xff));
+        buf.push_back(static_cast<uint8_t>((kl >> 16) & 0xff));
+        buf.push_back(static_cast<uint8_t>((kl >> 8)  & 0xff));
+        buf.push_back(static_cast<uint8_t>( kl        & 0xff));
+        buf.insert(buf.end(), key.begin(), key.end());
+        buf.insert(buf.end(), vh.begin(), vh.end());
+        return sha256(buf);
+    };
+    auto inner_hash = [&](const std::array<uint8_t, 32>& l,
+                          const std::array<uint8_t, 32>& r) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 32 + 32);
+        buf.push_back(0x01);
+        buf.insert(buf.end(), l.begin(), l.end());
+        buf.insert(buf.end(), r.begin(), r.end());
+        return sha256(buf);
+    };
+    auto to_arr32 = [](const std::vector<uint8_t>& v) {
+        std::array<uint8_t, 32> a{};
+        std::copy(v.begin(), v.end(), a.begin());
+        return a;
+    };
+
+    // The leaf the proof binds: use the PROOF's key_bytes + value_hash so the
+    // walk reproduces what the daemon committed; the entry-derived values are
+    // cross-checked separately (key_matches / value_hash_matches above).
+    std::vector<uint8_t> proof_key = proof_key_hex.empty()
+                                   ? std::vector<uint8_t>{}
+                                   : from_hex(proof_key_hex);
+    std::array<uint8_t, 32> proof_vh = to_arr32(from_hex(proof_value_hash));
+    std::array<uint8_t, 32> root     = to_arr32(from_hex(root_hex));
+    std::vector<std::array<uint8_t, 32>> sibs;
+    sibs.reserve(sib_hex.size());
+    for (const auto& s : sib_hex) sibs.push_back(to_arr32(from_hex(s)));
+
+    bool merkle_ok = true;
+    std::string fail_reason;
+    if (leaf_count == 0) {
+        merkle_ok = false;
+        fail_reason = "leaf_count is 0";
+    } else if (target_index >= leaf_count) {
+        merkle_ok = false;
+        fail_reason = "target_index >= leaf_count";
+    } else {
+        std::array<uint8_t, 32> current = leaf_hash(proof_key, proof_vh);
+        uint64_t idx        = target_index;
+        uint64_t level_size = leaf_count;
+        size_t   proof_idx  = 0;
+        while (level_size > 1) {
+            if (level_size % 2 == 1) level_size += 1;
+            if (proof_idx >= sibs.size()) {
+                merkle_ok = false;
+                fail_reason = "ran out of sibling hashes before reaching root";
+                break;
+            }
+            const std::array<uint8_t, 32>& sib = sibs[proof_idx++];
+            current = (idx % 2 == 0) ? inner_hash(current, sib)
+                                     : inner_hash(sib, current);
+            idx        /= 2;
+            level_size /= 2;
+        }
+        if (merkle_ok) {
+            if (proof_idx != sibs.size()) {
+                merkle_ok = false;
+                fail_reason = "extra unused sibling hashes "
+                              "(proof_len does not match tree depth)";
+            } else if (current != root) {
+                merkle_ok = false;
+                fail_reason = "recomputed root does not match --root";
+            }
+        }
+    }
+
+    bool root_matches_proof = proof_state_root.empty()
+                            || (proof_state_root == root_hex);
+
+    // Compose the verdict. Each binding is load-bearing: the merkle walk proves
+    // the leaf is committed; key_matches proves it is THIS domain's stake row;
+    // value_hash_matches proves the entry's claimed locked / unlock_height are
+    // the ones the committee signed.
+    bool valid = merkle_ok && key_matches && value_hash_matches
+              && root_matches_proof;
+    if (merkle_ok && !key_matches)
+        fail_reason = "proof key_bytes (" + proof_key_hex
+                    + ") does not match the entry-derived s: key ("
+                    + expected_key_hex + ")";
+    else if (merkle_ok && key_matches && !value_hash_matches)
+        fail_reason = "entry re-derives value_hash (" + derived_value_hash
+                    + ") which does not match the committed proof value_hash ("
+                    + proof_value_hash + ")";
+    else if (merkle_ok && key_matches && value_hash_matches
+             && !root_matches_proof)
+        fail_reason = "proof's self-asserted state_root (" + proof_state_root
+                    + ") does not match --root";
+
+    // Eligibility derived from the BOUND entry against --head-height
+    // (informational only; reproduces the chain's UNSTAKE gate: reject when
+    // head < unlock_height). unlock_height == UINT64_MAX is the "no
+    // deregistration pending" sentinel — never eligible at any finite head.
+    bool unlock_pending = (e_unlock_height != UINT64_MAX);
+    bool eligible        = (head_h >= e_unlock_height);
+    // Countdown only meaningful while pending and still locked.
+    uint64_t blocks_until_unlock =
+        (unlock_pending && !eligible) ? (e_unlock_height - head_h) : 0;
+
+    std::string exit_reason = valid ? "valid" : "invalid";
+    int exit_code = valid ? 0 : 2;
+
+    if (json_out) {
+        nlohmann::json env = {
+            {"proof",              proof_path},
+            {"entry",              entry_path},
+            {"root",               root_hex},
+            {"head_height",        head_h},
+            {"valid",              valid},
+            {"domain",             domain},
+            {"namespace",          ns.empty() ? std::string("s") : ns},
+            {"key_bytes",          proof_key_hex},
+            {"expected_key_bytes", expected_key_hex},
+            {"key_matches",        key_matches},
+            {"value_hash",         proof_value_hash},
+            {"derived_value_hash", derived_value_hash},
+            {"value_hash_matches", value_hash_matches},
+            {"target_index",       target_index},
+            {"leaf_count",         leaf_count},
+            {"proof_len",          sib_hex.size()},
+            {"height",             height},
+            {"proof_state_root",   proof_state_root},
+            {"root_matches_proof", root_matches_proof},
+            {"locked",             e_locked},
+            {"unlock_height",      e_unlock_height},
+            {"unlock_pending",     unlock_pending},
+            {"eligible",           eligible},
+            {"exit_reason",        exit_reason},
+        };
+        // Countdown only carries a finite, meaningful value while a
+        // deregistration is pending and the head has not yet reached it.
+        if (unlock_pending) env["blocks_until_unlock"] = blocks_until_unlock;
+        if (!valid && !fail_reason.empty()) env["reason"] = fail_reason;
+        std::cout << env.dump() << "\n";
+    } else {
+        std::cout << "verify-stake-unlock: " << domain << "\n";
+        std::cout << "  namespace         : "
+                  << (ns.empty() ? std::string("s") : ns) << "\n";
+        std::cout << "  key_bytes         : " << proof_key_hex << "\n";
+        std::cout << "  expected_key      : " << expected_key_hex << "\n";
+        std::cout << "  key_matches       : "
+                  << (key_matches ? "true" : "false") << "\n";
+        std::cout << "  value_hash        : " << proof_value_hash << "\n";
+        std::cout << "  derived_value_hash: " << derived_value_hash << "\n";
+        std::cout << "  value_hash_matches: "
+                  << (value_hash_matches ? "true" : "false") << "\n";
+        std::cout << "  target_index      : " << target_index << "\n";
+        std::cout << "  leaf_count        : " << leaf_count << "\n";
+        std::cout << "  proof_len         : " << sib_hex.size() << "\n";
+        if (height) std::cout << "  height            : " << height << "\n";
+        std::cout << "  root (--root)     : " << root_hex << "\n";
+        if (!proof_state_root.empty()) {
+            std::cout << "  proof.state_root  : " << proof_state_root << "\n";
+            std::cout << "  root_matches      : "
+                      << (root_matches_proof ? "true" : "false") << "\n";
+        }
+        std::cout << "  head_height       : " << head_h << "\n";
+        std::cout << "  locked            : " << e_locked << "\n";
+        std::cout << "  unlock_height     : ";
+        if (unlock_pending) std::cout << e_unlock_height << "\n";
+        else                std::cout << e_unlock_height
+                                      << " (UINT64_MAX: no deregistration pending)\n";
+        std::cout << "  unlock_pending    : "
+                  << (unlock_pending ? "true" : "false") << "\n";
+        std::cout << "  eligible          : "
+                  << (eligible ? "true" : "false") << "\n";
+        if (unlock_pending && !eligible)
+            std::cout << "  blocks_until_unlock: " << blocks_until_unlock << "\n";
+        std::cout << "  result            : "
+                  << (valid ? "VALID" : "INVALID") << "\n";
+        if (!valid && !fail_reason.empty())
+            std::cout << "  reason            : " << fail_reason << "\n";
+    }
+    return exit_code;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // param-change-build --name <P> (--value <N> | --value-hex <hex>)
 //                    --effective-height <H> --nonce <N> --from <domain-or-addr>
 //                    [--fee <N>] [--out <file> | --allow-stdout] [--json]
@@ -23533,6 +24063,7 @@ int main(int argc, char** argv) {
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
     if (cmd == "state-proof-verify") return cmd_state_proof_verify(argc - 2, argv + 2);
     if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(argc - 2, argv + 2);
+    if (cmd == "verify-stake-unlock") return cmd_verify_stake_unlock(argc - 2, argv + 2);
     if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
     if (cmd == "subsidy-schedule") return cmd_subsidy_schedule(argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);

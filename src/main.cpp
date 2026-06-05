@@ -714,6 +714,11 @@ Additional in-process tests:
                                               invariants — STAKE / UNSTAKE /
                                               DEREGISTER / slash interaction
                                               + A1 conservation across lifecycle
+  determ test-unstake-eligibility             Trustless UNSTAKE-eligibility
+                                              reader — s: leaf Merkle-verify +
+                                              cleartext reconstruction +
+                                              eligible(unlock_height, head)
+                                              predicate + tamper detection
   determ test-fee-distribution-edge           Fee + subsidy distribution edge
                                               cases — dust to creator[0],
                                               zero-fee + non-zero subsidy,
@@ -23751,6 +23756,217 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": stake-accounting " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // Trustless stake-UNSTAKE-eligibility reader contract. A light
+    // client cannot apply blocks; it holds a committee-anchored head
+    // (height + state_root) and asks a possibly-hostile full node for
+    // an account's (locked, unlock_height). The decision "is UNSTAKE
+    // eligible at this head height?" is the predicate
+    //     eligible = unlock_height != UINT64_MAX
+    //                && head_height >= unlock_height
+    // (mirrors the apply-side gate in chain.cpp). The reader trusts
+    // that answer ONLY when the daemon-supplied cleartext reconstructs
+    // the SAME s:-namespace leaf that the state_proof Merkle-verifies
+    // under the anchored state_root. The leaf value-hash encoding is
+    //     SHA256( u64_be(locked) || u64_be(unlock_height) )
+    // matching src/chain/chain.cpp build_state_leaves() and the
+    // determ-light `stake-trustless` subcommand. This is distinct from
+    // test-stake-accounting (apply-side state machine) and
+    // test-state-proof (generic proof mechanics) — it pins the
+    // eligibility VERDICT layered on a Merkle-verified read, the exact
+    // composite a light-client `verify-unstake-eligibility` reader runs.
+    if (cmd == "test-unstake-eligibility") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Shared fixture: alice as creator with stake + balance.
+        GenesisConfig cfg;
+        cfg.chain_id = "unstake-eligibility-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        // s:-namespace leaf key per PROTOCOL.md §4.1.1.
+        auto stake_key = [](const std::string& domain) {
+            std::vector<uint8_t> key;
+            key.push_back('s'); key.push_back(':');
+            key.insert(key.end(), domain.begin(), domain.end());
+            return key;
+        };
+
+        // Reconstruct the s: leaf value-hash from claimed cleartext —
+        // exactly what the light client computes from the daemon's
+        // stake_info reply before comparing to the Merkle-proven hash.
+        auto leaf_hash = [](uint64_t locked, uint64_t unlock_height) {
+            crypto::SHA256Builder b;
+            b.append(locked);
+            b.append(unlock_height);
+            return b.finalize();
+        };
+
+        // The eligibility predicate the reader evaluates AFTER the
+        // read is proven authentic. Pure function of two u64s.
+        auto eligible = [](uint64_t unlock_height, uint64_t head_height) {
+            return unlock_height != UINT64_MAX
+                && head_height >= unlock_height;
+        };
+
+        // === Pure predicate boundaries (no chain needed) ===
+
+        // 1. Sentinel UINT64_MAX (registered / never-unlocked) is never
+        //    eligible regardless of head height.
+        check(!eligible(UINT64_MAX, 0)
+              && !eligible(UINT64_MAX, UINT64_MAX),
+              "predicate: UINT64_MAX sentinel never eligible");
+
+        // 2. head_height strictly below unlock_height → not eligible.
+        check(!eligible(100, 99),
+              "predicate: head < unlock_height → not eligible");
+
+        // 3. head_height == unlock_height → eligible (>= boundary,
+        //    matches the apply-side `height >= unlock_height` gate).
+        check(eligible(100, 100),
+              "predicate: head == unlock_height → eligible (>= boundary)");
+
+        // 4. head_height above unlock_height → eligible.
+        check(eligible(100, 250),
+              "predicate: head > unlock_height → eligible");
+
+        // === Genesis: registered, never unlockable ===
+
+        // 5. Genesis stake leaf carries unlock_height == UINT64_MAX, so
+        //    the reader reports NOT eligible at every head — and the
+        //    reconstructed leaf matches the Merkle-proven value_hash.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+
+            uint64_t locked = c.stake("alice");
+            uint64_t unlock = c.stake_unlock_height("alice");
+            auto p = c.state_proof(stake_key("alice"));
+            Hash root = c.compute_state_root();
+
+            bool proven = p.has_value()
+                && p->value_hash == leaf_hash(locked, unlock)
+                && crypto::merkle_verify(
+                      root, p->key, p->value_hash, p->target_index,
+                      p->leaf_count, p->proof);
+            check(proven,
+                  "genesis: s:alice leaf proves under state_root + cleartext matches");
+            check(unlock == UINT64_MAX && !eligible(unlock, c.height()),
+                  "genesis: registered alice not unstake-eligible (sentinel)");
+        }
+
+        // === Post-DEREGISTER: finite unlock_height, eligibility flips ===
+
+        // 6. After DEREGISTER, unlock_height becomes finite. The reader
+        //    reports NOT eligible while head < unlock, then eligible once
+        //    the head advances to unlock_height — driven entirely off the
+        //    Merkle-proven s: leaf, never re-applying blocks.
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(3);
+
+            // Block 1: DEREGISTER alice (sets finite unlock_height).
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions.push_back(dereg);
+            c.append(b1);
+
+            uint64_t unlock = c.stake_unlock_height("alice");
+            uint64_t locked = c.stake("alice");
+
+            // Verified read of the s: leaf at this head.
+            auto p = c.state_proof(stake_key("alice"));
+            Hash root = c.compute_state_root();
+            bool proven = p.has_value()
+                && p->value_hash == leaf_hash(locked, unlock)
+                && crypto::merkle_verify(
+                      root, p->key, p->value_hash, p->target_index,
+                      p->leaf_count, p->proof);
+            check(proven && unlock != UINT64_MAX,
+                  "post-DEREGISTER: s:alice leaf proves + unlock_height finite");
+
+            // Head is well below unlock_height right after DEREGISTER.
+            check(!eligible(unlock, c.height()),
+                  "post-DEREGISTER: not yet eligible (head < unlock_height)");
+
+            // The reader's verdict at the unlock head height itself.
+            check(eligible(unlock, unlock),
+                  "post-DEREGISTER: eligible once head reaches unlock_height");
+        }
+
+        // === Tamper detection: lying unlock_height is rejected ===
+
+        // 7. A hostile daemon claims an EARLIER unlock_height to trick a
+        //    light client into believing UNSTAKE is already eligible. The
+        //    reconstructed leaf no longer matches the Merkle-proven
+        //    value_hash, so the reader rejects the read (never reaching
+        //    the eligibility predicate).
+        {
+            Chain c;
+            c.append(make_genesis_block(cfg));
+            c.set_unstake_delay(1000);
+
+            Transaction dereg;
+            dereg.type = TxType::DEREGISTER;
+            dereg.from = "alice"; dereg.fee = 1; dereg.nonce = 0;
+            Block b1;
+            b1.index = 1; b1.prev_hash = c.head().compute_hash();
+            b1.creators = {"alice"};
+            for (size_t i = 0; i < b1.cumulative_rand.size(); ++i)
+                b1.cumulative_rand[i] = uint8_t(0x42);
+            b1.transactions.push_back(dereg);
+            c.append(b1);
+
+            uint64_t locked    = c.stake("alice");
+            uint64_t honest    = c.stake_unlock_height("alice");
+            uint64_t lied      = 0;  // attacker claims height 0 (already unlocked)
+
+            auto p = c.state_proof(stake_key("alice"));
+            Hash root = c.compute_state_root();
+
+            // Honest cleartext reconstructs the proven leaf.
+            bool honest_ok = p.has_value()
+                && leaf_hash(locked, honest) == p->value_hash;
+            check(honest_ok,
+                  "tamper: honest (locked, unlock_height) reconstructs proven leaf");
+
+            // The lie does NOT reconstruct the proven leaf → reader rejects.
+            bool lie_detected = p.has_value()
+                && leaf_hash(locked, lied) != p->value_hash;
+            check(lie_detected,
+                  "tamper: lied-earlier unlock_height fails leaf reconstruction");
+
+            // A locked-amount lie is caught the same way (single leaf binds both).
+            bool locked_lie_detected = p.has_value()
+                && leaf_hash(locked + 1, honest) != p->value_hash;
+            check(locked_lie_detected,
+                  "tamper: lied locked amount fails leaf reconstruction");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": unstake-eligibility " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
