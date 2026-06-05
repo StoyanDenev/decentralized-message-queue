@@ -39852,8 +39852,8 @@ int main(int argc, char** argv) {
         // topology never accidentally folds in the routing salt.
         {
             const uint32_t N = 4;
-            Hash salt_a = SHA256Builder{}.append(std::string("salt-a")).finalize();
-            Hash salt_b = SHA256Builder{}.append(std::string("salt-b")).finalize();
+            Hash salt_a = crypto::SHA256Builder{}.append(std::string("salt-a")).finalize();
+            Hash salt_b = crypto::SHA256Builder{}.append(std::string("salt-b")).finalize();
             Chain ca; ca.append(make_genesis_block(cfg));
             Chain cb; cb.append(make_genesis_block(cfg));
             ca.set_shard_routing(N, salt_a, ShardId{0});
