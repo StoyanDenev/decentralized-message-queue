@@ -3289,9 +3289,27 @@ json Node::rpc_state_proof(const std::string& ns,
     std::shared_lock<std::shared_mutex> lk(state_mutex_);
 
     // Build domain-prefixed key bytes matching build_state_leaves'
-    // encoding. Only the simple namespaces (single byte prefix +
-    // ASCII key) are exposed here; composite-key namespaces
-    // (i/m/p) are out of scope for this RPC.
+    // encoding (src/chain/chain.cpp). Two key shapes are served:
+    //
+    //   * Simple namespaces (a|s|r|d|b|k|c): the `key` param is the
+    //     human-readable ASCII suffix (domain / constant name). The full
+    //     leaf key is "<ns>:" + key (counters: "k:c:" + name).
+    //
+    //   * Composite namespaces (i|m|p): the leaf-key suffix is BINARY
+    //     (big-endian integers + 32-byte hashes), which cannot ride raw
+    //     inside a JSON string — nlohmann throws on non-UTF-8 bytes during
+    //     dump(). The caller therefore HEX-encodes the post-prefix body
+    //     and we decode it here, then prepend "<ns>:" — reproducing the
+    //     build_state_leaves key byte-for-byte:
+    //       i: body = hex( u64_be(src_shard) || tx_hash[32] )     (40B)
+    //          -> applied_inbound_receipts leaf (value = SHA256(0x01))
+    //       m: body = hex( u32_be(shard_id) )                     ( 4B)
+    //          -> merge_state leaf
+    //       p: body = hex( u64_be(eff_height) || u32_be(idx) )    (12B)
+    //          -> pending_param_changes leaf
+    //
+    // Absence still returns {"error":"not_found"} for any namespace;
+    // non-membership proofs require an SMT migration (see header comment).
     std::vector<uint8_t> k;
     if (ns == "a" || ns == "s" || ns == "r" || ns == "d" || ns == "b" || ns == "k") {
         // "a:" / "s:" / "r:" / "d:" / "b:" / "k:" + key string
@@ -3309,8 +3327,32 @@ json Node::rpc_state_proof(const std::string& ns,
         k.reserve(2 + composite.size());
         k.push_back('k'); k.push_back(':');
         k.insert(k.end(), composite.begin(), composite.end());
+    } else if (ns == "i" || ns == "m" || ns == "p") {
+        // Composite-key namespaces: `key` is the hex of the binary body.
+        std::vector<uint8_t> body;
+        try {
+            body = from_hex(key);
+        } catch (const std::exception&) {
+            return {{"error", "invalid hex key for composite namespace"},
+                    {"namespace", ns}, {"key", key}};
+        }
+        // Enforce the exact body width so a malformed query can't silently
+        // alias a different leaf (lengths per build_state_leaves).
+        const size_t want = (ns == "i") ? (8 + 32)   // src_be8 + tx_hash[32]
+                          : (ns == "m") ? 4           // shard_be4
+                                        : (8 + 4);    // eff_be8 + idx_be4
+        if (body.size() != want) {
+            return {{"error", "composite key wrong length"},
+                    {"namespace",      ns},
+                    {"expected_bytes", want},
+                    {"got_bytes",      body.size()}};
+        }
+        k.reserve(2 + body.size());
+        k.push_back(ns[0]);
+        k.push_back(':');
+        k.insert(k.end(), body.begin(), body.end());
     } else {
-        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c"}};
+        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|i|m|p"}};
     }
 
     auto proof_opt = chain_.state_proof(k);

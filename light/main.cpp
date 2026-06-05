@@ -191,10 +191,11 @@ void print_usage() {
         "      equal SHA256(0x01) (the presence marker) — binding the proof\n"
         "      to THIS receipt, not some other leaf. Receipts are\n"
         "      append-only once applied, so there is no per-block race.\n"
-        "      INCLUDED / NOT-INCLUDED are sound verified verdicts; if the\n"
-        "      daemon cannot serve an `i:` proof (e.g. the RPC does not yet\n"
-        "      expose composite-key namespaces) the verdict is UNVERIFIABLE\n"
-        "      and the command fails closed — never a false INCLUDED.\n"
+        "      INCLUDED / NOT-INCLUDED are sound verified verdicts. Current\n"
+        "      daemons serve the composite-key `i:` namespace (hex-encoded\n"
+        "      key body); against a legacy daemon that cannot, the verdict\n"
+        "      is UNVERIFIABLE and the command fails closed — never a false\n"
+        "      INCLUDED.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -1383,17 +1384,21 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
 
         // Fetch the `i:`-namespace state-proof. The daemon takes a string
         // `key`; for composite-key namespaces it builds the prefixed key
-        // bytes from this string, so we pass the post-prefix key body
-        // (everything after "i:") as a raw byte string: u64_be(src) ||
-        // tx_hash. nlohmann::json carries arbitrary bytes in a std::string.
-        std::string key_body;
-        key_body.reserve(8 + 32);
+        // bytes from this string. The post-prefix body (everything after
+        // "i:") is BINARY — u64_be(src) || tx_hash — which cannot ride raw
+        // inside a JSON string: nlohmann::json::dump() throws on the
+        // non-UTF-8 bytes a SHA-256 tx_hash almost always contains. So we
+        // HEX-encode the body; the daemon hex-decodes it and prepends "i:"
+        // to reconstruct the canonical key byte-for-byte.
+        std::vector<uint8_t> body;
+        body.reserve(8 + 32);
         for (int i = 7; i >= 0; --i)
-            key_body.push_back(static_cast<char>((src_shard >> (8 * i)) & 0xff));
-        key_body.append(reinterpret_cast<const char*>(tx_hash.data()), tx_hash.size());
+            body.push_back(static_cast<uint8_t>((src_shard >> (8 * i)) & 0xff));
+        body.insert(body.end(), tx_hash.begin(), tx_hash.end());
+        std::string key_body_hex = to_hex(body.data(), body.size());
 
         auto proof = rpc.call("state_proof",
-            {{"namespace", "i"}, {"key", key_body}});
+            {{"namespace", "i"}, {"key", key_body_hex}});
 
         // A daemon that cannot serve the `i:` namespace (e.g. the RPC does
         // not expose composite-key namespaces) returns an `error`. We
