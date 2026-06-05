@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (26 total + help / version):
+// Subcommands (27 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -33,6 +33,7 @@
 //   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
+//   verify-dapp-registration Prove domain D is a registered DApp (d:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
 //   committee-at-height      Report committee-verified creators at block H
@@ -284,6 +285,28 @@ void print_usage() {
         "      the chain advances past <H> the same query flips INCLUDED back\n"
         "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
         "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
+        "  verify-dapp-registration --rpc-port <N> --genesis <file>\n"
+        "                          --domain <D> [--json]\n"
+        "      Prove (or disprove) that domain <D> is CURRENTLY a registered\n"
+        "      DApp — i.e. that it is a member of the committee-verified `d:`\n"
+        "      (dapp_registry) namespace, the v2.18 sibling of the a:/s:/i:/m:/\n"
+        "      p: trustless readers. Anchors genesis, committee-verifies the\n"
+        "      header chain to head, fetches the `d:`-namespace state-proof\n"
+        "      (simple key: the daemon prepends \"d:\" to the raw domain), and\n"
+        "      Merkle-verifies it against the committee-signed state_root. The\n"
+        "      load-bearing cross-check: the daemon's `dapp_info` cleartext\n"
+        "      (service_pubkey, endpoint_url, topics, retention, metadata, and\n"
+        "      the registered_at / active_from / inactive_from heights) is\n"
+        "      re-hashed locally — SHA256 over the build_state_leaves `d:`\n"
+        "      encoding — and must equal the proof's value_hash, so a daemon\n"
+        "      lie about ANY registration field is detected, not propagated.\n"
+        "      On INCLUDED the verdict also reports ACTIVE vs INACTIVE derived\n"
+        "      from the committee-attested inactive_from vs the anchored head\n"
+        "      height (a deactivated DApp keeps its `d:` leaf, so INACTIVE is a\n"
+        "      verified verdict, not a daemon claim). INCLUDED / NOT-INCLUDED\n"
+        "      are sound verdicts anchored to the head height; any tamper,\n"
+        "      cleartext/leaf mismatch, or daemon refusal → UNVERIFIABLE\n"
+        "      (exit 3), never a false INCLUDED.\n"
         "\n"
         "Equivocation forensics (offline, no daemon):\n"
         "  verify-equivocation --in <event.json>\n"
@@ -2436,6 +2459,371 @@ int cmd_verify_param_change(int argc, char** argv) {
     }
 }
 
+// ─────────────────────── verify-dapp-registration ──────────────────────
+//
+// Trustless reader for the `d:` (dapp_registry) namespace — the v2.18
+// DApp-registry sibling of the a:/s: single-leaf reads and the i:/m:/p:
+// composite-key inclusion proofs. Proves (or disproves) that a domain is
+// CURRENTLY a registered DApp on the committee-verified chain, with the
+// proof bound to the EXACT registration the daemon serves over `dapp_info`
+// (a daemon lie about the service key, endpoint, topics, retention, or
+// metadata is detected, not propagated).
+//
+// `d:` is a SIMPLE-key namespace (rpc_state_proof prepends "d:" + the raw
+// domain bytes, like a:/s:/r:), so unlike verify-param-change there is no
+// hex-encoded composite key body: --domain is passed through verbatim.
+// The load-bearing cross-check is the leaf value_hash, which
+// build_state_leaves (chain.cpp "d:" branch) computes as:
+//
+//   SHA256( service_pubkey[32]
+//         || u64_be(registered_at) || u64_be(active_from)
+//         || u64_be(inactive_from)
+//         || u64_be(endpoint_url.size()) || endpoint_url
+//         || u64_be(topics.size())
+//         || for each topic: u64_be(topic.size()) || topic
+//         || u64_be(retention)            // u8 promoted to u64
+//         || u64_be(metadata.size()) || metadata )
+//
+// The `dapp_info` RPC returns every one of those fields verbatim
+// (service_pubkey + metadata as hex; topics as a string array; the three
+// height fields + retention as integers), so the verifier recomputes the
+// hash from the cleartext and rejects any divergence. A registration that
+// has been deactivated still has a `d:` leaf (op=1 sets inactive_from but
+// keeps the entry), so this command also reports the active/inactive state
+// derived from the committee-anchored inactive_from vs the anchored head
+// height — INACTIVE is a verified verdict, not a daemon claim.
+//
+// Verdict tri-state mirrors verify-merge-state / verify-param-change:
+// INCLUDED / NOT-INCLUDED (sound, exit 0) and UNVERIFIABLE (fail-closed,
+// exit 3); usage / parse errors exit 1. NOT-INCLUDED means the domain has
+// no `d:` leaf at the verified head (never registered, or — once the
+// chain implements registry pruning — pruned). A daemon that cannot serve
+// the `d:` namespace, or whose cleartext disagrees with the committed
+// leaf, yields UNVERIFIABLE — never a false INCLUDED.
+
+int cmd_verify_dapp_registration(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-dapp-registration: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "verify-dapp-registration: "
+                     "--rpc-port, --genesis, --domain are required\n";
+        return 1;
+    }
+
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+    // Committee-verified registration fields (populated only on INCLUDED).
+    std::string service_pubkey_hex, endpoint_url, metadata_hex;
+    std::vector<std::string> topics;
+    uint64_t registered_at = 0, active_from = 0, inactive_from = 0,
+             retention = 0;
+    bool active = false;
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-dapp-registration: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // `d:` is a simple-key namespace — the daemon prepends "d:" to the
+        // raw domain bytes (no hex-encoded composite body). Compute the
+        // canonical key locally so we can bind the proof's key_bytes to it.
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + domain.size());
+        local_key.push_back('d'); local_key.push_back(':');
+        local_key.insert(local_key.end(), domain.begin(), domain.end());
+
+        // Committee-verify the header chain end-to-end, capturing the
+        // head's state_root (the anchor for the Merkle inclusion).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `d:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `d:`-namespace state-proof for this domain.
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "d"}, {"key", domain}});
+
+        // not_found for our exact key → a sound NOT-INCLUDED (no such DApp
+        // registered at the verified head). Any other refusal → fail-closed
+        // UNVERIFIABLE (we will not assert membership either way).
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `d:` leaf for domain '" + domain
+                        + "' — no such DApp is registered at the verified "
+                          "head (state_proof not_found)";
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `d:` state-proof: " + err
+                        + " (cannot prove registration trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS domain: its key_bytes must equal the
+            // locally-computed canonical key. A mismatch means the daemon
+            // served a proof for a different leaf → UNVERIFIABLE.
+            std::string proof_key_hex =
+                proof.value("key_bytes", std::string{});
+            std::string local_key_hex =
+                to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical d: key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                // Fetch the cleartext registration via `dapp_info` and
+                // recompute the committed leaf value_hash from it. This is
+                // the load-bearing cross-check: a daemon could serve an
+                // honest proof for the right key while lying in the
+                // cleartext; the hash recomputation forces consistency.
+                auto di = rpc.call("dapp_info", {{"domain", domain}});
+                if (di.contains("error") && !di["error"].is_null()) {
+                    // The state-proof said the leaf exists but dapp_info
+                    // refuses it — inconsistent daemon, fail closed.
+                    throw std::runtime_error(
+                        "state_proof served a `d:` leaf for '" + domain
+                        + "' but dapp_info refused it: " + di["error"].dump()
+                        + " (inconsistent daemon)");
+                }
+
+                service_pubkey_hex = di.value("service_pubkey", std::string{});
+                endpoint_url       = di.value("endpoint_url",   std::string{});
+                metadata_hex       = di.value("metadata",       std::string{});
+                registered_at      = di.value("registered_at",  uint64_t{0});
+                active_from        = di.value("active_from",    uint64_t{0});
+                inactive_from      = di.value("inactive_from",  uint64_t{0});
+                retention          = di.value("retention",      uint64_t{0});
+                if (di.contains("topics") && di["topics"].is_array())
+                    for (auto& t : di["topics"]) topics.push_back(t.get<std::string>());
+
+                // Decode the hex-encoded blobs back to the raw bytes the
+                // leaf hashes (from_hex throws on malformed hex → exit 1).
+                std::vector<uint8_t> service_pubkey = from_hex(service_pubkey_hex);
+                std::vector<uint8_t> metadata =
+                    metadata_hex.empty() ? std::vector<uint8_t>{}
+                                         : from_hex(metadata_hex);
+                if (service_pubkey.size() != 32) {
+                    throw std::runtime_error(
+                        "dapp_info service_pubkey is not 32 bytes (got "
+                        + std::to_string(service_pubkey.size()) + ")");
+                }
+
+                // Recompute the committed leaf value_hash byte-for-byte
+                // matching chain.cpp build_state_leaves "d:" branch.
+                determ::crypto::SHA256Builder hb;
+                hb.append(service_pubkey.data(), service_pubkey.size());
+                hb.append(registered_at);
+                hb.append(active_from);
+                hb.append(inactive_from);
+                hb.append(static_cast<uint64_t>(endpoint_url.size()));
+                hb.append(endpoint_url);
+                hb.append(static_cast<uint64_t>(topics.size()));
+                for (auto& t : topics) {
+                    hb.append(static_cast<uint64_t>(t.size()));
+                    hb.append(t);
+                }
+                hb.append(retention);  // u8 promoted to u64 on chain too
+                hb.append(static_cast<uint64_t>(metadata.size()));
+                if (!metadata.empty()) hb.append(metadata.data(), metadata.size());
+                Hash expected_value_hash = hb.finalize();
+
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match the recomputed hash of the "
+                              "dapp_info registration for '" + domain + "'="
+                            + to_hex(expected_value_hash)
+                            + " — daemon is lying about the registration "
+                              "fields OR proving a different leaf";
+                } else {
+                    // Anchor the proof's claimed state_root to a
+                    // committee-signed header (the chain may have advanced
+                    // during the round-trip), mirroring verify-param-change.
+                    uint64_t proof_height =
+                        proof.value("height", uint64_t{0});
+                    std::string proof_root =
+                        proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    if (proof_height > vc.height) {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        auto pg = rpc.call("headers",
+                            {{"from", anchor_index}, {"count", 1}});
+                        if (!pg.contains("headers")
+                            || !pg["headers"].is_array()
+                            || pg["headers"].empty()) {
+                            throw std::runtime_error(
+                                "cannot fetch header at index="
+                                + std::to_string(anchor_index)
+                                + " (proof.height="
+                                + std::to_string(proof_height) + ")");
+                        }
+                        auto& h = pg["headers"][0];
+                        std::string hdr_root =
+                            h.value("state_root", std::string{});
+                        if (hdr_root != proof_root) {
+                            throw std::runtime_error(
+                                "proof.state_root=" + proof_root
+                                + " does not match header["
+                                + std::to_string(anchor_index)
+                                + "].state_root=" + hdr_root);
+                        }
+                        auto vbs = verify_block_sigs(h, committee_json,
+                                                     /*bft=*/false);
+                        if (!vbs.ok)
+                            vbs = verify_block_sigs(h, committee_json,
+                                                    /*bft=*/true);
+                        if (!vbs.ok) {
+                            throw std::runtime_error(
+                                "header[" + std::to_string(anchor_index)
+                                + "] committee-sig check failed: "
+                                + vbs.detail);
+                        }
+                        if (anchor_index >= vc.height) {
+                            auto walk = rpc.call("headers",
+                                {{"from", vc.height - 1},
+                                 {"count", proof_height - vc.height + 2}});
+                            auto vh = verify_headers(walk, "", "");
+                            if (!vh.ok) {
+                                throw std::runtime_error(
+                                    "prev_hash walk vc.height->proof.height: "
+                                    + vh.detail);
+                            }
+                        }
+                        anchor_root = proof_root;
+                        anchor_at   = proof_height;
+                    } else if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+
+                    // Merkle-verify the proof against the committee-signed
+                    // root. We already bound key_bytes + value_hash to the
+                    // canonical registration above, so a pass here is a
+                    // sound INCLUDED.
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                        // active/inactive is now a verified verdict: the
+                        // inactive_from we hashed is committee-attested, so
+                        // compare it against the committee-anchored head.
+                        // DAPP_CALL is rejected once inactive_from <= height.
+                        active = (anchored_height < inactive_from);
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",  included},
+                {"verdict",   verdict_str(verdict)},
+                {"domain",    domain},
+                {"namespace", "d"},
+            };
+            if (included) {
+                out["active"]         = active;
+                out["service_pubkey"] = service_pubkey_hex;
+                out["endpoint_url"]   = endpoint_url;
+                out["topics"]         = topics;
+                out["retention"]      = retention;
+                out["metadata"]       = metadata_hex;
+                out["registered_at"]  = registered_at;
+                out["active_from"]    = active_from;
+                out["inactive_from"]  = inactive_from;
+            }
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         d (dapp_registry)\n"
+                      << "  domain:            " << domain << "\n";
+            if (verdict == InclusionVerdict::INCLUDED) {
+                std::cout << "  status:            "
+                          << (active ? "ACTIVE" : "INACTIVE (deactivated)") << "\n"
+                          << "  service_pubkey:    " << service_pubkey_hex << "\n"
+                          << "  endpoint_url:      " << endpoint_url << "\n"
+                          << "  topics:            " << topics.size() << "\n"
+                          << "  retention:         " << retention << "\n"
+                          << "  registered_at:     " << registered_at << "\n"
+                          << "  active_from:       " << active_from << "\n"
+                          << "  inactive_from:     " << inactive_from << "\n"
+                          << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        // Exit codes match verify-param-change: INCLUDED / NOT-INCLUDED → 0
+        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-dapp-registration: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ──────────────────────── verify-equivocation ──────────────────────────
 
 // verify-equivocation — OFFLINE equivocation-evidence verifier (FA6).
@@ -3871,6 +4259,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
+        if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
         if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);

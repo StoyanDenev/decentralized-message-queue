@@ -20620,6 +20620,593 @@ int cmd_state_proof_verify(int argc, char** argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// verify-dapp-registration --proof <proof.json> --entry <entry.json>
+//                          --root <hex64> [--json]
+//
+// OFFLINE trustless verifier for a v2.18 DAPP_REGISTER on-chain registration.
+// The `d:`-namespace sibling of the i:/m:/p: composite-key readers: it binds a
+// committee-signed state_root to a concrete DApp-registry entry, completing the
+// trustless-read family across every queryable namespace.
+//
+// The d: namespace stores one leaf per registered DApp, keyed by the owning
+// domain ("d:" + domain). build_state_leaves (src/chain/chain.cpp) hashes the
+// entry's canonical fields into that leaf's value_hash. This command:
+//   (1) recomputes the d:-namespace value_hash from the operator-supplied entry
+//       JSON (the EXACT byte encoding the daemon commits, big-endian u64s);
+//   (2) recomputes key_bytes = "d:" + domain (ASCII) for the same domain;
+//   (3) cross-checks BOTH against the proof's self-asserted key_bytes /
+//       value_hash — a mismatch means the proof does not describe THIS entry;
+//   (4) runs the Merkle walk against --root (the trust anchor — a
+//       committee-signed state_root) to prove the entry is committed; and
+//   (5) reports the activation state derived from the bound entry
+//       (active_from / inactive_from vs the proof's height): REGISTERED,
+//       INACTIVE (deactivated via op=1 + DAPP_GRACE_BLOCKS deferral), or
+//       PENDING (active_from not yet reached).
+//
+// Why both --proof and --entry: a state_proof RPC for the d: namespace returns
+// only the opaque value_hash, not the structured fields. The dapp_info RPC
+// returns the structured fields but is untrusted (a lying node can fabricate
+// them). This tool refuses to trust dapp_info on its own: it re-derives the
+// value_hash from the claimed fields and rejects unless that hash is the one
+// the committee signed into --root. A node that lies about endpoint_url,
+// service_pubkey, topics, retention, metadata, or the activation heights
+// produces a value_hash that will NOT verify. Pure local SHA-256 / byte
+// assembly; no RPC, no network, no daemon, no subprocess. Deterministic.
+//
+// d:-namespace value_hash encoding (must match build_state_leaves byte-for-byte;
+// SHA256Builder::append(uint64_t) is big-endian 8-byte):
+//   SHA-256( service_pubkey[32]
+//         || u64_be(registered_at)
+//         || u64_be(active_from)
+//         || u64_be(inactive_from)
+//         || u64_be(endpoint_url.size()) || endpoint_url
+//         || u64_be(topics.size())
+//         || for each topic: u64_be(topic.size()) || topic
+//         || u64_be(retention)
+//         || u64_be(metadata.size()) || metadata )
+//
+// --entry JSON fields (the dapp_info RPC return shape, PROTOCOL.md §10.2):
+//   domain (string), service_pubkey (hex64), endpoint_url (string),
+//   topics (string array), retention (uint), metadata (hex, even-length),
+//   registered_at / active_from / inactive_from (uint).
+//
+// Exit codes:
+//   0  VALID — proof verifies against --root AND the entry re-derives the
+//      committed key_bytes + value_hash (registration is committed; the
+//      reported activation state is informational, NOT a failure)
+//   1  args / file-unreadable / malformed-proof / malformed-entry / bad-hex
+//   2  INVALID — merkle walk rejected, OR the entry's re-derived key_bytes /
+//      value_hash disagrees with the proof, OR proof.state_root disagrees
+//      with --root
+int cmd_verify_dapp_registration(int argc, char** argv) {
+    std::string proof_path, entry_path, root_hex;
+    bool json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--proof" && i + 1 < argc) proof_path = argv[++i];
+        else if (a == "--entry" && i + 1 < argc) entry_path = argv[++i];
+        else if (a == "--root"  && i + 1 < argc) root_hex   = argv[++i];
+        else if (a == "--json")                  json_out   = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet verify-dapp-registration\n"
+                "                       --proof <proof.json>\n"
+                "                       --entry <entry.json>\n"
+                "                       --root <hex64> [--json]\n"
+                "\n"
+                "  OFFLINE trustless verifier for a v2.18 DAPP_REGISTER on-chain\n"
+                "  registration — the `d:`-namespace sibling of the i:/m:/p:\n"
+                "  composite-key readers. Binds a committee-signed state_root to a\n"
+                "  concrete DApp-registry entry: re-derives the d:-namespace\n"
+                "  key_bytes + value_hash from the entry's claimed fields, refuses\n"
+                "  unless they match the proof, then Merkle-verifies against\n"
+                "  --root. In-process SHA-256; no RPC, no network, no subprocess.\n"
+                "\n"
+                "  --proof <proof.json>\n"
+                "      Required. A `state_proof` RPC result for the d: namespace\n"
+                "      (PROTOCOL.md §10.2). Required fields: key_bytes (hex),\n"
+                "      value_hash (hex64), target_index (uint), leaf_count (uint),\n"
+                "      proof (array of hex64 siblings). Optional state_root (hex64)\n"
+                "      + height (uint) are used if present.\n"
+                "\n"
+                "  --entry <entry.json>\n"
+                "      Required. The DApp-registry entry to verify, in the\n"
+                "      `dapp_info` RPC return shape: domain (string),\n"
+                "      service_pubkey (hex64), endpoint_url (string), topics\n"
+                "      (string array), retention (uint), metadata (even-length\n"
+                "      hex), registered_at / active_from / inactive_from (uint).\n"
+                "      This entry is UNTRUSTED input: its value_hash is\n"
+                "      re-derived locally and must match the committed proof.\n"
+                "\n"
+                "  --root <hex64>\n"
+                "      Required. The 32-byte (64 hex) state_root trust anchor.\n"
+                "      Source it from a committee-signed header / snapshot tail /\n"
+                "      `determ-light verify-state-root` output. The proof is\n"
+                "      recomputed against THIS root, not the proof's self-claim.\n"
+                "\n"
+                "  --json\n"
+                "      One-line machine-readable JSON. Shape:\n"
+                "        { proof, entry, root, valid, domain, namespace,\n"
+                "          key_bytes, expected_key_bytes, key_matches,\n"
+                "          value_hash, derived_value_hash, value_hash_matches,\n"
+                "          target_index, leaf_count, proof_len, height,\n"
+                "          proof_state_root, root_matches_proof,\n"
+                "          registered_at, active_from, inactive_from,\n"
+                "          activation: \"registered\" | \"pending\" | \"inactive\",\n"
+                "          exit_reason: \"valid\" | \"invalid\"\n"
+                "                     | \"invalid_args\" | \"malformed_proof\"\n"
+                "                     | \"malformed_entry\" }\n"
+                "\n"
+                "  Activation is derived from the BOUND entry against the proof's\n"
+                "  height (informational, never a failure): registered =\n"
+                "  active_from <= height < inactive_from; pending = active_from >\n"
+                "  height; inactive = inactive_from <= height (op=1 deactivation\n"
+                "  after its DAPP_GRACE_BLOCKS deferral has elapsed).\n"
+                "\n"
+                "  S-040 note: leaf_count is NOT bound into the Merkle hashes.\n"
+                "  Source the proof AND its leaf_count from a path anchored to the\n"
+                "  same committee-signed state_root you pass via --root.\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  VALID (proof verifies against --root; entry re-derives the\n"
+                "       committed key_bytes + value_hash)\n"
+                "    1  args / file-unreadable / malformed-proof / malformed-entry\n"
+                "    2  INVALID (merkle rejected OR key/value-hash mismatch OR\n"
+                "       proof.state_root disagrees with --root)\n";
+            return 0;
+        }
+        else {
+            std::cerr << "verify-dapp-registration: unknown argument '"
+                      << a << "'\n";
+            std::cerr << "Usage: determ-wallet verify-dapp-registration "
+                         "--proof <proof.json> --entry <entry.json> "
+                         "--root <hex64> [--json]\n";
+            return 1;
+        }
+    }
+
+    // emit_err: uniform diagnostic for the arg/parse failure family (exit 1).
+    auto emit_err = [&](const std::string& reason,
+                        const std::string& exit_reason) -> int {
+        if (json_out) {
+            nlohmann::json err = {
+                {"proof",       proof_path},
+                {"entry",       entry_path},
+                {"root",        root_hex},
+                {"valid",       false},
+                {"exit_reason", exit_reason},
+                {"reason",      reason},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "verify-dapp-registration: " << reason << "\n";
+        }
+        return 1;
+    };
+
+    if (proof_path.empty())
+        return emit_err("--proof <proof.json> is required", "invalid_args");
+    if (entry_path.empty())
+        return emit_err("--entry <entry.json> is required", "invalid_args");
+    if (root_hex.empty())
+        return emit_err("--root <hex64> is required", "invalid_args");
+
+    auto is_hex_str = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s) {
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto lower_hex = [](std::string s) {
+        for (char& c : s)
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+        return s;
+    };
+    if (root_hex.size() != 64 || !is_hex_str(root_hex))
+        return emit_err("--root must be 64 hex chars (32 bytes)", "invalid_args");
+    root_hex = lower_hex(root_hex);
+
+    // ── Read + parse the proof JSON (d: namespace state_proof). ──
+    std::ifstream pf(proof_path);
+    if (!pf)
+        return emit_err("cannot open --proof '" + proof_path + "'",
+                        "invalid_args");
+    nlohmann::json proof;
+    try {
+        proof = nlohmann::json::parse(pf);
+    } catch (const std::exception& e) {
+        return emit_err(std::string("--proof JSON parse failed: ") + e.what(),
+                        "malformed_proof");
+    }
+    if (!proof.is_object())
+        return emit_err("--proof top-level JSON is not an object",
+                        "malformed_proof");
+    if (proof.contains("error") && !proof["error"].is_null())
+        return emit_err("proof carries an error field: " + proof["error"].dump(),
+                        "malformed_proof");
+
+    std::string proof_key_hex, proof_value_hash, proof_state_root, ns;
+    uint64_t target_index = 0, leaf_count = 0, height = 0;
+    std::vector<std::string> sib_hex;
+    try {
+        if (!proof.contains("key_bytes") || !proof["key_bytes"].is_string())
+            return emit_err("proof missing string field 'key_bytes'",
+                            "malformed_proof");
+        proof_key_hex = lower_hex(proof["key_bytes"].get<std::string>());
+
+        if (!proof.contains("value_hash") || !proof["value_hash"].is_string())
+            return emit_err("proof missing string field 'value_hash'",
+                            "malformed_proof");
+        proof_value_hash = lower_hex(proof["value_hash"].get<std::string>());
+
+        if (!proof.contains("target_index") || !proof["target_index"].is_number())
+            return emit_err("proof missing numeric field 'target_index'",
+                            "malformed_proof");
+        target_index = proof["target_index"].get<uint64_t>();
+
+        if (!proof.contains("leaf_count") || !proof["leaf_count"].is_number())
+            return emit_err("proof missing numeric field 'leaf_count'",
+                            "malformed_proof");
+        leaf_count = proof["leaf_count"].get<uint64_t>();
+
+        if (!proof.contains("proof") || !proof["proof"].is_array())
+            return emit_err("proof missing array field 'proof'",
+                            "malformed_proof");
+        for (auto& h : proof["proof"]) {
+            if (!h.is_string())
+                return emit_err("proof[] contains a non-string sibling",
+                                "malformed_proof");
+            sib_hex.push_back(lower_hex(h.get<std::string>()));
+        }
+
+        if (proof.contains("state_root") && proof["state_root"].is_string())
+            proof_state_root = lower_hex(proof["state_root"].get<std::string>());
+        if (proof.contains("namespace") && proof["namespace"].is_string())
+            ns = proof["namespace"].get<std::string>();
+        if (proof.contains("height") && proof["height"].is_number())
+            height = proof["height"].get<uint64_t>();
+    } catch (const std::exception& e) {
+        return emit_err(std::string("malformed proof: ") + e.what(),
+                        "malformed_proof");
+    }
+
+    if (proof_value_hash.size() != 64 || !is_hex_str(proof_value_hash))
+        return emit_err("proof 'value_hash' must be 64 hex chars (32 bytes)",
+                        "malformed_proof");
+    if (!proof_key_hex.empty()
+        && (proof_key_hex.size() % 2 != 0 || !is_hex_str(proof_key_hex)))
+        return emit_err("proof 'key_bytes' must be even-length hex",
+                        "malformed_proof");
+    for (const auto& s : sib_hex) {
+        if (s.size() != 64 || !is_hex_str(s))
+            return emit_err("each proof[] sibling must be 64 hex chars",
+                            "malformed_proof");
+    }
+
+    // ── Read + parse the entry JSON (dapp_info shape). ──
+    std::ifstream ef(entry_path);
+    if (!ef)
+        return emit_err("cannot open --entry '" + entry_path + "'",
+                        "invalid_args");
+    nlohmann::json entry;
+    try {
+        entry = nlohmann::json::parse(ef);
+    } catch (const std::exception& e) {
+        return emit_err(std::string("--entry JSON parse failed: ") + e.what(),
+                        "malformed_entry");
+    }
+    if (!entry.is_object())
+        return emit_err("--entry top-level JSON is not an object",
+                        "malformed_entry");
+    if (entry.contains("error") && !entry["error"].is_null())
+        return emit_err("entry carries an error field: " + entry["error"].dump(),
+                        "malformed_entry");
+
+    std::string domain, service_pubkey_hex, endpoint_url, metadata_hex;
+    std::vector<std::string> topics;
+    uint64_t e_registered_at = 0, e_active_from = 0,
+             e_inactive_from = 0, e_retention = 0;
+    try {
+        if (!entry.contains("domain") || !entry["domain"].is_string())
+            return emit_err("entry missing string field 'domain'",
+                            "malformed_entry");
+        domain = entry["domain"].get<std::string>();
+        if (domain.empty())
+            return emit_err("entry 'domain' must be non-empty", "malformed_entry");
+
+        if (!entry.contains("service_pubkey")
+            || !entry["service_pubkey"].is_string())
+            return emit_err("entry missing string field 'service_pubkey'",
+                            "malformed_entry");
+        service_pubkey_hex =
+            lower_hex(entry["service_pubkey"].get<std::string>());
+
+        if (!entry.contains("endpoint_url") || !entry["endpoint_url"].is_string())
+            return emit_err("entry missing string field 'endpoint_url'",
+                            "malformed_entry");
+        endpoint_url = entry["endpoint_url"].get<std::string>();
+
+        if (!entry.contains("topics") || !entry["topics"].is_array())
+            return emit_err("entry missing array field 'topics'",
+                            "malformed_entry");
+        for (auto& t : entry["topics"]) {
+            if (!t.is_string())
+                return emit_err("entry 'topics' contains a non-string element",
+                                "malformed_entry");
+            topics.push_back(t.get<std::string>());
+        }
+
+        if (!entry.contains("retention") || !entry["retention"].is_number())
+            return emit_err("entry missing numeric field 'retention'",
+                            "malformed_entry");
+        e_retention = entry["retention"].get<uint64_t>();
+        if (e_retention > 0xff)
+            return emit_err("entry 'retention' must fit in one byte (0-255)",
+                            "malformed_entry");
+
+        // metadata is hex-encoded in the dapp_info RPC; "" means empty bytes.
+        if (entry.contains("metadata")) {
+            if (!entry["metadata"].is_string())
+                return emit_err("entry 'metadata' must be a hex string",
+                                "malformed_entry");
+            metadata_hex = lower_hex(entry["metadata"].get<std::string>());
+        }
+
+        if (!entry.contains("registered_at") || !entry["registered_at"].is_number())
+            return emit_err("entry missing numeric field 'registered_at'",
+                            "malformed_entry");
+        e_registered_at = entry["registered_at"].get<uint64_t>();
+
+        if (!entry.contains("active_from") || !entry["active_from"].is_number())
+            return emit_err("entry missing numeric field 'active_from'",
+                            "malformed_entry");
+        e_active_from = entry["active_from"].get<uint64_t>();
+
+        if (!entry.contains("inactive_from") || !entry["inactive_from"].is_number())
+            return emit_err("entry missing numeric field 'inactive_from'",
+                            "malformed_entry");
+        e_inactive_from = entry["inactive_from"].get<uint64_t>();
+    } catch (const std::exception& e) {
+        return emit_err(std::string("malformed entry: ") + e.what(),
+                        "malformed_entry");
+    }
+
+    if (service_pubkey_hex.size() != 64 || !is_hex_str(service_pubkey_hex))
+        return emit_err("entry 'service_pubkey' must be 64 hex chars (32 bytes)",
+                        "malformed_entry");
+    if (!metadata_hex.empty()
+        && (metadata_hex.size() % 2 != 0 || !is_hex_str(metadata_hex)))
+        return emit_err("entry 'metadata' must be even-length hex",
+                        "malformed_entry");
+
+    // ── Re-derive the d:-namespace value_hash from the entry fields. ──
+    // Reproduces build_state_leaves (src/chain/chain.cpp) byte-for-byte using
+    // OpenSSL SHA-256. SHA256Builder::append(uint64_t) emits 8 bytes
+    // big-endian (src/crypto/sha256.cpp); strings/bytes append verbatim.
+    auto u64_be = [](std::vector<uint8_t>& buf, uint64_t v) {
+        for (int i = 7; i >= 0; --i)
+            buf.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
+    };
+    std::vector<uint8_t> vbuf;
+    {
+        std::vector<uint8_t> svc = from_hex(service_pubkey_hex);  // 32 bytes
+        vbuf.insert(vbuf.end(), svc.begin(), svc.end());
+        u64_be(vbuf, e_registered_at);
+        u64_be(vbuf, e_active_from);
+        u64_be(vbuf, e_inactive_from);
+        u64_be(vbuf, static_cast<uint64_t>(endpoint_url.size()));
+        vbuf.insert(vbuf.end(), endpoint_url.begin(), endpoint_url.end());
+        u64_be(vbuf, static_cast<uint64_t>(topics.size()));
+        for (const auto& t : topics) {
+            u64_be(vbuf, static_cast<uint64_t>(t.size()));
+            vbuf.insert(vbuf.end(), t.begin(), t.end());
+        }
+        u64_be(vbuf, e_retention);  // retention promoted u8 -> u64
+        std::vector<uint8_t> meta = metadata_hex.empty()
+                                  ? std::vector<uint8_t>{}
+                                  : from_hex(metadata_hex);
+        u64_be(vbuf, static_cast<uint64_t>(meta.size()));
+        vbuf.insert(vbuf.end(), meta.begin(), meta.end());
+    }
+    std::array<uint8_t, 32> derived_vh{};
+    SHA256(vbuf.data(), vbuf.size(), derived_vh.data());
+    std::string derived_value_hash = to_hex(derived_vh);
+
+    // Re-derive key_bytes = "d:" + domain (ASCII) for THIS domain.
+    std::vector<uint8_t> exp_key;
+    exp_key.push_back('d'); exp_key.push_back(':');
+    exp_key.insert(exp_key.end(), domain.begin(), domain.end());
+    std::string expected_key_hex = to_hex(exp_key);
+
+    bool key_matches        = (proof_key_hex == expected_key_hex);
+    bool value_hash_matches = (proof_value_hash == derived_value_hash);
+
+    // ── Merkle walk (in-process; identical to merkle_verify / the
+    //    state-proof-verify path above). ──
+    auto sha256 = [](const std::vector<uint8_t>& in) {
+        std::array<uint8_t, 32> out{};
+        SHA256(in.data(), in.size(), out.data());
+        return out;
+    };
+    auto leaf_hash = [&](const std::vector<uint8_t>& key,
+                         const std::array<uint8_t, 32>& vh) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 4 + key.size() + 32);
+        buf.push_back(0x00);
+        uint32_t kl = static_cast<uint32_t>(key.size());
+        buf.push_back(static_cast<uint8_t>((kl >> 24) & 0xff));
+        buf.push_back(static_cast<uint8_t>((kl >> 16) & 0xff));
+        buf.push_back(static_cast<uint8_t>((kl >> 8)  & 0xff));
+        buf.push_back(static_cast<uint8_t>( kl        & 0xff));
+        buf.insert(buf.end(), key.begin(), key.end());
+        buf.insert(buf.end(), vh.begin(), vh.end());
+        return sha256(buf);
+    };
+    auto inner_hash = [&](const std::array<uint8_t, 32>& l,
+                          const std::array<uint8_t, 32>& r) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 32 + 32);
+        buf.push_back(0x01);
+        buf.insert(buf.end(), l.begin(), l.end());
+        buf.insert(buf.end(), r.begin(), r.end());
+        return sha256(buf);
+    };
+    auto to_arr32 = [](const std::vector<uint8_t>& v) {
+        std::array<uint8_t, 32> a{};
+        std::copy(v.begin(), v.end(), a.begin());
+        return a;
+    };
+
+    // The leaf the proof binds: use the PROOF's key_bytes + value_hash so the
+    // walk reproduces what the daemon committed; the entry-derived values are
+    // cross-checked separately (key_matches / value_hash_matches above).
+    std::vector<uint8_t> proof_key = proof_key_hex.empty()
+                                   ? std::vector<uint8_t>{}
+                                   : from_hex(proof_key_hex);
+    std::array<uint8_t, 32> proof_vh = to_arr32(from_hex(proof_value_hash));
+    std::array<uint8_t, 32> root     = to_arr32(from_hex(root_hex));
+    std::vector<std::array<uint8_t, 32>> sibs;
+    sibs.reserve(sib_hex.size());
+    for (const auto& s : sib_hex) sibs.push_back(to_arr32(from_hex(s)));
+
+    bool merkle_ok = true;
+    std::string fail_reason;
+    if (leaf_count == 0) {
+        merkle_ok = false;
+        fail_reason = "leaf_count is 0";
+    } else if (target_index >= leaf_count) {
+        merkle_ok = false;
+        fail_reason = "target_index >= leaf_count";
+    } else {
+        std::array<uint8_t, 32> current = leaf_hash(proof_key, proof_vh);
+        uint64_t idx        = target_index;
+        uint64_t level_size = leaf_count;
+        size_t   proof_idx  = 0;
+        while (level_size > 1) {
+            if (level_size % 2 == 1) level_size += 1;
+            if (proof_idx >= sibs.size()) {
+                merkle_ok = false;
+                fail_reason = "ran out of sibling hashes before reaching root";
+                break;
+            }
+            const std::array<uint8_t, 32>& sib = sibs[proof_idx++];
+            current = (idx % 2 == 0) ? inner_hash(current, sib)
+                                     : inner_hash(sib, current);
+            idx        /= 2;
+            level_size /= 2;
+        }
+        if (merkle_ok) {
+            if (proof_idx != sibs.size()) {
+                merkle_ok = false;
+                fail_reason = "extra unused sibling hashes "
+                              "(proof_len does not match tree depth)";
+            } else if (current != root) {
+                merkle_ok = false;
+                fail_reason = "recomputed root does not match --root";
+            }
+        }
+    }
+
+    bool root_matches_proof = proof_state_root.empty()
+                            || (proof_state_root == root_hex);
+
+    // Compose the verdict. Each binding is load-bearing: the merkle walk proves
+    // the leaf is committed; key_matches proves it is THIS domain's leaf;
+    // value_hash_matches proves the entry's claimed fields are the ones the
+    // committee signed. A failure of any one means the entry is not the
+    // committed registration.
+    bool valid = merkle_ok && key_matches && value_hash_matches
+              && root_matches_proof;
+    if (merkle_ok && !key_matches)
+        fail_reason = "proof key_bytes (" + proof_key_hex
+                    + ") does not match the entry-derived d: key ("
+                    + expected_key_hex + ")";
+    else if (merkle_ok && key_matches && !value_hash_matches)
+        fail_reason = "entry re-derives value_hash (" + derived_value_hash
+                    + ") which does not match the committed proof value_hash ("
+                    + proof_value_hash + ")";
+    else if (merkle_ok && key_matches && value_hash_matches
+             && !root_matches_proof)
+        fail_reason = "proof's self-asserted state_root (" + proof_state_root
+                    + ") does not match --root";
+
+    // Activation state derived from the BOUND entry (informational only).
+    std::string activation;
+    if (e_inactive_from <= height)        activation = "inactive";
+    else if (e_active_from > height)      activation = "pending";
+    else                                  activation = "registered";
+
+    std::string exit_reason = valid ? "valid" : "invalid";
+    int exit_code = valid ? 0 : 2;
+
+    if (json_out) {
+        nlohmann::json env = {
+            {"proof",              proof_path},
+            {"entry",              entry_path},
+            {"root",               root_hex},
+            {"valid",              valid},
+            {"domain",             domain},
+            {"namespace",          ns.empty() ? std::string("d") : ns},
+            {"key_bytes",          proof_key_hex},
+            {"expected_key_bytes", expected_key_hex},
+            {"key_matches",        key_matches},
+            {"value_hash",         proof_value_hash},
+            {"derived_value_hash", derived_value_hash},
+            {"value_hash_matches", value_hash_matches},
+            {"target_index",       target_index},
+            {"leaf_count",         leaf_count},
+            {"proof_len",          sib_hex.size()},
+            {"height",             height},
+            {"proof_state_root",   proof_state_root},
+            {"root_matches_proof", root_matches_proof},
+            {"registered_at",      e_registered_at},
+            {"active_from",        e_active_from},
+            {"inactive_from",      e_inactive_from},
+            {"activation",         activation},
+            {"exit_reason",        exit_reason},
+        };
+        if (!valid && !fail_reason.empty()) env["reason"] = fail_reason;
+        std::cout << env.dump() << "\n";
+    } else {
+        std::cout << "verify-dapp-registration: " << domain << "\n";
+        std::cout << "  namespace         : "
+                  << (ns.empty() ? std::string("d") : ns) << "\n";
+        std::cout << "  key_bytes         : " << proof_key_hex << "\n";
+        std::cout << "  expected_key      : " << expected_key_hex << "\n";
+        std::cout << "  key_matches       : "
+                  << (key_matches ? "true" : "false") << "\n";
+        std::cout << "  value_hash        : " << proof_value_hash << "\n";
+        std::cout << "  derived_value_hash: " << derived_value_hash << "\n";
+        std::cout << "  value_hash_matches: "
+                  << (value_hash_matches ? "true" : "false") << "\n";
+        std::cout << "  target_index      : " << target_index << "\n";
+        std::cout << "  leaf_count        : " << leaf_count << "\n";
+        std::cout << "  proof_len         : " << sib_hex.size() << "\n";
+        if (height) std::cout << "  height            : " << height << "\n";
+        std::cout << "  root (--root)     : " << root_hex << "\n";
+        if (!proof_state_root.empty()) {
+            std::cout << "  proof.state_root  : " << proof_state_root << "\n";
+            std::cout << "  root_matches      : "
+                      << (root_matches_proof ? "true" : "false") << "\n";
+        }
+        std::cout << "  registered_at     : " << e_registered_at << "\n";
+        std::cout << "  active_from       : " << e_active_from << "\n";
+        std::cout << "  inactive_from     : " << e_inactive_from << "\n";
+        std::cout << "  activation        : " << activation << "\n";
+        std::cout << "  result            : "
+                  << (valid ? "VALID" : "INVALID") << "\n";
+        if (!valid && !fail_reason.empty())
+            std::cout << "  reason            : " << fail_reason << "\n";
+    }
+    return exit_code;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // param-change-build --name <P> (--value <N> | --value-hex <hex>)
 //                    --effective-height <H> --nonce <N> --from <domain-or-addr>
 //                    [--fee <N>] [--out <file> | --allow-stdout] [--json]
@@ -22088,6 +22675,26 @@ void print_usage() {
         "                                             the proof + its leaf_count from a path\n"
         "                                             anchored to the same --root. Exit 0 VALID,\n"
         "                                             1 args/file/malformed-proof, 2 INVALID.\n"
+        "  verify-dapp-registration                   OFFLINE trustless verifier for a v2.18\n"
+        "                       --proof <proof.json>  DAPP_REGISTER on-chain registration — the\n"
+        "                       --entry <entry.json>  d:-namespace sibling of the i:/m:/p:\n"
+        "                       --root <hex64> [--json] composite-key readers. Binds a committee-\n"
+        "                                             signed state_root to a concrete DApp entry:\n"
+        "                                             re-derives the d:-namespace key_bytes +\n"
+        "                                             value_hash from the entry's claimed fields\n"
+        "                                             (service_pubkey, endpoint_url, topics,\n"
+        "                                             retention, metadata, registered_at/\n"
+        "                                             active_from/inactive_from), refuses unless\n"
+        "                                             they match the proof, then Merkle-verifies\n"
+        "                                             against --root. --proof is a d:-namespace\n"
+        "                                             state_proof JSON; --entry is the dapp_info\n"
+        "                                             RPC return shape (UNTRUSTED — re-derived\n"
+        "                                             locally). Reports activation (registered/\n"
+        "                                             pending/inactive) from the bound entry vs\n"
+        "                                             the proof height. In-process SHA-256; no RPC,\n"
+        "                                             no network, no subprocess. Exit 0 VALID, 1\n"
+        "                                             args/file/malformed, 2 INVALID (merkle\n"
+        "                                             rejected OR key/value-hash mismatch).\n"
         "  supply-audit --snapshot <file>             OFFLINE recompute of the A1 unitary-\n"
         "               [--in <file>]                 supply balance identity from a snapshot\n"
         "               [--json]                      JSON. Sums accounts[].balance +\n"
@@ -22233,6 +22840,7 @@ int main(int argc, char** argv) {
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
     if (cmd == "state-proof-verify") return cmd_state_proof_verify(argc - 2, argv + 2);
+    if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(argc - 2, argv + 2);
     if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
     if (cmd == "subsidy-schedule") return cmd_subsidy_schedule(argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);

@@ -688,6 +688,12 @@ Additional in-process tests:
                                               re-verify under state_root;
                                               wrong/absent + little-endian +
                                               tampered keys rejected
+  determ test-dapp-registry-trustless-read    v2.18 trustless d:-namespace
+                                              DApp-registry reader — recompute
+                                              the d: leaf value_hash off-node +
+                                              bind to the state_proof + verify
+                                              under state_root; field-tamper +
+                                              deactivation + absent rejected
   determ test-applied-receipt-restore         applied_inbound_receipts dedup
                                               survives snapshot restore —
                                               exactly-once-credit preserved
@@ -38862,6 +38868,290 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-proof-composite-key "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // R42 Theme: v2.18 DApp registry — trustless d:-namespace reader.
+    // The d: sibling of test-state-proof-value-hash (a:/s:/k:/c:) and
+    // test-state-proof-composite-key (i:/m:/p:), completing the trustless-
+    // read family across every queryable namespace. A light client that
+    // wants to learn a DApp's registration (service_pubkey / endpoint_url
+    // / topics / activity) without trusting the full node must:
+    //   1. reconstruct the "d:" + domain key,
+    //   2. fetch the state_proof for that key,
+    //   3. INDEPENDENTLY recompute the d: leaf value_hash from the entry's
+    //      canonical fields using the SAME encoding the producer used in
+    //      Chain::build_state_leaves, and confirm it equals the proof's
+    //      value_hash (the binding step — proves the entry the node reports
+    //      is exactly the one committed to the Merkle root),
+    //   4. merkle_verify(key, value_hash, ...) under the committee-signed
+    //      state_root.
+    // test-dapp-registry-determinism already covers snapshot/restore +
+    // state_root binding of the WHOLE d: namespace; this test pins the
+    // single-entry off-node reconstruction + binding contract that an
+    // external verify-dapp-registration reader depends on. If
+    // build_state_leaves ever reordered the d: fields, changed a width, or
+    // dropped a field without updating the documented light-client
+    // encoding, this test fails — protecting every off-node DApp reader.
+    if (cmd == "test-dapp-registry-trustless-read") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Genesis: alice is a registered Determ domain with balance + stake.
+        Block genesis;
+        genesis.index           = 0;
+        genesis.prev_hash       = Hash{};
+        genesis.timestamp       = 0;
+        genesis.cumulative_rand = Hash{};
+        GenesisAlloc a;
+        a.domain  = "alice";
+        a.balance = 1000;
+        a.stake   = 100;
+        for (size_t i = 0; i < a.ed_pub.size(); ++i) a.ed_pub[i] = uint8_t(i + 1);
+        genesis.initial_state.push_back(a);
+        Chain chain(genesis);
+
+        // DAPP_REGISTER op=0 (create/update) payload packer — mirrors the
+        // wire layout in block.hpp + test-dapp-register's pack_register_v0.
+        auto pack_register_v0 = [](const PubKey& svc_pk,
+                                      const std::string& url,
+                                      const std::vector<std::string>& topics,
+                                      uint8_t retention,
+                                      const std::vector<uint8_t>& metadata) {
+            std::vector<uint8_t> p;
+            p.push_back(0);  // op = create/update
+            p.insert(p.end(), svc_pk.begin(), svc_pk.end());
+            p.push_back(uint8_t(url.size()));
+            p.insert(p.end(), url.begin(), url.end());
+            p.push_back(uint8_t(topics.size()));
+            for (auto& t : topics) {
+                p.push_back(uint8_t(t.size()));
+                p.insert(p.end(), t.begin(), t.end());
+            }
+            p.push_back(retention);
+            p.push_back(uint8_t(metadata.size() & 0xFF));
+            p.push_back(uint8_t((metadata.size() >> 8) & 0xFF));
+            p.insert(p.end(), metadata.begin(), metadata.end());
+            return p;
+        };
+        auto pack_deactivate = []() {
+            return std::vector<uint8_t>{1};  // op = deactivate
+        };
+        auto build_register_block = [&](const std::string& from,
+                                          const std::vector<uint8_t>& payload) {
+            Block b;
+            b.index           = chain.height();
+            b.prev_hash       = chain.head_hash();
+            b.timestamp       = 1;
+            b.cumulative_rand = Hash{};
+            Transaction tx;
+            tx.type    = TxType::DAPP_REGISTER;
+            tx.from    = from;
+            tx.to      = "";
+            tx.amount  = 0;
+            tx.fee     = 0;
+            tx.nonce   = chain.next_nonce(from);
+            tx.payload = payload;
+            tx.hash    = tx.compute_hash();
+            b.transactions.push_back(tx);
+            return b;
+        };
+
+        // The light-client value-hash reconstruction — a byte-for-byte
+        // mirror of Chain::build_state_leaves' d:-namespace leaf. An
+        // off-node DApp reader runs exactly this over the entry fields it
+        // received and binds the result to the proof's value_hash.
+        auto recompute_dapp_value_hash = [](const DAppEntry& e) {
+            crypto::SHA256Builder b;
+            b.append(e.service_pubkey.data(), e.service_pubkey.size());
+            b.append(e.registered_at);
+            b.append(e.active_from);
+            b.append(e.inactive_from);
+            b.append(static_cast<uint64_t>(e.endpoint_url.size()));
+            b.append(e.endpoint_url);
+            b.append(static_cast<uint64_t>(e.topics.size()));
+            for (auto& t : e.topics) {
+                b.append(static_cast<uint64_t>(t.size()));
+                b.append(t);
+            }
+            b.append(static_cast<uint64_t>(e.retention));
+            b.append(static_cast<uint64_t>(e.metadata.size()));
+            if (!e.metadata.empty())
+                b.append(e.metadata.data(), e.metadata.size());
+            return b.finalize();
+        };
+        // d: key = "d:" + domain (matches k_with_prefix in build_state_leaves).
+        auto dapp_key = [](const std::string& domain) {
+            std::vector<uint8_t> key;
+            key.push_back('d'); key.push_back(':');
+            key.insert(key.end(), domain.begin(), domain.end());
+            return key;
+        };
+
+        // alice registers a DApp with non-trivial fields.
+        PubKey svc_pk{};
+        for (size_t i = 0; i < svc_pk.size(); ++i) svc_pk[i] = uint8_t(0xA0 + i);
+        std::vector<std::string> topics = {"chat", "files"};
+        std::vector<uint8_t> meta = {0xDE, 0xAD, 0xBE, 0xEF};
+        chain.append(build_register_block(
+            "alice", pack_register_v0(svc_pk, "https://dapp.example", topics, 2, meta)));
+
+        auto entry_opt = chain.dapp("alice");
+        check(entry_opt.has_value(),
+              "setup: d:-namespace has alice's registered DApp entry");
+
+        auto key  = dapp_key("alice");
+        Hash root = chain.compute_state_root();
+
+        // === Membership: proof exists + key round-trips ===
+
+        // 1. state_proof for the reconstructed d: key returns a proof whose
+        //    returned key equals the query key byte-for-byte.
+        {
+            auto p = chain.state_proof(key);
+            check(p.has_value() && p->key == key,
+                  "d:-membership: state_proof returns proof with matching key");
+        }
+
+        // 2. The proof re-verifies against compute_state_root via
+        //    crypto::merkle_verify (the membership half of the argument).
+        {
+            auto p = chain.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "d:-membership: proof verifies under committed state_root");
+        }
+
+        // === Binding: independently-recomputed value_hash == proof's ===
+
+        // 3. The CORE trustless-read contract. Recompute the d: leaf
+        //    value_hash from the entry's raw fields off-node and confirm it
+        //    matches the proof. Without this, a malicious node could return
+        //    a valid membership proof for a leaf that encodes a DIFFERENT
+        //    endpoint_url / service_pubkey than the entry it reports.
+        {
+            auto p = chain.state_proof(key);
+            Hash expected = recompute_dapp_value_hash(*entry_opt);
+            check(p.has_value() && p->value_hash == expected,
+                  "d:-binding: recomputed value_hash == proof value_hash");
+        }
+
+        // 4. Full reader pipeline: recomputed value_hash ALSO verifies
+        //    under the root (binding + membership composed — what a real
+        //    verify-dapp-registration command does end to end).
+        {
+            auto p = chain.state_proof(key);
+            Hash expected = recompute_dapp_value_hash(*entry_opt);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, expected,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "d:-reader: recomputed value_hash verifies under state_root");
+        }
+
+        // 5. Field-sensitivity: a reader that recomputes off a TAMPERED
+        //    endpoint_url derives a value_hash that does NOT match the
+        //    proof — the node cannot lie about discovery metadata.
+        {
+            auto p = chain.state_proof(key);
+            DAppEntry tampered = *entry_opt;
+            tampered.endpoint_url = "https://evil.example";
+            Hash bad = recompute_dapp_value_hash(tampered);
+            check(p.has_value() && p->value_hash != bad,
+                  "d:-binding: tampered endpoint_url breaks value_hash match");
+        }
+
+        // 6. Field-sensitivity: a tampered service_pubkey (the E2E
+        //    encryption key — the highest-value lie target) also breaks the
+        //    binding.
+        {
+            auto p = chain.state_proof(key);
+            DAppEntry tampered = *entry_opt;
+            tampered.service_pubkey[0] ^= 0xFF;
+            Hash bad = recompute_dapp_value_hash(tampered);
+            check(p.has_value() && p->value_hash != bad,
+                  "d:-binding: tampered service_pubkey breaks value_hash match");
+        }
+
+        // === Activity transition: deactivation is visible + bound ===
+
+        // 7. After op=1 deactivation, inactive_from flips from UINT64_MAX to
+        //    a finite value, so the committed leaf value_hash changes — a
+        //    trustless reader sees the deactivation reflected in the root.
+        {
+            Hash vh_before = chain.state_proof(key)->value_hash;
+            chain.append(build_register_block("alice", pack_deactivate()));
+            auto after_opt = chain.dapp("alice");
+            check(after_opt.has_value()
+                  && after_opt->inactive_from != UINT64_MAX,
+                  "d:-activity: deactivation sets finite inactive_from");
+            Hash vh_after = chain.state_proof(key)->value_hash;
+            check(vh_before != vh_after,
+                  "d:-activity: deactivation changes committed value_hash");
+            // Re-bind: post-deactivation recomputation still matches +
+            // verifies under the NEW root (reader stays trustless across
+            // the lifecycle transition).
+            Hash new_root = chain.compute_state_root();
+            auto p2 = chain.state_proof(key);
+            Hash expected = recompute_dapp_value_hash(*after_opt);
+            bool ok = p2.has_value() && p2->value_hash == expected
+                && crypto::merkle_verify(new_root, key, expected,
+                                          p2->target_index, p2->leaf_count, p2->proof);
+            check(ok,
+                  "d:-activity: post-deactivation value_hash re-binds + verifies");
+        }
+
+        // === Absent domain: no membership proof (sorted-leaves contract) ===
+
+        // 8. A d: key for a domain with no registry entry returns nullopt.
+        //    Non-membership is not supported by the sorted-leaves design;
+        //    nullopt is the documented contract (an off-node reader treats
+        //    nullopt as "no proven registration").
+        {
+            auto p = chain.state_proof(dapp_key("ghost"));
+            check(!p.has_value(),
+                  "d:-absent: state_proof for unregistered domain returns nullopt");
+        }
+
+        // 9. Wrong-namespace key: the SAME domain string under a different
+        //    namespace prefix ("x:" instead of "d:") does not certify the
+        //    DApp leaf — pins that the namespace byte is load-bearing.
+        {
+            std::vector<uint8_t> wrong;
+            wrong.push_back('x'); wrong.push_back(':');
+            const std::string d = "alice";
+            wrong.insert(wrong.end(), d.begin(), d.end());
+            auto p = chain.state_proof(wrong);
+            check(!p.has_value(),
+                  "d:-namespace: wrong prefix ('x:alice') returns nullopt");
+        }
+
+        // === Determinism ===
+
+        // 10. Two proofs for the same d: key over the unchanged chain are
+        //     byte-identical — any honest full node must return the same
+        //     proof to a light client.
+        {
+            auto p1 = chain.state_proof(key);
+            auto p2 = chain.state_proof(key);
+            check(p1.has_value() && p2.has_value()
+                  && p1->value_hash == p2->value_hash
+                  && p1->target_index == p2->target_index
+                  && p1->leaf_count == p2->leaf_count
+                  && p1->proof == p2->proof,
+                  "d:-determinism: 2 proofs for the d: key byte-identical");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": dapp-registry-trustless-read "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
