@@ -1157,6 +1157,32 @@ BlockValidator::Result BlockValidator::check_inbound_receipts(
             return {false, "inbound_receipts[" + std::to_string(i)
                          + "] already credited in earlier block"};
     }
+
+    // v2.7 F2 / S-016 (site 3): when F2 is active and this block admits inbound
+    // receipts, enforce the deterministic committee-wide intersection rule.
+    // Every admitted receipt's key must lie in reconcile_intersection of the
+    // committee's committed Phase-1 inbound views (carried per-creator), so the
+    // set is determined by the rule, not the producer's local timing. Each list
+    // is authenticated against its signed root (compute_view_root), and that
+    // root is bound into creator i's Phase-1 commit verified in check_creator_*.
+    if (b.index >= chain.f2_active_from_height() && !b.inbound_receipts.empty()) {
+        if (b.creator_view_inbound_lists.size() != b.creators.size())
+            return {false, "F2: creator_view_inbound_lists size != creators size"};
+        for (size_t i = 0; i < b.creator_view_inbound_lists.size(); ++i) {
+            Hash root = (i < b.creator_view_inbound_roots.size())
+                      ? b.creator_view_inbound_roots[i] : Hash{};
+            if (compute_view_root(b.creator_view_inbound_lists[i]) != root)
+                return {false, "F2: creator_view_inbound_lists[" + std::to_string(i)
+                             + "] does not match committed root"};
+        }
+        std::vector<Hash> isect = reconcile_intersection(b.creator_view_inbound_lists);
+        std::set<Hash> iset(isect.begin(), isect.end());
+        for (size_t i = 0; i < b.inbound_receipts.size(); ++i) {
+            if (!iset.count(hash_cross_shard_receipt(b.inbound_receipts[i])))
+                return {false, "F2: inbound_receipts[" + std::to_string(i)
+                             + "] not in committee-view intersection"};
+        }
+    }
     return {true, ""};
 }
 

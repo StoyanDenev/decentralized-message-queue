@@ -709,6 +709,7 @@ Block build_body(
         b.creator_view_eq_roots.push_back(c.view_eq_root);
         b.creator_view_abort_roots.push_back(c.view_abort_root);
         b.creator_view_inbound_roots.push_back(c.view_inbound_root);
+        b.creator_view_inbound_lists.push_back(c.view_inbound_list);  // site 3
     }
 
     // rev.9 S-009: when ordered_secrets is provided, the block is being
@@ -867,9 +868,23 @@ Block build_body(
     // any receipt already credited (replayed bundle) or addressed to a
     // different shard (defensive — Node should pre-filter, but the
     // chain check is canonical).
+    // v2.7 F2 / S-016 (site 3): when F2 is active, restrict the inbound set to
+    // the committee-wide intersection of the members' committed Phase-1 views.
+    // A receipt not in EVERY committee member's view waits for a later block
+    // where it is unanimous — the deterministic Option-1 rule that replaces the
+    // Option-2 local first-seen latency heuristic. Pre-activation: no filter.
+    bool f2_active = (b.index >= chain.f2_active_from_height());
+    std::set<Hash> f2_inbound_intersection;
+    if (f2_active) {
+        auto isect = reconcile_intersection(b.creator_view_inbound_lists);
+        f2_inbound_intersection.insert(isect.begin(), isect.end());
+    }
     for (auto& r : inbound_receipts) {
         if (r.dst_shard != chain.my_shard_id()) continue;
         if (chain.inbound_receipt_applied(r.src_shard, r.tx_hash)) continue;
+        if (f2_active
+            && !f2_inbound_intersection.count(hash_cross_shard_receipt(r)))
+            continue;
         b.inbound_receipts.push_back(r);
     }
 

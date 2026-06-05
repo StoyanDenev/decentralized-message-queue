@@ -414,6 +414,14 @@ json Block::to_json() const {
         j["creator_view_eq_roots"]      = jve;
         j["creator_view_abort_roots"]   = jva;
         j["creator_view_inbound_roots"] = jvi;
+        // site 3: the inbound view lists (enforce the intersection).
+        json jvil = json::array();
+        for (auto& list : creator_view_inbound_lists) {
+            json one = json::array();
+            for (auto& h : list) one.push_back(to_hex(h));
+            jvil.push_back(one);
+        }
+        j["creator_view_inbound_lists"] = jvil;
     }
 
     json jds = json::array();
@@ -521,6 +529,13 @@ Block Block::from_json(const json& j) {
     if (j.contains("creator_view_inbound_roots")) {
         for (auto& h : json_require_array(j, "creator_view_inbound_roots"))
             b.creator_view_inbound_roots.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("creator_view_inbound_lists")) {
+        for (auto& one : json_require_array(j, "creator_view_inbound_lists")) {
+            std::vector<Hash> list;
+            for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
+            b.creator_view_inbound_lists.push_back(std::move(list));
+        }
     }
     if (j.contains("creator_dh_secrets")) {
         for (auto& h : json_require_array(j, "creator_dh_secrets"))

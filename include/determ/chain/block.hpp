@@ -408,6 +408,12 @@ struct Block {
     std::vector<Hash>                 creator_view_eq_roots;
     std::vector<Hash>                 creator_view_abort_roots;
     std::vector<Hash>                 creator_view_inbound_roots;
+    // v2.7 F2 / S-016 (site 3): per-creator inbound view LISTS (the hashes
+    // behind creator_view_inbound_roots[i]). Carried so the validator can
+    // re-derive reconcile_intersection and enforce that inbound_receipts is the
+    // committee-wide intersection. Authenticated: root[i] == compute_view_root(
+    // list[i]) and root[i] is bound into creator i's signed Phase-1 commit.
+    std::vector<std::vector<Hash>>    creator_view_inbound_lists;
 
     Hash                     tx_root{};
     Hash                     delay_seed{};
