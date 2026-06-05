@@ -27,12 +27,24 @@ The honest version: an in-tree implementation attempt landed, broke the equivoca
 | `abort_events` | ✓ | ✗ |
 | `equivocation_events` | ✓ | ✗ |
 | `cross_shard_receipts` | ✓ | ✗ |
-| `inbound_receipts` | ✓ | ✗ |
+| `inbound_receipts` | ✓ | ✓ (conditional: bound when non-empty — commit `a727cb2`, see note) |
 | `partner_subset_hash` | ✓ (conditional: non-zero only) | ✗ |
 | `state_root` (S-033) | ✓ (conditional: non-zero only) | ✗ |
 | `initial_state` (genesis only) | ✓ | ✗ (genesis is not committee-signed) |
 
 The "✗" rows below the Phase-2 reveal block are the D2 gap. They're part of the canonical block, they affect deterministic apply, but the K signatures don't authenticate them.
+
+> **Note (`inbound_receipts` now bound — commit `a727cb2`).** The v2.7 F2 inbound
+> dimension closed this row directly: `compute_block_digest` appends a root over the
+> sorted `hash_cross_shard_receipt` keys of `inbound_receipts` when the block carries
+> any (skipped when empty, preserving the v1 byte-identical digest for non-cross-shard
+> blocks). This is the safe specialization of the "naive extension" warned against in
+> §2 — it does NOT reintroduce the gossip-async divergence, because by the time the
+> producer assembles `inbound_receipts` the set is already the deterministic committee-
+> wide intersection (F2 sites 1+3, `reconcile_intersection` over the committee's
+> Phase-1-committed views), so all honest assemblers digest the identical set. The
+> `equivocation_events` / `abort_events` / `cross_shard_receipts` / `partner_subset_hash`
+> rows remain ✗ pending the same carry+reconcile+digest treatment.
 
 **Conditional binding note.** `partner_subset_hash` and `state_root` are bound into `signing_bytes` only when their value is non-zero — a backward-compat shim that preserves byte-identical hashes for pre-feature blocks. On a freshly-deployed chain pre-S-033 (zero state_root on every block), the conditional binding contributes nothing; D2 is fully open. On a post-S-033 chain where the producer auto-populates state_root, the binding is active on every block, and S-033's indirect closure (§3.5) is in effect.
 
@@ -164,7 +176,9 @@ The current `compute_block_digest()` still doesn't cover the ✗-row fields — 
 
 6. **Equivocation slashing (FA6) catches a committee that does mint two K-of-K-signed blocks at the same height with different digests.** D2's specific case (same digest, different body fields) is harder to detect via slashing because there's only one digest, but the slashing pipeline catches the broader committee-malicious case.
 
-For permissioned / consortium deployments, S-033's partial closure is the practical solution. For permissionless deployments wanting to honor the "any single honest validator suffices" claim literally (and to prevent two-instance gossip-layer attacks even when both fail apply on honest nodes), v2.7 F2 view reconciliation ships the consensus-layer structural fix.
+7. **The inbound dimension's consensus-layer fix is now SHIPPED (commit `a727cb2`).** For `inbound_receipts` specifically, the structural F2 closure is no longer pending: the admitted set is the deterministic committee-wide intersection (F2 sites 1+3), and `compute_block_digest` now binds that set directly (the conditional ✓ row in §1). So even the two-instance gossip-layer attack is closed for inbound — two distinct admitted inbound sets cannot both collect K-of-K signatures, because they yield different digests. The remaining dimensions (`equivocation_events` / `abort_events` / `cross_shard_receipts` / `partner_subset_hash`) still rely on the apply-layer S-033 closure pending the same treatment.
+
+For permissioned / consortium deployments, S-033's partial closure is the practical solution. For permissionless deployments wanting to honor the "any single honest validator suffices" claim literally (and to prevent two-instance gossip-layer attacks even when both fail apply on honest nodes), v2.7 F2 view reconciliation ships the consensus-layer structural fix — already live for the inbound dimension per item 7, in progress for the rest.
 
 ---
 

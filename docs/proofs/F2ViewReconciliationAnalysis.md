@@ -36,10 +36,15 @@
 > validator ENFORCES it (`check_inbound_receipts` authenticates each list
 > against its signed root, then rejects any receipt whose key is outside the
 > intersection). So the admitted inbound set is the deterministic committee-wide
-> intersection, not the producer's local timing-dependent choice. Verified: the
-> full cross-shard suite passes. Remaining only for full S-030-D2 hardening: the
-> contrib-time V21–V26 view-root passes and binding the reconciled roots into
-> `compute_block_digest`.
+> intersection, not the producer's local timing-dependent choice. The inbound
+> S-030-D2 dimension is now also closed (commit `a727cb2`): `compute_block_digest`
+> appends a root over the sorted `hash_cross_shard_receipt` keys of
+> `inbound_receipts`, so the K-of-K signature binds the admitted SET (closing the
+> subset-only removal gap — a relayer can no longer STRIP an admitted receipt
+> after signing). Verified: the full cross-shard suite passes. Remaining for full
+> S-030-D2 hardening across ALL dimensions: extend the same carry+intersect+digest
+> pattern to the equivocation/abort view roots, plus the optional contrib-time
+> V21–V26 view-root passes.
 
 This document is the analytic companion to **FB22** (`docs/proofs/tla/F2ViewReconciliation.tla`). FB22 formalizes the v2.7 F2 view-reconciliation primitives + the validator-side passes V21..V26 in TLA+; the present document states and proves the same six algebraic invariants in plain prose, with line-by-line citations to the C++ implementation at `src/node/producer.cpp:335..496`.
 
@@ -364,7 +369,7 @@ F2's closure is structural, not a one-line digest extension (the naive extension
 
 2. **Phase-2 canonical reconciliation** (the present T-1..T-6). The producer assembles the block body by running `derive_canonical_view_lists` over the K Phase-1 commits. The validator runs the same primitives over the same K commits and gets the same canonical lists by T-3 (order-independent) + T-1/T-2 (monotone in committee composition) + T-4 (idempotent under duplicate views).
 
-3. **Block-digest binding via state_root + signing_bytes**. The reconciled lists are included in `signing_bytes` and (post-S-033) folded into `state_root`, which is itself bound into `signing_bytes` and (post-S-038) populated by the producer's `try_finalize_round` tentative-chain dry-run. Cross-block tampering is caught at `prev_hash` mismatch; within-block tampering is caught at V25/V26.
+3. **Block-digest binding via state_root + signing_bytes**. The reconciled lists are included in `signing_bytes` and (post-S-033) folded into `state_root`, which is itself bound into `signing_bytes` and (post-S-038) populated by the producer's `try_finalize_round` tentative-chain dry-run. Cross-block tampering is caught at `prev_hash` mismatch; within-block tampering is caught at V25/V26. **For the inbound dimension specifically, the admitted set is bound DIRECTLY into `compute_block_digest`** (commit `a727cb2`): the digest appends a root over the sorted `hash_cross_shard_receipt` keys of `inbound_receipts`, so the K-of-K Phase-2 signature itself — not only `signing_bytes`/`state_root` — attests to the exact admitted set, closing the subset-only removal gap at the strongest (signature) layer.
 
 T-5 (censorship-resistance lift) + T-6 (intersection-conservative) preserve the per-field semantics F2-SPEC.md §Q1 requires: equivocation + abort evidence flows through union (one observer suffices); inbound receipts flow through intersection (unanimous observation required). The validator's V25/V26 re-derivation is sound because the primitives are pure-function set operations (T-3 + T-4), and any honest validator running `derive_canonical_view_lists` over the same K signed ContribMsg produces the same canonical lists.
 
