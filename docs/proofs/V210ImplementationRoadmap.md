@@ -6,6 +6,18 @@ randomness, the last permissionless-readiness gate) against the actual `src/`
 tree as of this commit, and fixes the smallest-safe-first increment plus its
 GO/NO-GO.
 
+> **Progress (decision recorded + first increment landed).** The P0 backend
+> decision is made: **libsodium-free C99 `ref10`** (consistent with this doc §2,
+> `CRYPTO-C99-SPEC.md`, and the `determ-light` no-libsodium invariant; the
+> `frost.hpp` / `F2-V210-IMPLEMENTATION-PLAN` "libsodium" wording is the outlier
+> to reconcile). The "validate-before-vendor" oracle has shipped (commit
+> `9d69f05`): `determ test-ed25519-vectors` pins the daemon's Ed25519 against the
+> RFC 8032 §7.1 known-answer vectors (24 assertions; FAST=1 148/148) — this is the
+> §Q9 byte-equal gate the forthcoming ref10 backend must pass. Remaining P0:
+> vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
+> the `determ` target, and reconcile the three backend-naming docs. Then the
+> Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
+
 v2.10 replaces the v1 commit-reveal block randomness — `ContribMsg.dh_input`
 commit (`SHA256(secret‖pubkey)`) + `BlockSigMsg`/`creator_dh_secrets` Phase-2
 reveal, aggregated by `compute_block_rand` — with a t-of-K FROST-Ed25519
