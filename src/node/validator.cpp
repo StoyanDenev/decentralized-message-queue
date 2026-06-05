@@ -1172,6 +1172,25 @@ BlockValidator::Result BlockValidator::check_inbound_receipts(
         for (size_t i = 0; i < b.creator_view_inbound_lists.size(); ++i) {
             Hash root = (i < b.creator_view_inbound_roots.size())
                       ? b.creator_view_inbound_roots[i] : Hash{};
+            // Defensive symmetry with check_eqabort_reconciliation: a ZERO root is
+            // the v1 short-circuit sentinel (make_contrib computed no view because
+            // all of this creator's views were empty); its carried list must be
+            // empty and compute_view_root must NOT be recomputed over it (an empty
+            // list hashes to the non-zero empty-SHA-256, which would spuriously
+            // mismatch the zero sentinel). Today the intersection rule guarantees
+            // every root is non-zero whenever inbound_receipts is non-empty (an
+            // admitted receipt requires unanimous non-empty views), so this branch
+            // is dormant — but making it explicit removes the cross-module coupling
+            // the union eq/abort check already handles, so future changes to the
+            // admission rule cannot silently reintroduce the zero-root stall.
+            bool zero = true;
+            for (auto c : root) if (c) { zero = false; break; }
+            if (zero) {
+                if (!b.creator_view_inbound_lists[i].empty())
+                    return {false, "F2: creator_view_inbound_lists[" + std::to_string(i)
+                                 + "] non-empty list under zero (v1) root"};
+                continue;
+            }
             if (compute_view_root(b.creator_view_inbound_lists[i]) != root)
                 return {false, "F2: creator_view_inbound_lists[" + std::to_string(i)
                              + "] does not match committed root"};
