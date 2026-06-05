@@ -602,6 +602,32 @@ Hash compute_block_digest(const Block& b) {
             ikeys.push_back(hash_cross_shard_receipt(r));
         h.append(compute_view_root(ikeys));
     }
+    // v2.7 F2 / S-030-D2 (eq/abort dimension): bind the reconciled equivocation/
+    // abort sets into the digest, like inbound above, so the K-of-K sig attests
+    // to the exact set (closing the removal gap). Gated on a NON-ZERO per-creator
+    // view root — the intrinsic, JSON-stable signal that this block went through
+    // F2 reconciliation (build_body only carries a non-zero eq/abort root at/after
+    // the activation height). A non-F2 block (all roots zero) keeps the byte-
+    // identical v1 digest; its eq/abort sets are the un-reconciled local pool and
+    // MUST NOT be bound (binding them would reintroduce the gossip-async divergence
+    // that the reconciliation removes). compute_block_digest only sees the Block,
+    // so the root is the gate it can read. Field order: inbound, eq, abort.
+    auto any_nonzero = [](const std::vector<Hash>& v) {
+        for (auto& r : v) if (!is_zero_hash_(r)) return true;
+        return false;
+    };
+    if (any_nonzero(b.creator_view_eq_roots)) {
+        std::vector<Hash> ekeys;
+        ekeys.reserve(b.equivocation_events.size());
+        for (auto& e : b.equivocation_events) ekeys.push_back(hash_equivocation_event(e));
+        h.append(compute_view_root(ekeys));
+    }
+    if (any_nonzero(b.creator_view_abort_roots)) {
+        std::vector<Hash> akeys;
+        akeys.reserve(b.abort_events.size());
+        for (auto& a : b.abort_events) akeys.push_back(hash_abort_event(a));
+        h.append(compute_view_root(akeys));
+    }
     return h.finalize();
 }
 
@@ -709,8 +735,6 @@ Block build_body(
     b.index               = chain.empty() ? 1 : chain.height();
     b.prev_hash           = chain.empty() ? Hash{} : chain.head_hash();
     b.timestamp           = now_unix();
-    b.abort_events        = aborts;
-    b.equivocation_events = equivocation_events;
     b.creators            = creator_domains;
 
     // Per-creator Phase-1 evidence in selection order.
@@ -725,6 +749,39 @@ Block build_body(
         b.creator_view_abort_roots.push_back(c.view_abort_root);
         b.creator_view_inbound_roots.push_back(c.view_inbound_root);
         b.creator_view_inbound_lists.push_back(c.view_inbound_list);  // site 3
+        // v2.7 F2 / S-030-D2: carry each creator's committed eq/abort view
+        // LISTS so the validator can re-derive reconcile_union and authenticate
+        // the block's evidence set (subset-of-union).
+        b.creator_view_eq_lists.push_back(c.view_eq_list);
+        b.creator_view_abort_lists.push_back(c.view_abort_list);
+    }
+
+    // v2.7 F2 / S-030-D2 (eq/abort dimension): reconcile equivocation/abort
+    // evidence to the committee-wide UNION of the members' committed Phase-1
+    // views (F2-SPEC §Q1 — union, vs inbound's intersection). When F2 is active,
+    // the block's evidence is the assembler's local pool RESTRICTED to events
+    // some committee member committed in Phase-1 — i.e. the subset of the union
+    // the assembler can materialize. So the set is committee-attested, not the
+    // assembler's unilateral pool, and compute_block_digest binds it (a post-
+    // signing strip changes the digest — the S-030-D2 removal gap). SUBSET, not
+    // exact-cardinality: hash_equivocation_event / hash_abort_event include
+    // observer-dependent forensic fields (shard_id / beacon_anchor_height set at
+    // detection time), so two honest observers can commit different hashes for
+    // one misbehavior; forcing the assembler to materialize every witness in the
+    // union would stall when it lacks a peer's exact struct. The assembler's own
+    // committed view covers its own pool, so its evidence is never dropped. See
+    // docs/proofs/EqAbortViewDigestExtension.md. Pre-activation: direct assign.
+    if (b.index >= chain.f2_active_from_height()) {
+        std::set<Hash> eq_union, ab_union;
+        { auto u = reconcile_union(b.creator_view_eq_lists);    eq_union.insert(u.begin(), u.end()); }
+        { auto u = reconcile_union(b.creator_view_abort_lists); ab_union.insert(u.begin(), u.end()); }
+        for (auto& e : equivocation_events)
+            if (eq_union.count(hash_equivocation_event(e))) b.equivocation_events.push_back(e);
+        for (auto& a : aborts)
+            if (ab_union.count(hash_abort_event(a))) b.abort_events.push_back(a);
+    } else {
+        b.abort_events        = aborts;
+        b.equivocation_events = equivocation_events;
     }
 
     // rev.9 S-009: when ordered_secrets is provided, the block is being

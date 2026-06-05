@@ -857,7 +857,7 @@ void Node::start_contrib_phase() {
     // verifies); the equivocation detector compares the v1 CORE commit only, so
     // a view that legitimately changes across re-rounds is not self-flagged.
     // Empty pool / pre-activation -> empty list -> zero root -> v1 commit.
-    std::vector<Hash> f2_inbound_view;
+    std::vector<Hash> f2_inbound_view, f2_eq_view, f2_abort_view;
     if (block_index >= chain_.f2_active_from_height()) {
         auto elig = inbound_receipts_eligible_for_inclusion();
         f2_inbound_view.reserve(elig.size());
@@ -866,12 +866,29 @@ void Node::start_contrib_phase() {
         std::sort(f2_inbound_view.begin(), f2_inbound_view.end());
         if (f2_inbound_view.size() > F2_VIEW_LIST_CAP)
             f2_inbound_view.resize(F2_VIEW_LIST_CAP);
+        // v2.7 F2 / S-030-D2: commit to this node's view of the equivocation /
+        // abort evidence pools, symmetric to the inbound view above. build_body
+        // reconciles the committee-wide UNION (F2-SPEC Q1 — vs inbound's
+        // intersection) and the validator enforces subset(union). Same re-round
+        // safety as inbound: the equivocation DETECTOR in on_contrib compares the
+        // v1 CORE commit (no view roots), so a view that grows across re-rounds is
+        // never self-flagged as equivocation.
+        f2_eq_view.reserve(pending_equivocation_evidence_.size());
+        for (const auto& e : pending_equivocation_evidence_)
+            f2_eq_view.push_back(hash_equivocation_event(e));
+        std::sort(f2_eq_view.begin(), f2_eq_view.end());
+        if (f2_eq_view.size() > F2_VIEW_LIST_CAP) f2_eq_view.resize(F2_VIEW_LIST_CAP);
+        f2_abort_view.reserve(current_aborts_.size());
+        for (const auto& a : current_aborts_)
+            f2_abort_view.push_back(hash_abort_event(a));
+        std::sort(f2_abort_view.begin(), f2_abort_view.end());
+        if (f2_abort_view.size() > F2_VIEW_LIST_CAP) f2_abort_view.resize(F2_VIEW_LIST_CAP);
     }
     ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
                                           block_index, prev_hash,
                                           current_aborts_.size(),
                                           snap, my_commit,
-                                          {}, {}, f2_inbound_view);
+                                          f2_eq_view, f2_abort_view, f2_inbound_view);
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 

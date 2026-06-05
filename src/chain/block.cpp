@@ -422,6 +422,22 @@ json Block::to_json() const {
             jvil.push_back(one);
         }
         j["creator_view_inbound_lists"] = jvil;
+        // v2.7 F2 / S-030-D2 (eq/abort dimension): the eq/abort view lists
+        // (enforce subset-of-union). Emitted under the same any_view_root gate.
+        json jvel = json::array();
+        for (auto& list : creator_view_eq_lists) {
+            json one = json::array();
+            for (auto& h : list) one.push_back(to_hex(h));
+            jvel.push_back(one);
+        }
+        j["creator_view_eq_lists"] = jvel;
+        json jval = json::array();
+        for (auto& list : creator_view_abort_lists) {
+            json one = json::array();
+            for (auto& h : list) one.push_back(to_hex(h));
+            jval.push_back(one);
+        }
+        j["creator_view_abort_lists"] = jval;
     }
 
     json jds = json::array();
@@ -535,6 +551,21 @@ Block Block::from_json(const json& j) {
             std::vector<Hash> list;
             for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
             b.creator_view_inbound_lists.push_back(std::move(list));
+        }
+    }
+    // v2.7 F2 / S-030-D2: per-creator eq/abort view lists (absent on pre-F2).
+    if (j.contains("creator_view_eq_lists")) {
+        for (auto& one : json_require_array(j, "creator_view_eq_lists")) {
+            std::vector<Hash> list;
+            for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
+            b.creator_view_eq_lists.push_back(std::move(list));
+        }
+    }
+    if (j.contains("creator_view_abort_lists")) {
+        for (auto& one : json_require_array(j, "creator_view_abort_lists")) {
+            std::vector<Hash> list;
+            for (auto& h : one) list.push_back(from_hex_arr<32>(h.get<std::string>()));
+            b.creator_view_abort_lists.push_back(std::move(list));
         }
     }
     if (j.contains("creator_dh_secrets")) {

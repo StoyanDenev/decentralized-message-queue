@@ -109,6 +109,13 @@ private:
     // chains expect an empty list.
     Result check_inbound_receipts(const chain::Block& b,
                                     const chain::Chain& chain) const;
+    // v2.7 F2 / S-030-D2: equivocation/abort evidence must be a SUBSET of the
+    // committee-wide reconcile_union of the members' committed Phase-1 views
+    // (carried per-creator + authenticated against the signed roots). Closes the
+    // S-030-D2 removal gap for the eq/abort dimensions together with the
+    // compute_block_digest binding. See docs/proofs/EqAbortViewDigestExtension.md.
+    Result check_eqabort_reconciliation(const chain::Block& b,
+                                         const chain::Chain& chain) const;
     Result check_cumulative_rand(const chain::Block& b, const chain::Chain& chain) const;
     Result check_transactions(const chain::Block& b, const chain::Chain& chain,
                                const NodeRegistry& registry) const;

@@ -36,6 +36,7 @@ BlockValidator::Result BlockValidator::validate(const Block& b,
     if (auto r = check_transactions(b, chain, registry); !r.ok) return r;
     if (auto r = check_cross_shard_receipts(b, chain);   !r.ok) return r;
     if (auto r = check_inbound_receipts(b, chain);       !r.ok) return r;
+    if (auto r = check_eqabort_reconciliation(b, chain); !r.ok) return r;
     if (auto r = check_timestamp(b);                     !r.ok) return r;
     return {true, ""};
 }
@@ -1182,6 +1183,83 @@ BlockValidator::Result BlockValidator::check_inbound_receipts(
                 return {false, "F2: inbound_receipts[" + std::to_string(i)
                              + "] not in committee-view intersection"};
         }
+    }
+    return {true, ""};
+}
+
+BlockValidator::Result BlockValidator::check_eqabort_reconciliation(
+    const Block& b, const Chain& chain) const {
+    // v2.7 F2 / S-030-D2 (eq/abort dimension): when F2 is active, the block's
+    // equivocation_events / abort_events must each be a SUBSET of the committee-
+    // wide reconcile_union of the members' committed Phase-1 views (carried
+    // per-creator). Each list is authenticated against its signed root
+    // (compute_view_root), and that root is bound into creator i's Phase-1
+    // commit verified in check_creator_tx_commitments — so a non-committee event
+    // cannot be injected, and the digest binding (compute_block_digest) prevents
+    // a post-signing strip. SUBSET, not exact-cardinality: the event hashes
+    // include observer-dependent forensic fields (shard_id / beacon_anchor_height
+    // recorded at detection time), so the union can hold several witnesses for one
+    // misbehavior that no single assembler can fully materialize; requiring exact
+    // cardinality would stall. Subset still closes S-030-D2 (the digest binds the
+    // included set) and union persistence gives eventual inclusion. The intrinsic
+    // validity of each event is checked separately (check_equivocation_events /
+    // check_abort_certs). See docs/proofs/EqAbortViewDigestExtension.md.
+    if (b.index < chain.f2_active_from_height()) return {true, ""};
+
+    // Authenticate each carried per-creator list against its committed root, then
+    // enforce that the block's evidence keys are a SUBSET of reconcile_union over
+    // those lists. A ZERO root is the v1 short-circuit sentinel: make_contrib
+    // computes NO view root when all of a creator's three views are empty, so its
+    // carried list must be empty and it contributes nothing to the union. We must
+    // NOT recompute compute_view_root over that empty list — compute_view_root({})
+    // is the non-zero empty-SHA-256, which would spuriously mismatch the zero
+    // sentinel (this is the union-rule counterpart the intersection-only inbound
+    // check never hits, since an admitted inbound receipt forces every root
+    // non-zero). A non-zero root (real evidence, or the empty-root when the
+    // creator bound OTHER non-empty views) is authenticated by
+    // compute_view_root(list) == root.
+    auto check_dim = [&](const std::vector<std::vector<Hash>>& lists,
+                         const std::vector<Hash>& roots,
+                         const std::vector<Hash>& event_keys,
+                         const char* what) -> Result {
+        if (!lists.empty() && lists.size() != b.creators.size())
+            return {false, std::string("F2: ") + what + " size != creators size"};
+        std::set<Hash> uset;
+        for (size_t i = 0; i < lists.size(); ++i) {
+            Hash root = (i < roots.size()) ? roots[i] : Hash{};
+            bool zero = true;
+            for (auto c : root) if (c) { zero = false; break; }
+            if (zero) {
+                if (!lists[i].empty())
+                    return {false, std::string("F2: ") + what + "[" + std::to_string(i)
+                                 + "] non-empty list under zero (v1) root"};
+                continue;  // v1 short-circuit creator: contributes nothing
+            }
+            if (compute_view_root(lists[i]) != root)
+                return {false, std::string("F2: ") + what + "[" + std::to_string(i)
+                             + "] does not match committed root"};
+            for (auto& h : lists[i]) uset.insert(h);
+        }
+        for (size_t i = 0; i < event_keys.size(); ++i)
+            if (!uset.count(event_keys[i]))
+                return {false, std::string("F2: ") + what + " event["
+                             + std::to_string(i) + "] not in committee-view union"};
+        return {true, ""};
+    };
+
+    if (!b.equivocation_events.empty() || !b.creator_view_eq_lists.empty()) {
+        std::vector<Hash> keys;
+        keys.reserve(b.equivocation_events.size());
+        for (auto& e : b.equivocation_events) keys.push_back(hash_equivocation_event(e));
+        if (auto r = check_dim(b.creator_view_eq_lists, b.creator_view_eq_roots,
+                               keys, "creator_view_eq_lists"); !r.ok) return r;
+    }
+    if (!b.abort_events.empty() || !b.creator_view_abort_lists.empty()) {
+        std::vector<Hash> keys;
+        keys.reserve(b.abort_events.size());
+        for (auto& a : b.abort_events) keys.push_back(hash_abort_event(a));
+        if (auto r = check_dim(b.creator_view_abort_lists, b.creator_view_abort_roots,
+                               keys, "creator_view_abort_lists"); !r.ok) return r;
     }
     return {true, ""};
 }
