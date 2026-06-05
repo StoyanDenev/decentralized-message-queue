@@ -29,6 +29,7 @@
 //   export-headers           Verifiable header archive (FETCH+VERIFY+WRITE)
 //   verify-archive           OFFLINE re-verify of an export-headers archive
 //   verify-tx-inclusion      Prove tx H is (not) in block B vs committee sigs
+//   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
 //   help / version
 //
 // Trust-model invariants:
@@ -176,6 +177,24 @@ void print_usage() {
         "      false INCLUDED). Inclusion is cryptographically anchored: any\n"
         "      historical block is verifiable (its committee sigs travel with\n"
         "      it), unlike state-proofs which the daemon serves head-only.\n"
+        "  verify-receipt-inclusion --rpc-port <N> --genesis <file>\n"
+        "                           --src-shard <S> --tx-hash <hex> [--json]\n"
+        "      Prove (or disprove) that the cross-shard inbound receipt\n"
+        "      (src_shard=<S>, tx_hash=<hex>) has been applied on this shard\n"
+        "      — i.e. is a member of the committee-verified `i:`\n"
+        "      (applied_inbound_receipts) namespace. Anchors genesis,\n"
+        "      committee-verifies the header chain to head, computes the\n"
+        "      canonical receipt key (\"i:\" + src_shard_be8 + tx_hash),\n"
+        "      fetches the `i:`-namespace state-proof, and Merkle-verifies it\n"
+        "      against the committee-signed state_root. The proof's key_bytes\n"
+        "      must equal the locally-computed key AND its value_hash must\n"
+        "      equal SHA256(0x01) (the presence marker) — binding the proof\n"
+        "      to THIS receipt, not some other leaf. Receipts are\n"
+        "      append-only once applied, so there is no per-block race.\n"
+        "      INCLUDED / NOT-INCLUDED are sound verified verdicts; if the\n"
+        "      daemon cannot serve an `i:` proof (e.g. the RPC does not yet\n"
+        "      expose composite-key namespaces) the verdict is UNVERIFIABLE\n"
+        "      and the command fails closed — never a false INCLUDED.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -1250,6 +1269,311 @@ int cmd_verify_tx_inclusion(int argc, char** argv) {
     }
 }
 
+// ─────────────────────── verify-receipt-inclusion ──────────────────────
+//
+// Trust-minimized INCLUDED / NOT-INCLUDED / UNVERIFIABLE verdict on
+// whether a cross-shard inbound receipt (src_shard, tx_hash) lives in the
+// committee-verified `i:` (applied_inbound_receipts) namespace.
+//
+// This is the receipt-membership analogue of verify-tx-inclusion (which
+// proves tx membership in a block body) and the trustless state-proof
+// read of stake-trustless (which Merkle-verifies an `s:`-namespace leaf
+// against a committee-signed state_root). The receipt path differs in
+// three ways:
+//
+//   * Namespace is "i" and the leaf key is COMPOSITE — it is NOT a plain
+//     ASCII domain. The canonical encoding (see chain.cpp
+//     build_state_leaves, "applied_inbound_receipts_" branch) is:
+//         key       = 'i' ':' || u64_be(src_shard) || tx_hash[32]
+//         value_hash = SHA256(0x01)                 // presence marker
+//     The verifier recomputes BOTH locally and demands the proof's
+//     key_bytes == local key AND its value_hash == SHA256(0x01). Without
+//     those two equalities a daemon could serve a valid Merkle proof for
+//     some OTHER leaf and pass a bare verify_state_proof — so they are the
+//     load-bearing binding to THIS receipt.
+//
+//   * A receipt is a SET membership (present/absent), not a (value)
+//     decode. There is no cleartext cross-check RPC (unlike `stake_info`
+//     for stakes); the presence marker IS the whole payload. Membership
+//     is therefore proven entirely by the Merkle inclusion of the
+//     canonical (key, SHA256(0x01)) leaf under the committee-signed root.
+//
+//   * Receipts are append-only / stable once applied (chain.cpp inserts
+//     into applied_inbound_receipts_ and never erases — the only mutation
+//     is via the atomic snapshot rollback on a FAILED apply). So unlike a
+//     per-block counter there is NO per-block race: once present at any
+//     height H the receipt is present at every height >= H, and the
+//     head-only state_proof RPC is sufficient.
+//
+// Fail-closed contract: any tamper, malformed proof, key/value mismatch,
+// or daemon refusal to serve the `i:` proof yields UNVERIFIABLE (exit 3),
+// never a false INCLUDED. A clean Merkle-verified inclusion → INCLUDED
+// (exit 0); a daemon `not_found` for the canonical key → NOT-INCLUDED
+// (exit 0, a sound verified negative).
+
+int cmd_verify_receipt_inclusion(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, tx_hash_hex;
+    uint64_t src_shard = 0;
+    bool have_port = false, have_shard = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port"  && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis"   && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--src-shard" && i + 1 < argc) {
+            src_shard = parse_u64("--src-shard", argv[++i]); have_shard = true;
+        } else if (a == "--tx-hash"   && i + 1 < argc) tx_hash_hex  = argv[++i];
+        else if   (a == "--json")                      json_out     = true;
+        else {
+            std::cerr << "verify-receipt-inclusion: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_shard || tx_hash_hex.empty()) {
+        std::cerr << "verify-receipt-inclusion: --rpc-port, --genesis, "
+                     "--src-shard, --tx-hash are required\n";
+        return 1;
+    }
+
+    // The verdict mirrors verify-tx-inclusion's tri-state.
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-receipt-inclusion: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // Parse the 32-byte tx_hash now so a malformed hash fails fast.
+        Hash tx_hash = from_hex_arr<32>(tx_hash_hex);
+
+        // Compute the canonical receipt key bytes locally, byte-for-byte
+        // matching chain.cpp build_state_leaves:
+        //   'i' ':' || u64_be(src_shard) || tx_hash[32]
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + 8 + 32);
+        local_key.push_back('i'); local_key.push_back(':');
+        for (int i = 7; i >= 0; --i)
+            local_key.push_back(static_cast<uint8_t>((src_shard >> (8 * i)) & 0xff));
+        local_key.insert(local_key.end(), tx_hash.begin(), tx_hash.end());
+
+        // The committed value for a present receipt is SHA256(0x01).
+        determ::crypto::SHA256Builder mb;
+        uint8_t marker = 1; mb.append(&marker, 1);
+        Hash expected_value_hash = mb.finalize();
+
+        // Committee-verify the header chain end-to-end, capturing the
+        // head's state_root (the anchor for the Merkle inclusion).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `i:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `i:`-namespace state-proof. The daemon takes a string
+        // `key`; for composite-key namespaces it builds the prefixed key
+        // bytes from this string, so we pass the post-prefix key body
+        // (everything after "i:") as a raw byte string: u64_be(src) ||
+        // tx_hash. nlohmann::json carries arbitrary bytes in a std::string.
+        std::string key_body;
+        key_body.reserve(8 + 32);
+        for (int i = 7; i >= 0; --i)
+            key_body.push_back(static_cast<char>((src_shard >> (8 * i)) & 0xff));
+        key_body.append(reinterpret_cast<const char*>(tx_hash.data()), tx_hash.size());
+
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "i"}, {"key", key_body}});
+
+        // A daemon that cannot serve the `i:` namespace (e.g. the RPC does
+        // not expose composite-key namespaces) returns an `error`. We
+        // distinguish a genuine absence (`not_found` for our exact key →
+        // a sound NOT-INCLUDED) from any other refusal (→ UNVERIFIABLE,
+        // fail closed — we will not assert membership either way).
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `i:` leaf for the canonical "
+                          "receipt key (state_proof not_found)";
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `i:` state-proof: " + err
+                        + " (cannot prove membership trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS receipt: (1) key_bytes must equal the
+            // locally-computed canonical key, (2) value_hash must equal
+            // SHA256(0x01). Either mismatch means the daemon served a proof
+            // for a different leaf → UNVERIFIABLE.
+            std::string proof_key_hex =
+                proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical receipt key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " is not the presence marker SHA256(0x01)="
+                            + to_hex(expected_value_hash);
+                } else {
+                    // Anchor the proof's claimed state_root to a
+                    // committee-signed header (the chain may have advanced
+                    // during the round-trip), mirroring stake-trustless.
+                    uint64_t proof_height =
+                        proof.value("height", uint64_t{0});
+                    std::string proof_root =
+                        proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    if (proof_height > vc.height) {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        auto pg = rpc.call("headers",
+                            {{"from", anchor_index}, {"count", 1}});
+                        if (!pg.contains("headers")
+                            || !pg["headers"].is_array()
+                            || pg["headers"].empty()) {
+                            throw std::runtime_error(
+                                "cannot fetch header at index="
+                                + std::to_string(anchor_index)
+                                + " (proof.height="
+                                + std::to_string(proof_height) + ")");
+                        }
+                        auto& h = pg["headers"][0];
+                        std::string hdr_root =
+                            h.value("state_root", std::string{});
+                        if (hdr_root != proof_root) {
+                            throw std::runtime_error(
+                                "proof.state_root=" + proof_root
+                                + " does not match header["
+                                + std::to_string(anchor_index)
+                                + "].state_root=" + hdr_root);
+                        }
+                        auto vbs = verify_block_sigs(h, committee_json,
+                                                     /*bft=*/false);
+                        if (!vbs.ok)
+                            vbs = verify_block_sigs(h, committee_json,
+                                                    /*bft=*/true);
+                        if (!vbs.ok) {
+                            throw std::runtime_error(
+                                "header[" + std::to_string(anchor_index)
+                                + "] committee-sig check failed: "
+                                + vbs.detail);
+                        }
+                        if (anchor_index >= vc.height) {
+                            auto walk = rpc.call("headers",
+                                {{"from", vc.height - 1},
+                                 {"count", proof_height - vc.height + 2}});
+                            auto vh = verify_headers(walk, "", "");
+                            if (!vh.ok) {
+                                throw std::runtime_error(
+                                    "prev_hash walk vc.height->proof.height: "
+                                    + vh.detail);
+                            }
+                        }
+                        anchor_root = proof_root;
+                        anchor_at   = proof_height;
+                    } else if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+
+                    // Merkle-verify the proof against the committee-signed
+                    // root. verify_state_proof re-derives key_bytes +
+                    // value_hash from the proof JSON and rolls the siblings
+                    // up to anchor_root; we already bound those to the
+                    // canonical receipt above, so a pass here is a sound
+                    // INCLUDED.
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        std::string canon_tx_hash = to_hex(tx_hash);
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",    included},
+                {"verdict",     verdict_str(verdict)},
+                {"src_shard",   src_shard},
+                {"tx_hash",     canon_tx_hash},
+                {"namespace",   "i"},
+            };
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:   matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:     i (applied_inbound_receipts)\n"
+                      << "  src_shard:     " << src_shard << "\n"
+                      << "  tx_hash:       " << canon_tx_hash << "\n";
+            if (verdict == InclusionVerdict::INCLUDED) {
+                std::cout << "  state_root:    " << state_root_used << "\n"
+                          << "  anchored at H: " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:        " << detail << "\n";
+        }
+
+        // Exit codes match verify-tx-inclusion: INCLUDED / NOT-INCLUDED →
+        // 0 (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-receipt-inclusion: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1287,6 +1611,7 @@ int main(int argc, char** argv) {
         if (cmd == "export-headers")        return cmd_export_headers(sub_argc, sub_argv);
         if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);
         if (cmd == "verify-tx-inclusion")   return cmd_verify_tx_inclusion(sub_argc, sub_argv);
+        if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
