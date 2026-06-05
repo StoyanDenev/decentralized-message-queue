@@ -12481,6 +12481,255 @@ int cmd_receipt_key(int argc, char** argv) {
     return 0;
 }
 
+// ── block-tx-root ────────────────────────────────────────────────────────────
+//
+// Recompute the canonical Block.tx_root from a block JSON's creator_tx_lists
+// and (optionally) compare it against the block's stored `tx_root` field.
+//
+// This is the EXACT re-derivation the daemon's validator performs at
+// src/node/validator.cpp:165-166 to accept or reject a gossiped block:
+//
+//     Hash expected_root = compute_tx_root(b.creator_tx_lists);
+//     if (expected_root != b.tx_root) <reject>
+//
+// `tx_root` is NOT a per-tx Merkle root and is NOT the chained digest over
+// full transaction signing_bytes. It is the canonical commitment over the
+// UNION of the per-creator tx_hash lists, with these properties (matching
+// src/node/producer.cpp::compute_tx_root byte-for-byte):
+//
+//   * union semantics:  {A,B} ∪ {B,C}  ⇒  {A,B,C}
+//   * dedup:            identical tx_hashes across creator lists collapse
+//   * order-invariant:  list order and within-list order do not matter
+//                       (a std::set sorts the union by raw 32-byte value)
+//
+// Algorithm (identical to producer.cpp::compute_tx_root):
+//
+//   u = sorted set of every 32-byte tx_hash across all creator_tx_lists
+//   tx_root = SHA-256( u[0] || u[1] || ... || u[n-1] )   (canonical order)
+//
+// std::set<array<uint8_t,32>> orders lexicographically by raw bytes, the
+// same ordering the daemon's std::set<Hash> uses, so the concatenation
+// order — and therefore the hash — is identical. An empty union (no
+// transactions / empty creator lists) yields SHA-256("") = the well-known
+// e3b0c4... digest, exactly as the daemon emits for empty blocks.
+//
+// This is the OFFLINE, daemon-free counterpart to the validator's accept
+// gate: an auditor with a block JSON (from chain.json, a CHAIN_RESPONSE,
+// or a BLOCK gossip capture) can independently confirm the committed
+// tx_root binds precisely the union of tx_hashes the creators claimed —
+// before trusting any balance/receipt derived from that block. Distinct
+// from derive-tx-hash (single-tx SHA-256 of signing_bytes) and from
+// committee-signature-verify (needs a daemon-pinned block_digest); this
+// command reproduces ONE consensus rule with pure local SHA-256.
+//
+// Exit codes:
+//   0  success (or --check match)
+//   1  args / parse / IO error (incl. malformed creator_tx_lists)
+//   2  --check mismatch (only emitted when --check is set)
+int cmd_block_tx_root(int argc, char** argv) {
+    std::string block_path;
+    bool        do_check = false;
+    bool        json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--block-json" && i + 1 < argc) block_path = argv[++i];
+        else if (a == "--check")                      do_check = true;
+        else if (a == "--json")                       json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet block-tx-root --block-json <file|->\n"
+                "                                   [--check] [--json]\n"
+                "\n"
+                "  Recompute the canonical Block.tx_root from a block JSON's\n"
+                "  creator_tx_lists and (optionally) compare it against the\n"
+                "  block's stored `tx_root` field. This is the EXACT accept\n"
+                "  gate the daemon's validator runs (src/node/validator.cpp):\n"
+                "    expected = compute_tx_root(creator_tx_lists); reject if !=\n"
+                "  tx_root. Pure local SHA-256; no RPC, no network, no daemon.\n"
+                "  Deterministic.\n"
+                "\n"
+                "  tx_root is the commitment over the sorted-dedup UNION of the\n"
+                "  per-creator tx_hash lists — NOT a per-tx Merkle root and NOT\n"
+                "  the chained digest over full tx signing_bytes:\n"
+                "    union:           {A,B} U {B,C}  =>  {A,B,C}\n"
+                "    dedup:           identical tx_hashes collapse\n"
+                "    order-invariant: list order + within-list order ignored\n"
+                "  Empty union (no transactions) => SHA-256(\"\"), as the daemon\n"
+                "  emits for empty blocks.\n"
+                "\n"
+                "  --block-json <file|->  REQUIRED. Path to a block JSON object\n"
+                "                         (Block::to_json shape: at least a\n"
+                "                         creator_tx_lists array; with --check\n"
+                "                         also a tx_root field), or `-` for stdin.\n"
+                "  --check                Compare recomputed root against the\n"
+                "                         block's stored `tx_root`. Reports\n"
+                "                         match=true|false and exits 2 on mismatch.\n"
+                "  --json                 One-line JSON {recomputed_tx_root,\n"
+                "                         stored_tx_root?, leaf_count, match?}.\n"
+                "\n"
+                "  leaf_count is the size of the deduped union (number of\n"
+                "  distinct tx_hashes hashed into the root).\n"
+                "\n"
+                "  Exit codes: 0 success (or --check match), 1 args/parse/IO\n"
+                "  error, 2 --check mismatch.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "block-tx-root: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet block-tx-root --block-json "
+                         "<file|-> [--check] [--json]\n";
+            return 1;
+        }
+    }
+    if (block_path.empty()) {
+        std::cerr << "Usage: determ-wallet block-tx-root --block-json <file|-> "
+                     "[--check] [--json]\n"
+                     "  (--block-json is required; pass `-` for stdin)\n";
+        return 1;
+    }
+
+    // ── Read + parse the block JSON ──────────────────────────────────────
+    nlohmann::json j;
+    try {
+        if (block_path == "-") {
+            j = nlohmann::json::parse(std::cin);
+        } else {
+            std::ifstream block_f(block_path);
+            if (!block_f) {
+                std::cerr << "block-tx-root: cannot open --block-json file: "
+                          << block_path << "\n";
+                return 1;
+            }
+            block_f >> j;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "block-tx-root: --block-json is not valid JSON: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (!j.is_object()) {
+        std::cerr << "block-tx-root: --block-json must be a JSON object\n";
+        return 1;
+    }
+    if (!j.contains("creator_tx_lists")) {
+        std::cerr << "block-tx-root: --block-json missing required array "
+                     "'creator_tx_lists'\n";
+        return 1;
+    }
+    if (!j["creator_tx_lists"].is_array()) {
+        std::cerr << "block-tx-root: 'creator_tx_lists' must be a JSON array "
+                     "(array of arrays of 64-hex tx_hashes)\n";
+        return 1;
+    }
+
+    // Build the sorted-dedup union of every 32-byte tx_hash across all
+    // creator lists, exactly as src/node/producer.cpp::compute_tx_root does
+    // (std::set<Hash> — Hash = std::array<uint8_t,32> — orders by raw bytes).
+    std::set<std::array<uint8_t, 32>> u;
+    size_t list_idx = 0;
+    for (auto& list : j["creator_tx_lists"]) {
+        if (!list.is_array()) {
+            std::cerr << "block-tx-root: creator_tx_lists[" << list_idx
+                      << "] must be a JSON array of 64-hex tx_hashes\n";
+            return 1;
+        }
+        size_t hash_idx = 0;
+        for (auto& hj : list) {
+            if (!hj.is_string()) {
+                std::cerr << "block-tx-root: creator_tx_lists[" << list_idx
+                          << "][" << hash_idx << "] must be a 64-hex string\n";
+                return 1;
+            }
+            std::vector<uint8_t> hb;
+            try { hb = from_hex(hj.get<std::string>()); }
+            catch (std::exception& e) {
+                std::cerr << "block-tx-root: creator_tx_lists[" << list_idx
+                          << "][" << hash_idx << "] invalid hex: "
+                          << e.what() << "\n";
+                return 1;
+            }
+            if (hb.size() != 32) {
+                std::cerr << "block-tx-root: creator_tx_lists[" << list_idx
+                          << "][" << hash_idx << "] must be exactly 32 bytes "
+                             "(64 hex chars); got " << hb.size() << " bytes\n";
+                return 1;
+            }
+            std::array<uint8_t, 32> h{};
+            std::copy(hb.begin(), hb.end(), h.begin());
+            u.insert(h);
+            ++hash_idx;
+        }
+        ++list_idx;
+    }
+
+    // tx_root = SHA-256( union member bytes concatenated in canonical
+    // (set-sorted) order ). A streaming SHA256Builder appending each 32-byte
+    // member then finalizing is byte-identical to one-shot hashing the
+    // concatenation, so we assemble the buffer and hash once.
+    std::vector<uint8_t> buf;
+    buf.reserve(u.size() * 32);
+    for (auto& h : u) buf.insert(buf.end(), h.begin(), h.end());
+    std::array<uint8_t, 32> root{};
+    SHA256(buf.data(), buf.size(), root.data());
+    const std::string recomputed_hex = to_hex(root);
+    const size_t      leaf_count     = u.size();
+
+    // ── Optional --check against the block's stored tx_root ──────────────
+    bool        have_stored = false;
+    std::string stored_hex;            // canonical lowercase 64-hex
+    bool        match = false;
+    if (do_check) {
+        if (!j.contains("tx_root") || !j["tx_root"].is_string()) {
+            std::cerr << "block-tx-root: --check requires a string 'tx_root' "
+                         "field in --block-json\n";
+            return 1;
+        }
+        // Decode the stored field to bytes (case-insensitive via from_hex)
+        // and compare raw bytes against the recomputed root. Re-emit the
+        // canonical lowercase hex so JSON output is stable regardless of how
+        // the stored field was cased on disk.
+        std::vector<uint8_t> stored_bytes;
+        try { stored_bytes = from_hex(j["tx_root"].get<std::string>()); }
+        catch (std::exception& e) {
+            std::cerr << "block-tx-root: stored 'tx_root' invalid hex: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (stored_bytes.size() != 32) {
+            std::cerr << "block-tx-root: stored 'tx_root' must be exactly 32 "
+                         "bytes (64 hex chars); got " << stored_bytes.size()
+                      << " bytes\n";
+            return 1;
+        }
+        stored_hex  = to_hex(stored_bytes);
+        have_stored = true;
+        match = std::equal(stored_bytes.begin(), stored_bytes.end(),
+                           root.begin());
+    }
+
+    if (json_out) {
+        nlohmann::json r;
+        r["recomputed_tx_root"] = recomputed_hex;
+        r["leaf_count"]         = leaf_count;
+        if (have_stored) {
+            r["stored_tx_root"] = stored_hex;
+            r["match"]          = match;
+        }
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "recomputed_tx_root: " << recomputed_hex << "\n"
+                  << "leaf_count:         " << leaf_count      << "\n";
+        if (have_stored) {
+            std::cout << "stored_tx_root:     " << stored_hex << "\n"
+                      << "match:              " << (match ? "true" : "false")
+                      << "\n";
+        }
+    }
+
+    if (do_check && !match) return 2;
+    return 0;
+}
+
 // ── derive-tx-hash ───────────────────────────────────────────────────────────
 //
 // Recompute the canonical tx_hash from a signed tx envelope. The chain
@@ -19727,6 +19976,31 @@ void print_usage() {
         "                                             field names are both accepted. Pass `-` to\n"
         "                                             --tx-json to read from stdin. Exit 0 success,\n"
         "                                             1 args/parse/IO error, 2 --check mismatch.\n"
+        "  block-tx-root --block-json <file|->        OFFLINE recompute of the canonical Block.tx_root\n"
+        "                [--check] [--json]            from a block JSON's creator_tx_lists — the EXACT\n"
+        "                                             accept gate the daemon's validator runs (src/\n"
+        "                                             node/validator.cpp: expected = compute_tx_root(\n"
+        "                                             creator_tx_lists); reject if != stored tx_root).\n"
+        "                                             tx_root is the commitment over the sorted-dedup\n"
+        "                                             UNION of the per-creator tx_hash lists — NOT a\n"
+        "                                             per-tx Merkle root and NOT the chained digest\n"
+        "                                             over full tx signing_bytes: {A,B} U {B,C} =>\n"
+        "                                             {A,B,C}; identical tx_hashes collapse; list and\n"
+        "                                             within-list order are ignored. Mirrors src/node/\n"
+        "                                             producer.cpp::compute_tx_root byte-for-byte (a\n"
+        "                                             std::set sorts the union by raw 32-byte value).\n"
+        "                                             Empty union => SHA-256(\"\"), as the daemon emits\n"
+        "                                             for empty blocks. Pure local SHA-256; no RPC, no\n"
+        "                                             daemon, no network. Deterministic. --check\n"
+        "                                             compares against the block's stored `tx_root`\n"
+        "                                             and exits 2 on mismatch (offline tamper-\n"
+        "                                             detection for an auditor holding a block from\n"
+        "                                             chain.json / CHAIN_RESPONSE / BLOCK gossip).\n"
+        "                                             --json emits {recomputed_tx_root, stored_tx_root,\n"
+        "                                             leaf_count, match}; leaf_count is the deduped\n"
+        "                                             union size. Pass `-` to --block-json for stdin.\n"
+        "                                             Exit 0 success (or --check match), 1 args/parse/\n"
+        "                                             IO error, 2 --check mismatch.\n"
         "  receipt-key [--namespace i|m|p]            OFFLINE deriver for the composite state-root\n"
         "              i: --src-shard <S>             leaf-key bytes (i:/m:/p:) — the exact hex body\n"
         "                 --tx-hash <hex64>           the `state_proof` RPC expects for a composite-\n"
@@ -20181,6 +20455,7 @@ int main(int argc, char** argv) {
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "verify-batch")    return cmd_verify_batch   (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
+    if (cmd == "block-tx-root")   return cmd_block_tx_root  (argc - 2, argv + 2);
     if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);

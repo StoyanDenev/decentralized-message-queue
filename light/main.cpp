@@ -31,6 +31,7 @@
 //   verify-tx-inclusion      Prove tx H is (not) in block B vs committee sigs
 //   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
+//   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
 //   help / version
 //
 // Trust-model invariants:
@@ -217,6 +218,30 @@ void print_usage() {
         "      a later revert flips INCLUDED back to NOT-INCLUDED). Any\n"
         "      tamper, mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
         "      never a false INCLUDED.\n"
+        "  verify-param-change --rpc-port <N> --genesis <file>\n"
+        "                     --effective-height <H> --idx <I> --name <NAME>\n"
+        "                     [--value-hex <HEX>] [--json]\n"
+        "      Prove (or disprove) that a staged governance parameter change\n"
+        "      — the entry at index <I> within effective-height bucket <H>,\n"
+        "      named <NAME> with value <HEX> — is currently a member of the\n"
+        "      committee-verified `p:` (pending_param_changes) namespace, i.e.\n"
+        "      that it is STILL STAGED (not yet activated). Anchors genesis,\n"
+        "      committee-verifies the header chain to head, computes the\n"
+        "      canonical key (\"p:\" + eff_be8 + idx_be4), fetches the\n"
+        "      `p:`-namespace state-proof (hex-encoded key body), and Merkle-\n"
+        "      verifies it against the committee-signed state_root. The\n"
+        "      proof's key_bytes must equal the locally-computed key AND its\n"
+        "      value_hash must equal SHA256(u64_be(name_len) || name ||\n"
+        "      u64_be(value_len) || value) — binding the proof to THIS staged\n"
+        "      change, so a daemon lie about the parameter name or value is\n"
+        "      detected, not propagated. Use the daemon's `pending_params` RPC\n"
+        "      to discover the (effective_height, name, value_hex) to assert;\n"
+        "      --idx is the entry's 0-based position within its bucket.\n"
+        "      INCLUDED / NOT-INCLUDED are sound verdicts anchored to the head\n"
+        "      height (pending_param_changes is consumed at activation: once\n"
+        "      the chain advances past <H> the same query flips INCLUDED back\n"
+        "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
+        "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -1941,6 +1966,365 @@ int cmd_verify_merge_state(int argc, char** argv) {
     }
 }
 
+// ────────────────────── verify-param-change ────────────────────────────
+//
+// Trust-minimized INCLUDED / NOT-INCLUDED / UNVERIFIABLE verdict on
+// whether a staged governance parameter change (effective_height, idx →
+// name + value) lives in the committee-verified `p:` (pending_param_changes)
+// namespace, with the proof bound to the EXACT (name, value) the caller
+// asserts.
+//
+// This is the governance analogue of verify-merge-state (which proves `m:`
+// merge-record membership) and verify-receipt-inclusion (which proves `i:`
+// receipt membership). It uses the SAME composite-key state-proof path the
+// daemon serves (the caller hex-encodes the binary key body; see
+// src/node/node.cpp rpc_state_proof). The pending-param path differs from
+// the merge path in two ways:
+//
+//   * Namespace is "p" and the leaf key is COMPOSITE and WIDER. The
+//     canonical encoding (see chain.cpp build_state_leaves,
+//     "pending_param_changes_" branch) is:
+//         key        = 'p' ':' || u64_be(effective_height) || u32_be(idx)
+//         value_hash = SHA256( u64_be(name.size())  || name
+//                            || u64_be(value.size()) || value )      // value
+//                                                                    // omitted
+//                                                                    // when empty
+//     where idx is the entry's 0-based position within the per-height
+//     bucket. The verifier recomputes BOTH locally and demands the proof's
+//     key_bytes == local key AND its value_hash == the locally-recomputed
+//     hash. The value_hash binding is load-bearing: like `m:` (and unlike
+//     `i:` whose value is the constant presence marker SHA256(0x01)), a `p:`
+//     leaf carries DATA, so a daemon could serve a valid Merkle proof for
+//     slot (eff,idx) that encodes a DIFFERENT parameter name or value.
+//     Recomputing the hash from the caller-asserted (name, value_hex) forces
+//     the proof to match exactly that staged change — a daemon lie about
+//     either field is detected, not propagated.
+//
+//   * pending_param_changes is consumed at activation: activate_pending_params
+//     erases each per-height bucket once current_height reaches it (chain.cpp).
+//     So this is a head-anchored present/absent verdict, NOT an append-only
+//     guarantee — INCLUDED means "this exact change is STILL STAGED (not yet
+//     activated) AS OF the committee-verified head", and once the chain
+//     advances past effective_height the same query returns NOT-INCLUDED.
+//     The verdict is therefore always anchored to (and reported with) the
+//     head height it was proven at.
+//
+// Discovery: the daemon's `pending_params` RPC lists each staged entry's
+// (effective_height, name, value_hex). The caller reads that to obtain the
+// (height, name, value) to assert here; --idx is the 0-based position of the
+// target entry within its effective_height bucket (the bucket is emitted in
+// insertion order by both the RPC and build_state_leaves, so the RPC's
+// per-height ordinal IS the leaf idx).
+//
+// Fail-closed contract: any tamper, malformed proof, key/value mismatch, or
+// daemon refusal to serve the `p:` proof yields UNVERIFIABLE (exit 3), never
+// a false INCLUDED. A clean Merkle-verified inclusion → INCLUDED (exit 0); a
+// daemon `not_found` for the canonical key → NOT-INCLUDED (exit 0, a sound
+// verified negative — no such change is staged at that slot).
+
+int cmd_verify_param_change(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, name, value_hex;
+    uint64_t eff_height = 0, idx = 0;
+    bool have_port = false, have_eff = false, have_idx = false,
+         have_name = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--effective-height" && i + 1 < argc) {
+            eff_height = parse_u64("--effective-height", argv[++i]); have_eff = true;
+        } else if (a == "--idx"      && i + 1 < argc) {
+            idx = parse_u64("--idx", argv[++i]); have_idx = true;
+        } else if (a == "--name"     && i + 1 < argc) {
+            name = argv[++i]; have_name = true;
+        } else if (a == "--value-hex" && i + 1 < argc) value_hex = argv[++i];
+        else if   (a == "--json")                      json_out  = true;
+        else {
+            std::cerr << "verify-param-change: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_eff || !have_idx
+        || !have_name) {
+        std::cerr << "verify-param-change: --rpc-port, --genesis, "
+                     "--effective-height, --idx, --name are required\n";
+        return 1;
+    }
+    // idx is u32 on the wire (build_state_leaves emits u32_be(idx)). Reject
+    // anything that cannot fit so a malformed query can't silently alias a
+    // different leaf.
+    if (idx > 0xffffffffull) {
+        std::cerr << "verify-param-change: --idx exceeds u32 range\n";
+        return 1;
+    }
+
+    // The verdict mirrors verify-merge-state's tri-state.
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+
+    try {
+        // The asserted value (may be empty — a zero-length param value is
+        // legal, and build_state_leaves appends the value bytes only when
+        // non-empty). from_hex throws on malformed hex, so a bad --value-hex
+        // fails fast before any RPC.
+        std::vector<uint8_t> value =
+            value_hex.empty() ? std::vector<uint8_t>{} : from_hex(value_hex);
+
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-param-change: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // Compute the canonical pending_param_changes key bytes locally,
+        // byte-for-byte matching chain.cpp build_state_leaves
+        // "pending_param_changes_" branch:
+        //   'p' ':' || u64_be(effective_height) || u32_be(idx)
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + 8 + 4);
+        local_key.push_back('p'); local_key.push_back(':');
+        for (int i = 7; i >= 0; --i)
+            local_key.push_back(static_cast<uint8_t>((eff_height >> (8 * i)) & 0xff));
+        for (int i = 3; i >= 0; --i)
+            local_key.push_back(static_cast<uint8_t>(
+                (static_cast<uint32_t>(idx) >> (8 * i)) & 0xff));
+
+        // The committed value for THIS staged change:
+        //   SHA256(u64_be(name_len) || name || u64_be(value_len) || value)
+        // (value bytes appended only when non-empty — matching the
+        // build_state_leaves `if (!value.empty())` guard).
+        determ::crypto::SHA256Builder mb;
+        mb.append(static_cast<uint64_t>(name.size()));
+        mb.append(name);
+        mb.append(static_cast<uint64_t>(value.size()));
+        if (!value.empty()) mb.append(value.data(), value.size());
+        Hash expected_value_hash = mb.finalize();
+
+        // Committee-verify the header chain end-to-end, capturing the
+        // head's state_root (the anchor for the Merkle inclusion).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `p:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `p:`-namespace state-proof. The daemon takes a string
+        // `key`; for composite-key namespaces it hex-decodes the post-prefix
+        // body and prepends "p:" to reconstruct the canonical key. The body
+        // here is u64_be(eff_height) || u32_be(idx) (12 bytes) — see
+        // rpc_state_proof's width enforcement.
+        std::vector<uint8_t> body;
+        body.reserve(8 + 4);
+        for (int i = 7; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>((eff_height >> (8 * i)) & 0xff));
+        for (int i = 3; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>(
+                (static_cast<uint32_t>(idx) >> (8 * i)) & 0xff));
+        std::string key_body_hex = to_hex(body.data(), body.size());
+
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "p"}, {"key", key_body_hex}});
+
+        // A daemon that cannot serve the `p:` namespace returns an `error`.
+        // We distinguish a genuine absence (`not_found` for our exact key →
+        // a sound NOT-INCLUDED) from any other refusal (→ UNVERIFIABLE,
+        // fail closed — we will not assert membership either way).
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `p:` leaf for slot (eff_height="
+                        + std::to_string(eff_height) + ", idx="
+                        + std::to_string(idx) + ") — no such change is staged "
+                          "(state_proof not_found; may already have activated)";
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `p:` state-proof: " + err
+                        + " (cannot prove membership trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS staged change: (1) key_bytes must equal
+            // the locally-computed canonical key, (2) value_hash must equal
+            // the locally-recomputed SHA256 over (name, value). Either
+            // mismatch means the daemon served a proof for a different leaf
+            // OR is lying about the change's name/value → UNVERIFIABLE.
+            std::string proof_key_hex =
+                proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical param-change key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match the recomputed hash of "
+                              "(name=\"" + name + "\", value_hex="
+                            + (value_hex.empty() ? "<empty>" : value_hex) + ")="
+                            + to_hex(expected_value_hash)
+                            + " — daemon is lying about the change's "
+                              "name/value OR proving a different slot";
+                } else {
+                    // Anchor the proof's claimed state_root to a
+                    // committee-signed header (the chain may have advanced
+                    // during the round-trip), mirroring verify-merge-state /
+                    // verify-receipt-inclusion.
+                    uint64_t proof_height =
+                        proof.value("height", uint64_t{0});
+                    std::string proof_root =
+                        proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    if (proof_height > vc.height) {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        auto pg = rpc.call("headers",
+                            {{"from", anchor_index}, {"count", 1}});
+                        if (!pg.contains("headers")
+                            || !pg["headers"].is_array()
+                            || pg["headers"].empty()) {
+                            throw std::runtime_error(
+                                "cannot fetch header at index="
+                                + std::to_string(anchor_index)
+                                + " (proof.height="
+                                + std::to_string(proof_height) + ")");
+                        }
+                        auto& h = pg["headers"][0];
+                        std::string hdr_root =
+                            h.value("state_root", std::string{});
+                        if (hdr_root != proof_root) {
+                            throw std::runtime_error(
+                                "proof.state_root=" + proof_root
+                                + " does not match header["
+                                + std::to_string(anchor_index)
+                                + "].state_root=" + hdr_root);
+                        }
+                        auto vbs = verify_block_sigs(h, committee_json,
+                                                     /*bft=*/false);
+                        if (!vbs.ok)
+                            vbs = verify_block_sigs(h, committee_json,
+                                                    /*bft=*/true);
+                        if (!vbs.ok) {
+                            throw std::runtime_error(
+                                "header[" + std::to_string(anchor_index)
+                                + "] committee-sig check failed: "
+                                + vbs.detail);
+                        }
+                        if (anchor_index >= vc.height) {
+                            auto walk = rpc.call("headers",
+                                {{"from", vc.height - 1},
+                                 {"count", proof_height - vc.height + 2}});
+                            auto vh = verify_headers(walk, "", "");
+                            if (!vh.ok) {
+                                throw std::runtime_error(
+                                    "prev_hash walk vc.height->proof.height: "
+                                    + vh.detail);
+                            }
+                        }
+                        anchor_root = proof_root;
+                        anchor_at   = proof_height;
+                    } else if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+
+                    // Merkle-verify the proof against the committee-signed
+                    // root. verify_state_proof re-derives key_bytes +
+                    // value_hash from the proof JSON and rolls the siblings
+                    // up to anchor_root; we already bound those to the
+                    // canonical staged change above, so a pass here is a
+                    // sound INCLUDED.
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",         included},
+                {"verdict",          verdict_str(verdict)},
+                {"effective_height", eff_height},
+                {"idx",              idx},
+                {"name",             name},
+                {"value_hex",        value_hex},
+                {"namespace",        "p"},
+            };
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         p (pending_param_changes)\n"
+                      << "  effective_height:  " << eff_height << "\n"
+                      << "  idx:               " << idx << "\n"
+                      << "  name:              " << name << "\n"
+                      << "  value_hex:         "
+                      << (value_hex.empty() ? "<empty>" : value_hex) << "\n";
+            if (verdict == InclusionVerdict::INCLUDED) {
+                std::cout << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        // Exit codes match verify-merge-state: INCLUDED / NOT-INCLUDED → 0
+        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-param-change: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1980,6 +2364,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-tx-inclusion")   return cmd_verify_tx_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
+        if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

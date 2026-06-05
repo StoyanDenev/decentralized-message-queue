@@ -1100,6 +1100,28 @@ Additional in-process tests:
                                               flows subsidy-only to creators
                                               (accumulated_subsidy unchanged
                                               by absent fee_pool).
+  determ test-state-proof-value-hash          Light-client value-encoding
+                                              contract — pins that a proof's
+                                              value_hash EQUALS the SHA-256 of
+                                              the documented per-namespace
+                                              field encoding (build_state_
+                                              leaves), not merely that it
+                                              verifies under the root. An
+                                              external verifier recomputes the
+                                              expected value_hash from raw
+                                              fields for a: (balance,
+                                              next_nonce), s: (locked, unlock_
+                                              height), k:min_stake (u64), and
+                                              c:genesis_total (u64); each must
+                                              match the proof's value_hash AND
+                                              re-verify via merkle_verify. Also
+                                              asserts field-sensitivity (wrong
+                                              balance/nonce ordering diverges),
+                                              cross-namespace distinctness, and
+                                              tamper rejection — the "meaning"
+                                              half of the light-client argument
+                                              that test-state-proof-namespaces
+                                              (membership only) does not cover.
 )" << "\n";
 }
 
@@ -38224,6 +38246,227 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": state-proof-composite-key "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-state-proof-value-hash") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // The existing test-state-proof-namespaces fixture proves a leaf's
+        // (key, value_hash) pair is a MEMBER of the committed Merkle root —
+        // that is the "membership" half of the light-client argument. It
+        // never asserts what the leaf's value_hash MEANS. A trustless reader
+        // that wants to learn alice's balance (not just "alice has some
+        // proven leaf") must independently recompute the expected value_hash
+        // from raw fields using the SAME encoding the producer used in
+        // Chain::build_state_leaves, and confirm it equals the proof's
+        // value_hash. This test pins exactly that contract for the four
+        // simple namespaces a:/s:/k:/c:. If build_state_leaves ever changed
+        // a namespace's field order, width, or hashing without updating the
+        // documented light-client encoding, this test fails — protecting
+        // every external verifier that reconstructs value_hash off-node.
+
+        // Build a chain with known account + stake state for alice.
+        GenesisConfig cfg;
+        cfg.chain_id = "state-proof-value-hash-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 500;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        cfg.initial_balances = {alice_bal};
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        Hash root = c.compute_state_root();
+
+        // Helper: build "<ns>:" + suffix key (matches k_with_prefix).
+        auto ns_key = [](char ns, const std::string& suffix) {
+            std::vector<uint8_t> key;
+            key.push_back(uint8_t(ns)); key.push_back(':');
+            key.insert(key.end(), suffix.begin(), suffix.end());
+            return key;
+        };
+
+        // === a:-namespace — value_hash = SHA256( balance || next_nonce ) ===
+        // build_state_leaves encodes acct.balance then acct.next_nonce, both
+        // as u64 via SHA256Builder::append(uint64_t). A light client that
+        // learns alice's balance/nonce from a trusted source can confirm the
+        // proven leaf encodes exactly those values.
+        {
+            uint64_t bal   = c.balance("alice");
+            uint64_t nonce = c.next_nonce("alice");
+            crypto::SHA256Builder b;
+            b.append(bal);
+            b.append(nonce);
+            Hash expected = b.finalize();
+
+            auto key = ns_key('a', "alice");
+            auto p = c.state_proof(key);
+
+            // 1. The proof's value_hash equals the independently-recomputed
+            //    encoding (the core light-client value contract).
+            check(p.has_value() && p->value_hash == expected,
+                  "a:-value: value_hash == SHA256(balance||next_nonce)");
+
+            // 2. And that same recomputed value_hash re-verifies under the
+            //    root — so an off-node reader needs only (balance, nonce)
+            //    plus the sibling path, never the node's value_hash.
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, expected,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "a:-value: recomputed value_hash verifies under state_root");
+
+            // 3. Field-order sensitivity: appending nonce-then-balance (the
+            //    reversed order) yields a DIFFERENT hash, proving the encoding
+            //    is order-bound (balance is first). Guards against a verifier
+            //    that swaps the two u64 fields silently passing.
+            crypto::SHA256Builder rb;
+            rb.append(nonce);
+            rb.append(bal);
+            check(rb.finalize() != expected,
+                  "a:-value: reversed field order (nonce||balance) diverges");
+        }
+
+        // === s:-namespace — value_hash = SHA256( locked || unlock_height ) ===
+        {
+            uint64_t locked = c.stake("alice");
+            uint64_t unlock = c.stake_unlock_height("alice");
+            crypto::SHA256Builder b;
+            b.append(locked);
+            b.append(unlock);
+            Hash expected = b.finalize();
+
+            auto key = ns_key('s', "alice");
+            auto p = c.state_proof(key);
+
+            // 4. Stake leaf value_hash matches recomputed (locked, unlock).
+            check(p.has_value() && p->value_hash == expected,
+                  "s:-value: value_hash == SHA256(locked||unlock_height)");
+
+            // 5. Verifies under root using the recomputed value_hash.
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, expected,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "s:-value: recomputed value_hash verifies under state_root");
+
+            // 6. The genesis stake is the 500 we configured (sanity on the
+            //    fixture — the recomputation above is only meaningful if
+            //    `locked` is the value a reader would independently know).
+            check(locked == 500,
+                  "s:-value: alice's locked stake is the configured 500");
+        }
+
+        // === k:min_stake — value_hash = SHA256( u64(min_stake) ) ===
+        // The const_leaf form appends a single u64. Light clients prove
+        // genesis-pinned constants (e.g., the min_stake floor that bounds
+        // the S-010 Sybil cost) the same way.
+        {
+            crypto::SHA256Builder b;
+            b.append(c.min_stake());
+            Hash expected = b.finalize();
+
+            auto key = ns_key('k', "min_stake");
+            auto p = c.state_proof(key);
+
+            // 7. k:min_stake leaf value_hash matches SHA256(u64).
+            check(p.has_value() && p->value_hash == expected,
+                  "k:-value: value_hash('k:min_stake') == SHA256(u64(min_stake))");
+
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, expected,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "k:-value: recomputed value_hash verifies under state_root");
+        }
+
+        // === c:genesis_total — value_hash = SHA256( u64(genesis_total) ) ===
+        // The A1 supply counters use the same const_leaf encoding but with a
+        // "c:" suffix passed to const_leaf (so the on-tree key is "k:c:...").
+        // genesis_total is the unitary-supply anchor; a light client proving
+        // total issuance reconstructs it identically.
+        {
+            crypto::SHA256Builder b;
+            b.append(c.genesis_total());
+            Hash expected = b.finalize();
+
+            // const_leaf("c:genesis_total", ...) => on-tree key "k:" + "c:..."
+            auto key = ns_key('k', "c:genesis_total");
+            auto p = c.state_proof(key);
+
+            // 8. c:genesis_total counter value_hash matches SHA256(u64).
+            check(p.has_value() && p->value_hash == expected,
+                  "c:-value: value_hash('k:c:genesis_total') == SHA256(u64)");
+
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, expected,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "c:-value: recomputed value_hash verifies under state_root");
+        }
+
+        // === Cross-namespace value distinctness ===
+        // 9. The four recomputed value_hashes are not accidentally equal —
+        //    distinct encodings produce distinct leaf values (no collision
+        //    that would let a node substitute one leaf's value for another).
+        {
+            crypto::SHA256Builder ab; ab.append(c.balance("alice")); ab.append(c.next_nonce("alice"));
+            crypto::SHA256Builder sb; sb.append(c.stake("alice"));   sb.append(c.stake_unlock_height("alice"));
+            crypto::SHA256Builder kb; kb.append(c.min_stake());
+            crypto::SHA256Builder cb; cb.append(c.genesis_total());
+            Hash ha = ab.finalize(), hs = sb.finalize();
+            Hash hk = kb.finalize(), hc = cb.finalize();
+            bool distinct =
+                ha != hs && ha != hk && ha != hc &&
+                hs != hk && hs != hc && hk != hc;
+            check(distinct,
+                  "cross-namespace: a:/s:/k:/c: recomputed value_hashes distinct");
+        }
+
+        // === Tamper rejection on the recomputed value ===
+        // 10. A reader who recomputes value_hash from a WRONG balance (a
+        //     malicious source claiming alice holds 9999) gets a hash that
+        //     fails merkle_verify against the honest leaf's sibling path —
+        //     so a lie about the balance cannot be smuggled past the root.
+        {
+            crypto::SHA256Builder wb;
+            wb.append(uint64_t{9999});            // wrong balance
+            wb.append(c.next_nonce("alice"));
+            Hash wrong = wb.finalize();
+
+            auto key = ns_key('a', "alice");
+            auto p = c.state_proof(key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, key, wrong,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(!ok,
+                  "tamper: value_hash from a wrong balance (9999) fails verify");
+        }
+
+        // === Determinism of the value-hash contract ===
+        // 11. Two independent recomputations of the a: leaf encoding over the
+        //     unchanged chain are byte-identical (the encoding is pure).
+        {
+            crypto::SHA256Builder b1; b1.append(c.balance("alice")); b1.append(c.next_nonce("alice"));
+            crypto::SHA256Builder b2; b2.append(c.balance("alice")); b2.append(c.next_nonce("alice"));
+            check(b1.finalize() == b2.finalize(),
+                  "determinism: a:-value recomputation byte-identical across calls");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-proof-value-hash "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
