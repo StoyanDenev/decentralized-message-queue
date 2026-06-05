@@ -27,18 +27,31 @@ The walk is:
     IF idx even THEN current := inner(current, sibling)   \* 0x01-prefixed
                 ELSE current := inner(sibling, current)
     idx := idx / 2 ; level := level / 2
+  current := root_wrap(leaf_count, current)          \* 0x02-prefixed (S-040)
   RETURN pi = Len(proof) AND current = root
 
+S-040 CLOSURE (now reflected in this model). The committed root is no
+longer the bare inner-tree root; it is the root-wrapper hash
+  root = SHA256(0x02 || be_u32(leaf_count) || inner_root)
+(src/crypto/merkle.cpp::merkle_root_wrap; prefix 0x02 domain-separated
+from 0x00 leaf / 0x01 inner). merkle_verify re-derives the inner root
+from the proof exactly as before, then applies the SAME wrapper with
+the CALLER-supplied leaf_count and compares to the committed root. A
+forged count M /= N therefore yields a DIFFERENT committed root term
+(SHA256(0x02||M||inner) /= SHA256(0x02||N||inner) = root) and is
+REJECTED. leaf_count is now cryptographically BOUND into the root.
+
 The load-bearing safety property: merkle_verify accepts iff the
-recomputed root EQUALS the trusted root AND the proof length exactly
-matches the walk height. No reachable input accepts against a root the
-leaf+path does not actually hash to — the verifier never approves a
-forged inclusion. This is the trustless-read soundness contract: a
-light client that runs merkle_verify against a committee-signed
-state_root learns membership of EXACTLY the (key, value_hash) it
-recomputed, never a server-chosen substitute, because acceptance
-reduces to SHA-256 collision/second-preimage resistance
-(Preliminaries.md §2.1).
+recomputed (wrapped) root EQUALS the trusted root AND the proof length
+exactly matches the walk height. No reachable input accepts against a
+root the leaf+path+leaf_count does not actually hash to — the verifier
+never approves a forged inclusion NOR a forged leaf_count. This is the
+trustless-read soundness contract: a light client that runs
+merkle_verify against a committee-signed state_root learns membership
+of EXACTLY the (key, value_hash) it recomputed AT EXACTLY the
+leaf_count the root commits to, never a server-chosen substitute,
+because acceptance reduces to SHA-256 collision/second-preimage
+resistance (Preliminaries.md §2.1).
 
 The companion analytic surface is the exhaustive negative-space test
 tools/test_merkle_proof_tampering.sh (~30 assertions, 15 scenario
@@ -46,8 +59,9 @@ groups); FB44 is the state-machine companion that pins the same
 accept/reject decision across every reachable (input, tamper)
 interleaving rather than a fixed mechanical input list.
 
-Seven theorems are pinned (six positive invariants + one explicitly
-MODELED-BUT-NOT-ASSERTED weakness):
+Seven theorems are pinned, all SEVEN positive invariants (T-MV7 was
+previously a MODELED-BUT-NOT-ASSERTED weakness; S-040 is now CLOSED,
+so it is flipped to a true invariant — see below):
 
   (T-MV1) Recompute Soundness. Every accepted input recomputes to the
           supplied root: an "accept" outcome implies Recompute(input)
@@ -55,14 +69,17 @@ MODELED-BUT-NOT-ASSERTED weakness):
           leaf+path does not hash to its root. The headline
           no-forged-inclusion contract (merkle.cpp:140
           `current == root`).
-  (T-MV2) Domain Separation. The leaf hash is 0x00-prefixed and the
-          inner hash is 0x01-prefixed; the prefixes are disjoint, so
-          no leaf hash can ever equal an inner-node hash. This defeats
-          the second-preimage attack where an attacker presents an
-          inner node as a leaf (or vice-versa). Modeled structurally:
-          LeafTag /= InnerTag in every recomputed hash term
-          (merkle.cpp:28 prefix 0x00 vs :38 prefix 0x01;
-          merkle.hpp:93-96 rationale).
+  (T-MV2) Domain Separation. The leaf hash is 0x00-prefixed, the inner
+          hash is 0x01-prefixed, and the root-wrapper hash is
+          0x02-prefixed (S-040); all three prefixes are pairwise
+          disjoint, so no leaf hash can ever equal an inner-node hash
+          nor a root-wrapper hash. This defeats the second-preimage
+          attack where an attacker presents an inner node as a leaf (or
+          vice-versa) and the cross-shape root aliasing the root-wrapper
+          prefix forecloses. Modeled structurally: LeafTag, InnerTag,
+          RootTag pairwise distinct in every recomputed hash term
+          (merkle.cpp:28 prefix 0x00 vs :38 prefix 0x01 vs
+          merkle_root_wrap prefix 0x02; merkle.hpp:93-96 rationale).
   (T-MV3) Exact-Length Gate. Acceptance requires the proof length to
           EXACTLY equal the walk height (pi = Len(proof) at the end);
           a truncated OR an over-long proof is rejected even if the
@@ -88,35 +105,39 @@ MODELED-BUT-NOT-ASSERTED weakness):
           function of its arguments; the comparison against root is
           pure. The idempotence-under-replay witness.
 
-  (T-MV7) S-040 Caller-Trust Weakness — MODELED, NOT ASSERTED.
-          leaf_count is NOT bound into any leaf or inner hash. Two
-          distinct (target_index, leaf_count) pairs that produce the
-          SAME walk shape (same ceil(log2 N) level count + same
-          per-level parity) consume the same siblings and recompute to
-          the same root. A caller that sources leaf_count from an
-          untrusted channel separate from the proof can be fooled into
-          accepting a leaf at a position it does not occupy in the real
-          tree. Concrete witness pinned by `determ
-          test-merkle-proof-tampering` scenario #8: claiming
-          leaf_count = 8 for a 5-leaf tree at index 2 accepts as TRUE
-          because both yield identical 3-level walks consuming the same
-          3 siblings (merkle.hpp:64-83 S-040 caller-trust invariant;
-          SECURITY.md §S-040). FB44 makes this a REACHABLE state
-          witnessed by the operator NOT_INV_LeafCountBound — the
-          mitigation (always anchor leaf_count to the committed
-          state-proof header) lives ABOVE this primitive, so FB44
-          documents the boundary rather than asserting a property the
-          primitive does not provide.
+  (T-MV7) Leaf-Count Binding (S-040 CLOSED). leaf_count IS bound into
+          the committed root via the root-wrapper hash root =
+          SHA256(0x02 || be_u32(leaf_count) || inner_root)
+          (merkle.cpp::merkle_root_wrap). Two distinct
+          (target_index, leaf_count) pairs that produce the SAME inner
+          walk shape (same ceil(log2 N) level count + same per-level
+          parity) consume the same siblings and recompute to the same
+          INNER root, but the wrapper then folds in the DISTINCT
+          leaf_count, so the COMMITTED roots differ: M /= N implies
+          SHA256(0x02||M||inner) /= SHA256(0x02||N||inner). A caller
+          that supplies a forged leaf_count therefore recomputes a
+          wrapped root that does NOT equal the committed root and is
+          REJECTED. The former boundary case pinned by `determ
+          test-merkle-proof-tampering` scenario #8 — claiming
+          leaf_count = 8 for a 5-leaf tree at index 2 — now REJECTS
+          (the scenario assertion was inverted on S-040 closure: 5 and
+          8 no longer alias because their wrapped roots differ). FB44
+          asserts this as the true invariant INV_LeafCountBound: no two
+          ACCEPTED records may share (leaf, idx, sibs, root) yet differ
+          in n, because differing n forces differing committed roots.
+          The caller-trust obligation S-040 documented is now
+          cryptographically ENFORCED, not an operator guideline
+          (merkle.hpp:64-83; SECURITY.md §S-040 CLOSED).
 
 The state machine. A bounded universe of inputs is enumerated; a
 non-deterministic Verify action admits one input per step, runs it
 through the recompute walk, and appends a VerifyRecord (input + the
 recomputed-root term + the accept/reject decision) to a verify log.
-The six positive invariants read the log to confirm every accept is
+The seven positive invariants read the log to confirm every accept is
 sound (T-MV1), domain-separated (T-MV2), exact-length (T-MV3),
-parity-correct (T-MV4), and in-range (T-MV5); the operator
-NOT_INV_LeafCountBound exhibits the S-040 weakness as a reachable
-counterexample (T-MV7).
+parity-correct (T-MV4), in-range (T-MV5), and leaf-count-bound (T-MV7);
+S-040 is CLOSED, so INV_LeafCountBound holds — no two accepted records
+sharing (leaf, idx, sibs, root) may differ in n.
 
 Modeling scope (kept tractable for TLC):
 
@@ -139,13 +160,16 @@ Modeling scope (kept tractable for TLC):
     drawn from a bounded adversarial universe (honest values plus
     tampered variants: sibling-swap, truncation, extension, index
     off-by-one, leaf_count drift). The verifier does not trust them;
-    merkle_verify's job is to reject every tampered variant — except
-    the S-040 leaf_count-drift aliasing case (T-MV7), which is the one
-    the primitive structurally cannot catch.
+    merkle_verify's job is to reject every tampered variant — INCLUDING
+    the leaf_count-drift case, which post-S-040 the root-wrapper hash
+    now catches (T-MV7): a forged leaf_count produces a different
+    committed root and is rejected.
   * Tree depth is bounded by the finite Leaves universe (a 2-4 leaf
     model gives 1-2 level walks, enough to exercise the parity gate,
-    the odd-leaf duplication, and the exact-length gate; a 5-leaf
-    model under the .cfg exhibits the S-040 leaf_count=8 alias).
+    the odd-leaf duplication, and the exact-length gate; a 5-leaf vs
+    8-leaf model under the .cfg confirms the S-040 fix — both yield the
+    same INNER walk shape but DIFFERENT committed roots, so the former
+    leaf_count=8 alias is now rejected, not accepted).
 
 The state machine. Two actions cover the verifier:
 
@@ -157,10 +181,11 @@ The state machine. Two actions cover the verifier:
     bounds the state space; the invariants are evaluated at every
     reachable state along the way.
 
-TLC verifies the six positive invariants at every reachable state
+TLC verifies the seven positive invariants at every reachable state
 across every reachable interleaving of Verify actions over the bounded
-input universe, and the operator NOT_INV_LeafCountBound flags the
-S-040 aliasing state when configured with the 5-leaf model.
+input universe. INV_LeafCountBound holds because the root-wrapper hash
+binds leaf_count into the committed root (S-040 closed); the 5-leaf vs
+8-leaf model confirms the former alias no longer accepts.
 
 To check (assuming TLC installed):
   $ tlc MerklePathVerify.tla -config MerklePathVerify.cfg
@@ -168,13 +193,17 @@ To check (assuming TLC installed):
 Recommended config (state space ~10^4, < 30s):
   Leaves = a 3-element leaf universe, target indices 0..2, an
   adversarial Proofs universe of honest + tampered sibling lists,
-  LeafCounts = {2,3,4} (+ {5,8} to exhibit S-040), MaxVerifies = 5.
+  LeafCounts = {2,3,4} (+ {5,8} to confirm the S-040 fix — the two no
+  longer alias because the root-wrapper binds the distinct counts),
+  MaxVerifies = 5.
 
 Cross-references:
   - tools/test_merkle_proof_tampering.sh — the exhaustive negative-
     space regression (~30 assertions, 15 scenario groups); FB44 is the
     state-machine companion to its accept/reject decision. Scenario #8
-    (leaf_count drift) is the T-MV7 / NOT_INV_LeafCountBound witness.
+    (leaf_count drift) is the T-MV7 / INV_LeafCountBound witness — its
+    assertion was INVERTED on S-040 closure to assert the forged
+    leaf_count=8 is now REJECTED (was a pinned ACCEPT pre-fix).
   - tools/test_merkle.sh + tools/test_merkle_tree_balanced.sh — the
     positive surface (round-trip every leaf) FB44's HonestRoot /
     HonestProof construction mirrors.
@@ -192,9 +221,9 @@ Cross-references:
     (FB44) is checked against.
   - docs/proofs/Preliminaries.md §2.1 — SHA-256 collision/second-
     preimage resistance; T-MV1 + T-MV2 reduce to it.
-  - SECURITY.md §S-040 — the leaf_count caller-trust threat model +
-    structural fix path; T-MV7 / NOT_INV_LeafCountBound is its
-    state-machine witness.
+  - SECURITY.md §S-040 (CLOSED) — the leaf_count caller-trust threat
+    model + the shipped root-wrapper fix; T-MV7 / INV_LeafCountBound is
+    its state-machine witness now that the binding is enforced.
   - src/crypto/merkle.cpp:113-141 — merkle_verify; the Recompute
     operator is the spec-layer projection of the walk.
   - include/determ/crypto/merkle.hpp:64-98 — merkle_verify +
@@ -230,13 +259,15 @@ ASSUME ConfigOK ==
 \* they are syntactically identical — exactly the collision-resistance
 \* abstraction (FB23 + FB26 use the same device).
 \*
-\* LeafTag (0x00) and InnerTag (0x01) are the domain-separation
-\* prefixes (merkle.cpp:28 / :38). They are DISTINCT model values, so a
-\* LeafTerm can never equal an InnerTerm (T-MV2 domain separation is
+\* LeafTag (0x00), InnerTag (0x01), and RootTag (0x02) are the
+\* domain-separation prefixes (merkle.cpp:28 / :38 / merkle_root_wrap).
+\* They are pairwise DISTINCT model values, so a LeafTerm can never
+\* equal an InnerTerm nor a RootTerm (T-MV2 domain separation is
 \* structural).
 
 LeafTag  == "L"   \* the 0x00 leaf-hash prefix
 InnerTag == "I"   \* the 0x01 inner-node-hash prefix
+RootTag  == "R"   \* the 0x02 root-wrapper prefix (S-040)
 
 \* leaf_hash(key, value_hash) = SHA256(0x00 || u32_be(len) || key || value_hash).
 \* Modeled as <<LeafTag, leaf>> — the (key, value_hash) pair is the
@@ -248,6 +279,15 @@ LeafTerm(leaf) == <<LeafTag, leaf>>
 \* <<InnerTag, left, right>> — ORDER MATTERS (left /= right slot), so
 \* Inner(a,b) /= Inner(b,a) whenever a /= b (T-MV4 parity sensitivity).
 InnerTerm(left, right) == <<InnerTag, left, right>>
+
+\* root_wrap(leaf_count, inner_root) = SHA256(0x02 || be_u32(leaf_count)
+\* || inner_root). Modeled as <<RootTag, n, inner>> — the S-040
+\* root-wrapper that BINDS leaf_count into the committed root. Two
+\* distinct counts m /= n over the same inner root give distinct
+\* committed roots (RootTerm(m, inner) /= RootTerm(n, inner)), so a
+\* forged leaf_count cannot recompute to the trusted root (T-MV7;
+\* merkle.cpp::merkle_root_wrap).
+RootTerm(n, inner) == <<RootTag, n, inner>>
 
 \* -----------------------------------------------------------------
 \* §2. The recompute walk (merkle_verify lifted to a pure function).
@@ -271,25 +311,35 @@ WalkHeightAux(level) ==
 
 WalkHeight(n) == WalkHeightAux(n)
 
-\* Recompute(leaf, idx, n, sibs): the recomputed-root TERM produced by
-\* the walk, starting from LeafTerm(leaf) and folding in the sibling
-\* sequence `sibs` (each element is itself a TERM) under the parity-
-\* directed pairing. `sibs` is a 1-based Seq of sibling terms; the walk
-\* consumes them in order. This is the pure-function projection of
-\* merkle.cpp:122-138. The result is the term `current` holds at loop
-\* exit; the verifier accepts iff this term EQUALS the supplied root
-\* AND the consumed sibling count equals Len(sibs) (T-MV3).
-RECURSIVE RecomputeAux(_, _, _, _, _)
-RecomputeAux(current, idx, level, sibs, pi) ==
+\* RecomputeInner(leaf, idx, n, sibs): the recomputed INNER-tree-root
+\* TERM produced by the walk, starting from LeafTerm(leaf) and folding
+\* in the sibling sequence `sibs` (each element is itself a TERM) under
+\* the parity-directed pairing. `sibs` is a 1-based Seq of sibling
+\* terms; the walk consumes them in order. This is the pure-function
+\* projection of merkle.cpp:122-138 — the inner root BEFORE the S-040
+\* root-wrapper is applied.
+RECURSIVE RecomputeInnerAux(_, _, _, _, _)
+RecomputeInnerAux(current, idx, level, sibs, pi) ==
     IF level <= 1 THEN current
     ELSE LET even == IF level % 2 = 1 THEN level + 1 ELSE level
              sib  == sibs[pi]
              nxt  == IF idx % 2 = 0 THEN InnerTerm(current, sib)
                                     ELSE InnerTerm(sib, current)
-         IN RecomputeAux(nxt, idx \div 2, even \div 2, sibs, pi + 1)
+         IN RecomputeInnerAux(nxt, idx \div 2, even \div 2, sibs, pi + 1)
 
+RecomputeInner(leaf, idx, n, sibs) ==
+    RecomputeInnerAux(LeafTerm(leaf), idx, n, sibs, 1)
+
+\* Recompute(leaf, idx, n, sibs): the full committed-root TERM. The
+\* inner root from the walk is wrapped by RootTerm(n, inner) — the S-040
+\* root-wrapper SHA256(0x02 || be_u32(n) || inner_root)
+\* (merkle.cpp::merkle_root_wrap). The verifier accepts iff this WRAPPED
+\* term EQUALS the supplied root AND the consumed sibling count equals
+\* Len(sibs) (T-MV3). Because n is folded into the outermost term, a
+\* forged leaf_count yields a distinct committed root and is rejected
+\* (T-MV7 / INV_LeafCountBound).
 Recompute(leaf, idx, n, sibs) ==
-    RecomputeAux(LeafTerm(leaf), idx, n, sibs, 1)
+    RootTerm(n, RecomputeInner(leaf, idx, n, sibs))
 
 \* Accept(leaf, idx, n, sibs, root): the full merkle_verify decision.
 \*   1. RangeOk gate (T-MV5).
@@ -430,7 +480,7 @@ INV_TypeOK ==
     /\ Len(verify_log) = verify_count
 
 \* -----------------------------------------------------------------
-\* §9. Invariants — the six positive theorems T-MV1..T-MV6.
+\* §9. Invariants — the positive theorems T-MV1..T-MV6 (T-MV7 in §11).
 \* -----------------------------------------------------------------
 
 \* INV_RecomputeSound (T-MV1) — the headline no-forged-inclusion
@@ -448,24 +498,25 @@ INV_RecomputeSound ==
        LET e == verify_log[i] IN
        e.accepted => (e.recomp = e.root)
 
-\* INV_DomainSeparation (T-MV2) — the leaf-vs-inner second-preimage
-\* defense. Every accepted record's recomputed root, when the tree has
-\* height >= 1, is an InnerTerm (0x01-prefixed), NEVER a bare LeafTerm
-\* (0x00-prefixed): a multi-leaf tree's root is an inner-node hash, so
-\* an attacker cannot pass a raw leaf hash off as the root. For the
-\* single-leaf tree (height 0) the root IS the leaf hash — but the
-\* LeafTag/InnerTag prefixes are disjoint, so no leaf term ever
-\* collides with an inner term regardless.
+\* INV_DomainSeparation (T-MV2) — the leaf-vs-inner-vs-root
+\* second-preimage defense. Post-S-040 every accepted record's
+\* committed root is a RootTerm (0x02-prefixed root-wrapper), NEVER a
+\* bare LeafTerm (0x00) nor a bare InnerTerm (0x01): the outermost
+\* constructor is always the leaf-count-binding wrapper, even for the
+\* single-leaf tree (RootTerm(1, LeafTerm(...))). The three prefixes are
+\* pairwise disjoint, so no leaf hash, inner hash, or root hash can
+\* collide across the three shapes.
 \*
-\* Structural witness: Recompute folds LeafTerm through InnerTerm at
-\* every level; for WalkHeight(n) >= 1 the outermost constructor is
-\* InnerTerm (the InnerTag head). LeafTag /= InnerTag pins disjointness.
+\* Structural witness: Recompute = RootTerm(n, RecomputeInner(...)), so
+\* the outermost head is ALWAYS RootTag. LeafTag, InnerTag, RootTag
+\* pairwise distinct pins disjointness.
 INV_DomainSeparation ==
     /\ LeafTag /= InnerTag
+    /\ LeafTag /= RootTag
+    /\ InnerTag /= RootTag
     /\ \A i \in 1..Len(verify_log) :
           LET e == verify_log[i] IN
-          (e.accepted /\ WalkHeight(e.n) >= 1)
-          => (e.recomp[1] = InnerTag)
+          e.accepted => (e.recomp[1] = RootTag)
 
 \* INV_ExactLength (T-MV3) — the proof-length gate. Every accepted
 \* record's sibling sequence has length EXACTLY WalkHeight(n): a
@@ -535,30 +586,32 @@ PROP_EventualAnswer ==
     ~> (verify_count > 0 /\ Len(verify_log) = verify_count)
 
 \* -----------------------------------------------------------------
-\* §11. T-MV7 — the S-040 caller-trust weakness, MODELED NOT ASSERTED.
+\* §11. T-MV7 — the S-040 leaf-count binding, a TRUE INVARIANT (CLOSED).
 \* -----------------------------------------------------------------
 \*
-\* NOT_INV_LeafCountBound is an OPERATOR invariant that the primitive
-\* DELIBERATELY does NOT satisfy: it claims "no two distinct leaf_count
-\* values accept the same (leaf, idx, sibs, root) input." Under a .cfg
-\* that includes a leaf_count-drift pair sharing a walk shape (e.g.
-\* {5, 8} at idx 2 — scenario #8 of test_merkle_proof_tampering.sh),
-\* TLC finds a REACHABLE counterexample: both n=5 and n=8 yield
-\* WalkHeight = 3 with the same per-level parity for idx 2, consume the
-\* same 3 siblings, and recompute to the same root, so BOTH accept.
+\* INV_LeafCountBound is a positive invariant the primitive NOW
+\* satisfies (S-040 CLOSED): "no two distinct leaf_count values accept
+\* the same (leaf, idx, sibs, root) input." Pre-fix this was a modeled
+\* NON-invariant because leaf_count was not bound into any hash; the
+\* root-wrapper SHA256(0x02 || be_u32(leaf_count) || inner_root)
+\* (merkle.cpp::merkle_root_wrap) now folds leaf_count into the
+\* committed root, so two distinct counts produce two distinct roots.
 \*
-\* The point of stating this as a NOT-invariant (checked only when the
-\* operator deliberately wants to exhibit the boundary) is to DOCUMENT
-\* the S-040 contract at the state-machine layer: merkle_verify is
-\* sound w.r.t. (leaf, idx, sibs, root) but NOT w.r.t. an untrusted
-\* leaf_count. The mitigation lives ABOVE this primitive — the caller
-\* MUST anchor leaf_count to the committed state-proof header
-\* (merkle.hpp:64-83). FB44 pins exactly where the verifier's guarantee
-\* ends and the caller's obligation begins.
+\* The former boundary witness — {5, 8} at idx 2, scenario #8 of
+\* test_merkle_proof_tampering.sh — no longer aliases: n=5 and n=8 still
+\* yield the same INNER walk (WalkHeight 3, same per-level parity,
+\* same 3 siblings, same inner root), but the wrapper produces
+\* RootTerm(5, inner) /= RootTerm(8, inner). Only one of the two can
+\* equal the single trusted committed root, so at most one accepts; a
+\* record claiming the OTHER count recomputes a wrapped root that does
+\* not match and is rejected. Hence no two accepted records can share
+\* (leaf, idx, sibs, root) yet differ in n.
 \*
-\* Run as an INVARIANT to obtain the S-040 counterexample trace:
-\*   INVARIANTS NOT_INV_LeafCountBound   (expected to FAIL by design)
-NOT_INV_LeafCountBound ==
+\* The caller-trust obligation S-040 documented is now cryptographically
+\* ENFORCED, not an operator guideline. FB44 asserts INV_LeafCountBound
+\* directly in the INVARIANTS block (merkle.hpp:64-83; SECURITY.md
+\* §S-040 CLOSED).
+INV_LeafCountBound ==
     \A i, j \in 1..Len(verify_log) :
        (/\ verify_log[i].accepted
         /\ verify_log[j].accepted
@@ -599,21 +652,29 @@ NOT_INV_LeafCountBound ==
 \* layer (FB43 forbids reconstructing the wrong key in the first place).
 \*
 \* The domain-separation invariant (T-MV2) is the second-preimage
-\* defense: without the 0x00/0x01 prefix split, an attacker could
+\* defense: without the 0x00/0x01/0x02 prefix split, an attacker could
 \* present an inner-node hash as a leaf (or a 64-byte leaf as a pair of
-\* child hashes), aliasing a leaf to an internal node. The disjoint
-\* LeafTag/InnerTag prefixes — modeled structurally — close this
-\* (merkle.hpp:93-96).
+\* child hashes), aliasing a leaf to an internal node, or alias a
+\* bare inner root against the leaf-count-bound committed root. The
+\* pairwise-disjoint LeafTag/InnerTag/RootTag prefixes — modeled
+\* structurally — close this (merkle.hpp:93-96).
+\*
+\* The leaf-count-binding invariant (T-MV7 / INV_LeafCountBound) is the
+\* S-040 closure: the root-wrapper hash SHA256(0x02 || be_u32(n) ||
+\* inner_root) folds leaf_count into the committed root, so a forged
+\* leaf_count recomputes a distinct wrapped root and is rejected. Two
+\* accepted records can no longer share (leaf, idx, sibs, root) yet
+\* differ in n. Pre-S-040 this was a modeled non-invariant documenting
+\* a caller-trust boundary; the binding is now cryptographically
+\* enforced inside the primitive.
 \*
 \* What this spec adds beyond the regression test: a state-machine
 \* witness that the accept/reject soundness holds across every
 \* reachable interleaving of verifier calls, plus an explicit
-\* state-machine statement (T-MV7 / NOT_INV_LeafCountBound) of the ONE
-\* property the primitive does NOT provide — the S-040 leaf_count
-\* caller-trust boundary. Documenting the boundary is as load-bearing
-\* as documenting the guarantees: a reader knows EXACTLY where
-\* merkle_verify's soundness ends and the caller's anchoring
-\* obligation begins.
+\* state-machine statement of the leaf-count binding (T-MV7 /
+\* INV_LeafCountBound) the primitive now provides post-S-040. The model
+\* tracks the C++ primitive: every guarantee merkle_verify enforces is a
+\* checked invariant here, with no remaining caller-trust gap.
 \*
 \* What the spec does NOT check (consistent with the regression's
 \* scope + the SHA-256 abstraction):
@@ -640,7 +701,9 @@ NOT_INV_LeafCountBound ==
 \* tools/test_merkle_proof_tampering.sh ->
 \*   The exhaustive negative-space regression (15 scenario groups);
 \*       FB44 is its state-machine companion. Scenario #8 (leaf_count
-\*       drift) is the T-MV7 / NOT_INV_LeafCountBound witness.
+\*       drift) is the T-MV7 / INV_LeafCountBound witness — its
+\*       assertion was INVERTED on S-040 closure to assert the forged
+\*       leaf_count=8 is now REJECTED (was a pinned ACCEPT pre-fix).
 \*
 \* CompositeKeyStateProof.tla (FB43) ->
 \*   FB43 (right key) + FB44 (right path) = right membership. FB43's
@@ -663,23 +726,29 @@ NOT_INV_LeafCountBound ==
 \*   src/crypto/merkle.cpp:122      : current = leaf_hash(key, value).
 \*       LeafTerm; the 0x00-prefixed walk seed (T-MV2).
 \*   src/crypto/merkle.cpp:127-137 : the per-level walk (odd-duplicate,
-\*       parity-directed inner-hash, idx + level halving). Recompute's
-\*       RecomputeAux body (T-MV4 parity pairing).
+\*       parity-directed inner-hash, idx + level halving).
+\*       RecomputeInner's RecomputeInnerAux body (T-MV4 parity pairing).
 \*   src/crypto/merkle.cpp:129      : `proof_idx >= proof.size()` short-
 \*       proof guard. INV_ExactLength (T-MV3), mid-walk half.
+\*   src/crypto/merkle.cpp::merkle_root_wrap : root = SHA256(0x02 ||
+\*       be_u32(leaf_count) || inner_root) — the S-040 root-wrapper.
+\*       RootTerm(n, inner) (T-MV7 / INV_LeafCountBound + T-MV2 RootTag).
 \*   src/crypto/merkle.cpp:140      : `proof_idx == proof.size() &&
-\*       current == root` exact-consumption + root-equality gate.
-\*       INV_ExactLength (T-MV3) + INV_RecomputeSound (T-MV1).
+\*       current == root` exact-consumption + root-equality gate, where
+\*       `current` is the WRAPPED root. INV_ExactLength (T-MV3) +
+\*       INV_RecomputeSound (T-MV1).
 \*   include/determ/crypto/merkle.hpp:28 / :38 : 0x00 leaf prefix vs
-\*       0x01 inner prefix. LeafTag /= InnerTag (T-MV2).
-\*   include/determ/crypto/merkle.hpp:64-83 : the S-040 caller-trust
-\*       invariant. T-MV7 / NOT_INV_LeafCountBound is its state-machine
-\*       witness.
+\*       0x01 inner prefix vs 0x02 root-wrapper prefix. LeafTag,
+\*       InnerTag, RootTag pairwise distinct (T-MV2).
+\*   include/determ/crypto/merkle.hpp:64-83 : the S-040 leaf_count
+\*       binding (CLOSED via root-wrapper). T-MV7 / INV_LeafCountBound
+\*       is its state-machine witness.
 \*   light/verify.cpp:333-343 : light::verify_state_proof; the single
 \*       merkle_verify call FB44 models is this function's gate.
 \*
-\* SECURITY.md §S-040 -> T-MV7 / NOT_INV_LeafCountBound (the leaf_count
-\*       caller-trust threat model + structural fix path).
+\* SECURITY.md §S-040 (CLOSED) -> T-MV7 / INV_LeafCountBound (the
+\*       leaf_count caller-trust threat model + the shipped root-wrapper
+\*       fix that cryptographically binds leaf_count into the root).
 \* docs/proofs/Preliminaries.md §2.1 -> T-MV1 + T-MV2 reduce to SHA-256
 \*       collision / second-preimage resistance.
 ============================================================================

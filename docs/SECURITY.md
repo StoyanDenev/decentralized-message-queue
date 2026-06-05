@@ -1198,9 +1198,9 @@ D2 is still "partial" because the gate is apply-layer (rejection after some peer
 
 ---
 
-### S-040 — `merkle_verify` does not bind leaf_count — 🟠 Caller-trust invariant (Low/Op)
+### S-040 — `merkle_verify` does not bind leaf_count — ✅ Closed
 
-**Severity:** Operational (Low-Medium) • **Status:** 🟠 Registered, lock-in test shipped (scenario #8 of `determ test-merkle-proof-tampering`), structural fix deferred (wire-compat-break) • **Source:** R21A5 audit while writing `test-merkle-proof-tampering`
+**Severity:** Operational (Low-Medium) • **Status:** ✅ **Closed** — `leaf_count` is now bound into the committed root via a root-wrapper hash, so a forged count is cryptographically rejected. Shipped pre-launch as a wire-compat break (no installed base to migrate; every `state_root` value changes). • **Source:** R21A5 audit while writing `test-merkle-proof-tampering`
 
 **Pre-fix description.** `crypto::merkle_verify` accepts `leaf_count` as an input parameter but does NOT bind it into the leaf or inner hash. Two distinct `(target_index, leaf_count)` pairs that produce the same walk-shape (same `ceil(log2(N))` level count + same per-level parity given target_index) share an identical proof structure. Concrete failure case pinned by `test-merkle-proof-tampering` scenario #8: claiming `leaf_count=8` for a 5-leaf tree at index 2 verifies as TRUE because both yield identical 3-level walks consuming the same 3 siblings in the same left/right order.
 
@@ -1208,11 +1208,11 @@ D2 is still "partial" because the gate is apply-layer (rejection after some peer
 
 **Adversary model.** A v2.2 light-client fetches: (1) a state_root from a trusted committee-signed header; (2) a state-proof from an untrusted CDN / cache / relay; (3) a leaf_count from the same untrusted source. The attacker craft a proof + leaf_count pair that share walk-shape with the canonical (leaf_count, target_index) but claim a different (key, value_hash). T-040 holds against the proof-only attack (the canonical leaves are fixed; tamper detected at the leaf hash), but the attacker can pick leaf_count to make THEIR fake leaves walk-shape match.
 
-**Mitigation paths (all wire-compat-break).** (1) Domain-separate leaf_count into the leaf hash: `leaf_hash = SHA256("DETERM/MERKLE-LEAF-v2" || leaf_count_LE || key || value_hash)`. (2) Domain-separate into the inner hash: every level binds leaf_count. (3) Carry explicit per-level "is_pad" bits in the proof so the verifier can derive leaf_count + cross-check. Paths (1) + (2) alter every existing chain's state_root — coordinated migration with flag-day height required. Path (3) preserves root values but expands proof wire format — requires v2.2 light-client protocol bump.
+**Closure (shipped) — root-wrapper binding.** Rather than the three originally-sketched paths (per-leaf / per-inner domain separation, or per-level is_pad bits), the shipped fix is a more surgical 4th variant: `merkle_root` now wraps the inner-tree root in a final hash that binds the leaf count — `root = SHA256(0x02 ‖ be_u32(leaf_count) ‖ inner_root)` (`src/crypto/merkle.cpp::merkle_root_wrap`, prefix `0x02` distinct from `0x00` leaf / `0x01` inner). `merkle_verify` re-derives the inner root from the proof exactly as before, then applies the same wrapper with the CALLER-supplied `leaf_count` and compares to the committed `root`. A forged count `M ≠ N` yields `SHA256(0x02‖M‖inner) ≠ SHA256(0x02‖N‖inner) = root` → rejected. This binds leaf_count without changing the `merkle_leaf_hash` / `merkle_inner_hash` / `merkle_proof` signatures (no direct-caller churn) — only `merkle_root` + `merkle_verify` internals change. The light-client (`light/verify.cpp`) calls `crypto::merkle_verify` directly, so it inherits the binding with no separate change.
 
-**Mitigation in place (operator-side).** `include/determ/crypto/merkle.hpp` documents the S-040 caller-trust invariant directly above the `merkle_verify` declaration. `determ test-merkle-proof-tampering` scenario #8 pins the current behavior as a passing assertion + multi-paragraph explanatory comment. Light-client integrators are documented to source `leaf_count` from the same committee-signed envelope that pins `state_root`.
+**Wire-compat note.** Every chain's `state_root` value changes (the root is now the wrapped hash). Shipped pre-launch as a free break — no installed base to migrate. Determinism/round-trip invariants are preserved (only the value moved), so snapshot + state-root determinism tests stay green.
 
-**Tracking.** Forward-dev candidate: path (1) or (3) shipped under a v2.x feature gate; estimated 2-3 days (~30 LOC impl + protocol-version bump + docs).
+**Test flipped.** `determ test-merkle-proof-tampering` scenario (12) — which pinned the old "leaf_count=8 in a 5-leaf tree ACCEPTED (pinned limitation)" — was inverted to assert the forged count is now REJECTED. FAST=1 green at 142/142.
 
 ---
 

@@ -31492,22 +31492,19 @@ int main(int argc, char** argv) {
             check(!merkle_verify(root, leaves[2].key, leaves[2].value_hash,
                                     2, /*leaf_count=*/4, p2),
                   "(12) odd-leaf (5): claim leaf_count=4 (drops level) rejected");
-            // ACTUAL BEHAVIOR PIN: leaf_count drift that PRESERVES the
-            // ceil(log2(N)) level count is NOT detected by merkle_verify
-            // alone. Claiming leaf_count=8 in a 5-leaf tree at index 2
-            // yields the same 3-level walk consuming the same 3 siblings
-            // in the same left/right order — so the computed hash equals
-            // the 5-leaf root. This is a documented implementation
-            // limitation: leaf_count primarily gates the level count,
-            // not the precise tree shape. Callers that need a precise
-            // shape-bound must pass the canonical leaf_count from the
-            // committed snapshot header, not accept arbitrary client-
-            // supplied values. Pin the actual behavior so a future
-            // strengthening (e.g. encoding leaf_count into a level's
-            // domain separator) is a deliberate spec change.
-            check(merkle_verify(root, leaves[2].key, leaves[2].value_hash,
-                                   2, /*leaf_count=*/8, p2),
-                  "(12) odd-leaf (5): leaf_count=8 (same level count) ACCEPTED (pinned limitation)");
+            // S-040 CLOSED: leaf_count is now bound into the committed root
+            // via merkle_root_wrap (0x02 || be_u32(leaf_count) || inner_root).
+            // Claiming leaf_count=8 in a 5-leaf tree at index 2 still produces
+            // the same 3-level inner walk consuming the same 3 siblings (so the
+            // INNER root recomputes equal), BUT the final wrapper hash binds the
+            // CLAIMED count: H(0x02||8||inner) != H(0x02||5||inner) = committed
+            // root, so the forged count is REJECTED. Pre-fix this was an accepted
+            // "pinned limitation" (the documented S-040 caller-trust gap); the
+            // root-wrapper binding closed it pre-launch as a free wire-compat
+            // break (state_root values changed; no installed base to migrate).
+            check(!merkle_verify(root, leaves[2].key, leaves[2].value_hash,
+                                    2, /*leaf_count=*/8, p2),
+                  "(12) odd-leaf (5): leaf_count=8 (same level count) now REJECTED (S-040 closed)");
         }
 
         // ── (13) 7-leaf tree: the most heavily-padded power-of-2-minus-1

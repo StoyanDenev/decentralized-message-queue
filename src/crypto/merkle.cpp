@@ -20,6 +20,23 @@ void append_be_u32(SHA256Builder& b, uint32_t v) {
     b.append(bytes, 4);
 }
 
+// S-040 closure: bind the leaf count into the committed root. The inner
+// Merkle tree alone does not commit HOW MANY leaves it has, so a verifier
+// that trusts a caller-supplied `leaf_count` to drive its structure walk
+// could (pre-fix) be steered by a forged count. Wrapping the inner root in
+// a final hash that includes leaf_count means the committed root is bound
+// to the TRUE count: a verifier re-deriving with a wrong count computes a
+// different wrapper hash and rejects. Domain-separated with prefix 0x02
+// (distinct from 0x00 leaf / 0x01 inner) so it can never alias either.
+Hash merkle_root_wrap(const Hash& inner_root, uint32_t leaf_count) {
+    SHA256Builder b;
+    uint8_t prefix = 0x02;
+    b.append(&prefix, 1);
+    append_be_u32(b, leaf_count);
+    b.append(inner_root);
+    return b.finalize();
+}
+
 } // namespace
 
 Hash merkle_leaf_hash(const std::vector<uint8_t>& key,
@@ -69,7 +86,8 @@ Hash merkle_root(const std::vector<MerkleLeaf>& leaves) {
         }
         row = std::move(next);
     }
-    return row[0];
+    // S-040: bind leaf_count into the committed root (see merkle_root_wrap).
+    return merkle_root_wrap(row[0], static_cast<uint32_t>(leaves.size()));
 }
 
 std::vector<Hash> merkle_proof(const std::vector<MerkleLeaf>& leaves,
@@ -137,7 +155,10 @@ bool merkle_verify(const Hash& root,
         level_size /= 2;
     }
 
-    return proof_idx == proof.size() && current == root;
+    // S-040: the committed root binds leaf_count via merkle_root_wrap, so a
+    // forged leaf_count yields a different wrapper hash and is rejected here.
+    return proof_idx == proof.size()
+        && merkle_root_wrap(current, static_cast<uint32_t>(leaf_count)) == root;
 }
 
 } // namespace determ::crypto

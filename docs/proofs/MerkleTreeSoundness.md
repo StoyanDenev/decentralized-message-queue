@@ -6,7 +6,7 @@ Two adjacent proofs treat the *composition* of this primitive with the rest of t
 
 The proof is partly structural (tree shape, domain separation, determinism) and partly cryptographic (collision-resistance reductions for second-preimage and inclusion-forgery resistance). Where a reduction is to a base assumption, it is to **A2 (SHA-256 collision / second-preimage resistance)** as stated in `Preliminaries.md` §2.1 — *not* to FA3, which in Determ's proof series denotes `SelectiveAbort.md` (selective-abort resistance), an unrelated property.
 
-**Companion documents.** `Preliminaries.md` (F0) §1.3 for hash notation (`H`, `‖`, big-endian integer encoding) and §2.1 for SHA-256 collision / preimage / second-preimage resistance (A2); `S033StateRootNamespaceCoverage.md` (the 10-namespace leaf-set enumeration this proof composes with — its T-3 deterministic-leaf-ordering result and this document's MT-1 jointly give `state_root` reproducibility); `BlockchainStateIntegrity.md` (the four-surface S-021 + S-033 + S-038 composition whose §4.2 Claims (i) + (ii) this document formally discharges); `AccountStateInvariants.md` (FA-Apply-1) for the apply-determinism that supplies the *identical-leaf-set* precondition MT-1 consumes; `SnapshotEquivalence.md` (FA-Apply-2) for the snapshot-pathway sibling that reuses MT-1; `docs/SECURITY.md` §S-033 + §S-038 + §S-040 for the closure / limitation narratives this proof formalizes; `docs/PROTOCOL.md` §4.1.1 for the canonical `state_root` Merkle-leaf table.
+**Companion documents.** `Preliminaries.md` (F0) §1.3 for hash notation (`H`, `‖`, big-endian integer encoding) and §2.1 for SHA-256 collision / preimage / second-preimage resistance (A2); `S033StateRootNamespaceCoverage.md` (the 10-namespace leaf-set enumeration this proof composes with — its T-3 deterministic-leaf-ordering result and this document's MT-1 jointly give `state_root` reproducibility); `BlockchainStateIntegrity.md` (the four-surface S-021 + S-033 + S-038 composition whose §4.2 Claims (i) + (ii) this document formally discharges); `AccountStateInvariants.md` (FA-Apply-1) for the apply-determinism that supplies the *identical-leaf-set* precondition MT-1 consumes; `SnapshotEquivalence.md` (FA-Apply-2) for the snapshot-pathway sibling that reuses MT-1; `docs/SECURITY.md` §S-033 + §S-038 + §S-040 for the closure narratives this proof formalizes; `docs/PROTOCOL.md` §4.1.1 for the canonical `state_root` Merkle-leaf table.
 
 ---
 
@@ -34,7 +34,7 @@ Their consumers, as exercised by the test surface:
 The structural and tamper-detection behavior proved here is pinned by three regression surfaces (all in `tools/` + the in-binary unit tests):
 
 - **`determ test-merkle`** (`src/main.cpp:6217-6364`, 10 assertions) — empty/single-leaf base cases, determinism, balanced (8-leaf) and unbalanced (7-leaf) round-trips, value/sibling/index tamper rejection, **leaf-vs-inner domain separation** (assertion 9), and **sort-invariance** (assertion 10). Driven end-to-end by `tools/test_merkle.sh`.
-- **`determ test-merkle-proof-tampering`** (`src/main.cpp:28555-28934`, 15 scenarios) — exhaustive proof-tamper detection across balanced + heavily-padded (5-leaf, 7-leaf, 16-leaf) trees, including the **key-binding** scenarios #14 (cross-key value swap rejected) and #15 (in-place key tamper rejected) and the **S-040 `leaf_count` caller-trust limitation** pinned by scenario #12. Driven by `tools/test_merkle_proof_tampering.sh`.
+- **`determ test-merkle-proof-tampering`** (`src/main.cpp:28555-28934`, 15 scenarios) — exhaustive proof-tamper detection across balanced + heavily-padded (5-leaf, 7-leaf, 16-leaf) trees, including the **key-binding** scenarios #14 (cross-key value swap rejected) and #15 (in-place key tamper rejected) and the **S-040 `leaf_count` binding** pinned by scenario #12 (now asserting a forged `leaf_count` is **rejected**). Driven by `tools/test_merkle_proof_tampering.sh`.
 - **`tools/test_verify_state_proof.sh`** (9 assertions) — the end-to-end light-client demonstrator: a 3-node cluster, `determ state-proof` fetch, `determ verify-state-proof` local verification, including the external-`--state-root` light-client mode (assertion 6) and the mismatched-root rejection (assertion 9).
 
 > **Note on test naming.** The task brief referenced an 8-assertion `determ test-merkle-tree-balanced` command and a `light/verify.cpp::verify_state_proof` source unit. Neither exists in this tree: the balanced/unbalanced structural assertions live inside `determ test-merkle` (assertions 4–5, 10) and `determ test-merkle-proof-tampering` (scenarios #12–#13), and the light-client verifier is the `determ verify-state-proof` CLI in `src/main.cpp` calling `crypto::merkle_verify` directly (there is no `light/` subtree). This document cites the surfaces that actually ship. `LightClientThreatModel.md` (T-L3) — shipped (R39+1 A7) — is cross-referenced below as the end-to-end light-client composition that consumes MT-4 as its inclusion-proof-soundness core.
@@ -147,7 +147,13 @@ Three structural checks make the verifier sound against malformed proofs (all pi
 
 The **left/right composition order** at each level is driven by the *parity of `idx`* (`idx % 2 == 0` ⇒ current is the left child), which matches `merkle_proof`'s sibling-selection logic (`merkle.cpp:100`: `sibling = (idx%2==0) ? idx+1 : idx-1`). A wrong `target_index` therefore composes siblings in the wrong order and fails root-equality (scenarios #4, #8 of `test-merkle`).
 
-**`leaf_count` is NOT bound into any hash.** The verifier uses `leaf_count` only to drive the *number of levels* and the per-level duplication parity; it is not an input to `LH` or `IH`. This is the **S-040 caller-trust invariant** documented at `merkle.hpp:64-83` and analyzed in §6.2.
+**`leaf_count` IS bound into the committed root (S-040 closed).** `merkle_root` no longer returns the bare inner root: it wraps it as
+
+$$
+\mathrm{root} \;=\; H\big(\,\texttt{0x02} \,\|\, u32\_be(\text{leaf\_count}) \,\|\, \text{inner\_root}\,\big)
+$$
+
+(`src/crypto/merkle.cpp::merkle_root_wrap`; prefix `0x02` is domain-separated from the `0x00` leaf / `0x01` inner prefixes). `merkle_verify` re-derives `inner_root` from the proof exactly as before — `leaf_count` still drives the *number of levels* and the per-level duplication parity, and is not an input to `LH` or `IH` — and then applies the *same* wrapper with the **caller-supplied** `leaf_count`, comparing the result to the committed `root`. A forged count `M ≠ N` yields `H(0x02 ‖ u32_be(M) ‖ inner_root) ≠ H(0x02 ‖ u32_be(N) ‖ inner_root) = root` (except with SHA-256-collision probability), so the forgery is **rejected**. The former **S-040 caller-trust obligation** (documented at `merkle.hpp:64-83`) is now cryptographically enforced; see §6.2.
 
 ---
 
@@ -226,7 +232,7 @@ Therefore a passing verification with a non-member leaf yields a collision; cont
 
 **Light-client composition.** In `determ verify-state-proof` (`main.cpp:5537-5566`), the operator may supply `--state-root` (an independently-trusted root). The CLI verifies against *that* root, not the server-reported one (`main.cpp:5537`: `Hash verify_root = claimed_root;` overridden by the supplied root at 5546), and warns loudly on mismatch (5552-5562). MT-4 then says: a `true` result proves the entry is committed under the *trusted* root. The end-to-end demonstrator `tools/test_verify_state_proof.sh` pins both the positive case (assertion 6: matching external root verifies) and the attack case (assertion 9: a fabricated `--state-root` of all-`a` makes verification fail — a malicious node cannot fabricate a root to make its tampered proof self-consistent against a client that already trusts a different root). Tamper-rejection on `value_hash` and sibling hashes is pinned by assertions 7–8 and by `determ test-merkle-proof-tampering` scenarios #2–#3.
 
-> **Cross-reference.** `LightClientThreatModel.md` (shipped, R39+1 A7) T-L3 (inclusion-proof soundness against a malicious responding node) cites MT-4 as its cryptographic core, and its anchor-trust precondition rests on §6.2 (S-040) as the operational obligation on where `state_root` *and* `leaf_count` are sourced.
+> **Cross-reference.** `LightClientThreatModel.md` (shipped, R39+1 A7) T-L3 (inclusion-proof soundness against a malicious responding node) cites MT-4 as its cryptographic core. Post-S-040, `leaf_count` is bound into the committed root (§6.2), so the former operational obligation on where `leaf_count` is sourced is now cryptographically discharged — a light client need only trust the `state_root` anchor; a forged `leaf_count` is rejected by `merkle_verify` regardless of its source.
 
 ### MT-5 (Non-membership: actual capability — positive only)
 
@@ -282,13 +288,21 @@ By **MT-4**, a light client holding a committee-signed `state_root` can verify a
 
 A residual hardening note: the `merkle.cpp:48-49` comment ("keys assumed unique by caller; we don't enforce here") means the uniqueness guarantee is a *caller contract*, discharged by `build_state_leaves`'s use of keyed containers rather than by `merkle_root` itself. A *future* caller that fed `merkle_root` an attacker-influenced list with possible duplicate keys would need to re-examine this analysis. Today there is exactly one production caller (`build_state_leaves`) and it satisfies the contract; the unit-test caller (`make_leaves` in `determ test-merkle*`) uses `{'k', i}` distinct keys. This is captured as a documentation obligation, not a code defect.
 
-### 6.2 S-040 — `leaf_count` is not bound into the hash (registered caller-trust limitation)
+### 6.2 S-040 — `leaf_count` is bound into the committed root (CLOSED)
 
-**The limitation.** `merkle_verify` consumes `leaf_count` only to drive the level count and per-level duplication parity; it is **not** an input to `LH` or `IH` (§2.6). Two distinct `(target_index, leaf_count)` pairs that yield the *same walk shape* — same `ceil(log2(N))` level count and the same per-level parity sequence — share the same proof structure and verify identically. The concrete failure, pinned by `determ test-merkle-proof-tampering` scenario #12 (`main.cpp:28829-28844`): claiming `leaf_count = 8` for a genuinely-5-leaf tree at index 2 verifies as **true**, because both yield identical 3-level walks consuming the same 3 siblings in the same left/right order, so the recomputed hash equals the 5-leaf root.
+**Prior limitation (pre-fix).** `merkle_verify` consumed `leaf_count` only to drive the level count and per-level duplication parity; it was **not** an input to `LH` or `IH`. Two distinct `(target_index, leaf_count)` pairs that yield the *same walk shape* — same `ceil(log2(N))` level count and the same per-level parity sequence — shared the same proof structure and verified identically. The concrete failure, formerly pinned by `determ test-merkle-proof-tampering` scenario #12 (`main.cpp:28829-28844`): claiming `leaf_count = 8` for a genuinely-5-leaf tree at index 2 verified as **true**, because both yielded identical 3-level walks consuming the same 3 siblings in the same left/right order, so the recomputed inner hash equaled the 5-leaf inner root. The mitigation was an operator-level obligation to source `leaf_count` from the same anchor as `state_root`.
 
-**Why this is not a soundness break of MT-4.** MT-4 is stated and proved with `n = |Λ|` — the *genuine* leaf count of the tree the root commits to. The S-040 issue is a *caller-trust* problem orthogonal to MT-4: it bites only a caller that sources `leaf_count` from an *untrusted* channel *different* from the channel that supplied the trusted root. The header documents the mitigation (`merkle.hpp:64-83`): **always source `leaf_count` from the same committed/anchored source as `state_root`.** In the shipped path this holds: `Chain::state_proof` returns `leaf_count` from the daemon's own canonical state (`chain.cpp:456`: `p.leaf_count = leaves.size()`), and a light client verifying against a single trusted daemon gets a consistent `(root, leaf_count)` pair. The danger is the split-source case — proof from one untrusted node, `leaf_count` from another — which a careful light client avoids by binding `leaf_count` into its trusted anchor.
+**The fix (root-wrapper binding).** `merkle_root` now binds `leaf_count` into the committed root via a domain-separated root-wrapper hash (`src/crypto/merkle.cpp::merkle_root_wrap`):
 
-**Status.** Registered as **S-040 (Low/Op)** in `docs/SECURITY.md`; the structural fix path (domain-separate `leaf_count` into the leaf hash, e.g. `LH = H(0x00 ‖ u32(leaf_count) ‖ u32(|k|) ‖ k ‖ v)`) breaks v1 wire compatibility and is tracked for a future v2.x flag-day. This document does not re-open S-040; it records that MT-4 holds with the genuine `leaf_count` and that the operational obligation is to source it from the anchor.
+$$
+\mathrm{root} \;=\; H\big(\,\texttt{0x02} \,\|\, u32\_be(\text{leaf\_count}) \,\|\, \text{inner\_root}\,\big),
+$$
+
+where `inner_root` is the bare sorted-leaves balanced-binary-tree root produced by the level reduction of §2.4 and the prefix `0x02` is domain-separated from the `0x00` leaf / `0x01` inner prefixes (extending the MT-2 separation to a third tag class). `merkle_verify` re-derives `inner_root` from the proof exactly as before (the inner walk is byte-for-byte unchanged — `leaf_count` still drives only the level count and per-level duplication parity), then applies the **same** wrapper with the **caller-supplied** `leaf_count` and compares to the committed `root`. A forged count `M ≠ N` produces `H(0x02 ‖ u32_be(M) ‖ inner_root) ≠ H(0x02 ‖ u32_be(N) ‖ inner_root) = root` unless the adversary finds a SHA-256 collision (A2, `≤ 2⁻¹²⁸`), so the forgery is **rejected**. Only `merkle_root` and `merkle_verify` changed; `merkle_leaf_hash` / `merkle_inner_hash` / `merkle_proof` signatures and behavior are unchanged, so no direct-caller churn. The light client (`light/verify.cpp`) calls `crypto::merkle_verify` directly and inherits the binding with no separate change. Shipped pre-launch as a wire-compat break (every `state_root` *value* changes; there is no installed base to migrate), with determinism and round-trip invariants preserved.
+
+**Relation to MT-4.** MT-4's theorem statement is unchanged in meaning: it was always stated and proved with `n = |Λ|` — the *genuine* leaf count of the tree the root commits to — and it still holds for the genuine count. What changed is that a *forged* `leaf_count` is now **also** rejected: the caller-trust obligation S-040 previously documented (always source `leaf_count` from the same committed/anchored source as `state_root`) is now cryptographically enforced rather than left as an operator guideline. In the shipped path the binding is transparent: `Chain::state_proof` returns `leaf_count` from the daemon's own canonical state (`chain.cpp:456`: `p.leaf_count = leaves.size()`), and the split-source attack — proof and root from a trusted anchor, `leaf_count` substituted from an untrusted channel — now fails the root-equality check at the verifier.
+
+**Status.** **S-040 closed** in `docs/SECURITY.md`. The structural fix (domain-separating `leaf_count` into a `0x02` root-wrapper) shipped; the former v1 wire format is superseded pre-launch (no migration needed). The lock-in test was inverted: `determ test-merkle-proof-tampering` scenario #12 now asserts the forged `leaf_count = 8` over a 5-leaf tree is **REJECTED** (previously it pinned the "ACCEPTED" limitation). This document records that MT-4 holds with the genuine `leaf_count` *and* that a forged `leaf_count` is rejected.
 
 ### 6.3 Not a sparse Merkle tree — no native non-membership
 
@@ -306,10 +320,10 @@ For `n = 1`, `MR({(k,v)}) = LH(k, v)` with an empty proof (§2.5). A light clien
 |---|---|---|
 | `merkle_leaf_hash` | `src/crypto/merkle.cpp:25-34` | LH definition (§2.1); `0x00` prefix + length-prefixed key. |
 | `merkle_inner_hash` | `src/crypto/merkle.cpp:36-43` | IH definition (§2.2); `0x01` prefix. |
-| `merkle_root` | `src/crypto/merkle.cpp:45-73` | Sort (§2.3) + odd-count duplication (§2.4) + base cases (§2.5); subject of MT-1, MT-3. |
+| `merkle_root` | `src/crypto/merkle.cpp:45-73` | Sort (§2.3) + odd-count duplication (§2.4) + base cases (§2.5) + `leaf_count` root-wrapper (`merkle_root_wrap`, `0x02`, §6.2 / S-040); subject of MT-1, MT-3. |
 | `merkle_proof` | `src/crypto/merkle.cpp:75-111` | Sibling-path generator; sort + parity-driven sibling selection. |
 | `merkle_verify` | `src/crypto/merkle.cpp:113-141` | Verifier (§2.6); subject of MT-4; range/underflow/exact-consume gates. |
-| `MerkleLeaf` + header contracts | `include/determ/crypto/merkle.hpp:37-103` | Leaf struct; `0x00`/`0x01` domain-sep note (lines 93-102); SMT/non-membership note (13-21); **S-040 caller-trust note (64-83)**. |
+| `MerkleLeaf` + header contracts | `include/determ/crypto/merkle.hpp:37-103` | Leaf struct; `0x00`/`0x01` domain-sep note (lines 93-102); SMT/non-membership note (13-21); **S-040 `leaf_count`-binding note (64-83)**. |
 | `Chain::build_state_leaves` | `src/chain/chain.cpp:267-411` | The unique-keyed 10-namespace leaf assembly; the §6.1 CVE non-applicability rests on its `std::map`/`std::set` sources. |
 | `Chain::compute_state_root` | `src/chain/chain.cpp:413-415` | `merkle_root(build_state_leaves())`; the S-033 root. |
 | `Chain::state_proof` | `src/chain/chain.cpp:435-462` | Light-client proof producer; sorts, `lower_bound`s the key, returns `(key, value_hash, target_index, leaf_count, proof)`. |
@@ -317,7 +331,7 @@ For `n = 1`, `MR({(k,v)}) = LH(k, v)` with an empty proof (§2.5). A light clien
 | snapshot-restore gate | `src/chain/chain.cpp:1880-1911` | Tail-head `state_root` check; sibling surface (FA-Apply-2). |
 | `determ verify-state-proof` CLI | `src/main.cpp:5471-5589` | The shipped light-client local verifier; `--state-root` override at 5537-5566; consumes MT-4 (§5.4). |
 | `determ test-merkle` | `src/main.cpp:6217-6364` (10 assertions) | Base cases, determinism, round-trips, domain-sep (a.9), sort-invariance (a.10). |
-| `determ test-merkle-proof-tampering` | `src/main.cpp:28555-28934` (15 scenarios) | Exhaustive tamper detection; S-040 limitation pin (#12); key-binding (#14-#15); padded-tree round-trips (#12-#13). |
+| `determ test-merkle-proof-tampering` | `src/main.cpp:28555-28934` (15 scenarios) | Exhaustive tamper detection; S-040 forged-`leaf_count` rejection pin (#12); key-binding (#14-#15); padded-tree round-trips (#12-#13). |
 | `tools/test_merkle.sh` | `tools/test_merkle.sh` | Driver for `determ test-merkle`. |
 | `tools/test_merkle_proof_tampering.sh` | `tools/test_merkle_proof_tampering.sh` | Driver for `determ test-merkle-proof-tampering`. |
 | `tools/test_verify_state_proof.sh` | `tools/test_verify_state_proof.sh` (9 assertions) | End-to-end light-client demonstrator; MT-4 in practice (assertions 6-9). |
@@ -330,10 +344,10 @@ For `n = 1`, `MR({(k,v)}) = LH(k, v)` with an empty proof (§2.5). A light clien
 **Spec complete; implementation shipped; structural + tamper tests shipped; proof complete.**
 
 - **Implementation** — the four primitive functions live in `src/crypto/merkle.cpp` (v2.1 foundation; the S-038 closure made the producer actually populate `body.state_root`, activating the apply-time gate that consumes MT-1 + MT-3). The light-client verifier is the `determ verify-state-proof` CLI in `src/main.cpp`.
-- **Tests** — `determ test-merkle` (10 assertions, commit `47f1119`), `determ test-merkle-proof-tampering` (15 scenarios, commit `fbeec00`), and `tools/test_verify_state_proof.sh` (9 assertions) collectively pin every structural and tamper-detection property proved here, including the S-040 `leaf_count` limitation (scenario #12) and the leaf/inner domain separation (assertion 9). CI gates on these passing.
+- **Tests** — `determ test-merkle` (10 assertions, commit `47f1119`), `determ test-merkle-proof-tampering` (15 scenarios, commit `fbeec00`), and `tools/test_verify_state_proof.sh` (9 assertions) collectively pin every structural and tamper-detection property proved here, including the S-040 `leaf_count` binding (scenario #12 now asserts a forged `leaf_count` is rejected) and the leaf/inner domain separation (assertion 9). CI gates on these passing.
 - **Proof** — this document is analytic; it changes no code. MT-1 (determinism) and MT-3 (collision-resistance inheritance) discharge the two Merkle-primitive sub-claims that `BlockchainStateIntegrity.md` §4.2 and `S033StateRootNamespaceCoverage.md` T-3/T-4 cite without proof. MT-4 (inclusion-proof soundness) is the cryptographic core the light-client surface rests on. MT-2 (domain separation) and MT-5 (non-membership capability boundary) document the structural defenses and the SMT design boundary.
 - **CVE-2012-2459 verdict (§6.1):** **does NOT apply.** Determ's leaves are sorted, unique, namespace-keyed state entries recomputed by each node from its own state via `build_state_leaves`; the attacker cannot supply a crafted duplicate-leaf list, so the Bitcoin duplicate-tx aliasing has no analog. The last-leaf duplication is over identical honest content and introduces no collision surface (MT-3). No finding.
-- **Open limitation:** S-040 (`leaf_count` not bound into the hash) is a registered Low/Op caller-trust item, orthogonal to MT-4's soundness, mitigated operationally by sourcing `leaf_count` from the same anchor as `state_root` (§6.2). Structural fix tracked for a future wire-breaking v2.x flag-day.
+- **S-040 closed:** `leaf_count` is now bound into the committed root via the `0x02` root-wrapper `root = H(0x02 ‖ u32_be(leaf_count) ‖ inner_root)` (`merkle_root_wrap`, §6.2). MT-4 holds with the genuine `leaf_count` as before, and a *forged* `leaf_count` is now also rejected (the former caller-trust obligation is cryptographically enforced). Shipped pre-launch as a wire-compat break — every `state_root` value changes, no installed base to migrate; scenario #12 was inverted to assert rejection.
 
 ---
 
@@ -366,14 +380,14 @@ For `n = 1`, `MR({(k,v)}) = LH(k, v)` with an empty proof (§2.5). A light clien
 
 ### Tests
 - `tools/test_merkle.sh` + `determ test-merkle` (10 assertions) — MT-1, MT-2, base cases.
-- `tools/test_merkle_proof_tampering.sh` + `determ test-merkle-proof-tampering` (15 scenarios) — MT-4 tamper rejection, S-040 limitation (#12), key-binding (#14-#15).
+- `tools/test_merkle_proof_tampering.sh` + `determ test-merkle-proof-tampering` (15 scenarios) — MT-4 tamper rejection, S-040 forged-`leaf_count` rejection (#12), key-binding (#14-#15).
 - `tools/test_verify_state_proof.sh` (9 assertions) — MT-4 end-to-end light-client verification.
 
 ### Specifications
 - `docs/PROTOCOL.md §4.1.1` — `state_root` algorithm + Merkle-leaf table.
 - `docs/SECURITY.md §S-033` — state_root commitment closure.
 - `docs/SECURITY.md §S-038` — producer-side state_root population (activates the apply-gate).
-- `docs/SECURITY.md §S-040` — `leaf_count` caller-trust invariant (§6.2).
+- `docs/SECURITY.md §S-040` — `leaf_count` root-wrapper binding (closed; §6.2).
 - NIST FIPS 180-4 — SHA-256 (A2).
 - RFC 6962 §2.1 — Certificate Transparency `0x00`/`0x01` leaf/node tagged hashing (the MT-2 domain-separation pattern Determ follows).
 - CVE-2012-2459 — Bitcoin duplicate-transaction Merkle malleability (analyzed in §6.1; does not apply).

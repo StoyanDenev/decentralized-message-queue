@@ -83,7 +83,7 @@ multiple FA theorems.
 | `test-sha256` | crypto primitive — SHA-256 (under FA1 / FA2 / FA3 / FA6 / FA7 / FA8 / FA10) | FIPS 180-4 conformance + Preliminaries §1.3 BE encoding under every signing-bytes path |
 | `test-ed25519` | FA1 / FA2 / FA5 / FA6 / FA7 / FA10 (every signature claim) | EUF-CMA primitive: RFC-8032 determinism, cross-key rejection, tampered-message rejection |
 | `test-merkle` | FA1 (S-033 state commitment) | balanced + unbalanced + edge-case leaf sets; domain separation leaf vs inner |
-| `test-merkle-proof-tampering` | FA1 / S-040 (caller-trust invariant) | per-tamper rejection (value_hash / sibling / target_index / cross-proof-swap) |
+| `test-merkle-proof-tampering` | FA1 / S-040 (CLOSED — leaf_count bound into root) | per-tamper rejection (value_hash / sibling / target_index / cross-proof-swap / forged leaf_count) |
 | `test-committee-selection` | FA1 / FA2 / FA5 / FA8 (S-020 hybrid) | both rejection-sampling and partial-Fisher-Yates branches; seed-sensitivity |
 | `test-shard-routing` | FA7 (cross-shard destination routing) | salted SHA-256 determinism + uniformity + salt-sensitivity |
 | `test-shard-routing-determinism` | FA7 (cross-shard destination routing) | deterministic replay invariant on `shard_id_for_address` across (addr,count,salt) probes |
@@ -313,7 +313,7 @@ Option 1 seeding.
 | S-034 VDF cleanup | VDF removed entirely (S-009 closure); no surface. | N/A. |
 | S-036 Under-quorum merge edges | EXTENDED-mode-only; covered by `test-merge-event-apply` + `test-merge-event-apply-edge`. v2.11 closes fully. | Effectively covered. |
 | S-039 Genesis-hash gap | ✅ Covered — `test-genesis` + `test-genesis-sharded` lock in the CURRENT no-effect behavior with explicit `expect == base_hash` assertions for each unbound field. |
-| S-040 Merkle leaf_count | ✅ Covered — `test-merkle-proof-tampering` exercises caller-trust-invariant tampering paths (sibling-hash / target_index / cross-proof-swap; leaf_count is the next-step extension). |
+| S-040 Merkle leaf_count | ✅ Covered (S-040 CLOSED) — `leaf_count` is bound into the committed root via the root-wrapper hash `SHA256(0x02 ‖ be_u32(leaf_count) ‖ inner_root)`, so a forged count is rejected by `merkle_verify`. `test-merkle-proof-tampering` exercises every tampering path (sibling-hash / target_index / cross-proof-swap / forged leaf_count → all rejected). |
 
 **Summary.** Out of 40 FA/S items, **3 in-process Option-1 extensions remain
 worth pursuing** without architectural change: (a) RPC HMAC auth handshake
