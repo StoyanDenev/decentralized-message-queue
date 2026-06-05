@@ -399,6 +399,15 @@ struct Block {
     std::vector<Signature>            creator_ed_sigs;     // K (Phase 1 Ed25519 over commit)
     std::vector<Hash>                 creator_dh_inputs;   // K (Phase 1 commits = SHA256(secret_i || pubkey_i))
     std::vector<Hash>                 creator_dh_secrets;  // K (Phase 2 revealed secrets)
+    // v2.7 F2 / S-016: per-creator Phase-1 view roots (committee order, parallel
+    // to creators). Empty for pre-F2 / non-cross-shard blocks. When a creator
+    // binds a non-zero view root into its commit, the validator MUST recompute
+    // that creator's commit WITH these roots or the F2-bound creator sig fails
+    // (the v1 recompute mismatches). Authenticated by creator_ed_sigs (which are
+    // in signing_bytes), so they need no separate hash binding.
+    std::vector<Hash>                 creator_view_eq_roots;
+    std::vector<Hash>                 creator_view_abort_roots;
+    std::vector<Hash>                 creator_view_inbound_roots;
 
     Hash                     tx_root{};
     Hash                     delay_seed{};

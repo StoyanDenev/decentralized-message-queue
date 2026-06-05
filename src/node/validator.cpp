@@ -152,8 +152,22 @@ BlockValidator::Result BlockValidator::check_creator_tx_commitments(
                 return {false, "creator_tx_lists[" + std::to_string(i)
                              + "] not sorted ascending unique"};
         }
+        // v2.7 F2 / S-016: recompute the creator's Phase-1 commit WITH its
+        // view roots (carried per-creator in the block). Size-tolerant: a v1
+        // block omits the vectors (size 0) -> zero roots -> the make_contrib_
+        // commitment all-zero short-circuit reproduces the byte-identical v1
+        // commit. An F2 creator that bound a non-zero view root signed the
+        // DTM-F2-v1 commit, so the v1 recompute would mismatch and falsely
+        // reject the block (the S-016 site-1 regression). Authenticated:
+        // tampering any root makes this sig check fail.
+        auto vr_at = [](const std::vector<Hash>& v, size_t idx) -> Hash {
+            return idx < v.size() ? v[idx] : Hash{};
+        };
         Hash commit = make_contrib_commitment(b.index, b.prev_hash, list,
-                                                b.creator_dh_inputs[i]);
+                                                b.creator_dh_inputs[i],
+                                                vr_at(b.creator_view_eq_roots, i),
+                                                vr_at(b.creator_view_abort_roots, i),
+                                                vr_at(b.creator_view_inbound_roots, i));
         if (!verify(e->pubkey, commit.data(), commit.size(), b.creator_ed_sigs[i]))
             return {false, "creator commit sig invalid: " + b.creators[i]};
     }

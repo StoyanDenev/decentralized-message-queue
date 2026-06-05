@@ -850,10 +850,28 @@ void Node::start_contrib_phase() {
         .append(key_.pub.data(), key_.pub.size())
         .finalize();
 
+    // v2.7 F2 / S-016 (site 1): at/after the genesis-pinned activation height,
+    // commit to this node's view of the eligible inbound cross-shard receipt
+    // keys. build_body carries the per-creator view roots into the block and the
+    // validator recomputes the creator commit with them (so the F2-bound sig
+    // verifies); the equivocation detector compares the v1 CORE commit only, so
+    // a view that legitimately changes across re-rounds is not self-flagged.
+    // Empty pool / pre-activation -> empty list -> zero root -> v1 commit.
+    std::vector<Hash> f2_inbound_view;
+    if (block_index >= chain_.f2_active_from_height()) {
+        auto elig = inbound_receipts_eligible_for_inclusion();
+        f2_inbound_view.reserve(elig.size());
+        for (const auto& r : elig)
+            f2_inbound_view.push_back(hash_cross_shard_receipt(r));
+        std::sort(f2_inbound_view.begin(), f2_inbound_view.end());
+        if (f2_inbound_view.size() > F2_VIEW_LIST_CAP)
+            f2_inbound_view.resize(F2_VIEW_LIST_CAP);
+    }
     ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
                                           block_index, prev_hash,
                                           current_aborts_.size(),
-                                          snap, my_commit);
+                                          snap, my_commit,
+                                          {}, {}, f2_inbound_view);
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 
@@ -2138,8 +2156,24 @@ void Node::on_contrib(const ContribMsg& msg) {
             existing->second.view_abort_root,
             existing->second.view_inbound_root);
         // commit (declared above for the sig-verify path) is the new
-        // message's commitment.
-        if (existing_commit != commit) {
+        // message's commitment (full, F2-view-root-bound).
+        //
+        // v2.7 F2 / S-016: equivocation DETECTION compares the v1 CORE commit
+        // (tx set / prev_hash / dh_input) only — NOT the F2 view roots. A
+        // committee member's view of pool-fed inputs (inbound-receipt evidence,
+        // etc.) legitimately VARIES across re-rounds at the same height
+        // (receipts age past the latency gate, fresh ones arrive) and is
+        // reconciled by intersection downstream, not equality here. Comparing
+        // the full view-bound commit would false-positive an honest member that
+        // refreshed its view between rounds as a self-equivocator. The slashing
+        // EVIDENCE below keeps the full signed commits so the recorded sigs
+        // still verify against the equivocator's key.
+        Hash existing_core = make_contrib_commitment(
+            existing->second.block_index, existing->second.prev_hash,
+            existing->second.tx_hashes,   existing->second.dh_input);
+        Hash new_core = make_contrib_commitment(
+            msg.block_index, msg.prev_hash, msg.tx_hashes, msg.dh_input);
+        if (existing_core != new_core) {
             chain::EquivocationEvent ev;
             ev.equivocator          = msg.signer;
             ev.block_index          = msg.block_index;

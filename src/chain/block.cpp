@@ -394,6 +394,28 @@ json Block::to_json() const {
     for (auto& h : creator_dh_inputs) jdi.push_back(to_hex(h));
     j["creator_dh_inputs"] = jdi;
 
+    // v2.7 F2 / S-016: per-creator view roots. Emitted ONLY when at least one
+    // root is non-zero, so pre-F2 / non-cross-shard blocks keep byte-identical
+    // JSON (and chain.json representation). from_json defaults them to empty;
+    // the validator treats empty/zero as the v1 (no-view) commit.
+    bool any_view_root = false;
+    for (auto& h : creator_view_inbound_roots) if (h != Hash{}) { any_view_root = true; break; }
+    if (!any_view_root)
+        for (auto& h : creator_view_eq_roots) if (h != Hash{}) { any_view_root = true; break; }
+    if (!any_view_root)
+        for (auto& h : creator_view_abort_roots) if (h != Hash{}) { any_view_root = true; break; }
+    if (any_view_root) {
+        json jve = json::array();
+        for (auto& h : creator_view_eq_roots) jve.push_back(to_hex(h));
+        json jva = json::array();
+        for (auto& h : creator_view_abort_roots) jva.push_back(to_hex(h));
+        json jvi = json::array();
+        for (auto& h : creator_view_inbound_roots) jvi.push_back(to_hex(h));
+        j["creator_view_eq_roots"]      = jve;
+        j["creator_view_abort_roots"]   = jva;
+        j["creator_view_inbound_roots"] = jvi;
+    }
+
     json jds = json::array();
     for (auto& h : creator_dh_secrets) jds.push_back(to_hex(h));
     j["creator_dh_secrets"] = jds;
@@ -486,6 +508,19 @@ Block Block::from_json(const json& j) {
     if (j.contains("creator_dh_inputs")) {
         for (auto& h : json_require_array(j, "creator_dh_inputs"))
             b.creator_dh_inputs.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    // v2.7 F2 / S-016: per-creator view roots (absent on pre-F2 blocks).
+    if (j.contains("creator_view_eq_roots")) {
+        for (auto& h : json_require_array(j, "creator_view_eq_roots"))
+            b.creator_view_eq_roots.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("creator_view_abort_roots")) {
+        for (auto& h : json_require_array(j, "creator_view_abort_roots"))
+            b.creator_view_abort_roots.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    if (j.contains("creator_view_inbound_roots")) {
+        for (auto& h : json_require_array(j, "creator_view_inbound_roots"))
+            b.creator_view_inbound_roots.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
     if (j.contains("creator_dh_secrets")) {
         for (auto& h : json_require_array(j, "creator_dh_secrets"))

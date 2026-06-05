@@ -703,6 +703,12 @@ Block build_body(
         b.creator_tx_lists.push_back(c.tx_hashes);
         b.creator_ed_sigs.push_back(c.ed_sig);
         b.creator_dh_inputs.push_back(c.dh_input);
+        // v2.7 F2 / S-016: carry each creator's Phase-1 view roots into the
+        // block so the validator can recompute the F2-bound creator commit.
+        // Zero for v1 contribs (Block::to_json then omits them entirely).
+        b.creator_view_eq_roots.push_back(c.view_eq_root);
+        b.creator_view_abort_roots.push_back(c.view_abort_root);
+        b.creator_view_inbound_roots.push_back(c.view_inbound_root);
     }
 
     // rev.9 S-009: when ordered_secrets is provided, the block is being
