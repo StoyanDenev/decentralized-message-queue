@@ -253,8 +253,8 @@ State commitment + light-client (v2.1 + v2.2):
   determ verify-genesis --in genesis.json   Standalone genesis.json validator. Loads,
                           [--expected-hash  applies sane-bounds checks, computes
                            <hex64>] [--json] compute_genesis_hash, prints a structured
-                                              summary (incl. operational params NOT bound
-                                              to identity hash per S-039). Optional
+                                              summary (incl. operational params now bound
+                                              to identity hash; S-039 closed). Optional
                                               --expected-hash pins against external value;
                                               --json emits machine-readable output.
                                               for BFT-mode threshold = ceil(2K/3).
@@ -428,8 +428,8 @@ In-process tests (deterministic, no network):
                                               and v2.10-DKG-SPEC.md)
   determ test-genesis                         compute_genesis_hash +
                                               make_genesis_block — chain
-                                              identity origin + S-039
-                                              diagnostic-UX gap lock-in
+                                              identity origin (S-039 closed:
+                                              operational params now bound)
   determ test-envelope                        wallet/envelope.hpp AES-256-GCM
                                               + PBKDF2 encrypt/decrypt + AAD
                                               binding + serialize round-trip
@@ -801,8 +801,8 @@ Additional in-process tests:
                                               deployments — chain_role
                                               (SINGLE/BEACON/SHARD) + shard_id
                                               sensitivity in compute_genesis_hash;
-                                              JSON round-trip; S-039 gap lock-in
-                                              on initial_shard_count (NOT bound).
+                                              JSON round-trip; S-039 CLOSED:
+                                              initial_shard_count now bound.
   determ test-cross-shard-atomicity           Two-Chain pair model (S0 source +
                                               S1 destination) — src outbound
                                               debit + dst inbound credit;
@@ -1005,11 +1005,11 @@ Additional in-process tests:
                                               sensitivity contract (reversing
                                               initial_creators[] changes the
                                               hash — order is committed),
-                                              S-039 documented gap (m_creators /
+                                              S-039 CLOSED (m_creators /
                                               block_subsidy / bft_enabled /
-                                              shard_address_salt do NOT change
-                                              the hash; pins the current no-
-                                              effect behavior).
+                                              shard_address_salt now DO change
+                                              the hash; operational params
+                                              bound into chain identity).
   determ test-empty-genesis-edge              Minimal / edge-case GenesisConfig
                                               pinning — default-constructed
                                               defaults (empty collections, K=M=3,
@@ -1653,15 +1653,17 @@ static int cmd_verify_genesis(int argc, char** argv) {
             {"shard_id",              cfg.shard_id},
             {"initial_creators",      cfg.initial_creators.size()},
             {"initial_balances",      cfg.initial_balances.size()},
-            // Operational params NOT in compute_genesis_hash (S-039).
-            // Emit them so operators can spot mismatches manually.
+            // Operational params — S-039 CLOSED: these are now bound into
+            // compute_genesis_hash, so a config mismatch changes the
+            // genesis_hash and is caught at the HELLO handshake. Emitted
+            // here for operator visibility.
             {"m_creators",            cfg.m_creators},
             {"k_block_sigs",          cfg.k_block_sigs},
             {"block_subsidy",         cfg.block_subsidy},
             {"min_stake",             cfg.min_stake},
             {"initial_shard_count",   cfg.initial_shard_count},
             {"bft_enabled",           cfg.bft_enabled},
-            // Fields that ARE in the hash:
+            // Identity / message fields (also bound into the hash):
             {"genesis_message_is_default",
                 cfg.genesis_message == chain::DEFAULT_GENESIS_MESSAGE},
             {"genesis_message_bytes", cfg.genesis_message.size()},
@@ -1693,7 +1695,7 @@ static int cmd_verify_genesis(int argc, char** argv) {
             std::cout << "  shard_id           : " << cfg.shard_id << "\n";
             std::cout << "  initial_creators   : " << cfg.initial_creators.size() << "\n";
             std::cout << "  initial_balances   : " << cfg.initial_balances.size() << "\n";
-            std::cout << "  --- operational params (S-039: NOT bound to identity hash) ---\n";
+            std::cout << "  --- operational params (S-039 CLOSED: bound to genesis hash) ---\n";
             std::cout << "  m_creators         : " << cfg.m_creators << "\n";
             std::cout << "  k_block_sigs       : " << cfg.k_block_sigs << "\n";
             std::cout << "  block_subsidy      : " << cfg.block_subsidy << "\n";
@@ -28455,15 +28457,15 @@ int main(int argc, char** argv) {
         //    of chain identity (you can't pivot the shard count without
         //    a new chain).
         {
-            // initial_shard_count is part of chain identity per S-039 we
-            // documented that it's NOT bound into the hash. But shard_id
-            // IS bound. Let me verify the documented S-039 behavior here:
-            // changing initial_shard_count from 4 to 8 should NOT change
-            // the hash (this is the S-039 gap — documented + lock-in).
+            // initial_shard_count is part of chain identity. S-039 CLOSED:
+            // it is now bound into the genesis hash (along with the other
+            // operational params), so changing it from 4 to 8 DOES change
+            // the hash — a shard-count mismatch is rejected at the HELLO
+            // genesis-hash check instead of silently diverging.
             Hash h4 = compute_genesis_hash(make_cfg(ChainRole::SHARD, 0, 4));
             Hash h8 = compute_genesis_hash(make_cfg(ChainRole::SHARD, 0, 8));
-            check(h4 == h8,
-                  "S-039 gap: initial_shard_count NOT bound in hash (documented gap)");
+            check(h4 != h8,
+                  "S-039 CLOSED: initial_shard_count IS bound in genesis hash");
         }
 
         // === Determinism ===
@@ -37150,22 +37152,22 @@ int main(int argc, char** argv) {
                   "config produces the same hash (idempotent)");
         }
 
-        // === Scenario 7: S-039 documented gap — operational params NOT
-        //                 in compute_genesis_hash ===
+        // === Scenario 7: S-039 CLOSED — operational params ARE now bound
+        //                 into compute_genesis_hash ===
         //
-        // Per docs/SECURITY.md S-039 / tools/test_genesis.sh: the
-        // following GenesisConfig fields contribute NOTHING to
-        // compute_genesis_hash by current design. Two operators with
-        // the same chain_id but different m_creators (etc.) hit
-        // cryptic consensus failures rather than a clear "your config
-        // doesn't match the chain" error.
-        //
-        // Tracked as a forward-dev item; not fixed here because adding
-        // any to the hash invalidates every existing chain's
-        // genesis_hash. This scenario LOCKS the CURRENT no-effect
-        // contract so we notice if it changes accidentally (e.g.,
-        // someone adds one to the hash without a coordinated migration).
-        // 4 assertions covering the major no-effect fields.
+        // Per docs/SECURITY.md S-039: the following GenesisConfig fields
+        // govern consensus behaviour (committee size K, Phase-2 quorum,
+        // E1/E3 economics, sharding, BFT escalation, epoch length, routing
+        // salt). They are now bound UNCONDITIONALLY into the genesis hash
+        // (src/chain/genesis.cpp "DTM-genesis-ops-v1" block), so two
+        // operators whose configs differ in any of them compute DIFFERENT
+        // genesis hashes and the mismatch is rejected at the HELLO
+        // genesis-hash check — instead of the pre-fix silent
+        // non-convergence (cryptic "no progress" stalls). This scenario
+        // asserts each field now CHANGES the hash (it was a no-effect
+        // lock-in pre-closure; flipped as the wire-compat break landed
+        // pre-launch, with no installed base to migrate).
+        // 4 assertions covering the major now-bound fields.
         {
             GenesisConfig base = make_populated_cfg();
             Hash base_hash = make_genesis_block(base).compute_hash();
@@ -37174,9 +37176,9 @@ int main(int argc, char** argv) {
             {
                 GenesisConfig c = base;
                 c.m_creators = base.m_creators + 1;
-                check(make_genesis_block(c).compute_hash() == base_hash,
-                      "(7) S-039 no-effect: mutating m_creators does NOT "
-                      "change genesis block hash (documented gap; pinned)");
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(7) S-039 CLOSED: mutating m_creators DOES "
+                      "change genesis block hash (committee size K now bound)");
             }
             // (7b) block_subsidy + subsidy_pool_initial (E1/E3 economics)
             // — NOT in hash.
@@ -37184,10 +37186,10 @@ int main(int argc, char** argv) {
                 GenesisConfig c = base;
                 c.block_subsidy = base.block_subsidy + 1000;
                 c.subsidy_pool_initial = base.subsidy_pool_initial + 5000;
-                check(make_genesis_block(c).compute_hash() == base_hash,
-                      "(7) S-039 no-effect: mutating block_subsidy + "
-                      "subsidy_pool_initial does NOT change genesis block "
-                      "hash (documented gap; pinned)");
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(7) S-039 CLOSED: mutating block_subsidy + "
+                      "subsidy_pool_initial DOES change genesis block "
+                      "hash (E1/E3 economics now bound)");
             }
             // (7c) bft_enabled + bft_escalation_threshold + epoch_blocks
             // — NOT in hash.
@@ -37196,20 +37198,20 @@ int main(int argc, char** argv) {
                 c.bft_enabled = !base.bft_enabled;
                 c.bft_escalation_threshold = base.bft_escalation_threshold + 3;
                 c.epoch_blocks = base.epoch_blocks + 100;
-                check(make_genesis_block(c).compute_hash() == base_hash,
-                      "(7) S-039 no-effect: mutating bft_enabled + "
-                      "bft_escalation_threshold + epoch_blocks does NOT "
-                      "change genesis block hash (documented gap; pinned)");
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(7) S-039 CLOSED: mutating bft_enabled + "
+                      "bft_escalation_threshold + epoch_blocks DOES "
+                      "change genesis block hash (BFT + epoch now bound)");
             }
             // (7d) shard_address_salt + initial_shard_count — NOT in hash.
             {
                 GenesisConfig c = base;
                 for (int i = 0; i < 32; ++i) c.shard_address_salt[i] ^= 0xFF;
                 c.initial_shard_count = base.initial_shard_count + 5;
-                check(make_genesis_block(c).compute_hash() == base_hash,
-                      "(7) S-039 no-effect: mutating shard_address_salt + "
-                      "initial_shard_count does NOT change genesis block "
-                      "hash (documented gap; pinned)");
+                check(make_genesis_block(c).compute_hash() != base_hash,
+                      "(7) S-039 CLOSED: mutating shard_address_salt + "
+                      "initial_shard_count DOES change genesis block "
+                      "hash (sharding identity now bound)");
             }
         }
 

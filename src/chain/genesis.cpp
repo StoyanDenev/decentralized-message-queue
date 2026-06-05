@@ -421,6 +421,35 @@ Block make_genesis_block(const GenesisConfig& cfg) {
         rb.append(static_cast<uint64_t>(cfg.revert_threshold_blocks));
         rb.append(static_cast<uint64_t>(cfg.merge_grace_blocks));
     }
+    // S-039 closure: bind ALL consensus-critical operational parameters
+    // into the genesis hash UNCONDITIONALLY. Pre-fix these governed
+    // consensus behaviour (committee size K, Phase-2 quorum, E1/E3
+    // economics, sharding, BFT escalation, epoch length, routing salt)
+    // but were NOT part of the chain identity, so two operators whose
+    // configs differed in any of them computed the SAME genesis_hash and
+    // then silently failed to converge (different K-committees -> block
+    // signatures never gather -> chain stalls with no clear cause). Now a
+    // mismatch in any of these yields a DIFFERENT genesis_hash, rejected
+    // at the HELLO genesis-hash handshake with a clear diagnostic. Bound
+    // UNCONDITIONALLY (no "only when non-default" backward-compat guard
+    // like the older optional mixes above): there is no pre-existing
+    // installed base to preserve byte-compat for, and unconditional
+    // binding has no default-value collision edge cases. Domain-separated
+    // by its own tag so the field block can never alias the preceding
+    // optional mixes.
+    rb.append(std::string("DTM-genesis-ops-v1"));
+    rb.append(static_cast<uint64_t>(cfg.m_creators));
+    rb.append(static_cast<uint64_t>(cfg.k_block_sigs));
+    rb.append(cfg.block_subsidy);
+    rb.append(cfg.subsidy_pool_initial);
+    rb.append(static_cast<uint8_t>(cfg.subsidy_mode));
+    rb.append(static_cast<uint64_t>(cfg.lottery_jackpot_multiplier));
+    rb.append(cfg.min_stake);
+    rb.append(static_cast<uint64_t>(cfg.initial_shard_count));
+    rb.append(static_cast<uint8_t>(cfg.bft_enabled ? 1 : 0));
+    rb.append(static_cast<uint64_t>(cfg.bft_escalation_threshold));
+    rb.append(static_cast<uint64_t>(cfg.epoch_blocks));
+    rb.append(cfg.shard_address_salt.data(), cfg.shard_address_salt.size());
     g.cumulative_rand = rb.finalize();
 
     return g;

@@ -692,7 +692,7 @@ The two gates together close S-012: a tampered snapshot fails one gate or the ot
 
 ## 12. Genesis
 
-Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis JSON file; nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense).
+Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis JSON file; nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense). The hash binds the full consensus-critical config: chain_id, chain_role, shard_id, committee_region, genesis_message, the creator ed_pubs, governance + suspension/unstake + merge-threshold fields, **and (S-039 closure) all operational params** — `m_creators`, `k_block_sigs`, `block_subsidy`/`subsidy_pool_initial`/`subsidy_mode`/`lottery_jackpot_multiplier`, `min_stake`, `initial_shard_count`, `bft_enabled`/`bft_escalation_threshold`, `epoch_blocks`, `shard_address_salt` — bound unconditionally under a `DTM-genesis-ops-v1` tag (`src/chain/genesis.cpp::make_genesis_block`). So two operators whose configs differ in any consensus-affecting field compute distinct `genesis_hash` values and the mismatch is caught at the HELLO handshake instead of silently failing to converge.
 
 ### 12.1 Schema
 
