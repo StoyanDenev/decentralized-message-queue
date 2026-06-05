@@ -153,10 +153,17 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 | Tests + docs | 2 weeks | DSF-driven Byzantine scenarios |
 | **Bundle effort** | **~3-4 months** | per Beaconless-v2-SPEC.md §5 |
 
-**Depends on:** Bundle 4 (DSF), Bundle 1 (v2.10 FROST for Q6 randomness), v2 + Theme 9 substantially shipped (per BL-8)
+**Depends on:** Bundle 4 (DSF), Bundle 1 (v2.10 FROST for Q6 randomness), v2 + v2.26 substantially shipped (per BL-8; DSSO-as-DApp removed v2.25 from this requirement)
 **Blocks:** v2.23 cross-chain bridge (out of review-week scope; uses Beaconless v2's light-client primitive)
-**Cannot parallelize with:** v2 + Theme 9 (per BL-8 — rebase pain; spec-authority conflicts)
-**Sequencing note:** Phase D start gated on TWO completion criteria: (a) DSF in place (Bundle 4 done), (b) v2 + Theme 9 substantially shipped (criterion TBD — see §4).
+**Cannot parallelize with:** v2 (per BL-8 — rebase pain; spec-authority conflicts)
+**Sequencing note:** Phase D start gated on TWO completion criteria: (a) DSF in place (Bundle 4 done), (b) v2 + v2.26 substantially shipped (criterion TBD — see §4.2).
+
+**Bundle 5 priority levers (per §4.1.1, added 2026-06-05).** Three planning artifacts produced during Phase B/C to de-risk Bundle 5 Phase D start:
+1. `BUNDLE5-INTERFACE-CONTRACTS.md` — locks all cross-bundle interfaces Bundle 5 consumes; produced during Phase B/C; ~3-5 days.
+2. DSF Beaconless-v2 scenario prioritization — Bundle 5-specific scenarios at top of DSF initial 30-scenario set; ~1 day during Bundle 4 spec finalization.
+3. **v2.26 early-start carve-out** — v2.26 (~10-11 days) ships in late Phase B/C parallel with Bundle 3 rather than inside Bundle 5's Phase D envelope. Satisfies BL-8 "v2.26 substantially shipped" gate by being feature-complete. Removes v2.26 from Phase D critical path; Bundle 5 starts with ROTATE_KEY infrastructure ready.
+
+**Revised Phase D effort estimate (post-carve-out): ~3-4 months for Beaconless v2 ONLY** (v2.26's ~10-11 days now lands during Phase B/C). Bundle effort table above keeps v2.26 separate from BL-1..BL-8 line items.
 
 ---
 
@@ -195,6 +202,59 @@ These cannot be answered from the design specs alone; they require team-knowledg
 3. **Pre-merge test gating**: every PR must pass full test suite before merge. No `--no-verify` exceptions.
 4. **Bundle-boundary verification**: at bundle completion, dedicated thread runs end-to-end integration test exercising every decision in the bundle (e.g., for Bundle 3: full confidential-amount transfer with both AMT_AUDITABLE and AMT_PFS paths, audit-mode disclosure, reconciliation, padding).
 5. **Specs as canonical source**: when threads disagree on intent, the spec text wins. If the spec is ambiguous, freeze and resolve before resuming parallel work.
+
+#### 4.1.1 Bundle 5 priority levers within BL-7/BL-8 constraints (added 2026-06-05)
+
+**Principle.** Bundle 5 (Beaconless v2 + v2.26) is the heaviest and most-bottleneck-prone item at ~3-4 months Phase D effort. It cannot start chronologically before Phase D (BL-7 requires DSF prerequisite; BL-8 requires v2 + v2.26 substantially shipped). But Bundle 5 deserves disproportionate *planning attention* during Phase B/C so that Phase D opens with maximum readiness and minimum rebase risk.
+
+**Three priority levers (parallelizable with Phase B/C bundle work):**
+
+1. **Bundle 5 interface contract document** — produced during Phase B/C; locks all cross-bundle interfaces Bundle 5 consumes:
+
+   | Cross-bundle interface | Locked by end of |
+   |---|---|
+   | v2.10 FROST partial-sig + accumulator interface (Bundle 5 Q6 randomness consumer) | Bundle 1 ship |
+   | v2.15 multi-sig threshold check interface (manifest mutation co-signing consumer) | v2.15 sketch → spec milestone |
+   | v2.22 cross-shard receipt × confidential amount interaction format | Bundle 3 ship |
+   | v2.26 ROTATE_KEY apply path (committee log consumer) | v2.26 early-start carve-out (lever #3 below) |
+   | §7.5 discriminator semantics (signature_form, pubkey_form, policy_tier_flags, quorum_bitset) | pre-bundle work |
+
+   Effort: ~3-5 days of one thread's time during Phase B/C; produces `BUNDLE5-INTERFACE-CONTRACTS.md` in `docs/proofs/`. Outcome: zero rebase pain at Phase D start; Bundle 5 implementation threads begin with all interface contracts frozen.
+
+2. **DSF Beaconless-v2 scenario prioritization** — Bundle 4 (DSF) ships per `DSF-SPEC.md §0.7` initial 30-scenario set. Prioritize scenarios that exercise Bundle 5 specifically:
+   - Selective-abort with Beaconless committee continuity
+   - Equivocation with cross-shard receipt forgery attempts
+   - Partition with light-client header eviction storms
+   - Cross-shard with Merritt-witness affidavit collection under k Byzantine
+   - DKG with cross-epoch rotation guards
+   - F2 view-reconciliation interaction with Bundle 5 cross-shard receipts
+   - BFT-escalation under beaconless deployment
+   - Manifest mutation under selective availability
+   - Randomness aggregation with late-shard adversarial timing
+
+   Effort: ~1 day during Bundle 4 spec finalization; updates `DSF-SPEC.md §0.7`. Outcome: Bundle 5 has DSF coverage from day 1 of Phase D (rather than building generic scenarios first and Bundle 5-specific ones later).
+
+3. **v2.26 early-start carve-out** — v2.26 (~10-11 days per `v2.26-ROTATION-SPEC.md §5`) is bundled into Phase D per Bundle 5's umbrella, but its sub-components can ship during late Phase B/C (parallel with Bundle 3 era) without violating BL-8:
+   - v2.26 satisfies "v2.26 substantially shipped" gate for BL-8 by being feature-complete (which IS the "substantially shipped" definition)
+   - v2.26 implementation depends on §7.5.6 + §7.5.7 + §7.5.10 + §7.5.11 discriminators (all pre-bundle work) but does NOT depend on Bundles 1-4
+   - Shipping v2.26 in late Phase B/C gives Bundle 5 the rotation primitive (committee log + cross-shard registry rotation propagation) working before Bundle 5's committee-rotation log work begins
+
+   Effort: ~10-11 days, parallelizable with Bundle 3. Outcome: removes v2.26 from Phase D critical path; Bundle 5 starts with v2.26 ROTATE_KEY infrastructure ready.
+
+**Risk monitoring during Phase B/C.** Every Bundle 1/2/3 milestone should include a "Bundle 5 impact" checklist:
+- Bundle 1 FROST aggregation function signature → affects Bundle 5 Q6
+- Bundle 3 PRIV-6 OTPK stream representation → affects how Bundle 5 cross-shard receipts handle confidential-amount carriers
+- Bundle 4 DSF scenario format → must accommodate Bundle 5 multi-shard scenarios
+
+**Integration-thread pre-selection.** The Opus 4.7 thread that will own Bundle 5 integration should be pre-selected during Phase B/C and shadow the relevant Bundles 1-4 integration work. Absorbs cross-bundle context before becoming the Bundle 5 lead.
+
+**Net calendar effect of these levers.**
+- Phase D start time: unchanged (still gated on BL-7 DSF + BL-8 v2 + v2.26 substantially shipped)
+- Phase D rebase risk: substantially reduced (interface contracts pre-frozen; v2.26 already shipped; DSF scenarios cover Bundle 5 from day 1)
+- Phase D effort: same ~3-4 months but lower variance — fewer mid-bundle interface negotiations
+- Bundle 5 spec-quality: higher entering Phase D (interface contract is itself a spec deliverable)
+
+**Why this matters more than nominal priority status.** Bundle 5's no-migrations exposure is the project's highest bug-cost surface — any Bundle 5 bug that escapes beta into mainnet binds permanently under `dlt-no-migrations-constraint`. Pre-bundle attention is the project's highest-leverage risk reduction.
 
 **Wall-clock with this capacity model (REFRESHED 2026-05-24 post-DSSO-as-DApp + v2.26 + pre-bundle discriminators).**
 

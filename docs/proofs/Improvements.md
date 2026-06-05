@@ -46,17 +46,11 @@
 
 **Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary; §7.5 schema-freeze decision.
 
-### 1.3 Stealth addresses (Monero-style) for graph privacy
+### 1.3 Stealth addresses (Monero-style) for graph privacy — MOVED TO §11.1 (2026-06-03)
 
-**Improvement.** Combine amount-PFS with recipient-graph-privacy. Sender derives a fresh stealth address per tx via DH against recipient's `spend_view_pk`; recipient scans chain to find their own.
+**Status:** reclassified from "v3 candidate" to "Out of scope" — not v3-motivating on its own. See §11.1 for full original analysis.
 
-**Deferred reason.** Architectural change vastly larger than v2.22's amount-PFS scope. Requires full chain scan per recipient per receive — light-client problem unsolved at scale; Monero hits this wall too. Conflicts with v2.24 audit model (stealth addresses designed to be unlinkable). Appropriate as v3+ work alongside broader graph-privacy.
-
-**Classification.** Breaking + research (light-client scan optimization needed at scale).
-
-**Dependencies.** Light-client scan optimization research OR acceptance of full-scan recipient cost; v3 audit-model redesign.
-
-**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary.
+**Why moved:** Graph privacy is a significant feature, but requires Monero-class whole-chain rewrite. A whole-chain rebuild just to add graph privacy is overkill — graph-privacy users have Monero/Zcash.
 
 ### 1.4 OOB ephemeral exchange (established-pair PFS mode)
 
@@ -146,17 +140,11 @@
 
 ## 3. Beaconless v2 improvements
 
-### 3.1 Horizontal scale beyond ~500 shards
+### 3.1 Horizontal scale beyond ~500 shards — MOVED TO §11.2 (2026-06-03)
 
-**Improvement.** Sharding-of-sharding architecture for deployments needing >500 shards. Lazy validation contains O(N²) cost up to ~200-500 shards; beyond that, additional architectural work needed.
+**Status:** reclassified from "v3 candidate" to "Out of scope" — speculative scaling for unforeseen need. See §11.2 for full original analysis.
 
-**Deferred reason.** v3 concern per Beaconless-v2-SPEC.md §1 scope. No current deployment driving the need.
-
-**Classification.** Breaking (significant architectural change).
-
-**Dependencies.** Deployment-driven need for >500 shards.
-
-**Related.** Beaconless-v2-SPEC.md §1.
+**Why moved:** No deployment in any foreseeable horizon needs >500 shards.
 
 ### 3.2 VRF-based cross-shard randomness aggregation
 
@@ -330,17 +318,11 @@ The block-header schema gains a `signature_form` discriminator: `SIG_KK_ED25519`
 
 **Related.** `docs/Improvements.md` §2 (annotated as OPTIONAL); existing BFT-escalation per `docs/proofs/S025BFTEscalationSoundness.md` (R34A7) — the 4-gate escalation is a strictly *temporary* liveness mode triggered by abort threshold; §7.2 would make BFT-mode the steady-state default for opt-in deployments. The two are complementary: a deployment running in `unanimous_k` mode still escalates to BFT-mode under stress; a deployment running in `bft_quorum_2f1` mode operates at the BFT threshold continuously without escalation gates.
 
-### 6.3 Data deduplication — `deduplicated_tx_root`
+### 6.3 Data deduplication `deduplicated_tx_root` — MOVED TO §11.3 (2026-06-03)
 
-**Improvement.** Replace the per-creator `creator_tx_lists[][]` arrays (which can carry the same transaction across multiple creators' lists, redundantly) with a single `deduplicated_tx_root` Merkle root over the globally lex-sorted unique transaction set. The committee's contribution remains attested via the Phase-1 sketch (see §7.4) and the BLS aggregate sig (see §7.1) — the tx_root commits to the canonical post-dedup set without listing per-creator membership.
+**Status:** reclassified from "v3 candidate" to "Out of scope (ride-along only)" — not v3-motivating on its own. See §11.3 for full original analysis.
 
-**Deferred reason.** Bandwidth saving is real (proportional to inter-creator overlap, which is high under healthy mempool propagation), but the per-creator-list redundancy is also the evidence base for FA2 censorship resistance (every creator's contributed-or-not status is observable from the per-creator lists). Removing per-creator lists removes that evidence; FA2's "k_bft-conjunction-of-creators-must-collude-to-censor" argument doesn't carry over without replacement. A replacement would be: per-creator commitment to a Bloom filter / IBLT over their proposed-tx set, recorded in the header for off-chain verification — adds complexity that erodes the bandwidth saving.
-
-**Classification.** Breaking (block-header structural change; loses per-creator censorship-evidence surface; requires FA2 reformulation).
-
-**Dependencies.** Replacement evidence-surface for FA2 censorship resistance (per-creator Bloom/IBLT commitment in the header, OR a separate audit-log mechanism); FA2 proof reformulation; production-grade IBLT/Minisketch impl in C99.
-
-**Related.** `docs/Improvements.md` §3; FA2 censorship proof at `docs/proofs/Censorship.md`.
+**Why moved:** Bandwidth saving is real but not load-bearing per the entry's own analysis; requires FA2 proof reformulation. Cost-benefit doesn't favor opening v3 just for this. Could ride along IF v3 opens for another reason (e.g., crypto migration).
 
 ### 6.4 Bandwidth reduction — IBLT/Minisketch in Phase-1 contrib
 
@@ -372,9 +354,10 @@ Any improvement classified **Breaking** cannot ship post-v1.0 mainnet without on
 2. Explicit opening of a new protocol version (effectively v2.0; project-policy decision separate from current execution)
 3. Operation of an alternate chain alongside v1.0
 
-This means most items in §1.1, §1.2, §1.3, §1.8, §3.1, §3.2, §3.3, §4.1, §6.1 (MODERN variant), §6.3, §6.4 are *effectively v3 candidates* if pursued. Their planning horizon is years, not months. **Exceptions:**
-- §6.2 (Quorum Liveness OPTIONAL) is classified Additive-via-opt-in because legacy K-of-K remains the default codepath — see its entry for the policy rationale.
+This means most items in §1.1, §1.2, §1.8, §3.2, §3.3, §4.1, §6.1 (MODERN variant), §6.4 are *effectively v3 candidates* if pursued. Their planning horizon is years, not months. **Exceptions:**
+- §6.2 (Quorum Liveness OPTIONAL) — fully Additive via §7.5.10 + §7.5.11 (per `DECISION-LOG.md` 2026-06-03); no longer a v3 candidate.
 - §6.1 (BLS aggregation) is split per profile: the MODERN-profile aggregation variant is Breaking (v3 candidate), but the FIPS-profile variant is Additive — FIPS deployments retain the v1.0 K-of-K Ed25519 array unchanged. The per-profile dispatch mirrors the PRIV-3 / C99-11 "curve follows profile" pattern. See §6.1 for the `signature_form` discriminator decision that must be made pre-v1.0 schema freeze to preserve MODERN-side optionality.
+- §1.3 stealth addresses, §3.1 sharding-of-sharding, §6.3 dedup, §9.1 tier-bond monetization — RECLASSIFIED 2026-06-03 to **§11 Out of scope** (not v3-motivating on their own). See §11 entries for reasoning.
 
 ### 7.2 Additive improvements + opt-in defaults
 
@@ -389,12 +372,10 @@ Items classified **Research** are paused waiting for primitive maturation or dep
 - Production-grade ZK proof system in C99 → revisit 1.7
 - Dilithium-FROST publication + audit → revisit 2.2, 4.1
 - FIPS 206 finalization + Falcon C99 impl → revisit 2.1
-- Deployment driving >500 shards → revisit 3.1
 - Fair-ordering research breakthrough → revisit 4.3
 - Production-grade C99 BLS12-381 + pairing primitives + project-policy decision to expand crypto-curve roster → revisit 6.1
-- Permissioned-deployment operator demand for first-class BFT-threshold finalization (rather than abort-rate escalation) → revisit 6.2
-- FA2 censorship-resistance evidence-surface replacement design → revisit 6.3
 - Production-grade IBLT / Minisketch C99 implementation + sketch-decode-failure fallback spec → revisit 6.4
+- (§3.1 >500 shards, §6.3 dedup moved to §11 Out of scope 2026-06-03; not in live revisit-trigger list)
 
 ### 7.4 Reopening process
 
@@ -695,17 +676,11 @@ Captured 2026-06-03 after explicit rejection of a casino-fee proposal (per DECIS
 
 **Common principle.** All five avoid the rejected proposal's anti-pattern of pricing general-purpose cryptographic primitives (VRF, ZK proofs, escrow) that have legitimate non-casino uses. Instead, they price either (a) resource consumption, (b) deployment posture, or (c) DApp-layer revenue capture — none of which tax the cryptographic substrate itself.
 
-### 9.1 Option A — Stake/bond requirements scaled by deployment tier
+### 9.1 Option A — Stake/bond requirements scaled by deployment tier — MOVED TO §11.4 (2026-06-03)
 
-**Mechanism.** Operators register at a tier (`UNSTAKED`, `ENTERPRISE`, `REGULATED`, `HIGH_RISK`) and post bond proportional to tier. Casinos in `HIGH_RISK` post substantial slashable bond; non-casino enterprises pay zero or token bonds. Tier-misdeclaration is slashable by governance.
+**Status:** reclassified from "v3 candidate (Breaking-only)" to "Out of scope" — deliberately rejected via 7.5.8 skip on 2026-06-03. See §11.4 for full original analysis.
 
-**Classification.** Breaking (registry schema change) — UNLESS captured via a §7.5-style discriminator in v1.0 (`RegistryEntry.deployment_tier: enum` with default `UNSTAKED`). Currently NOT preserved in §7.5; would need a new §7.5.8 if this path is pursued. Flag for pre-v1.0-schema-freeze review.
-
-**Dependencies.** Governance mechanism for tier validation + slashing; community/operator consensus on tier definitions; bond economic design.
-
-**Pro/Con.** Self-selecting via slashable misdeclaration; doesn't tax specific primitives; compatible with no-migrations if §7.5.8 discriminator ships. Con: requires governance teeth that v1.0 doesn't currently have.
-
-**Related.** §7.5 discriminator framework; §1.8 trusted-issuer (similar policy-driven shape); `DECISION-LOG.md` → "Casino-fee mechanism rejection".
+**Why moved:** The 7.5.8 skip was a deliberate project decision (preserving chain-level character of "no per-account fee differentiation"). Classification as "v3 candidate" implied a backdoor where the project might revisit; that's misleading since the rejection was a value decision, not technical. §11.4 preserves the analysis without false signaling.
 
 ### 9.2 Option B — Application-layer pricing via DApp framework
 
@@ -820,4 +795,66 @@ Three v3 items had blocker-alternative analysis indicating modest spec work coul
 
 ---
 
-*End of improvements queue. Append new entries as future deliberations produce additional deferred items.*
+---
+
+## 11. Out of v1.0 + Not motivating v3 (preserved-for-posterity)
+
+**Purpose.** Items reclassified from "v3 candidate (Breaking)" to "Out of scope" on 2026-06-03. Each was an architectural change too large or marginal-benefit to *motivate* opening v3 protocol on its own. Captured here so future planning sessions don't re-propose them without reading the deferral reasoning — and so reviewers asking "why isn't this in the design?" find the answer.
+
+**Convention difference vs §1–§10.** Entries here are NOT classified as Additive / Breaking / Research because they're not "future work" — they're "considered and explicitly out of scope." Three of the four could *ride along* if v3 ever opens for an unrelated reason (e.g., mandatory PQ migration) but none is a v3 driver.
+
+**Pattern for future entries:** when triaging a v3-candidate Breaking item, ask "does this item *by itself* motivate opening v3?" If no, it belongs here, not in the live v3 queue.
+
+### 11.1 Stealth addresses (Monero-style) for graph privacy
+
+**Original improvement.** Combine amount-PFS with recipient-graph-privacy. Sender derives a fresh stealth address per tx via DH against recipient's `spend_view_pk`; recipient scans chain to find their own.
+
+**Original deferred reason.** Architectural change vastly larger than v2.22's amount-PFS scope. Requires full chain scan per recipient per receive — light-client problem unsolved at scale; Monero hits this wall too. Conflicts with v2.24 audit model (stealth addresses designed to be unlinkable).
+
+**Why out of scope.** Graph-privacy users have Monero/Zcash today; Determ rebuilding its whole tx-routing model just to compete in graph-privacy is overkill. Determ's value proposition is K-of-K mutual-distrust + Kerckhoffs's principle + amount-PFS, not graph-privacy. If graph-privacy becomes a project priority later, the rebuild is essentially "build a different chain" — would happen as a separate project, not as a Determ v3.
+
+**Ride-along potential.** None — graph-privacy requires whole-chain architectural changes that can't be bundled with smaller protocol opens.
+
+**Related.** `DECISION-LOG.md` → v2.22 PRIVACY → PRIV-6 alternative-mechanism rejection summary.
+
+### 11.2 Sharding-of-sharding (horizontal scale beyond ~500 shards)
+
+**Original improvement.** Sharding-of-sharding architecture for deployments needing >500 shards. Lazy validation contains O(N²) cost up to ~200-500 shards; beyond that, additional architectural work needed.
+
+**Original deferred reason.** v3 concern per Beaconless-v2-SPEC.md §1 scope. No current deployment driving the need.
+
+**Why out of scope.** Speculative scaling for a problem nobody has and nobody is forecast to have. 200-500 shards covers every realistic deployment topology including planet-scale. Beyond that, the right answer is probably "deploy a sibling Determ chain and bridge them" — which is v2.23 cross-chain bridge territory, not sharding-of-sharding.
+
+**Ride-along potential.** None — fundamental shard architecture restructuring; can't bundle.
+
+**Related.** `Beaconless-v2-SPEC.md §1` scope.
+
+### 11.3 Data deduplication (`deduplicated_tx_root`)
+
+**Original improvement.** Replace the per-creator `creator_tx_lists[][]` arrays with a single `deduplicated_tx_root` Merkle root over the globally lex-sorted unique transaction set.
+
+**Original deferred reason.** Bandwidth saving is real (proportional to inter-creator overlap) but the per-creator-list redundancy is also the evidence base for FA2 censorship resistance. Removing per-creator lists removes that evidence; FA2's "k_bft-conjunction-of-creators-must-collude-to-censor" argument doesn't carry over without replacement.
+
+**Why out of scope.** Per the entry's own analysis, the bandwidth savings aren't load-bearing at Determ's target throughput. Cost-benefit ratio doesn't favor opening v3 just for this. FA2 reformulation via per-creator Bloom/IBLT (per `§10.1`) was identified as a spec-ready path, but even with the reformulation done the savings don't motivate v3.
+
+**Ride-along potential.** Yes — IF v3 opens for an unrelated reason (e.g., mandatory PQ signature migration requires breaking block-header schema), §11.3 dedup could ride along as a coincident cleanup. The §10.1 per-creator Bloom/IBLT reformulation should be spec-ready when v3 opens; that work converts dedup from "Breaking + research-stuck" to "Breaking + spec-ready, ride-along available."
+
+**Related.** `Improvements.md §10.1` (per-creator Bloom/IBLT reformulation); `docs/proofs/Censorship.md` (FA2 proof).
+
+### 11.4 Tier-bond monetization (Option A)
+
+**Original improvement.** Operators register at a tier (`UNSTAKED`, `ENTERPRISE`, `REGULATED`, `HIGH_RISK`) and post bond proportional to tier. Casinos in `HIGH_RISK` post substantial slashable bond; non-casino enterprises pay zero or token bonds.
+
+**Original deferred reason.** Required §7.5.8 `RegistryEntry.deployment_tier: enum` discriminator pre-v1.0 to remain Additive. §7.5.8 was explicitly skipped 2026-06-03.
+
+**Why out of scope.** The 7.5.8 skip was a deliberate project decision preserving chain-level character of "no per-account fee differentiation." Calling §9.1 a "v3 candidate" after the skip implied a backdoor where the project might revisit — misleading because the rejection was a value decision (project philosophy: primitive-free public-interest infrastructure, not fee-market substrate), not a technical one.
+
+**Ride-along potential.** Technically yes (could ship via v3 protocol opening), but the value rejection still applies regardless of v3 opening. If v3 opens for another reason, §11.4 stays out of scope.
+
+**Live monetization candidates remain:** §9.2 DApp-layer pricing (Additive) and §9.5 Foundation services (off-protocol). Per `DECISION-LOG.md` 2026-06-03.
+
+**Related.** `DECISION-LOG.md` → "Gas-style pricing rejected" + "§7.5 sweep extension: 7.5.8 SKIP + 7.5.10 SHIP".
+
+---
+
+*End of improvements queue. Append new entries as future deliberations produce additional deferred items. When triaging future v3-candidate Breaking items, apply the §11 test: does this motivate v3 by itself?*

@@ -593,4 +593,77 @@ Best leverage of any §7.5 decision so far.
 
 ---
 
+---
+
+## 2026-06-03 — Four items reclassified from "v3 candidate" → §11 Out of scope
+
+### "Does this motivate v3 by itself?" test applied; 4 items moved out of v3 queue
+
+**Question.** The post-7.5 sweep state showed 4 items as "Breaking — v3 candidate": §1.3 stealth addresses, §3.1 sharding-of-sharding, §6.3 dedup, §9.1 tier-bond monetization. User observation: "the remaining structural foreclosures looks like overkill for v3." Are these items genuinely v3 candidates, or are they misclassified?
+
+**Analysis.** A v3-candidate should either (a) *motivate* v3 by itself (compelling enough to justify the protocol break) or (b) *ride along* if v3 opens for another reason. Walked each item:
+
+- **§1.3 stealth addresses** — Monero-class whole-chain rewrite just for graph privacy. Graph-privacy users have Monero/Zcash. Doesn't motivate v3; can't ride along (architectural rewrite too large to bundle).
+- **§3.1 sharding-of-sharding** — Speculative scaling for a problem nobody has and nobody is forecast to have. 200-500 shards covers every realistic deployment. Beyond that, "deploy sibling chain + bridge" is the right answer (v2.23). Doesn't motivate; can't ride along.
+- **§6.3 dedup `deduplicated_tx_root`** — Per the entry's own analysis, bandwidth savings aren't load-bearing at target throughput. Doesn't motivate v3. CAN ride along if v3 opens for crypto reason (per `§10.1` per-creator Bloom/IBLT reformulation, which makes dedup spec-ready).
+- **§9.1 tier-bond monetization (Option A)** — Just explicitly skipped via 7.5.8. The skip was a deliberate value decision (project philosophy: primitive-free public-interest infrastructure). Calling it "v3 candidate" implied backdoor revisit — misleading.
+
+**Decision.** All four reclassified from "v3 candidate (Breaking)" to **§11 Out of scope** in `Improvements.md`. Full original analysis preserved in §11.1-§11.4; original entries in §1.3, §3.1, §6.3, §9.1 replaced with brief redirect stubs pointing to §11.
+
+**Why §11 rather than deletion.** Analysis is valuable — someone proposing stealth addresses or sharding-of-sharding later should find the deferral reasoning. Deletion loses institutional memory. §11 with "Out of scope" framing preserves the analysis without misleading "future work" signaling.
+
+**Convention established for future v3-candidate triage.** Apply the §11 test: "Does this item motivate v3 by itself? If yes, v3 candidate. If no — even if Breaking — it belongs in §11." This protects the live v3 queue from items that create false planning expectations.
+
+**Cross-reference updates applied:**
+- `Improvements.md §7.1` Breaking-improvements list: removed §1.3, §3.1, §6.3, §9.1; noted reclassification
+- `Improvements.md §7.3` revisit-trigger list: removed §3.1, §6.3; noted §11 reclassification
+- `Improvements.md §1.3/§3.1/§6.3/§9.1`: replaced full entries with redirect stubs
+
+**Net effect on live v3 queue.**
+- Pre-reclassification: ~33 v3 items
+- Post-reclassification: ~29 v3 items (24 Additive + 4 in §11 out of scope + 1 principle-rejected + 1 research-stuck — sums adjusted)
+- The remaining "v3 candidates (Breaking)" are now: §6.1 BLS aggregation MODERN variant only — which has a real strategic motivation (curve roster expansion + Bitcoin-grade BLS adoption). One genuine v3-motivator remains.
+
+**Generalization.** Most "v3-candidate Breaking" items in cryptographic infrastructure projects fail the §11 test because v3 protocol opening is itself a major project decision requiring overwhelming justification. Routine improvements should ship as Additive via discriminator dispatch; major improvements either justify v3 by themselves (rare) or ride along with another v3-opening event (limited set). The §11 section captures the rest honestly.
+
+---
+
+---
+
+## 2026-06-05 — Bundle 5 priority levers within BL-7/BL-8 constraints
+
+### Bundle 5 elevated to "top priority for development" via planning levers (not earlier chronological start)
+
+**Question.** Bundle 5 (Beaconless v2 + v2.26) was identified as the most development-heavy single item in v1.0 (~3-4 months; cross-cutting architectural; composes with virtually every other spec; mainnet-readiness criteria depend on it). User direction: "Bundle 5 should be top priority for development."
+
+**Constraint analysis.** Literal "start Bundle 5 first" violates two binding sequencing decisions from review week:
+- **BL-7**: DSF (Bundle 4) is hard prerequisite. Skipping = shipping Bundle 5 Byzantine paths into no-migrations-bound mainnet without coverage.
+- **BL-8**: Bundle 5 starts in Phase D after v2 + v2.26 substantially shipped. Skipping = constant rebases mid-Bundle-5 against in-flight Bundle 1-4 changes.
+
+Both constraints remain load-bearing. Cannot relax.
+
+**Decision.** Reframe "top priority" as **disproportionate planning attention during Phase B/C**, applied via three concrete levers that respect BL-7/BL-8:
+
+1. **`BUNDLE5-INTERFACE-CONTRACTS.md`** produced during Phase B/C; locks cross-bundle interfaces Bundle 5 consumes (v2.10 FROST aggregation, v2.15 multi-sig threshold check, v2.22 cross-shard receipt × confidential amount, v2.26 ROTATE_KEY apply path, §7.5 discriminator semantics). Effort: ~3-5 days of one thread's time. Outcome: zero rebase pain at Phase D start.
+
+2. **DSF Beaconless-v2 scenario prioritization** in `DSF-SPEC.md §0.7` initial 30-scenario set. Bundle 5-specific scenarios (selective-abort with committee continuity, equivocation with cross-shard receipt forgery, partition with header eviction storms, Merritt-witness collection, cross-epoch DKG guard, F2 interaction, BFT-escalation, manifest mutation under selective availability, randomness aggregation with adversarial timing) at top of the list. Effort: ~1 day during Bundle 4 spec finalization.
+
+3. **v2.26 early-start carve-out** — v2.26 (~10-11 days) ships in late Phase B/C parallel with Bundle 3, NOT inside Bundle 5's Phase D envelope. Satisfies BL-8 "v2.26 substantially shipped" gate by being feature-complete. Removes v2.26 from Phase D critical path; Bundle 5 starts with ROTATE_KEY infrastructure ready.
+
+**Additional supporting practices.**
+- Bundle 5 integration-thread pre-selection during Phase B/C (the thread shadows Bundles 1-4 integration work and absorbs cross-bundle context)
+- "Bundle 5 impact" checklist reviewed at every Bundle 1-4 milestone (catches downstream-impact decisions early)
+
+**Why this matters more than nominal priority status.** Bundle 5's no-migrations exposure is the project's highest bug-cost surface — any Bundle 5 bug that escapes beta into mainnet binds permanently under `dlt-no-migrations-constraint`. Pre-bundle attention is the project's highest-leverage risk reduction. Calendar order is unchanged; risk posture substantially improved.
+
+**Calendar effect.**
+- Phase D start time: unchanged (still gated on BL-7 + BL-8)
+- Phase D rebase risk: substantially reduced (interface contracts pre-frozen; v2.26 already shipped; DSF scenarios cover Bundle 5 from day 1)
+- Phase D effort: same ~3-4 months but lower variance — fewer mid-bundle interface negotiations
+- Bundle 5 spec-quality: higher entering Phase D (interface contract is itself a spec deliverable)
+
+**Generalization.** "Priority" in a constrained-sequencing context means planning attention + risk monitoring, not earlier chronological start. When a project has hard prerequisites (BL-7 DSF, BL-8 substantial-ship gate), the answer to "we should prioritize X" is "we should pre-plan X" — not "we should violate prerequisite Y to start X."
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*
