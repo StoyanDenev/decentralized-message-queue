@@ -10823,10 +10823,69 @@ int main(int argc, char** argv) {
             check(std::memcmp(c99b, osslb, 64) == 0, "SHA-512 C99 == OpenSSL on 1 MiB message");
         }
 
+        // (4) HMAC-SHA-256 / SHA-512 vs OpenSSL HMAC() over a (key,msg)-length
+        // grid including the key>block-size hashing path (RFC 2104). No
+        // transcribed digest — pure byte-equality.
+        {
+            const size_t klens[] = {0,1,16,31,32,33,63,64,65,100,200};
+            const size_t mlens[] = {0,1,13,32,55,56,63,64,100,200};
+            bool h256_ok = true, h512_ok = true; long h_at = -1;
+            uint8_t one = 0;
+            for (size_t ki = 0; ki < sizeof(klens)/sizeof(klens[0]) && (h256_ok||h512_ok); ++ki)
+            for (size_t mi = 0; mi < sizeof(mlens)/sizeof(mlens[0]) && (h256_ok||h512_ok); ++mi) {
+                size_t kl = klens[ki], ml = mlens[mi];
+                std::vector<uint8_t> key(kl), msg(ml);
+                for (size_t i=0;i<kl;i++) key[i]=(uint8_t)((i*97u+kl*3u+1u)&0xffu);
+                for (size_t i=0;i<ml;i++) msg[i]=(uint8_t)((i*61u+ml*5u+9u)&0xffu);
+                const uint8_t* kp = kl ? key.data() : &one;
+                const uint8_t* mp = ml ? msg.data() : &one;
+                if (h256_ok) {
+                    uint8_t c[32]; determ_hmac_sha256(kp,kl,mp,ml,c);
+                    uint8_t o[32]; unsigned int ol=32; HMAC(EVP_sha256(), kp,(int)kl, mp, ml, o, &ol);
+                    if (std::memcmp(c,o,32)!=0){ h256_ok=false; h_at=(long)(kl*1000+ml); }
+                }
+                if (h512_ok) {
+                    uint8_t c[64]; determ_hmac_sha512(kp,kl,mp,ml,c);
+                    uint8_t o[64]; unsigned int ol=64; HMAC(EVP_sha512(), kp,(int)kl, mp, ml, o, &ol);
+                    if (std::memcmp(c,o,64)!=0){ h512_ok=false; h_at=(long)(kl*1000+ml); }
+                }
+            }
+            check(h256_ok, h256_ok ? "HMAC-SHA-256 C99 == OpenSSL over the (key,msg)-length grid"
+                                   : "HMAC-SHA-256 diverges (kl*1000+ml=" + std::to_string(h_at) + ")");
+            check(h512_ok, h512_ok ? "HMAC-SHA-512 C99 == OpenSSL over the (key,msg)-length grid"
+                                   : "HMAC-SHA-512 diverges (kl*1000+ml=" + std::to_string(h_at) + ")");
+        }
+
+        // (5) HKDF-SHA-256 against the RFC 5869 known-answer vectors. HKDF is
+        // built entirely on the HMAC cross-validated above, so these vectors
+        // anchor the extract/expand glue (multi-block expand + the empty-salt /
+        // empty-info default path). OpenSSL's 3.0 EVP_KDF API is unavailable under
+        // this build's OPENSSL_API_COMPAT pin, so the RFC vectors are the anchor;
+        // the §Q9 byte-equal-vs-OpenSSL gate runs through the HMAC building block.
+        {
+            uint8_t ikm[22]; std::memset(ikm, 0x0b, 22);
+            // Test Case 1: 13-byte salt + 10-byte info, L=42 (two expand blocks).
+            {
+                uint8_t salt[13]; for (int i=0;i<13;i++) salt[i]=(uint8_t)i;
+                uint8_t info[10]; for (int i=0;i<10;i++) info[i]=(uint8_t)(0xf0+i);
+                uint8_t okm[42];
+                determ_hkdf_sha256(salt,13, ikm,22, info,10, okm,42);
+                check(to_hexs(okm,42)=="3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+                      "HKDF-SHA-256 matches RFC 5869 Test Case 1 (salt + info)");
+            }
+            // Test Case 3: empty salt + empty info (the zero-salt default path), L=42.
+            {
+                uint8_t okm[42];
+                determ_hkdf_sha256(nullptr,0, ikm,22, nullptr,0, okm,42);
+                check(to_hexs(okm,42)=="8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
+                      "HKDF-SHA-256 matches RFC 5869 Test Case 3 (no salt, no info)");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": sha2-c99 "
-                  << (fail == 0 ? "all cross-validation + NIST KATs matched" : "had failures")
-                  << " (libsodium-free C99 SHA-2 vs OpenSSL backend — the §Q9 gate)\n";
+                  << (fail == 0 ? "all cross-validation + NIST/RFC KATs matched" : "had failures")
+                  << " (libsodium-free C99 SHA-2 + HMAC + HKDF vs OpenSSL backend — the §Q9 gate)\n";
         return fail == 0 ? 0 : 1;
     }
 

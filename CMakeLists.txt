@@ -92,6 +92,8 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
 # NIST KATs). Not yet wired into any call site — additive, validated module.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hkdf.c")
 
 add_executable(determ ${SOURCES})
 
