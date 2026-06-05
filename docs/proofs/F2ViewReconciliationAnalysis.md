@@ -20,6 +20,21 @@
 > **apply layer** (S-033 `state_root` + S-038 producer wiring, which ARE
 > shipped); the consensus-layer view-binding described here is the remaining
 > open work. This banner is removed when sites 1–4 of the wiring land.
+>
+> **UPDATE (commit 850d2c3): site 1 + 4a/4b are now LIVE.** `start_contrib_phase`
+> populates this node's eligible inbound-receipt key view and binds
+> `view_inbound_root` into the Phase-1 commit; `Block` carries per-creator
+> `creator_view_{eq,abort,inbound}_roots`; `BlockValidator` recomputes each
+> creator's commit WITH those roots (so the F2-bound creator sig verifies); and
+> S-006 equivocation detection now compares the v1 CORE commit only (a member's
+> view legitimately varies across re-rounds). Verified: build + FAST 147/147 +
+> the full cross-shard suite (`test_cross_shard_transfer` credits B end-to-end).
+> STILL pending for full S-016 / S-030-D2 closure: **site 3** (build_body filters
+> `inbound_receipts` to `reconcile_intersection` of the committed views — block
+> content is still each node's local eligible set, so cross-committee
+> determinism is carried+validated but not yet ENFORCED), the V21–V26
+> contrib-view validator passes, and binding the reconciled roots into
+> `compute_block_digest`.
 
 This document is the analytic companion to **FB22** (`docs/proofs/tla/F2ViewReconciliation.tla`). FB22 formalizes the v2.7 F2 view-reconciliation primitives + the validator-side passes V21..V26 in TLA+; the present document states and proves the same six algebraic invariants in plain prose, with line-by-line citations to the C++ implementation at `src/node/producer.cpp:335..496`.
 
