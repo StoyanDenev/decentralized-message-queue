@@ -64,6 +64,9 @@
 #  include <netdb.h>
 #  include <errno.h>
 #  include <fcntl.h>  // open(O_RDONLY) — keyfile-rotate fsync path
+#  include <sys/stat.h>  // ::chmod(0600) — POSIX keyfile/output perms.
+                         // On Windows chmod comes transitively from <io.h>
+                         // above; on Linux/POSIX it lives here.
 #endif
 
 using namespace determ::wallet;
