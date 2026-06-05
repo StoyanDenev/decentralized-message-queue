@@ -135,6 +135,9 @@ while len(row) > 1:
     row = [inner_hash(row[i], row[i+1]) for i in range(0, len(row), 2)]
     idx //= 2
 root = row[0]
+# S-040: the committed state_root wraps the inner root with the leaf count:
+# SHA-256(0x02 || u32_be(leaf_count) || inner_root). Match the daemon convention.
+root = hashlib.sha256(b"\x02" + struct.pack(">I", leaf_count) + root).digest()
 
 proof_doc = {
     "state_root":   root.hex(),
@@ -171,6 +174,8 @@ h.update(u64(locked)); h.update(u64(unlock_height))
 svh = h.digest()
 skey = b"s:" + domain.encode()
 root = hashlib.sha256(b"\x00" + struct.pack(">I", len(skey)) + skey + svh).digest()
+# S-040: single-leaf tree — wrap the lone leaf hash (inner root) with leaf_count=1.
+root = hashlib.sha256(b"\x02" + struct.pack(">I", 1) + root).digest()
 proof_doc = {
     "state_root": root.hex(), "namespace": "s", "key_bytes": skey.hex(),
     "value_hash": svh.hex(), "target_index": 0, "leaf_count": 1,

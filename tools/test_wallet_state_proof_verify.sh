@@ -111,6 +111,9 @@ while len(row) > 1:
     row = nxt
     idx //= 2
 root = row[0]
+# S-040: the committed state_root wraps the inner root with the leaf count:
+# SHA-256(0x02 || u32_be(leaf_count) || inner_root). Match the daemon convention.
+root = hashlib.sha256(b"\x02" + struct.pack(">I", leaf_count) + root).digest()
 
 tk, tv = pairs[target_index]
 # value_hash is the committed value-hash leaf field directly (already a

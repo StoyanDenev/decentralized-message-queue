@@ -20544,14 +20544,13 @@ int cmd_snapshot_verify(int argc, char** argv) {
 // compared against --root, but trust flows from the operator's anchored root —
 // a proof that "verifies" only against its own self-asserted root is worthless.
 //
-// S-040 caller-trust note (merkle.hpp §S-040): leaf_count is NOT bound into the
-// leaf/inner hashes, so an attacker who controls BOTH the proof and the
-// leaf_count can craft (target_index, leaf_count) pairs that share a walk shape.
-// This tool consumes leaf_count from the proof file as-is; the operator MUST
-// source the proof (and ideally an attestation binding leaf_count) from a path
-// anchored to the same committee-signed state_root they pass via --root. This
-// matches the documented operator-side mitigation: a single trusted anchor for
-// BOTH the root and the leaf_count closes the gap.
+// S-040 (merkle.hpp §S-040): leaf_count IS bound into the committed root. The
+// committed state_root is merkle_root_wrap(inner_root, leaf_count) =
+// SHA-256(0x02 || u32_be(leaf_count) || inner_root), domain-separated from the
+// 0x00 leaf / 0x01 inner prefixes. A verifier that re-derives with a forged
+// leaf_count computes a different wrapper hash and rejects (see the wrap step
+// below), so leaf_count needs no out-of-band attestation — the single
+// committee-signed --root anchors both the tree contents AND the leaf count.
 //
 // Algorithm (byte-identical to crypto::merkle_verify):
 //   leaf_hash  = SHA-256( 0x00 || u32_be(key_len) || key || value_hash )
@@ -20561,7 +20560,8 @@ int cmd_snapshot_verify(int argc, char** argv) {
 //           sib = next proof sibling
 //           current = idx even ? inner(current,sib) : inner(sib,current)
 //           idx/=2; level_size/=2
-//   VALID iff every sibling consumed (no extra/missing) AND current==root.
+//   VALID iff every sibling consumed (no extra/missing) AND
+//           merkle_root_wrap(current, leaf_count) == root   (S-040 wrap step).
 //
 // Exit codes:
 //   0  VALID (proof verifies against --root; proof.state_root matches --root)
@@ -20613,11 +20613,10 @@ int cmd_state_proof_verify(int argc, char** argv) {
                 "          exit_reason: \"valid\" | \"invalid\"\n"
                 "                     | \"invalid_args\" | \"malformed_proof\" }\n"
                 "\n"
-                "  S-040 note: leaf_count is NOT bound into the Merkle hashes\n"
-                "  (merkle.hpp §S-040). Source the proof AND its leaf_count from a\n"
-                "  path anchored to the same committee-signed state_root you pass\n"
-                "  via --root; do not mix a proof from one untrusted source with a\n"
-                "  leaf_count from another.\n"
+                "  S-040: leaf_count IS bound into the committed root via\n"
+                "  merkle_root_wrap (SHA-256(0x02 || u32_be(leaf_count) ||\n"
+                "  inner_root)), so a forged leaf_count is rejected here; the\n"
+                "  single committee-signed --root anchors the contents AND count.\n"
                 "\n"
                 "  Exit codes:\n"
                 "    0  VALID (verifies against --root; proof.state_root matches)\n"
@@ -20837,9 +20836,26 @@ int cmd_state_proof_verify(int argc, char** argv) {
                 merkle_ok = false;
                 fail_reason = "extra unused sibling hashes "
                               "(proof_len does not match tree depth)";
-            } else if (current != root) {
-                merkle_ok = false;
-                fail_reason = "recomputed root does not match --root";
+            } else {
+                // S-040: the committed state_root is NOT the bare inner Merkle
+                // root — it is merkle_root_wrap(inner_root, leaf_count) =
+                // SHA-256(0x02 || u32_be(leaf_count) || inner_root), the value
+                // the daemon's rpc_state_proof returns (= compute_state_root()).
+                // Wrap the recomputed inner root before comparing to --root,
+                // matching src/crypto/merkle.cpp::merkle_verify.
+                std::vector<uint8_t> wbuf;
+                wbuf.reserve(1 + 4 + 32);
+                wbuf.push_back(0x02);
+                uint32_t lc = static_cast<uint32_t>(leaf_count);
+                wbuf.push_back(static_cast<uint8_t>((lc >> 24) & 0xff));
+                wbuf.push_back(static_cast<uint8_t>((lc >> 16) & 0xff));
+                wbuf.push_back(static_cast<uint8_t>((lc >> 8)  & 0xff));
+                wbuf.push_back(static_cast<uint8_t>( lc        & 0xff));
+                wbuf.insert(wbuf.end(), current.begin(), current.end());
+                if (sha256(wbuf) != root) {
+                    merkle_ok = false;
+                    fail_reason = "recomputed root does not match --root";
+                }
             }
         }
     }
@@ -21027,9 +21043,9 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                 "  height; inactive = inactive_from <= height (op=1 deactivation\n"
                 "  after its DAPP_GRACE_BLOCKS deferral has elapsed).\n"
                 "\n"
-                "  S-040 note: leaf_count is NOT bound into the Merkle hashes.\n"
-                "  Source the proof AND its leaf_count from a path anchored to the\n"
-                "  same committee-signed state_root you pass via --root.\n"
+                "  S-040: leaf_count IS bound into the committed root via\n"
+                "  merkle_root_wrap, so a forged leaf_count is rejected; the single\n"
+                "  committee-signed --root anchors the tree contents AND the count.\n"
                 "\n"
                 "  Exit codes:\n"
                 "    0  VALID (proof verifies against --root; entry re-derives the\n"
@@ -21388,9 +21404,26 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                 merkle_ok = false;
                 fail_reason = "extra unused sibling hashes "
                               "(proof_len does not match tree depth)";
-            } else if (current != root) {
-                merkle_ok = false;
-                fail_reason = "recomputed root does not match --root";
+            } else {
+                // S-040: the committed state_root is NOT the bare inner Merkle
+                // root — it is merkle_root_wrap(inner_root, leaf_count) =
+                // SHA-256(0x02 || u32_be(leaf_count) || inner_root), the value
+                // the daemon's rpc_state_proof returns (= compute_state_root()).
+                // Wrap the recomputed inner root before comparing to --root,
+                // matching src/crypto/merkle.cpp::merkle_verify.
+                std::vector<uint8_t> wbuf;
+                wbuf.reserve(1 + 4 + 32);
+                wbuf.push_back(0x02);
+                uint32_t lc = static_cast<uint32_t>(leaf_count);
+                wbuf.push_back(static_cast<uint8_t>((lc >> 24) & 0xff));
+                wbuf.push_back(static_cast<uint8_t>((lc >> 16) & 0xff));
+                wbuf.push_back(static_cast<uint8_t>((lc >> 8)  & 0xff));
+                wbuf.push_back(static_cast<uint8_t>( lc        & 0xff));
+                wbuf.insert(wbuf.end(), current.begin(), current.end());
+                if (sha256(wbuf) != root) {
+                    merkle_ok = false;
+                    fail_reason = "recomputed root does not match --root";
+                }
             }
         }
     }
@@ -21608,9 +21641,9 @@ int cmd_verify_stake_unlock(int argc, char** argv) {
                 "  locked (0 once eligible; absent when unlock_pending is false,\n"
                 "  since no finite countdown exists).\n"
                 "\n"
-                "  S-040 note: leaf_count is NOT bound into the Merkle hashes.\n"
-                "  Source the proof AND its leaf_count from a path anchored to the\n"
-                "  same committee-signed state_root you pass via --root.\n"
+                "  S-040: leaf_count IS bound into the committed root via\n"
+                "  merkle_root_wrap, so a forged leaf_count is rejected; the single\n"
+                "  committee-signed --root anchors the tree contents AND the count.\n"
                 "\n"
                 "  Exit codes:\n"
                 "    0  VALID (proof verifies against --root; entry re-derives the\n"
@@ -21903,9 +21936,26 @@ int cmd_verify_stake_unlock(int argc, char** argv) {
                 merkle_ok = false;
                 fail_reason = "extra unused sibling hashes "
                               "(proof_len does not match tree depth)";
-            } else if (current != root) {
-                merkle_ok = false;
-                fail_reason = "recomputed root does not match --root";
+            } else {
+                // S-040: the committed state_root is NOT the bare inner Merkle
+                // root — it is merkle_root_wrap(inner_root, leaf_count) =
+                // SHA-256(0x02 || u32_be(leaf_count) || inner_root), the value
+                // the daemon's rpc_state_proof returns (= compute_state_root()).
+                // Wrap the recomputed inner root before comparing to --root,
+                // matching src/crypto/merkle.cpp::merkle_verify.
+                std::vector<uint8_t> wbuf;
+                wbuf.reserve(1 + 4 + 32);
+                wbuf.push_back(0x02);
+                uint32_t lc = static_cast<uint32_t>(leaf_count);
+                wbuf.push_back(static_cast<uint8_t>((lc >> 24) & 0xff));
+                wbuf.push_back(static_cast<uint8_t>((lc >> 16) & 0xff));
+                wbuf.push_back(static_cast<uint8_t>((lc >> 8)  & 0xff));
+                wbuf.push_back(static_cast<uint8_t>( lc        & 0xff));
+                wbuf.insert(wbuf.end(), current.begin(), current.end());
+                if (sha256(wbuf) != root) {
+                    merkle_ok = false;
+                    fail_reason = "recomputed root does not match --root";
+                }
             }
         }
     }
@@ -23865,9 +23915,9 @@ void print_usage() {
         "                                             state_root is cross-checked against --root.\n"
         "                                             --root is the 64-hex trust anchor (source\n"
         "                                             it from a committee-signed header/snapshot\n"
-        "                                             tail). S-040: leaf_count is unbound — source\n"
-        "                                             the proof + its leaf_count from a path\n"
-        "                                             anchored to the same --root. Exit 0 VALID,\n"
+        "                                             tail). S-040: leaf_count is bound into the\n"
+        "                                             committed root via merkle_root_wrap, so a\n"
+        "                                             forged count is rejected. Exit 0 VALID,\n"
         "                                             1 args/file/malformed-proof, 2 INVALID.\n"
         "  verify-dapp-registration                   OFFLINE trustless verifier for a v2.18\n"
         "                       --proof <proof.json>  DAPP_REGISTER on-chain registration — the\n"
