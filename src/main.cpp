@@ -667,6 +667,10 @@ Additional in-process tests:
                                               survives snapshot restore —
                                               exactly-once-credit preserved
                                               across fast-sync bootstrap
+  determ test-applied-receipt-snapshot        i: namespace non-default snapshot
+                                              round-trip — field-for-field set
+                                              + state_root preserved; tamper /
+                                              drop diverges the root
   determ test-stake-accounting                Full stake-state-machine
                                               invariants — STAKE / UNSTAKE /
                                               DEREGISTER / slash interaction
@@ -22754,6 +22758,202 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": applied-receipt-restore " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-041 lesson extended to the i: (applied_inbound_receipts) state-root
+    // namespace. The sibling test-applied-receipt-restore proves the dedup
+    // contract survives bootstrap (re-credit is a NO-OP) and that the root is
+    // preserved across ONE restore. It does NOT assert that the i: SET itself
+    // round-trips field-for-field (every original (src_shard, tx_hash) entry
+    // is present post-restore AND no spurious entry was injected), nor that a
+    // TAMPERED or DROPPED receipt in the snapshot actually MOVES the
+    // compute_state_root() value. Those are the two angles closed here:
+    //
+    //   (1) Field-for-field i:-set round-trip via serialize_state →
+    //       restore_from_snapshot. Every applied (src_shard, tx_hash) pair is
+    //       present on the restored chain (inbound_receipt_applied true) AND
+    //       absent pairs stay absent (no over-restore), AND the snapshot JSON
+    //       array matches the populated set exactly (size + per-entry
+    //       src_shard/tx_hash). The accumulated_inbound counter — the A1
+    //       supply binding the i: set feeds — also survives.
+    //
+    //   (2) state_root sensitivity. Because the i: namespace contributes a
+    //       leaf per applied receipt (chain.cpp build_state_leaves: key
+    //       "i:"+src_be8+tx_hash, presence-marker value), DROPPING any one
+    //       receipt from the snapshot OR TAMPERING its tx_hash must change
+    //       compute_state_root() after restore. A namespace silently omitted
+    //       from build_state_leaves (the S-037-class bug) would make the root
+    //       insensitive to the i: set — this test would catch that.
+    //
+    // The i: set is populated through the REAL apply path (inbound_receipts on
+    // appended blocks), exactly as test-applied-receipt-restore does, so the
+    // fixture is a genuine apply-built chain rather than a JSON splice.
+    if (cmd == "test-applied-receipt-snapshot") {
+        using namespace determ;
+        using namespace determ::chain;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        GenesisConfig cfg;
+        cfg.chain_id = "applied-receipt-snapshot-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain = "bob"; bob_bal.balance = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        // A receipt with a fully-distinct 32-byte tx_hash (not just byte 0)
+        // so the i:-namespace key is non-trivial across its whole width — a
+        // tamper that flips a late byte still moves the leaf key + the root.
+        auto make_receipt = [](ShardId src_shard, uint8_t seed,
+                               const std::string& to_domain, uint64_t amount) {
+            CrossShardReceipt r;
+            r.src_shard = src_shard; r.dst_shard = 0;
+            r.src_block_index = 1;
+            r.src_block_hash = Hash{};
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i)
+                h[i] = uint8_t(seed ^ (i * 7 + 1));
+            r.tx_hash = h;
+            r.from = "remote";
+            r.to = to_domain;
+            r.amount = amount;
+            r.fee = 0; r.nonce = 0;
+            return r;
+        };
+        // The same tx_hash derivation, exposed for predicate lookups below.
+        auto seed_hash = [](uint8_t seed) {
+            Hash h{};
+            for (size_t i = 0; i < h.size(); ++i)
+                h[i] = uint8_t(seed ^ (i * 7 + 1));
+            return h;
+        };
+
+        // ── Fixture: apply 4 NON-trivial inbound receipts across 2 source
+        // shards. Each distinct (src_shard, tx_hash) becomes one i: leaf.
+        struct RKey { ShardId src; uint8_t seed; uint64_t amount; };
+        const std::vector<RKey> KEYS = {
+            {ShardId{1}, 0x21, 11},
+            {ShardId{1}, 0x42, 22},
+            {ShardId{2}, 0x63, 33},
+            {ShardId{5}, 0x84, 44},
+        };
+        const uint64_t TOTAL_CREDIT = 11 + 22 + 33 + 44;
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        {
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            for (auto& k : KEYS)
+                b.inbound_receipts.push_back(
+                    make_receipt(k.src, k.seed, "bob", k.amount));
+            c.append(b);
+        }
+
+        // ── 0. Fixture sanity: all 4 receipts applied (guards vacuous pass).
+        {
+            bool all_in = true;
+            for (auto& k : KEYS)
+                all_in = all_in && c.inbound_receipt_applied(k.src, seed_hash(k.seed));
+            check(all_in && c.balance("bob") == 200 + TOTAL_CREDIT
+                  && c.accumulated_inbound() == TOTAL_CREDIT,
+                  "fixture: all 4 NON-trivial receipts applied (i: set populated)");
+        }
+
+        // ── 1. Snapshot JSON carries the i: set field-for-field.
+        json snap = c.serialize_state(16);
+        check(snap.contains("applied_inbound_receipts")
+              && snap["applied_inbound_receipts"].is_array()
+              && snap["applied_inbound_receipts"].size() == KEYS.size(),
+              "serialize_state: applied_inbound_receipts array has all 4 entries");
+        {
+            // Every spliced entry must match an original (src_shard, tx_hash).
+            bool every_entry_matches = true;
+            for (auto& e : snap["applied_inbound_receipts"]) {
+                bool matched = false;
+                for (auto& k : KEYS) {
+                    if (e.at("src_shard").get<uint64_t>() == uint64_t(k.src)
+                        && e.at("tx_hash").get<std::string>()
+                               == to_hex(seed_hash(k.seed)))
+                        matched = true;
+                }
+                every_entry_matches = every_entry_matches && matched;
+            }
+            check(every_entry_matches,
+                  "serialize_state: every i: entry matches an applied (src_shard, tx_hash)");
+        }
+
+        // ── 2. restore_from_snapshot reproduces the i: set field-for-field:
+        //    every original present, AND an unapplied pair stays absent (no
+        //    over-restore / spurious-entry injection).
+        Chain r = Chain::restore_from_snapshot(snap);
+        {
+            bool all_present = true;
+            for (auto& k : KEYS)
+                all_present = all_present
+                    && r.inbound_receipt_applied(k.src, seed_hash(k.seed));
+            // A pair that was NEVER applied must remain absent post-restore.
+            bool absent_stays_absent =
+                  !r.inbound_receipt_applied(ShardId{1}, seed_hash(0xFE))
+               && !r.inbound_receipt_applied(ShardId{9}, seed_hash(0x21));
+            check(all_present && absent_stays_absent,
+                  "restore: i: set round-trips exactly (originals present, non-members absent)");
+        }
+        check(r.accumulated_inbound() == TOTAL_CREDIT
+              && r.balance("bob") == c.balance("bob"),
+              "restore: accumulated_inbound + bob balance preserved (A1 binding)");
+
+        // ── 3. S-033: compute_state_root preserved through the round-trip.
+        const Hash root0 = c.compute_state_root();
+        check(r.compute_state_root() == root0,
+              "S-033: compute_state_root preserved (i: leaves reproduced)");
+
+        // ── 4. TAMPER sensitivity: flip one receipt's tx_hash in the
+        //    snapshot. The i: leaf key changes → root MUST diverge.
+        {
+            json tampered = snap;
+            // Mutate the FIRST entry's tx_hash to a value not in the set.
+            std::string bad = to_hex(seed_hash(0xCC));
+            tampered["applied_inbound_receipts"][0]["tx_hash"] = bad;
+            Chain rt = Chain::restore_from_snapshot(tampered);
+            check(rt.compute_state_root() != root0,
+                  "tamper: mutated tx_hash diverges state_root (i: leaf is bound)");
+        }
+
+        // ── 5. DROP sensitivity: remove one receipt from the snapshot. One
+        //    fewer i: leaf → root MUST diverge (and the dropped pair is gone).
+        {
+            json dropped = snap;
+            json kept = json::array();
+            // Drop the last entry.
+            for (size_t i = 0; i + 1 < dropped["applied_inbound_receipts"].size(); ++i)
+                kept.push_back(dropped["applied_inbound_receipts"][i]);
+            dropped["applied_inbound_receipts"] = kept;
+            Chain rd = Chain::restore_from_snapshot(dropped);
+            bool root_moved = rd.compute_state_root() != root0;
+            // The dropped pair is whichever original is no longer present.
+            size_t still_present = 0;
+            for (auto& k : KEYS)
+                if (rd.inbound_receipt_applied(k.src, seed_hash(k.seed)))
+                    ++still_present;
+            check(root_moved && still_present == KEYS.size() - 1,
+                  "drop: removed receipt diverges state_root + leaves exactly 3 in i: set");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": applied-receipt-snapshot " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
