@@ -308,6 +308,13 @@ public:
     void     set_suspension_slash(uint64_t s) { suspension_slash_ = s; }
     uint64_t unstake_delay()    const { return unstake_delay_; }
     void     set_unstake_delay(uint64_t d)    { unstake_delay_ = d; }
+    // v2.7 F2 / S-016 migration gate (genesis-pinned, set at boot from
+    // GenesisConfig::v2_7_f2_active_from_height). Block height at/after which the
+    // producer populates ContribMsg view lists + binds the view roots into the
+    // digest, and the validator runs the V21..V26 reconciliation passes. 0 =
+    // active from genesis (new chains); UINT64_MAX = never (stay on v1 commit).
+    uint64_t f2_active_from_height() const { return f2_active_from_height_; }
+    void     set_f2_active_from_height(uint64_t h) { f2_active_from_height_ = h; }
 
     // R4 Phase 1: under-quorum merge thresholds. Read by the upcoming
     // beacon-side trigger detection logic (Phase 2).
@@ -588,6 +595,7 @@ private:
     // A5 Phase 3: instance-state promotion of params.hpp constants.
     uint64_t                                    suspension_slash_{10};
     uint64_t                                    unstake_delay_{1000};
+    uint64_t                                    f2_active_from_height_{0};
     // R4 Phase 1: merge thresholds (defaults match GenesisConfig).
     uint32_t                                    merge_threshold_blocks_{100};
     uint32_t                                    revert_threshold_blocks_{200};

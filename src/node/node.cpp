@@ -144,6 +144,7 @@ Node::Node(const Config& cfg)
     uint32_t genesis_revert_threshold = 200;
     uint32_t genesis_merge_grace      = 10;
     chain::InclusionModel genesis_inclusion = chain::InclusionModel::STAKE_INCLUSION;
+    uint64_t genesis_f2_active = 0;  // v2.7 F2 / S-016 migration gate (genesis-pinned)
     std::optional<chain::GenesisConfig> gcfg_opt;
     if (!cfg_.genesis_path.empty()) {
         auto gcfg = chain::GenesisConfig::load(cfg_.genesis_path);
@@ -170,6 +171,7 @@ Node::Node(const Config& cfg)
         genesis_revert_threshold     = gcfg.revert_threshold_blocks;
         genesis_merge_grace          = gcfg.merge_grace_blocks;
         genesis_inclusion            = gcfg.inclusion_model;
+        genesis_f2_active            = gcfg.v2_7_f2_active_from_height;
         validator_.set_k_block_sigs(cfg_.k_block_sigs);
         validator_.set_m_pool(cfg_.m_creators);
         validator_.set_bft_enabled(cfg_.bft_enabled);
@@ -520,6 +522,11 @@ Node::Node(const Config& cfg)
     }
 
 chain_loaded:
+    // v2.7 F2 / S-016 migration gate (genesis-pinned). Set after all chain_
+    // construction paths (load / snapshot-restore / genesis-bootstrap / legacy)
+    // converge here, so every path picks it up. 0 = active from genesis;
+    // UINT64_MAX = never (chain stays on the v1 commit shape).
+    chain_.set_f2_active_from_height(genesis_f2_active);
     registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
 
     gossip_.set_hello(cfg_.domain, cfg_.listen_port);
