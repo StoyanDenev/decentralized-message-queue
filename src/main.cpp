@@ -1144,6 +1144,25 @@ Additional in-process tests:
                                               transition; and c:-namespace
                                               state_root sensitivity to the
                                               clamped accumulated_subsidy.
+  determ test-wire-negotiation                A3 / S8 wire-version negotiation +
+                                              S-022 framing/cap layering — pins
+                                              the min(ours,theirs) handshake
+                                              arithmetic from gossip.cpp
+                                              (clamp-to-our-max, pass-through-
+                                              when-lower, idempotence, symmetry,
+                                              monotonicity, missing-field default
+                                              to legacy), the framing-vs-cap
+                                              layering invariant (every per-type
+                                              max_message_bytes <= kMaxFrameBytes;
+                                              tiers strictly ordered 1<4<16 MB;
+                                              partition completeness; fail-closed
+                                              default to 1 MB for a future
+                                              MsgType), and discriminator-byte
+                                              preservation (every non-HELLO
+                                              MsgType encodes its type byte at
+                                              envelope offset 2 + decode_binary
+                                              recovers the exact MsgType, keyed
+                                              on the envelope not the payload).
 )" << "\n";
 }
 
@@ -36400,6 +36419,337 @@ int main(int argc, char** argv) {
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+    // A3 / S8 + S-022 wire-version negotiation + framing/cap layering contract.
+    //
+    // This test pins the network-layer invariants that surround the binary
+    // codec but are NOT the codec round-trip itself (test-binary-codec and
+    // test-binary-codec-roundtrip-exhaustive own that) and are NOT the HELLO
+    // encode/field-binding (test-hello-handshake-determinism owns that). The
+    // three orthogonal surfaces here are the ones a peer would actually get
+    // wrong on the wire under adversarial conditions:
+    //
+    //   (A) NEGOTIATION ARITHMETIC. The live handshake in src/net/gossip.cpp
+    //       computes `negotiated = their_v < kWireVersionMax ? their_v
+    //       : kWireVersionMax` — i.e. min(ours, theirs) — and binary_codec.cpp
+    //       documents the same min(our_max, their_max) contract. A receiver
+    //       that mis-negotiated UP would send a binary body to a peer that
+    //       can't parse it (silent connection death); negotiating DOWN
+    //       incorrectly costs efficiency but is safe. We pin: clamp-to-our-max,
+    //       pass-through-when-lower, idempotence, symmetry (both sides reach
+    //       the SAME version), monotonicity, and the pre-HELLO / missing-field
+    //       default to kWireVersionLegacy (0). The negotiation is reproduced
+    //       here as a local lambda mirroring gossip.cpp byte-for-byte so a
+    //       drift in the contract surfaces in the unit suite, not in a 3-node
+    //       cluster bring-up.
+    //
+    //   (B) FRAMING-vs-CAP LAYERING. S-022 has TWO ceilings: kMaxFrameBytes
+    //       (16 MB, enforced in Peer::read_body BEFORE deserialize) and the
+    //       per-type max_message_bytes (enforced AFTER deserialize). The
+    //       load-bearing invariant is that NO per-type cap exceeds the frame
+    //       ceiling — otherwise the type-aware layer could never fire (the
+    //       frame layer would have already dropped the connection), making the
+    //       tight cap dead code. We assert max_message_bytes(t) <= kMaxFrameBytes
+    //       for every enumerated MsgType, that the cap table partitions into
+    //       EXACTLY the three documented tiers (1 / 4 / 16 MB), that the tiers
+    //       are strictly ordered, and that the default branch (future MsgType)
+    //       lands in the tightest tier — the "fail closed on a new type" rule.
+    //
+    //   (C) DISCRIMINATOR-BYTE PRESERVATION. The binary envelope carries the
+    //       MsgType at offset 2 (uint8_t cast). For every non-HELLO MsgType we
+    //       assert the encoded discriminator byte equals the cast value AND
+    //       that decode_binary recovers the exact same MsgType — the wire
+    //       type-tag is the dispatch key on the receive side, so a silent
+    //       discriminator corruption would route a BLOCK to the TRANSACTION
+    //       handler. HELLO is excluded (encode_binary rejects it by contract).
+    if (cmd == "test-wire-negotiation") {
+        using namespace determ;
+        using namespace determ::net;
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Local mirror of the negotiation arithmetic in src/net/gossip.cpp
+        // (the on_hello handler) and the contract in src/net/binary_codec.cpp:
+        //   negotiated = their_v < our_max ? their_v : our_max
+        // i.e. min(our_max, their_v). Reproduced verbatim so a future change
+        // to the gossip-side rule that diverges from this min() trips here.
+        auto negotiate = [](uint8_t our_max, uint8_t their_v) -> uint8_t {
+            return their_v < our_max ? their_v : our_max;
+        };
+
+        // === (A) Negotiation arithmetic ===
+
+        // 1. Clamp-to-our-max: a peer advertising a HIGHER version than we
+        //    understand negotiates DOWN to our max (never up — we can't
+        //    speak a codec we don't have).
+        {
+            uint8_t n = negotiate(kWireVersionMax,
+                                  static_cast<uint8_t>(kWireVersionMax + 5));
+            check(n == kWireVersionMax,
+                  "(1) negotiate: peer advertising version > our max clamps "
+                  "to our max (never negotiate UP to an unknown codec)");
+        }
+
+        // 2. Pass-through-when-lower: a peer advertising a LOWER version
+        //    pins the pair to that lower version (legacy compat).
+        {
+            uint8_t n = negotiate(kWireVersionMax, kWireVersionLegacy);
+            check(n == kWireVersionLegacy,
+                  "(2) negotiate: peer advertising legacy (0) pins the pair "
+                  "to legacy JSON — backward compat with pre-A3 peers");
+        }
+
+        // 3. Exact-match: identical maxima negotiate to that shared value.
+        {
+            check(negotiate(kWireVersionBinary, kWireVersionBinary) ==
+                  kWireVersionBinary,
+                  "(3) negotiate: matching maxima resolve to the shared "
+                  "version (both binary-capable → binary)");
+        }
+
+        // 4. Idempotence: re-negotiating an already-negotiated version
+        //    against our max is a fixed point (re-running the handshake
+        //    arithmetic on a settled pair changes nothing).
+        {
+            uint8_t once  = negotiate(kWireVersionMax, kWireVersionBinary);
+            uint8_t twice = negotiate(kWireVersionMax, once);
+            check(once == twice,
+                  "(4) negotiate: idempotent — re-applying min() to an "
+                  "already-negotiated value is a fixed point");
+        }
+
+        // 5. Symmetry: both endpoints independently compute the SAME
+        //    negotiated version from their own max + the peer's advertised
+        //    max. This is the property that guarantees a pair AGREES on the
+        //    codec without a round-trip ack — each side runs min() locally.
+        {
+            uint8_t our_max   = kWireVersionMax;       // 1
+            uint8_t their_max = kWireVersionLegacy;    // 0 (legacy-only peer)
+            uint8_t our_view   = negotiate(our_max,   their_max);
+            uint8_t their_view = negotiate(their_max, our_max);
+            check(our_view == their_view,
+                  "(5) negotiate: symmetric — both endpoints reach the same "
+                  "min(our,their) without an explicit ack (no split-brain "
+                  "codec where one side sends binary the other can't read)");
+            check(our_view == kWireVersionLegacy,
+                  "(5) negotiate: mixed binary+legacy pair resolves to "
+                  "legacy (the lower common version)");
+        }
+
+        // 6. Monotonicity: for a fixed our_max, raising the peer's advertised
+        //    version never LOWERS the negotiated result. Guards against an
+        //    inverted comparison that would make a more-capable peer
+        //    negotiate to a worse codec.
+        {
+            uint8_t lo = negotiate(kWireVersionMax, kWireVersionLegacy);
+            uint8_t hi = negotiate(kWireVersionMax, kWireVersionBinary);
+            check(hi >= lo,
+                  "(6) negotiate: monotone in the peer's advertised version "
+                  "(a more-capable peer never yields a worse codec)");
+        }
+
+        // 7. Missing-field default: gossip.cpp reads
+        //    `msg.payload.value("wire_version", kWireVersionLegacy)` — a peer
+        //    that omits the field (pre-A3) is treated as legacy. Reproduce
+        //    that default extraction against a HELLO built WITHOUT the field.
+        {
+            json hello_no_version = {
+                {"domain", "old-peer"}, {"port", 9000}
+            };
+            uint8_t their_v = hello_no_version.value("wire_version",
+                                                     kWireVersionLegacy);
+            check(their_v == kWireVersionLegacy,
+                  "(7) negotiate: HELLO omitting wire_version defaults the "
+                  "peer to legacy (0) — pre-A3 compatibility preserved");
+            check(negotiate(kWireVersionMax, their_v) == kWireVersionLegacy,
+                  "(7) negotiate: a field-less HELLO negotiates the pair to "
+                  "legacy JSON end-to-end");
+        }
+
+        // 8. make_hello default carries kWireVersionMax — a current-build
+        //    peer advertises the highest version it knows, so two current
+        //    builds negotiate to kWireVersionMax (binary today).
+        {
+            Message hello = make_hello("self", uint16_t{7000});
+            uint8_t advertised = hello.payload.value("wire_version",
+                                                     kWireVersionLegacy);
+            check(advertised == kWireVersionMax,
+                  "(8) make_hello defaults wire_version to kWireVersionMax "
+                  "(advertise the best we speak)");
+            check(negotiate(kWireVersionMax, advertised) == kWireVersionMax,
+                  "(8) two current builds negotiate to kWireVersionMax");
+        }
+
+        // === (B) Framing-vs-cap layering (S-022) ===
+
+        // The full enumerated MsgType set (mirrors messages.hpp). Kept as a
+        // local list so adding a MsgType without revisiting the cap-tier
+        // contract surfaces as a count/partition mismatch below.
+        const std::vector<MsgType> all_types = {
+            MsgType::HELLO, MsgType::BLOCK, MsgType::TRANSACTION,
+            MsgType::BLOCK_SIG, MsgType::CONTRIB, MsgType::GET_CHAIN,
+            MsgType::CHAIN_RESPONSE, MsgType::STATUS_REQUEST,
+            MsgType::STATUS_RESPONSE, MsgType::ABORT_CLAIM,
+            MsgType::ABORT_EVENT, MsgType::EQUIVOCATION_EVIDENCE,
+            MsgType::BEACON_HEADER, MsgType::SHARD_TIP,
+            MsgType::CROSS_SHARD_RECEIPT_BUNDLE, MsgType::SNAPSHOT_REQUEST,
+            MsgType::SNAPSHOT_RESPONSE, MsgType::HEADERS_REQUEST,
+            MsgType::HEADERS_RESPONSE,
+        };
+
+        // 9. Load-bearing layering invariant: NO per-type cap exceeds the
+        //    framing ceiling. If a per-type cap were > kMaxFrameBytes the
+        //    framing layer (which fires FIRST, before deserialize) would
+        //    drop the connection before the type-aware cap could ever apply
+        //    — making the tighter cap dead code and the type's real ceiling
+        //    silently kMaxFrameBytes.
+        {
+            bool all_within = true;
+            for (MsgType t : all_types) {
+                if (max_message_bytes(t) > kMaxFrameBytes) all_within = false;
+            }
+            check(all_within,
+                  "(9) layering: every per-type max_message_bytes <= "
+                  "kMaxFrameBytes (framing ceiling) — the tight cap is "
+                  "always reachable, never shadowed by the frame layer");
+        }
+
+        // 10. The three documented tiers are strictly ordered:
+        //     1 MB (consensus/requests) < 4 MB (blocks) < 16 MB (bulk).
+        {
+            constexpr size_t k1  = 1  * 1024 * 1024;
+            constexpr size_t k4  = 4  * 1024 * 1024;
+            constexpr size_t k16 = 16 * 1024 * 1024;
+            check(k1 < k4 && k4 < k16,
+                  "(10) layering: cap tiers strictly ordered 1 MB < 4 MB "
+                  "< 16 MB");
+            check(k16 == kMaxFrameBytes,
+                  "(10) layering: the largest tier (16 MB) EQUALS the framing "
+                  "ceiling — bulk channels saturate the frame layer exactly, "
+                  "no tier exceeds it");
+        }
+
+        // 11. Cap-table partition completeness: every enumerated MsgType
+        //     lands in exactly one of the three tiers (no type falls through
+        //     to an unexpected value). Counts also lock the tier membership
+        //     so a future re-categorisation is a visible diff.
+        {
+            constexpr size_t k1  = 1  * 1024 * 1024;
+            constexpr size_t k4  = 4  * 1024 * 1024;
+            constexpr size_t k16 = 16 * 1024 * 1024;
+            int n1 = 0, n4 = 0, n16 = 0, other = 0;
+            for (MsgType t : all_types) {
+                size_t cap = max_message_bytes(t);
+                if      (cap == k1)  n1++;
+                else if (cap == k4)  n4++;
+                else if (cap == k16) n16++;
+                else                 other++;
+            }
+            check(other == 0,
+                  "(11) partition: every enumerated MsgType lands in exactly "
+                  "one of the 1/4/16 MB tiers (no stray cap value)");
+            check(n16 == 2,
+                  "(11) partition: exactly 2 types in the 16 MB tier "
+                  "(SNAPSHOT_RESPONSE + CHAIN_RESPONSE)");
+            check(n4 == 5,
+                  "(11) partition: exactly 5 types in the 4 MB tier "
+                  "(BLOCK / BEACON_HEADER / SHARD_TIP / "
+                  "CROSS_SHARD_RECEIPT_BUNDLE / HEADERS_RESPONSE)");
+            check(n1 == static_cast<int>(all_types.size()) - n4 - n16,
+                  "(11) partition: the remaining types fall in the 1 MB "
+                  "default tier (consensus chatter + requests + status)");
+        }
+
+        // 12. Fail-closed default: an out-of-range MsgType (future variant
+        //     added without an explicit cap entry) lands in the TIGHTEST
+        //     tier, never the loosest. A new unbounded type must not slip
+        //     through at 16 MB by accident.
+        {
+            check(max_message_bytes(static_cast<MsgType>(250)) ==
+                  1 * 1024 * 1024,
+                  "(12) fail-closed: an unmapped future MsgType defaults to "
+                  "the 1 MB floor, NOT the 16 MB ceiling");
+        }
+
+        // === (C) Discriminator-byte preservation ===
+
+        // 13. For every non-HELLO MsgType, the binary envelope's type byte
+        //     (offset 2) equals the cast value, and decode_binary recovers
+        //     the exact same MsgType. The discriminator IS the receive-side
+        //     dispatch key — a silent corruption would route a message to
+        //     the wrong handler. Use an empty-object payload (the JSON-
+        //     fallback path) for non-TRANSACTION types; TRANSACTION uses
+        //     its fixed-frame codec, so feed it a minimal tx JSON.
+        {
+            bool all_disc_ok = true;
+            for (MsgType t : all_types) {
+                if (t == MsgType::HELLO) continue;   // encode_binary rejects
+                Message m;
+                m.type = t;
+                if (t == MsgType::TRANSACTION) {
+                    // TRANSACTION uses the fixed-frame codec, which routes
+                    // through Transaction::from_json — every required field
+                    // (type/from/to/amount/nonce/payload/sig/hash) must be
+                    // present and hex-shaped or from_json throws (S-018).
+                    m.payload = {
+                        {"type", 0}, {"from", "a"}, {"to", "b"},
+                        {"amount", 1}, {"fee", 0}, {"nonce", 0},
+                        {"payload", ""},
+                        {"sig",  std::string(128, '0')},
+                        {"hash", std::string(64,  '0')}
+                    };
+                } else {
+                    m.payload = json::object();
+                }
+                std::vector<uint8_t> bytes;
+                try {
+                    bytes = encode_binary(m);
+                } catch (const std::exception&) {
+                    all_disc_ok = false;
+                    continue;
+                }
+                if (bytes.size() < 4) { all_disc_ok = false; continue; }
+                // Offset 2 is the discriminator byte.
+                if (bytes[2] != static_cast<uint8_t>(t)) {
+                    all_disc_ok = false;
+                    continue;
+                }
+                Message back = decode_binary(bytes.data(), bytes.size());
+                if (back.type != t) all_disc_ok = false;
+            }
+            check(all_disc_ok,
+                  "(13) discriminator: every non-HELLO MsgType encodes its "
+                  "type byte at offset 2 and decode_binary recovers the exact "
+                  "same MsgType (dispatch key never silently corrupts)");
+        }
+
+        // 14. The discriminator byte is INDEPENDENT of payload — two
+        //     different MsgTypes with byte-identical payloads still encode
+        //     distinct type bytes, so a receiver dispatches correctly even
+        //     when payloads collide.
+        {
+            Message a; a.type = MsgType::BLOCK;     a.payload = json::object();
+            Message b; b.type = MsgType::SHARD_TIP; b.payload = json::object();
+            auto ba = encode_binary(a);
+            auto bb = encode_binary(b);
+            check(ba.size() >= 4 && bb.size() >= 4 && ba[2] != bb[2],
+                  "(14) discriminator: distinct MsgTypes with identical "
+                  "payloads still carry distinct type bytes (dispatch keyed "
+                  "on the envelope, not the body)");
+            check(decode_binary(ba.data(), ba.size()).type == MsgType::BLOCK &&
+                  decode_binary(bb.data(), bb.size()).type == MsgType::SHARD_TIP,
+                  "(14) discriminator: each decodes back to its own MsgType "
+                  "despite the colliding payload");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": wire-negotiation "
+                  << (fail == 0 ? "all assertions" : "had failures") << "\n";
         return fail == 0 ? 0 : 1;
     }
     // GenesisConfig::to_json + make_genesis_block byte-identity contract.

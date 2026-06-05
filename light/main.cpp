@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (19 total + help / version):
+// Subcommands (20 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -34,6 +34,7 @@
 //   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
 //   committee-at-height      Report committee-verified creators at block H
+//   decode-wire              OFFLINE decode + validate a binary wire frame
 //   help / version
 //
 // Trust-model invariants:
@@ -65,8 +66,10 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -278,6 +281,30 @@ void print_usage() {
         "      the chain advances past <H> the same query flips INCLUDED back\n"
         "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
         "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
+        "\n"
+        "Wire-format tooling (offline, no daemon):\n"
+        "  decode-wire --in <file> [--expect-type <NAME>] [--json]\n"
+        "      Decode + structurally validate a single Determ binary wire\n"
+        "      envelope (A3 / S8 wire-version 1) read from a raw artifact —\n"
+        "      the message BODY (the bytes that ride after the transport\n"
+        "      layer's [u32 big-endian length] frame header). Self-contained:\n"
+        "      re-implements the published envelope spec (src/net/\n"
+        "      binary_codec.cpp) INDEPENDENTLY of the daemon's codec, so it is\n"
+        "      an external conformance oracle — a producer that drifts from\n"
+        "      the documented byte layout is flagged, not trusted. Checks,\n"
+        "      fail-closed: 16 MB framing ceiling; magic 0xB1 + version 0x01 +\n"
+        "      zero reserved byte; msg_type in [0,18] (HELLO rejected — it is\n"
+        "      always JSON pre-negotiation); the S-022 per-type body cap\n"
+        "      (max_message_bytes: 1 MB chatter / 4 MB block-class / 16 MB\n"
+        "      snapshot+chain); and payload well-formedness — the TRANSACTION\n"
+        "      4×256-bit frame + trailer (reserved slot zero, exact lengths,\n"
+        "      no trailing bytes), or the [u32 LE json_len][json] wrapper for\n"
+        "      every other type (declared length matches the body exactly and\n"
+        "      parses as JSON). VALID → exit 0; any spec violation → MALFORMED\n"
+        "      (exit 3); I/O or usage error → exit 1. --expect-type asserts\n"
+        "      the decoded MsgType name (case-insensitive); a mismatch is\n"
+        "      MALFORMED. Use to fuzz/triage captured frames or to confirm a\n"
+        "      build's emitted frame conforms to the wire spec.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -3047,6 +3074,409 @@ int cmd_committee_at_height(int argc, char** argv) {
     }
 }
 
+// ──────────────────────────── decode-wire ──────────────────────────────
+//
+// OFFLINE decoder + structural validator for a single Determ binary wire
+// envelope (A3 / S8 wire-version 1). No daemon, no RPC, no genesis — it
+// reads a raw artifact (the message BODY, i.e. the bytes that ride after
+// the transport layer's [u32 big-endian length] frame header) and checks
+// it conforms to the published envelope spec in src/net/binary_codec.cpp +
+// include/determ/net/messages.hpp.
+//
+// Why a SEPARATE, self-contained decoder (not a link against the daemon's
+// binary_codec.cpp)? Same trust-minimization stance as the verify-*
+// commands: this binary re-implements the wire spec INDEPENDENTLY from the
+// published byte layout, so it is an external conformance oracle. If a
+// daemon (or a future codec refactor) emits a frame that drifts from the
+// documented format, this decoder flags it — it never inherits the
+// producer's bug by sharing the producer's code.
+//
+// What it enforces (fail-closed — any deviation → MALFORMED, exit 3):
+//   * Framing ceiling: body length <= kMaxFrameBytes (16 MB). The peer
+//     layer drops oversized frames pre-deserialize; we mirror that bound.
+//   * Envelope header (offsets 0..3): magic = 0xB1, version = 0x01,
+//     reserved byte = 0x00 (the codec zeroes it on encode; we reject
+//     non-zero rather than silently ignore, since a stray reserved byte
+//     means the artifact was not produced by a conforming encoder).
+//   * msg_type byte in the known MsgType range [0, 18]. HELLO (0) is
+//     rejected: HELLO is ALWAYS JSON pre-negotiation and is never legally
+//     carried inside a binary envelope (encode_binary throws on it).
+//   * S-022 per-type body-size cap: the post-deserialize body length must
+//     not exceed max_message_bytes(msg_type) (1 MB consensus chatter /
+//     4 MB block-class / 16 MB snapshot+chain). Reimplemented locally from
+//     the documented table so the artifact is checked against the SPEC,
+//     not against whatever the producing build happened to compile.
+//   * Payload well-formedness:
+//       - TRANSACTION: the 4×256-bit fixed frame + trailer parses cleanly,
+//         reserved amount-block slot is zero, lengths are consistent, and
+//         the trailer's length-prefixed from/to/sig/hash fit exactly.
+//       - all other types: a [u32 LE json_len][json_bytes] payload whose
+//         declared length matches the remaining body exactly and whose
+//         bytes parse as JSON.
+//
+// A clean artifact → VALID (exit 0) and a one-line (or --json) report of
+// the decoded type + sizes (+ tx scalar fields for TRANSACTION). A spec
+// violation → MALFORMED (exit 3). An I/O / usage error → exit 1. The
+// tri-state mirrors verify-tx-inclusion's verdict discipline: exit 3 is
+// reserved for "the artifact is structurally unsound", never conflated
+// with a usage error.
+
+namespace {
+
+// Local copy of the wire constants from include/determ/net/messages.hpp +
+// src/net/binary_codec.cpp. Duplicated ON PURPOSE: this decoder validates
+// an artifact against the PUBLISHED spec, so it must not depend on the
+// daemon's compiled values (that would defeat the cross-check). If the spec
+// ever changes, this table must be updated in lock-step with the codec —
+// tools/test_light_decode_wire.sh pins the magic/version/caps so drift is
+// caught in CI.
+constexpr uint8_t  kWireBinaryMagic    = 0xB1;
+constexpr uint8_t  kWireBinaryVersion  = 0x01;
+constexpr size_t   kWireMaxFrameBytes  = 16ull * 1024 * 1024;   // kMaxFrameBytes
+constexpr uint8_t  kWireMsgTypeMax     = 18;                    // HEADERS_RESPONSE
+
+// max_message_bytes(MsgType) — mirrors include/determ/net/messages.hpp.
+size_t wire_max_message_bytes(uint8_t t) {
+    switch (t) {
+        case 16: // SNAPSHOT_RESPONSE
+        case 6:  // CHAIN_RESPONSE
+            return 16ull * 1024 * 1024;
+        case 1:  // BLOCK
+        case 12: // BEACON_HEADER
+        case 13: // SHARD_TIP
+        case 14: // CROSS_SHARD_RECEIPT_BUNDLE
+        case 18: // HEADERS_RESPONSE
+            return 4ull * 1024 * 1024;
+        default:
+            return 1ull * 1024 * 1024;
+    }
+}
+
+// MsgType name for the report. Only reached for t in [0, kWireMsgTypeMax]
+// (the dispatcher rejects out-of-range types as MALFORMED first); the
+// default branch returns "" and is effectively unreachable.
+const char* wire_msgtype_name(uint8_t t) {
+    switch (t) {
+        case 0:  return "HELLO";
+        case 1:  return "BLOCK";
+        case 2:  return "TRANSACTION";
+        case 3:  return "BLOCK_SIG";
+        case 4:  return "CONTRIB";
+        case 5:  return "GET_CHAIN";
+        case 6:  return "CHAIN_RESPONSE";
+        case 7:  return "STATUS_REQUEST";
+        case 8:  return "STATUS_RESPONSE";
+        case 9:  return "ABORT_CLAIM";
+        case 10: return "ABORT_EVENT";
+        case 11: return "EQUIVOCATION_EVIDENCE";
+        case 12: return "BEACON_HEADER";
+        case 13: return "SHARD_TIP";
+        case 14: return "CROSS_SHARD_RECEIPT_BUNDLE";
+        case 15: return "SNAPSHOT_REQUEST";
+        case 16: return "SNAPSHOT_RESPONSE";
+        case 17: return "HEADERS_REQUEST";
+        case 18: return "HEADERS_RESPONSE";
+        default: return "";
+    }
+}
+
+inline uint16_t wire_le_u16(const uint8_t* p) {
+    return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+}
+inline uint32_t wire_le_u32(const uint8_t* p) {
+    return  static_cast<uint32_t>(p[0])
+         | (static_cast<uint32_t>(p[1]) <<  8)
+         | (static_cast<uint32_t>(p[2]) << 16)
+         | (static_cast<uint32_t>(p[3]) << 24);
+}
+inline uint64_t wire_le_u64(const uint8_t* p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[i]) << (i * 8);
+    return v;
+}
+
+// Thrown for a structural spec violation → MALFORMED (exit 3). Distinct
+// from a plain std::runtime_error (usage / I/O) which maps to exit 1.
+struct WireMalformed : std::runtime_error {
+    explicit WireMalformed(const std::string& m) : std::runtime_error(m) {}
+};
+
+// Read an entire file as raw bytes. Throws std::runtime_error on I/O error
+// (exit 1) — a missing/unreadable file is a usage problem, not a malformed
+// artifact.
+std::vector<uint8_t> read_binary_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open: " + path);
+    std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+    if (f.bad()) throw std::runtime_error("read error: " + path);
+    return buf;
+}
+
+// Validate + decode the TRANSACTION payload (body = bytes AFTER the 4-byte
+// envelope header). Mirrors decode_tx_frame in src/net/binary_codec.cpp:
+//   offset 0..127  : 4×256-bit fixed frame
+//     32..39 amount, 40..47 fee, 48..55 nonce, 56..63 reserved (==0)
+//     96..127 payload slot (first 32 bytes of payload)
+//   128            : type (u8)
+//   129..130       : payload_len (u16 LE)
+//   131..          : payload_overflow (payload_len-32 bytes, iff > 32)
+//   then           : [u8 from_len][from][u8 to_len][to][64 sig][32 hash]
+// Populates `report` with the decoded scalar fields. Any inconsistency →
+// WireMalformed.
+void decode_wire_tx(const uint8_t* body, size_t blen, json& report) {
+    if (blen < 128 + 1 + 2)
+        throw WireMalformed("TRANSACTION frame too short (need >= 131 bytes, "
+                            "got " + std::to_string(blen) + ")");
+
+    uint64_t amount   = wire_le_u64(body + 32);
+    uint64_t fee      = wire_le_u64(body + 40);
+    uint64_t nonce    = wire_le_u64(body + 48);
+    uint64_t reserved = wire_le_u64(body + 56);
+    if (reserved != 0)
+        throw WireMalformed("TRANSACTION amount-block reserved slot non-zero");
+
+    size_t off = 128;
+    uint8_t  type        = body[off++];
+    uint16_t payload_len = wire_le_u16(body + off); off += 2;
+
+    std::vector<uint8_t> payload;
+    if (payload_len <= 32) {
+        payload.assign(body + 96, body + 96 + payload_len);
+    } else {
+        size_t overflow = static_cast<size_t>(payload_len) - 32;
+        if (off + overflow > blen)
+            throw WireMalformed("TRANSACTION truncated payload overflow "
+                                "(declared payload_len=" +
+                                std::to_string(payload_len) + ")");
+        payload.reserve(payload_len);
+        payload.insert(payload.end(), body + 96, body + 128);
+        payload.insert(payload.end(), body + off, body + off + overflow);
+        off += overflow;
+    }
+
+    // Length-prefixed from/to.
+    auto take_lp = [&](const char* what) -> std::string {
+        if (off + 1 > blen)
+            throw WireMalformed(std::string("TRANSACTION truncated ") + what +
+                                " length prefix");
+        uint8_t n = body[off++];
+        if (off + n > blen)
+            throw WireMalformed(std::string("TRANSACTION truncated ") + what +
+                                " body (declared " + std::to_string(n) + ")");
+        std::string s(reinterpret_cast<const char*>(body + off), n);
+        off += n;
+        return s;
+    };
+    std::string from = take_lp("from");
+    std::string to   = take_lp("to");
+
+    if (off + 64 + 32 > blen)
+        throw WireMalformed("TRANSACTION truncated sig/hash (need 96 trailer "
+                            "bytes, have " + std::to_string(blen - off) + ")");
+    std::string sig_hex  = to_hex(body + off, 64); off += 64;
+    std::string hash_hex = to_hex(body + off, 32); off += 32;
+
+    // After hash there must be NOTHING left — a conforming encoder writes
+    // sig+hash as the final fields. Trailing bytes mean a malformed or
+    // attacker-padded frame.
+    if (off != blen)
+        throw WireMalformed("TRANSACTION has " + std::to_string(blen - off) +
+                            " trailing byte(s) after sig/hash");
+
+    report["amount"]      = amount;
+    report["fee"]         = fee;
+    report["nonce"]       = nonce;
+    report["tx_type"]     = static_cast<unsigned>(type);
+    report["payload_len"] = static_cast<unsigned>(payload_len);
+    report["from"]        = from;
+    report["to"]          = to;
+    report["sig"]         = sig_hex;
+    report["hash"]        = hash_hex;
+}
+
+} // namespace
+
+int cmd_decode_wire(int argc, char** argv) {
+    std::string in_path;
+    bool json_out = false;
+    bool require_type_set = false;
+    std::string require_type;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"   && i + 1 < argc) in_path = argv[++i];
+        else if (a == "--json")                 json_out = true;
+        else if (a == "--expect-type" && i + 1 < argc) {
+            require_type = argv[++i]; require_type_set = true;
+        } else {
+            std::cerr << "decode-wire: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (in_path.empty()) {
+        std::cerr << "decode-wire: --in <file> is required\n";
+        return 1;
+    }
+
+    // VERDICT discipline (mirrors verify-tx-inclusion):
+    //   VALID     → exit 0 (artifact conforms to the binary wire spec).
+    //   MALFORMED → exit 3 (structural spec violation; fail-closed).
+    //   I/O / usage error → exit 1.
+    try {
+        std::vector<uint8_t> buf = read_binary_file(in_path);
+        json report;
+        report["file"]      = in_path;
+        report["byte_len"]  = buf.size();
+
+        try {
+            // Framing ceiling (S-022 kMaxFrameBytes).
+            if (buf.size() > kWireMaxFrameBytes)
+                throw WireMalformed("frame exceeds 16 MB ceiling (" +
+                                    std::to_string(buf.size()) + " bytes)");
+
+            // Envelope header (offsets 0..3).
+            if (buf.size() < 4)
+                throw WireMalformed("body shorter than 4-byte envelope header");
+            if (buf[0] != kWireBinaryMagic)
+                throw WireMalformed("bad magic byte (got 0x" +
+                                    to_hex(buf.data(), 1) +
+                                    ", want 0xb1) — not a binary envelope "
+                                    "(0x7b would be legacy JSON)");
+            if (buf[1] != kWireBinaryVersion)
+                throw WireMalformed("unsupported binary version 0x" +
+                                    to_hex(buf.data() + 1, 1) + " (want 0x01)");
+            if (buf[3] != 0x00)
+                throw WireMalformed("reserved envelope byte non-zero (0x" +
+                                    to_hex(buf.data() + 3, 1) + ")");
+
+            uint8_t msg_type = buf[2];
+            if (msg_type > kWireMsgTypeMax)
+                throw WireMalformed("msg_type " + std::to_string(msg_type) +
+                                    " out of known range [0, " +
+                                    std::to_string(kWireMsgTypeMax) + "]");
+            if (msg_type == 0)
+                throw WireMalformed("HELLO must never be carried in a binary "
+                                    "envelope (it is always JSON pre-"
+                                    "negotiation)");
+
+            const char* tname = wire_msgtype_name(msg_type);
+            report["msg_type"]      = static_cast<unsigned>(msg_type);
+            report["msg_type_name"] = tname;
+
+            // S-022 per-type body-size cap. The "body" is everything after
+            // the 4-byte envelope header.
+            size_t body_len = buf.size() - 4;
+            size_t cap      = wire_max_message_bytes(msg_type);
+            report["body_len"]  = body_len;
+            report["type_cap"]  = cap;
+            if (buf.size() > cap)
+                throw WireMalformed(std::string(tname) + " frame (" +
+                                    std::to_string(buf.size()) +
+                                    " bytes) exceeds its S-022 cap (" +
+                                    std::to_string(cap) + " bytes)");
+
+            const uint8_t* body = buf.data() + 4;
+            if (msg_type == 2 /* TRANSACTION */) {
+                report["payload_kind"] = "tx_frame";
+                decode_wire_tx(body, body_len, report);
+            } else {
+                // [u32 LE json_len][json_bytes] — declared length must
+                // match the remaining body EXACTLY and parse as JSON.
+                report["payload_kind"] = "lp_json";
+                if (body_len < 4)
+                    throw WireMalformed(std::string(tname) +
+                                        " truncated payload length header");
+                uint32_t plen = wire_le_u32(body);
+                if (4 + static_cast<size_t>(plen) != body_len)
+                    throw WireMalformed(std::string(tname) +
+                                        " declared json_len=" +
+                                        std::to_string(plen) +
+                                        " does not match body (" +
+                                        std::to_string(body_len - 4) +
+                                        " payload bytes available)");
+                report["json_len"] = plen;
+                try {
+                    json parsed = json::parse(body + 4, body + 4 + plen);
+                    // Echo a shallow shape hint, not the whole payload.
+                    if (parsed.is_object())
+                        report["json_keys"] = static_cast<unsigned>(parsed.size());
+                    report["json_type"] = parsed.is_object()  ? "object"
+                                        : parsed.is_array()   ? "array"
+                                        : parsed.is_string()  ? "string"
+                                        : parsed.is_number()  ? "number"
+                                        : parsed.is_boolean() ? "bool"
+                                        : parsed.is_null()    ? "null"
+                                                              : "other";
+                } catch (const std::exception& e) {
+                    throw WireMalformed(std::string(tname) +
+                                        " payload is not valid JSON: " +
+                                        e.what());
+                }
+            }
+
+            // Optional caller-supplied expectation: the decoded type must
+            // equal --expect-type (name, case-insensitive). A mismatch is a
+            // MALFORMED verdict — the artifact is not the message the caller
+            // expected to find.
+            if (require_type_set) {
+                std::string want = require_type;
+                std::string got  = tname;
+                std::transform(want.begin(), want.end(), want.begin(),
+                               [](unsigned char c){ return std::toupper(c); });
+                std::transform(got.begin(),  got.end(),  got.begin(),
+                               [](unsigned char c){ return std::toupper(c); });
+                if (want != got)
+                    throw WireMalformed("decoded type " + std::string(tname) +
+                                        " != --expect-type " + require_type);
+            }
+
+            report["verdict"] = "VALID";
+        } catch (const WireMalformed& e) {
+            report["verdict"] = "MALFORMED";
+            report["detail"]  = e.what();
+            if (json_out) {
+                std::cout << report.dump() << "\n";
+            } else {
+                std::cout << "MALFORMED\n"
+                          << "  file:   " << in_path << "\n"
+                          << "  bytes:  " << buf.size() << "\n"
+                          << "  detail: " << e.what() << "\n";
+            }
+            return 3;
+        }
+
+        if (json_out) {
+            std::cout << report.dump() << "\n";
+        } else {
+            std::cout << "VALID\n"
+                      << "  file:      " << in_path << "\n"
+                      << "  bytes:     " << buf.size() << "\n"
+                      << "  msg_type:  " << report["msg_type"] << " ("
+                      << report["msg_type_name"].get<std::string>() << ")\n"
+                      << "  body_len:  " << report["body_len"] << "\n"
+                      << "  type_cap:  " << report["type_cap"] << "\n";
+            if (report["payload_kind"] == "tx_frame") {
+                std::cout << "  payload:   tx_frame\n"
+                          << "  amount:    " << report["amount"] << "\n"
+                          << "  fee:       " << report["fee"] << "\n"
+                          << "  nonce:     " << report["nonce"] << "\n"
+                          << "  tx_type:   " << report["tx_type"] << "\n"
+                          << "  from:      " << report["from"].get<std::string>() << "\n"
+                          << "  to:        " << report["to"].get<std::string>() << "\n"
+                          << "  hash:      " << report["hash"].get<std::string>() << "\n";
+            } else {
+                std::cout << "  payload:   lp_json (" << report["json_len"]
+                          << " bytes, " << report["json_type"].get<std::string>()
+                          << ")\n";
+            }
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "decode-wire: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3089,6 +3519,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
+        if (cmd == "decode-wire")           return cmd_decode_wire(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;

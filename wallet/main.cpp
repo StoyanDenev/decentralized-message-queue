@@ -12492,6 +12492,353 @@ int cmd_verify_batch(int argc, char** argv) {
     return 0;
 }
 
+// ── decode-wire-frame ─────────────────────────────────────────────────────────
+//
+// OFFLINE decoder + bounds-validator for a single inter-peer message body
+// — the bytes that ride INSIDE the transport-layer [u32 length, big-endian]
+// frame the gossip/peer layer prepends. Given a captured body (hex), this
+// command reproduces the receive-side framing logic in src/net/peer.cpp ::
+// Peer::read_body byte-for-byte, WITHOUT a daemon, socket, or chain state.
+//
+// The peer read path is a two-stage gate (S-022, see include/determ/net/
+// messages.hpp):
+//
+//   1. FRAMING CEILING. The transport reads at most kMaxFrameBytes =
+//      16 MiB before deserialization; a longer frame drops the connection.
+//   2. PER-TYPE CAP. After the envelope is parsed, max_message_bytes(type)
+//      is applied. Only SNAPSHOT_RESPONSE / CHAIN_RESPONSE legitimately
+//      need the full 16 MiB; BLOCK-class types cap at 4 MiB; everything
+//      else (consensus chatter / requests / status / tx / hello) caps at
+//      1 MiB. A body over its type cap is dropped + the peer closed, the
+//      same disposition as a framing overflow.
+//
+// The body is self-describing by its first byte (src/net/binary_codec.cpp):
+//
+//   '{' (0x7B)  → legacy JSON envelope (wire-version 0). The JSON object
+//                 carries {"type": <u8>, "payload": ...}. msg_type is read
+//                 from the "type" field.
+//   0xB1        → binary envelope, version 1. Header is 4 bytes:
+//                   [0] magic    = 0xB1
+//                   [1] version  = 0x01
+//                   [2] msg_type = MsgType (u8)
+//                   [3] reserved = 0x00 (must be zero on encode)
+//                 The payload follows at offset 4.
+//
+// This command parses the envelope header / type discriminator, names the
+// MsgType, looks up the type-aware byte cap, and reports whether the body
+// would survive BOTH gates. It is a pure-bytes diagnostic: an auditor with
+// a pcap-captured frame (or a fuzzing harness building a malformed one) can
+// confirm offline exactly how the receive side would classify and bound it
+// — distinct from inspect-tx (decodes a TRANSACTION's inner fields) and
+// from any RPC path (this never opens a socket).
+//
+// The MsgType table + the cap tiers are pinned to messages.hpp; the magic /
+// version / header layout is pinned to binary_codec.cpp. Both are mirrored
+// as local constants here so the wallet stays decoupled from the daemon's
+// net headers (which pull in producer.hpp / block.hpp — heavy, daemon-side
+// dependencies the wallet deliberately does not link).
+//
+// Input modes (exactly one):
+//   --in <hex>          message body as a hex string on the command line.
+//   --in-file <path>    read the hex string from a file (trailing
+//                       whitespace / newlines stripped). Pass `-` for stdin.
+//
+// Output (--json): one-line object
+//   {envelope, msg_type, msg_type_name, body_bytes, per_type_cap,
+//    frame_ceiling, within_per_type_cap, within_frame_ceiling, accepted,
+//    binary_version?, reserved_ok?}
+// Default: a human-readable block.
+//
+// `accepted` is true iff the body survives BOTH gates (within_frame_ceiling
+// AND within_per_type_cap) AND the envelope parsed cleanly (known magic /
+// version for binary; parseable {"type"} for JSON). A malformed envelope,
+// an unknown MsgType discriminator, or an over-cap body all yield
+// accepted=false — matching the peer layer's drop-and-close disposition.
+//
+// Exit codes:
+//   0  body parsed AND accepted by both gates
+//   1  args / hex / IO error (no decodable envelope)
+//   2  envelope parsed but REJECTED (over a cap, unknown type, or bad
+//      reserved byte) — the offline analogue of the peer dropping the frame
+int cmd_decode_wire_frame(int argc, char** argv) {
+    std::string in_hex;
+    std::string in_file;
+    bool        have_in   = false, have_file = false;
+    bool        json_out  = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"      && i + 1 < argc) { in_hex  = argv[++i]; have_in   = true; }
+        else if (a == "--in-file" && i + 1 < argc) { in_file = argv[++i]; have_file = true; }
+        else if (a == "--json")                      json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet decode-wire-frame\n"
+                "         (--in <hex> | --in-file <file|->) [--json]\n"
+                "\n"
+                "  OFFLINE decoder + bounds-validator for ONE inter-peer message\n"
+                "  body — the bytes inside the transport [u32 length BE] frame.\n"
+                "  Reproduces the receive-side framing logic in src/net/peer.cpp\n"
+                "  (Peer::read_body) byte-for-byte: NO daemon, socket, or chain\n"
+                "  state. Deterministic.\n"
+                "\n"
+                "  Two-stage gate (S-022, include/determ/net/messages.hpp):\n"
+                "    1. Framing ceiling: kMaxFrameBytes = 16 MiB.\n"
+                "    2. Per-type cap: max_message_bytes(type) — 16 MiB for\n"
+                "       SNAPSHOT_RESPONSE/CHAIN_RESPONSE, 4 MiB for BLOCK-class\n"
+                "       (BLOCK/BEACON_HEADER/SHARD_TIP/CROSS_SHARD_RECEIPT_BUNDLE/\n"
+                "       HEADERS_RESPONSE), 1 MiB for everything else.\n"
+                "\n"
+                "  Self-describing first byte (src/net/binary_codec.cpp):\n"
+                "    '{' (0x7B) → legacy JSON envelope (wire-version 0);\n"
+                "                 msg_type from the JSON \"type\" field.\n"
+                "    0xB1       → binary envelope v1; 4-byte header\n"
+                "                 [magic 0xB1][version 0x01][msg_type u8]\n"
+                "                 [reserved 0x00], payload at offset 4.\n"
+                "\n"
+                "  --in <hex>        message body as a hex string.\n"
+                "  --in-file <file>  read the hex string from a file; `-` = stdin.\n"
+                "  --json            one-line {envelope, msg_type,\n"
+                "                    msg_type_name, body_bytes, per_type_cap,\n"
+                "                    frame_ceiling, within_per_type_cap,\n"
+                "                    within_frame_ceiling, accepted, ...}.\n"
+                "\n"
+                "  Exit codes: 0 parsed AND accepted by both gates, 1 args/hex/\n"
+                "  IO error, 2 envelope parsed but REJECTED (over a cap, unknown\n"
+                "  MsgType, or bad reserved byte — the peer would drop the frame).\n";
+            return 0;
+        }
+        else {
+            std::cerr << "decode-wire-frame: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet decode-wire-frame "
+                         "(--in <hex> | --in-file <file|->) [--json]\n";
+            return 1;
+        }
+    }
+
+    if (have_in == have_file) {
+        std::cerr << "decode-wire-frame: provide exactly one of --in or "
+                     "--in-file\n";
+        return 1;
+    }
+
+    // ── Resolve the hex source ─────────────────────────────────────────────
+    std::string hex;
+    if (have_in) {
+        hex = in_hex;
+    } else {
+        std::string raw;
+        if (in_file == "-") {
+            std::ostringstream ss;
+            ss << std::cin.rdbuf();
+            raw = ss.str();
+        } else {
+            std::ifstream f(in_file, std::ios::binary);
+            if (!f) {
+                std::cerr << "decode-wire-frame: cannot open --in-file: "
+                          << in_file << "\n";
+                return 1;
+            }
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            raw = ss.str();
+        }
+        // Strip ASCII whitespace (leading / trailing / interior newlines)
+        // so a hex dump pasted across lines decodes cleanly.
+        for (char c : raw) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+            hex.push_back(c);
+        }
+    }
+
+    if (hex.empty()) {
+        std::cerr << "decode-wire-frame: empty input (no body bytes)\n";
+        return 1;
+    }
+
+    std::vector<uint8_t> body;
+    try { body = from_hex(hex); }
+    catch (std::exception& e) {
+        std::cerr << "decode-wire-frame: --in is not valid hex: "
+                  << e.what() << "\n";
+        return 1;
+    }
+    if (body.empty()) {
+        std::cerr << "decode-wire-frame: empty input (no body bytes)\n";
+        return 1;
+    }
+
+    // ── Wire constants (mirror include/determ/net/messages.hpp +
+    //    src/net/binary_codec.cpp; kept local so the wallet does not link
+    //    the daemon net headers). ─────────────────────────────────────────
+    const uint64_t kMaxFrameBytes = 16ull * 1024 * 1024;   // S-022 ceiling
+    const uint8_t  kBinaryMagic    = 0xB1;
+    const uint8_t  kBinaryVersion  = 0x01;
+    const uint8_t  kJsonFirstByte  = 0x7B;                  // '{'
+
+    // MsgType name table — index == discriminator value (messages.hpp
+    // enum class MsgType : uint8_t, 0..18 contiguous).
+    static const char* kMsgNames[] = {
+        "HELLO", "BLOCK", "TRANSACTION", "BLOCK_SIG", "CONTRIB",
+        "GET_CHAIN", "CHAIN_RESPONSE", "STATUS_REQUEST", "STATUS_RESPONSE",
+        "ABORT_CLAIM", "ABORT_EVENT", "EQUIVOCATION_EVIDENCE",
+        "BEACON_HEADER", "SHARD_TIP", "CROSS_SHARD_RECEIPT_BUNDLE",
+        "SNAPSHOT_REQUEST", "SNAPSHOT_RESPONSE",
+        "HEADERS_REQUEST", "HEADERS_RESPONSE",
+    };
+    const int kMsgTypeCount = static_cast<int>(sizeof(kMsgNames) /
+                                               sizeof(kMsgNames[0]));
+
+    // Per-type cap — mirrors max_message_bytes(MsgType). Default branch
+    // (unknown / unlisted type) keeps the tight 1 MiB cap, same as the
+    // daemon's switch default.
+    auto per_type_cap = [&](int t) -> uint64_t {
+        switch (t) {
+        case 16:  // SNAPSHOT_RESPONSE
+        case 6:   // CHAIN_RESPONSE
+            return 16ull * 1024 * 1024;
+        case 1:   // BLOCK
+        case 12:  // BEACON_HEADER
+        case 13:  // SHARD_TIP
+        case 14:  // CROSS_SHARD_RECEIPT_BUNDLE
+        case 18:  // HEADERS_RESPONSE
+            return 4ull * 1024 * 1024;
+        default:
+            return 1ull * 1024 * 1024;
+        }
+    };
+
+    // ── Classify the envelope by first byte ────────────────────────────────
+    std::string envelope;       // "binary" | "json"
+    int         msg_type = -1;
+    std::string parse_error;    // non-empty on a structural failure
+    int         binary_version = -1;
+    int         reserved_byte  = -1;   // binary only; -1 == n/a
+
+    if (body[0] == kBinaryMagic) {
+        envelope = "binary";
+        if (body.size() < 4) {
+            parse_error = "binary envelope truncated (need >=4 header bytes, "
+                          "got " + std::to_string(body.size()) + ")";
+        } else if (body[1] != kBinaryVersion) {
+            binary_version = body[1];
+            parse_error = "unsupported binary version " +
+                          std::to_string(static_cast<int>(body[1])) +
+                          " (only 0x01 is understood)";
+        } else {
+            binary_version = body[1];
+            msg_type       = body[2];
+            reserved_byte  = body[3];
+        }
+    } else if (body[0] == kJsonFirstByte) {
+        envelope = "json";
+        nlohmann::json env;
+        try { env = nlohmann::json::parse(body.begin(), body.end()); }
+        catch (std::exception& e) {
+            parse_error = std::string("JSON envelope parse error: ") + e.what();
+        }
+        if (parse_error.empty()) {
+            if (!env.is_object() || !env.contains("type")) {
+                parse_error = "JSON envelope missing required \"type\" field";
+            } else if (!env["type"].is_number_integer() &&
+                       !env["type"].is_number_unsigned()) {
+                parse_error = "JSON envelope \"type\" is not an integer";
+            } else {
+                int64_t t = env["type"].get<int64_t>();
+                if (t < 0 || t > 0xFF) {
+                    parse_error = "JSON envelope \"type\" out of u8 range (" +
+                                  std::to_string(t) + ")";
+                } else {
+                    msg_type = static_cast<int>(t);
+                }
+            }
+        }
+    } else {
+        envelope = "unknown";
+        std::ostringstream fb;
+        fb << "0x" << std::hex << std::setw(2) << std::setfill('0')
+           << static_cast<int>(body[0]);
+        parse_error = "unrecognised first byte " + fb.str() +
+                      " (expected 0x7B '{' JSON or 0xB1 binary)";
+    }
+
+    // ── Resolve name + caps ────────────────────────────────────────────────
+    std::string msg_type_name = "UNKNOWN";
+    bool        known_type     = false;
+    if (msg_type >= 0 && msg_type < kMsgTypeCount) {
+        msg_type_name = kMsgNames[msg_type];
+        known_type    = true;
+    }
+
+    const uint64_t body_bytes      = static_cast<uint64_t>(body.size());
+    const uint64_t cap             = (msg_type >= 0) ? per_type_cap(msg_type)
+                                                     : (1ull * 1024 * 1024);
+    const bool within_frame        = body_bytes <= kMaxFrameBytes;
+    const bool within_cap          = body_bytes <= cap;
+    const bool reserved_ok         = (reserved_byte < 0) || (reserved_byte == 0);
+
+    // accepted == survives both gates AND a clean, known envelope.
+    const bool accepted = parse_error.empty()
+                       && known_type
+                       && within_frame
+                       && within_cap
+                       && reserved_ok;
+
+    // Human-readable reject reason (default-mode diagnostic).
+    std::string reject_reason;
+    if (!accepted) {
+        if (!parse_error.empty())      reject_reason = parse_error;
+        else if (!known_type)          reject_reason =
+            "unknown MsgType discriminator " + std::to_string(msg_type);
+        else if (!within_frame)        reject_reason =
+            "body " + std::to_string(body_bytes) + "B exceeds framing ceiling "
+            + std::to_string(kMaxFrameBytes) + "B";
+        else if (!within_cap)          reject_reason =
+            "body " + std::to_string(body_bytes) + "B exceeds per-type cap "
+            + std::to_string(cap) + "B for " + msg_type_name;
+        else if (!reserved_ok)         reject_reason =
+            "binary reserved byte is " + std::to_string(reserved_byte) +
+            " (must be 0)";
+    }
+
+    if (json_out) {
+        nlohmann::json r;
+        r["envelope"]             = envelope;
+        r["msg_type"]             = msg_type;             // -1 if undecodable
+        r["msg_type_name"]        = msg_type_name;
+        r["body_bytes"]           = body_bytes;
+        r["per_type_cap"]         = cap;
+        r["frame_ceiling"]        = kMaxFrameBytes;
+        r["within_per_type_cap"]  = within_cap;
+        r["within_frame_ceiling"] = within_frame;
+        r["accepted"]             = accepted;
+        if (envelope == "binary") {
+            r["binary_version"] = binary_version;        // -1 if truncated
+            r["reserved_ok"]    = reserved_ok;
+        }
+        if (!reject_reason.empty()) r["reject_reason"] = reject_reason;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "envelope:             " << envelope          << "\n"
+                  << "msg_type:             " << msg_type           << "\n"
+                  << "msg_type_name:        " << msg_type_name      << "\n"
+                  << "body_bytes:           " << body_bytes         << "\n"
+                  << "per_type_cap:         " << cap                << "\n"
+                  << "frame_ceiling:        " << kMaxFrameBytes     << "\n"
+                  << "within_per_type_cap:  " << (within_cap   ? "true" : "false") << "\n"
+                  << "within_frame_ceiling: " << (within_frame ? "true" : "false") << "\n";
+        if (envelope == "binary") {
+            std::cout << "binary_version:       " << binary_version << "\n"
+                      << "reserved_ok:          " << (reserved_ok ? "true" : "false") << "\n";
+        }
+        std::cout << "accepted:             " << (accepted ? "true" : "false") << "\n";
+        if (!reject_reason.empty())
+            std::cout << "reject_reason:        " << reject_reason << "\n";
+    }
+
+    return accepted ? 0 : 2;
+}
+
 // ── receipt-key ──────────────────────────────────────────────────────────────
 //
 // OFFLINE derivation of the canonical composite leaf-key bytes for the
@@ -20730,6 +21077,34 @@ void print_usage() {
         "                                             key_bytes for a hit, so the caller can bind a\n"
         "                                             proof to THIS leaf). --json emits a one-line\n"
         "                                             object. Exit 0 success, 1 args/range error.\n"
+        "  decode-wire-frame                          OFFLINE decoder + bounds-validator for ONE\n"
+        "    (--in <hex> | --in-file <file|->)        inter-peer message body (the bytes inside the\n"
+        "    [--json]                                 transport [u32 length BE] frame). Reproduces\n"
+        "                                             src/net/peer.cpp Peer::read_body byte-for-byte:\n"
+        "                                             NO daemon, socket, or chain state. Detects the\n"
+        "                                             envelope by first byte ('{' 0x7B = legacy JSON\n"
+        "                                             wire-v0; 0xB1 = binary envelope v1, 4-byte\n"
+        "                                             header [magic][version][msg_type][reserved]),\n"
+        "                                             names the MsgType, then applies the S-022 two-\n"
+        "                                             stage gate: framing ceiling kMaxFrameBytes =\n"
+        "                                             16 MiB, then per-type cap max_message_bytes(\n"
+        "                                             type) — 16 MiB SNAPSHOT_RESPONSE/CHAIN_RESPONSE,\n"
+        "                                             4 MiB BLOCK-class (BLOCK/BEACON_HEADER/SHARD_\n"
+        "                                             TIP/CROSS_SHARD_RECEIPT_BUNDLE/HEADERS_RESPONSE),\n"
+        "                                             1 MiB everything else. Table pinned to include/\n"
+        "                                             determ/net/messages.hpp; header layout pinned to\n"
+        "                                             src/net/binary_codec.cpp. --json emits {envelope,\n"
+        "                                             msg_type, msg_type_name, body_bytes, per_type_\n"
+        "                                             cap, frame_ceiling, within_per_type_cap, within_\n"
+        "                                             frame_ceiling, accepted, ...}. --in-file `-`\n"
+        "                                             reads from stdin. `accepted` is true iff the\n"
+        "                                             body survives BOTH gates with a clean, known\n"
+        "                                             envelope. Distinct from inspect-tx (decodes a\n"
+        "                                             TRANSACTION's inner fields) and any RPC path\n"
+        "                                             (never opens a socket). Exit 0 parsed AND\n"
+        "                                             accepted, 1 args/hex/IO error, 2 envelope\n"
+        "                                             parsed but REJECTED (over a cap, unknown\n"
+        "                                             MsgType, or bad reserved byte).\n"
         "  inspect-tx --tx-json <file|-> [--json]     READ-ONLY introspection of a signed tx\n"
         "                                             envelope. Parses every standard field,\n"
         "                                             decodes the payload per TxType where the\n"
@@ -21184,6 +21559,7 @@ int main(int argc, char** argv) {
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "block-tx-root")   return cmd_block_tx_root  (argc - 2, argv + 2);
     if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
+    if (cmd == "decode-wire-frame") return cmd_decode_wire_frame(argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);
