@@ -18100,6 +18100,397 @@ int cmd_snapshot_verify(int argc, char** argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// state-proof-verify --in <proof.json> --root <hex64> [--json]
+//
+// OFFLINE Merkle state-proof verifier. The wallet-side dual of the daemon's
+// `state_proof` RPC + determ-light `verify-state-proof`: it takes a proof JSON
+// (the exact shape returned by the `state_proof` RPC — see PROTOCOL.md §10.2)
+// and an operator-supplied 32-byte `state_root`, then recomputes the Merkle
+// root from the leaf + sibling path and reports VALID/INVALID. No RPC, no
+// network, no subprocess — pure local-file + in-process SHA-256.
+//
+// Why in-process (not subprocess like snapshot-verify): the verification is a
+// fixed O(log N) sequence of SHA-256 evaluations with a tiny, fully-specified
+// algorithm (merkle.hpp / src/crypto/merkle.cpp::merkle_verify). The wallet
+// already links OpenSSL libcrypto (SHA256), so we reproduce the documented
+// leaf/inner-hash + balanced-binary-tree walk inline rather than shelling out.
+// This keeps the verifier self-contained for air-gapped operator workflows
+// (verify a proof handed over on a USB key, against a committee-anchored root,
+// with no daemon reachable).
+//
+// Proof JSON shape (per state_proof RPC):
+//   { "state_root": <hex64>,         (proof's self-claimed root — informational)
+//     "key_bytes":  <hex>,           (the leaf key, opaque bytes)
+//     "value_hash": <hex64>,         (SHA-256 of the committed value)
+//     "target_index": <uint>,        (leaf position in the sorted-by-key array)
+//     "leaf_count":   <uint>,        (total leaves in the tree)
+//     "proof":      [<hex64>, ...],  (sibling hashes, leaf→root order)
+//     "height":     <uint> }         (optional; informational)
+//
+// The verification root is ALWAYS the operator-supplied --root (NOT the proof's
+// own state_root field). The proof's state_root is reported for diagnostics and
+// compared against --root, but trust flows from the operator's anchored root —
+// a proof that "verifies" only against its own self-asserted root is worthless.
+//
+// S-040 caller-trust note (merkle.hpp §S-040): leaf_count is NOT bound into the
+// leaf/inner hashes, so an attacker who controls BOTH the proof and the
+// leaf_count can craft (target_index, leaf_count) pairs that share a walk shape.
+// This tool consumes leaf_count from the proof file as-is; the operator MUST
+// source the proof (and ideally an attestation binding leaf_count) from a path
+// anchored to the same committee-signed state_root they pass via --root. This
+// matches the documented operator-side mitigation: a single trusted anchor for
+// BOTH the root and the leaf_count closes the gap.
+//
+// Algorithm (byte-identical to crypto::merkle_verify):
+//   leaf_hash  = SHA-256( 0x00 || u32_be(key_len) || key || value_hash )
+//   inner_hash = SHA-256( 0x01 || left || right )
+//   walk: current=leaf_hash; for each level while level_size>1:
+//           if level_size odd: level_size+=1   (duplicate-last simulation)
+//           sib = next proof sibling
+//           current = idx even ? inner(current,sib) : inner(sib,current)
+//           idx/=2; level_size/=2
+//   VALID iff every sibling consumed (no extra/missing) AND current==root.
+//
+// Exit codes:
+//   0  VALID (proof verifies against --root; proof.state_root matches --root)
+//   1  args / file-unreadable / malformed-proof / bad-hex error
+//   2  INVALID (merkle_verify rejected, or proof.state_root != --root)
+int cmd_state_proof_verify(int argc, char** argv) {
+    std::string in_path, root_hex;
+    bool json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"   && i + 1 < argc) in_path  = argv[++i];
+        else if (a == "--root" && i + 1 < argc) root_hex = argv[++i];
+        else if (a == "--json")                 json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet state-proof-verify --in <proof.json>\n"
+                "                                        --root <hex64>\n"
+                "                                        [--json]\n"
+                "\n"
+                "  OFFLINE Merkle state-proof verifier — the wallet-side dual of\n"
+                "  the daemon's `state_proof` RPC and determ-light\n"
+                "  `verify-state-proof`. Recomputes the Merkle root from the\n"
+                "  proof's leaf + sibling path (in-process SHA-256, no RPC, no\n"
+                "  network, no subprocess) and reports VALID / INVALID against an\n"
+                "  operator-supplied state_root.\n"
+                "\n"
+                "  --in <proof.json>\n"
+                "      Required. A state-proof JSON as returned by the\n"
+                "      `state_proof` RPC (PROTOCOL.md §10.2). Required fields:\n"
+                "      key_bytes (hex), value_hash (hex64), target_index (uint),\n"
+                "      leaf_count (uint), proof (array of hex64 siblings). An\n"
+                "      optional state_root (hex64) field, if present, is compared\n"
+                "      against --root.\n"
+                "\n"
+                "  --root <hex64>\n"
+                "      Required. The 32-byte (64 hex chars) state_root to verify\n"
+                "      against. This is the trust anchor: the proof is recomputed\n"
+                "      against THIS root, not the proof's self-asserted\n"
+                "      state_root. Source it from a committee-signed header /\n"
+                "      snapshot tail / `determ-light verify-state-root` output.\n"
+                "\n"
+                "  --json\n"
+                "      Emit one-line machine-readable JSON. Default is human\n"
+                "      output. JSON shape:\n"
+                "        { in, root, valid, namespace, key_bytes, value_hash,\n"
+                "          target_index, leaf_count, proof_len, height,\n"
+                "          proof_state_root, root_matches_proof,\n"
+                "          exit_reason: \"valid\" | \"invalid\"\n"
+                "                     | \"invalid_args\" | \"malformed_proof\" }\n"
+                "\n"
+                "  S-040 note: leaf_count is NOT bound into the Merkle hashes\n"
+                "  (merkle.hpp §S-040). Source the proof AND its leaf_count from a\n"
+                "  path anchored to the same committee-signed state_root you pass\n"
+                "  via --root; do not mix a proof from one untrusted source with a\n"
+                "  leaf_count from another.\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  VALID (verifies against --root; proof.state_root matches)\n"
+                "    1  args / file-unreadable / malformed-proof / bad-hex\n"
+                "    2  INVALID (merkle_verify rejected OR proof.state_root\n"
+                "       disagrees with --root)\n";
+            return 0;
+        }
+        else {
+            std::cerr << "state-proof-verify: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet state-proof-verify --in <proof.json> "
+                         "--root <hex64> [--json]\n";
+            return 1;
+        }
+    }
+
+    // emit_err: uniform diagnostic for the arg/parse failure family (exit 1).
+    auto emit_err = [&](const std::string& reason,
+                        const std::string& exit_reason) -> int {
+        if (json_out) {
+            nlohmann::json err = {
+                {"in",          in_path},
+                {"root",        root_hex},
+                {"valid",       false},
+                {"exit_reason", exit_reason},
+                {"reason",      reason},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "state-proof-verify: " << reason << "\n";
+        }
+        return 1;
+    };
+
+    if (in_path.empty())
+        return emit_err("--in <proof.json> is required", "invalid_args");
+    if (root_hex.empty())
+        return emit_err("--root <hex64> is required", "invalid_args");
+
+    // Normalize + validate --root to 64 lowercase hex chars (32 bytes).
+    auto is_hex_str = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s) {
+            bool ok = (c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'f')
+                   || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    };
+    auto lower_hex = [](std::string s) {
+        for (char& c : s)
+            if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+        return s;
+    };
+    if (root_hex.size() != 64 || !is_hex_str(root_hex))
+        return emit_err("--root must be 64 hex chars (32 bytes)", "invalid_args");
+    root_hex = lower_hex(root_hex);
+
+    // Read + parse the proof JSON.
+    std::ifstream f(in_path);
+    if (!f)
+        return emit_err("cannot open '" + in_path + "'", "invalid_args");
+    nlohmann::json proof;
+    try {
+        proof = nlohmann::json::parse(f);
+    } catch (const std::exception& e) {
+        return emit_err(std::string("JSON parse failed: ") + e.what(),
+                        "malformed_proof");
+    }
+    if (!proof.is_object())
+        return emit_err("top-level JSON is not an object", "malformed_proof");
+    // A state_proof RPC that 404s returns {"error":"not_found",...}; surface it.
+    if (proof.contains("error") && !proof["error"].is_null())
+        return emit_err("proof carries an error field: " + proof["error"].dump(),
+                        "malformed_proof");
+
+    // Extract the required proof fields. Use the same field names as the
+    // state_proof RPC return shape (PROTOCOL.md §10.2).
+    std::string key_hex, value_hash_hex, proof_state_root, ns;
+    uint64_t target_index = 0, leaf_count = 0, height = 0;
+    std::vector<std::string> sib_hex;
+    try {
+        if (!proof.contains("key_bytes") || !proof["key_bytes"].is_string())
+            return emit_err("proof missing string field 'key_bytes'",
+                            "malformed_proof");
+        key_hex = proof["key_bytes"].get<std::string>();
+
+        if (!proof.contains("value_hash") || !proof["value_hash"].is_string())
+            return emit_err("proof missing string field 'value_hash'",
+                            "malformed_proof");
+        value_hash_hex = lower_hex(proof["value_hash"].get<std::string>());
+
+        if (!proof.contains("target_index") || !proof["target_index"].is_number())
+            return emit_err("proof missing numeric field 'target_index'",
+                            "malformed_proof");
+        target_index = proof["target_index"].get<uint64_t>();
+
+        if (!proof.contains("leaf_count") || !proof["leaf_count"].is_number())
+            return emit_err("proof missing numeric field 'leaf_count'",
+                            "malformed_proof");
+        leaf_count = proof["leaf_count"].get<uint64_t>();
+
+        if (!proof.contains("proof") || !proof["proof"].is_array())
+            return emit_err("proof missing array field 'proof'",
+                            "malformed_proof");
+        for (auto& h : proof["proof"]) {
+            if (!h.is_string())
+                return emit_err("proof[] contains a non-string sibling",
+                                "malformed_proof");
+            sib_hex.push_back(lower_hex(h.get<std::string>()));
+        }
+
+        // Optional / informational fields.
+        if (proof.contains("state_root") && proof["state_root"].is_string())
+            proof_state_root = lower_hex(proof["state_root"].get<std::string>());
+        if (proof.contains("namespace") && proof["namespace"].is_string())
+            ns = proof["namespace"].get<std::string>();
+        if (proof.contains("height") && proof["height"].is_number())
+            height = proof["height"].get<uint64_t>();
+    } catch (const std::exception& e) {
+        return emit_err(std::string("malformed proof: ") + e.what(),
+                        "malformed_proof");
+    }
+
+    // Validate hex shapes before decoding.
+    if (value_hash_hex.size() != 64 || !is_hex_str(value_hash_hex))
+        return emit_err("'value_hash' must be 64 hex chars (32 bytes)",
+                        "malformed_proof");
+    if (!key_hex.empty() && (key_hex.size() % 2 != 0 || !is_hex_str(key_hex)))
+        return emit_err("'key_bytes' must be even-length hex", "malformed_proof");
+    for (const auto& s : sib_hex) {
+        if (s.size() != 64 || !is_hex_str(s))
+            return emit_err("each proof[] sibling must be 64 hex chars",
+                            "malformed_proof");
+    }
+
+    // ── Decode + run the Merkle verification (in-process, no chain link). ──
+    // Reproduces crypto::merkle_verify (src/crypto/merkle.cpp) exactly using
+    // OpenSSL SHA-256 (already linked into determ-wallet). Hashes are 32-byte
+    // arrays; key is opaque bytes; the walk is the balanced-binary-tree,
+    // duplicate-last convention.
+    auto sha256 = [](const std::vector<uint8_t>& in) {
+        std::array<uint8_t, 32> out{};
+        SHA256(in.data(), in.size(), out.data());
+        return out;
+    };
+    // leaf_hash = SHA-256(0x00 || u32_be(key_len) || key || value_hash)
+    auto leaf_hash = [&](const std::vector<uint8_t>& key,
+                         const std::array<uint8_t, 32>& vh) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 4 + key.size() + 32);
+        buf.push_back(0x00);
+        uint32_t kl = static_cast<uint32_t>(key.size());
+        buf.push_back(static_cast<uint8_t>((kl >> 24) & 0xff));
+        buf.push_back(static_cast<uint8_t>((kl >> 16) & 0xff));
+        buf.push_back(static_cast<uint8_t>((kl >> 8)  & 0xff));
+        buf.push_back(static_cast<uint8_t>( kl        & 0xff));
+        buf.insert(buf.end(), key.begin(), key.end());
+        buf.insert(buf.end(), vh.begin(), vh.end());
+        return sha256(buf);
+    };
+    // inner_hash = SHA-256(0x01 || left || right)
+    auto inner_hash = [&](const std::array<uint8_t, 32>& l,
+                          const std::array<uint8_t, 32>& r) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 32 + 32);
+        buf.push_back(0x01);
+        buf.insert(buf.end(), l.begin(), l.end());
+        buf.insert(buf.end(), r.begin(), r.end());
+        return sha256(buf);
+    };
+    auto to_arr32 = [](const std::vector<uint8_t>& v) {
+        std::array<uint8_t, 32> a{};
+        std::copy(v.begin(), v.end(), a.begin());
+        return a;
+    };
+
+    std::vector<uint8_t> key_bytes = key_hex.empty()
+                                   ? std::vector<uint8_t>{}
+                                   : from_hex(key_hex);
+    std::array<uint8_t, 32> value_hash = to_arr32(from_hex(value_hash_hex));
+    std::array<uint8_t, 32> root       = to_arr32(from_hex(root_hex));
+    std::vector<std::array<uint8_t, 32>> sibs;
+    sibs.reserve(sib_hex.size());
+    for (const auto& s : sib_hex) sibs.push_back(to_arr32(from_hex(s)));
+
+    // crypto::merkle_verify walk.
+    bool merkle_ok = true;
+    std::string fail_reason;
+    if (leaf_count == 0) {
+        merkle_ok = false;
+        fail_reason = "leaf_count is 0";
+    } else if (target_index >= leaf_count) {
+        merkle_ok = false;
+        fail_reason = "target_index >= leaf_count";
+    } else {
+        std::array<uint8_t, 32> current = leaf_hash(key_bytes, value_hash);
+        uint64_t idx        = target_index;
+        uint64_t level_size = leaf_count;
+        size_t   proof_idx  = 0;
+        while (level_size > 1) {
+            if (level_size % 2 == 1) level_size += 1;  // simulate duplication
+            if (proof_idx >= sibs.size()) {
+                merkle_ok = false;
+                fail_reason = "ran out of sibling hashes before reaching root";
+                break;
+            }
+            const std::array<uint8_t, 32>& sib = sibs[proof_idx++];
+            current = (idx % 2 == 0) ? inner_hash(current, sib)
+                                     : inner_hash(sib, current);
+            idx        /= 2;
+            level_size /= 2;
+        }
+        if (merkle_ok) {
+            if (proof_idx != sibs.size()) {
+                merkle_ok = false;
+                fail_reason = "extra unused sibling hashes "
+                              "(proof_len does not match tree depth)";
+            } else if (current != root) {
+                merkle_ok = false;
+                fail_reason = "recomputed root does not match --root";
+            }
+        }
+    }
+
+    // Cross-check: does the proof's self-asserted state_root match --root?
+    // A mismatch here is informational unless the merkle walk also passes —
+    // a proof that verifies against --root but carries a different self-root
+    // is still INVALID (the operator's anchor disagrees with the proof's
+    // claim, so the proof file is not the one anchored to --root).
+    bool root_matches_proof = proof_state_root.empty()
+                            || (proof_state_root == root_hex);
+
+    bool valid = merkle_ok && root_matches_proof;
+    if (merkle_ok && !root_matches_proof)
+        fail_reason = "proof's self-asserted state_root (" + proof_state_root
+                    + ") does not match --root";
+
+    std::string exit_reason = valid ? "valid" : "invalid";
+    int exit_code = valid ? 0 : 2;
+
+    if (json_out) {
+        nlohmann::json env = {
+            {"in",                 in_path},
+            {"root",               root_hex},
+            {"valid",              valid},
+            {"namespace",          ns},
+            {"key_bytes",          lower_hex(key_hex)},
+            {"value_hash",         value_hash_hex},
+            {"target_index",       target_index},
+            {"leaf_count",         leaf_count},
+            {"proof_len",          sib_hex.size()},
+            {"height",             height},
+            {"proof_state_root",   proof_state_root},
+            {"root_matches_proof", root_matches_proof},
+            {"exit_reason",        exit_reason},
+        };
+        if (!valid && !fail_reason.empty()) env["reason"] = fail_reason;
+        std::cout << env.dump() << "\n";
+    } else {
+        std::cout << "state-proof-verify: " << in_path << "\n";
+        if (!ns.empty())
+            std::cout << "  namespace        : " << ns << "\n";
+        std::cout << "  key_bytes        : " << lower_hex(key_hex) << "\n";
+        std::cout << "  value_hash       : " << value_hash_hex << "\n";
+        std::cout << "  target_index     : " << target_index << "\n";
+        std::cout << "  leaf_count       : " << leaf_count << "\n";
+        std::cout << "  proof_len        : " << sib_hex.size() << "\n";
+        if (height) std::cout << "  height           : " << height << "\n";
+        std::cout << "  root (--root)    : " << root_hex << "\n";
+        if (!proof_state_root.empty()) {
+            std::cout << "  proof.state_root : " << proof_state_root << "\n";
+            std::cout << "  root_matches     : "
+                      << (root_matches_proof ? "true" : "false") << "\n";
+        }
+        std::cout << "  result           : "
+                  << (valid ? "VALID" : "INVALID") << "\n";
+        if (!valid && !fail_reason.empty())
+            std::cout << "  reason           : " << fail_reason << "\n";
+    }
+    return exit_code;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // param-change-build --name <P> (--value <N> | --value-hex <hex>)
 //                    --effective-height <H> --nonce <N> --from <domain-or-addr>
 //                    [--fee <N>] [--out <file> | --allow-stdout] [--json]
@@ -19396,6 +19787,23 @@ void print_usage() {
         "                                             args/file-unreadable/subprocess error,\n"
         "                                             2 invalid snapshot OR expectation\n"
         "                                             mismatch.\n"
+        "  state-proof-verify --in <proof.json>       OFFLINE Merkle state-proof verifier — the\n"
+        "                     --root <hex64> [--json]  wallet-side dual of the `state_proof` RPC\n"
+        "                                             and determ-light verify-state-proof.\n"
+        "                                             Recomputes the Merkle root from the proof's\n"
+        "                                             leaf + sibling path (in-process SHA-256, no\n"
+        "                                             RPC, no network, no subprocess) and reports\n"
+        "                                             VALID/INVALID against the operator-supplied\n"
+        "                                             --root. --in is a state_proof JSON\n"
+        "                                             (PROTOCOL.md §10.2): key_bytes, value_hash,\n"
+        "                                             target_index, leaf_count, proof[]; optional\n"
+        "                                             state_root is cross-checked against --root.\n"
+        "                                             --root is the 64-hex trust anchor (source\n"
+        "                                             it from a committee-signed header/snapshot\n"
+        "                                             tail). S-040: leaf_count is unbound — source\n"
+        "                                             the proof + its leaf_count from a path\n"
+        "                                             anchored to the same --root. Exit 0 VALID,\n"
+        "                                             1 args/file/malformed-proof, 2 INVALID.\n"
         "  supply-audit --snapshot <file>             OFFLINE recompute of the A1 unitary-\n"
         "               [--in <file>]                 supply balance identity from a snapshot\n"
         "               [--json]                      JSON. Sums accounts[].balance +\n"
@@ -19517,6 +19925,7 @@ int main(int argc, char** argv) {
     if (cmd == "account-balance-history") return cmd_account_balance_history(argc - 2, argv + 2);
     if (cmd == "diff-snapshots")  return cmd_diff_snapshots  (argc - 2, argv + 2);
     if (cmd == "snapshot-verify") return cmd_snapshot_verify (argc - 2, argv + 2);
+    if (cmd == "state-proof-verify") return cmd_state_proof_verify(argc - 2, argv + 2);
     if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
