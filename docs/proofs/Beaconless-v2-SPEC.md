@@ -327,12 +327,20 @@ Block {
 - Accumulator computation at epoch boundary.
 - Late-shard handling (subset recording in block header).
 
-### 4.7 `AUTONOMOUS_SHARD` chain_role + migration (~1-2 weeks)
+### 4.7 `AUTONOMOUS_SHARD` chain_role + interop (~1 week) — REVISED 2026-06-05
 
-- New chain_role enum value.
-- Interop logic with existing `SHARD` / `BEACON` roles during transition.
-- Migration tooling: convert beacon-bound deployment to beaconless via flag-day.
-- Per-deployment operator runbook.
+**Originally (~1-2 weeks):** chain_role enum + interop logic + flag-day migration tooling (beacon-bound → beaconless conversion) + per-deployment operator migration runbook.
+
+**Revised under no-migrations:** the flag-day conversion path is structurally forbidden per memory `dlt-no-migrations-constraint`. Operators who deploy beacon-bound at v1.0 launch cannot later migrate to beaconless via chain mechanism; their options are stay beacon-bound forever OR operationally redeploy as a new beaconless chain (application-level account transfer; not chain-level). What remains:
+
+- New `chain_role` enum value (`AUTONOMOUS_SHARD`) (~1-2 days) — needed for v1.0 launch where both deployment types coexist
+- Interop logic between existing `SHARD` / `BEACON` roles and `AUTONOMOUS_SHARD` at v1.0 launch (~3-5 days) — cross-deployment operation; each shard knows its own role from genesis
+
+**Removed:** flag-day conversion tooling (~3-5 days dead), per-deployment migration runbook (~1-2 days dead).
+
+**Operational guidance** (replacing the removed migration runbook): operators choose deployment type (beacon-bound or beaconless) at genesis. Choice is permanent for that chain's lifetime under no-migrations. To switch to the other model, operator stands up a new chain and migrates via application-level account-balance transfer — documented in operator-facing materials, not in chain-level migration tooling.
+
+**Net effort reduction:** ~5-7 days deleted from Bundle 5 critical path.
 
 ### 4.8 Tests + docs (~2 weeks)
 

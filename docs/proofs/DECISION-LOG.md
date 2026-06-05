@@ -666,4 +666,33 @@ Both constraints remain load-bearing. Cannot relax.
 
 ---
 
+---
+
+## 2026-06-05 — No-migrations cascade cleanup (spec dead-code removal)
+
+### v2.22 §4.8 + Beaconless-v2 §4.7 trimmed to remove migration tooling dead under no-migrations
+
+**Question.** When the project committed to "no migrations at all" (memory `dlt-no-migrations-constraint`), several review-week-era spec sub-components became dead code without being removed from bundle effort estimates. Identified during a "most insignificant + heavy load" triage 2026-06-05.
+
+**Two sub-components identified:**
+
+1. **v2.22-PRIVACY-SPEC.md §4.8 Migration / wire-version bump (~1 week)** — flag-day machinery: dual-decode validator path (clear AND confidential during transition), pre/post-flag-day activation logic, operator migration tooling. Pre-mainnet + no-migrations means there's no flag-day boundary; the dual-decode path is never exercised; the whole sub-component is structurally dead except for the genesis-pinned validation rule + wire-format version stamp.
+
+2. **Beaconless-v2-SPEC.md §4.7 AUTONOMOUS_SHARD chain_role + migration (~1-2 weeks)** — flag-day conversion tooling (beacon-bound → beaconless) + per-deployment migration runbook. Under no-migrations, an operator who deploys beacon-bound at v1.0 cannot later migrate to beaconless via chain mechanism. The chain_role enum + interop logic survive (needed for v1.0 launch where both types coexist); the migration tooling and runbook are dead.
+
+**Decision.** Both sub-components revised:
+- v2.22 §4.8: rewrite from ~1 week to ~1-2 days (genesis rule + wire-format version stamp only). Net deletion: ~5-7 days.
+- Beaconless-v2 §4.7: rewrite from ~1-2 weeks to ~1 week (chain_role enum + interop only; drop conversion tooling + migration runbook). Net deletion: ~5-7 days.
+- IMPLEMENTATION-SEQUENCING.md Bundle 5 entry: §4.7 line item revised from 1-2 weeks to ~1 week.
+
+**Combined effort reduction: ~10-14 days across Bundle 3 + Bundle 5.** Not huge in the ~6.5-8 month total horizon, but real — implementation threads would otherwise have started this work, discovered it was moot, and wasted time. The cleanup makes bundle effort estimates aligned with project constraints.
+
+**Operational guidance preserved.** §4.7 revised text notes that operators choosing to switch deployment types must do so via application-level account-balance transfer (operationally migrate to a new chain), not via chain-level mechanism. The operator-side migration path still exists; what's removed is the chain-level tooling that would have automated it.
+
+**Generalization.** When a load-bearing project constraint is added mid-spec (like "no migrations at all" was added after v2.22 + Beaconless-v2 specs were drafted), do a cascade cleanup pass to remove sub-components that become dead under the new constraint. Without the pass, effort estimates over-state remaining work; implementation threads waste time starting dead sub-components. Cost of cleanup: ~1-2 hours per spec. Benefit: aligned estimates + no wasted implementation effort.
+
+**Other no-migrations-cascade candidates checked:** PRIV-5 wire-format break was already correctly handled (migration N/A; tx types still ship as operational primitives). No other migration-tooling sub-components identified in the spec set.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

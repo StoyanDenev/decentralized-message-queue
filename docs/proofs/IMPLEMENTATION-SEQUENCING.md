@@ -149,7 +149,7 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 | BL-7: DSF prerequisite | (Bundle 4) | already landed before Bundle 5 starts |
 | BL-8: Phase D sequencing | (this doc) | meta-decision |
 | Q2.1: Manifest validity (hard + soft tiers) | 1 week | inside BL-2 work |
-| AUTONOMOUS_SHARD chain_role + migration | 1-2 weeks | per §4.7 |
+| AUTONOMOUS_SHARD chain_role + interop (revised 2026-06-05 to drop dead migration tooling) | ~1 week | per §4.7 revised |
 | Tests + docs | 2 weeks | DSF-driven Byzantine scenarios |
 | **Bundle effort** | **~3-4 months** | per Beaconless-v2-SPEC.md §5 |
 
