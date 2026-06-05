@@ -22,6 +22,7 @@
 #include "shamir.hpp"
 #include <asio.hpp>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <filesystem>
 #include <fstream>
@@ -352,6 +353,13 @@ In-process tests (deterministic, no network):
                                               bypass, first-touch full, burst
                                               exhaustion, per-key independence,
                                               refill timing, burst-cap invariant
+  determ test-rpc-auth-hmac                   S-001 / v2.16 RPC HMAC-SHA-256 auth
+                                              contract — canonical message format
+                                              (method|params.dump()), HMAC digest
+                                              shape, constant-time compare semantics,
+                                              client/server parse round-trip
+                                              agreement, secret/method/params
+                                              sensitivity
   determ test-block-digest                    compute_block_digest (FA1 signature
                                               target) — INCLUSION-list field
                                               coverage + EXCLUSION-list (S-030 D2)
@@ -8231,6 +8239,229 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": rate-limiter " << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    // S-001 / v2.16 RPC HMAC-SHA-256 authentication contract. The
+    // production verifier (RpcServer::verify_auth) and client signer
+    // (rpc_call) both live in src/rpc/rpc.cpp behind an asio
+    // io_context + Node, so they cannot be exercised in-process. This
+    // test re-implements the SAME auth-field algebra from rpc.cpp —
+    //
+    //   canonical_for_hmac(method, params) = method + "|" + params.dump()
+    //   auth_field = hex(HMAC-SHA-256(secret, canonical))
+    //   verify     = constant_time_equal(expected_auth, got_auth)
+    //
+    // — and pins the load-bearing invariants the wire protocol relies
+    // on. The end-to-end tools/test_rpc_hmac_auth.sh exercises a live
+    // cluster; this is the pure-function complement (FAST=1, no
+    // sockets) that locks in WHY that test passes:
+    //
+    //   * The canonical message is EXACTLY "method|params.dump()" —
+    //     a regression that changed the separator or field order
+    //     would silently break client/server agreement.
+    //   * HMAC-SHA-256 output is 32 bytes → 64 lowercase hex chars.
+    //   * The constant-time compare returns equal iff every byte
+    //     matches AND lengths match (a length mismatch must reject,
+    //     not index out of range).
+    //   * Client/server agreement survives a JSON parse round-trip:
+    //     what rpc_call computes over `params` equals what verify_auth
+    //     recomputes over `json::parse(req.dump())["params"]`. This is
+    //     the subtle property the rpc.cpp comment flags (nlohmann's
+    //     dump()/parse() key-order behavior); pin it so a future
+    //     nlohmann bump or an ordered_json swap is caught here.
+    //   * Sensitivity: changing the secret, the method, or any params
+    //     field changes the auth digest (so a forged request with a
+    //     stale auth tag is rejected — replay/tamper resistance at the
+    //     field level).
+    if (cmd == "test-rpc-auth-hmac") {
+        using nlohmann::json;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Mirror src/rpc/rpc.cpp's anonymous-namespace helpers exactly.
+        auto canonical_for_hmac = [](const std::string& method,
+                                     const json& params) -> std::string {
+            return method + "|" + params.dump();
+        };
+        auto hmac_sha256_hex = [](const std::vector<uint8_t>& key,
+                                  const std::string& message) -> std::string {
+            unsigned char mac[32];
+            unsigned int  mac_len = 0;
+            HMAC(EVP_sha256(),
+                 key.data(), static_cast<int>(key.size()),
+                 reinterpret_cast<const unsigned char*>(message.data()),
+                 message.size(),
+                 mac, &mac_len);
+            return to_hex(mac, mac_len);
+        };
+        // Mirror RpcServer::verify_auth's constant-time comparison.
+        auto ct_equal = [](const std::string& a, const std::string& b) -> bool {
+            if (a.size() != b.size()) return false;
+            int diff = 0;
+            for (size_t i = 0; i < a.size(); ++i) diff |= (a[i] ^ b[i]);
+            return diff == 0;
+        };
+
+        const std::string secret_hex = "00112233445566778899aabbccddeeff";
+        const auto secret = from_hex(secret_hex);
+
+        // 1. Canonical message format is EXACTLY "method|params.dump()"
+        //    — the separator is a single '|' and nothing else.
+        {
+            json params = {{"domain", "alice"}};
+            std::string canon = canonical_for_hmac("balance", params);
+            check(canon == "balance|" + params.dump(),
+                  "canonical message is 'method|' + params.dump()");
+            check(canon.find('|') != std::string::npos
+                  && canon.substr(0, canon.find('|')) == "balance",
+                  "method appears before the single '|' separator");
+        }
+
+        // 2. Empty params (default json::object()) canonicalizes to
+        //    "method|{}" — the server uses json::object() as the
+        //    default when 'params' is absent, so this must match.
+        {
+            json empty = json::object();
+            check(canonical_for_hmac("head", empty) == "head|{}",
+                  "empty-object params canonicalizes to 'method|{}'");
+        }
+
+        // 3. HMAC-SHA-256 output is 32 bytes → exactly 64 lowercase
+        //    hex chars, and is non-empty.
+        {
+            std::string mac = hmac_sha256_hex(
+                secret, canonical_for_hmac("balance",
+                                           json{{"domain", "alice"}}));
+            check(mac.size() == 64, "HMAC-SHA-256 hex digest is 64 chars (32 bytes)");
+            bool lower_hex = !mac.empty();
+            for (char ch : mac)
+                if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')))
+                    lower_hex = false;
+            check(lower_hex, "HMAC hex digest is lowercase hex");
+        }
+
+        // 4. Determinism: the same (secret, method, params) always
+        //    produces the same auth field.
+        {
+            json params = {{"domain", "bob"}, {"limit", 5}};
+            std::string m1 = hmac_sha256_hex(secret,
+                                 canonical_for_hmac("history", params));
+            std::string m2 = hmac_sha256_hex(secret,
+                                 canonical_for_hmac("history", params));
+            check(m1 == m2, "HMAC is deterministic over identical inputs");
+        }
+
+        // 5. Constant-time compare: identical strings are equal.
+        {
+            std::string mac = hmac_sha256_hex(secret,
+                                  canonical_for_hmac("head", json::object()));
+            check(ct_equal(mac, mac), "constant-time compare: equal digests accept");
+        }
+
+        // 6. Constant-time compare: a single flipped hex nibble rejects.
+        {
+            std::string mac = hmac_sha256_hex(secret,
+                                  canonical_for_hmac("head", json::object()));
+            std::string tampered = mac;
+            tampered[0] = (tampered[0] == 'a') ? 'b' : 'a';
+            check(!ct_equal(mac, tampered),
+                  "constant-time compare: single-nibble difference rejects");
+        }
+
+        // 7. Constant-time compare: a length mismatch rejects WITHOUT
+        //    indexing out of range (the size guard fires first). This
+        //    is what makes a truncated/oversized 'auth' field safe.
+        {
+            std::string mac = hmac_sha256_hex(secret,
+                                  canonical_for_hmac("head", json::object()));
+            check(!ct_equal(mac, mac.substr(0, 32)),
+                  "constant-time compare: shorter 'auth' rejects on length guard");
+            check(!ct_equal(mac, mac + "00"),
+                  "constant-time compare: longer 'auth' rejects on length guard");
+            check(!ct_equal(mac, ""),
+                  "constant-time compare: empty 'auth' rejects");
+        }
+
+        // 8. Client/server agreement across a JSON parse round-trip.
+        //    The client computes the tag over `params`; the server
+        //    recomputes over json::parse(wire)["params"]. The auth
+        //    field MUST match — this is the load-bearing nlohmann
+        //    dump()/parse() stability property flagged in rpc.cpp.
+        {
+            json params = {{"domain", "carol"}, {"from_height", 3}, {"to_height", 9}};
+            std::string method = "messages";
+            // Client side (mirrors rpc_call).
+            std::string client_auth = hmac_sha256_hex(secret,
+                                          canonical_for_hmac(method, params));
+            json req = {{"method", method}, {"params", params},
+                        {"auth", client_auth}};
+            std::string wire = req.dump();
+            // Server side (mirrors verify_auth): parse, re-extract,
+            // recompute, constant-time compare.
+            json parsed = json::parse(wire);
+            std::string s_method = parsed.value("method", "");
+            json s_params = parsed.value("params", json::object());
+            std::string server_expected = hmac_sha256_hex(secret,
+                                              canonical_for_hmac(s_method, s_params));
+            std::string server_got = parsed.value("auth", std::string{});
+            check(ct_equal(server_expected, server_got),
+                  "client/server agree on auth across dump()/parse() round-trip");
+        }
+
+        // 9. Sensitivity — wrong SECRET fails verification. A node
+        //    configured with a different rpc_auth_secret rejects.
+        {
+            json params = {{"domain", "dave"}};
+            std::string method = "balance";
+            std::string canon = canonical_for_hmac(method, params);
+            std::string good = hmac_sha256_hex(secret, canon);
+            auto other_secret = from_hex("ffffffffffffffffffffffffffffffff");
+            std::string bad = hmac_sha256_hex(other_secret, canon);
+            check(!ct_equal(good, bad),
+                  "wrong secret produces a different (rejected) auth tag");
+        }
+
+        // 10. Sensitivity — wrong METHOD fails. A request signed for
+        //     'balance' cannot be replayed as 'send'.
+        {
+            json params = {{"domain", "dave"}};
+            std::string a = hmac_sha256_hex(secret,
+                                canonical_for_hmac("balance", params));
+            std::string b = hmac_sha256_hex(secret,
+                                canonical_for_hmac("send", params));
+            check(!ct_equal(a, b),
+                  "changing the method changes the auth tag (no method replay)");
+        }
+
+        // 11. Sensitivity — any params field change fails. Tampering
+        //     with the amount in a transfer invalidates the tag.
+        {
+            std::string method = "send";
+            std::string a = hmac_sha256_hex(secret,
+                                canonical_for_hmac(method,
+                                    json{{"to", "eve"}, {"amount", 100}}));
+            std::string b = hmac_sha256_hex(secret,
+                                canonical_for_hmac(method,
+                                    json{{"to", "eve"}, {"amount", 101}}));
+            check(!ct_equal(a, b),
+                  "changing a params field changes the auth tag (tamper-evident)");
+        }
+
+        // 12. Auth-disabled contract: an empty secret means auth is
+        //     OFF (verify_auth returns "" / pass). Pin the convention
+        //     that hex_to_bytes("") yields an empty key so the server
+        //     can detect the disabled state.
+        {
+            check(from_hex("").empty(),
+                  "empty secret hex decodes to empty key (auth-disabled signal)");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": rpc-auth-hmac " << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         return fail == 0 ? 0 : 1;
     }

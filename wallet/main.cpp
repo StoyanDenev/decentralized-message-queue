@@ -21648,6 +21648,358 @@ int cmd_param_change_build(int argc, char** argv) {
     return 0;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// rpc-auth --method <m> [--params <json> | --params-file <file>]
+//          --secret <hex> [--verify <hex> | --request <file>] [--json]
+//
+// OFFLINE computor + verifier for the S-001 (v2.16) RPC HMAC-auth tag. It is
+// the wallet-side dual of RpcServer::verify_auth / rpc_call's auth wiring in
+// src/rpc/rpc.cpp: it derives the `auth` field a caller must attach to an
+// RPC request, OR verifies a claimed `auth` against a re-derivation — without
+// opening a socket. The daemon's rpc_auth_secret never has to leave the
+// operator host to be exercised; this lets a cold operator pre-sign request
+// envelopes or audit a captured request's tag against the configured secret.
+//
+// Canonical scheme (must match src/rpc/rpc.cpp byte-for-byte):
+//   key       = hex_decode(secret)                  (raw HMAC key bytes)
+//   canonical = method + "|" + params.dump()        (compact, sorted keys)
+//   auth      = lowercase-hex( HMAC-SHA-256(key, canonical) )
+// The request envelope the server reads is {"method","params","auth"}\n.
+//
+// Why params.dump() reproduces the server's canonical form: the daemon parses
+// `params` out of the request JSON, then re-dumps it for the HMAC input. We
+// likewise parse --params (or --params-file) into a json and dump() it, so the
+// nlohmann default object (std::map) sorts keys identically on both sides. An
+// operator who hand-orders params keys therefore still produces the SAME tag
+// the server computes after its parse-then-dump round trip. --params defaults
+// to {} — the same json::object() the server falls back to when params is
+// absent — so methods that take no params (e.g. "head", "abort_records")
+// authenticate without an explicit --params argument.
+//
+// Modes:
+//   compute (default)  : derive + print the auth tag, the canonical preimage,
+//                        and a ready-to-send request envelope.
+//   verify (--verify H): recompute the expected tag and constant-time-compare
+//                        it to the claimed tag H. The compare mirrors
+//                        verify_auth: length check first, then XOR-accumulate.
+//   verify (--request F): same, but the claimed tag + method + params are read
+//                        from a captured request JSON ({"method","params",
+//                        "auth"}) — params.dump() of the parsed object is the
+//                        preimage, exactly as the server reconstructs it. CLI
+//                        --method / --params, if also given, must agree with
+//                        the file or the call exits 1 (no silent override).
+//
+// The secret is NEVER echoed (only its byte length). No RPC, no network, no
+// subprocess, no secret material on stdout.
+//
+// Exit codes:
+//   0  compute OK, or verify MATCH
+//   1  args / parse error (bad hex secret, malformed params/request JSON,
+//      missing required flag, CLI/file method-or-params disagreement)
+//   2  verify MISMATCH (recomputed tag != claimed tag)
+int cmd_rpc_auth(int argc, char** argv) {
+    std::string method, params_str, params_file, secret_hex, verify_hex,
+                request_file;
+    bool have_params = false, have_method = false, json_out = false;
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--method"      && i + 1 < argc) { method = argv[++i]; have_method = true; }
+        else if (a == "--params"      && i + 1 < argc) { params_str = argv[++i]; have_params = true; }
+        else if (a == "--params-file" && i + 1 < argc) params_file = argv[++i];
+        else if (a == "--secret"      && i + 1 < argc) secret_hex = argv[++i];
+        else if (a == "--verify"      && i + 1 < argc) verify_hex = argv[++i];
+        else if (a == "--request"     && i + 1 < argc) request_file = argv[++i];
+        else if (a == "--json")                        json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet rpc-auth --method <m>\n"
+                "                      [--params <json> | --params-file <file>]\n"
+                "                      --secret <hex>\n"
+                "                      [--verify <hex> | --request <file>] [--json]\n"
+                "\n"
+                "  OFFLINE computor + verifier for the S-001 (v2.16) RPC HMAC-auth\n"
+                "  tag — the wallet-side dual of RpcServer::verify_auth /\n"
+                "  rpc_call's auth wiring in src/rpc/rpc.cpp. Derives the `auth`\n"
+                "  field a caller attaches to an RPC request, OR verifies a claimed\n"
+                "  tag against a re-derivation, with no socket and no daemon.\n"
+                "\n"
+                "  Scheme (matches the daemon byte-for-byte):\n"
+                "    key       = hex_decode(secret)\n"
+                "    canonical = method + \"|\" + params.dump()  (compact, sorted keys)\n"
+                "    auth      = lowercase-hex( HMAC-SHA-256(key, canonical) )\n"
+                "  The request envelope is {\"method\",\"params\",\"auth\"}.\n"
+                "\n"
+                "  --method <m>\n"
+                "      Required (compute mode, or verify via --verify). The RPC\n"
+                "      method name (e.g. head, balance, submit_tx). In --request\n"
+                "      mode the method is read from the file; if --method is ALSO\n"
+                "      given it must agree with the file.\n"
+                "\n"
+                "  --params <json> | --params-file <file>\n"
+                "      Optional. The RPC params object as a JSON string or file.\n"
+                "      Parsed then re-dumped (sorted keys) so hand-ordered keys\n"
+                "      still produce the server's canonical form. Defaults to {}\n"
+                "      (the json::object() the server falls back to when params is\n"
+                "      absent), so no-param methods need no --params. Mutually\n"
+                "      exclusive.\n"
+                "\n"
+                "  --secret <hex>\n"
+                "      Required. The rpc_auth_secret as an even-length hex string\n"
+                "      (the daemon hex-decodes it to raw HMAC key bytes). Never\n"
+                "      echoed — only its decoded byte length is reported.\n"
+                "\n"
+                "  --verify <hex>\n"
+                "      Verify mode. A claimed auth tag (64 lowercase hex). The tool\n"
+                "      recomputes the expected tag from --method/--params/--secret\n"
+                "      and constant-time-compares (length check, then XOR-accumulate\n"
+                "      — same discipline as verify_auth). MATCH exits 0, MISMATCH 2.\n"
+                "\n"
+                "  --request <file>\n"
+                "      Verify mode. A captured request JSON {\"method\",\"params\",\n"
+                "      \"auth\"}. method + params + claimed auth are taken from the\n"
+                "      file; params.dump() of the parsed object is the preimage,\n"
+                "      exactly as the server reconstructs it. Mutually exclusive\n"
+                "      with --verify.\n"
+                "\n"
+                "  --json\n"
+                "      One-line machine-readable JSON. Compute shape:\n"
+                "        { command, mode: \"compute\", method, params,\n"
+                "          secret_bytes, canonical, auth, request }\n"
+                "      Verify shape:\n"
+                "        { command, mode: \"verify\", method, params, secret_bytes,\n"
+                "          canonical, expected_auth, claimed_auth, valid,\n"
+                "          exit_reason: \"match\" | \"mismatch\" }\n"
+                "\n"
+                "  Security: this exercises the auth secret WITHOUT sending it over\n"
+                "  the wire. The tag binds (method, params) only — it is NOT a\n"
+                "  per-request nonce and does NOT prevent replay of an identical\n"
+                "  (method, params) request; pair it with the daemon's transport\n"
+                "  controls (localhost-only bind / S-014 rate limit) for exposed\n"
+                "  RPC. No RPC, no network, no subprocess.\n"
+                "\n"
+                "  Exit codes:\n"
+                "    0  compute OK, or verify MATCH\n"
+                "    1  args / parse error (bad hex secret, malformed params or\n"
+                "       request JSON, missing flag, CLI/file disagreement)\n"
+                "    2  verify MISMATCH\n";
+            return 0;
+        }
+        else {
+            std::cerr << "rpc-auth: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet rpc-auth --method <m> "
+                         "[--params <json> | --params-file <file>] --secret <hex> "
+                         "[--verify <hex> | --request <file>] [--json]\n";
+            return 1;
+        }
+    }
+
+    // emit_err: uniform diagnostic for the arg/parse failure family (exit 1).
+    auto emit_err = [&](const std::string& reason) -> int {
+        if (json_out) {
+            nlohmann::json err = {
+                {"command",     "rpc-auth"},
+                {"valid",       false},
+                {"exit_reason", "invalid_args"},
+                {"reason",      reason},
+            };
+            std::cout << err.dump() << "\n";
+        } else {
+            std::cerr << "rpc-auth: " << reason << "\n";
+        }
+        return 1;
+    };
+
+    if (secret_hex.empty())
+        return emit_err("--secret <hex> is required");
+    if (have_params && !params_file.empty())
+        return emit_err("--params and --params-file are mutually exclusive");
+    if (!verify_hex.empty() && !request_file.empty())
+        return emit_err("--verify and --request are mutually exclusive");
+
+    // ── Decode the secret. Mirrors src/rpc/rpc.cpp's hex_to_bytes(): the wire
+    //    secret is hex, the HMAC key is its raw bytes. Reject odd-length /
+    //    non-hex up front so the failure surfaces here, not on the daemon.
+    std::vector<uint8_t> key;
+    try {
+        key = from_hex(secret_hex);
+    } catch (const std::exception& e) {
+        return emit_err(std::string("--secret is not valid hex: ") + e.what());
+    }
+    if (key.empty())
+        return emit_err("--secret decoded to 0 bytes (empty key disables auth "
+                        "on the daemon — supply a real rpc_auth_secret)");
+
+    // ── Resolve method + params, depending on mode. In --request mode they
+    //    come from the captured request; otherwise from the CLI flags.
+    std::string claimed_auth;     // set in verify mode
+    bool verify_mode = !verify_hex.empty() || !request_file.empty();
+
+    if (!request_file.empty()) {
+        std::ifstream rf(request_file);
+        if (!rf)
+            return emit_err("cannot open --request '" + request_file + "'");
+        nlohmann::json req;
+        try {
+            req = nlohmann::json::parse(rf);
+        } catch (const std::exception& e) {
+            return emit_err(std::string("--request JSON parse failed: ")
+                            + e.what());
+        }
+        if (!req.is_object())
+            return emit_err("--request top-level JSON is not an object");
+        if (!req.contains("method") || !req["method"].is_string())
+            return emit_err("--request missing string field 'method'");
+        if (!req.contains("auth") || !req["auth"].is_string())
+            return emit_err("--request missing string field 'auth' "
+                            "(nothing to verify)");
+        std::string file_method = req["method"].get<std::string>();
+        claimed_auth            = req["auth"].get<std::string>();
+        // params is optional in the envelope; the server defaults absent
+        // params to json::object().
+        nlohmann::json file_params = req.contains("params")
+                                         ? req["params"]
+                                         : nlohmann::json::object();
+
+        // No silent override: if the operator ALSO passed --method/--params,
+        // they must agree with the file (catches verifying against the wrong
+        // request body).
+        if (have_method && method != file_method)
+            return emit_err("--method '" + method + "' disagrees with --request "
+                            "method '" + file_method + "'");
+        if (have_params) {
+            nlohmann::json cli_params;
+            try {
+                cli_params = nlohmann::json::parse(params_str);
+            } catch (const std::exception& e) {
+                return emit_err(std::string("--params JSON parse failed: ")
+                                + e.what());
+            }
+            if (cli_params != file_params)
+                return emit_err("--params disagrees with --request params");
+        }
+        method = file_method;
+        // Render params from the parsed file object (sorted-key dump downstream).
+        params_str = file_params.dump();
+        have_params = true;
+        have_method = true;
+    } else {
+        if (!have_method || method.empty())
+            return emit_err("--method <m> is required");
+        if (!verify_hex.empty()) claimed_auth = verify_hex;
+
+        if (!params_file.empty()) {
+            std::ifstream pf(params_file);
+            if (!pf)
+                return emit_err("cannot open --params-file '" + params_file + "'");
+            std::stringstream ss;
+            ss << pf.rdbuf();
+            params_str = ss.str();
+            have_params = true;
+        }
+    }
+
+    // ── Build the canonical params object. Default to {} when none supplied,
+    //    matching the daemon's json::object() fallback. Parse-then-dump sorts
+    //    keys to the server's canonical form.
+    nlohmann::json params_obj;
+    if (have_params) {
+        try {
+            params_obj = nlohmann::json::parse(params_str);
+        } catch (const std::exception& e) {
+            return emit_err(std::string("--params JSON parse failed: ")
+                            + e.what());
+        }
+    } else {
+        params_obj = nlohmann::json::object();
+    }
+
+    // canonical = method + "|" + params.dump()   (src/rpc/rpc.cpp::canonical_for_hmac)
+    std::string canonical = method + "|" + params_obj.dump();
+
+    // auth = lowercase-hex( HMAC-SHA-256(key, canonical) )
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    unsigned int  mac_len = 0;
+    if (!HMAC(EVP_sha256(),
+              key.data(), static_cast<int>(key.size()),
+              reinterpret_cast<const unsigned char*>(canonical.data()),
+              canonical.size(),
+              mac, &mac_len)) {
+        return emit_err("HMAC-SHA-256 computation failed");
+    }
+    std::vector<uint8_t> mac_bytes(mac, mac + mac_len);
+    std::string expected_auth = to_hex(mac_bytes);
+
+    if (!verify_mode) {
+        // ── Compute mode: emit the tag + a ready-to-send request envelope. ──
+        nlohmann::json request_env = {
+            {"method", method},
+            {"params", params_obj},
+            {"auth",   expected_auth},
+        };
+        if (json_out) {
+            nlohmann::json out = {
+                {"command",      "rpc-auth"},
+                {"mode",         "compute"},
+                {"method",       method},
+                {"params",       params_obj},
+                {"secret_bytes", key.size()},
+                {"canonical",    canonical},
+                {"auth",         expected_auth},
+                {"request",      request_env},
+            };
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << "rpc-auth compute\n";
+            std::cout << "  method      : " << method << "\n";
+            std::cout << "  params      : " << params_obj.dump() << "\n";
+            std::cout << "  secret_bytes: " << key.size() << "\n";
+            std::cout << "  canonical   : " << canonical << "\n";
+            std::cout << "  auth        : " << expected_auth << "\n";
+            std::cout << "  request     : " << request_env.dump() << "\n";
+        }
+        return 0;
+    }
+
+    // ── Verify mode: constant-time compare against the claimed tag. Mirrors
+    //    RpcServer::verify_auth — length check first, then XOR-accumulate so
+    //    the compare leaks neither the position of the first mismatch nor the
+    //    expected tag's bytes via early exit.
+    bool valid = false;
+    if (expected_auth.size() == claimed_auth.size()) {
+        int diff = 0;
+        for (size_t i = 0; i < expected_auth.size(); ++i)
+            diff |= (expected_auth[i] ^ claimed_auth[i]);
+        valid = (diff == 0);
+    }
+
+    if (json_out) {
+        nlohmann::json out = {
+            {"command",       "rpc-auth"},
+            {"mode",          "verify"},
+            {"method",        method},
+            {"params",        params_obj},
+            {"secret_bytes",  key.size()},
+            {"canonical",     canonical},
+            {"expected_auth", expected_auth},
+            {"claimed_auth",  claimed_auth},
+            {"valid",         valid},
+            {"exit_reason",   valid ? "match" : "mismatch"},
+        };
+        std::cout << out.dump() << "\n";
+    } else {
+        std::cout << "rpc-auth verify\n";
+        std::cout << "  method       : " << method << "\n";
+        std::cout << "  params       : " << params_obj.dump() << "\n";
+        std::cout << "  secret_bytes : " << key.size() << "\n";
+        std::cout << "  canonical    : " << canonical << "\n";
+        std::cout << "  expected_auth: " << expected_auth << "\n";
+        std::cout << "  claimed_auth : " << claimed_auth << "\n";
+        std::cout << "  result       : " << (valid ? "MATCH" : "MISMATCH") << "\n";
+    }
+    return valid ? 0 : 2;
+}
+
 void print_usage() {
     std::cerr <<
         "Usage: determ-wallet <command> ...\n"
@@ -22763,6 +23115,33 @@ void print_usage() {
         "                                             lowercase (S-028). No network, no RPC, no\n"
         "                                             secret material. Exit 0 built, 1 args/\n"
         "                                             validation error.\n"
+        "  rpc-auth --method <m>                      OFFLINE computor + verifier for the S-001\n"
+        "           [--params <json> |                (v2.16) RPC HMAC-auth tag — the wallet-side\n"
+        "            --params-file <file>]            dual of RpcServer::verify_auth / rpc_call's\n"
+        "           --secret <hex>                    auth wiring (src/rpc/rpc.cpp). Derives the\n"
+        "           [--verify <hex> |                 `auth` field a caller attaches to an RPC\n"
+        "            --request <file>]                request, OR verifies a claimed tag against a\n"
+        "           [--json]                          re-derivation, with no socket and no daemon\n"
+        "                                             (lets a cold operator pre-sign request\n"
+        "                                             envelopes or audit a captured request's tag\n"
+        "                                             without the secret leaving the host). Scheme\n"
+        "                                             matches the daemon byte-for-byte: key =\n"
+        "                                             hex_decode(secret); canonical = method + \"|\"\n"
+        "                                             + params.dump() (compact, sorted keys); auth\n"
+        "                                             = lowercase-hex(HMAC-SHA-256(key,canonical)).\n"
+        "                                             --params is parsed then re-dumped so hand-\n"
+        "                                             ordered keys still match the server's canonical\n"
+        "                                             form; absent params defaults to {} (the\n"
+        "                                             json::object() the server uses). Compute mode\n"
+        "                                             (default) prints the tag, canonical preimage,\n"
+        "                                             and a ready-to-send {method,params,auth}\n"
+        "                                             envelope. --verify <hex> or --request <file>\n"
+        "                                             switches to verify: recompute + constant-time\n"
+        "                                             compare (length check then XOR-accumulate, as\n"
+        "                                             verify_auth). The secret is never echoed (only\n"
+        "                                             its byte length). No RPC, no network, no\n"
+        "                                             subprocess. Exit 0 compute-OK / verify-MATCH,\n"
+        "                                             1 args/parse error, 2 verify MISMATCH.\n"
         "  create-recovery --seed <hex> --password <str>  Persist a T-of-N recovery setup\n"
         "                  -t T -n N --out <file>\n"
         "                  [--scheme {passphrase|opaque}]\n"
@@ -22844,6 +23223,7 @@ int main(int argc, char** argv) {
     if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
     if (cmd == "subsidy-schedule") return cmd_subsidy_schedule(argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
+    if (cmd == "rpc-auth")        return cmd_rpc_auth       (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
     if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);

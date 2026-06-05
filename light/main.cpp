@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (27 total + help / version):
+// Subcommands (28 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -38,6 +38,7 @@
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
 //   committee-at-height      Report committee-verified creators at block H
 //   decode-wire              OFFLINE decode + validate a binary wire frame
+//   rpc-auth                 OFFLINE compute/verify the S-001 HMAC RPC tag
 //   help / version
 //
 // Trust-model invariants:
@@ -376,6 +377,42 @@ void print_usage() {
         "      the decoded MsgType name (case-insensitive); a mismatch is\n"
         "      MALFORMED. Use to fuzz/triage captured frames or to confirm a\n"
         "      build's emitted frame conforms to the wire spec.\n"
+        "\n"
+        "RPC auth tooling (offline, no daemon):\n"
+        "  rpc-auth --secret <hex> --method <NAME>\n"
+        "           [--params-file <file> | --params-string <json> | --params-stdin]\n"
+        "           [--expect <hex>] [--emit-request] [--json]\n"
+        "      Compute (or verify) the S-001 HMAC-SHA256 RPC authentication\n"
+        "      tag for a single Determ RPC request — the `auth` field the\n"
+        "      daemon's RpcServer::verify_auth re-derives and constant-time\n"
+        "      compares when rpc_auth_secret is configured. Pure offline\n"
+        "      computation (no socket): re-implements the v2.16 scheme from\n"
+        "      src/rpc/rpc.cpp INDEPENDENTLY of the daemon's codec, so it is an\n"
+        "      external conformance oracle for the tag, not a wrapper around\n"
+        "      the daemon's own HMAC. The tag is\n"
+        "      HMAC-SHA256(secret, method + \"|\" + params.dump()) hex-encoded,\n"
+        "      where params.dump() is nlohmann's compact sorted-key form (the\n"
+        "      verifier parses the supplied params JSON and re-dumps it, the\n"
+        "      identical parse-then-dump the server performs after receiving\n"
+        "      the request — so an object with keys in any order yields the\n"
+        "      same canonical tag). --secret is the SAME hex secret the\n"
+        "      operator sets as rpc_auth_secret / DETERM_RPC_AUTH_SECRET; it is\n"
+        "      HMAC key material, hex-decoded to the raw key bytes (matching\n"
+        "      the server's hex_to_bytes(rpc_auth_secret)). Params default to\n"
+        "      `{}` when none of --params-file / --params-string /\n"
+        "      --params-stdin is given (a no-param method). With --emit-request\n"
+        "      the full request object {method, params, auth} is printed ready\n"
+        "      to pipe to the daemon's line-framed RPC socket; otherwise just\n"
+        "      the bare tag. With --expect <hex> the command VERIFIES instead\n"
+        "      of prints: it recomputes the tag and does a constant-time\n"
+        "      compare against <hex> (the same length-then-XOR discipline as\n"
+        "      the server, no early-exit timing leak), reporting MATCH (exit 0)\n"
+        "      or MISMATCH (exit 3). Note: the S-001 tag is a STATELESS\n"
+        "      per-(method,params) MAC — it does NOT bind a nonce or timestamp,\n"
+        "      so an observed request is replayable; pair an external RPC bind\n"
+        "      with rpc_localhost_only or a TLS terminator, exactly as the\n"
+        "      server's external-bind warning states. Malformed hex /\n"
+        "      unparseable params / missing flags are usage errors (exit 1).\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -4218,6 +4255,220 @@ int cmd_decode_wire(int argc, char** argv) {
     }
 }
 
+// ───────────────────────────── rpc-auth ────────────────────────────────
+//
+// Offline computor / verifier for the S-001 (v2.16) HMAC RPC auth tag —
+// the `auth` field the daemon's RpcServer::verify_auth re-derives and
+// constant-time compares whenever rpc_auth_secret is configured. This
+// re-implements the daemon's scheme (src/rpc/rpc.cpp::canonical_for_hmac
+// + hmac_sha256_hex) INDEPENDENTLY of the daemon's codec — including a
+// from-scratch RFC-2104 HMAC-SHA256 built on the shared SHA256Builder
+// primitive rather than OpenSSL's HMAC() — so a passing tag is an
+// external conformance check on the wire-visible auth field, not a wrapper
+// around the daemon's own MAC. No socket: pure local computation.
+//
+// Canonical message = method + "|" + params.dump(), where params.dump() is
+// nlohmann's compact form. The daemon computes the tag AFTER parsing the
+// request JSON (json::parse normalizes object keys to sorted order, dump()
+// re-serializes), so to agree byte-for-byte the verifier likewise parses
+// the supplied params and re-dumps them. An object whose keys are supplied
+// in any order therefore yields the SAME canonical tag.
+
+namespace {
+
+// RFC 2104 HMAC-SHA256 over (key, message). Block size B = 64 (SHA-256's
+// input block). Keys longer than B are first hashed to 32 bytes; shorter
+// keys are zero-padded to B. Returns the 32-byte MAC. Built on the shared
+// SHA256Builder so the light binary needs no extra OpenSSL-HMAC linkage and
+// the construction is auditable against the spec in one place.
+Hash hmac_sha256(const std::vector<uint8_t>& key,
+                 const std::string& message) {
+    constexpr size_t B = 64;
+    std::vector<uint8_t> k0;
+    if (key.size() > B) {
+        Hash kh = determ::crypto::sha256(key.data(), key.size());
+        k0.assign(kh.begin(), kh.end());
+    } else {
+        k0 = key;
+    }
+    k0.resize(B, 0x00);  // zero-pad (or leave) to the block size.
+
+    std::vector<uint8_t> ipad(B), opad(B);
+    for (size_t i = 0; i < B; ++i) {
+        ipad[i] = static_cast<uint8_t>(k0[i] ^ 0x36);
+        opad[i] = static_cast<uint8_t>(k0[i] ^ 0x5c);
+    }
+
+    // inner = SHA256(ipad || message)
+    determ::crypto::SHA256Builder ib;
+    ib.append(ipad.data(), ipad.size());
+    ib.append(reinterpret_cast<const uint8_t*>(message.data()), message.size());
+    Hash inner = ib.finalize();
+
+    // outer = SHA256(opad || inner)
+    determ::crypto::SHA256Builder ob;
+    ob.append(opad.data(), opad.size());
+    ob.append(inner);
+    return ob.finalize();
+}
+
+// Canonical HMAC input — identical to src/rpc/rpc.cpp::canonical_for_hmac.
+std::string canonical_for_hmac(const std::string& method, const json& params) {
+    return method + "|" + params.dump();
+}
+
+} // namespace
+
+int cmd_rpc_auth(int argc, char** argv) {
+    std::string secret_hex, method, params_file, params_string, expect_hex;
+    bool have_params_file = false, have_params_string = false;
+    bool params_stdin = false, emit_request = false, json_out = false;
+    bool have_expect = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--secret"        && i + 1 < argc) secret_hex    = argv[++i];
+        else if (a == "--method"        && i + 1 < argc) method        = argv[++i];
+        else if (a == "--params-file"   && i + 1 < argc) { params_file   = argv[++i]; have_params_file   = true; }
+        else if (a == "--params-string" && i + 1 < argc) { params_string = argv[++i]; have_params_string = true; }
+        else if (a == "--params-stdin")                  params_stdin  = true;
+        else if (a == "--expect"        && i + 1 < argc) { expect_hex    = argv[++i]; have_expect        = true; }
+        else if (a == "--emit-request")                  emit_request  = true;
+        else if (a == "--json")                          json_out      = true;
+        else {
+            std::cerr << "rpc-auth: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (secret_hex.empty() || method.empty()) {
+        std::cerr << "rpc-auth: --secret and --method are required\n";
+        return 1;
+    }
+    int src_count = (have_params_file ? 1 : 0)
+                  + (have_params_string ? 1 : 0)
+                  + (params_stdin ? 1 : 0);
+    if (src_count > 1) {
+        std::cerr << "rpc-auth: choose at most one of --params-file, "
+                     "--params-string, --params-stdin\n";
+        return 1;
+    }
+
+    // VERDICT discipline (compute mode prints the tag; verify mode mirrors
+    // verify-tx-inclusion's fail-closed contract):
+    //   compute → exit 0 with the tag (or request object) on stdout.
+    //   verify  → MATCH exit 0 / MISMATCH exit 3 (fail-closed).
+    //   usage / bad-hex / unparseable-params → exit 1.
+    try {
+        // Secret is HMAC key material — hex-decoded to raw bytes, exactly
+        // as the server does (hex_to_bytes(rpc_auth_secret)). A non-hex
+        // secret is a usage error, never a silent empty key.
+        std::vector<uint8_t> key;
+        try {
+            key = from_hex(secret_hex);
+        } catch (const std::exception&) {
+            std::cerr << "rpc-auth: --secret must be valid hex (2N chars)\n";
+            return 1;
+        }
+        if (key.empty()) {
+            std::cerr << "rpc-auth: --secret decodes to an empty key "
+                         "(auth would be disabled server-side)\n";
+            return 1;
+        }
+
+        // Resolve params. Default to {} when no source is given — matching a
+        // method whose params object is empty. Parse-then-keep so dump()
+        // yields the canonical sorted-key form the server re-derives.
+        json params;
+        if (have_params_file) {
+            params = read_json_file(params_file);
+        } else if (have_params_string) {
+            try {
+                params = json::parse(params_string);
+            } catch (const std::exception& e) {
+                std::cerr << "rpc-auth: --params-string is not valid JSON: "
+                          << e.what() << "\n";
+                return 1;
+            }
+        } else if (params_stdin) {
+            try {
+                params = json::parse(std::cin);
+            } catch (const std::exception& e) {
+                std::cerr << "rpc-auth: stdin params are not valid JSON: "
+                          << e.what() << "\n";
+                return 1;
+            }
+        } else {
+            params = json::object();
+        }
+
+        std::string canonical = canonical_for_hmac(method, params);
+        Hash mac = hmac_sha256(key, canonical);
+        std::string tag = to_hex(mac);
+
+        if (have_expect) {
+            // Verify mode. Constant-time compare against the supplied tag,
+            // mirroring RpcServer::verify_auth: a length mismatch is an
+            // immediate non-match, otherwise XOR-accumulate every byte with
+            // no early exit so the comparison time does not leak how many
+            // leading characters matched. The expected tag is compared as
+            // a lowercase hex STRING (the on-wire form), so case-insensitive
+            // input is normalized first.
+            std::string got = expect_hex;
+            std::transform(got.begin(), got.end(), got.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            bool match;
+            if (got.size() != tag.size()) {
+                match = false;
+            } else {
+                int diff = 0;
+                for (size_t i = 0; i < tag.size(); ++i)
+                    diff |= (tag[i] ^ got[i]);
+                match = (diff == 0);
+            }
+            if (json_out) {
+                json out = {
+                    {"verdict",  match ? "MATCH" : "MISMATCH"},
+                    {"method",   method},
+                    {"computed", tag},
+                    {"expected", got},
+                };
+                std::cout << out.dump() << "\n";
+            } else if (match) {
+                std::cout << "MATCH\n"
+                          << "  method: " << method << "\n"
+                          << "  tag:    " << tag << "\n";
+            } else {
+                std::cout << "MISMATCH\n"
+                          << "  method:   " << method << "\n"
+                          << "  computed: " << tag << "\n"
+                          << "  expected: " << got << "\n";
+            }
+            return match ? 0 : 3;
+        }
+
+        // Compute mode.
+        if (emit_request) {
+            json req = {
+                {"method", method},
+                {"params", params},
+                {"auth",   tag},
+            };
+            std::cout << req.dump() << "\n";
+        } else if (json_out) {
+            json out = {
+                {"method", method},
+                {"auth",   tag},
+            };
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << tag << "\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "rpc-auth: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -4264,6 +4515,7 @@ int main(int argc, char** argv) {
         if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);
         if (cmd == "committee-at-height")   return cmd_committee_at_height(sub_argc, sub_argv);
         if (cmd == "decode-wire")           return cmd_decode_wire(sub_argc, sub_argv);
+        if (cmd == "rpc-auth")              return cmd_rpc_auth(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
