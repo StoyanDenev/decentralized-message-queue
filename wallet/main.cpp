@@ -12233,6 +12233,254 @@ int cmd_verify_batch(int argc, char** argv) {
     return 0;
 }
 
+// ── receipt-key ──────────────────────────────────────────────────────────────
+//
+// OFFLINE derivation of the canonical composite leaf-key bytes for the
+// three composite state-root namespaces (i: / m: / p:) — the exact hex
+// body determ-light hands to the daemon's `state_proof` RPC for a
+// composite-key namespace.
+//
+// State-root leaves split into two key shapes (src/chain/chain.cpp
+// build_state_leaves):
+//   * Simple namespaces (a|s|r|d|b|k|c): the suffix is human-readable
+//     ASCII (a domain / constant / counter name). No tool needed — pass
+//     the name straight to state_proof.
+//   * Composite namespaces (i|m|p): the suffix is BINARY (big-endian
+//     integers + 32-byte hashes), which cannot ride raw inside a JSON
+//     string (nlohmann::json::dump() throws on the non-UTF-8 bytes). The
+//     RPC caller therefore HEX-encodes the post-"<ns>:" body; the daemon
+//     (src/node/node.cpp rpc_state_proof) hex-decodes it and re-prepends
+//     "<ns>:" to reconstruct the canonical key byte-for-byte.
+//
+// This command builds that body locally so an operator (or a script
+// driving the RPC directly) can reproduce the precise hex without
+// running determ-light or guessing the endianness. Three modes:
+//
+//   i: (default — receipt key)  body = u64_be(src_shard) || tx_hash[32]
+//                                      (40 bytes) → applied_inbound_
+//                                      receipts_ leaf. The present-receipt
+//                                      value is SHA256(0x01); we emit that
+//                                      expected value_hash too so the
+//                                      caller can bind a returned proof to
+//                                      THIS receipt (matches determ-light
+//                                      verify-receipt-inclusion).
+//   m: (merge key)              body = u32_be(shard_id)   ( 4 bytes)
+//                                      → merge_state_ leaf.
+//   p: (param key)              body = u64_be(eff_height) || u32_be(idx)
+//                                      (12 bytes) → pending_param_changes_
+//                                      leaf.
+//
+// Pure local computation: no RPC, no network, no daemon, no file IO.
+// Deterministic — identical inputs always yield identical hex.
+//
+// Output fields:
+//   * namespace          — i | m | p
+//   * key_body_hex       — the post-"<ns>:" body, hex. This is the EXACT
+//                          string passed as state_proof's `key` param for
+//                          a composite namespace.
+//   * full_key_bytes_hex — to_hex("<ns>:" || body). Equals the daemon's
+//                          returned `key_bytes` for a hit; the caller
+//                          compares the two to confirm the proof is for
+//                          THIS leaf, not some aliased one.
+//   * value_hash (i: only) — SHA256(0x01), the present-receipt marker
+//                          value, for proof binding.
+//
+// Exit codes: 0 success, 1 args / range error.
+int cmd_receipt_key(int argc, char** argv) {
+    std::string ns = "i";               // i | m | p
+    bool        have_src   = false, have_tx = false;
+    bool        have_shard = false;
+    bool        have_eff   = false, have_idx = false;
+    uint64_t    src_shard = 0, eff_height = 0;
+    uint32_t    shard_id  = 0, idx        = 0;
+    std::string tx_hash_hex;
+    bool        json_out = false;
+
+    auto parse_u64_arg = [](const std::string& flag, const char* raw,
+                            bool& ok) -> uint64_t {
+        try {
+            size_t pos = 0;
+            unsigned long long v = std::stoull(raw, &pos, 10);
+            if (pos != std::strlen(raw)) { ok = false; return 0; }
+            ok = true;
+            return static_cast<uint64_t>(v);
+        } catch (...) { ok = false; (void)flag; return 0; }
+    };
+
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--namespace" && i + 1 < argc) ns = argv[++i];
+        else if (a == "--src-shard" && i + 1 < argc) {
+            bool ok = false; src_shard = parse_u64_arg(a, argv[++i], ok);
+            if (!ok) { std::cerr << "receipt-key: --src-shard must be a "
+                                    "decimal u64\n"; return 1; }
+            have_src = true;
+        }
+        else if (a == "--tx-hash"   && i + 1 < argc) {
+            tx_hash_hex = argv[++i]; have_tx = true;
+        }
+        else if (a == "--shard-id"  && i + 1 < argc) {
+            bool ok = false; uint64_t v = parse_u64_arg(a, argv[++i], ok);
+            if (!ok || v > 0xffffffffULL) {
+                std::cerr << "receipt-key: --shard-id must be a decimal "
+                             "u32\n"; return 1;
+            }
+            shard_id = static_cast<uint32_t>(v); have_shard = true;
+        }
+        else if (a == "--eff-height" && i + 1 < argc) {
+            bool ok = false; eff_height = parse_u64_arg(a, argv[++i], ok);
+            if (!ok) { std::cerr << "receipt-key: --eff-height must be a "
+                                    "decimal u64\n"; return 1; }
+            have_eff = true;
+        }
+        else if (a == "--idx"       && i + 1 < argc) {
+            bool ok = false; uint64_t v = parse_u64_arg(a, argv[++i], ok);
+            if (!ok || v > 0xffffffffULL) {
+                std::cerr << "receipt-key: --idx must be a decimal u32\n";
+                return 1;
+            }
+            idx = static_cast<uint32_t>(v); have_idx = true;
+        }
+        else if (a == "--json")                      json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet receipt-key [--namespace i|m|p] [--json]\n"
+                "         i:  --src-shard <S> --tx-hash <hex64>\n"
+                "         m:  --shard-id <N>\n"
+                "         p:  --eff-height <H> --idx <N>\n"
+                "\n"
+                "  OFFLINE deriver for the composite state-root leaf-key bytes\n"
+                "  (i: / m: / p:) — the exact hex body the `state_proof` RPC\n"
+                "  expects for a composite-key namespace, and that determ-light\n"
+                "  computes internally. Pure local SHA-256 / byte assembly; no\n"
+                "  RPC, no network, no daemon, no file IO. Deterministic.\n"
+                "\n"
+                "  --namespace <i|m|p>   Which composite namespace (default i).\n"
+                "    i (applied_inbound_receipts): REQUIRES --src-shard +\n"
+                "        --tx-hash. body = u64_be(src_shard) || tx_hash[32]\n"
+                "        (40B). Also emits value_hash = SHA256(0x01), the\n"
+                "        present-receipt marker, for proof binding.\n"
+                "    m (merge_state): REQUIRES --shard-id. body =\n"
+                "        u32_be(shard_id) (4B).\n"
+                "    p (pending_param_changes): REQUIRES --eff-height + --idx.\n"
+                "        body = u64_be(eff_height) || u32_be(idx) (12B).\n"
+                "  --src-shard <S>       i: source shard id (decimal u64).\n"
+                "  --tx-hash <hex64>     i: 32-byte cross-shard tx hash (64 hex).\n"
+                "  --shard-id <N>        m: shard id (decimal u32).\n"
+                "  --eff-height <H>      p: effective height (decimal u64).\n"
+                "  --idx <N>             p: entry index at that height (u32).\n"
+                "  --json                One-line JSON {namespace, key_body_hex,\n"
+                "                        full_key_bytes_hex, value_hash?}.\n"
+                "\n"
+                "  key_body_hex is the EXACT `key` param for state_proof.\n"
+                "  full_key_bytes_hex equals the daemon's returned key_bytes\n"
+                "  for a hit (\"<ns>:\" + body), so the caller can bind a\n"
+                "  returned proof to THIS leaf.\n"
+                "\n"
+                "  Exit codes: 0 success, 1 args/range error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "receipt-key: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet receipt-key "
+                         "[--namespace i|m|p] (see --help)\n";
+            return 1;
+        }
+    }
+
+    if (ns != "i" && ns != "m" && ns != "p") {
+        std::cerr << "receipt-key: --namespace must be i | m | p (got '"
+                  << ns << "')\n";
+        return 1;
+    }
+
+    std::vector<uint8_t> body;
+    std::string value_hash_hex;          // i: only
+
+    if (ns == "i") {
+        if (!have_src || !have_tx) {
+            std::cerr << "receipt-key: --namespace i requires --src-shard "
+                         "and --tx-hash\n";
+            return 1;
+        }
+        std::vector<uint8_t> tx_hash;
+        try { tx_hash = from_hex(tx_hash_hex); }
+        catch (std::exception& e) {
+            std::cerr << "receipt-key: --tx-hash invalid hex: "
+                      << e.what() << "\n";
+            return 1;
+        }
+        if (tx_hash.size() != 32) {
+            std::cerr << "receipt-key: --tx-hash must be exactly 32 bytes "
+                         "(64 hex chars); got " << tx_hash.size()
+                      << " bytes\n";
+            return 1;
+        }
+        // body = u64_be(src_shard) || tx_hash[32]  (matches chain.cpp
+        // build_state_leaves applied_inbound_receipts_ branch + determ-
+        // light verify-receipt-inclusion byte-for-byte).
+        body.reserve(8 + 32);
+        for (int i = 7; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>((src_shard >> (8 * i)) & 0xff));
+        body.insert(body.end(), tx_hash.begin(), tx_hash.end());
+        // Present-receipt committed value = SHA256(0x01).
+        std::array<uint8_t, 32> mv{};
+        const uint8_t marker = 1;
+        SHA256(&marker, 1, mv.data());
+        value_hash_hex = to_hex(mv);
+    } else if (ns == "m") {
+        if (!have_shard) {
+            std::cerr << "receipt-key: --namespace m requires --shard-id\n";
+            return 1;
+        }
+        // body = u32_be(shard_id)  (chain.cpp merge_state_ branch).
+        body.reserve(4);
+        for (int i = 3; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>((shard_id >> (8 * i)) & 0xff));
+    } else {  // ns == "p"
+        if (!have_eff || !have_idx) {
+            std::cerr << "receipt-key: --namespace p requires --eff-height "
+                         "and --idx\n";
+            return 1;
+        }
+        // body = u64_be(eff_height) || u32_be(idx)  (chain.cpp
+        // pending_param_changes_ branch).
+        body.reserve(8 + 4);
+        for (int i = 7; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>((eff_height >> (8 * i)) & 0xff));
+        for (int i = 3; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>((idx >> (8 * i)) & 0xff));
+    }
+
+    const std::string key_body_hex = to_hex(body);
+
+    // full_key_bytes = "<ns>:" || body. Equals the daemon's returned
+    // key_bytes for a hit, so the caller can confirm the served proof is
+    // for THIS leaf and not an aliased one.
+    std::vector<uint8_t> full_key;
+    full_key.reserve(2 + body.size());
+    full_key.push_back(static_cast<uint8_t>(ns[0]));
+    full_key.push_back(':');
+    full_key.insert(full_key.end(), body.begin(), body.end());
+    const std::string full_key_bytes_hex = to_hex(full_key);
+
+    if (json_out) {
+        nlohmann::json r;
+        r["namespace"]          = ns;
+        r["key_body_hex"]       = key_body_hex;
+        r["full_key_bytes_hex"] = full_key_bytes_hex;
+        if (ns == "i") r["value_hash"] = value_hash_hex;
+        std::cout << r.dump() << "\n";
+    } else {
+        std::cout << "namespace:          " << ns                 << "\n"
+                  << "key_body_hex:       " << key_body_hex       << "\n"
+                  << "full_key_bytes_hex: " << full_key_bytes_hex << "\n";
+        if (ns == "i")
+            std::cout << "value_hash:         " << value_hash_hex << "\n";
+    }
+    return 0;
+}
+
 // ── derive-tx-hash ───────────────────────────────────────────────────────────
 //
 // Recompute the canonical tx_hash from a signed tx envelope. The chain
@@ -19479,6 +19727,26 @@ void print_usage() {
         "                                             field names are both accepted. Pass `-` to\n"
         "                                             --tx-json to read from stdin. Exit 0 success,\n"
         "                                             1 args/parse/IO error, 2 --check mismatch.\n"
+        "  receipt-key [--namespace i|m|p]            OFFLINE deriver for the composite state-root\n"
+        "              i: --src-shard <S>             leaf-key bytes (i:/m:/p:) — the exact hex body\n"
+        "                 --tx-hash <hex64>           the `state_proof` RPC expects for a composite-\n"
+        "              m: --shard-id <N>              key namespace, and that determ-light computes\n"
+        "              p: --eff-height <H> --idx <N>  internally. Pure local SHA-256 / byte assembly:\n"
+        "              [--json]                       no RPC, no network, no daemon, no file IO.\n"
+        "                                             Deterministic. i (default): body = u64_be(\n"
+        "                                             src_shard) || tx_hash[32] (40B, applied_\n"
+        "                                             inbound_receipts_); also emits value_hash =\n"
+        "                                             SHA256(0x01), the present-receipt marker, for\n"
+        "                                             proof binding. m: body = u32_be(shard_id) (4B,\n"
+        "                                             merge_state_). p: body = u64_be(eff_height) ||\n"
+        "                                             u32_be(idx) (12B, pending_param_changes_). The\n"
+        "                                             byte layout mirrors src/chain/chain.cpp build_\n"
+        "                                             state_leaves. Output: key_body_hex (the EXACT\n"
+        "                                             state_proof `key` param) + full_key_bytes_hex\n"
+        "                                             (\"<ns>:\" + body, equals the daemon's returned\n"
+        "                                             key_bytes for a hit, so the caller can bind a\n"
+        "                                             proof to THIS leaf). --json emits a one-line\n"
+        "                                             object. Exit 0 success, 1 args/range error.\n"
         "  inspect-tx --tx-json <file|-> [--json]     READ-ONLY introspection of a signed tx\n"
         "                                             envelope. Parses every standard field,\n"
         "                                             decodes the payload per TxType where the\n"
@@ -19913,6 +20181,7 @@ int main(int argc, char** argv) {
     if (cmd == "validate-tx")     return cmd_validate_tx    (argc - 2, argv + 2);
     if (cmd == "verify-batch")    return cmd_verify_batch   (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
+    if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
     if (cmd == "inspect-tx")      return cmd_inspect_tx     (argc - 2, argv + 2);
     if (cmd == "sign-arbitrary")  return cmd_sign_arbitrary (argc - 2, argv + 2);
     if (cmd == "verify-arbitrary") return cmd_verify_arbitrary(argc - 2, argv + 2);

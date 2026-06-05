@@ -663,6 +663,12 @@ Additional in-process tests:
                                               major namespaces (a/s/r/b/d) +
                                               cross-namespace independence +
                                               swap-rejection defense
+  determ test-state-proof-composite-key       state_proof verify across the
+                                              composite-key namespaces
+                                              (i/m/p) — binary key bodies
+                                              re-verify under state_root;
+                                              wrong/absent + little-endian +
+                                              tampered keys rejected
   determ test-applied-receipt-restore         applied_inbound_receipts dedup
                                               survives snapshot restore —
                                               exactly-once-credit preserved
@@ -37946,6 +37952,280 @@ int main(int argc, char** argv) {
         std::fputs(fail == 0 ? "all assertions" : "had failures", stdout);
         std::fputs("\n", stdout);
         std::fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+    // R41 round-4: state_proof verify path across the three COMPOSITE-key
+    // namespaces. The sibling test-state-proof-namespaces unit covers the
+    // five SIMPLE per-domain namespaces (a/s/r/b/d — key = "<ns>:" + domain).
+    // It does NOT touch the three composite keys that build_state_leaves
+    // constructs from binary key bodies:
+    //   i:  applied_inbound_receipts_  key = 'i' ':' u64_be(src_shard) tx_hash
+    //   m:  merge_state_               key = 'm' ':' u32_be(shard_id)
+    //   p:  pending_param_changes_     key = 'p' ':' u64_be(eff) u32_be(idx)
+    // These are exactly the keys the daemon's state_proof RPC now serves for
+    // light clients (rpc_state_proof hex-decodes the binary body). A light
+    // client reconstructing one of these keys byte-for-byte and re-verifying
+    // the returned proof against compute_state_root() is the trust model
+    // exercised here. The key reconstruction below mirrors
+    // src/chain/chain.cpp::build_state_leaves exactly.
+    if (cmd == "test-state-proof-composite-key") {
+        using namespace determ;
+        using namespace determ::chain;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // Big-endian byte appenders matching build_state_leaves.
+        auto push_u64_be = [](std::vector<uint8_t>& k, uint64_t v) {
+            for (int i = 7; i >= 0; --i) k.push_back((v >> (8*i)) & 0xff);
+        };
+        auto push_u32_be = [](std::vector<uint8_t>& k, uint32_t v) {
+            for (int i = 3; i >= 0; --i) k.push_back((v >> (8*i)) & 0xff);
+        };
+        // i: key = 'i' ':' u64_be(src_shard) tx_hash(32).
+        auto inbound_key = [&](uint64_t src_shard, const Hash& tx_hash) {
+            std::vector<uint8_t> k;
+            k.push_back('i'); k.push_back(':');
+            push_u64_be(k, src_shard);
+            k.insert(k.end(), tx_hash.begin(), tx_hash.end());
+            return k;
+        };
+        // m: key = 'm' ':' u32_be(shard_id).
+        auto merge_key = [&](uint32_t shard_id) {
+            std::vector<uint8_t> k;
+            k.push_back('m'); k.push_back(':');
+            push_u32_be(k, shard_id);
+            return k;
+        };
+        // p: key = 'p' ':' u64_be(eff) u32_be(idx).
+        auto param_key = [&](uint64_t eff, uint32_t idx) {
+            std::vector<uint8_t> k;
+            k.push_back('p'); k.push_back(':');
+            push_u64_be(k, eff);
+            push_u32_be(k, idx);
+            return k;
+        };
+
+        // Build a chain holding one entry in each composite namespace.
+        // - i: via an applied inbound receipt (src_shard 1, tx_hash[0]=0x77)
+        // - m: via a MERGE_BEGIN (shard 1 → partner 2 under shard_count=4)
+        // - p: via stage_param_change(eff=500, "min_stake", ...)
+        GenesisConfig cfg;
+        cfg.chain_id = "state-proof-composite-key-test";
+        GenesisCreator alice_c;
+        alice_c.domain = "alice";
+        for (size_t i = 0; i < alice_c.ed_pub.size(); ++i)
+            alice_c.ed_pub[i] = uint8_t(0x10 + i);
+        alice_c.initial_stake = 0;
+        cfg.initial_creators = {alice_c};
+        GenesisAllocation alice_bal, bob_bal;
+        alice_bal.domain = "alice"; alice_bal.balance = 1000;
+        bob_bal.domain   = "bob";   bob_bal.balance   = 200;
+        cfg.initial_balances = {alice_bal, bob_bal};
+
+        Chain c;
+        c.append(make_genesis_block(cfg));
+        Hash salt{};
+        c.set_shard_routing(4, salt, ShardId{0});
+
+        // i:-namespace — apply an inbound receipt.
+        Hash recv_tx_hash{}; recv_tx_hash[0] = 0x77;
+        {
+            CrossShardReceipt r;
+            r.src_shard = ShardId{1}; r.dst_shard = ShardId{0};
+            r.src_block_index = 1;
+            r.tx_hash = recv_tx_hash;
+            r.from = "remote"; r.to = "bob";
+            r.amount = 10; r.fee = 0; r.nonce = 0;
+            Block b;
+            b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.inbound_receipts.push_back(r);
+            c.append(b);
+        }
+
+        // m:-namespace — MERGE_BEGIN for shard 1 → partner 2.
+        {
+            MergeEvent ev;
+            ev.event_type = MergeEvent::BEGIN;
+            ev.shard_id   = ShardId{1};
+            ev.partner_id = ShardId{2};
+            ev.effective_height = 100;
+            ev.evidence_window_start = 0;
+            ev.merging_shard_region = "us-east";
+            Transaction tx;
+            tx.type = TxType::MERGE_EVENT;
+            tx.from = "alice"; tx.fee = 0; tx.nonce = 0;
+            tx.payload = ev.encode();
+            Block b;
+            b.index = c.height(); b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"};
+            b.transactions.push_back(tx);
+            c.append(b);
+        }
+
+        // p:-namespace — stage a param change at eff height 500, index 0.
+        c.stage_param_change(500, "min_stake", {0xDE, 0xAD, 0xBE, 0xEF});
+
+        // Sanity: each composite map now has exactly the entry we expect.
+        check(c.inbound_receipt_applied(ShardId{1}, recv_tx_hash),
+              "setup: i:-namespace has the applied inbound receipt");
+        check(c.merge_state().count(ShardId{1}) == 1,
+              "setup: m:-namespace has the MERGE_BEGIN entry for shard 1");
+        check(c.pending_param_changes().count(500) == 1,
+              "setup: p:-namespace has the staged param change at eff 500");
+
+        Hash root = c.compute_state_root();
+
+        // === i:-namespace composite-key proof ===
+
+        // 1. state_proof for the reconstructed i: key returns a proof
+        //    whose returned key equals the query key (byte-for-byte).
+        auto i_key = inbound_key(1, recv_tx_hash);
+        {
+            auto p = c.state_proof(i_key);
+            check(p.has_value() && p->key == i_key,
+                  "i:-composite: state_proof returns proof with matching key");
+        }
+
+        // 2. The i: proof re-verifies against compute_state_root via
+        //    crypto::merkle_verify (the entire light-client argument).
+        {
+            auto p = c.state_proof(i_key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, i_key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(ok,
+                  "i:-composite: proof verifies under state_root");
+        }
+
+        // === m:-namespace composite-key proof ===
+
+        // 3. state_proof for the reconstructed m: key (shard 1) verifies.
+        auto m_key = merge_key(1);
+        {
+            auto p = c.state_proof(m_key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, m_key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && p->key == m_key && ok,
+                  "m:-composite: proof for u32_be(shard=1) verifies under root");
+        }
+
+        // === p:-namespace composite-key proof ===
+
+        // 4. state_proof for the reconstructed p: key (eff 500, idx 0)
+        //    verifies.
+        auto p_key = param_key(500, 0);
+        {
+            auto p = c.state_proof(p_key);
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, p_key, p->value_hash,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(p.has_value() && p->key == p_key && ok,
+                  "p:-composite: proof for u64_be(eff)+u32_be(idx) verifies under root");
+        }
+
+        // === Cross-namespace distinctness ===
+
+        // 5. The three composite-key value_hashes are pairwise distinct
+        //    (no accidental collision across namespaces).
+        {
+            auto pi = c.state_proof(i_key);
+            auto pm = c.state_proof(m_key);
+            auto pp = c.state_proof(p_key);
+            bool all = pi.has_value() && pm.has_value() && pp.has_value();
+            bool distinct = all
+                && pi->value_hash != pm->value_hash
+                && pi->value_hash != pp->value_hash
+                && pm->value_hash != pp->value_hash;
+            check(distinct,
+                  "cross-composite: i:/m:/p: value_hashes pairwise distinct");
+        }
+
+        // === Wrong-key rejection (the core negative case) ===
+
+        // 6. A deliberately-wrong i: key — same shape but a tx_hash that
+        //    was never applied — returns nullopt (no membership proof for
+        //    an absent composite key; sorted-leaves design contract).
+        {
+            Hash ghost_tx{}; ghost_tx[0] = 0xAB;
+            auto bad = inbound_key(1, ghost_tx);
+            auto p = c.state_proof(bad);
+            check(!p.has_value(),
+                  "wrong i:-key (absent tx_hash): state_proof returns nullopt");
+        }
+
+        // 7. A wrong m: key — a shard_id with no merge_state entry —
+        //    returns nullopt.
+        {
+            auto bad = merge_key(3);  // shard 3 was never merged
+            auto p = c.state_proof(bad);
+            check(!p.has_value(),
+                  "wrong m:-key (unmerged shard 3): state_proof returns nullopt");
+        }
+
+        // 8. A wrong p: key — correct eff height but a non-existent index
+        //    (idx 1 when only idx 0 was staged) — returns nullopt.
+        {
+            auto bad = param_key(500, 1);
+            auto p = c.state_proof(bad);
+            check(!p.has_value(),
+                  "wrong p:-key (absent idx 1 at eff 500): returns nullopt");
+        }
+
+        // 9. Endianness sensitivity: a LITTLE-endian-encoded m: key body
+        //    (bytes reversed vs the big-endian build_state_leaves form)
+        //    does NOT match shard 1's leaf → nullopt. This pins the
+        //    big-endian wire contract the RPC depends on.
+        {
+            std::vector<uint8_t> bad;
+            bad.push_back('m'); bad.push_back(':');
+            // shard 1 little-endian = 01 00 00 00 (vs BE 00 00 00 01).
+            bad.push_back(0x01); bad.push_back(0x00);
+            bad.push_back(0x00); bad.push_back(0x00);
+            auto p = c.state_proof(bad);
+            check(!p.has_value(),
+                  "endianness: little-endian m:-key body returns nullopt (BE contract)");
+        }
+
+        // === Tamper rejection on a valid composite proof ===
+
+        // 10. A valid i: proof with a tampered value_hash fails
+        //     merkle_verify — defends against a malicious full node
+        //     lying about a receipt's presence in the dedup set.
+        {
+            auto p = c.state_proof(i_key);
+            Hash bad_value = p->value_hash;
+            bad_value[0] ^= 0xFF;
+            bool ok = p.has_value()
+                && crypto::merkle_verify(root, i_key, bad_value,
+                                          p->target_index, p->leaf_count, p->proof);
+            check(!ok,
+                  "tamper: i:-proof with flipped value_hash rejected");
+        }
+
+        // === Determinism ===
+
+        // 11. Two proofs for the same composite key over the unchanged
+        //     chain are byte-identical (any full node must agree).
+        {
+            auto p1 = c.state_proof(p_key);
+            auto p2 = c.state_proof(p_key);
+            check(p1.has_value() && p2.has_value()
+                  && p1->value_hash == p2->value_hash
+                  && p1->target_index == p2->target_index
+                  && p1->leaf_count == p2->leaf_count
+                  && p1->proof == p2->proof,
+                  "determinism: 2 proofs for p:-composite key byte-identical");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": state-proof-composite-key "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
         return fail == 0 ? 0 : 1;
     }
     if (cmd == "stake")       return cmd_stake(sub_argc, sub_argv);

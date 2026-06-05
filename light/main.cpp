@@ -10,7 +10,7 @@
 // connection — the light-client computes compute_genesis_hash locally
 // and refuses to proceed if the daemon's block 0 doesn't match.
 //
-// Subcommands (17 total + help / version):
+// Subcommands (18 total + help / version):
 //   verify-headers           Verify a `headers` RPC reply's chain
 //   verify-block-sigs        Verify K-of-K committee sigs on a header
 //   verify-state-proof       Verify a state-proof against a root
@@ -30,6 +30,7 @@
 //   verify-archive           OFFLINE re-verify of an export-headers archive
 //   verify-tx-inclusion      Prove tx H is (not) in block B vs committee sigs
 //   verify-receipt-inclusion Prove cross-shard receipt (src,H) is applied (i:)
+//   verify-merge-state       Prove shard S is merged into partner P (m:)
 //   help / version
 //
 // Trust-model invariants:
@@ -196,6 +197,26 @@ void print_usage() {
         "      key body); against a legacy daemon that cannot, the verdict\n"
         "      is UNVERIFIABLE and the command fails closed — never a false\n"
         "      INCLUDED.\n"
+        "  verify-merge-state --rpc-port <N> --genesis <file>\n"
+        "                     --shard-id <S> --partner-id <P>\n"
+        "                     --refugee-region <R> [--json]\n"
+        "      Prove (or disprove) that shard <S> is currently merged into\n"
+        "      partner <P> with refugee region <R> — i.e. that the exact\n"
+        "      record (partner_id=<P>, refugee_region=<R>) is a member of the\n"
+        "      committee-verified `m:` (merge_state) namespace. Anchors\n"
+        "      genesis, committee-verifies the header chain to head, computes\n"
+        "      the canonical merge key (\"m:\" + shard_id_be4), fetches the\n"
+        "      `m:`-namespace state-proof (hex-encoded key body), and Merkle-\n"
+        "      verifies it against the committee-signed state_root. The\n"
+        "      proof's key_bytes must equal the locally-computed key AND its\n"
+        "      value_hash must equal SHA256(u64_be(partner_id) ||\n"
+        "      u64_be(region_len) || region) — binding the proof to THIS\n"
+        "      merge record, so a daemon lie about the partner or region is\n"
+        "      detected, not propagated. INCLUDED / NOT-INCLUDED are sound\n"
+        "      verdicts anchored to the head height (merge_state is mutable:\n"
+        "      a later revert flips INCLUDED back to NOT-INCLUDED). Any\n"
+        "      tamper, mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
+        "      never a false INCLUDED.\n"
         "\n"
         "Meta:\n"
         "  help, --help, -h    Show this message.\n"
@@ -1579,6 +1600,347 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
     }
 }
 
+// ─────────────────────── verify-merge-state ────────────────────────────
+//
+// Trust-minimized INCLUDED / NOT-INCLUDED / UNVERIFIABLE verdict on
+// whether a shard's under-quorum-merge record (shard_id → partner_id +
+// refugee_region) lives in the committee-verified `m:` (merge_state)
+// namespace, with the proof bound to the EXACT (partner_id, refugee_region)
+// the caller asserts.
+//
+// This is the merge-state analogue of verify-receipt-inclusion (which
+// proves `i:` receipt membership) and stake-trustless (which Merkle-
+// verifies an `s:` leaf against a committee-signed state_root). It uses the
+// SAME composite-key state-proof path the daemon now serves (the caller
+// hex-encodes the binary key body; see src/node/node.cpp rpc_state_proof).
+// The merge path differs from the receipt path in two ways:
+//
+//   * Namespace is "m" and the leaf key is COMPOSITE but SHORT. The
+//     canonical encoding (see chain.cpp build_state_leaves, "merge_state_"
+//     branch) is:
+//         key        = 'm' ':' || u32_be(shard_id)
+//         value_hash = SHA256( u64_be(partner_id)
+//                            || u64_be(refugee_region.size())
+//                            || refugee_region )
+//     The verifier recomputes BOTH locally and demands the proof's
+//     key_bytes == local key AND its value_hash == the locally-recomputed
+//     hash. The value_hash binding is load-bearing: unlike `i:` (whose
+//     value is the constant presence marker SHA256(0x01)), a `m:` leaf
+//     carries DATA, so a daemon could serve a valid Merkle proof for shard
+//     S that encodes a DIFFERENT partner/region. Recomputing the hash from
+//     the caller-asserted (partner_id, refugee_region) forces the proof to
+//     match exactly that record — a daemon lie about either field is
+//     detected, not propagated.
+//
+//   * merge_state is mutable: a MERGE_END erases the leaf (chain.cpp). So
+//     this is a head-anchored present/absent verdict, NOT an append-only
+//     guarantee — INCLUDED means "merged INTO partner_id with that refugee
+//     region AS OF the committee-verified head", and a later revert makes
+//     the same query return NOT-INCLUDED. The verdict is therefore always
+//     anchored to (and reported with) the head height it was proven at.
+//
+// Fail-closed contract: any tamper, malformed proof, key/value mismatch,
+// or daemon refusal to serve the `m:` proof yields UNVERIFIABLE (exit 3),
+// never a false INCLUDED. A clean Merkle-verified inclusion → INCLUDED
+// (exit 0); a daemon `not_found` for the canonical key → NOT-INCLUDED
+// (exit 0, a sound verified negative — shard S is not currently merged
+// into THAT partner with THAT region).
+
+int cmd_verify_merge_state(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, refugee_region;
+    uint64_t shard_id = 0, partner_id = 0;
+    bool have_port = false, have_shard = false, have_partner = false,
+         have_region = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port"  && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis"   && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--shard-id"   && i + 1 < argc) {
+            shard_id = parse_u64("--shard-id", argv[++i]); have_shard = true;
+        } else if (a == "--partner-id" && i + 1 < argc) {
+            partner_id = parse_u64("--partner-id", argv[++i]); have_partner = true;
+        } else if (a == "--refugee-region" && i + 1 < argc) {
+            refugee_region = argv[++i]; have_region = true;
+        } else if (a == "--json")                      json_out     = true;
+        else {
+            std::cerr << "verify-merge-state: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || !have_shard || !have_partner
+        || !have_region) {
+        std::cerr << "verify-merge-state: --rpc-port, --genesis, --shard-id, "
+                     "--partner-id, --refugee-region are required\n";
+        return 1;
+    }
+    // shard_id and partner_id are u32 on the wire (build_state_leaves emits
+    // u32_be(shard_id) keys and stores ShardId partner_id). Reject anything
+    // that cannot fit so a malformed query can't silently alias a leaf.
+    if (shard_id > 0xffffffffull) {
+        std::cerr << "verify-merge-state: --shard-id exceeds u32 range\n";
+        return 1;
+    }
+    if (partner_id > 0xffffffffull) {
+        std::cerr << "verify-merge-state: --partner-id exceeds u32 range\n";
+        return 1;
+    }
+    // The region binds into the leaf hash with a u64_be length prefix; cap
+    // it at the MERGE_EVENT wire ceiling (32 bytes) so a query can't assert
+    // a region the protocol could never have stored.
+    if (refugee_region.size() > 32) {
+        std::cerr << "verify-merge-state: --refugee-region exceeds 32 bytes\n";
+        return 1;
+    }
+
+    // The verdict mirrors verify-receipt-inclusion's tri-state.
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-merge-state: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // Compute the canonical merge_state key bytes locally, byte-for-byte
+        // matching chain.cpp build_state_leaves "merge_state_" branch:
+        //   'm' ':' || u32_be(shard_id)
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + 4);
+        local_key.push_back('m'); local_key.push_back(':');
+        for (int i = 3; i >= 0; --i)
+            local_key.push_back(static_cast<uint8_t>(
+                (static_cast<uint32_t>(shard_id) >> (8 * i)) & 0xff));
+
+        // The committed value for THIS merge record:
+        //   SHA256(u64_be(partner_id) || u64_be(region_len) || region)
+        determ::crypto::SHA256Builder mb;
+        mb.append(static_cast<uint64_t>(partner_id));
+        mb.append(static_cast<uint64_t>(refugee_region.size()));
+        mb.append(refugee_region);
+        Hash expected_value_hash = mb.finalize();
+
+        // Committee-verify the header chain end-to-end, capturing the
+        // head's state_root (the anchor for the Merkle inclusion).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `m:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `m:`-namespace state-proof. The daemon takes a string
+        // `key`; for composite-key namespaces it hex-decodes the post-prefix
+        // body and prepends "m:" to reconstruct the canonical key. The body
+        // here is u32_be(shard_id) (4 bytes) — see rpc_state_proof's width
+        // enforcement.
+        std::vector<uint8_t> body;
+        body.reserve(4);
+        for (int i = 3; i >= 0; --i)
+            body.push_back(static_cast<uint8_t>(
+                (static_cast<uint32_t>(shard_id) >> (8 * i)) & 0xff));
+        std::string key_body_hex = to_hex(body.data(), body.size());
+
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "m"}, {"key", key_body_hex}});
+
+        // A daemon that cannot serve the `m:` namespace returns an `error`.
+        // We distinguish a genuine absence (`not_found` for our exact key →
+        // a sound NOT-INCLUDED) from any other refusal (→ UNVERIFIABLE,
+        // fail closed — we will not assert membership either way).
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `m:` leaf for shard "
+                        + std::to_string(shard_id)
+                        + " (state_proof not_found — shard is not currently "
+                          "merged)";
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `m:` state-proof: " + err
+                        + " (cannot prove membership trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS merge record: (1) key_bytes must equal
+            // the locally-computed canonical key, (2) value_hash must equal
+            // the locally-recomputed SHA256 over (partner_id, region). Either
+            // mismatch means the daemon served a proof for a different leaf
+            // OR is lying about the merge's partner/region → UNVERIFIABLE.
+            std::string proof_key_hex =
+                proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical merge key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match the recomputed hash of "
+                              "(partner_id=" + std::to_string(partner_id)
+                            + ", refugee_region=\"" + refugee_region + "\")="
+                            + to_hex(expected_value_hash)
+                            + " — daemon is lying about the merge's "
+                              "partner/region OR proving a different record";
+                } else {
+                    // Anchor the proof's claimed state_root to a
+                    // committee-signed header (the chain may have advanced
+                    // during the round-trip), mirroring verify-receipt-
+                    // inclusion / stake-trustless.
+                    uint64_t proof_height =
+                        proof.value("height", uint64_t{0});
+                    std::string proof_root =
+                        proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    if (proof_height > vc.height) {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        auto pg = rpc.call("headers",
+                            {{"from", anchor_index}, {"count", 1}});
+                        if (!pg.contains("headers")
+                            || !pg["headers"].is_array()
+                            || pg["headers"].empty()) {
+                            throw std::runtime_error(
+                                "cannot fetch header at index="
+                                + std::to_string(anchor_index)
+                                + " (proof.height="
+                                + std::to_string(proof_height) + ")");
+                        }
+                        auto& h = pg["headers"][0];
+                        std::string hdr_root =
+                            h.value("state_root", std::string{});
+                        if (hdr_root != proof_root) {
+                            throw std::runtime_error(
+                                "proof.state_root=" + proof_root
+                                + " does not match header["
+                                + std::to_string(anchor_index)
+                                + "].state_root=" + hdr_root);
+                        }
+                        auto vbs = verify_block_sigs(h, committee_json,
+                                                     /*bft=*/false);
+                        if (!vbs.ok)
+                            vbs = verify_block_sigs(h, committee_json,
+                                                    /*bft=*/true);
+                        if (!vbs.ok) {
+                            throw std::runtime_error(
+                                "header[" + std::to_string(anchor_index)
+                                + "] committee-sig check failed: "
+                                + vbs.detail);
+                        }
+                        if (anchor_index >= vc.height) {
+                            auto walk = rpc.call("headers",
+                                {{"from", vc.height - 1},
+                                 {"count", proof_height - vc.height + 2}});
+                            auto vh = verify_headers(walk, "", "");
+                            if (!vh.ok) {
+                                throw std::runtime_error(
+                                    "prev_hash walk vc.height->proof.height: "
+                                    + vh.detail);
+                            }
+                        }
+                        anchor_root = proof_root;
+                        anchor_at   = proof_height;
+                    } else if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+
+                    // Merkle-verify the proof against the committee-signed
+                    // root. verify_state_proof re-derives key_bytes +
+                    // value_hash from the proof JSON and rolls the siblings
+                    // up to anchor_root; we already bound those to the
+                    // canonical merge record above, so a pass here is a
+                    // sound INCLUDED.
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",       included},
+                {"verdict",        verdict_str(verdict)},
+                {"shard_id",       shard_id},
+                {"partner_id",     partner_id},
+                {"refugee_region", refugee_region},
+                {"namespace",      "m"},
+            };
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:    matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:      m (merge_state)\n"
+                      << "  shard_id:       " << shard_id << "\n"
+                      << "  partner_id:     " << partner_id << "\n"
+                      << "  refugee_region: " << refugee_region << "\n";
+            if (verdict == InclusionVerdict::INCLUDED) {
+                std::cout << "  state_root:     " << state_root_used << "\n"
+                          << "  anchored at H:  " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:         " << detail << "\n";
+        }
+
+        // Exit codes match verify-receipt-inclusion: INCLUDED / NOT-INCLUDED
+        // → 0 (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-merge-state: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1617,6 +1979,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);
         if (cmd == "verify-tx-inclusion")   return cmd_verify_tx_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
+        if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);
     } catch (const std::exception& e) {
         std::cerr << "determ-light: unhandled error: " << e.what() << "\n";
         return 2;
