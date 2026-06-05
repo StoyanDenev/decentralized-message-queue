@@ -403,9 +403,9 @@ In-process tests (deterministic, no network):
                                               vectors (the C99 ref10 cross-val
                                               oracle per CRYPTO-C99-SPEC §Q7/§Q9)
   determ test-sha2-c99                        v2.10 Phase 0: libsodium-free C99
-                                              SHA-256/512 (FIPS 180-4) byte-equal
-                                              vs OpenSSL over all length/padding
-                                              boundaries + NIST KATs (§Q9 gate)
+                                              SHA-256/512 + HMAC + HKDF + PBKDF2
+                                              byte-equal vs OpenSSL + NIST/RFC
+                                              KATs (CRYPTO-C99-SPEC §Q9 gate)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -10882,10 +10882,40 @@ int main(int argc, char** argv) {
             }
         }
 
+        // (6) PBKDF2-HMAC-SHA-256 vs OpenSSL PKCS5_PBKDF2_HMAC over a
+        // (pw,salt,iters,outlen) grid (small iter counts keep it fast — the
+        // construction is exercised identically regardless of count) + a KAT.
+        {
+            const uint32_t iters[] = {1,2,5,10,100,1000};
+            const size_t   olens[] = {1,16,31,32,33,48,64,100};
+            bool pb_ok = true; long pb_at = -1; uint8_t one = 0;
+            for (size_t ii=0; ii<sizeof(iters)/sizeof(iters[0]) && pb_ok; ++ii)
+            for (size_t oi=0; oi<sizeof(olens)/sizeof(olens[0]) && pb_ok; ++oi) {
+                size_t pl = 4 + (oi*7)%30, sl = (ii*5 + oi*3)%40, outlen = olens[oi];
+                std::vector<uint8_t> pw(pl), salt(sl), c(outlen), o(outlen);
+                for (size_t i=0;i<pl;i++) pw[i]=(uint8_t)((i*29u+oi+1u)&0xffu);
+                for (size_t i=0;i<sl;i++) salt[i]=(uint8_t)((i*7u+ii*3u+5u)&0xffu);
+                determ_pbkdf2_hmac_sha256(pw.data(),pl, sl?salt.data():nullptr,sl, iters[ii], c.data(), outlen);
+                PKCS5_PBKDF2_HMAC((const char*)pw.data(),(int)pl, sl?salt.data():&one,(int)sl,
+                                  (int)iters[ii], EVP_sha256(),(int)outlen, o.data());
+                if (std::memcmp(c.data(),o.data(),outlen)!=0){ pb_ok=false; pb_at=(long)(iters[ii]*100+outlen); }
+            }
+            check(pb_ok, pb_ok ? "PBKDF2-HMAC-SHA-256 C99 == OpenSSL over the (pw,salt,iters,outlen) grid"
+                               : "PBKDF2-HMAC-SHA-256 diverges (iters*100+outlen=" + std::to_string(pb_at) + ")");
+            // Known-answer: P="password", S="salt", c=4096, dkLen=32 (RFC-style vector).
+            {
+                const char* P = "password"; const char* S = "salt";
+                uint8_t dk[32];
+                determ_pbkdf2_hmac_sha256((const uint8_t*)P,8,(const uint8_t*)S,4,4096, dk,32);
+                check(to_hexs(dk,32)=="c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+                      "PBKDF2-HMAC-SHA-256(\"password\",\"salt\",4096,32) matches KAT");
+            }
+        }
+
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": sha2-c99 "
                   << (fail == 0 ? "all cross-validation + NIST/RFC KATs matched" : "had failures")
-                  << " (libsodium-free C99 SHA-2 + HMAC + HKDF vs OpenSSL backend — the §Q9 gate)\n";
+                  << " (libsodium-free C99 SHA-2 + HMAC + HKDF + PBKDF2 vs OpenSSL — the §Q9 gate)\n";
         return fail == 0 ? 0 : 1;
     }
 

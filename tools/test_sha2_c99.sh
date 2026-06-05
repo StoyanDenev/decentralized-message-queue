@@ -5,15 +5,15 @@
 # (RFC 8032 Ed25519 + RFC 9591 FROST H1..H5 are SHA-512-based), so it unblocks
 # the v2.10 work.
 #
-# Covers the whole CRYPTO-C99-SPEC §3.1 family (SHA-256/512 + HMAC + HKDF), 12
-# assertions: (1) byte-equal cross-validation of the C99 SHA-256 + SHA-512 against
-# the daemon's OpenSSL backend over EVERY message length 0..300 (single-block,
-# multi-block, both padding edges — the §Q9 gate, needing no transcribed digest),
+# Covers the C99 SHA-2 hash/MAC/KDF family (SHA-256/512 + HMAC + HKDF [§3.1] +
+# PBKDF2 [§3.8b]), 14 assertions: (1) byte-equal cross-validation of C99 SHA-256 +
+# SHA-512 against the OpenSSL backend over EVERY message length 0..300 (single-
+# block, multi-block, both padding edges — the §Q9 gate, no transcribed digest),
 # (2) NIST FIPS 180-4 KATs for SHA-256/512 of "abc" and "", (3) a 1 MiB message,
 # (4) HMAC-SHA-256/512 vs OpenSSL HMAC() over a (key,msg)-length grid incl. the
-# key>block hashing path, (5) HKDF-SHA-256 vs OpenSSL EVP_KDF over fuzzed inputs
-# + the RFC 5869 Test Case 1 KAT. The module is additive — not wired into any
-# call site yet.
+# key>block hashing path, (5) HKDF-SHA-256 vs the RFC 5869 Test Case 1 + 3 KATs,
+# (6) PBKDF2-HMAC-SHA-256 vs OpenSSL PKCS5_PBKDF2_HMAC over a grid + a KAT. The
+# module is additive — not wired into any call site yet.
 #
 # Run from repo root: bash tools/test_sha2_c99.sh
 set -u

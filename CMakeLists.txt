@@ -94,6 +94,7 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hkdf.c")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c")
 
 add_executable(determ ${SOURCES})
 

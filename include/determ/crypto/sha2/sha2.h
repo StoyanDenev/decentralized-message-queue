@@ -51,6 +51,12 @@ int determ_hkdf_sha256(const uint8_t *salt, size_t saltlen,
                        const uint8_t *info, size_t infolen,
                        uint8_t *out, size_t outlen);
 
+/* PBKDF2-HMAC-SHA-256 (RFC 8018 / PKCS #5 v2.1). `iters` must be >= 1. `pw`/`salt`
+ * may be NULL when their length is 0. Returns 0 on success, -1 if iters == 0. */
+int determ_pbkdf2_hmac_sha256(const uint8_t *pw,   size_t pwlen,
+                              const uint8_t *salt, size_t saltlen,
+                              uint32_t iters, uint8_t *out, size_t outlen);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
