@@ -702,7 +702,9 @@ Additional in-process tests:
                                               bind to the state_proof + verify
                                               under state_root; field-tamper +
                                               deactivation + absent rejected
-  determ test-applied-receipt-restore         applied_inbound_receipts dedup
+)";
+    // MSVC 16384-char-per-literal limit: continue in a fresh raw-string write.
+    std::cout << R"(  determ test-applied-receipt-restore         applied_inbound_receipts dedup
                                               survives snapshot restore —
                                               exactly-once-credit preserved
                                               across fast-sync bootstrap
@@ -872,7 +874,9 @@ Additional in-process tests:
                                               rejected with diagnostic;
                                               non-object input rejected with
                                               distinct 'not a JSON object'.
-  determ test-config-defaults                 Operator-facing security defaults
+)";
+    // MSVC 16384-char-per-literal limit: continue in a fresh raw-string write.
+    std::cout << R"(  determ test-config-defaults                 Operator-facing security defaults
                                               from Config::from_json({}) —
                                               S-001 rpc_localhost_only=true,
                                               rate-limit disabled, BFT enabled,
@@ -1057,7 +1061,9 @@ Additional in-process tests:
                                               shard_address_salt now DO change
                                               the hash; operational params
                                               bound into chain identity).
-  determ test-empty-genesis-edge              Minimal / edge-case GenesisConfig
+)";
+    // MSVC 16384-char-per-literal limit: continue in a fresh raw-string write.
+    std::cout << R"(  determ test-empty-genesis-edge              Minimal / edge-case GenesisConfig
                                               pinning — default-constructed
                                               defaults (empty collections, K=M=3,
                                               SINGLE / shard 0, STAKE_INCLUSION,
