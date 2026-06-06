@@ -10760,10 +10760,14 @@ int main(int argc, char** argv) {
     // PIN-tested to throw their Phase-A diagnostic.
     if (cmd == "test-aes-c99") {
         // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: validate the libsodium-free C99
-        // AES-256 block cipher (the cipher under AES-256-GCM) against (1) the
-        // FIPS-197 Appendix C.3 known-answer vector and (2) byte-equal vs OpenSSL
-        // EVP_aes_256_ecb (single block, padding off) over fuzzed key/blocks —
-        // the §Q9 gate. NOTE: table-based S-box, NOT constant-time (see aes.h).
+        // AES-256-GCM AEAD against (0) an exhaustive constant-time-S-box selftest
+        // (the arithmetic S-box == the canonical FIPS-197 table over all 256
+        // inputs), (1) the FIPS-197 Appendix C.3 known-answer vector, (2) byte-
+        // equal vs OpenSSL EVP_aes_256_ecb over fuzzed key/blocks, (3) the full
+        // AES-256-GCM (ct + tag) byte-equal vs OpenSSL EVP_aes_256_gcm over a
+        // (pt,aad)-length grid — the §Q9 gate, and (4) GCM decrypt round-trip +
+        // tamper rejection. The S-box is now constant-time (arithmetic, no key-
+        // dependent table lookup); GHASH is branchless — see aes.h / aes_gcm.c.
         using namespace determ;
         int fail = 0;
         auto check = [&](bool cond, const std::string& m) {
@@ -10774,6 +10778,10 @@ int main(int argc, char** argv) {
             static const char* H = "0123456789abcdef";
             std::string s; for (size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s;
         };
+
+        // (0) Constant-time S-box exhaustively equals the canonical FIPS-197 table.
+        check(determ_aes256_sbox_selftest()==1,
+              "AES-256 constant-time S-box == FIPS-197 table over all 256 inputs");
 
         // (1) FIPS-197 C.3 AES-256 known-answer vector.
         {
@@ -10865,7 +10873,7 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": aes-c99 "
                   << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
-                  << " (libsodium-free C99 AES-256 + GCM vs OpenSSL — the §Q9 gate; S-box NOT yet constant-time)\n";
+                  << " (libsodium-free C99 AES-256-GCM vs OpenSSL — the §Q9 gate; constant-time S-box + branchless GHASH)\n";
         return fail==0 ? 0 : 1;
     }
 

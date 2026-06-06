@@ -3,16 +3,18 @@
 # src/crypto/aes/ (AES-256 block FIPS-197 + GHASH over GF(2^128) + the GCM mode,
 # NIST SP 800-38D). This is the AEAD the wallet keyfile envelope (S-004) uses.
 #
-# NOTE: GHASH here is branchless/constant-time, but the AES S-box is table-based
-# and NOT constant-time (see aes.h). This is an additive validated module; it must
-# be CT-hardened (constant-time S-box / AES-NI / BearSSL per the spec) before
-# replacing OpenSSL at a secret-key call site.
+# CONSTANT-TIME: GHASH is branchless, and the AES S-box is computed arithmetically
+# (a branchless GF(2^8) inverse via a fixed x^254 addition chain + the affine map),
+# so there is no key-dependent table lookup -> no cache-timing channel. §3.5 is now
+# complete (byte-correctness + CT); this remains an additive validated module not
+# yet wired into the S-004 call site.
 #
-# 6 assertions: (1) AES-256 encrypt vs the FIPS-197 Appendix C.3 KAT; (2) AES-256
-# block byte-equal vs OpenSSL EVP_aes_256_ecb over 256 fuzzed pairs; (3) the full
-# AES-256-GCM (ciphertext AND tag) byte-equal vs OpenSSL EVP_aes_256_gcm over a
-# (plaintext,aad)-length grid -- the §Q9 gate; (4) GCM decrypt round-trip + tamper
-# rejection (tag + ciphertext). Additive -- not wired into any call site yet.
+# 7 assertions: (0) the constant-time S-box exhaustively equals the canonical
+# FIPS-197 table over all 256 inputs; (1) AES-256 encrypt vs the FIPS-197 Appendix
+# C.3 KAT; (2) AES-256 block byte-equal vs OpenSSL EVP_aes_256_ecb over 256 fuzzed
+# pairs; (3) the full AES-256-GCM (ciphertext AND tag) byte-equal vs OpenSSL
+# EVP_aes_256_gcm over a (plaintext,aad)-length grid -- the §Q9 gate; (4) GCM
+# decrypt round-trip + tamper rejection (tag + ciphertext).
 #
 # Run from repo root: bash tools/test_aes_c99.sh
 set -u

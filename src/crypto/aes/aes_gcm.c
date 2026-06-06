@@ -4,10 +4,10 @@
  * GF(2^128). Validated byte-equal against OpenSSL EVP_aes_256_gcm + a decrypt
  * round-trip + tamper rejection by `determ test-aes-c99`.
  *
- * GHASH below is BRANCHLESS / constant-time (the mask + reduction use no
- * secret-dependent branch). The AES S-box, however, is table-based and NOT
- * constant-time (see aes.h) — that is the part requiring CT hardening before
- * this replaces OpenSSL at a secret-key call site. */
+ * This AEAD is constant-time end to end: GHASH below is BRANCHLESS (the mask +
+ * reduction use no secret-dependent branch), and the AES S-box (aes_core.c) is
+ * computed arithmetically with no key-dependent table lookup. There is no
+ * remaining cache-timing channel gating use at a secret-key call site. */
 #include "determ/crypto/aes/aes.h"
 #include <string.h>
 

@@ -1,11 +1,18 @@
 /* Determ C99-native AES-256 block cipher, encrypt direction (FIPS-197).
  * Part of the libsodium-free crypto stack (CRYPTO-C99-SPEC.md Section 3.5).
- * TABLE-BASED S-box -> NOT constant-time; see aes.h. Correctness is gated
- * byte-equal against OpenSSL + the FIPS-197 KAT by `determ test-aes-c99`. */
+ * CONSTANT-TIME S-box: SubBytes / SubWord are computed arithmetically (a
+ * branchless GF(2^8) inverse via a fixed x^254 addition chain + the affine
+ * map), so there is no key-dependent table lookup and therefore no cache-
+ * timing channel. The canonical FIPS-197 table is retained only as a build-
+ * time validation oracle (`determ_aes256_sbox_selftest`, driven exhaustively
+ * by `determ test-aes-c99`). Correctness is gated byte-equal against OpenSSL +
+ * the FIPS-197 KAT by `determ test-aes-c99`. */
 #include "determ/crypto/aes/aes.h"
 #include <string.h>
 
-/* FIPS-197 Figure 7 substitution box. */
+/* FIPS-197 Figure 7 substitution box — kept ONLY as the reference oracle that
+ * the constant-time `aes_sbox_ct` is exhaustively validated against; it is not
+ * indexed by the cipher itself (that would reintroduce the cache-timing leak). */
 static const uint8_t SBOX[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
     0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -29,6 +36,66 @@ static uint8_t xtime(uint8_t x) {
     return (uint8_t)((x << 1) ^ (((x >> 7) & 1) * 0x1b));
 }
 
+/* Constant-time field multiply over GF(2^8) mod 0x11b (the AES polynomial).
+ * Branchless: a fixed 8 iterations with mask-selected partial-product XOR and
+ * mask-selected reduction — no secret-dependent branch or memory access. */
+static uint8_t gf_mul(uint8_t a, uint8_t b) {
+    uint8_t p = 0;
+    int i;
+    for (i = 0; i < 8; i++) {
+        p ^= (uint8_t)(a & (uint8_t)(0u - (uint8_t)(b & 1)));   /* p ^= a if b0 set */
+        {
+            uint8_t hi = (uint8_t)(0u - (uint8_t)((a >> 7) & 1)); /* 0xff if MSB set */
+            a = (uint8_t)(a << 1);
+            a ^= (uint8_t)(0x1b & hi);                          /* reduce mod 0x11b */
+        }
+        b = (uint8_t)(b >> 1);
+    }
+    return p;
+}
+
+/* Multiplicative inverse in GF(2^8) as x^254 (= x^-1 for x != 0; maps 0 -> 0,
+ * matching the AES S-box convention), via a fixed square-and-multiply addition
+ * chain — value-independent, hence constant-time. */
+static uint8_t gf_inv(uint8_t x) {
+    uint8_t x2   = gf_mul(x, x);       /* x^2   */
+    uint8_t x4   = gf_mul(x2, x2);     /* x^4   */
+    uint8_t x8   = gf_mul(x4, x4);     /* x^8   */
+    uint8_t x16  = gf_mul(x8, x8);     /* x^16  */
+    uint8_t x32  = gf_mul(x16, x16);   /* x^32  */
+    uint8_t x64  = gf_mul(x32, x32);   /* x^64  */
+    uint8_t x128 = gf_mul(x64, x64);   /* x^128 */
+    uint8_t r = gf_mul(x128, x64);     /* x^192 */
+    r = gf_mul(r, x32);                /* x^224 */
+    r = gf_mul(r, x16);                /* x^240 */
+    r = gf_mul(r, x8);                 /* x^248 */
+    r = gf_mul(r, x4);                 /* x^252 */
+    r = gf_mul(r, x2);                 /* x^254 */
+    return r;
+}
+
+static uint8_t rotl8(uint8_t x, int n) {
+    return (uint8_t)((uint8_t)(x << n) | (uint8_t)(x >> (8 - n)));
+}
+
+/* AES S-box computed constant-time: the GF(2^8) inverse followed by the
+ * FIPS-197 affine map  s = b ^ (b<<<1) ^ (b<<<2) ^ (b<<<3) ^ (b<<<4) ^ 0x63.
+ * No key-dependent table index, so it is not a cache-timing target. */
+static uint8_t aes_sbox_ct(uint8_t x) {
+    uint8_t b = gf_inv(x);
+    return (uint8_t)(b ^ rotl8(b, 1) ^ rotl8(b, 2) ^ rotl8(b, 3) ^ rotl8(b, 4) ^ 0x63);
+}
+
+/* Build-time validation hook: exhaustively assert the constant-time S-box is
+ * byte-identical to the canonical FIPS-197 table over all 256 inputs. Returns
+ * 1 on full match, 0 otherwise. Driven by `determ test-aes-c99`. */
+int determ_aes256_sbox_selftest(void) {
+    int i;
+    for (i = 0; i < 256; i++)
+        if (aes_sbox_ct((uint8_t)i) != SBOX[i]) return 0;
+    return 1;
+}
+
 void determ_aes256_init(determ_aes256_ctx *ctx, const uint8_t key[32]) {
     uint8_t *rk = ctx->rk;
     uint8_t rcon = 0x01;
@@ -39,14 +106,15 @@ void determ_aes256_init(determ_aes256_ctx *ctx, const uint8_t key[32]) {
         if ((i % 32) == 0) {
             /* RotWord -> SubWord -> XOR Rcon */
             uint8_t a = t0;
-            t0 = (uint8_t)(SBOX[t1] ^ rcon);
-            t1 = SBOX[t2];
-            t2 = SBOX[t3];
-            t3 = SBOX[a];
+            t0 = (uint8_t)(aes_sbox_ct(t1) ^ rcon);
+            t1 = aes_sbox_ct(t2);
+            t2 = aes_sbox_ct(t3);
+            t3 = aes_sbox_ct(a);
             rcon = xtime(rcon);
         } else if ((i % 32) == 16) {
             /* AES-256: an extra SubWord on the middle word */
-            t0 = SBOX[t0]; t1 = SBOX[t1]; t2 = SBOX[t2]; t3 = SBOX[t3];
+            t0 = aes_sbox_ct(t0); t1 = aes_sbox_ct(t1);
+            t2 = aes_sbox_ct(t2); t3 = aes_sbox_ct(t3);
         }
         rk[i + 0] = (uint8_t)(rk[i - 32] ^ t0);
         rk[i + 1] = (uint8_t)(rk[i - 31] ^ t1);
@@ -82,12 +150,12 @@ void determ_aes256_encrypt_block(const determ_aes256_ctx *ctx,
     memcpy(s, in, 16);
     for (i = 0; i < 16; i++) s[i] ^= ctx->rk[i];        /* AddRoundKey (round 0) */
     for (round = 1; round < 14; round++) {
-        for (i = 0; i < 16; i++) s[i] = SBOX[s[i]];      /* SubBytes */
+        for (i = 0; i < 16; i++) s[i] = aes_sbox_ct(s[i]); /* SubBytes (constant-time) */
         shift_rows(s);
         mix_columns(s);
         for (i = 0; i < 16; i++) s[i] ^= ctx->rk[round * 16 + i];
     }
-    for (i = 0; i < 16; i++) s[i] = SBOX[s[i]];          /* final round (no MixColumns) */
+    for (i = 0; i < 16; i++) s[i] = aes_sbox_ct(s[i]);   /* final round (no MixColumns) */
     shift_rows(s);
     for (i = 0; i < 16; i++) s[i] ^= ctx->rk[14 * 16 + i];
     memcpy(out, s, 16);
