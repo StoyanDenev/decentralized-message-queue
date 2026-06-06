@@ -11479,6 +11479,32 @@ int main(int argc, char** argv) {
                                    : "HMAC-SHA-512 diverges (kl*1000+ml=" + std::to_string(h_at) + ")");
         }
 
+        // (4b) HMAC RFC 4231 known-answer vectors — an OpenSSL-INDEPENDENT anchor.
+        // The grid above proves we agree with OpenSSL; these pin the canonical
+        // published digests so a shared (us-and-OpenSSL) blind spot cannot hide.
+        {
+            uint8_t m256[32], m512[64];
+            // Test Case 1: key = 20 x 0x0b, data = "Hi There".
+            uint8_t k1[20]; std::memset(k1, 0x0b, 20);
+            const char* d1 = "Hi There";
+            determ_hmac_sha256(k1, 20, (const uint8_t*)d1, std::strlen(d1), m256);
+            determ_hmac_sha512(k1, 20, (const uint8_t*)d1, std::strlen(d1), m512);
+            check(to_hexs(m256,32)=="b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+                  "HMAC-SHA-256 matches RFC 4231 Test Case 1");
+            check(to_hexs(m512,64)=="87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde"
+                                    "daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854",
+                  "HMAC-SHA-512 matches RFC 4231 Test Case 1");
+            // Test Case 2: key = "Jefe", data = "what do ya want for nothing?".
+            const char* k2 = "Jefe"; const char* d2 = "what do ya want for nothing?";
+            determ_hmac_sha256((const uint8_t*)k2, 4, (const uint8_t*)d2, std::strlen(d2), m256);
+            determ_hmac_sha512((const uint8_t*)k2, 4, (const uint8_t*)d2, std::strlen(d2), m512);
+            check(to_hexs(m256,32)=="5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+                  "HMAC-SHA-256 matches RFC 4231 Test Case 2");
+            check(to_hexs(m512,64)=="164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554"
+                                    "9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737",
+                  "HMAC-SHA-512 matches RFC 4231 Test Case 2");
+        }
+
         // (5) HKDF-SHA-256 against the RFC 5869 known-answer vectors. HKDF is
         // built entirely on the HMAC cross-validated above, so these vectors
         // anchor the extract/expand glue (multi-block expand + the empty-salt /

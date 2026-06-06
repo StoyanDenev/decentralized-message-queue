@@ -611,9 +611,11 @@ applying it across the stack (see the remediation banner at the top).
 The current grid is sound for the common path but leaves the audited blind spots
 untested. Worth adding to `determ test-*-c99`:
 
-- **NIST CAVP** vectors for SHA-256/512 (SHAVS), HMAC (RFC 4231 full set), and
-  AES-256-GCM (the NIST GCM test vectors / `gcmEncryptExtIV256`) to broaden KAT
-  coverage beyond the OpenSSL oracle.
+- **NIST CAVP** vectors for SHA-256/512 (SHAVS) and AES-256-GCM (the NIST GCM
+  test vectors / `gcmEncryptExtIV256`) to broaden KAT coverage beyond the OpenSSL
+  oracle. **(Partially landed:** HMAC now carries the **RFC 4231 Test Case 1 + 2**
+  known-answer vectors for both SHA-256 and SHA-512 in `test-sha2-c99` — an
+  OpenSSL-independent anchor, closing the HMAC part of this item.)
 - **HKDF** RFC 5869 TC2 (long inputs / `outlen=82`), `outlen=0` (zero-output),
   single-block, and the max `L=8160` boundary — none currently exercised.
 - **PBKDF2** RFC 6070 / RFC 7914 vectors at varied `dkLen` and the
