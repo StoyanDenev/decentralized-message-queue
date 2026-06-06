@@ -351,16 +351,18 @@ claim's *direction* confirmed by the what-is-lost analysis, with the corrections
   per-header committee-sig check are unchanged under both.)
 
 - **Beaconless-sharding triviality (ADOPTED 2026-06-07).** `Beaconless-v2-SPEC.md` §Q6
-  now uses each shard's per-block MPDH output (its committee-certified `cumulative_rand`)
+  now uses each shard's per-block MPDH output (its `cumulative_rand`, header-chain-authenticated)
   as its cross-shard contribution instead of a per-shard FROST
   threshold signature — keeping the same SHA-256 accumulator + XOR-own-entropy structure
   and removing per-shard DKG/PSS/epoch-orchestration entirely (S× per epoch in an S-shard
   deployment). The double-check corrected three over-claims and they are now baked into
   the §Q6 DECISION box: (1) this was a **change** to §Q6 (which previously specced FROST)
-  — now made and authorized; (2) the per-block `delay_output` is **excluded from the
-  signed digest** (S-009), so the per-shard contribution must be bound into a
-  committee-signed header field (`cumulative_rand` already is) — a wiring requirement, not
-  free; (3) cross-shard consumers still pay O(`K`) per source header, but the light-client
+  — now made and authorized; (2) the contribution (`cumulative_rand`) is **not** in the
+  Phase-2 K-of-K committee digest — `compute_block_digest` excludes `cumulative_rand`,
+  `delay_output`, and `state_root` alike (S-009 / S-030-D2); it is bound into the block
+  *hash* (`signing_bytes`) and authenticated **transitively via the prev_hash chain** (the
+  receiver verifies the source shard's header chain through `H+1`), which is the chain walk
+  the mesh already performs; (3) cross-shard consumers still pay O(`K`) per source header, but the light-client
   mesh pays that regardless, so it is **no marginal cost** and FROST's O(1) verify saves
   nothing here. The accumulator needs only SHA-256 (no uniqueness/threshold input — FROST
   never gave uniqueness), and the abort residual is identical under both. **Hard

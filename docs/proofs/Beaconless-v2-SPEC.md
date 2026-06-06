@@ -26,7 +26,7 @@ The artifacts produced by Beaconless v2:
 - **Append-only committee-rotation log** per shard with cross-signing by previous committee
 - **Direct shard-to-shard cross-shard receipt gossip** with Merkle inclusion proofs against source shard's state_root
 - **Per-shard SHARD_TIP observation** for decentralized merge-detection
-- **Cross-shard randomness aggregation** via per-epoch accumulator over each shard's committee-certified MPDH commit-reveal randomness (no per-shard DKG)
+- **Cross-shard randomness aggregation** via per-epoch accumulator over each shard's header-chain-authenticated MPDH commit-reveal randomness (no per-shard DKG)
 - **`AUTONOMOUS_SHARD` chain_role** for the new shard type, enabling beaconless-deployment selection at genesis (no in-chain migration from beacon-bound — deployment type is a permanent genesis choice per v1.1-launch + no-migrations)
 
 ---
@@ -224,9 +224,9 @@ then this shard locally emits `MERGE_BEGIN(target=S)` in its next block. The MER
 
 ### Q6: Cross-shard randomness mixing — per-epoch accumulator
 
-**Decision: cross-shard randomness aggregation via per-epoch accumulator over each shard's committee-certified MPDH commit-reveal randomness.** (Authorized 2026-06-07 — switched from per-shard FROST threshold signatures to MPDH commit-reveal, consistent with the block-beacon decision; see the DECISION box below and `DECISION-LOG.md` 2026-06-07.)
+**Decision: cross-shard randomness aggregation via per-epoch accumulator over each shard's header-chain-authenticated MPDH commit-reveal randomness.** (Authorized 2026-06-07 — switched from per-shard FROST threshold signatures to MPDH commit-reveal, consistent with the block-beacon decision; see the DECISION box below and `DECISION-LOG.md` 2026-06-07.)
 
-At each epoch boundary, every shard contributes its current `cumulative_rand` value — the MPDH commit-reveal beacon output, **already committed K-of-K in the shard's block header** and therefore committee-certified, with no extra signature and no DKG. Each shard's contribution `shard_rand_i = (epoch, shard_id, shard_state_root, cumulative_rand)` is gossiped together with the shard's signed header (or a Merkle inclusion proof against `shard_state_root`), so a receiver authenticates it via the committee-rotation log it already maintains for that shard.
+At each epoch boundary, every shard contributes its `cumulative_rand` at a deterministic height `H` (the MPDH commit-reveal beacon output). **Authentication path (precise — verified against `producer.cpp::compute_block_digest`):** `cumulative_rand` is bound into the block **hash** (`Block::signing_bytes`) but is **NOT** in the Phase-2 K-of-K committee digest — like `state_root` and `delay_output`, it is excluded from `compute_block_digest` (S-009 / S-030-D2) because it depends on Phase-2 reveals. It is therefore authenticated **transitively via the prev_hash chain**: block `H+1`'s committee-signed digest binds `prev_hash = hash(H)`, and `hash(H)` binds `cumulative_rand(H)`. A receiver authenticates a shard's contribution by verifying that shard's header chain **through `H+1`** — exactly the chain walk the light-client mesh already performs (so still no extra signature and no DKG, but the contribution is authenticated by the header *chain*, not by block `H`'s signature in isolation). Each shard's `shard_rand_i = (epoch, shard_id, H, cumulative_rand_H)` is gossiped with the proving header(s).
 
 The deployment-wide randomness for epoch N+1 is the accumulator:
 
@@ -258,11 +258,13 @@ Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the
 > - **What it removes.** Per-shard DKG, PSS-on-rotation, long-lived secret shares + their failure modes,
 >   the `EPOCH_RAND` threshold-sig wire. The accumulator is unchanged (it needs only SHA-256
 >   collision/preimage resistance, *not* a unique/threshold input — FROST never gave uniqueness either).
-> - **What it does NOT get for free (corrections from the double-check).** (1) the per-block MPDH
->   `delay_output` is **excluded from the signed block digest** (S-009), so the per-shard contribution
->   must be bound into a **committee-signed header field** to be cross-shard-authenticatable —
->   `cumulative_rand` already is committed in the header, so use that (or commit the contribution into
->   `shard_state_root`); this is a wiring requirement, not zero. (2) A consumer still verifies O(K)
+> - **What it does NOT get for free (corrections from the double-check).** (1) `cumulative_rand` is **not**
+>   in the Phase-2 K-of-K committee digest — `compute_block_digest` excludes `cumulative_rand`, `delay_output`,
+>   and `state_root` alike (S-009 / S-030-D2, all Phase-2-dependent). It is bound into the block *hash*
+>   (`signing_bytes`) and authenticated **transitively via the prev_hash chain** (the receiver verifies the
+>   source shard's header chain through `H+1`, whose committee-signed digest binds `prev_hash = hash(H)`). So
+>   the contribution is authenticated by the header *chain*, not by block `H`'s signature in isolation — a
+>   wiring requirement, not zero. (2) A consumer still verifies O(K)
 >   committee sigs per source header — but the light-client mesh already pays that per header regardless
 >   (`LightClientThreatModel.md` T-L2), so it is **no marginal cost**; FROST's O(1) succinct verify saves
 >   nothing here. (3) The selective-abort residual is **identical** under both (abort ⇒ deterministic
