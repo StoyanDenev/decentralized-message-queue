@@ -37,7 +37,12 @@ int determ_ed25519_sign(const uint8_t seed[32], const uint8_t pk[32],
 
 /* Verify the 64-byte signature `sig` over `msg` under public key `pk`, per RFC
  * 8032 §5.1.7. Returns 0 if the signature is valid, -1 otherwise (bad signature,
- * malformed public key, or internal allocation failure). */
+ * malformed public key, or internal allocation failure). Enforces the RFC
+ * canonicality gates that defeat malleability: the scalar S is rejected unless
+ * S < L (§5.1.7, so (R, S+L) does NOT re-verify — signatures are unique), and a
+ * non-canonical public-key y >= q is rejected (§5.1.3). This is intentionally
+ * STRICTER than OpenSSL's lenient ref10 decoder on adversarial inputs; honestly
+ * generated keys/signatures are always canonical and behave identically. */
 int determ_ed25519_verify(const uint8_t pk[32],
                           const uint8_t *msg, size_t msglen, const uint8_t sig[64]);
 

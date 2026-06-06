@@ -14,6 +14,7 @@
 #include "determ/crypto/secure_zero.h"
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef uint8_t  u8;
 typedef int64_t  i64;
@@ -226,6 +227,36 @@ static int ct_verify_32(const u8 *x, const u8 *y) {
     return d == 0 ? 0 : -1;
 }
 
+/* Constant-time test that the 32-byte little-endian scalar s is canonical
+ * (s < L, the group order). Returns 1 iff s < L. Computes s - L byte-wise and
+ * inspects the final borrow — no data-dependent branch. RFC 8032 §5.1.7 step 1
+ * requires the verifier to reject a non-canonical S (defeats (R, S+L)
+ * malleability); the daemon's signer always emits canonical S via modL. */
+static int sc_lt_L(const u8 s[32]) {
+    unsigned int borrow = 0; int i;
+    for (i = 0; i < 32; i++) {
+        unsigned int d = (unsigned int)s[i] - (unsigned int)(u8)L[i] - borrow;
+        borrow = (d >> 8) & 1u;   /* 1 if this byte underflowed */
+    }
+    return (int)borrow;           /* 1 iff s < L */
+}
+
+/* 1 iff the 32-byte little-endian point encoding p has a canonical y < q
+ * (q = 2^255-19). RFC 8032 §5.1.3 rejects y >= q on decode; the field's reduced
+ * canonical form (pack25519) is compared against the input's low 255 bits.
+ * Branch is on PUBLIC key bytes, so it is not a constant-time concern. NOTE:
+ * this is STRICTER than OpenSSL's lenient ref10 decoder, which accepts the 19
+ * non-canonical y in {q..q+18}; we follow RFC 8032 to keep "one point = one
+ * encoding" for any consensus / anon-address derivation over the raw bytes. */
+static int point_y_is_canonical(const u8 p[32]) {
+    gf y; u8 rt[32], d = 0; int i;
+    unpack25519(y, p);            /* y = low 255 bits of p */
+    pack25519(rt, y);             /* canonical (reduced mod q) encoding of y */
+    for (i = 0; i < 31; i++) d |= (u8)(rt[i] ^ p[i]);
+    d |= (u8)(rt[31] ^ (u8)(p[31] & 0x7f));   /* ignore the sign bit (p[31] bit 7) */
+    return d == 0 ? 1 : 0;
+}
+
 void determ_ed25519_pubkey_from_seed(const u8 seed[32], u8 pk[32]) {
     u8 h[64]; gf p[4];
     determ_sha512(seed, 32, h);
@@ -257,7 +288,7 @@ int determ_ed25519_sign(const u8 seed[32], const u8 pk[32],
 
     /* r = reduce( SHA512( prefix || msg ) ), prefix = h[32..63] */
     for (i = 0; i < 32; i++) buf[i] = h[32 + i];
-    for (i = 0; (size_t)i < msglen; i++) buf[32 + i] = msg[i];
+    if (msglen) memcpy(buf + 32, msg, msglen);   /* size_t-safe splice */
     determ_sha512(buf, 32 + msglen, rh);
     reduce(rh);                                  /* rh[0..31] = r */
 
@@ -267,7 +298,7 @@ int determ_ed25519_sign(const u8 seed[32], const u8 pk[32],
 
     /* k = reduce( SHA512( R || pk || msg ) ) */
     for (i = 0; i < 32; i++) { buf[i] = sig[i]; buf[32 + i] = pk[i]; }
-    for (i = 0; (size_t)i < msglen; i++) buf[64 + i] = msg[i];
+    if (msglen) memcpy(buf + 64, msg, msglen);   /* size_t-safe splice */
     determ_sha512(buf, 64 + msglen, hram);
     reduce(hram);                                /* hram[0..31] = k */
 
@@ -294,13 +325,15 @@ int determ_ed25519_verify(const u8 pk[32],
     u8 *buf;
 
     if (msglen > SIZE_MAX - 64u) return -1;
+    if (!point_y_is_canonical(pk)) return -1;    /* RFC 8032 §5.1.3: reject y >= q */
+    if (!sc_lt_L(sig + 32)) return -1;           /* RFC 8032 §5.1.7: reject S >= L (anti-malleability) */
     if (unpackneg(Q, pk)) return -1;             /* Q = -A */
 
     buf = (u8 *)malloc(64 + msglen);
     if (buf == NULL) return -1;
 
     for (i = 0; i < 32; i++) { buf[i] = sig[i]; buf[32 + i] = pk[i]; }
-    for (i = 0; (size_t)i < msglen; i++) buf[64 + i] = msg[i];
+    if (msglen) memcpy(buf + 64, msg, msglen);   /* size_t-safe splice */
     determ_sha512(buf, 64 + msglen, hram);
     reduce(hram);
 

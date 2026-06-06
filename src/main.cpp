@@ -10970,6 +10970,19 @@ int main(int argc, char** argv) {
             uint8_t badpk[32]; std::memcpy(badpk,pk,32); badpk[0]^=0x01;
             check(determ_ed25519_verify(badpk, (const uint8_t*)m, ml, sig)==-1,
                   "Ed25519 verify rejects a wrong public key");
+            // anti-malleability (RFC 8032 §5.1.7): (R, S+L) must be REJECTED, so a
+            // valid signature has no second distinct-but-valid form.
+            {
+                static const uint8_t Lb[32]={0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
+                    0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10};
+                uint8_t mal[64]; std::memcpy(mal,sig,64);
+                unsigned int carry=0;
+                for(int i=0;i<32;i++){ unsigned int t=(unsigned int)mal[32+i]+Lb[i]+carry;
+                    mal[32+i]=(uint8_t)t; carry=t>>8; }
+                check(determ_ed25519_verify(pk,(const uint8_t*)m,ml,sig)==0 &&
+                      determ_ed25519_verify(pk,(const uint8_t*)m,ml,mal)==-1,
+                      "Ed25519 verify rejects the malleable (R, S+L) signature (S < L gate)");
+            }
             // cross-binary: OpenSSL must verify our signature
             EVP_PKEY* pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pk, 32);
             EVP_MD_CTX* mc = EVP_MD_CTX_new();
