@@ -380,14 +380,29 @@ Build approach:
 **Decision: complete removal of libsodium from Determ's dependency list once vendored C99 primitives pass test-vector + constant-time validation.**
 
 Migration steps:
-1. Phase 0 Track 2 ships all vendored C99 primitives (~6-7 weeks per §3 below)
-2. Refactor every libsodium call site to use `determ::crypto::` API (~1 week)
-3. Cross-validate: run libsodium-output and C99-output side-by-side on test vectors; verify byte-equal
+1. Phase 0 Track 2 ships all vendored C99 primitives (~6-7 weeks per §3 below) —
+   **DONE for the wallet/keyfile/identity set**: SHA-2/HMAC/HKDF/PBKDF2, ChaCha20-Poly1305
+   + XChaCha20-Poly1305, AES-256-GCM, Ed25519, X25519, BLAKE2b, Argon2id, and the
+   full FROST suite are all shipped + adversarially audited (C99CryptoStackAudit
+   §6–§8f). Remaining: §3.7 secp256k1 + §3.9 OPRF (the MODERN/FIPS-profile OPRF path).
+2. Refactor every libsodium call site to use the C99 API (~1 week) — **NOT yet done**;
+   needs care + versioning where it changes on-disk format (the keyfile envelope's
+   `crypto_pwhash`/AEAD), so it is gated on an explicit go-ahead.
+3. Cross-validate: run libsodium-output and C99-output side-by-side; verify byte-equal —
+   **DONE as a standing harness**: `tools/test_c99_libsodium_xval.sh` (commit `23930b1`)
+   compiles `tools/c99_libsodium_xval.c` against the build tree's `libsodium.a` and
+   asserts BLAKE2b / X25519 / XChaCha20-Poly1305 / Argon2id are byte-equal to
+   `crypto_generichash` / `crypto_scalarmult{,_base}` / `crypto_aead_xchacha20poly1305_ietf`
+   / `crypto_pwhash_argon2id` over wide grids (5/5 families matched). This is the
+   behaviour-preserving evidence for step 2.
 4. Drop libsodium from CMakeLists / build system
 5. Remove libsodium submodule
 6. Update documentation: SECURITY.md crypto-dependency list, WHITEPAPER §7 cryptographic primitives, V2-DESIGN.md cross-references
 
-**Validation:** existing 136 in-process `determ test-*` subcommands continue passing after migration. New `determ test-crypto-*` subcommands added per primitive.
+**Validation:** the in-process `determ test-*` subcommands continue passing after
+migration; per-primitive `determ test-*-c99` subcommands (sha2/aes/chacha20/ed25519/
+frost/x25519/blake2b/xchacha/argon2id) + the full-stack libsodium-equivalence harness
+above are the regression gate.
 
 ### Q10: Profile bundling — crypto choice tied to TimingProfile
 
