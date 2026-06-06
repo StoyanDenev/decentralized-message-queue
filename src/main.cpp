@@ -14,6 +14,7 @@
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
+#include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -410,6 +411,10 @@ In-process tests (deterministic, no network):
   determ test-chacha20-c99                    v2.10 Phase 0: libsodium-free C99
                                               ChaCha20 (RFC 8439) byte-equal vs
                                               OpenSSL EVP_chacha20 (§3.4 cipher)
+  determ test-aes-c99                         v2.10 Phase 0: libsodium-free C99
+                                              AES-256 (FIPS-197) byte-equal vs
+                                              OpenSSL + the FIPS-197 KAT (§3.5
+                                              block cipher; S-box not yet CT)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -10753,6 +10758,62 @@ int main(int argc, char** argv) {
     // §3). Round-trip + tamper + wrong-key assertions exercise the real
     // path; the still-stubbed keygen/sign/aggregate primitives are
     // PIN-tested to throw their Phase-A diagnostic.
+    if (cmd == "test-aes-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: validate the libsodium-free C99
+        // AES-256 block cipher (the cipher under AES-256-GCM) against (1) the
+        // FIPS-197 Appendix C.3 known-answer vector and (2) byte-equal vs OpenSSL
+        // EVP_aes_256_ecb (single block, padding off) over fuzzed key/blocks —
+        // the §Q9 gate. NOTE: table-based S-box, NOT constant-time (see aes.h).
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto to_hexs = [](const uint8_t* p, size_t n) {
+            static const char* H = "0123456789abcdef";
+            std::string s; for (size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s;
+        };
+
+        // (1) FIPS-197 C.3 AES-256 known-answer vector.
+        {
+            uint8_t key[32], in[16], out[16];
+            for (int i=0;i<32;i++) key[i]=(uint8_t)i;             /* 000102...1f */
+            for (int i=0;i<16;i++) in[i]=(uint8_t)(0x00 + i*0x11); /* 00112233...ff */
+            determ_aes256_ctx ctx; determ_aes256_init(&ctx, key);
+            determ_aes256_encrypt_block(&ctx, in, out);
+            check(to_hexs(out,16)=="8ea2b7ca516745bfeafc49904b496089",
+                  "AES-256 encrypt matches FIPS-197 C.3 KAT");
+        }
+
+        // (2) Byte-equal vs OpenSSL EVP_aes_256_ecb over fuzzed (key, block).
+        {
+            bool xval = true; long at = -1;
+            for (int t=0; t<256 && xval; ++t) {
+                uint8_t key[32], in[16], mine[16], ossl[16];
+                for (int i=0;i<32;i++) key[i]=(uint8_t)((i*53u+t*7u+1u)&0xffu);
+                for (int i=0;i<16;i++) in[i]=(uint8_t)((i*29u+t*3u+5u)&0xffu);
+                determ_aes256_ctx ctx; determ_aes256_init(&ctx, key);
+                determ_aes256_encrypt_block(&ctx, in, mine);
+                EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+                int outl=0;
+                EVP_EncryptInit_ex(c, EVP_aes_256_ecb(), nullptr, key, nullptr);
+                EVP_CIPHER_CTX_set_padding(c, 0);
+                EVP_EncryptUpdate(c, ossl, &outl, in, 16);
+                EVP_CIPHER_CTX_free(c);
+                if (std::memcmp(mine, ossl, 16)!=0){ xval=false; at=t; }
+            }
+            check(xval, xval ? "AES-256 block C99 == OpenSSL EVP_aes_256_ecb over 256 fuzzed (key,block) pairs"
+                             : "AES-256 diverges from OpenSSL at iter=" + std::to_string(at));
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": aes-c99 "
+                  << (fail==0 ? "all cross-validation + FIPS-197 KAT matched" : "had failures")
+                  << " (libsodium-free C99 AES-256 block vs OpenSSL — the §Q9 gate; S-box NOT yet constant-time)\n";
+        return fail==0 ? 0 : 1;
+    }
+
     if (cmd == "test-chacha20-c99") {
         // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: validate the libsodium-free C99
         // ChaCha20 (RFC 8439) — the cipher half of the ChaCha20-Poly1305 AEAD

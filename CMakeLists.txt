@@ -100,6 +100,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/poly1305.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: AES-256 (FIPS-197), the block cipher under
+# AES-256-GCM. Table-based (NOT constant-time) — see aes.h. GHASH + the GCM mode
+# follow. Exercised by `determ test-aes-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c")
 
 add_executable(determ ${SOURCES})
 
