@@ -696,6 +696,8 @@ The §7.5 review used the following heuristic:
 
 Items that V2-DESIGN.md originally framed as chain-level substrate but were reclassified as post-v1.0 chain-aware DApps. These ship on top of the v1.0 v2.18 + v2.19 + v2.26 substrate without requiring chain-level work.
 
+**v1.1 plan reference.** Items in this section + §10 are operationalized in `V1.1-PLAN.md` (the post-v1.0 Additive release covering DSSO-DApp, zk-VM-DApp, sketch-v2.x formalization, and 5 reference killer-DApps). v1.1 ships ~4-7 months post-mainnet. See `V1.1-PLAN.md` Bundle A specifically for the DSSO-DApp implementation plan operationalizing §8.1 below.
+
 ### 8.1 v2.25 DSSO substrate — reclassified as DApp (2026-05-24)
 
 **Improvement.** Distributed identity provider with K-of-K mutual-distrust posture, T-OPAQUE authentication, signed assertions for relying parties.

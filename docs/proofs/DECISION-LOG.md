@@ -767,4 +767,73 @@ The first claim is true; the second is wrong. v1.x has the chain-level economic 
 
 ---
 
+---
+
+## 2026-06-06 — Doc coherence sweep (V1.1-PLAN cross-references + sibling-doc references)
+
+### Working copy synced to HEAD; V1.1-PLAN cross-references added; V210ImplementationRoadmap + C99CryptoStackAudit linked from planning docs
+
+**Question.** Repo has progressed substantially since session start — user committed multiple curation rounds ("Cleanup", "Updated design", "remove blockers", "Fees coherence", "Improvement"); v2.10 Phase 0 C99 crypto primitives substantially shipped (SHA-2, HMAC, HKDF, PBKDF2, ChaCha20-Poly1305, AES-256-GCM all complete per `V210ImplementationRoadmap.md`); `C99CryptoStackAudit.md` landed with 18 findings remediated (commit `2e0058b`). User flagged: "the repo is updated, make the docs coherent."
+
+**Discovery.** Working copy was stale relative to HEAD (~31 KB / 548 net lines behind across 9 planning docs) because user's curation commits hadn't been pulled into the sandbox's working copy. My session-local edits had been integrated into HEAD via user's curation; only my untracked `V1.1-PLAN.md` was unique to working copy.
+
+**Coherence pass applied.**
+1. Synced 9 planning docs from HEAD to working copy via `git show HEAD:<file> > <file>` (preserves user's curation; loses my stale uncommitted local edits which were already integrated by user differently).
+2. Added `V1.1-PLAN.md` to `IMPLEMENTATION-SEQUENCING.md` companion-docs list (the only thing genuinely missing from HEAD after sync).
+3. Added `V210ImplementationRoadmap.md` + `C99CryptoStackAudit.md` to `IMPLEMENTATION-SEQUENCING.md` companion-docs list (these exist in HEAD but weren't cross-referenced from the sequencing plan; only README + CRYPTO-C99-SPEC referenced them).
+4. Added `V1.1-PLAN.md` reference paragraph to `Improvements.md §8` (DApp roadmap section) pointing readers to v1.1 Bundle A for DSSO-DApp implementation.
+5. Updated `V1.1-PLAN.md` companion-docs list to reference `V210ImplementationRoadmap.md` + `C99CryptoStackAudit.md` (so v1.1 planning context includes v1.0 implementation tracker + audit report).
+6. Updated `V1.1-PLAN.md` Bundle A pre-requisites section to reflect actual v2.10 Phase 0 status (Phase 0 C99 crypto primitives substantially shipped; FROST itself still pending) rather than the optimistic stale "✅ Bundle 1 of v1.0" status.
+
+**Net effect.** Planning artifacts now coherent across the three primary planning surfaces:
+- v1.0 execution plan (`IMPLEMENTATION-SEQUENCING.md`)
+- v1.0 implementation tracker (`V210ImplementationRoadmap.md` + `C99CryptoStackAudit.md`)
+- v1.1 application-layer plan (`V1.1-PLAN.md`)
+
+All three cross-reference each other appropriately. Substantial v1.0 Phase 0 implementation progress (10+ crypto primitives shipped + audit landed + remediation complete) is now visible from `V1.1-PLAN.md`'s perspective.
+
+**Generalization for future doc coherence passes.** When the repo has parallel curation activity from the user (multiple commits to planning docs between my interactions), check working-copy-vs-HEAD diff before making edits. If HEAD is materially ahead, sync working copy first (via `git show HEAD:<file> > <file>`); then add only the cross-references/content genuinely new vs HEAD. Don't compete with user's curation — they're integrating my session work + their own thinking, and my stale working-copy edits often duplicate or contradict their better-curated versions.
+
+---
+
+---
+
+## 2026-06-06 — V1.1-PLAN.md Bundle D expansion: zk-VM composition + Merritt-voting DApp
+
+### Bundle D grows from 5 to 9 killer DApps; zk-VM substrate now composed with first-class killer apps (not just Bundle B internal demos)
+
+**Question.** User asked: "Is there DApp in the plan that use zk-VM?" Discovered honest gap: Bundle B (zk-VM substrate) included 3 internal reference apps that DEMONSTRATE zk-VM, but Bundle D's 5 killer DApps used chain primitives only — none composed with zk-VM. The zk-VM substrate would have shipped without first-class killer-DApp consumption, undersells the God-Stack framing.
+
+User direction: apply Option C (promote Bundle B's 3 reference apps to first-class Bundle D members) + Option A (augment D.4 AI-agent with zk-VM verifiable inference) + add a new D.9 Merritt-witness fault-tolerant voting DApp per Michael Merritt's 1984 PODC paper "Elections in the Presence of Faults."
+
+**Decisions applied to `V1.1-PLAN.md`.**
+
+1. **Bundle B §3 reference-app line item removed.** The 3 reference apps (private payment rollup, verifiable AI inference, anonymous credential issuance) are no longer Bundle B internal demos; they're first-class Bundle D killer DApps. Bundle B total revised: ~3-6 months → ~3-5 months (effort lifted out).
+
+2. **Bundle D split into §5.1 chain-primitive DApps + §5.2 zk-VM-augmented DApps.** §5.1 = D.1, D.2, D.3, D.5, D.9 (5 DApps; depend only on DSSO). §5.2 = D.4, D.6, D.7, D.8 (4 DApps; depend on DSSO + zk-VM substrate).
+
+3. **D.4 augmented with zk-VM verifiable inference.** AI-agent infrastructure DApp now composes Bundle B zk-VM so delegate AI agents can cryptographically prove they executed within authorized parameters. Effort: ~3-4 weeks base + ~1-2 weeks zk-VM integration = ~4-6 weeks total.
+
+4. **D.6 Private payment rollup, D.7 Verifiable AI inference, D.8 Anonymous credential issuance** — promoted to first-class killer DApps; ~3-4 weeks each. These are the apps formerly listed as Bundle B internal demos.
+
+5. **D.9 Merritt-witness fault-tolerant voting DApp added** — Byzantine-fault-tolerant elections per Merritt 1984 (the same paper that backs Beaconless-v2 §Q5 BL-5 Merritt-witness merge-detection). Use cases: government elections under hybrid-warfare conditions (mission-aligned per `MOTIVATION.md`), jury verdicts in distributed legal systems, corporate governance, consortium decisions, DAO governance. Reuses the Merritt-witness infrastructure already paid for at the consensus layer (BL-5). Composition: Merritt-witness pattern + DSSO identity + v2.22 confidential ballots + v2.10 FROST for tie-breaking + v2.24 audit hooks. Optionally augmentable with zk-VM (D.7-style) for ZK ballot proofs in a later iteration. Effort: ~3-4 weeks base; +1-2 weeks for optional zk-VM variant.
+
+6. **Mission-alignment priority order updated.** D.5 first (government random-selection, original MOTIVATION.md use case); D.9 second (Merritt-voting, extends mission to elections themselves); D.4 + D.6 next (commercially and strategically broadest). D.7 + D.8 validate zk-VM substrate.
+
+7. **§7 Sequencing updated.** Diagram shows §5.1 DApps starting when DSSO ships; §5.2 DApps starting when both DSSO + zk-VM ship. Net v1.1 horizon: ~5-8 months post-mainnet (slight increase from ~4-7 months due to D.9 addition + §5.2 dependency on Bundle B). Total project horizon: ~11-15 months from current state.
+
+8. **§8 open questions extended** with two new D.9-specific questions:
+   - D.9 ship sequencing — base first then zk-VM-augmented variant, or combined?
+   - D.9 architecture — reuse Beaconless-v2 §Q5 BL-5 Merritt-affidavit collection code as a library, or implement standalone?
+
+**Why D.9 is mission-strategic.** `MOTIVATION.md` cites the originating use case as Bulgarian random-judge-selection compromised by closed-source implementation. D.5 directly addresses random-selection. D.9 extends the same threat-model coverage to elections themselves — government voting under hybrid-warfare conditions where some voting infrastructure may be compromised. Merritt's "Mutually Verified Election" protocol provides provable Byzantine resistance with `num_voters > k(k+1)` for k Byzantine voters. The Merritt infrastructure is already in the project (paid for at consensus layer via BL-5); D.9 lifts it to a user-facing DApp.
+
+**Why Option C (promotion over keep-as-Bundle-B-demos).** Calling the 3 zk-VM apps "Bundle B internal reference apps" understated their value. Private payment rollups, verifiable AI inference, and anonymous credential issuance are independently-valuable killer use cases — operators deploying them don't think of them as "demos for zk-VM substrate"; they think of them as solutions to their problems. The reframing makes the plan honest about what gets built and aligns Bundle D's role as "killer-DApp catalog" with what's actually produced.
+
+**Why Option A (D.4 zk-VM augmentation).** AI-agent infrastructure is the most strategic killer DApp per `Improvements.md §9.5.1` AI-agent-economy positioning. Augmenting it with zk-VM verifiable inference makes it competitive with any other AI-agent infrastructure platform: cryptographic proof of correct delegate execution is exactly what compliance-bound AI deployments need. ~1-2 weeks additional effort for massive strategic positioning value.
+
+**Generalization.** When a substrate (like zk-VM) is built, ensure first-class consumers exist beyond "internal reference apps." Internal demos prove the substrate works; first-class killer apps prove the substrate matters. The two roles are different; both are needed; ideally the same artifacts can serve both by promoting reference apps to first-class members.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

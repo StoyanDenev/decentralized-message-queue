@@ -6,11 +6,14 @@
 - `../MOTIVATION.md` — project's public-interest mandate linking design decisions to the originating problem (per `docs/Confrontation_against_public_unjustice_i.odt`)
 - `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved)
 - `CRYPTO-C99-SPEC.md`, `DSF-SPEC.md`, `F2-SPEC.md`, `v2.10-DKG-SPEC.md`, `v2.22-PRIVACY-SPEC.md`, `Beaconless-v2-SPEC.md`, `v2.26-ROTATION-SPEC.md` — sibling spec docs that this plan executes against
+- `V210ImplementationRoadmap.md` — v2.10 FROST threshold-randomness implementation tracker (verified state of v2.10 work vs `src/` tree; companion to v2.10-DKG-SPEC.md)
+- `C99CryptoStackAudit.md` — adversarial audit of the libsodium-free C99 cryptographic primitives shipped under `src/crypto/{sha2,chacha20,aes}/`; 18 findings remediated per commit `2e0058b`
 - `DECISION-LOG.md` — backward-looking deliberation history for the decisions this plan executes
 - `Improvements.md` — forward-looking enhancement queue (post-v1.0 items deferred from this plan; rejected alternatives; research items; pre-v1.0-schema-freeze discriminator decisions per §7.5)
 - `MAINNET_READINESS.md` — readiness-criteria tracking artifact gating mainnet declaration
 - `PFS_DEPLOYMENT_GUIDANCE.md` — operator-facing PFS regulatory framework
 - `DAPP_SDK_GUIDANCE.md` — DApp-developer-facing browser-side crypto strategy per profile
+- `V1.1-PLAN.md` — successor plan covering the post-v1.0 Additive release (DSSO-DApp, zk-VM-DApp, sketch-v2.x formalization, reference killer-DApp catalog). v1.1 begins after v1.0 mainnet ships per this sequencing plan.
 
 ---
 
