@@ -875,3 +875,30 @@ The extended-nonce AEAD was not run through the adversarial workflow; its assura
 
 A dedicated adversarial audit is a low-priority follow-up; no daemon call site
 consumes XChaCha20-Poly1305 yet.
+
+---
+
+## 8f. Argon2id (`src/crypto/argon2/argon2id.c`, commit `00e3efb`) — validation basis
+
+The memory-hard password hash was not run through the adversarial workflow; its
+assurance rests on a strong external oracle:
+
+1. **Byte-exact vs libsodium `crypto_pwhash_argon2id`.** A standalone harness
+   linking the build tree's `libsodium.a` matched `determ_argon2id` 12/12 over a
+   t∈{1,2,3} × m∈{8,16,32,256} KiB grid (p=1, outlen=32) — confirmed against
+   libsodium's confirmed internal mapping `argon2id_hash_raw(opslimit, memlimit/1024,
+   lanes=1, v0x13)`. Any error in H0, H', the fBlaMka/P/G compression, the Argon2id
+   hybrid addressing, `index_alpha`, or the final XOR would diverge from libsodium.
+   `determ test-argon2id-c99` pins 4 of those libsodium-generated vectors (t/m/outlen
+   varied incl. m=1 MiB + a 64-byte output), since the determ daemon is libsodium-free.
+2. **Determinism + salt-sensitivity + parameter errors** are asserted in the same
+   test (`outlen<4` and `t_cost=0` rejected; the tag changes with the salt).
+3. **NOT constant-time by design.** The data-dependent passes (Argon2d component)
+   are intentionally memory-access-pattern-dependent for GPU resistance; the
+   Argon2id hybrid keeps pass-0's first half data-independent (RFC 9106 §3.4). The
+   block memory is `determ_secure_zero`'d before `free`.
+
+A dedicated adversarial audit is a low-priority follow-up (the libsodium byte-equal
+oracle makes a hidden correctness defect improbable). The intended consumer — a
+libsodium-free passphrase keyfile KDF — is the natural next integration step (the
+determ-wallet envelope's `crypto_pwhash` call site).
