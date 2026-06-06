@@ -95,6 +95,9 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hkdf.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: ChaCha20 (RFC 8439), the cipher half of
+# the ChaCha20-Poly1305 AEAD family. Exercised by `determ test-chacha20-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c")
 
 add_executable(determ ${SOURCES})
 

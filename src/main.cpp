@@ -13,6 +13,7 @@
 #include <determ/crypto/random.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
+#include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -406,6 +407,9 @@ In-process tests (deterministic, no network):
                                               SHA-256/512 + HMAC + HKDF + PBKDF2
                                               byte-equal vs OpenSSL + NIST/RFC
                                               KATs (CRYPTO-C99-SPEC §Q9 gate)
+  determ test-chacha20-c99                    v2.10 Phase 0: libsodium-free C99
+                                              ChaCha20 (RFC 8439) byte-equal vs
+                                              OpenSSL EVP_chacha20 (§3.4 cipher)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -10749,6 +10753,80 @@ int main(int argc, char** argv) {
     // §3). Round-trip + tamper + wrong-key assertions exercise the real
     // path; the still-stubbed keygen/sign/aggregate primitives are
     // PIN-tested to throw their Phase-A diagnostic.
+    if (cmd == "test-chacha20-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: validate the libsodium-free C99
+        // ChaCha20 (RFC 8439) — the cipher half of the ChaCha20-Poly1305 AEAD
+        // family — byte-equal against OpenSSL EVP_chacha20 over fuzzed
+        // (key,counter,nonce,length) inputs. OpenSSL's EVP_chacha20 takes a
+        // 16-byte IV = [32-bit counter LE][96-bit nonce], matching RFC 8439, so a
+        // direct byte-equal comparison is the §Q9 gate (no transcribed vector).
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+
+        // (1) Cross-validation vs OpenSSL EVP_chacha20 over a length/counter grid.
+        bool xval = true; long at = -1;
+        const size_t lens[] = {0,1,16,63,64,65,127,128,191,256,300};
+        // Counter values stay well below 2^32 so no block-counter overflow occurs
+        // within a message: RFC 8439 §2.3 leaves 32-bit-counter overflow undefined
+        // (a message would need 2^32 blocks = 256 GiB to reach it), and impls
+        // legitimately differ there (we wrap the 32-bit word per the RFC; OpenSSL
+        // carries into the nonce). The AEAD always starts at counter 0/1 and never
+        // overflows, so this is not a reachable correctness case.
+        const uint32_t ctrs[] = {0,1,7,123456u};
+        for (size_t ci=0; ci<sizeof(ctrs)/sizeof(ctrs[0]) && xval; ++ci)
+        for (size_t li=0; li<sizeof(lens)/sizeof(lens[0]) && xval; ++li) {
+            size_t len = lens[li]; uint32_t ctr = ctrs[ci];
+            uint8_t key[32], nonce[12];
+            for (int i=0;i<32;i++) key[i]=(uint8_t)((i*73u+ci*11u+len*3u+1u)&0xffu);
+            for (int i=0;i<12;i++) nonce[i]=(uint8_t)((i*53u+li*7u+5u)&0xffu);
+            std::vector<uint8_t> in(len), mine(len), ossl(len);
+            for (size_t i=0;i<len;i++) in[i]=(uint8_t)((i*29u+ci+li+2u)&0xffu);
+            determ_chacha20(key, ctr, nonce, in.data(), len, mine.data());
+            uint8_t iv[16]; iv[0]=(uint8_t)ctr; iv[1]=(uint8_t)(ctr>>8); iv[2]=(uint8_t)(ctr>>16); iv[3]=(uint8_t)(ctr>>24);
+            std::memcpy(iv+4, nonce, 12);
+            EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+            int outl = 0;
+            EVP_EncryptInit_ex(c, EVP_chacha20(), nullptr, key, iv);
+            if (len) EVP_EncryptUpdate(c, ossl.data(), &outl, in.data(), (int)len);
+            EVP_CIPHER_CTX_free(c);
+            if (len && std::memcmp(mine.data(), ossl.data(), len)!=0){ xval=false; at=(long)(ctr*1000+len); }
+        }
+        check(xval, xval ? "ChaCha20 C99 == OpenSSL EVP_chacha20 over the (counter,length) grid"
+                         : "ChaCha20 diverges (ctr*1000+len=" + std::to_string(at) + ")");
+
+        // (2) Self-inverse: applying the keystream twice returns the plaintext.
+        {
+            uint8_t key[32], nonce[12];
+            for (int i=0;i<32;i++) key[i]=(uint8_t)(i+1);
+            for (int i=0;i<12;i++) nonce[i]=(uint8_t)(i*9+3);
+            std::vector<uint8_t> pt(200), ct(200), back(200);
+            for (size_t i=0;i<pt.size();i++) pt[i]=(uint8_t)(i*7+1);
+            determ_chacha20(key, 5, nonce, pt.data(), pt.size(), ct.data());
+            determ_chacha20(key, 5, nonce, ct.data(), ct.size(), back.data());
+            check(std::memcmp(pt.data(), back.data(), pt.size())==0,
+                  "ChaCha20 is self-inverse (encrypt twice -> plaintext)");
+        }
+
+        // (3) Counter sensitivity: changing the block counter changes the keystream.
+        {
+            uint8_t key[32]={0}, nonce[12]={0}, z[64]={0};
+            uint8_t a[64], b[64];
+            determ_chacha20(key, 0, nonce, z, 64, a);
+            determ_chacha20(key, 1, nonce, z, 64, b);
+            check(std::memcmp(a,b,64)!=0, "ChaCha20 keystream depends on the block counter");
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": chacha20-c99 "
+                  << (fail==0 ? "all cross-validation matched" : "had failures")
+                  << " (libsodium-free C99 ChaCha20 vs OpenSSL EVP_chacha20 — the §Q9 gate)\n";
+        return fail==0 ? 0 : 1;
+    }
+
     if (cmd == "test-sha2-c99") {
         // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.1 first vendored primitive: validate
         // the libsodium-free C99 SHA-256 / SHA-512 (src/crypto/sha2/) two ways —
