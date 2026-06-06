@@ -16,7 +16,7 @@
 This spec covers ONLY the architectural removal of the beacon as a special role and the redistribution of beacon functions across shards. It does NOT cover:
 
 - New consensus mechanism — Beaconless v2 reuses the existing K-of-K mutual-distrust consensus per shard. Only the cross-shard coordination layer changes.
-- New cryptographic primitives — uses the v2.10 FROST-Ed25519 DKG infrastructure (curve25519 family via libsodium), v2.1 state Merkle root, v2.2 light-client proofs. All already-shipped or already-spec'd.
+- New cryptographic primitives — none for randomness: cross-shard randomness uses the v1 **MPDH commit-reveal** beacon (no per-shard DKG), plus v2.1 state Merkle root and v2.2 light-client proofs (all already-shipped). The FROST-Ed25519 stack remains available for manifest / committee-log co-signing but is **not required** for cross-shard randomness (Q6 decision, 2026-06-07).
 - Horizontal-scale beyond ~hundreds of shards — Beaconless v2 raises the practical ceiling from ~50 to ~200-500 shards via lazy validation; beyond that, additional sharding-of-sharding work is a v3 concern.
 - Cross-deployment interop — Beaconless v2 is intra-deployment only. Cross-deployment bridges remain v2.23's scope (which also uses light-client mesh, so the infrastructures align).
 
@@ -26,7 +26,7 @@ The artifacts produced by Beaconless v2:
 - **Append-only committee-rotation log** per shard with cross-signing by previous committee
 - **Direct shard-to-shard cross-shard receipt gossip** with Merkle inclusion proofs against source shard's state_root
 - **Per-shard SHARD_TIP observation** for decentralized merge-detection
-- **Cross-shard randomness aggregation** via per-epoch accumulator over signed shard randomness
+- **Cross-shard randomness aggregation** via per-epoch accumulator over each shard's committee-certified MPDH commit-reveal randomness (no per-shard DKG)
 - **`AUTONOMOUS_SHARD` chain_role** for the new shard type, enabling beaconless-deployment selection at genesis (no in-chain migration from beacon-bound — deployment type is a permanent genesis choice per v1.1-launch + no-migrations)
 
 ---
@@ -60,7 +60,8 @@ The deployment manifest contains:
 - List of shard IDs in the deployment
 - Each shard's genesis hash
 - Each shard's initial committee (as of deployment creation)
-- Cryptographic primitives in use (curve25519 family, FROST-Ed25519, etc.)
+- Cryptographic primitives in use (curve25519 family, Ed25519; FROST-Ed25519 optional, for co-signing only)
+- `randomness_aggregation_form: enum { mpdh_commit_reveal (default), frost_threshold, bls_threshold }` — the per-shard cross-shard-randomness primitive (Q6); a **permanent genesis choice** (no-migrations constraint), default `mpdh_commit_reveal`
 - Manifest version (incremented on mutation)
 - Co-signing record (every mutation signed by the existing committee of every shard, K-of-K per shard)
 - **Operator-tunable parameters** (per review-week BL-3, BL-5, BL-6):
@@ -169,7 +170,7 @@ The log is stored as a per-shard data structure committed in each block's state_
 **Rationale.**
 - Cryptographically auditable: any historical committee verifiable by anyone with the deployment manifest.
 - Self-contained per shard: no cross-shard coordination needed for committee rotation.
-- Composes with v2.10 epoch-boundary DKG (FROST-Ed25519) — committee rotation already happens at epoch boundary; the log just records what's already deterministically derived.
+- Committee rotation happens at the epoch boundary via `cumulative_rand`-driven selection (**no DKG needed under MPDH** — the new committee simply signs forward with its members' own Ed25519 keys); the log just records what's already deterministically derived and K-of-K co-signed.
 
 ### Q4: Cross-shard receipts — Merkle inclusion proofs
 
@@ -223,35 +224,34 @@ then this shard locally emits `MERGE_BEGIN(target=S)` in its next block. The MER
 
 ### Q6: Cross-shard randomness mixing — per-epoch accumulator
 
-**Decision: cross-shard randomness aggregation via per-epoch accumulator over each shard's threshold-signature output.**
+**Decision: cross-shard randomness aggregation via per-epoch accumulator over each shard's committee-certified MPDH commit-reveal randomness.** (Authorized 2026-06-07 — switched from per-shard FROST threshold signatures to MPDH commit-reveal, consistent with the block-beacon decision; see the DECISION box below and `DECISION-LOG.md` 2026-06-07.)
 
-At each epoch boundary, every shard's K-of-K committee produces an epoch-end threshold signature (via v2.10 FROST-Ed25519 DKG) over `("DTM-EPOCH-RAND" || epoch || shard_id || shard_state_root)`. These per-shard threshold signatures are gossiped across the deployment.
+At each epoch boundary, every shard contributes its current `cumulative_rand` value — the MPDH commit-reveal beacon output, **already committed K-of-K in the shard's block header** and therefore committee-certified, with no extra signature and no DKG. Each shard's contribution `shard_rand_i = (epoch, shard_id, shard_state_root, cumulative_rand)` is gossiped together with the shard's signed header (or a Merkle inclusion proof against `shard_state_root`), so a receiver authenticates it via the committee-rotation log it already maintains for that shard.
 
 The deployment-wide randomness for epoch N+1 is the accumulator:
 
 ```
 deployment_rand_N+1 = SHA256(
     "DTM-MIX-V1"
-    || sort_by_shard_id(threshold_sig_0_N, threshold_sig_1_N, …, threshold_sig_{S-1}_N)
+    || sort_by_shard_id(shard_rand_0_N, shard_rand_1_N, …, shard_rand_{S-1}_N)
 )
 ```
 
 Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the shard's own commit-reveal output via XOR. Result: committee selection depends on BOTH this shard's current epoch AND every other shard's previous epoch — biasing committee selection requires controlling this shard AND every other shard in the deployment, simultaneously, before the epoch boundary.
 
-**Late-shard handling.** If some shards haven't emitted their epoch-N threshold signature within `manifest.epoch_boundary_cutoff_blocks` of the epoch boundary, deployment_rand_N+1 is computed over the subset that did. Each shard records which subset was used in its block header (via a new `deployment_rand_subset` field), so light clients can verify the derivation deterministically. Cutoff window is operator-tunable per deployment via the manifest (BL-6 revise) — shorter window favors liveness, longer window favors complete-shard participation.
+**Late-shard handling.** If some shards haven't emitted their epoch-N randomness contribution (`cumulative_rand`) within `manifest.epoch_boundary_cutoff_blocks` of the epoch boundary, deployment_rand_N+1 is computed over the subset that did. Each shard records which subset was used in its block header (via a new `deployment_rand_subset` field), so light clients can verify the derivation deterministically. Cutoff window is operator-tunable per deployment via the manifest (BL-6 revise) — shorter window favors liveness, longer window favors complete-shard participation.
 
 **Rationale.**
 - Removes beacon as randomness aggregator.
-- Reuses v2.10 threshold-signature infrastructure already in tree.
-- Bias-resistance is structurally stronger than current beacon-mediated mixing (requires controlling more parties).
+- Reuses the per-shard MPDH commit-reveal beacon already in tree — **no per-shard DKG/PSS**, so committee churn stays ceremony-free (elastic). The accumulator needs only SHA-256 collision/preimage resistance, not a unique/threshold input.
+- Bias-resistance is structurally stronger than current beacon-mediated mixing (requires controlling more parties) — and is a property of the XOR-own-entropy + accumulator structure, independent of the per-shard primitive, so it is preserved under MPDH.
 - Late-shard handling preserves liveness — randomness doesn't stall waiting for a slow shard.
 
-> **NOTICE — MPDH simplification option (decision input for Stoyan Denev; not co-authored by the AI assistant).**
-> Following the MPDH-adoption decision for the block beacon (`V210-PhaseD-RandomnessWiring.md` §9),
-> an adversarially-verified analysis indicates this Q6 cross-shard layer can be **simplified** by
-> using each shard's **per-block MPDH commit-reveal output** as the per-shard contribution instead
-> of a per-shard **FROST threshold signature** — keeping this exact SHA-256 accumulator + XOR-own-entropy
-> structure. This is presented as an option for the design owner, with verified scope:
+> **DECISION (authorized 2026-06-07; design authority Stoyan Denev — recorded, not co-authored by the AI assistant).**
+> This Q6 cross-shard layer uses each shard's **per-block MPDH commit-reveal output** as the per-shard
+> contribution (NOT a per-shard FROST threshold signature), keeping this exact SHA-256 accumulator +
+> XOR-own-entropy structure. Adversarially verified (8-agent ground-then-refute; elasticity confirmed
+> 0/3, triviality confirmed with the corrections folded in below). Scope + implementation requirements:
 > - **Elasticity (confirmed).** MPDH is stateless — committee churn needs *zero* key ceremony, whereas the
 >   FROST path couples every epoch boundary (and every membership change) to a per-shard DKG/PSS ceremony.
 >   In an S-shard deployment that is S× per-epoch ceremonies removed.
@@ -276,8 +276,8 @@ Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the
 >   simplification only while the accepted abort⇒re-roll posture holds.
 >
 > The shipped FROST C99 stack is **not wasted** — it remains available for manifest co-signing,
-> committee-log cross-signing, and threshold signing. Only the per-shard *randomness* application would move
-> to MPDH. **This is decision input; the Q6 design choice remains Stoyan Denev's.**
+> committee-log cross-signing, and threshold signing. Only the per-shard *randomness* application moves
+> to MPDH (this decision).
 
 ---
 
@@ -302,7 +302,7 @@ Block {
 - `LIGHT_CLIENT_HEADER_REQUEST` / `LIGHT_CLIENT_HEADER_RESPONSE` — lazy-fetch of source shard's headers when receipt arrives from previously-dormant pair
 - `SHARD_TIP_BROADCAST` — periodic heartbeat for merge-detection
 - `CROSS_SHARD_RECEIPT` (existing, extended) — adds `inclusion_proof` + `receipt_id` fields
-- `EPOCH_RAND_THRESHOLD_SIG` — per-shard epoch-end threshold signature for deployment rand
+- `EPOCH_RAND_CONTRIB` — per-shard epoch-boundary MPDH commit-reveal value (`cumulative_rand`) for the deployment-rand accumulator, carried with the shard's signed header / Merkle inclusion proof (no threshold signature)
 - `MERGE_OBSERVATION` — Merritt-witness affidavit for absent-heartbeat claim
 
 ### 3.3 New tx type
@@ -335,7 +335,7 @@ Block {
 ### 4.3 Committee-rotation log (~1-2 weeks)
 
 - Per-shard log data structure + state_root commitment.
-- Per-epoch entry creation (at v2.10 DKG ceremony completion).
+- Per-epoch entry creation (at the epoch boundary via committee selection; no DKG).
 - Light-client traversal logic.
 - Snapshot compaction (every EPOCH_SNAPSHOT_INTERVAL epochs).
 
@@ -355,7 +355,7 @@ Block {
 
 ### 4.6 Cross-shard randomness aggregation (~1-2 weeks)
 
-- Per-shard epoch-end threshold signature emission (uses v2.10 FROST-Ed25519).
+- Per-shard epoch-boundary MPDH commit-reveal value (`cumulative_rand`) emission (committed in header; no DKG / threshold sig).
 - Gossip replication of per-shard signatures.
 - Accumulator computation at epoch boundary.
 - Late-shard handling (subset recording in block header).
@@ -414,7 +414,7 @@ This is genuinely a multi-month architectural effort — significantly larger th
 
 *Mitigation.* Cooldown-based default-accept: if a shard fails to co-sign within `MANIFEST_UPDATE_TIMEOUT_BLOCKS` (default 10000, ~7 hours at tactical), its co-signature requirement is bypassed by deployment-wide governance vote (threshold of K-of-K committees from other shards). Documented as soft-default, operator-tunable.
 
-**Risk: Cross-shard randomness aggregation has subtle bias if late-shard subset is adversarially chosen.** An attacker controlling network timing could selectively delay certain shards' threshold signatures, biasing which subset contributes to deployment_rand.
+**Risk: Cross-shard randomness aggregation has subtle bias if late-shard subset is adversarially chosen.** An attacker controlling network timing could selectively delay certain shards' epoch-rand contributions, biasing which subset contributes to deployment_rand.
 
 *Mitigation.* Subset selection is deterministic given the gossip-observed arrival order at epoch boundary — every honest node sees roughly the same arrival order. Subset is recorded in block header for verification. Selective bias requires controlling gossip timing for K-of-K committee of multiple shards simultaneously — same threshold as Byzantine takeover.
 

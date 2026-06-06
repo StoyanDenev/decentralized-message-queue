@@ -350,15 +350,14 @@ claim's *direction* confirmed by the what-is-lost analysis, with the corrections
   randomness *key* ceremony; committee selection over `cumulative_rand` and the O(`K`)
   per-header committee-sig check are unchanged under both.)
 
-- **Beaconless-sharding triviality (confirmed *as a proposed simplification*, with
-  conditions).** Adopting MPDH lets `Beaconless-v2-SPEC.md` §Q6 use each shard's
-  per-block MPDH output as its cross-shard contribution instead of a per-shard FROST
+- **Beaconless-sharding triviality (ADOPTED 2026-06-07).** `Beaconless-v2-SPEC.md` §Q6
+  now uses each shard's per-block MPDH output (its committee-certified `cumulative_rand`)
+  as its cross-shard contribution instead of a per-shard FROST
   threshold signature — keeping the same SHA-256 accumulator + XOR-own-entropy structure
   and removing per-shard DKG/PSS/epoch-orchestration entirely (S× per epoch in an S-shard
-  deployment). The double-check corrected three over-claims and they are now baked in:
-  (1) Beaconless-v2 *as written today* specs FROST for Q6, so this is a **proposed change**,
-  not the current design (decision deferred to Stoyan Denev — see the NOTICE added at
-  `Beaconless-v2-SPEC.md` §Q6); (2) the per-block `delay_output` is **excluded from the
+  deployment). The double-check corrected three over-claims and they are now baked into
+  the §Q6 DECISION box: (1) this was a **change** to §Q6 (which previously specced FROST)
+  — now made and authorized; (2) the per-block `delay_output` is **excluded from the
   signed digest** (S-009), so the per-shard contribution must be bound into a
   committee-signed header field (`cumulative_rand` already is) — a wiring requirement, not
   free; (3) cross-shard consumers still pay O(`K`) per source header, but the light-client
