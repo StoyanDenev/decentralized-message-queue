@@ -282,7 +282,12 @@ int determ_frost_dkg_commit(/* poly,t,idx -> commitments,pop */);       // round
 int determ_frost_dkg_verify_pop(/* commitment0,idx,pop */);             // rogue-key defence
 void determ_frost_dkg_share(/* poly,t,j -> share */);                   // round-2 dealt share f_i(j)
 int determ_frost_dkg_verify_share(/* share,j,commitments,t */);         // Feldman VSS check
-int determ_frost_pss_refresh(/* ... */);  // proactive secret sharing (future)
+// PSS refresh — SHIPPED as two primitives (no monolithic _refresh call): the
+// caller deals zero-hole δ_i via determ_frost_pss_commit, peers check the hole
+// with determ_frost_pss_verify_commit, shares reuse the dkg_share/_verify_share
+// path, and s'_j = s_j + Σ_i δ_i(j) is a caller-side scalar sum:
+int determ_frost_pss_commit(/* zeropoly,t -> commitments (C_0 = identity) */);   // SHIPPED
+int determ_frost_pss_verify_commit(/* commitment0 -> 0 iff C_0 == [0]B */);      // SHIPPED
 int determ_frost_sign_partial(/* one signer's round-2 share z_i */);    // SHIPPED (distributed signing)
 int determ_frost_aggregate(/* sum z_i + recompute R -> Ed25519 sig */); // SHIPPED
 
@@ -520,7 +525,11 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 
 - Implement DKG protocol per RFC 9591 §3
 - Polynomial-commitment generation, share distribution, complaint phase, finalize
-- Proactive Secret Sharing (PSS) refresh extension
+- Proactive Secret Sharing (PSS) refresh extension — **SHIPPED**: `determ_frost_pss_commit`
+  (zero-hole Feldman commitments) + `determ_frost_pss_verify_commit` (the `C_0 == [0]B`
+  zero-hole proof); refreshed share `s'_j = s_j + Σ_i δ_i(j)` rotates every share
+  under the unchanged group key (Herzberg et al. 1995), validated by `determ test-frost-c99`
+  §6 (proof: `FrostThresholdSoundness.md` T-6)
 - Partial signing + aggregation — **SHIPPED**: centralized `determ_frost_sign` plus
   the distributed two-round split `determ_frost_sign_partial` (per-signer round-2
   share) + `determ_frost_aggregate` (sum + shared-R recompute); the distributed

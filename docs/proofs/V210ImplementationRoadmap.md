@@ -100,6 +100,14 @@ GO/NO-GO.
 > single party learns the group secret — validated by `determ test-frost-c99`
 > (an n=3,t=2 ceremony whose summed shares reconstruct the group secret and sign a
 > valid Ed25519 sig under the DKG group key, with tampered-PoP/share rejection).
+> **The Proactive Secret Sharing (PSS) refresh primitive is also SHIPPED** (commit
+> `090931f`): `determ_frost_pss_commit` (zero-hole Feldman commitments) +
+> `determ_frost_pss_verify_commit` (the `C_0 == [0]B` zero-hole proof) rotate every
+> committee member's share under the UNCHANGED group key (Herzberg et al. 1995) —
+> validated by `determ test-frost-c99` §6 (refreshed shares reconstruct the original
+> secret + sign under the same `PK`, while an old+new share mix does NOT recover the
+> secret; proof: `FrostThresholdSoundness.md` T-6). This is the crypto primitive the
+> Phase B "PSS refresh" + Phase C epoch-orchestration steps build on.
 > **Remaining v2.10 work** (all integration, no longer crypto-prerequisite): (a)
 > RFC-9591 byte-exact binding-factor / DKG interop vectors (the current encodings
 > are self-consistent but not yet vector-exact); (b) wiring the FROST aggregate
@@ -273,7 +281,7 @@ recommended smallest-safe increment (§4) is constructed so it can be validated
 |---|---|---|---|
 | **P0** (new — this roadmap) | Resolve §2 backend contradiction; link/vendor one EC backend into `determ`; reconcile the three docs to it. | `CMakeLists.txt` (link line) **or** new `src/crypto/ed25519/`; doc reconcile in `frost.hpp`, `v2.10-DKG-SPEC.md`, `CRYPTO-C99-SPEC.md` | 1-5 d (P1 ≈ 1 d, P2 ≈ 3-5 d) |
 | **A** | FROST primitives onto the chosen backend (keygen/sign/aggregate). RFC 9591 §6.6 H1..H5, F_L poly eval, Lagrange, PoP Schnorr. Cross-validate vs `zcash/frost-ed25519` on RFC 9591 App. C vectors. | `src/crypto/frost.cpp` only (header stable) | 2-3 d *after P0* |
-| **B** | DKG ceremony (3-phase, R blocks): `DKGCommitMsg`/`DKGShareMsg`/`DKGComplaintMsg`; VSS check; complaint/exclusion; PSS refresh. | `include/determ/net/messages.hpp`, `src/net/binary_codec.cpp`, `src/net/gossip.cpp`, new `src/node/dkg.cpp` | 1-1.5 wk |
+| **B** | DKG ceremony (3-phase, R blocks): `DKGCommitMsg`/`DKGShareMsg`/`DKGComplaintMsg`; VSS check; complaint/exclusion; PSS refresh. *(All crypto primitives now shipped — DKG `determ_frost_dkg_*`, PSS `determ_frost_pss_*`; Phase B is the wire/gossip/state layer over them.)* | `include/determ/net/messages.hpp`, `src/net/binary_codec.cpp`, `src/net/gossip.cpp`, new `src/node/dkg.cpp` | 1-1.5 wk |
 | **C** | Epoch-boundary orchestration. Hook on `epoch_blocks`; fresh-DKG vs PSS by committee delta; commit `epoch_public_key`; `dkg_round_blocks`/`pss_refresh_blocks` genesis constants. | `src/chain/chain.cpp`, `src/chain/genesis.cpp` | 3-5 d |
 | **D** | Threshold-sig integration. `creator_dh_secrets`→`creator_partial_sigs`; Phase-2 reveal becomes FROST partial over `(beacon_seed‖height)`; `compute_block_rand` aggregates t partials → canonical R; **`v2_10_active_from_height` gate goes live here** (producer/validator first read it). | `src/node/producer.cpp`, `src/chain/block.cpp` (signing_bytes binding), `src/node/validator.cpp` | 3-5 d |
 | **E** | Failure modes: insufficient-partials → v1 fallback; DKG timeout → previous-epoch keys; below-threshold detection; metrics. | `src/node/dkg.cpp`, `src/node/node.cpp`, `src/chain/chain.cpp` | 3-5 d |

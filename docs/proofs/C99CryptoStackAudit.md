@@ -748,3 +748,37 @@ fixed for consistency with the Ed25519 hardening (§6.1/§6.2). The VSS and Schn
 soundness were confirmed sound — these are robustness/uniqueness fixes, not
 correctness corrections. RFC-9591 byte-exact DKG/binding-factor vectors + wiring
 into `compute_block_rand` remain the tracked integration follow-ups.
+
+---
+
+## 8b. FROST PSS refresh (`determ_frost_pss_*`, commit `090931f`) — separate audit
+
+The Proactive Secret Sharing refresh primitives (`determ_frost_pss_commit` +
+`determ_frost_pss_verify_commit`) were audited by the same adversarial workflow
+along **four dimensions**: PSS correctness / secret-preservation, zero-hole
+soundness, constant-time, and memory-safety. Each dimension auditor's findings were
+then independently re-judged by three skeptics biased to refute, with `≥2/3`
+required to confirm.
+
+**Verdict: 0 Critical / 0 High / 0 confirmed findings — all four dimensions
+clean.** Secret-preservation and zero-hole-soundness returned no findings at all:
+the `Δ=Σδ_i`, `Δ(0)=0 ⇒ g(0)=s` preservation argument and the `C_0=[0]B` zero-hole
+proof were both confirmed sound (see `FrostThresholdSoundness.md` T-6). The
+reconstruction reuse (`determ_frost_reconstruct`), the Feldman-VSS reuse for refresh
+shares (`determ_frost_dkg_verify_share`, which sees `C_0=identity` transparently),
+and the caller-side `s'_j = s_j + Σ_i δ_i(j)` scalar sum were all confirmed correct.
+
+**Two raised-but-NOT-confirmed items (each `<2/3` skeptic agreement):**
+
+| # | Dimension (raised sev.) | Item | Disposition |
+|---|---|---|---|
+| PSS-CT-001 | constant-time (High) | The zero-hole check looped `if (zeropoly[k]!=0) return -1`, a per-byte data-dependent early return. | **Not a real leak** — the checked bytes are the protocol-mandated PUBLIC-zero constant term `δ_0`, not secret material (the secret coefficients `δ_1..δ_{t-1}` flow only through the constant-time `point_basemul`). **Hardened anyway** in `ab381be` to a branchless aggregate-OR (`hole |= zeropoly[k]; if (hole) return -1`), matching the §4 house compare discipline, so the form is no longer flaggable. |
+| PSS-API-001 | memory-safety (Medium) | `pss_commit` validates `t<1` but no upper bound on `t`. | **Not a defect** — `t` is a buffer-sizing parameter the caller owns (both `zeropoly` and `commitments` are caller-allocated); EVERY FROST primitive (`keygen_trusted`, `reconstruct`, `dkg_commit`, `sign`, …) follows the same caller-allocates contract and bounds only the 1-based participant *indices* to `[1,255]`, not the threshold `t`. Adding a `t>255` cap to PSS alone would create an inconsistency, not close a hole. No change. |
+
+*(Methodology note: of the six per-finding skeptic agents, three failed to emit
+structured output and counted as non-votes; neither raised item reached the `2/3`
+confirmation bar regardless. The workflow used 10 agents / ~727k subagent tokens.)*
+
+The PSS primitives are the crypto layer for v2.10 Phase B "PSS refresh" + Phase C
+epoch orchestration; the gossip/wire/state plumbing over them remains the tracked
+integration follow-up.

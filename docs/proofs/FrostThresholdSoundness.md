@@ -2,11 +2,11 @@
 
 **Subject:** the libsodium-free C99 FROST-Ed25519 stack — `src/crypto/ed25519/`
 (field/group + RFC 8032 sign/verify) and `src/crypto/frost/` (trusted-dealer +
-DKG keygen, two-round threshold signing). This document is the *construction*
-soundness companion to the three implementation audits recorded in
+DKG keygen, two-round threshold signing, PSS share-refresh). This document is the
+*construction* soundness companion to the implementation audits recorded in
 [C99CryptoStackAudit.md](C99CryptoStackAudit.md) §6 (Ed25519), §7 (FROST), §8
-(DKG): the audits answer "did we implement the scheme correctly + safely"; this
-answers "is the scheme sound, and what does each in-tree check buy."
+(DKG), §8b (PSS refresh): the audits answer "did we implement the scheme correctly
++ safely"; this answers "is the scheme sound, and what does each in-tree check buy."
 
 It extends [FrostVerifyDelegation.md](FrostVerifyDelegation.md) (which proved only
 the single shipped `frost_verify` primitive) to the now-shipped keygen / signing /
@@ -166,6 +166,42 @@ the "message" `(Cᵢ,₀, idx)` is itself a function of `a_{i,0}`, so there is n
 second distinct challenge over the same `R` for the same secret — the classic
 nonce-reuse leak does not arise. ∎
 
+### T-6 (PSS refresh preserves the group key; rotates shares; cross-epoch shares are useless)
+
+*The Proactive Secret Sharing refresh (`determ_frost_pss_*`) produces new shares
+`s'_j` that (a) reconstruct the SAME secret `s` and verify under the SAME public
+key `PK=[s]B`, (b) differ from the old `s_j`, and (c) cannot be combined with
+pre-refresh shares to recover `s` — provided each participant's zero-hole proof
+passes.*
+
+**Proof.** Each participant `i` deals a degree-`(t-1)` polynomial `δ_i` with
+`δ_i(0)=0`, committed as `Cᵢ,ₖ=[δ_{i,k}]B`. `determ_frost_pss_verify_commit`
+accepts `i` only if `Cᵢ,₀ = [0]B` (the identity), i.e. `δ_i(0)=0` — so no single
+participant can inject a non-zero hole. Let `Δ = Σᵢ δ_i`; it is degree `≤ t-1`
+with `Δ(0) = Σᵢ δ_i(0) = 0`. Participant `j`'s refreshed share is
+`s'_j = s_j + Σᵢ δ_i(j) = f(j) + Δ(j) = (f+Δ)(j)`, a point on the degree-`(t-1)`
+polynomial `g := f+Δ`. **(a) Preservation:** `g(0) = f(0)+Δ(0) = s+0 = s`, so any
+`t` of the `s'_j` Lagrange-interpolate to `s` (T-2 correctness applied to `g`), and
+`[g(0)]B = [s]B = PK` is unchanged. **(b) Rotation:** `s'_j − s_j = Δ(j)`; since
+`Δ` is a non-zero polynomial (its coefficients `δ_{·,k≥1}` are random, not all
+zero w.h.p.), `Δ(j) ≠ 0` for all but `≤ t-1` of the `j`, so the share *values*
+move even though the secret does not. **(c) Cross-epoch uselessness:** old shares
+lie on `f`, new shares on `g = f+Δ`; for `t` points to interpolate to `s` they
+must lie on a *single* degree-`(t-1)` polynomial through `(0,s)`. A mixed set of
+`a` old + `b=t−a` new points (`1≤a≤t−1`) lies on one such polynomial only if
+`Δ(j)=0` at all `b` new abscissae, a measure-zero coincidence over the random `Δ`
+(probability `≤ (t-1)/2^{252}` of accidental agreement); generically the mixed
+interpolation yields `s'' ≠ s`. Thus a mobile adversary holding `≤ t-1` shares
+from epoch `e` gains nothing in epoch `e+1`: it must capture `t` shares *within one
+epoch*. **VSS during refresh:** each `δ_i(j)` is validated by the SAME Feldman
+check (`determ_frost_dkg_verify_share`), which sees `Cᵢ,₀=identity` transparently
+(`Σ_k j^k Cᵢ,ₖ = [Σ_k δ_{i,k} j^k]B = [δ_i(j)]B`), so a cheating refresher is
+caught modulo A2 exactly as in T-4. ∎
+*(Witnessed: `test-frost-c99` §6 — zero-hole commit/verify, the non-zero-hole +
+non-identity-`C₀` rejections, per-share VSS, shares-actually-changed, two refreshed
+subsets reconstructing the original `s`, the old+new mix FAILING to recover `s`,
+and a refreshed quorum signing a valid Ed25519 sig under the unchanged `PK`.)*
+
 ---
 
 ## 4. Robustness / canonicality gates (what the hardening buys)
@@ -192,9 +228,10 @@ hash):
 ## 5. Scope and non-goals
 
 - **Implementation correctness + constant-time** are established separately by the
-  four adversarial audits (C99CryptoStackAudit §1–§8) and the byte-equal-vs-OpenSSL
-  + KAT cross-validation in `test-ed25519-c99` / `test-frost-c99`; this document
-  assumes them and argues the construction.
+  adversarial audits (C99CryptoStackAudit §1–§8b, incl. §8b PSS refresh — 0
+  confirmed findings) and the byte-equal-vs-OpenSSL + KAT cross-validation in
+  `test-ed25519-c99` / `test-frost-c99`; this document assumes them and argues the
+  construction.
 - **RFC 9591 byte-exact interop is NOT claimed.** The binding-factor encoding is
   self-consistent (signer ⇄ aggregator agree; the aggregate verifies as a standard
   Ed25519 signature) but is not yet byte-identical to the FROST(Ed25519,SHA-512)
@@ -203,7 +240,10 @@ hash):
   signer and aggregator.
 - **Trusted dealer vs DKG.** The trusted-dealer keygen (T-2) is a development /
   testing convenience; the **DKG (T-4/T-5) is the production keygen** for a
-  decentralized committee, since a trusted dealer would know `s`.
+  decentralized committee, since a trusted dealer would know `s`. **PSS refresh
+  (T-6)** is the epoch-boundary maintenance operation: it re-randomizes the
+  share set under the fixed DKG group key, so committee membership can roll over
+  and long-lived shares can be retired without a fresh DKG or any change to `PK`.
 - **Consensus wiring is out of scope.** Replacing the v1 commit-reveal block
   randomness with the FROST aggregate behind `v2_10_active_from_height`
   (`compute_block_rand`) is the remaining integration step; its safety composes
@@ -214,14 +254,14 @@ hash):
 ## 6. Cross-references
 
 - Implementation audits: [C99CryptoStackAudit.md](C99CryptoStackAudit.md) §6
-  (Ed25519), §7 (FROST sign/keygen), §8 (DKG).
+  (Ed25519), §7 (FROST sign/keygen), §8 (DKG), §8b (PSS refresh).
 - Prior primitive proof: [FrostVerifyDelegation.md](FrostVerifyDelegation.md)
   (`frost_verify` ↔ Ed25519 verify).
 - Spec + roadmap: [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.2/§3.8,
   [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 - Tests: `determ test-ed25519-c99` (10 assertions), `determ test-frost-c99`
-  (29 assertions incl. DKG + the distributed sign_partial/aggregate parity),
-  both in `tools/run_all.sh` (FAST).
+  (38 assertions incl. DKG, the distributed sign_partial/aggregate parity, and
+  the PSS refresh §6 block), both in `tools/run_all.sh` (FAST).
 - References: Komlo–Goldberg 2020 (FROST); RFC 9591 (FROST ciphersuites); RFC 8032
   (Ed25519); Pedersen 1991 (DKG); Feldman 1987 (VSS); Shamir 1979 (secret sharing);
   Bellare–Neven 2006 / forking lemma (Schnorr PoK).
