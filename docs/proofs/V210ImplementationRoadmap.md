@@ -53,6 +53,18 @@ GO/NO-GO.
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
+>
+> **Audit + hardening (commit `2e0058b`).** With §3.1/§3.4/§3.5/§3.8b byte-correct,
+> the shipped stack was put through an adversarial correctness + constant-time
+> audit (10 files, 32 agents, per-finding adversarial verification — see
+> [C99CryptoStackAudit.md](C99CryptoStackAudit.md)): 0 Critical / 0 High / 1 Medium
+> / 10 Low / 7 Info, 18 confirmed-real, all remediated. The stack gained its first
+> memory-hygiene primitive — `determ_secure_zero` (a non-elidable volatile-pointer
+> `memset` at `src/crypto/secure_zero.c`) — now scrubbing every secret-bearing
+> buffer across all 10 files; plus `malloc` NULL-checks + `size_t`-overflow guards
+> on the HMAC/HKDF/PBKDF2/AEAD APIs, the PBKDF2 RFC 8018 dkLen ceiling, and the
+> SHA-256/512 block-counter width fix. All output-preserving (the byte-equal
+> cross-validation + FAST 151/151 are unchanged).
 
 v2.10 replaces the v1 commit-reveal block randomness — `ContribMsg.dh_input`
 commit (`SHA256(secret‖pubkey)`) + `BlockSigMsg`/`creator_dh_secrets` Phase-2
