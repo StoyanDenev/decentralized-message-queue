@@ -11082,10 +11082,53 @@ int main(int argc, char** argv) {
             check(recon({3,4,5}), "FROST reconstruct from shares {3,4,5} == secret");
         }
 
+        // (4) threshold SIGNING: a t-of-n FROST aggregate verifies as a PLAIN
+        //     Ed25519 signature under the group public key — the load-bearing FROST
+        //     property (any t-of-n quorum jointly produces a standard Ed25519 sig).
+        {
+            const int t=3, n=5;
+            uint8_t secret[32], coeffs[2*32];
+            sc_from("frost-secret", secret);
+            sc_from("frost-coeff-1", coeffs);
+            sc_from("frost-coeff-2", coeffs+32);
+            uint8_t shares[5*32], group_pk[32], share_pks[5*32];
+            determ_frost_keygen_trusted(secret, coeffs, t, n, shares, group_pk, share_pks);
+            const char* msg = "determ randomness beacon round 42"; size_t mlen=std::strlen(msg);
+
+            auto threshold_sign_verify = [&](std::vector<int> signers)->bool{
+                int tt=(int)signers.size();
+                std::vector<uint8_t> sh(tt*32), d(tt*32), e(tt*32);
+                for(int q=0;q<tt;q++){
+                    std::memcpy(&sh[q*32], shares+(signers[q]-1)*32, 32);
+                    uint8_t hd[64], he[64];
+                    std::string ld="frost-d-"+std::to_string(signers[q]);
+                    std::string le="frost-e-"+std::to_string(signers[q]);
+                    determ_sha512((const uint8_t*)ld.data(), ld.size(), hd);
+                    determ_sha512((const uint8_t*)le.data(), le.size(), he);
+                    determ_ed25519_sc_reduce64(hd, &d[q*32]);
+                    determ_ed25519_sc_reduce64(he, &e[q*32]);
+                }
+                uint8_t sig[64];
+                if (determ_frost_sign(signers.data(), sh.data(), d.data(), e.data(), tt,
+                                      (const uint8_t*)msg, mlen, group_pk, sig)!=0) return false;
+                if (determ_ed25519_verify(group_pk, (const uint8_t*)msg, mlen, sig)!=0) return false;
+                EVP_PKEY* pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, group_pk, 32);
+                EVP_MD_CTX* mc = EVP_MD_CTX_new();
+                EVP_DigestVerifyInit(mc, nullptr, nullptr, nullptr, pub);
+                int ov = EVP_DigestVerify(mc, sig, 64, (const uint8_t*)msg, mlen);
+                EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
+                return ov==1;
+            };
+            check(threshold_sign_verify({1,2,3}),
+                  "FROST aggregate {1,2,3} verifies as Ed25519 under group_pk (C99 + OpenSSL)");
+            check(threshold_sign_verify({2,4,5}),
+                  "FROST aggregate {2,4,5} verifies as Ed25519 under group_pk (different quorum)");
+        }
+
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": frost-c99 "
-                  << (fail==0 ? "all keygen + reconstruction invariants held" : "had failures")
-                  << " (libsodium-free C99 FROST-Ed25519 keygen — Shamir/Lagrange over the scalar field; RFC 9591)\n";
+                  << (fail==0 ? "all keygen + threshold-signing invariants held" : "had failures")
+                  << " (libsodium-free C99 FROST-Ed25519 — Shamir/Lagrange + a t-of-n aggregate that IS an Ed25519 sig; RFC 9591)\n";
         return fail==0 ? 0 : 1;
     }
 

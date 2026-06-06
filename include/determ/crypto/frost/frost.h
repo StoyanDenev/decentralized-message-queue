@@ -40,6 +40,22 @@ int determ_frost_keygen_trusted(const uint8_t secret[32], const uint8_t *coeffs,
 int determ_frost_reconstruct(const int *xs, const uint8_t *shares, int t,
                              uint8_t secret_out[32]);
 
+/* Produce a FROST threshold signature over `msg` from the `t` participating
+ * signers. This is a centralized simulation of the two-round protocol: the caller
+ * marshals each signer's round-1 secret nonces (`d`, `e`, t*32 bytes each, in `xs`
+ * order) and secret key `shares` (t*32 bytes); the function derives the public
+ * commitments [d_i]B / [e_i]B, the per-signer binding factors, the group
+ * commitment R, the Ed25519-compatible challenge c = H(R ‖ group_pk ‖ msg), the
+ * Lagrange-weighted signature shares z_i = d_i + e_i·rho_i + lambda_i·s_i·c, and
+ * their sum z. Writes `sig` = R ‖ z (64 bytes) — a signature that VERIFIES AS A
+ * PLAIN ED25519 SIGNATURE under `group_pk` (so any t-of-n quorum can jointly
+ * produce a standard Ed25519 signature). Returns 0 on success, -1 on bad params /
+ * an oversized message / a point-decode failure. */
+int determ_frost_sign(const int *xs, const uint8_t *shares,
+                      const uint8_t *d, const uint8_t *e, int t,
+                      const uint8_t *msg, size_t msglen,
+                      const uint8_t group_pk[32], uint8_t sig[64]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

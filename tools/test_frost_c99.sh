@@ -5,11 +5,14 @@
 # sharing over the Ed25519 scalar field (mod L) + Lagrange reconstruction; the
 # threshold-signing round lands on the same base.
 #
-# 8 assertions: (1) group homomorphism [a]B+[b]B == [a+b]B and [k]([a]B) == [k*a]B
+# 12 assertions: (1) group homomorphism [a]B+[b]B == [a+b]B and [k]([a]B) == [k*a]B
 # (validates point add/mul); (2) a * a^-1 == 1 mod L (scalar inversion); (3) a
 # trusted-dealer keygen(t=3,n=5) with share-pubkey + group-key consistency and four
 # distinct t-subsets each reconstructing the same secret (the Shamir threshold
-# invariant). Additive -- not yet wired into the consensus randomness path.
+# invariant); (4) THRESHOLD SIGNING -- two different t-of-n quorums each produce an
+# aggregate that verifies as a plain Ed25519 signature under the group public key,
+# under BOTH the C99 Ed25519 verifier and OpenSSL. Additive -- not yet wired into
+# the consensus randomness path.
 set -u
 cd "$(dirname "$0")/.."
 source tools/common.sh
@@ -18,7 +21,7 @@ echo "=== C99 FROST-Ed25519 keygen (Shamir/Lagrange over the Ed25519 scalar fiel
 OUT=$($DETERM test-frost-c99 2>&1)
 echo "$OUT"
 
-if echo "$OUT" | tail -3 | grep -q "PASS: frost-c99 all keygen + reconstruction invariants held"; then
+if echo "$OUT" | tail -3 | grep -q "PASS: frost-c99 all keygen + threshold-signing invariants held"; then
   echo ""
   echo "  PASS: frost-c99 unit test"
   exit 0
