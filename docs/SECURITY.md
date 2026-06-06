@@ -25,7 +25,7 @@
 Currently genuinely outstanding:
 
 - **S-030 D2 full closure (v2.7 F2)** — design specification complete in `docs/proofs/F2-SPEC.md`; implementation ~3-4 days. D1 is effective-closed via S-033 state_root binding; D2 is partial-closed via the same mechanism (apply-layer rejection). v2.7 F2 closes D2 at the consensus layer (signatures gather only on view convergence).
-- **v2.10 threshold randomness aggregation** — 🔥 promoted to active in plan.md A11. Defeats residual selective-abort attack via t-of-K threshold signatures. **~3 weeks** including FROST-Ed25519 primitive port on already-vendored libsodium (Option C per `docs/proofs/v2.10-DKG-SPEC.md`: epoch-boundary trustless DKG with proactive secret-sharing refresh — supports validator rotation under mutual distrust). DKG infrastructure shared with v2.22 / v2.25; preserves "two primitives" design value (SHA-256 + curve25519 family).
+- **v2.10 threshold randomness aggregation** — ⏸️ **block-beacon application DE-SCOPED.** Decision: retain the v1 MPDH commit-reveal block beacon. Per `docs/proofs/V210-PhaseD-RandomnessWiring.md` §9, a FROST aggregate is **not** a bias-resistance upgrade over the existing FA3 commit-reveal guarantee (which already neutralises grinding, information-theoretically under SHA-256 preimage resistance), and — unlike threshold-BLS — FROST is **not** unbiasable-by-construction; so it does not justify the DKG/PSS ceremony for the block beacon. Residual selective-abort remains **accepted** under MPDH and handled by re-roll + suspension slashing (not a gate). The FROST-Ed25519 DKG infrastructure (built + audited) is retained for *other* uses (`docs/proofs/Beaconless-v2-SPEC.md` cross-shard randomness; shared curve25519 family with v2.22 / v2.25). Block-beacon design authority: Stoyan Denev.
 
 Closed in-session (retained here for audit trail; see §3 bodies):
 
@@ -1467,16 +1467,16 @@ Two tracks. **Track A** is the cheap-and-localized cluster (~4-6 days). **Track 
 - 27 findings mitigated in-session total (5 Critical + 13 High + 1 Medium + 8 Low/Op)
 - Track A remaining: **none — Track A complete**
 - v2.7 F2: 3-4 days (full S-030 D2 closure at the consensus layer)
-- v2.10 active: **~3-4 weeks** (threshold randomness aggregation incl. DKG infrastructure per Option C, plan.md A11 / `docs/proofs/v2.10-DKG-SPEC.md`)
+- v2.10 block-beacon: **de-scoped** — MPDH commit-reveal retained (`docs/proofs/V210-PhaseD-RandomnessWiring.md` §9); FROST DKG infra retained for other uses (Beaconless-v2). Not a remaining gate.
 - v2.26 added to design (Theme 9 — chain-level key rotation primitive; ROTATE_KEY tx + rotation-aware sig verify; ~1 week)
 - v2.25 added to design (Theme 9 DSSO — distributed IdP w/ T-OPAQUE; reclassified 2026-05-24 as **post-v1.0 chain-aware DApp** on top of v2.18 + v2.19 + v2.26 substrate per `docs/proofs/Improvements.md §8.1`)
 
 The original "5-6 weeks of engineering" estimate has been substantially absorbed in-session. Remaining gates to permissionless-deployment-ready posture:
 1. ~~Track A small items~~ — **complete in-session**.
 2. v2.7 F2 implementation per F2-SPEC.md (~3-4 days).
-3. v2.10 threshold randomness aggregation per plan.md A11 (**~3 weeks**, includes FROST-Ed25519 primitive port on already-vendored libsodium per Option C — epoch-boundary trustless DKG with PSS refresh on the curve25519 family; revised from prior ~1 week estimate after DKG spec).
+3. ~~v2.10 threshold randomness aggregation~~ — **block-beacon application de-scoped** (MPDH commit-reveal retained; `docs/proofs/V210-PhaseD-RandomnessWiring.md` §9). No longer a permissionless-readiness gate: the residual selective-abort is accepted under MPDH (re-roll + suspension slashing). The FROST-Ed25519 DKG infra (built + audited) is retained for other uses.
 
-Total remaining: ~4-5 weeks to "production-deployment-ready" posture. v2.10 is now the long pole; v2.7 F2 is small in comparison. Beyond that (v2.X), Theme 8 (privacy + interop) + Theme 9 (DSSO) extend the design space toward god-protocol completeness for Determ's lane. v2.10's DKG infrastructure is a shared foundation for v2.22 (curve choice) and v2.25 (T-OPAQUE OPRF) — landing it well amortizes across multiple downstream items.
+Total remaining: ~3-4 days to "production-deployment-ready" posture (v2.7 F2 only; v2.10 is no longer a gate). Beyond that (v2.X), Theme 8 (privacy + interop) + Theme 9 (DSSO) extend the design space toward god-protocol completeness for Determ's lane. The FROST-Ed25519 DKG infrastructure remains a shared foundation for v2.22 (curve choice) and v2.25 (T-OPAQUE OPRF) and for Beaconless-v2 cross-shard randomness — its value persists independent of the block-beacon de-scope.
 
 ---
 
