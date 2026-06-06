@@ -15,6 +15,7 @@
 #include <determ/crypto/sha2/sha2.h>   // v2.10 Phase 0: C99-native SHA-2 (CRYPTO-C99-SPEC §3.1)
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
+#include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -412,9 +413,13 @@ In-process tests (deterministic, no network):
                                               ChaCha20 (RFC 8439) byte-equal vs
                                               OpenSSL EVP_chacha20 (§3.4 cipher)
   determ test-aes-c99                         v2.10 Phase 0: libsodium-free C99
-                                              AES-256 (FIPS-197) byte-equal vs
-                                              OpenSSL + the FIPS-197 KAT (§3.5
-                                              block cipher; S-box not yet CT)
+                                              AES-256-GCM (FIPS-197 + SP 800-38D)
+                                              byte-equal vs OpenSSL + FIPS-197 KAT
+                                              (§3.5; constant-time S-box + GHASH)
+  determ test-ed25519-c99                     v2.10 Phase 0: libsodium-free C99
+                                              Ed25519 (RFC 8032) byte-equal vs
+                                              OpenSSL EVP_PKEY_ED25519 + the RFC
+                                              8032 §7.1 KAT (§3.2; FROST prereq)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -10874,6 +10879,110 @@ int main(int argc, char** argv) {
                   << ": aes-c99 "
                   << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
                   << " (libsodium-free C99 AES-256-GCM vs OpenSSL — the §Q9 gate; constant-time S-box + branchless GHASH)\n";
+        return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-ed25519-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.2: validate the libsodium-free C99
+        // Ed25519 (RFC 8032) against (1) the RFC 8032 §7.1 TEST 1 public-key
+        // anchor, (2) byte-equal public-key + signature cross-validation vs
+        // OpenSSL EVP_PKEY_ED25519 over a fuzzed (seed,message) grid — the §Q9
+        // gate, and (3) verify accept / tamper-reject semantics. This is the EC
+        // prerequisite for the v2.10 FROST-Ed25519 work.
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto to_hexs = [](const uint8_t* p, size_t n) {
+            static const char* H = "0123456789abcdef";
+            std::string s; for (size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s;
+        };
+        auto from_hex = [](const std::string& h) {
+            std::vector<uint8_t> v; for (size_t i=0;i+1<h.size();i+=2)
+                v.push_back((uint8_t)std::stoul(h.substr(i,2), nullptr, 16)); return v;
+        };
+
+        // (1) RFC 8032 §7.1 TEST 1 (empty message): a published anchor independent
+        //     of OpenSSL, validating both pubkey derivation and signing.
+        {
+            auto seed = from_hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+            uint8_t pk[32], sig[64];
+            determ_ed25519_pubkey_from_seed(seed.data(), pk);
+            check(to_hexs(pk,32)=="d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+                  "Ed25519 pubkey matches RFC 8032 §7.1 TEST 1 vector");
+            determ_ed25519_sign(seed.data(), pk, nullptr, 0, sig);
+            check(to_hexs(sig,64)=="e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+                                   "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+                  "Ed25519 signature matches RFC 8032 §7.1 TEST 1 vector (empty message)");
+        }
+
+        // (2) Byte-equal vs OpenSSL EVP_PKEY_ED25519: public key + signature over
+        //     a fuzzed (seed, message-length) grid.
+        {
+            bool pk_ok = true, sg_ok = true; long pk_at=-1, sg_at=-1;
+            const size_t mlens[] = {0,1,2,31,32,33,64,127,128,200};
+            for (size_t mi=0; mi<sizeof(mlens)/sizeof(mlens[0]) && pk_ok && sg_ok; ++mi) {
+                size_t ml = mlens[mi];
+                uint8_t seed[32];
+                for (int i=0;i<32;i++) seed[i]=(uint8_t)((i*37u + mi*11u + 5u)&0xffu);
+                std::vector<uint8_t> msg(ml);
+                for (size_t i=0;i<ml;i++) msg[i]=(uint8_t)((i*19u + mi*7u + 3u)&0xffu);
+
+                uint8_t my_pk[32], my_sig[64];
+                determ_ed25519_pubkey_from_seed(seed, my_pk);
+                determ_ed25519_sign(seed, my_pk, ml?msg.data():nullptr, ml, my_sig);
+
+                // OpenSSL oracle
+                EVP_PKEY* sk = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, seed, 32);
+                uint8_t o_pk[32]; size_t o_pk_len = 32;
+                EVP_PKEY_get_raw_public_key(sk, o_pk, &o_pk_len);
+                uint8_t o_sig[64]; size_t o_sig_len = 64;
+                EVP_MD_CTX* mc = EVP_MD_CTX_new();
+                EVP_DigestSignInit(mc, nullptr, nullptr, nullptr, sk);
+                EVP_DigestSign(mc, o_sig, &o_sig_len, ml?msg.data():(const uint8_t*)"", ml);
+                EVP_MD_CTX_free(mc);
+                EVP_PKEY_free(sk);
+
+                if (std::memcmp(my_pk, o_pk, 32)!=0) { pk_ok=false; pk_at=(long)ml; }
+                if (o_sig_len!=64 || std::memcmp(my_sig, o_sig, 64)!=0) { sg_ok=false; sg_at=(long)ml; }
+            }
+            check(pk_ok, pk_ok ? "Ed25519 pubkey C99 == OpenSSL EVP_PKEY_ED25519 (fuzzed seeds)"
+                               : "Ed25519 pubkey diverges from OpenSSL (mlen="+std::to_string(pk_at)+")");
+            check(sg_ok, sg_ok ? "Ed25519 signature C99 == OpenSSL EVP_DigestSign (fuzzed seed,msg) — the §Q9 gate"
+                               : "Ed25519 signature diverges from OpenSSL (mlen="+std::to_string(sg_at)+")");
+        }
+
+        // (3) verify: accept a valid signature; reject tampered tag / message / key.
+        {
+            uint8_t seed[32]; for (int i=0;i<32;i++) seed[i]=(uint8_t)(i*9+1);
+            uint8_t pk[32], sig[64];
+            const char* m = "the quick brown fox"; size_t ml = std::strlen(m);
+            determ_ed25519_pubkey_from_seed(seed, pk);
+            determ_ed25519_sign(seed, pk, (const uint8_t*)m, ml, sig);
+            check(determ_ed25519_verify(pk, (const uint8_t*)m, ml, sig)==0,
+                  "Ed25519 verify accepts a valid signature");
+            uint8_t bad[64]; std::memcpy(bad,sig,64); bad[10]^=0x01;
+            check(determ_ed25519_verify(pk, (const uint8_t*)m, ml, bad)==-1,
+                  "Ed25519 verify rejects a tampered signature");
+            check(determ_ed25519_verify(pk, (const uint8_t*)"the quick brown box", ml, sig)==-1,
+                  "Ed25519 verify rejects a tampered message");
+            uint8_t badpk[32]; std::memcpy(badpk,pk,32); badpk[0]^=0x01;
+            check(determ_ed25519_verify(badpk, (const uint8_t*)m, ml, sig)==-1,
+                  "Ed25519 verify rejects a wrong public key");
+            // cross-binary: OpenSSL must verify our signature
+            EVP_PKEY* pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pk, 32);
+            EVP_MD_CTX* mc = EVP_MD_CTX_new();
+            EVP_DigestVerifyInit(mc, nullptr, nullptr, nullptr, pub);
+            int ov = EVP_DigestVerify(mc, sig, 64, (const uint8_t*)m, ml);
+            EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
+            check(ov==1, "Ed25519 signature C99 verifies under OpenSSL EVP_DigestVerify");
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": ed25519-c99 "
+                  << (fail==0 ? "all cross-validation + RFC 8032 KAT matched" : "had failures")
+                  << " (libsodium-free C99 Ed25519 vs OpenSSL — the §Q9 gate; constant-time gf[16] ladder)\n";
         return fail==0 ? 0 : 1;
     }
 

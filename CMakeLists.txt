@@ -107,6 +107,11 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c
 # Exercised by `determ test-aes-c99`.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.2: Ed25519 (RFC 8032), the EC prerequisite
+# for FROST-Ed25519. Constant-time gf[16] field + cswap-ladder scalarmult; built
+# on the C99 SHA-512. Exercised by `determ test-ed25519-c99` (byte-equal vs
+# OpenSSL EVP_PKEY_ED25519 + RFC 8032 KATs).
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c")
 
 add_executable(determ ${SOURCES})
 
