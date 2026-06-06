@@ -87,11 +87,16 @@ GO/NO-GO.
 > verifies as a PLAIN Ed25519 signature under the group public key — validated by
 > `determ test-frost-c99` (12/12) under BOTH the C99 verifier and OpenSSL, over two
 > distinct quorums. So a t-of-K committee can now jointly produce a standard
-> Ed25519 signature. **Remaining v2.10 work** (no longer crypto-prerequisite): (a)
-> the DKG ceremony (RFC 9591 §6.6 — replace the trusted dealer); (b) RFC-9591
-> byte-exact binding-factor interop vectors (the current encoding is
-> self-consistent but not yet vector-exact); (c) wiring the FROST aggregate into
-> the consensus randomness path (`compute_block_rand`) behind
+> Ed25519 signature. **The trustless DKG ceremony is now also SHIPPED** (commit
+> `79dc483`): a Pedersen DKG with Feldman VSS + proof-of-possession
+> (`determ_frost_dkg_commit` / `_verify_pop` / `_share` / `_verify_share`) where no
+> single party learns the group secret — validated by `determ test-frost-c99`
+> (an n=3,t=2 ceremony whose summed shares reconstruct the group secret and sign a
+> valid Ed25519 sig under the DKG group key, with tampered-PoP/share rejection).
+> **Remaining v2.10 work** (all integration, no longer crypto-prerequisite): (a)
+> RFC-9591 byte-exact binding-factor / DKG interop vectors (the current encodings
+> are self-consistent but not yet vector-exact); (b) wiring the FROST aggregate
+> into the consensus randomness path (`compute_block_rand`) behind
 > `v2_10_active_from_height`, replacing the v1 commit-reveal. NOTE: the C99 stack
 > is additive — the daemon's Ed25519 call sites still use OpenSSL
 > `EVP_PKEY_ED25519`; these C99 modules exist for the FROST threshold layer.
