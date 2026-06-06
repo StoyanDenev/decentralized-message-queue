@@ -2,6 +2,8 @@
 
 **Status:** living plan. Sub-steps 0, 1, 3 (helpers only) shipped — see per-sub-step status tags below. v2.10 Phase A frost_verify also shipped as the first FROST primitive.
 
+> **DECISION UPDATE — v2.10 block-randomness portion DE-SCOPED.** The v2.10 half of this plan (wiring FROST threshold signatures into the *block-randomness beacon*) is **de-scoped**: the project retains the v1 MPDH commit-reveal block beacon (`V210-PhaseD-RandomnessWiring.md` §9). The **v2.7 F2** half of this plan is **unaffected** and proceeds. The FROST C99 primitives already built under this plan are retained for non-beacon uses (`Beaconless-v2-SPEC.md` cross-shard randomness, threshold signing). Treat the v2.10 sub-steps below as historical/optional, not active block-beacon work. Consensus design authority: Stoyan Denev; this NOTICE is not co-authored by the AI assistant.
+
 **Companion docs:**
 - `F2-SPEC.md` — v2.7 F2 view-reconciliation design (9 open questions resolved)
 - `v2.10-DKG-SPEC.md` — v2.10 threshold-randomness DKG ceremony spec (FROST-Ed25519 on curve25519 family)
