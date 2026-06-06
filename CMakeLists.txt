@@ -128,6 +128,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c")
 # Argon2id is built on. Validated vs OpenSSL EVP_blake2b512 (unkeyed-64 core) +
 # python hashlib.blake2b reference vectors (keyed/var-len) by `determ test-blake2b-c99`.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/blake2/blake2b.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6: Argon2id (RFC 9106) on the BLAKE2b above —
+# the memory-hard password hash (libsodium-free keyfile-KDF replacement). Validated
+# byte-equal vs libsodium crypto_pwhash_argon2id by `determ test-argon2id-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/argon2/argon2id.c")
 
 add_executable(determ ${SOURCES})
 
