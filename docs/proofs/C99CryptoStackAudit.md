@@ -696,3 +696,36 @@ self-consistent (signer ⇄ aggregator agree, validated by the aggregate verifyi
 under OpenSSL) but **not yet byte-exact to the RFC 9591 ciphersuite vectors** —
 RFC-9591 interop vectors are a tracked follow-up — and the trusted-dealer keygen is
 to be superseded by the DKG ceremony (RFC 9591 §6.6).
+
+---
+
+## 8. FROST DKG (`src/crypto/frost/frost.c` — DKG functions) — separate audit
+
+The Pedersen-DKG / Feldman-VSS trustless keygen (commit `79dc483`) was audited
+along **four dimensions**: VSS soundness, proof-of-possession soundness,
+constant-time, and memory-safety.
+
+**Verdict:** VSS-soundness, constant-time, and memory-safety are **clean**; 0
+Critical / 0 High. The Feldman VSS check (`[share]B == Σ_k j^k·C_k`) was confirmed
+to be the **correct soundness predicate** — a share is accepted iff it lies on the
+committed polynomial, and a cheating dealer cannot pass an inconsistent share
+without breaking the Ed25519 discrete log; the `j^k` accumulation, `j^0=C_0` base
+case, and `t=1` degenerate path are all off-by-one-free. The proof-of-possession
+is a sound Fiat-Shamir Schnorr proof of knowledge of `a_0` (the challenge binds
+`A_0`, so it is **not forgeable** without `a_0`; the deterministic nonce is the
+standard RFC-6979-style pattern and leaks nothing). All DKG secrets flow only
+through constant-time ops; the fixed `nb[54]`/`cb[86]` buffers are sized exactly
+to their `memcpy` footprints.
+
+**Two confirmed Low findings — both remediated in `12aa6ec`:**
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 8.1 | Low | `determ_frost_dkg_verify_pop` fed the PoP scalar `z` into the ladder with no `z < L` check, so `(R, z+L)` re-verified — PoP byte-non-uniqueness (the same malleability class the Ed25519 verifier closes; knowledge-of-`a_0` soundness unaffected). | Exposed `determ_ed25519_sc_is_canonical` (wraps `sc_lt_L`) and gate `z` before use; a new test asserts `(R, z+L)` is rejected. |
+| 8.2 | Low | `R` was decoded leniently (`point_unpack` accepts non-canonical `y ≥ q`), so the ~19 non-canonical `y`-encodings of `R` also re-verified. | Exposed `determ_ed25519_point_is_canonical` (wraps `point_y_is_canonical`) and gate `R` before use, matching the Ed25519 verifier's RFC 8032 §5.1.3 posture. |
+
+Both were latent (no consumer treats the PoP bytes as a unique identifier yet) but
+fixed for consistency with the Ed25519 hardening (§6.1/§6.2). The VSS and Schnorr
+soundness were confirmed sound — these are robustness/uniqueness fixes, not
+correctness corrections. RFC-9591 byte-exact DKG/binding-factor vectors + wiring
+into `compute_block_rand` remain the tracked integration follow-ups.
