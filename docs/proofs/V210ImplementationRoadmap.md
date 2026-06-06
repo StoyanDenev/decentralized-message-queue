@@ -85,9 +85,16 @@ GO/NO-GO.
 > trusted-dealer keygen (Shamir secret sharing over the Ed25519 scalar field +
 > Lagrange reconstruction) and two-round threshold signing whose t-of-n aggregate
 > verifies as a PLAIN Ed25519 signature under the group public key — validated by
-> `determ test-frost-c99` (12/12) under BOTH the C99 verifier and OpenSSL, over two
+> `determ test-frost-c99` under BOTH the C99 verifier and OpenSSL, over two
 > distinct quorums. So a t-of-K committee can now jointly produce a standard
-> Ed25519 signature. **The trustless DKG ceremony is now also SHIPPED** (commit
+> Ed25519 signature. **The distributed two-round signing API is also SHIPPED**
+> (commit `b49db4f`): the centralized `determ_frost_sign` is split into the
+> per-signer `determ_frost_sign_partial` (each node computes only its own `zᵢ` from
+> its own secrets + the public commitments) and `determ_frost_aggregate` (sum +
+> shared-`R` recompute), which is the shape Phase D's `compute_block_rand` wiring
+> consumes; `test-frost-c99` asserts the distributed result is byte-identical to the
+> centralized one (see `FrostThresholdSoundness.md` T-1.1). **The trustless DKG
+> ceremony is now also SHIPPED** (commit
 > `79dc483`): a Pedersen DKG with Feldman VSS + proof-of-possession
 > (`determ_frost_dkg_commit` / `_verify_pop` / `_share` / `_verify_share`) where no
 > single party learns the group secret — validated by `determ test-frost-c99`
@@ -97,7 +104,10 @@ GO/NO-GO.
 > RFC-9591 byte-exact binding-factor / DKG interop vectors (the current encodings
 > are self-consistent but not yet vector-exact); (b) wiring the FROST aggregate
 > into the consensus randomness path (`compute_block_rand`) behind
-> `v2_10_active_from_height`, replacing the v1 commit-reveal. NOTE: the C99 stack
+> `v2_10_active_from_height`, replacing the v1 commit-reveal — the per-signer
+> `determ_frost_sign_partial` + `determ_frost_aggregate` primitives this wiring
+> calls now exist (commit `b49db4f`), so (b) is pure consensus integration with no
+> remaining crypto-primitive prerequisite. NOTE: the C99 stack
 > is additive — the daemon's Ed25519 call sites still use OpenSSL
 > `EVP_PKEY_ED25519`; these C99 modules exist for the FROST threshold layer.
 

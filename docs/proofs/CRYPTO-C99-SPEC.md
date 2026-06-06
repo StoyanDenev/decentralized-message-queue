@@ -275,12 +275,16 @@ typedef struct { /* per-member secret share */ } determ_frost_share_t;
 typedef struct { /* group public key */ } determ_frost_pubkey_t;
 typedef struct { /* partial signature */ } determ_frost_partial_t;
 
-int determ_frost_dkg_round1(/* ... */);  // commitments
-int determ_frost_dkg_round2(/* ... */);  // share distribution
-int determ_frost_dkg_finalize(/* ... */);
-int determ_frost_pss_refresh(/* ... */);  // proactive secret sharing
-int determ_frost_partial_sign(/* ... */);
-int determ_frost_aggregate(/* ... */);
+// Shipped names (src/crypto/frost/frost.h) — the sketch below predated the
+// implementation; the DKG ceremony shipped as a commit / verify-PoP / share /
+// verify-share decomposition rather than the round1/round2/finalize sketch:
+int determ_frost_dkg_commit(/* poly,t,idx -> commitments,pop */);       // round-1 Feldman commitments + PoP
+int determ_frost_dkg_verify_pop(/* commitment0,idx,pop */);             // rogue-key defence
+void determ_frost_dkg_share(/* poly,t,j -> share */);                   // round-2 dealt share f_i(j)
+int determ_frost_dkg_verify_share(/* share,j,commitments,t */);         // Feldman VSS check
+int determ_frost_pss_refresh(/* ... */);  // proactive secret sharing (future)
+int determ_frost_sign_partial(/* one signer's round-2 share z_i */);    // SHIPPED (distributed signing)
+int determ_frost_aggregate(/* sum z_i + recompute R -> Ed25519 sig */); // SHIPPED
 
 // ─── Constant-time primitives ───────────────────────────────────────
 int  determ_ct_memcmp(const uint8_t* a, const uint8_t* b, size_t n);
@@ -517,7 +521,10 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Implement DKG protocol per RFC 9591 §3
 - Polynomial-commitment generation, share distribution, complaint phase, finalize
 - Proactive Secret Sharing (PSS) refresh extension
-- Partial signing + aggregation
+- Partial signing + aggregation — **SHIPPED**: centralized `determ_frost_sign` plus
+  the distributed two-round split `determ_frost_sign_partial` (per-signer round-2
+  share) + `determ_frost_aggregate` (sum + shared-R recompute); the distributed
+  path is byte-identical to the centralized one (asserted by `determ test-frost-c99`)
 - Test vectors from RFC 9591 Appendix C
 - Reference cross-check: zcash/frost-ed25519 (Rust) output comparison
 

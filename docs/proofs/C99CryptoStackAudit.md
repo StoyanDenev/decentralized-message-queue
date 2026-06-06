@@ -687,6 +687,23 @@ constant-time scalar/point ops and never into a hash buffer; and the
 `csize = 64 + msglen`) lands exactly at each buffer end, is `size_t`-overflow-safe,
 and frees on every path.
 
+**Post-audit refactor (`b49db4f`) — distributed two-round signing.** The
+centralized `determ_frost_sign` needs every signer's secret nonces at once, so no
+single node can run it in production. Its binding-factor/R/challenge derivation (and
+the `rsize`/`csize` buffers audited above) was factored verbatim into a shared
+static helper `frost_binding_and_challenge`, now invoked by `determ_frost_sign`,
+the new per-signer `determ_frost_sign_partial` (one signer's round-2 share `z_i`
+from only its own secrets + the public commitment lists), and `determ_frost_aggregate`
+(sum of partials + shared-`R` recompute). The signer-set guard from finding 7.1 was
+likewise factored into `frost_check_signer_set` and is applied by all three entry
+points. Because the three share one derivation, the distributed path is
+**byte-identical** to the centralized one — asserted directly by `test-frost-c99`
+(`memcmp(agg, ref, 64)==0`), which also re-verifies the distributed aggregate under
+both the C99 verifier and OpenSSL and confirms a tampered partial breaks the
+signature. The allocation accounting, secret-flow, and constant-time conclusions
+above carry over unchanged (the helper performs the identical operations on the
+identical buffers).
+
 **One confirmed Low finding — remediated in `55a0f34`:**
 
 | # | Severity | Issue | Fix |

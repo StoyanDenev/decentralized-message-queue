@@ -47,7 +47,12 @@ Scalars are `mod L`; points are order-`L` subgroup elements; `B` is the base poi
   binding factor `ρᵢ = H₁(i, m, {(j,D_j,E_j)})`; the group commitment
   `R = Σ_{i∈S}(Dᵢ + [ρᵢ]Eᵢ)`; the challenge `c = H₂(R ‖ PK ‖ m) mod L`; the
   signature share `zᵢ = dᵢ + eᵢ·ρᵢ + λᵢ(0)·sᵢ·c`; the aggregate `z = Σ_{i∈S} zᵢ`;
-  the signature is `(R, z)`.
+  the signature is `(R, z)`. `determ_frost_sign` is a *centralized* convenience
+  routine that holds every signer's secrets at once; the *distributed* protocol that
+  runs in production splits it into `determ_frost_sign_partial` (each signer computes
+  only its own `zᵢ` from its own `(sᵢ, dᵢ, eᵢ)` plus the public `{Dⱼ}`, `{Eⱼ}`) and
+  `determ_frost_aggregate` (sum the `zᵢ`, recompute the shared `R`). T-1.1 shows the
+  two paths are byte-identical.
 
 ---
 
@@ -69,6 +74,28 @@ f(0) = s` (Lagrange interpolation at 0, T-2). Hence
 exact Ed25519 challenge, `(R, z)` is a valid RFC 8032 signature under `PK`. ∎
 *(Witnessed end-to-end: `test-frost-c99` signs with two distinct quorums and both
 verify under the C99 verifier AND OpenSSL `EVP_DigestVerify`.)*
+
+### T-1.1 (Distributed decomposition is byte-identical to the centralized sign)
+
+*The distributed two-round API — each signer's `determ_frost_sign_partial` plus
+`determ_frost_aggregate` — produces the SAME `(R, z)` as the centralized
+`determ_frost_sign` for the same inputs, and hence inherits T-1.*
+
+**Proof.** `determ_frost_sign`, `determ_frost_sign_partial`, and
+`determ_frost_aggregate` all derive `{ρᵢ}`, `R`, and `c` through one shared routine
+(`frost_binding_and_challenge`) over the *same* public commitment lists `{Dᵢ}`,
+`{Eᵢ}`, message `m`, and group key `PK`; so every party computes identical `ρ_pos`,
+`R`, and `c`. `determ_frost_sign_partial` at position `pos` returns exactly
+`z_pos = d_pos + e_pos·ρ_pos + λ_pos(0)·s_pos·c` — the same summand the centralized
+loop computes for `i = pos`. `determ_frost_aggregate` outputs `R` (recomputed
+identically) and `z = Σ_{i∈S} z_i`, which is the centralized `z`. Therefore the two
+paths emit bit-for-bit equal 64-byte signatures, and T-1's verification equation
+holds for the distributed result. The shared `R` recompute is also the property that
+defeats selective-abort: any `t`-of-`K` quorum that reaches aggregation derives the
+same `R` regardless of which members participated. ∎
+*(Witnessed: `test-frost-c99` asserts `memcmp(aggregate, centralized, 64)==0`, then
+re-verifies the distributed aggregate under both the C99 verifier and OpenSSL, and
+confirms a single tampered partial breaks the signature.)*
 
 ### T-2 (Reconstruction correctness + secrecy)
 
