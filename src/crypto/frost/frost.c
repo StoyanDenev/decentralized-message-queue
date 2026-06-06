@@ -354,9 +354,15 @@ int determ_frost_dkg_verify_share(const u8 share[32], int j, const u8 *commitmen
  * the existing determ_frost_dkg_share / _verify_share (the Feldman check is
  * identical; it simply sees C_0 = identity). */
 int determ_frost_pss_commit(const u8 *zeropoly, int t, u8 *commitments) {
-    int k;
+    int k; u8 hole = 0;
     if (t < 1) return -1;
-    for (k = 0; k < 32; k++) if (zeropoly[k] != 0) return -1;     /* δ_0 == 0 required */
+    /* δ_0 == 0 required (zero hole). Accumulate all 32 bytes into one OR and branch
+     * once on the aggregate, matching the house branchless-compare discipline (no
+     * per-byte early-return timing). The checked bytes are the protocol-mandated
+     * public-zero constant term, not secret material — the secret coefficients
+     * δ_1..δ_{t-1} flow only through the constant-time point_basemul below. */
+    for (k = 0; k < 32; k++) hole |= zeropoly[k];
+    if (hole != 0) return -1;
     for (k = 0; k < t; k++)
         determ_ed25519_point_basemul(&commitments[k * 32], &zeropoly[k * 32]);
     return 0;
