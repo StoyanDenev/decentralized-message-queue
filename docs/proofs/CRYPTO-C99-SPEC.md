@@ -89,7 +89,8 @@ Achieved via three substitutions:
 | Poly1305 | `src/crypto/chacha20/poly1305.c` | RFC 8439 reference | Public domain | ~500 |
 | XChaCha20-Poly1305 | `src/crypto/chacha20/xchacha20_poly1305.c` | RFC draft + RFC 8439 composition | Public domain | ~500 |
 | AES-256-GCM | `src/crypto/aes/` | NIST FIPS 197 + SP 800-38D | Public domain | ~3K |
-| Argon2id | `src/crypto/argon2/` | P-H-C reference | CC0 / Apache 2.0 | ~2K |
+| BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
+| Argon2id | `src/crypto/argon2/` | P-H-C reference (on the shipped BLAKE2b above) | CC0 / Apache 2.0 | ~2K |
 | secp256k1 (ECDH + signing) | `src/crypto/secp256k1/` | libsecp256k1 (Bitcoin Core) | MIT | ~6K |
 | secp256k1 Bulletproofs | `src/crypto/secp256k1_zkp/` | libsecp256k1-zkp (Blockstream/Grin) | MIT | ~3K |
 | FROST-Ed25519 | `src/crypto/frost/` | **SHIPPED** — trusted-dealer + trustless DKG (Feldman VSS + PoP) keygen + threshold sign whose aggregate is a plain Ed25519 sig | Determ-original | ~330 |
@@ -129,10 +130,11 @@ src/crypto/
 │   ├── aes_core.c
 │   ├── aes_gcm.c
 │   └── aes.h
-├── argon2/                     # Argon2id from P-H-C reference
+├── blake2/                     # SHIPPED: BLAKE2b (RFC 7693), keyed + variable-length
+│   └── blake2b.c               #   the hash Argon2id builds on; header at include/determ/crypto/blake2/
+├── argon2/                     # Argon2id from P-H-C reference (reuses ../blake2/blake2b)
 │   ├── argon2.c
 │   ├── argon2_core.c
-│   ├── blake2b.c               # BLAKE2b is Argon2id's underlying hash
 │   └── argon2.h
 ├── secp256k1/                  # libsecp256k1 vendored
 │   ├── (libsecp256k1 source tree, pinned version)
@@ -508,11 +510,18 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 > Peralta / AES-NI S-box would be faster but is an optional throughput
 > optimization, not a security gate (the S-004 use is one-shot).
 
-### 3.6 Argon2id (~6 days)
+### 3.6 Argon2id (~6 days) — prerequisite BLAKE2b **SHIPPED** (commit `695d4f4`)
 
-- Vendor P-H-C reference implementation
-- Includes BLAKE2b (Argon2's underlying hash)
-- Test vectors from P-H-C reference
+- **BLAKE2b (Argon2's underlying hash) is DONE** — `src/crypto/blake2/blake2b.c`,
+  canonical RFC 7693 (keyed + variable-length + incremental), validated by
+  `determ test-blake2b-c99` (vs OpenSSL `EVP_blake2b512` unkeyed-64 + `hashlib.blake2b`
+  keyed/var-len KATs). The remaining Argon2id work is the memory-hard core
+  (fill_segment / the B/G compression over 1 KiB blocks) + the H' variable-length
+  hash + the parameter encoding, all on top of this BLAKE2b.
+- Vendor / implement the P-H-C Argon2id core on the shipped BLAKE2b
+- Test vectors from the P-H-C reference / RFC 9106 — and cross-validate against the
+  already-linked libsodium `crypto_pwhash` (Argon2id) in the `determ-wallet` test
+  harness (which links libsodium), since the `determ` binary is libsodium-free
 - Memory-hard property + CT discipline
 
 ### 3.7 secp256k1 + libsecp256k1-zkp (~10 days)
