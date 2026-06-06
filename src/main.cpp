@@ -20,6 +20,7 @@
 #include <determ/crypto/frost/frost.h>        // v2.10 Phase A: C99-native FROST-Ed25519 (RFC 9591)
 #include <determ/crypto/x25519/x25519.h>      // v2.10 Phase 0: C99-native X25519 (RFC 7748, §3.3)
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
+#include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -436,6 +437,10 @@ In-process tests (deterministic, no network):
                                               BLAKE2b (RFC 7693) byte-equal vs
                                               OpenSSL EVP_blake2b512 + hashlib
                                               KATs (§3.6 prereq; Argon2id base)
+  determ test-xchacha-c99                     v2.10 Phase 0: libsodium-free C99
+                                              XChaCha20-Poly1305 (draft xchacha)
+                                              vs OpenSSL inner AEAD + HChaCha20
+                                              §2.2.1 KAT (§3.4; extended nonce)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11691,6 +11696,97 @@ int main(int argc, char** argv) {
                   << ": blake2b-c99 "
                   << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
                   << " (libsodium-free C99 BLAKE2b vs OpenSSL EVP_blake2b512 + hashlib.blake2b KATs — RFC 7693; Argon2id prereq)\n";
+        return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-xchacha-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: validate the libsodium-free C99
+        // XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha) — (1) HChaCha20 vs the draft
+        // §2.2.1 KAT (an independent from-scratch reference); (2) the full AEAD
+        // byte-equal vs OpenSSL's inner ChaCha20-Poly1305 on the derived
+        // (subkey, 96-bit nonce) — XChaCha20-Poly1305 is DEFINED as that composition
+        // and (1) pins HChaCha20, so this is the §Q9 gate; (3) decrypt round-trip +
+        // tamper rejection (tag / ciphertext / AAD / nonce).
+        using namespace determ;
+        int fail=0;
+        auto check=[&](bool c,const std::string&m){ if(c) std::cout<<"  PASS: "<<m<<"\n"; else {std::cout<<"  FAIL: "<<m<<"\n"; fail++;} };
+        auto hx=[](const uint8_t*p,size_t n){ static const char*H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+
+        // (1) HChaCha20 draft §2.2.1 KAT (key=00..1f, nonce=00000009 0000004a 00000000 31415927).
+        {
+            uint8_t key[32]; for(int i=0;i<32;i++) key[i]=(uint8_t)i;
+            uint8_t n16[16]={0,0,0,0x09, 0,0,0,0x4a, 0,0,0,0, 0x31,0x41,0x59,0x27};
+            uint8_t sub[32]; determ_hchacha20(sub,key,n16);
+            check(hx(sub,32)=="82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc",
+                  "HChaCha20 matches draft-irtf-cfrg-xchacha §2.2.1 KAT");
+        }
+
+        // (2) full AEAD byte-equal vs OpenSSL ChaCha20-Poly1305 on the derived
+        //     (subkey, 0x00000000||nonce24[16:24]) across a (pt,aad)-length grid.
+        {
+            bool ct_ok=true, tag_ok=true; long at=-1;
+            const size_t ptl[]={0,1,16,63,64,65,128,200};
+            const size_t aadl[]={0,1,12,16,20};
+            for(size_t pi=0;pi<sizeof(ptl)/sizeof(ptl[0])&&ct_ok&&tag_ok;++pi)
+            for(size_t ai=0;ai<sizeof(aadl)/sizeof(aadl[0])&&ct_ok&&tag_ok;++ai){
+                size_t pl=ptl[pi], al=aadl[ai];
+                uint8_t key[32], n24[24];
+                for(int i=0;i<32;i++) key[i]=(uint8_t)((i*41u+pi*7u+ai+1u)&0xff);
+                for(int i=0;i<24;i++) n24[i]=(uint8_t)((i*17u+pi+ai*3u+2u)&0xff);
+                std::vector<uint8_t> pt(pl), aad(al), ct(pl);
+                for(size_t i=0;i<pl;i++) pt[i]=(uint8_t)((i*23u+pi+5u)&0xff);
+                for(size_t i=0;i<al;i++) aad[i]=(uint8_t)((i*31u+ai+9u)&0xff);
+                uint8_t mytag[16];
+                determ_xchacha20_poly1305_encrypt(key,n24, al?aad.data():nullptr,al, pl?pt.data():nullptr,pl, ct.data(), mytag);
+                uint8_t sub[32], n12[12]; determ_hchacha20(sub,key,n24);
+                n12[0]=n12[1]=n12[2]=n12[3]=0; std::memcpy(n12+4,n24+16,8);
+                std::vector<uint8_t> octt(pl); uint8_t otag[16];
+                EVP_CIPHER_CTX* c=EVP_CIPHER_CTX_new(); int outl=0;
+                EVP_EncryptInit_ex(c, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr);
+                EVP_EncryptInit_ex(c, nullptr, nullptr, sub, n12);
+                if(al) EVP_EncryptUpdate(c, nullptr, &outl, aad.data(), (int)al);
+                if(pl) EVP_EncryptUpdate(c, octt.data(), &outl, pt.data(), (int)pl);
+                EVP_EncryptFinal_ex(c, octt.data()+(pl?(size_t)outl:0), &outl);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 16, otag);
+                EVP_CIPHER_CTX_free(c);
+                if(pl && std::memcmp(ct.data(),octt.data(),pl)!=0){ ct_ok=false; at=(long)(pl*100+al); }
+                if(std::memcmp(mytag,otag,16)!=0){ tag_ok=false; at=(long)(pl*100+al); }
+            }
+            check(ct_ok && tag_ok, (ct_ok&&tag_ok)
+                  ? "XChaCha20-Poly1305 C99 == OpenSSL inner ChaCha20-Poly1305 on the derived (subkey,nonce) — the §Q9 gate"
+                  : "XChaCha20-Poly1305 diverges from OpenSSL (pl*100+al="+std::to_string(at)+")");
+        }
+
+        // (3) decrypt round-trip + tamper rejection.
+        {
+            uint8_t key[32], n24[24];
+            for(int i=0;i<32;i++) key[i]=(uint8_t)(i*3+7);
+            for(int i=0;i<24;i++) n24[i]=(uint8_t)(i+1);
+            const char* m="the quick brown fox jumps over the lazy dog"; size_t pl=std::strlen(m);
+            uint8_t aad[6]={9,8,7,6,5,4}; std::vector<uint8_t> ct(pl), back(pl); uint8_t tag[16];
+            determ_xchacha20_poly1305_encrypt(key,n24, aad,6, (const uint8_t*)m,pl, ct.data(), tag);
+            check(determ_xchacha20_poly1305_decrypt(key,n24, aad,6, ct.data(),pl, tag, back.data())==0
+                  && std::memcmp(back.data(),m,pl)==0, "XChaCha20-Poly1305 decrypt round-trips the plaintext");
+            uint8_t bad[16]; std::memcpy(bad,tag,16); bad[0]^=1;
+            check(determ_xchacha20_poly1305_decrypt(key,n24, aad,6, ct.data(),pl, bad, back.data())==-1,
+                  "XChaCha20-Poly1305 rejects a tampered tag");
+            std::vector<uint8_t> ct2=ct; if(pl) ct2[0]^=1;
+            check(determ_xchacha20_poly1305_decrypt(key,n24, aad,6, ct2.data(),pl, tag, back.data())==-1,
+                  "XChaCha20-Poly1305 rejects tampered ciphertext");
+            uint8_t aad2[6]={9,8,7,6,5,3};
+            check(determ_xchacha20_poly1305_decrypt(key,n24, aad2,6, ct.data(),pl, tag, back.data())==-1,
+                  "XChaCha20-Poly1305 rejects tampered AAD");
+            uint8_t n24b[24]; std::memcpy(n24b,n24,24); n24b[20]^=1;
+            check(determ_xchacha20_poly1305_decrypt(key,n24b, aad,6, ct.data(),pl, tag, back.data())==-1,
+                  "XChaCha20-Poly1305 rejects a tampered nonce");
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": xchacha-c99 "
+                  << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
+                  << " (libsodium-free C99 XChaCha20-Poly1305 + HChaCha20 — draft-irtf-cfrg-xchacha; the §Q9 gate)\n";
         return fail==0 ? 0 : 1;
     }
 

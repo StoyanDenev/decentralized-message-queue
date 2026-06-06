@@ -102,6 +102,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/poly1305.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha) —
+# extended-nonce AEAD = HChaCha20 subkey + the ChaCha20-Poly1305 above. Validated by
+# `determ test-xchacha-c99` (HChaCha20 KAT + AEAD byte-equal vs OpenSSL's inner AEAD).
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/xchacha20_poly1305.c")
 # v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: AES-256-GCM (FIPS-197 + SP 800-38D),
 # constant-time end to end (arithmetic S-box + branchless GHASH — see aes.h).
 # Exercised by `determ test-aes-c99`.
