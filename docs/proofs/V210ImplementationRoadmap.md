@@ -77,11 +77,24 @@ GO/NO-GO.
 > choice deviates from the originally-planned `ref10` (radix-2^51 + a ~30 KB
 > precomputed base table that is infeasible to hand-vendor) in favor of the
 > smaller, auditable, constant-time TweetNaCl construction — a `ref10` perf
-> variant remains a future optimization, not a blocker. **The next P0 is now the
-> FROST primitives themselves** (keygen/sign/aggregate per RFC 9591), which become
-> implementable on this group-op layer; `frost.cpp` still needs wiring to it.
-> NOTE: the module is additive — the daemon's existing Ed25519 call sites still
-> use OpenSSL `EVP_PKEY_ED25519`; this layer exists for the FROST group ops.
+> variant remains a future optimization, not a blocker.
+>
+> **§3.8 FROST-Ed25519 SHIPPED (commits `92a85b5` + `ee2d50c`) — the §2
+> BLOCKED-ON-PREREQ verdict below is fully RESOLVED.** `src/crypto/frost/frost.c`
+> is a from-scratch, libsodium-free C99 FROST-Ed25519 on the group ops above:
+> trusted-dealer keygen (Shamir secret sharing over the Ed25519 scalar field +
+> Lagrange reconstruction) and two-round threshold signing whose t-of-n aggregate
+> verifies as a PLAIN Ed25519 signature under the group public key — validated by
+> `determ test-frost-c99` (12/12) under BOTH the C99 verifier and OpenSSL, over two
+> distinct quorums. So a t-of-K committee can now jointly produce a standard
+> Ed25519 signature. **Remaining v2.10 work** (no longer crypto-prerequisite): (a)
+> the DKG ceremony (RFC 9591 §6.6 — replace the trusted dealer); (b) RFC-9591
+> byte-exact binding-factor interop vectors (the current encoding is
+> self-consistent but not yet vector-exact); (c) wiring the FROST aggregate into
+> the consensus randomness path (`compute_block_rand`) behind
+> `v2_10_active_from_height`, replacing the v1 commit-reveal. NOTE: the C99 stack
+> is additive — the daemon's Ed25519 call sites still use OpenSSL
+> `EVP_PKEY_ED25519`; these C99 modules exist for the FROST threshold layer.
 
 v2.10 replaces the v1 commit-reveal block randomness — `ContribMsg.dh_input`
 commit (`SHA256(secret‖pubkey)`) + `BlockSigMsg`/`creator_dh_secrets` Phase-2
@@ -149,11 +162,22 @@ This is the path that must remain byte-identical for blocks below
 
 ## 2. EC-primitive prerequisite verdict — THE LOAD-BEARING FINDING
 
-**Verdict: BLOCKED-ON-PREREQ. No elliptic-curve scalar/point arithmetic
-backend is currently wired into the `determ` daemon. The FROST keygen/sign/
-aggregate primitives cannot be ported until one is chosen and linked. This is
-the gating decision for all of v2.10 Phase A beyond `frost_verify`, and the
-in-tree documentation currently disagrees with itself about which backend it
+> **UPDATE — RESOLVED (commits `031be9e` Ed25519, `92a85b5` + `ee2d50c` FROST).**
+> The verdict below was the state at audit time and is preserved as the forensic
+> record. It is now CLOSED: the chosen path was neither P1 (link libsodium) nor P2
+> (vendor `ref10`) but a third — a from-scratch, constant-time, libsodium-free C99
+> Ed25519 in the TweetNaCl-derived `gf[16]` representation (`src/crypto/ed25519/`),
+> exposing the scalar/point primitives (`ed25519_group.h`) that the C99 FROST layer
+> (`src/crypto/frost/`) now builds keygen + threshold signing on. The three
+> backend-naming docs are reconciled to this in `CRYPTO-C99-SPEC.md` §3.2/§3.8. The
+> daemon's `frost.cpp` C++ stubs are a separate surface still to be wired to the
+> C99 module; the C99 FROST is validated standalone by `determ test-frost-c99`.
+
+**Verdict (at audit time): BLOCKED-ON-PREREQ. No elliptic-curve scalar/point
+arithmetic backend is currently wired into the `determ` daemon. The FROST
+keygen/sign/aggregate primitives cannot be ported until one is chosen and linked.
+This is the gating decision for all of v2.10 Phase A beyond `frost_verify`, and
+the in-tree documentation currently disagrees with itself about which backend it
 is.**
 
 ### What the daemon actually has today
