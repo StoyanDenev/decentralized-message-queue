@@ -10879,6 +10879,13 @@ int main(int argc, char** argv) {
             std::vector<uint8_t> ct2=ct; if(pl) ct2[0]^=0x01;
             check(determ_aes256_gcm_decrypt(key,iv, aad,6, ct2.data(),pl, tag, back.data())==-1,
                   "AES-256-GCM decrypt rejects tampered ciphertext");
+            // AAD-binding (the property S004KeyfileAtRest.md T-2 relies on): a flipped
+            // or length-changed AAD must fail even with a valid ciphertext + tag.
+            uint8_t aad2[6]={9,8,7,6,5,3};
+            check(determ_aes256_gcm_decrypt(key,iv, aad2,6, ct.data(),pl, tag, back.data())==-1,
+                  "AES-256-GCM decrypt rejects tampered AAD (AAD-binding)");
+            check(determ_aes256_gcm_decrypt(key,iv, aad,5, ct.data(),pl, tag, back.data())==-1,
+                  "AES-256-GCM decrypt rejects an AAD-length mismatch");
         }
 
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
@@ -11635,6 +11642,13 @@ int main(int argc, char** argv) {
             std::vector<uint8_t> ct2=ct; if(pl) ct2[0]^=0x01;
             check(determ_chacha20_poly1305_decrypt(key,nonce, aad,5, ct2.data(),pl, tag, back.data())==-1,
                   "AEAD decrypt rejects tampered ciphertext");
+            // AAD-binding (the property S004KeyfileAtRest.md T-2 relies on): a flipped
+            // or length-changed AAD must fail even with a valid ciphertext + tag.
+            uint8_t aad2[5]={1,2,3,4,6};
+            check(determ_chacha20_poly1305_decrypt(key,nonce, aad2,5, ct.data(),pl, tag, back.data())==-1,
+                  "AEAD decrypt rejects tampered AAD (AAD-binding)");
+            check(determ_chacha20_poly1305_decrypt(key,nonce, aad,4, ct.data(),pl, tag, back.data())==-1,
+                  "AEAD decrypt rejects an AAD-length mismatch");
         }
 
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
