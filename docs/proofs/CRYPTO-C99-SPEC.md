@@ -1,6 +1,6 @@
 # Determ cryptographic stack — C99-native, libsodium-free, modular
 
-**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (byte-correctness; GHASH branchless/CT, S-box CT-hardening pending). Remaining Phase-0: ref10 Ed25519 scalar/point arithmetic, then the FROST primitives. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
+**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box). Remaining Phase-0: ref10 Ed25519 scalar/point arithmetic, then the FROST primitives. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 
 **Companion documents:**
 - `v2.10-DKG-SPEC.md` — FROST-Ed25519 threshold-randomness spec (consumer of this stack)
@@ -484,17 +484,21 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Test vectors from NIST CAVP
 - Optional: vendor BearSSL's AES-GCM if its license permits (cleaner CT discipline)
 
-> **Byte-correctness landed** (`src/crypto/aes/{aes_core.c,aes_gcm.c}`, commits
-> `facf915` + `a053964`). The GHASH is implemented BRANCHLESS / constant-time
-> (bit-serial GF(2^128) with a mask-based reduction — no secret-dependent branch).
-> `determ test-aes-c99` validates: the AES-256 block vs the FIPS-197 C.3 KAT and
-> byte-equal vs OpenSSL `EVP_aes_256_ecb`; the full AES-256-GCM (ciphertext AND
-> tag) byte-equal vs OpenSSL `EVP_aes_256_gcm` over a (plaintext,aad)-length grid;
-> and a GCM decrypt round-trip + tamper rejection of the tag and the ciphertext.
-> **Remaining for §3.5:** the AES S-box is table-based and NOT constant-time — it
-> must be CT-hardened (bitsliced / Boyar-Peralta circuit, AES-NI, or BearSSL's
-> constant-time AES) before this module replaces OpenSSL at the keyfile-envelope
-> (S-004) secret-key call site.
+> **COMPLETE — constant-time end to end** (`src/crypto/aes/{aes_core.c,aes_gcm.c}`,
+> commits `facf915` + `a053964` + the S-box CT-hardening). The GHASH is BRANCHLESS
+> / constant-time (bit-serial GF(2^128) with a mask-based reduction — no
+> secret-dependent branch), and the S-box is computed arithmetically — the GF(2^8)
+> inverse via a fixed x^254 addition chain over a branchless field multiply, then
+> the FIPS-197 affine map — so there is no key-dependent table lookup and hence no
+> cache-timing channel. `determ test-aes-c99` validates seven assertions: an
+> exhaustive proof that the constant-time S-box equals the canonical FIPS-197 table
+> over all 256 inputs; the AES-256 block vs the FIPS-197 C.3 KAT and byte-equal vs
+> OpenSSL `EVP_aes_256_ecb`; the full AES-256-GCM (ciphertext AND tag) byte-equal
+> vs OpenSSL `EVP_aes_256_gcm` over a (plaintext,aad)-length grid; and a GCM
+> decrypt round-trip + tamper rejection of the tag and the ciphertext. The module
+> is CT-clean for the keyfile-envelope (S-004) call site; a bitsliced / Boyar-
+> Peralta / AES-NI S-box would be faster but is an optional throughput
+> optimization, not a security gate (the S-004 use is one-shot).
 
 ### 3.6 Argon2id (~6 days)
 

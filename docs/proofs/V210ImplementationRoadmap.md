@@ -35,18 +35,21 @@ GO/NO-GO.
 > the one primitive where an adversarial design workflow caught both agent attempts
 > as buggy and its own fix as unverified — the canonical donna-32 was written by
 > hand and proven only by the KAT + the byte-equal AEAD cross-validation. **§3.5
-> byte-correctness is complete: the full C99 AES-256-GCM AEAD shipped** — the
-> AES-256 block cipher (commit `facf915`, FIPS-197 C.3 KAT + byte-equal vs OpenSSL
-> `EVP_aes_256_ecb`) plus GHASH over GF(2^128) + the GCM mode (NIST SP 800-38D).
-> `determ test-aes-c99` now runs six assertions: the two block-cipher checks, the
-> full AES-256-GCM (ciphertext AND tag) byte-equal vs OpenSSL `EVP_aes_256_gcm`
-> over a (plaintext,aad)-length grid — the §Q9 gate — plus a GCM decrypt
-> round-trip and tamper rejection of both the tag and the ciphertext (6/6; FAST
-> 151/151). GHASH is written BRANCHLESS / constant-time (mask + reduction use no
-> secret-dependent branch); the AES S-box, however, is table-based and carries a
-> loud, documented CONSTANT-TIME caveat. The **only remaining §3.5 work is S-box
-> CT-hardening** (constant-time S-box / AES-NI / BearSSL per the spec) before the
-> module replaces OpenSSL at the keyfile-envelope (S-004) call site. Remaining P0:
+> is COMPLETE: the full C99 AES-256-GCM AEAD shipped, constant-time end to end** —
+> the AES-256 block cipher (commit `facf915`, FIPS-197 C.3 KAT + byte-equal vs
+> OpenSSL `EVP_aes_256_ecb`) plus GHASH over GF(2^128) + the GCM mode (NIST SP
+> 800-38D, commit `a053964`), then the S-box CT-hardening. The S-box is now
+> computed arithmetically — the GF(2^8) inverse via a fixed x^254 addition chain
+> over a branchless field multiply, then the FIPS-197 affine map — so there is no
+> key-dependent table lookup (no cache-timing channel); GHASH was already
+> branchless. `determ test-aes-c99` runs seven assertions: an exhaustive proof
+> that the constant-time S-box equals the canonical FIPS-197 table over all 256
+> inputs, the two block-cipher checks, the full AES-256-GCM (ciphertext AND tag)
+> byte-equal vs OpenSSL `EVP_aes_256_gcm` over a (plaintext,aad)-length grid — the
+> §Q9 gate — plus a GCM decrypt round-trip and tamper rejection of both the tag
+> and the ciphertext (7/7; FAST 151/151). The module is now CT-clean for the
+> keyfile-envelope (S-004) call site; a bitsliced / AES-NI S-box remains an
+> optional throughput optimization, not a security gate. Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
