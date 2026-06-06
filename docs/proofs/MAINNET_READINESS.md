@@ -1,8 +1,10 @@
 # Mainnet Readiness — tracking artifact
 
-**Status:** scaffold (created 2026-05-24). Beta has not started; criteria status fields are placeholders to be populated by integration threads as Bundle 5 completes and beta progresses.
+**Status:** scaffold (created 2026-05-24; reframed 2026-06-06 for v1.1 launch model). Beta has not started; criteria status fields are placeholders to be populated by integration threads as the v1.1 launch bundles complete and beta progresses.
 
-**Purpose.** Single source of truth for mainnet-declaration readiness. Three internal-quality criteria categories (chosen 2026-05-24) feed into one human decision. Updated continuously by integration threads during beta; reviewed by sole declaration authority when criteria converge.
+**Purpose.** Single source of truth for v1.1 mainnet-declaration readiness. Three internal-quality criteria categories (chosen 2026-05-24) feed into one human decision. Updated continuously by integration threads during beta; reviewed by sole declaration authority when criteria converge.
+
+**Scope note (REFRAMED 2026-06-06):** This document tracks readiness for the **v1.1 launch** (the single mainnet genesis event). There is no v1.0 mainnet; v1.0 is internal pre-launch development designation only. All bundles from `IMPLEMENTATION-SEQUENCING.md` (substrate Bundles 1-5) + all V1.1-PLAN.md bundles (DSSO, zk-VM, killer DApps, Additive chain features) ship together. Readiness criteria apply to the combined v1.1 launch scope.
 
 ---
 

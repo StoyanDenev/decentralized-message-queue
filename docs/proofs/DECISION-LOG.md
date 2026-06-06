@@ -836,4 +836,145 @@ User direction: apply Option C (promote Bundle B's 3 reference apps to first-cla
 
 ---
 
+---
+
+## 2026-06-06 — Three-policy economic configuration + §5.8 EIP-1559-style mechanism
+
+### Recommended operator economic-config pattern captured; new chain mechanism proposed for v1.0 ship as Additive
+
+**Question.** User specified three-policy economic configuration for v1.0 deployments:
+1. **Fixed Block Subsidy → minimum** — stops diluting token supply; eliminates inflation tax; true cost of messaging tied strictly to actual network demand
+2. **Priority Tip Split → 100% to active K-of-K committee, split evenly 1/K** — symmetric incentive across signers; eliminates incentive to stall/veto/defect; critical for Phase-2 efficiency
+3. **Base-Fee Parameters → microscopic floor with 50% utilization target** — keeps base cost at floor for telemetry/Web3-logging; only rises algorithmically when blocks exceed 50% full; priority tip uncapped
+
+**Analysis.**
+- **Items #1 and #2 are operator configuration** of existing v1.x mechanism — set `block_subsidy ≈ 0` and use existing `subsidy_mode = FLAT` (which already implements 1/K split with dust to creators[0]).
+- **Item #3 is a NEW chain mechanism** — v1.x has a single per-tx `fee` field, not split into (base + tip). Adding EIP-1559-style semantics requires new wire-format fields + algorithmic base-fee computation + manifest-pinned algorithm parameters.
+
+**Decisions applied.**
+
+1. **Created `ECONOMICS_CONFIG_GUIDANCE.md`** (operator-facing) — captures the three-policy pattern as recommended-defaults; covers per-policy detail, self-consistent default config template, composition with chain primitives + §5.7 validation + §9.6 monetization framing.
+
+2. **Added `Improvements.md §5.8` — EIP-1559-style base-fee + priority-tip mechanism** — new chain mechanism with wire-format additions:
+   - `Transaction.priority_tip: u64` (new optional field; sender-set; uncapped; goes to validators 1/K)
+   - `Block.base_fee: u64` (new per-block field; algorithmic per EIP-1559 adjustment)
+   - `manifest.base_fee_floor`, `base_fee_target_util`, `base_fee_adjust_rate`, `base_fee_handling` (new genesis-pinned manifest fields)
+   - Apply path: validator computes base_fee per block; rejects txs below base; priority_tip → 1/K FLAT distribution to K committee; base_fee disposition per manifest policy
+   - Classification: Additive if shipped pre-v1.0 (~1-2 weeks); Breaking-only if shipped post-v1.0 without pre-v1.0 `Transaction.fee_form` discriminator
+   - Recommended ship: pre-v1.0 (in v1.0 mainnet genesis schema) so the three-policy pattern is configurable from day 1
+
+3. **Updated `IMPLEMENTATION-SEQUENCING.md` companion-docs** to reference `ECONOMICS_CONFIG_GUIDANCE.md`.
+
+**Why ship §5.8 pre-v1.0.** The three-policy pattern is the recommended economic configuration per `MOTIVATION.md` framing (public-interest substrate, no monetary expansion subsidizing operators). Shipping §5.8 in v1.0 schema makes the pattern directly configurable at genesis. If §5.8 is deferred to post-v1.0 without pre-v1.0 discriminator scaffolding, the pattern becomes unavailable for v1.0 mainnet — operators must use v1.x's simpler single-fee mechanism with off-chain base-fee equivalents.
+
+**Compositional cleanliness of §5.8.** The mechanism is Additive-via-default-zero: when `manifest.base_fee_floor = 0` AND `base_fee_target_util = 0` AND `Transaction.priority_tip = 0`, behavior reduces exactly to v1.x's existing single-fee model. Operators opt in to EIP-1559 by setting manifest fields; default deployment behavior unchanged. No no-migrations-constraint conflict.
+
+**Compose with §5.7 genesis-time validation.** The three-policy pattern requires `sponsor_declaration` to be set (since both `block_subsidy ≈ 0` AND `base_fee_floor ≈ 0` mean validator economics depend on priority-tip flow + sponsor backing). §5.7 + §5.8 together let operators ship the three-policy pattern with safety-checked configuration that rejects misconfigured deployments at genesis.
+
+**Generalization.** When operators want a specific economic pattern that depends on chain mechanism not in v1.x, the right move is: (a) add the chain mechanism as Additive via §7.5 discriminator OR new optional field, (b) capture the operator-pattern in `..._GUIDANCE.md` operator-facing doc, (c) add genesis-validation entry (§5.7-style) that rejects misconfigured combinations. This pattern (chain mechanism + operator guidance + genesis validation) keeps deployment economics safe by construction.
+
+**Pre-v1.0-schema-freeze flag added.** §5.8 is the 4th candidate added post-§7.5-sweep (after §7.5.8 deployment_tier SKIPPED, §7.5.10/11 SHIPPED, §7.5.12 sponsor_declaration TBD). User-confirmed §7.5.8 + §7.5.10 + §7.5.11 already; §7.5.12 + §5.8 fields remain pre-v1.0 schema decisions.
+
+---
+
+---
+
+## 2026-06-06 — Launch-model reframe: v1.0 → internal pre-launch dev; v1.1 → THE LAUNCH
+
+### "No test/main net before v1.1" — single launch event collapsing the prior two-event model
+
+**Question.** User stated: "There will be no test/main net before v1.1." What does this mean for the substrate-vs-application split in `IMPLEMENTATION-SEQUENCING.md` + `V1.1-PLAN.md`?
+
+**Decision.** Reframe the launch model:
+- **v1.0** = internal pre-launch development designation (no public release ever)
+- **v1.1** = THE LAUNCH EVENT (mainnet — the single genesis ship)
+
+All bundles previously framed as "v1.0 substrate ships first; v1.1 applications follow" now ship together as v1.1 mainnet. Substrate Bundles 1-5 (per `IMPLEMENTATION-SEQUENCING.md`) + application V1.1 Bundles A-E (per `V1.1-PLAN.md`) all complete before v1.1 launch.
+
+**Rationale.** Launching the substrate without the applications would be a sterile event — DApps + zk-VM + DSSO are what gives the substrate visible value. Shipping them together at v1.1 means the mainnet genesis includes the complete ecosystem operators can actually use, not just the chain primitives they'd need to build applications on top of. Aligns with `MOTIVATION.md` (substrate-is-rich-enough thesis is validated by killer DApps that demonstrate it) and avoids the phased-launch coordination problem.
+
+**Implications.**
+
+| Area | Pre-reframe | Post-reframe |
+|---|---|---|
+| Launch events | Two (v1.0 mainnet + v1.1 release) | **One (v1.1 mainnet)** |
+| No-migrations boundary | Applied from v1.0 launch | **Applied from v1.1 launch** |
+| §7.5 schema discriminators | "v1.0 schema commitments" | **"v1.1 schema commitments"** |
+| §5.8 EIP-1559 fee mechanism | Deferred Additive to post-v1.0 (would need pre-v1.0 discriminator) | **Ships in v1.1 genesis directly** (no discriminator needed; just genesis schema) |
+| §5.7 economic-config validation | Pre-v1.0 schema decision (§7.5.12 sponsor_declaration) | **Ships in v1.1 genesis directly** |
+| DSSO-as-DApp | Post-v1.0 DApp shipping in v1.1 release | **Ships at v1.1 launch as part of genesis-time DApp pre-loads** (or operator-installable add-on; deployment policy) |
+| zk-VM-DApp | Post-v1.0 substrate shipping in v1.1 release | **Ships at v1.1 launch** |
+| 9 killer DApps (D.1-D.9) | Post-v1.0 reference catalog | **Ship at v1.1 launch** as reference catalog (operators install per their use case) |
+| Pre-launch development | Pre-v1.0 (substrate); pre-v1.1 (applications) | **Pre-v1.1** (everything) — breaking changes during dev allowed freely |
+| Calendar | ~6.5-8 months v1.0 + ~5-8 months v1.1 = ~11-15 months total | **~11-15 months to v1.1 launch** (calendar barely changes; we just don't ship v1.0 separately) |
+| MAINNET_READINESS criteria | v1.0 mainnet criteria | **v1.1 mainnet criteria** (combined substrate + applications scope) |
+
+**Doc updates applied.**
+- `IMPLEMENTATION-SEQUENCING.md` header — added LAUNCH MODEL REFRAMED paragraph; bundles ship as part of v1.1 launch
+- `V1.1-PLAN.md` header + premise + convention — reframed as THE LAUNCH (not "post-v1.0 release"); convention notes no-migrations applies post-v1.1; everything ships at v1.1 genesis
+- `MAINNET_READINESS.md` — reframed for v1.1 launch scope (combined substrate + applications)
+- Memory `dlt-no-migrations-constraint` — updated to clarify constraint applies post-v1.1 launch; pre-v1.1 dev can have breaking changes
+- This DECISION-LOG entry
+
+**What this does NOT change.**
+- The bundle structure (Bundles 1-5 substrate + Bundles A-E applications) is preserved
+- The dependency ordering between bundles is preserved (V1.1 Bundle A DSSO-DApp still depends on Bundle 1 v2.10 FROST shipping; etc.)
+- The work effort estimates are unchanged
+- Memory `dlt-pre-mainnet-status` still applies — project is pre-mainnet (= pre-v1.1) until launch
+- Memory `dlt-qa-strategy` (closed-beta, clean-break, open-ended, no external audit) applies to v1.1 beta
+- Memory `dlt-team-composition` (4-32 fungible Opus 4.7 threads) unchanged
+- Memory `dlt-dsso-as-dapp` — DSSO is still a chain-aware DApp, just shipping at v1.1 launch rather than post-v1.0
+
+**What this DOES simplify.**
+- §5.8 EIP-1559 fee mechanism no longer needs "ship pre-v1.0 OR discriminator-defer" decision — it's just genesis schema; ship it
+- §5.7 genesis validation + §7.5.12 sponsor_declaration similar — direct genesis schema decision
+- §7.5.8 deployment_tier reconsideration — was SKIP because Option A monetization became Breaking-only post-v1.0; under v1.1 launch model, all schema decisions are pre-launch so could revisit (but the underlying value decision against tier-bond monetization still applies)
+
+**Generalization.** When a launch model changes from phased to single-event, all "pre-launch schema preservation" decisions simplify — there's no "pre-launch vs post-launch" boundary within the dev period; everything is pre-launch. The no-migrations constraint moves from "applies to v1.0 mainnet schema" to "applies to v1.1 mainnet schema" — same discipline, just at the actual launch event rather than an interim one.
+
+---
+
+---
+
+## 2026-06-06 — v1.1 genesis schema final-call walkthrough + ECONOMICS_CONFIG_GUIDANCE block_subsidy correction
+
+### 3 schema decisions resolved under reframed v1.1-launch model + block_subsidy recommendation refined from 0 → 1
+
+**Question.** After the v1.1-launch model reframe (no test/main net before v1.1; v1.0 is internal pre-launch dev only), 3 deferred/pending schema items needed final ship-or-skip decisions for v1.1 genesis: §7.5.8 deployment_tier (was SKIPPED under old two-event model), §7.5.12 sponsor_declaration (pending), §5.8 EIP-1559 mechanism (pending — ship full mechanism, discriminator only, or skip).
+
+Plus user direction: ECONOMICS_CONFIG_GUIDANCE recommended config should use `block_subsidy = 1` (one dust unit) not 0 — preserves A1 invariant subsidy counter exercise + defensive against subsidy code-path bitrot.
+
+**Decisions.**
+
+1. **`block_subsidy = 1` canonical recommendation** in ECONOMICS_CONFIG_GUIDANCE (corrected from prior `0` framing). Rationale: 1 dust × ~31M blocks/year ≈ 31M dust units/year is economically negligible but operationally safer; ensures subsidy mint path + A1 invariant tracking exercised every block; ensures validators always receive something even if priority-tip flow temporarily dries up.
+
+2. **§7.5.8 `RegistryEntry.deployment_tier` enum — REVISED to SHIP in v1.1 genesis.** Was SKIPPED 2026-06-03 under the (now-defunct) "Breaking-only post-v1.0" framing. Under v1.1-launch model that boundary is gone; shipping the discriminator (1 byte/RegistryEntry) preserves Option A tier-bond monetization optionality at trivial schema cost. **Value-decision against tier-bond monetization stays** (validator enforces deployment_tier = UNSTAKED at v1.1 launch; tier-bond logic NOT implemented). Schema slot exists for future revisit.
+
+3. **§7.5.12 `manifest.sponsor_declaration` enum — SHIP in v1.1 genesis.** Required by §5.7 economic-config validation rule + ECONOMICS_CONFIG_GUIDANCE recommended three-policy pattern (which includes `sponsor_declaration: SOVEREIGN_OPERATOR`). 1 byte/manifest enum (NONE / SOVEREIGN_OPERATOR / FOUNDATION_RUN / OTHER); ~1 day spec + ~1 day implementation. Chain validates field syntax but does not enforce truthfulness of off-chain sponsor attestation.
+
+4. **§5.8 EIP-1559 fee mechanism — SHIP FULL MECHANISM in v1.1 genesis (not just discriminator).** Adds `Transaction.priority_tip: u64`, `Block.base_fee: u64`, and 4 manifest fields (`base_fee_floor`, `base_fee_target_util`, `base_fee_adjust_rate`, `base_fee_handling`). ~1-2 weeks pre-launch implementation. Additive-via-default-zero: when manifest fields are zero, behavior reduces exactly to v1.x single-fee model. Enables ECONOMICS_CONFIG_GUIDANCE three-policy pattern from v1.1 launch day 1.
+
+5. **§7.5.9 gas_pricing_form stays REJECTED.** Gas-style monetization is value-decision rejection (changes Determ's character toward fee-market substrate), not boundary issue. Stays out of v1.1 schema regardless of launch-model reframing.
+
+**Pre-launch schema work scope updated.**
+- Was ~6-10 days for 7 discriminators (per prior IMPLEMENTATION-SEQUENCING)
+- Now ~9-15 days for 9 discriminators + §5.8 EIP-1559 full mechanism (+2-4 days for 7.5.8/7.5.12 + 1-2 weeks for §5.8 mechanism implementation)
+
+**Cascade effects.**
+- ECONOMICS_CONFIG_GUIDANCE three-policy pattern (minimal subsidy + 1/K priority tip + EIP-1559 base fee) becomes fully configurable at v1.1 launch via §5.8 + §7.5.12 + existing FLAT distribution mode
+- §5.7 economic-config validation has the `sponsor_declaration` field it needs to validate "zero subsidy + zero fees + no sponsor" as bad combination
+- Bundle 3 (v2.22) work unit gains ~1-2 weeks for §5.8 EIP-1559 mechanism (can ship in same era as v2.22 since both touch Transaction wire format)
+- Beaconless-v2 manifest schema gains 7.5.12 + 4 §5.8 manifest fields (~6 bytes total addition; trivial)
+- Pre-bundle critical path: ~9-15 days
+
+**Files updated.**
+- `Improvements.md §7.5` table — 7.5.8 status revised SKIP → SHIP; 7.5.12 + §5.8.S rows added
+- `IMPLEMENTATION-SEQUENCING.md` pre-bundle schema table — added 7.5.8 + 7.5.12 + §5.8 rows; combined effort updated from ~6-10 days to ~9-15 days
+- `ECONOMICS_CONFIG_GUIDANCE.md` — `block_subsidy = 0` → `block_subsidy = 1` canonical; §2.1 rationale rewritten; §3 config template updated
+- This DECISION-LOG entry
+
+**Generalization.** When a launch-model reframing collapses "phased launch" into "single launch event," previously-foreclosed schema decisions can be revisited cheaply. The §7.5 sweep was final under the two-event model; under the v1.1-launch model, 3 additional items naturally fold in without the deliberation overhead the original sweep required. Reframing → schema-decision-window-reopened pattern is worth flagging if the project ever undergoes another such reframe.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

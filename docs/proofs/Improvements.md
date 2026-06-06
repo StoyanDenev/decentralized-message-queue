@@ -331,6 +331,65 @@ Manifest fails validation if `acceptable == false`. Operator must either (a) ena
 
 **Related.** `DECISION-LOG.md` → v2.26 v2.26-ROTATION-SPEC.md → KR-11; `v2.26-ROTATION-SPEC.md §2 KR-11`.
 
+### 5.8 EIP-1559-style base-fee + priority-tip mechanism (added 2026-06-06)
+
+**Improvement.** Add a chain-level mechanism to split per-tx fees into (base fee + priority tip). Base fee is algorithmic per block, targeting a configurable utilization (e.g., 50% block capacity), with a microscopic floor. Priority tip is uncapped, user-set, awarded 100% to the active K-of-K committee split 1/K (uses existing FLAT distribution). Composes with `ECONOMICS_CONFIG_GUIDANCE.md` three-policy pattern for deployments wanting cheap base layer + market-bid priority lane.
+
+**The problem this solves.** v1.x's per-tx `fee` field is a single value; sender sets, validator distributes. This works for simple economics but doesn't support:
+- Microscopic base cost for telemetry/Web3-logging workloads (no algorithmic floor + adjustment)
+- Market-bid priority lane that doesn't drag up the base for everyone else
+- Spam-mitigation backpressure that activates only when blocks exceed target utilization
+- Symmetric Phase-2 signing incentive across K committee members (single-fee model doesn't guarantee even split semantics)
+
+EIP-1559 (Ethereum's 2021 fee market upgrade) solved these with base-fee + priority-tip semantics. Adapting to Determ's K-of-K consensus + sovereign-deployment context fits the project's character.
+
+**Wire-format additions.**
+
+| Field | Location | Purpose |
+|---|---|---|
+| `Transaction.priority_tip: u64` | Every Transaction (NEW optional field) | Sender-set bid for next-block inclusion; 0 for telemetry-class txs; uncapped for high-frequency actors |
+| `Block.base_fee: u64` | Block header (NEW per-block field) | Algorithmic base-fee value for this block; computed by validators from previous block's utilization |
+| `manifest.base_fee_floor: u64` | Beaconless-v2 deployment manifest (NEW genesis-pinned field) | Operator-set minimum base fee; deployment-wide |
+| `manifest.base_fee_target_util: u16` | Beaconless-v2 deployment manifest (NEW genesis-pinned field) | Operator-set target utilization in basis points (5000 = 50%); deployment-wide |
+| `manifest.base_fee_adjust_rate: u16` | Beaconless-v2 deployment manifest (NEW genesis-pinned field) | Adjustment rate per block in basis points (1250 = 1/8 per EIP-1559 default); deployment-wide |
+| `manifest.base_fee_handling: enum` | Beaconless-v2 deployment manifest (NEW genesis-pinned field) | Operator policy: BURN / SUBSIDY_POOL / PRIORITY_POOL for base-fee disposition |
+
+**Classification.** Additive if the new `Transaction.priority_tip` field is preserved via a pre-v1.0 schema discriminator (similar to §7.5 pattern). Otherwise Breaking. Recommended: ship the field in v1.0 with default `priority_tip = 0` for backward compatibility (legacy fee-only path); EIP-1559 algorithm activates when manifest fields are set non-zero.
+
+**Apply path.**
+
+1. Validator computes `base_fee_this_block = adjust(prev_block.base_fee, prev_utilization, manifest.base_fee_floor, target, rate)` per EIP-1559 algorithm
+2. For each tx in block: `total_fee_paid = tx.fee + tx.priority_tip`; `base_fee_required = base_fee_this_block * tx_size_or_complexity_metric`; reject if `tx.fee < base_fee_required`
+3. Distribute: `tx.priority_tip → FLAT split 1/K to active K committee (dust to creators[0])`; `(tx.fee - base_fee_required) → manifest.base_fee_handling policy (BURN | SUBSIDY_POOL | PRIORITY_POOL)`
+
+**Dependencies.**
+- Genesis-pinned manifest fields for base-fee parameters (~1 day spec)
+- `Transaction.priority_tip` optional field (~1 day wire format)
+- `Block.base_fee` per-block field (~1 day wire format)
+- Validator base-fee algorithm + distribution logic (~3-5 days impl)
+- Tests + docs (~2-3 days)
+- **Total effort: ~1-2 weeks if shipped pre-v1.0 (Additive)**
+- If shipped post-v1.0, requires `Transaction.fee_form` discriminator pre-v1.0 (would need §7.5.13 added to existing 9-discriminator sweep)
+
+**Pre-v1.0-schema-freeze flag.** §5.8 needs either:
+- Ship the new fields in v1.0 schema (Additive; ~1-2 weeks pre-bundle work) — recommended
+- Ship a `Transaction.fee_form` discriminator + `manifest.fee_form` discriminator (~1-2 days pre-bundle) preserving optionality to add the algorithm post-v1.0
+- Skip and accept that EIP-1559-style economics is v3-only
+
+**Related.** `ECONOMICS_CONFIG_GUIDANCE.md` (operator-facing recommended-defaults pattern); `Improvements.md §5.7` (genesis-time economic-config validation; §5.7 + §5.8 together let operators ship the three-policy pattern with safety-checked configuration); `WHITEPAPER-v1.x.md §8.2-8.4` (v1.x economic primitives this extends).
+
+**Pro/Con vs alternative approaches.**
+
+| Pro | Con |
+|---|---|
+| Microscopic base cost for telemetry workloads | New chain-level mechanism (additional implementation work) |
+| Market-bid priority lane isolated from base | New manifest parameters operators must understand |
+| Spam-mitigation only when blocks > 50% full | EIP-1559 adjustment can oscillate under certain load patterns |
+| 1/K priority-tip split aligns K-of-K signing incentives symmetrically | If shipped post-v1.0 without pre-v1.0 discriminator, becomes Breaking |
+| Composable with §5.7 genesis-validation + §9.2 DApp-pricing | Adds complexity to the fee-accounting layer (validators must compute base_fee per block) |
+
+**Compositional cleanliness.** The mechanism is Additive-via-default-zero: when `manifest.base_fee_floor = 0` AND `manifest.base_fee_target_util = 0` AND `Transaction.priority_tip = 0`, behavior reduces exactly to v1.x's existing single-fee model. Operators opt in to EIP-1559 by setting the manifest fields; default deployment behavior unchanged.
+
 ---
 
 ## 6. Post-v2 architectural optimizations (from `docs/Improvements.md` C99 spec)
@@ -452,9 +511,11 @@ Under the no-migrations constraint, several improvements classified as Breaking 
 | **7.5.5** | `ContribMsg.contrib_msg_form: enum` | Phase-1 ContribMsg | `TX_HASH_ARRAY` | §6.4 IBLT/Minisketch contrib | 1 byte/ContribMsg | ✅ SHIP |
 | **7.5.6** | `Transaction.sig_form: enum` | Every Transaction | `SIG_ED25519` | §4.1 PQ migration of tx-level sigs (Dilithium); future tx-level BLS use cases | 1 byte/tx | ✅ SHIP (added 2026-05-24 after gap analysis) |
 | **7.5.7** | `pubkey_form: enum` + variable-length pubkey encoding throughout | Every pubkey-bearing field: RegistryEntry.ed_pub, Transaction.from, Transaction.to, Account, ROTATE_KEY new_pubkey, DAppEntry.service_pubkey, view_master_pk, audit_view_master_pk, OTPK entries, etc. | `PUBKEY_ED25519` (fixed 32B encoded as variable-length with leading discriminator) | §4.1 PQ migration of pubkeys (Dilithium 1952B); §6.1 BLS aggregation per-creator pubkeys (BLS12-381 96B) | 1 byte/pubkey + variable-length encoding overhead; ~3-5 days v1.0 schema lift | ✅ SHIP (added 2026-05-24 after gap analysis) |
-| **7.5.8** | `RegistryEntry.deployment_tier: enum` (per-account monetization tier) | RegistryEntry | `UNSTAKED` | §9.1 Option A tier-bond monetization | 1 byte/RegistryEntry | ❌ **SKIP 2026-06-03** — Option A monetization now Breaking-only post-v1.0; cascade: §9.6 candidate list reduced; POLICY_TIER_BONDS_ENABLED flag in §7.5.10 becomes vestigial |
+| **7.5.8** | `RegistryEntry.deployment_tier: enum` (per-account monetization tier) | RegistryEntry | `UNSTAKED` | §9.1 Option A tier-bond monetization (forward-compat slot only; tier-bond logic NOT implemented at v1.1) | 1 byte/RegistryEntry | ✅ **SHIP REVISED 2026-06-06** — under v1.1-launch model the "Breaking-only post-v1.0" framing dissolves (no pre-v1.0 boundary); shipping the discriminator preserves forward-compat optionality at trivial schema cost. Value-decision against tier-bond monetization stays (validator enforces deployment_tier = UNSTAKED at v1.1 launch); POLICY_TIER_BONDS_ENABLED flag in §7.5.10 becomes implementable if Option A ever revisited post-v1.1 as Additive. |
 | **7.5.10** | `manifest.policy_tier_flags: u32` bitset (per-deployment opt-in policy framework) | Beaconless-v2 deployment manifest | `0x00000000` (all flags off — conservative) | Operator-tier opt-in framework (§10.3) cascading to §1.8 trusted-issuer audit, §5.2 external audit, §5.5 HW wallet certification, §6.2 Quorum Liveness OPTIONAL | 4 bytes/manifest; validated via Beaconless-v2 §Q2.1 hard-invariant (unknown bits = reject) | ✅ **SHIP 2026-06-03** — single 4-byte field unlocks 4 deferred items as Additive |
 | **7.5.11** | Per-block `quorum_bitset` field (variable-length per genesis K) | Block header | All-1s (matches unanimous_k mode; equivalent to current behavior) | §6.2 Quorum Liveness OPTIONAL — completes the unlock initiated by 7.5.10 (manifest flag + per-block bitset both required for full implementability) | 1-16 bytes/block depending on profile K (1B tactical K=8 → 16B global K=128); prunable under chain pruning | ✅ **SHIP 2026-06-03** — completes §6.2 unlock; coherent with 7.5.10 ship decision |
+| **7.5.12** | `manifest.sponsor_declaration: enum` (off-chain validator funding attestation) | Beaconless-v2 deployment manifest | `NONE` (per-deployment operator attestation; chain does not enforce truthfulness) | §5.7 genesis-time economic-config validation rule — enables operator attestation that validators are funded off-chain (sovereign-deployment model); required by ECONOMICS_CONFIG_GUIDANCE three-policy recommended pattern | 1 byte/manifest (enum NONE / SOVEREIGN_OPERATOR / FOUNDATION_RUN / OTHER) | ✅ **SHIP v1.1 GENESIS 2026-06-06** — enables §5.7 validation + ECONOMICS_CONFIG_GUIDANCE recommended pattern; required when subsidy + base_fee floor are minimal |
+| **5.8.S** | EIP-1559 fee mechanism fields: `Transaction.priority_tip: u64` + `Block.base_fee: u64` + 4 manifest fields (`base_fee_floor`, `base_fee_target_util`, `base_fee_adjust_rate`, `base_fee_handling`) | Transaction, Block header, manifest | All zero (reduces to v1.x single-fee model) | §5.8 EIP-1559-style three-policy fee mechanism (per `ECONOMICS_CONFIG_GUIDANCE.md`) | 8B/tx + 8B/block + ~16-32B/manifest | ✅ **SHIP v1.1 GENESIS 2026-06-06** — full mechanism (not just discriminator); enables ECONOMICS_CONFIG_GUIDANCE three-policy pattern from v1.1 launch day 1; Additive-via-default-zero (manifest fields zero = v1.x behavior preserved) |
 
 **Effective reclassification.** The five Breaking entries above are now effectively Additive-via-discriminator-dispatch: their wire-format toggle ships in v1.0; the underlying mechanism can be added post-v1.0 without schema change as long as legacy validators handle unknown enum values gracefully (recommended: fail-closed on unknown discriminator values per profile-dispatch contract).
 

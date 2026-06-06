@@ -2,6 +2,8 @@
 
 **Status:** planning artifact. Resolves the execution sequence for the 41 design decisions + 4 spec amendments resolved during pre-implementation review week (May 2026). Approach C (bundled releases): each bundle ships as a discrete release; related decisions land together rather than incrementally.
 
+**LAUNCH MODEL REFRAMED 2026-06-06:** No test/main net before v1.1. **v1.0 is an internal pre-launch development designation (no public release); v1.1 IS the launch event (mainnet).** All bundles in this plan (substrate Bundles 1-5) PLUS all V1.1-PLAN.md bundles (DSSO-DApp, zk-VM substrate, sketch-v2.x, killer-DApp catalog, Additive chain features) ship together at v1.1 mainnet genesis. The no-migrations constraint applies from v1.1 launch onward; pre-v1.1 development can have breaking changes freely.
+
 **Companion documents:**
 - `../MOTIVATION.md` — project's public-interest mandate linking design decisions to the originating problem (per `docs/Confrontation_against_public_unjustice_i.odt`)
 - `PRE-IMPLEMENTATION-REVIEW.md` — review-week checklist (decisions verbally resolved)
@@ -13,6 +15,7 @@
 - `MAINNET_READINESS.md` — readiness-criteria tracking artifact gating mainnet declaration
 - `PFS_DEPLOYMENT_GUIDANCE.md` — operator-facing PFS regulatory framework
 - `DAPP_SDK_GUIDANCE.md` — DApp-developer-facing browser-side crypto strategy per profile
+- `ECONOMICS_CONFIG_GUIDANCE.md` — operator-facing recommended-defaults pattern for the three-policy economic configuration (minimal block_subsidy + 1/K priority-tip split + EIP-1559-style base-fee with 50% utilization target); composes with `Improvements.md §5.7` genesis validation + `§5.8` base-fee mechanism
 - `V1.1-PLAN.md` — successor plan covering the post-v1.0 Additive release (DSSO-DApp, zk-VM-DApp, sketch-v2.x formalization, reference killer-DApp catalog). v1.1 begins after v1.0 mainnet ships per this sequencing plan.
 
 ---
@@ -61,8 +64,11 @@ Seven v1.0 schema discriminators must land **before any review-week bundle** to 
 | `pubkey_form` + variable-length pubkey encoding | Every pubkey-bearing field (RegistryEntry.ed_pub, Transaction.from/to, Account fields, DAppEntry, OTPK, etc.) | `PUBKEY_ED25519` (32B body) | **~3-5 days** | Unlocks future PQ pubkey migration (Dilithium 1952B) + BLS pubkey adoption (96B). **MUST include discriminator in address-derivation preimage** to prevent address collision across pubkey forms. Substantive v1.0 schema lift — touches every consumer of pubkey data. |
 | `manifest.policy_tier_flags` u32 bitset (7.5.10) | Beaconless-v2 deployment manifest | `0x00000000` (all flags off) | ~1-2 days | Unlocks operator-tier opt-in framework (Improvements.md §10.3) cascading to §1.8 trusted-issuer + §5.2 external audit + §5.5 HW wallet certification + §6.2 Quorum Liveness OPTIONAL. Validated via Beaconless-v2 §Q2.1 hard-invariant (unknown bits = reject). |
 | Per-block `quorum_bitset` field (7.5.11) | Block header | All-1s (matches unanimous_k mode) | ~1 day | Completes §6.2 Quorum Liveness OPTIONAL unlock (7.5.10's BFT flag is implementable). Variable-length per genesis K (1-16 bytes/block). |
+| `RegistryEntry.deployment_tier` enum (7.5.8, REVISED 2026-06-06) | RegistryEntry | `UNSTAKED` | ~0.5-1 day | Preserves Option A tier-bond monetization optionality under v1.1-launch model. Validator enforces UNSTAKED at v1.1 launch; tier-bond logic not implemented (forward-compat slot only). |
+| `manifest.sponsor_declaration` enum (7.5.12, ADDED 2026-06-06) | Beaconless-v2 deployment manifest | `NONE` | ~1 day spec + ~1 day implementation | Enables §5.7 genesis-time economic-config validation + ECONOMICS_CONFIG_GUIDANCE three-policy recommended pattern. Operator attestation of off-chain validator funding (sovereign-deployment model). |
+| EIP-1559 fee mechanism (§5.8 full ship, ADDED 2026-06-06) | Transaction + Block header + 4 manifest fields | All zero (reduces to v1.x single-fee model) | ~1-2 weeks | Full mechanism (not just discriminator): `Transaction.priority_tip`, `Block.base_fee`, manifest base-fee parameters. Enables ECONOMICS_CONFIG_GUIDANCE three-policy pattern from v1.1 launch day 1. Validator base-fee algorithm + priority-tip distribution + EIP-1559 utilization-target adjustment. |
 
-Combined effort: **~6-10 days** (substantially larger than the original 5-discriminator estimate due to 7.5.7 variable-length pubkey encoding). Validator behavior: fail-closed on unknown enum values (forward-compat). No additional logic needed in v1.0 for the unused discriminator values — wire-format scaffolding only — but the pubkey-encoding lift is real implementation work touching sig verification, address derivation, serialization, deserialization throughout.
+Combined effort: **~9-15 days** (was ~6-10; +2-4 days for 7.5.8 + 7.5.12 schema discriminators added 2026-06-06; +1-2 weeks for §5.8 EIP-1559 full mechanism ship added 2026-06-06). Validator behavior: fail-closed on unknown enum values for discriminator fields (forward-compat); §5.8 EIP-1559 algorithm implemented in full (not just discriminator). Pre-launch work scope: discriminator scaffolding + §5.8 base-fee algorithm + priority-tip distribution + sponsor_declaration validation.
 
 The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit_model`, `manifest.randomness_aggregation_form`) land inside Bundle 3 and Bundle 5 respectively — see those bundles.
 
