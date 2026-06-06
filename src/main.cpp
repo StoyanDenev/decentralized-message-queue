@@ -11123,6 +11123,19 @@ int main(int argc, char** argv) {
                   "FROST aggregate {1,2,3} verifies as Ed25519 under group_pk (C99 + OpenSSL)");
             check(threshold_sign_verify({2,4,5}),
                   "FROST aggregate {2,4,5} verifies as Ed25519 under group_pk (different quorum)");
+            // a malformed signer set (duplicate / out-of-range x) must be REJECTED
+            // (-1), not silently produce a wrong signature.
+            {
+                uint8_t sh[3*32], d3[3*32], e3[3*32], sg[64];
+                for(int q=0;q<3;q++){ std::memcpy(&sh[q*32], shares, 32);
+                    uint8_t hh[64]; std::string l="frost-x-"+std::to_string(q);
+                    determ_sha512((const uint8_t*)l.data(), l.size(), hh);
+                    determ_ed25519_sc_reduce64(hh, &d3[q*32]);
+                    determ_ed25519_sc_reduce64(hh, &e3[q*32]); }
+                int dup[3]={1,2,2};
+                check(determ_frost_sign(dup, sh, d3, e3, 3, (const uint8_t*)msg, mlen, group_pk, sg)==-1,
+                      "FROST sign rejects a malformed signer set (duplicate x)");
+            }
         }
 
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")

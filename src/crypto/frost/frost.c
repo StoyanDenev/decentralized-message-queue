@@ -101,6 +101,15 @@ int determ_frost_sign(const int *xs, const u8 *shares,
 
     if (t < 1) return -1;
     if (msglen > (size_t)0x10000000) return -1;          /* 256 MiB cap — beacon msgs are tiny */
+    /* Validate the signer set: indices must be in [1,255] (they are hashed as a
+     * u8 binding-factor tag) and pairwise distinct — a repeated x makes the
+     * Lagrange denominator prod(x_j - x_i) singular, which sc_invert maps to
+     * inv(0)=0, collapsing lambda_i to 0 and silently producing a WRONG signature.
+     * Mirrors determ_frost_reconstruct's guards; turns that into a clean -1. */
+    for (i = 0; i < t; i++) {
+        if (xs[i] < 1 || xs[i] > 255) return -1;
+        for (k = i + 1; k < t; k++) if (xs[k] == xs[i]) return -1;
+    }
 
     Dc  = (u8 *)malloc((size_t)t * 32);
     Ec  = (u8 *)malloc((size_t)t * 32);
