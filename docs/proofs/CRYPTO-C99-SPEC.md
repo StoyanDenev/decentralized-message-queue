@@ -496,12 +496,13 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 > secret-dependent branch), and the S-box is computed arithmetically — the GF(2^8)
 > inverse via a fixed x^254 addition chain over a branchless field multiply, then
 > the FIPS-197 affine map — so there is no key-dependent table lookup and hence no
-> cache-timing channel. `determ test-aes-c99` validates seven assertions: an
+> cache-timing channel. `determ test-aes-c99` validates nine assertions: an
 > exhaustive proof that the constant-time S-box equals the canonical FIPS-197 table
 > over all 256 inputs; the AES-256 block vs the FIPS-197 C.3 KAT and byte-equal vs
 > OpenSSL `EVP_aes_256_ecb`; the full AES-256-GCM (ciphertext AND tag) byte-equal
 > vs OpenSSL `EVP_aes_256_gcm` over a (plaintext,aad)-length grid; and a GCM
-> decrypt round-trip + tamper rejection of the tag and the ciphertext. The module
+> decrypt round-trip + tamper rejection of the tag, the ciphertext, and the AAD
+> (value-flip + length-mismatch — the AAD-binding negative paths). The module
 > is CT-clean for the keyfile-envelope (S-004) call site; a bitsliced / Boyar-
 > Peralta / AES-NI S-box would be faster but is an optional throughput
 > optimization, not a security gate (the S-004 use is one-shot).
