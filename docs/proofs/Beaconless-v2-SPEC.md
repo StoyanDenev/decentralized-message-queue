@@ -246,6 +246,39 @@ Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the
 - Bias-resistance is structurally stronger than current beacon-mediated mixing (requires controlling more parties).
 - Late-shard handling preserves liveness — randomness doesn't stall waiting for a slow shard.
 
+> **NOTICE — MPDH simplification option (decision input for Stoyan Denev; not co-authored by the AI assistant).**
+> Following the MPDH-adoption decision for the block beacon (`V210-PhaseD-RandomnessWiring.md` §9),
+> an adversarially-verified analysis indicates this Q6 cross-shard layer can be **simplified** by
+> using each shard's **per-block MPDH commit-reveal output** as the per-shard contribution instead
+> of a per-shard **FROST threshold signature** — keeping this exact SHA-256 accumulator + XOR-own-entropy
+> structure. This is presented as an option for the design owner, with verified scope:
+> - **Elasticity (confirmed).** MPDH is stateless — committee churn needs *zero* key ceremony, whereas the
+>   FROST path couples every epoch boundary (and every membership change) to a per-shard DKG/PSS ceremony.
+>   In an S-shard deployment that is S× per-epoch ceremonies removed.
+> - **What it removes.** Per-shard DKG, PSS-on-rotation, long-lived secret shares + their failure modes,
+>   the `EPOCH_RAND` threshold-sig wire. The accumulator is unchanged (it needs only SHA-256
+>   collision/preimage resistance, *not* a unique/threshold input — FROST never gave uniqueness either).
+> - **What it does NOT get for free (corrections from the double-check).** (1) the per-block MPDH
+>   `delay_output` is **excluded from the signed block digest** (S-009), so the per-shard contribution
+>   must be bound into a **committee-signed header field** to be cross-shard-authenticatable —
+>   `cumulative_rand` already is committed in the header, so use that (or commit the contribution into
+>   `shard_state_root`); this is a wiring requirement, not zero. (2) A consumer still verifies O(K)
+>   committee sigs per source header — but the light-client mesh already pays that per header regardless
+>   (`LightClientThreatModel.md` T-L2), so it is **no marginal cost**; FROST's O(1) succinct verify saves
+>   nothing here. (3) The selective-abort residual is **identical** under both (abort ⇒ deterministic
+>   re-roll; only threshold-BLS is unbiasable-by-construction), and cross-shard bias resistance comes from
+>   the XOR-own-entropy + accumulator structure, not from the primitive — so it survives the swap.
+> - **Hard precondition (no-migrations).** Bake a `randomness_aggregation_form` discriminator into the v1.0
+>   deployment-manifest schema so the per-shard primitive is a **genesis choice** (cf. `Improvements.md` §3.2/§7.5);
+>   without it, switching later is a breaking change.
+> - **Caveat.** If a deployment ever needs *unbiasable-by-construction* cross-shard randomness (no abort
+>   re-roll at all), neither MPDH nor FROST suffices — only threshold-BLS does. MPDH is the right
+>   simplification only while the accepted abort⇒re-roll posture holds.
+>
+> The shipped FROST C99 stack is **not wasted** — it remains available for manifest co-signing,
+> committee-log cross-signing, and threshold signing. Only the per-shard *randomness* application would move
+> to MPDH. **This is decision input; the Q6 design choice remains Stoyan Denev's.**
+
 ---
 
 ## 3. Wire-format extensions

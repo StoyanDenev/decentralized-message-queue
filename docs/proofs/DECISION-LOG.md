@@ -1012,4 +1012,31 @@ These three are not just *features* shipping at v1.1 — they are *commitments* 
 
 ---
 
+## 2026-06-07 — Adopt MPDH for the block-randomness beacon (de-scope v2.10 FROST-as-beacon)
+
+*(Reference: `V210-PhaseD-RandomnessWiring.md` §9 + §9.1; `SECURITY.md` §1; `V2-DESIGN.md` v2.10 row. Authority: Stoyan Denev. This entry is recorded by the AI assistant on Stoyan's instruction and is **not co-authored** — the design decision is Stoyan's.)*
+
+**Question.** Should the block-randomness beacon move from the v1 MPDH commit-reveal scheme to the planned v2.10 FROST-Ed25519 threshold-signature aggregate?
+
+**Options considered.**
+1. **Keep MPDH commit-reveal** (v1, shipped, stateless).
+2. **FROST-as-block-beacon** (v2.10 Phases B–E: per-epoch DKG + PSS + threshold signing wired into `compute_block_rand`).
+3. **Threshold BLS** (unique-signature beacon — drand/DFINITY style).
+
+**Choice: Option 1 — retain MPDH.**
+
+**Why the others were rejected.**
+- *FROST (2):* adversarial verification (three workflows, 21 + 7 + 8 agents) established that a FROST aggregate is **not** a bias-resistance upgrade over MPDH. FROST/Schnorr is randomized + non-unique; a round-2 withholder forces a re-roll with a *different* `R` (it is not even drop-tolerant within a fixed signer set — only threshold-BLS interpolates any-`t` to the same output). MPDH already closes *grinding* bias information-theoretically (FA3 / `SelectiveAbort.md` T-3, under SHA-256 preimage resistance) and handles the *abort* residual by re-roll + suspension slashing. FROST would add a DKG/PSS ceremony, long-lived secret shares + their failure modes, and a wire-version bump — paying ≈BLS-level complexity **without** delivering BLS's defining uniqueness. Its two genuine edges (`t`-of-`K` availability, O(1) succinct verify) are narrow and largely already covered (abort→re-roll + BFT escalation; the light client doesn't re-verify the beacon and pays O(`K`) per header regardless).
+- *BLS (3):* the only option that is unbiasable-by-construction, but the heaviest (pairings + DKG). Reserved for a future deployment that genuinely requires no-abort-re-roll randomness; not warranted under Determ's accepted abort posture.
+
+**Cross-decision implications (worth flagging).**
+- The FROST C99 stack (keygen/DKG/sign/aggregate/PSS, built + audited this cycle) is **retained** — only the *block-beacon application* is dropped. It remains available for `Beaconless-v2-SPEC.md` cross-shard randomness, threshold/multisig signing, and the shared curve25519 foundation for v2.22 / v2.25.
+- **Elasticity (verified, 0/3 refuted).** MPDH's statelessness makes committee/validator churn **ceremony-free** — no DKG/PSS on rotation. This is an architectural asset, not just "good enough."
+- **Beaconless-sharding payoff (verified as a proposed simplification).** `Beaconless-v2-SPEC.md` §Q6 can use per-shard MPDH commit-reveal as the cross-shard contribution instead of per-shard FROST threshold sigs (same SHA-256 accumulator), removing per-shard DKG/PSS. **Conditions:** the per-shard contribution must be committed into a committee-signed header field (`cumulative_rand` already is — note `delay_output` is excluded from the digest per S-009); and the per-shard primitive must be pinned by a genesis-time `randomness_aggregation_form` manifest discriminator (no-migrations). A NOTICE recording this option (decision deferred to Stoyan) was added at `Beaconless-v2-SPEC.md` §Q6.
+- Readiness: v2.10 is **no longer a permissionless-readiness gate**; the residual selective-abort is an accepted posture under MPDH. Remaining gate is v2.7 F2 (~3–4 days).
+
+**Generalization.** A threshold *signature* scheme is not automatically a better *randomness beacon*. Bias-resistance for a beacon comes from either (a) hiding-commit + accepted abort handling (MPDH/FA3), (b) signature *uniqueness* (BLS), or (c) a VDF — not from "it's a threshold scheme." FROST sits in an awkward middle: keyed-scheme cost without keyed-scheme uniqueness. Prefer the stateless contributory scheme unless `t`-of-`K` availability or succinct single-sig verifiability is a hard, demonstrated requirement.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

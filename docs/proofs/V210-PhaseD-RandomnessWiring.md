@@ -334,3 +334,42 @@ is justified mainly if `t`-of-`K` availability under committee churn becomes a h
 requirement. **FROST is a middle option that costs nearly as much as BLS but does not
 deliver BLS's defining property** — so the genuine forks are *keep MPDH* (simplest) or
 *go BLS* (if unbiasable-by-construction is actually required).
+
+### 9.1 Elasticity + the beaconless-sharding payoff (adversarially verified)
+
+Two downstream consequences of adopting MPDH, double-checked by an 8-agent
+ground-then-refute workflow (elasticity confirmed 0/3 refuted; the sharding-triviality
+claim's *direction* confirmed by the what-is-lost analysis, with the corrections below):
+
+- **Elasticity (confirmed).** Because MPDH is **stateless** — a fresh per-block secret,
+  no long-lived key, no DKG, no PSS — committee/validator membership can change with
+  **zero key-management ceremony**. A FROST/BLS randomness beacon instead binds randomness
+  to a DKG'd group key whose shares must be PSS-refreshed (even on *unchanged* membership,
+  per `v2.10-DKG-SPEC.md` Q4) or re-DKG'd on churn. So MPDH makes committees *elastic*;
+  a threshold beacon makes churn a recurring cryptographic ceremony. (Scope: this is the
+  randomness *key* ceremony; committee selection over `cumulative_rand` and the O(`K`)
+  per-header committee-sig check are unchanged under both.)
+
+- **Beaconless-sharding triviality (confirmed *as a proposed simplification*, with
+  conditions).** Adopting MPDH lets `Beaconless-v2-SPEC.md` §Q6 use each shard's
+  per-block MPDH output as its cross-shard contribution instead of a per-shard FROST
+  threshold signature — keeping the same SHA-256 accumulator + XOR-own-entropy structure
+  and removing per-shard DKG/PSS/epoch-orchestration entirely (S× per epoch in an S-shard
+  deployment). The double-check corrected three over-claims and they are now baked in:
+  (1) Beaconless-v2 *as written today* specs FROST for Q6, so this is a **proposed change**,
+  not the current design (decision deferred to Stoyan Denev — see the NOTICE added at
+  `Beaconless-v2-SPEC.md` §Q6); (2) the per-block `delay_output` is **excluded from the
+  signed digest** (S-009), so the per-shard contribution must be bound into a
+  committee-signed header field (`cumulative_rand` already is) — a wiring requirement, not
+  free; (3) cross-shard consumers still pay O(`K`) per source header, but the light-client
+  mesh pays that regardless, so it is **no marginal cost** and FROST's O(1) verify saves
+  nothing here. The accumulator needs only SHA-256 (no uniqueness/threshold input — FROST
+  never gave uniqueness), and the abort residual is identical under both. **Hard
+  precondition:** a genesis-time `randomness_aggregation_form` manifest discriminator
+  (no-migrations), so the per-shard primitive is fixed at deployment.
+
+Net: MPDH is not just "good enough" for the block beacon — its statelessness is an
+*architectural asset* that makes committees elastic and collapses the beaconless
+cross-shard randomness layer to a hash over already-committee-certified per-shard values,
+provided the contribution is committed into a signed header field and the form is pinned
+at genesis.
