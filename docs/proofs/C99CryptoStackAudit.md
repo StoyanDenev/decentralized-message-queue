@@ -628,3 +628,38 @@ These additions would not change today's correctness verdict — every primitive
 byte-equal to OpenSSL over the validated grid and constant-time at the source
 level — but they would convert the §3 hardening items from "argued" to
 "regression-tested".
+
+---
+
+## 6. Ed25519 module (`src/crypto/ed25519/ed25519.c`) — separate audit
+
+The C99 Ed25519 (RFC 8032; commit `031be9e`) shipped after the §1–§5 stack and was
+audited by the same adversarial workflow, but along **six dimensions** rather than
+per-file: field arithmetic, scalar/mod-L, group ops, RFC 8032 framing, constant-
+time, and memory-safety. The field-arithmetic and scalar/mod-L dimensions were
+**independently differential-tested against exact Python GMP modular arithmetic**
+(250 k+ `pack25519` inputs, 500 k+ `modL` inputs, plus boundary bands) — a check
+the OpenSSL byte-equality oracle does not provide.
+
+**Verdict:** field-arith, scalar-modL, and constant-time are **clean**; 0 Critical
+/ 0 High. Five confirmed-real findings (one Medium, two Low, two info/duplicate
+restatements of the Medium). **All three actionable findings remediated in commit
+`3a6370f`** — output-preserving on honest inputs (the byte-equal-vs-OpenSSL + RFC
+8032 §7.1 KAT grid is unchanged; FAST 152/152, `test-ed25519-c99` now 10
+assertions incl. a malleability-rejection test).
+
+| # | Severity | Issue | Fix (commit `3a6370f`) |
+|---|---|---|---|
+| 6.1 | **Medium** | `verify` accepted a non-canonical scalar `S ≥ L`, so `(R, S+L)` re-verified — signatures had a second distinct-but-valid form (the TweetNaCl cofactorless gap; RFC 8032 §5.1.7 mandates the check, and OpenSSL enforces it). Invisible to the cross-val (the signer always emits canonical `S`). Matters for any equivocation/dedup logic keyed on signature bytes. | Constant-time `sc_lt_L` (byte-wise `s − L` borrow) gate before the ladder; a new test asserts `(R, S+L)` is rejected. |
+| 6.2 | Low | `unpackneg` accepted non-canonical public keys with `y ≥ q` (the 19 encodings `y ∈ {q..q+18}`), weakening "one point = one encoding" (RFC 8032 §5.1.3). | `point_y_is_canonical` (`pack25519` round-trip compare). Intentionally stricter than OpenSSL's lenient ref10 decoder; documented in the header. Branch on PUBLIC key bytes — no CT concern. |
+| 6.3 | Low | The three message-splice loops used an `int` index against a `size_t` `msglen`, so for `msglen > INT_MAX` the index overflowed (signed UB / truncated copy + over-read of uninitialized heap) despite the `SIZE_MAX−64` guard admitting the length. | Replaced with `size_t`-safe `memcpy`. |
+
+**Constant-time posture:** confirmed clean — the cswap ladder runs a fixed 256
+iterations performing both `add()` calls per bit and routing each secret bit only
+through `cswap`→`sel25519` (branchless); `sel25519`, `ct_verify_32`, and the new
+`sc_lt_L` are branchless; the clamp is pure bitwise; the only data-dependent
+branches are on PUBLIC data (the public key in `unpackneg`/`point_y_is_canonical`,
+message/scalar lengths, the ladder bit counter). No secret-dependent branch,
+index, or table lookup exists. The implementation choice — a table-free `gf[16]`
+form (vs `ref10`'s precomputed base table) — is what makes the whole module
+auditable in one pass.
