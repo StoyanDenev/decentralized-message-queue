@@ -104,6 +104,7 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c
 # AES-256-GCM. Table-based (NOT constant-time) — see aes.h. GHASH + the GCM mode
 # follow. Exercised by `determ test-aes-c99`.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c")
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c")
 
 add_executable(determ ${SOURCES})
 

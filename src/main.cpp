@@ -10807,10 +10807,65 @@ int main(int argc, char** argv) {
                              : "AES-256 diverges from OpenSSL at iter=" + std::to_string(at));
         }
 
+        // (3) AES-256-GCM cross-validation vs OpenSSL EVP_aes_256_gcm (ct + tag)
+        // over a (plaintext,aad)-length grid.
+        {
+            bool g_ok = true; long g_at = -1;
+            const size_t ptl[]  = {0,1,16,63,64,65,128,200};
+            const size_t aadl[] = {0,1,12,16,20};
+            for (size_t pi=0; pi<sizeof(ptl)/sizeof(ptl[0]) && g_ok; ++pi)
+            for (size_t ai=0; ai<sizeof(aadl)/sizeof(aadl[0]) && g_ok; ++ai) {
+                size_t pl=ptl[pi], al=aadl[ai];
+                uint8_t key[32], iv[12];
+                for(int i=0;i<32;i++) key[i]=(uint8_t)((i*61u+pi*5u+ai+3u)&0xffu);
+                for(int i=0;i<12;i++) iv[i]=(uint8_t)((i*19u+pi+ai*2u+1u)&0xffu);
+                std::vector<uint8_t> pt(pl), aad(al), ct(pl), octt(pl);
+                for(size_t i=0;i<pl;i++) pt[i]=(uint8_t)((i*23u+pi+5u)&0xffu);
+                for(size_t i=0;i<al;i++) aad[i]=(uint8_t)((i*31u+ai+9u)&0xffu);
+                uint8_t mytag[16], otag[16];
+                determ_aes256_gcm_encrypt(key,iv, al?aad.data():nullptr,al,
+                                          pl?pt.data():nullptr,pl, ct.data(), mytag);
+                EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+                int outl=0;
+                EVP_EncryptInit_ex(c, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr);
+                EVP_EncryptInit_ex(c, nullptr, nullptr, key, iv);
+                if (al) EVP_EncryptUpdate(c, nullptr, &outl, aad.data(), (int)al);
+                if (pl) EVP_EncryptUpdate(c, octt.data(), &outl, pt.data(), (int)pl);
+                EVP_EncryptFinal_ex(c, octt.data() + (pl?(size_t)outl:0), &outl);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 16, otag);
+                EVP_CIPHER_CTX_free(c);
+                bool ctm = (pl==0) || (std::memcmp(ct.data(), octt.data(), pl)==0);
+                bool tgm = std::memcmp(mytag, otag, 16)==0;
+                if(!ctm||!tgm){ g_ok=false; g_at=(long)(pl*100+al); }
+            }
+            check(g_ok, g_ok ? "AES-256-GCM C99 == OpenSSL EVP_aes_256_gcm (ciphertext + tag)"
+                             : "AES-256-GCM diverges from OpenSSL (pl*100+al=" + std::to_string(g_at) + ")");
+        }
+
+        // (4) GCM decrypt round-trip + tamper rejection (tag + ciphertext).
+        {
+            uint8_t key[32], iv[12];
+            for(int i=0;i<32;i++) key[i]=(uint8_t)(i*5+9);
+            for(int i=0;i<12;i++) iv[i]=(uint8_t)(i*2+1);
+            const char* msg="the quick brown fox jumps over"; size_t pl=std::strlen(msg);
+            uint8_t aad[6]={9,8,7,6,5,4};
+            std::vector<uint8_t> ct(pl), back(pl); uint8_t tag[16];
+            determ_aes256_gcm_encrypt(key,iv, aad,6, (const uint8_t*)msg,pl, ct.data(), tag);
+            check(determ_aes256_gcm_decrypt(key,iv, aad,6, ct.data(),pl, tag, back.data())==0
+                  && std::memcmp(back.data(), msg, pl)==0, "AES-256-GCM decrypt round-trips the plaintext");
+            uint8_t badtag[16]; std::memcpy(badtag,tag,16); badtag[0]^=0x01;
+            check(determ_aes256_gcm_decrypt(key,iv, aad,6, ct.data(),pl, badtag, back.data())==-1,
+                  "AES-256-GCM decrypt rejects a tampered tag");
+            std::vector<uint8_t> ct2=ct; if(pl) ct2[0]^=0x01;
+            check(determ_aes256_gcm_decrypt(key,iv, aad,6, ct2.data(),pl, tag, back.data())==-1,
+                  "AES-256-GCM decrypt rejects tampered ciphertext");
+        }
+
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": aes-c99 "
-                  << (fail==0 ? "all cross-validation + FIPS-197 KAT matched" : "had failures")
-                  << " (libsodium-free C99 AES-256 block vs OpenSSL — the §Q9 gate; S-box NOT yet constant-time)\n";
+                  << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
+                  << " (libsodium-free C99 AES-256 + GCM vs OpenSSL — the §Q9 gate; S-box NOT yet constant-time)\n";
         return fail==0 ? 0 : 1;
     }
 
