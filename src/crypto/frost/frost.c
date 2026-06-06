@@ -180,3 +180,82 @@ done:
     determ_secure_zero(ls, 32); determ_secure_zero(lam, 32); determ_secure_zero(hbuf, 64);
     return rc;
 }
+
+/* ── DKG (Pedersen / Feldman VSS, RFC 9591 §6.6) ─────────────────────────── */
+
+/* 20-byte domain for the proof-of-possession hashes (nonce/challenge separated by
+ * a 1-byte tag). */
+static const u8 DKG_POP_DOM[20] =
+    { 'D','E','T','E','R','M','-','F','R','O','S','T','-','D','K','G','-','P','O','P' };
+
+/* f(x) = Σ_{k=0}^{t-1} poly_k x^k, evaluated by Horner. */
+static void frost_poly_eval(const u8 *poly, int t, int x, u8 out[32]) {
+    u8 xs[32], acc[32]; int k;
+    determ_ed25519_sc_set_small(xs, (uint64_t)x);
+    for (k = 0; k < 32; k++) acc[k] = poly[(t - 1) * 32 + k];   /* highest coeff */
+    for (k = t - 2; k >= 0; k--)
+        determ_ed25519_sc_muladd(acc, acc, xs, &poly[k * 32]);
+    for (k = 0; k < 32; k++) out[k] = acc[k];
+    determ_secure_zero(acc, sizeof acc);
+}
+
+void determ_frost_dkg_share(const u8 *poly, int t, int j, u8 share_out[32]) {
+    frost_poly_eval(poly, t, j, share_out);
+}
+
+int determ_frost_dkg_commit(const u8 *poly, int t, int idx,
+                            u8 *commitments, u8 pop[64]) {
+    int k;
+    u8 A0[32], R[32], kn[32], c[32], z[32], hbuf[64], nb[54], cb[86];
+    if (t < 1 || idx < 1 || idx > 255) return -1;
+
+    for (k = 0; k < t; k++) determ_ed25519_point_basemul(&commitments[k * 32], &poly[k * 32]);
+    for (k = 0; k < 32; k++) A0[k] = commitments[k];          /* [a_0] B */
+
+    /* deterministic Schnorr nonce kn = H(DOM ‖ 0x01 ‖ idx ‖ a_0) mod L */
+    memcpy(nb, DKG_POP_DOM, 20); nb[20] = 0x01; nb[21] = (u8)idx; memcpy(nb + 22, poly, 32);
+    determ_sha512(nb, sizeof nb, hbuf);
+    determ_ed25519_sc_reduce64(hbuf, kn);
+    determ_ed25519_point_basemul(R, kn);                      /* R = [kn] B */
+
+    /* challenge c = H(DOM ‖ 0x02 ‖ idx ‖ A_0 ‖ R) mod L */
+    memcpy(cb, DKG_POP_DOM, 20); cb[20] = 0x02; cb[21] = (u8)idx;
+    memcpy(cb + 22, A0, 32); memcpy(cb + 54, R, 32);
+    determ_sha512(cb, sizeof cb, hbuf);
+    determ_ed25519_sc_reduce64(hbuf, c);
+
+    determ_ed25519_sc_muladd(z, c, poly, kn);                 /* z = c·a_0 + kn */
+    memcpy(pop, R, 32); memcpy(pop + 32, z, 32);
+
+    determ_secure_zero(kn, sizeof kn); determ_secure_zero(z, sizeof z);
+    determ_secure_zero(nb, sizeof nb); determ_secure_zero(hbuf, sizeof hbuf);
+    return 0;
+}
+
+int determ_frost_dkg_verify_pop(const u8 commitment0[32], int idx, const u8 pop[64]) {
+    u8 c[32], hbuf[64], cb[86], lhs[32], rhs[32], tmp[32];
+    if (idx < 1 || idx > 255) return -1;
+    memcpy(cb, DKG_POP_DOM, 20); cb[20] = 0x02; cb[21] = (u8)idx;
+    memcpy(cb + 22, commitment0, 32); memcpy(cb + 54, pop, 32);   /* pop[0..31] = R */
+    determ_sha512(cb, sizeof cb, hbuf);
+    determ_ed25519_sc_reduce64(hbuf, c);
+    determ_ed25519_point_basemul(lhs, pop + 32);                 /* [z] B */
+    if (determ_ed25519_point_mul(tmp, c, commitment0)) return -1;/* [c] A_0 */
+    if (determ_ed25519_point_add(rhs, pop, tmp)) return -1;      /* R + [c] A_0 */
+    return (memcmp(lhs, rhs, 32) == 0) ? 0 : -1;
+}
+
+int determ_frost_dkg_verify_share(const u8 share[32], int j, const u8 *commitments, int t) {
+    u8 acc[32], jpow[32], js[32], term[32], lhs[32]; int k;
+    if (t < 1 || j < 1 || j > 255) return -1;
+    for (k = 0; k < 32; k++) acc[k] = commitments[k];            /* j^0 · C_0 = C_0 */
+    determ_ed25519_sc_set_small(jpow, 1u);
+    determ_ed25519_sc_set_small(js, (uint64_t)j);
+    for (k = 1; k < t; k++) {
+        determ_ed25519_sc_mul(jpow, jpow, js);                   /* jpow = j^k */
+        if (determ_ed25519_point_mul(term, jpow, &commitments[k * 32])) return -1;
+        if (determ_ed25519_point_add(acc, acc, term)) return -1; /* acc += j^k · C_k */
+    }
+    determ_ed25519_point_basemul(lhs, share);                    /* [share] B */
+    return (memcmp(lhs, acc, 32) == 0) ? 0 : -1;
+}

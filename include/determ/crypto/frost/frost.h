@@ -56,6 +56,36 @@ int determ_frost_sign(const int *xs, const uint8_t *shares,
                       const uint8_t *msg, size_t msglen,
                       const uint8_t group_pk[32], uint8_t sig[64]);
 
+/* ── Distributed key generation (Pedersen DKG + Feldman VSS, RFC 9591 §6.6) ──
+ * Trustless keygen: NO single party learns the group secret. Each participant i
+ * picks a degree-(t-1) polynomial f_i (t scalar coeffs in `poly`, `poly[0]`= its
+ * secret contribution a_{i,0}); the group secret is Σ_i a_{i,0} and the group
+ * public key Σ_i [a_{i,0}]B, neither of which is ever assembled in one place.
+ * Each participant j's long-term share is Σ_i f_i(j); a quorum then FROST-signs.
+ */
+
+/* Round 1: from participant i's polynomial (`poly`, t*32 bytes), emit the Feldman
+ * commitments C_k = [poly_k]B (`commitments`, t*32 bytes) and a Schnorr
+ * proof-of-possession of a_{i,0} bound to the participant index `idx` (`pop`, 64
+ * bytes). Returns 0; -1 on bad params (t<1 or idx not in [1,255]). */
+int determ_frost_dkg_commit(const uint8_t *poly, int t, int idx,
+                            uint8_t *commitments, uint8_t pop[64]);
+
+/* Verify participant i's PoP against its commitment[0] (= [a_{i,0}]B) and index.
+ * Defends against rogue-key attacks. Returns 0 if valid, -1 otherwise. */
+int determ_frost_dkg_verify_pop(const uint8_t commitment0[32], int idx,
+                                const uint8_t pop[64]);
+
+/* The secret share f_i(j) that participant i sends privately to recipient j. */
+void determ_frost_dkg_share(const uint8_t *poly, int t, int j, uint8_t share_out[32]);
+
+/* Feldman VSS check: confirm a received share s = f_i(j) against the dealer's
+ * public commitments, i.e. [s]B == Σ_{k=0}^{t-1} j^k · commitments[k]. Returns 0
+ * if the share is consistent with the commitment, -1 otherwise (a cheating dealer
+ * or a corrupted share). */
+int determ_frost_dkg_verify_share(const uint8_t share[32], int j,
+                                  const uint8_t *commitments, int t);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

@@ -11138,10 +11138,83 @@ int main(int argc, char** argv) {
             }
         }
 
+        // (5) Distributed Key Generation (Pedersen DKG / Feldman VSS) — TRUSTLESS
+        //     keygen: no single party learns the group secret. Each participant
+        //     commits to a polynomial + proves possession of its constant term;
+        //     shares are cross-verified against the public commitments (VSS); the
+        //     summed shares are a (t,n) sharing of Σ a_i0 under group_pk = Σ [a_i0]B.
+        {
+            const int n=3, t=2;
+            uint8_t poly[3][2*32], comm[3][2*32], pop[3][64];
+            for(int p=0;p<n;p++){
+                std::string l0="dkg-poly-"+std::to_string(p)+"-0";
+                std::string l1="dkg-poly-"+std::to_string(p)+"-1";
+                sc_from(l0.c_str(), &poly[p][0]);
+                sc_from(l1.c_str(), &poly[p][32]);
+                determ_frost_dkg_commit(poly[p], t, p+1, comm[p], pop[p]);
+            }
+            bool pops=true;
+            for(int p=0;p<n;p++) if(determ_frost_dkg_verify_pop(&comm[p][0], p+1, pop[p])!=0) pops=false;
+            check(pops, "FROST DKG: all participant proofs-of-possession verify");
+
+            uint8_t longterm[3][32]; bool vss=true;
+            for(int j=1;j<=n;j++){
+                uint8_t acc[32]={0};
+                for(int i=0;i<n;i++){
+                    uint8_t s[32]; determ_frost_dkg_share(poly[i], t, j, s);
+                    if(determ_frost_dkg_verify_share(s, j, comm[i], t)!=0) vss=false;
+                    determ_ed25519_sc_add(acc, acc, s);
+                }
+                std::memcpy(longterm[j-1], acc, 32);
+            }
+            check(vss, "FROST DKG: every dealt share passes the Feldman VSS check");
+
+            uint8_t group_pk[32], gsecret[32]={0}, Bgs[32];
+            std::memcpy(group_pk, &comm[0][0], 32);
+            for(int i=1;i<n;i++) determ_ed25519_point_add(group_pk, group_pk, &comm[i][0]);
+            for(int i=0;i<n;i++) determ_ed25519_sc_add(gsecret, gsecret, &poly[i][0]);
+            determ_ed25519_point_basemul(Bgs, gsecret);
+            check(std::memcmp(Bgs, group_pk, 32)==0,
+                  "FROST DKG: [Sum a_i0]B == Sum commitment_i0 (group key consistency)");
+
+            { int xs[2]={1,2}; uint8_t sub[2*32], rec[32];
+              std::memcpy(&sub[0], longterm[0], 32); std::memcpy(&sub[32], longterm[1], 32);
+              determ_frost_reconstruct(xs, sub, t, rec);
+              check(std::memcmp(rec, gsecret, 32)==0,
+                    "FROST DKG: t long-term shares reconstruct the group secret"); }
+
+            { const char* dm="dkg beacon"; size_t dl=std::strlen(dm);
+              int signers[2]={2,3};
+              uint8_t sh[2*32], d2[2*32], e2[2*32], sig[64];
+              for(int q=0;q<2;q++){
+                  std::memcpy(&sh[q*32], longterm[signers[q]-1], 32);
+                  uint8_t hd[64],he[64];
+                  std::string ld="dkg-d-"+std::to_string(signers[q]);
+                  std::string le="dkg-e-"+std::to_string(signers[q]);
+                  determ_sha512((const uint8_t*)ld.data(), ld.size(), hd);
+                  determ_sha512((const uint8_t*)le.data(), le.size(), he);
+                  determ_ed25519_sc_reduce64(hd,&d2[q*32]); determ_ed25519_sc_reduce64(he,&e2[q*32]); }
+              determ_frost_sign(signers, sh, d2, e2, 2, (const uint8_t*)dm, dl, group_pk, sig);
+              bool ok = determ_ed25519_verify(group_pk,(const uint8_t*)dm,dl,sig)==0;
+              EVP_PKEY* pub=EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519,nullptr,group_pk,32);
+              EVP_MD_CTX* mc=EVP_MD_CTX_new(); EVP_DigestVerifyInit(mc,nullptr,nullptr,nullptr,pub);
+              int ov=EVP_DigestVerify(mc,sig,64,(const uint8_t*)dm,dl);
+              EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
+              check(ok && ov==1,
+                    "FROST DKG: a t-of-n quorum of DKG shares signs a valid Ed25519 sig under the DKG group key"); }
+
+            { uint8_t bad[64]; std::memcpy(bad,pop[0],64); bad[40]^=0x01;
+              check(determ_frost_dkg_verify_pop(&comm[0][0],1,bad)==-1,
+                    "FROST DKG: a tampered proof-of-possession is rejected"); }
+            { uint8_t s[32]; determ_frost_dkg_share(poly[0],t,2,s); s[0]^=0x01;
+              check(determ_frost_dkg_verify_share(s,2,comm[0],t)==-1,
+                    "FROST DKG: a tampered share fails the VSS check"); }
+        }
+
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": frost-c99 "
-                  << (fail==0 ? "all keygen + threshold-signing invariants held" : "had failures")
-                  << " (libsodium-free C99 FROST-Ed25519 — Shamir/Lagrange + a t-of-n aggregate that IS an Ed25519 sig; RFC 9591)\n";
+                  << (fail==0 ? "all keygen + DKG + threshold-signing invariants held" : "had failures")
+                  << " (libsodium-free C99 FROST-Ed25519 — DKG/Shamir/Lagrange + a t-of-n aggregate that IS an Ed25519 sig; RFC 9591)\n";
         return fail==0 ? 0 : 1;
     }
 
