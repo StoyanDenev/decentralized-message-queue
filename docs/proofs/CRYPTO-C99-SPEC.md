@@ -84,7 +84,7 @@ Achieved via three substitutions:
 | HMAC-SHA-256 | `src/crypto/sha2/hmac.c` | RFC 2104 (trivial) | Public domain | ~100 |
 | HKDF-SHA-256 | `src/crypto/sha2/hkdf.c` | RFC 5869 (trivial) | Public domain | ~200 |
 | Ed25519 sign/verify | `src/crypto/ed25519/` | **SHIPPED** — constant-time `gf[16]` cswap-ladder (TweetNaCl-derived); `ref10` radix-2^51 is a future perf variant | Public domain | ~330 |
-| X25519 | `src/crypto/curve25519/` | curve25519-donna (Adam Langley) | BSD-3-Clause | ~2K |
+| X25519 | `src/crypto/x25519/` | **SHIPPED** — constant-time Montgomery cswap-ladder (TweetNaCl-derived), shares the Ed25519 `gf[16]` field lineage; validated vs OpenSSL `EVP_PKEY_X25519` + RFC 7748 §6.1 KAT | Public domain | ~140 |
 | ChaCha20 | `src/crypto/chacha20/` | RFC 8439 reference | Public domain | ~500 |
 | Poly1305 | `src/crypto/chacha20/poly1305.c` | RFC 8439 reference | Public domain | ~500 |
 | XChaCha20-Poly1305 | `src/crypto/chacha20/xchacha20_poly1305.c` | RFC draft + RFC 8439 composition | Public domain | ~500 |
@@ -117,10 +117,8 @@ src/crypto/
 ├── ed25519/                    # SHIPPED: constant-time gf[16] (TweetNaCl-derived)
 │   ├── ed25519.c               #   field + scalar + group + RFC 8032 sign/verify
 │   └── ed25519.h               #   (one self-contained file; ref10 split is future)
-├── curve25519/                 # curve25519-donna vendored
-│   ├── x25519.c
-│   ├── (internal field ops)
-│   └── curve25519.h
+├── x25519/                     # SHIPPED: constant-time Montgomery ladder (TweetNaCl-derived)
+│   └── x25519.c                #   X25519 DH (RFC 7748); header at include/determ/crypto/x25519/x25519.h
 ├── chacha20/                   # ChaCha20-Poly1305 + XChaCha20
 │   ├── chacha20.c
 │   ├── poly1305.c
@@ -221,17 +219,11 @@ int  determ_ed25519_verify(const determ_ed25519_pk_t* pk,
                             const uint8_t* msg, size_t msg_len,
                             const determ_ed25519_sig_t* sig);
 
-// ─── X25519 ─────────────────────────────────────────────────────────
-typedef struct { uint8_t bytes[32]; } determ_x25519_sk_t;
-typedef struct { uint8_t bytes[32]; } determ_x25519_pk_t;
-typedef struct { uint8_t bytes[32]; } determ_x25519_shared_t;
-
-void determ_x25519_keypair(const uint8_t seed[32],
-                            determ_x25519_sk_t* sk,
-                            determ_x25519_pk_t* pk);
-int  determ_x25519_dh(const determ_x25519_sk_t* sk,
-                       const determ_x25519_pk_t* peer_pk,
-                       determ_x25519_shared_t* shared);
+// ─── X25519 ── SHIPPED (src/crypto/x25519/x25519.h) — the sketch below predated
+// the implementation; the shipped API is two raw-buffer calls (no struct wrappers,
+// the scalar is clamped internally per RFC 7748 §5):
+int determ_x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]); // X25519(scalar, u); -1 on low-order
+int determ_x25519_base(uint8_t out[32], const uint8_t scalar[32]);                     // public key = X25519(scalar, 9)
 
 // ─── ChaCha20-Poly1305 / XChaCha20-Poly1305 ─────────────────────────
 int determ_xchacha20_poly1305_encrypt(const uint8_t key[32],
@@ -469,12 +461,21 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Test vectors from RFC 8032 + Bernstein's reference
 - Constant-time review (ref10 is well-understood CT)
 
-### 3.3 X25519 (~4 days)
+### 3.3 X25519 — **SHIPPED** (commit `bc87704`)
 
-- Vendor curve25519-donna from Adam Langley's source
-- Adapter layer
-- Test vectors from RFC 7748
-- Constant-time review
+- `src/crypto/x25519/x25519.c` — a from-scratch, constant-time Montgomery cswap-ladder
+  (TweetNaCl-derived, the same Curve25519 `gf[16]` field lineage as the §3.2 Ed25519,
+  NOT curve25519-donna — chosen for one auditable field implementation across the
+  curve25519 family). `determ_x25519` (clamped scalar mult, RFC 7748 §5) +
+  `determ_x25519_base` (public key); all-zero low-order result returns -1 (RFC 7748
+  contributory check).
+- Validated by `determ test-x25519-c99` (8 assertions): byte-equal vs OpenSSL
+  `EVP_PKEY_X25519` over a fuzzed scalar grid (pubkey + ECDH `EVP_PKEY_derive` + DH
+  symmetry — the §Q9 gate) and the canonical RFC 7748 §6.1 KAT.
+- Constant-time: no key-dependent branch/index; clamped scalar + field intermediates
+  zeroized via `determ_secure_zero`.
+- Additive — no daemon call site yet (completes the curve25519 family for a future
+  libsodium-free DH/handshake consumer).
 
 ### 3.4 ChaCha20-Poly1305 + XChaCha20-Poly1305 (~4 days)
 

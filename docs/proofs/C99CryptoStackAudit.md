@@ -793,3 +793,32 @@ confirmation bar regardless. The workflow used 10 agents / ~727k subagent tokens
 The PSS primitives are the crypto layer for v2.10 Phase B "PSS refresh" + Phase C
 epoch orchestration; the gossip/wire/state plumbing over them remains the tracked
 integration follow-up.
+
+---
+
+## 8c. X25519 (`src/crypto/x25519/`, commit `bc87704`) — validation basis
+
+The C99 X25519 (RFC 7748) Diffie-Hellman primitive was **not** put through the
+four-dimension adversarial workflow that §6–§8b applied to the other modules; its
+assurance rests on three pillars instead, recorded here for coherence with the
+rest of the stack:
+
+1. **Shared lineage with the §6-audited Ed25519.** The Montgomery ladder is the
+   canonical TweetNaCl `crypto_scalarmult` over the *same* Curve25519 `gf[16]`
+   field (p = 2^255-19) whose field/scalar arithmetic §6 differential-tested vs
+   exact GMP and found clean. The DH-specific code is the ladder + clamp + final
+   inversion — small, standard, public-domain.
+2. **OpenSSL is a near-complete correctness oracle.** `test-x25519-c99` checks
+   byte-equality vs OpenSSL `EVP_PKEY_X25519` for BOTH public-key derivation and
+   ECDH (`EVP_PKEY_derive`) over a 64-scalar fuzzed grid, plus DH symmetry; any
+   single-bit deviation in clamping, ladder, or inversion fails. The RFC 7748 §6.1
+   KAT is the OpenSSL-independent anchor, and the all-zero low-order result is
+   rejected (RFC 7748 contributory check).
+3. **Constant-time by construction.** The `sel25519` cswap is masked by the secret
+   scalar bit (no branch/index on the secret); the clamped scalar copy + all field
+   intermediates are `determ_secure_zero`'d before return; the inversion exponent
+   (p-2) is a public constant.
+
+A dedicated adversarial audit of `x25519.c` is a low-priority tracked follow-up
+(the cross-validation oracle + provenance make a hidden correctness defect
+improbable). No daemon call site consumes X25519 yet.
