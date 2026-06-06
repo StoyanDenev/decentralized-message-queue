@@ -264,3 +264,57 @@ evidence are all in place, so most of the work is integration plumbing. The one 
 the canonical, pre-frozen signer set + nonce binding that a Schnorr/FROST aggregate
 needs to be a sound beacon (BLS would get this for free; FROST does not). That piece
 must be specified and audited, not merely coded; everything else is mechanical.
+
+---
+
+## 9. The simplicity tradeoff — keep MPDH, go FROST, or go BLS?
+
+A fair reading of §1 is that **the v2.10 FROST swap is not a bias-resistance upgrade.**
+The v1 MPDH commit-reveal already closes *grinding* (FA3 / `SelectiveAbort.md` T-3,
+information-theoretic under SHA-256 preimage resistance) and handles *abort* via
+re-roll + suspension slashing. So the honest question is whether FROST's *narrow* gains
+justify its *large* added complexity.
+
+**What staying on MPDH avoids (the simplicity case):**
+
+- No **DKG ceremony** (Phase B): gossip messages, state machine, Feldman VSS, PoP,
+  complaint/exclusion handling.
+- No **epoch orchestration** (Phase C) or **PSS refresh**: no key rotation, no share
+  handover on membership change.
+- No **threshold-signing wire** (round-1 commitments / round-2 partials), no new
+  message types, no wire-version bump.
+- No **long-lived secret-share** key material — hence none of its failure modes
+  (ceremony failure → stale-key reuse, below-threshold halt, PSS bugs leaving members
+  shareless). The v1 beacon is *stateless*: a fresh secret per block, nothing carried
+  between rounds, nothing to leak.
+- No new EC/threshold assumptions — the bias defense rests only on SHA-256 preimage
+  resistance.
+- ~3–4 weeks of consensus integration in the hot files (§6) + multi-node cluster
+  testing, avoided.
+
+**What FROST actually buys over *disciplined* MPDH — and the honest size of each:**
+
+- **Availability**: `t`-of-`K` liveness (with a ROAST-style wrapper) vs `K`-of-`K`, so a
+  withholding minority can't stall the round. *Real*, but partly already covered by the
+  v1 abort→re-roll + slashing + BFT escalation — and FROST does **not** make abort
+  *bias* vanish (each re-roll is a different `R`; only BLS folds withholders into the
+  *same* output).
+- **Succinct verifiability**: an O(1) single Ed25519 beacon vs O(n) re-check of all
+  contributions. *Real but marginal for Determ* — the light client does not re-verify
+  the beacon today (it is excluded from the signed digest) and still does O(`K`)
+  committee-signature checks per header regardless.
+
+**Decision guide:**
+
+| Goal | Choice | Cost |
+|---|---|---|
+| Bias defense is enough; keep it simple | **Keep MPDH** (skip v2.10) | lowest — FA3 already holds; stateless; no ceremony |
+| Need withholding-minority liveness + a publicly-verifiable single-sig beacon | **FROST** (Phases B–E + §1 discipline) | ~3–4 wks + long-lived-secret failure surface |
+| Need unbiasable-*by-construction* (no abort re-roll bias at all) | **Threshold BLS** | highest — pairings + DKG; the only option that delivers it |
+
+For Determ's fork-free, permissioned/consortium-leaning posture, the simplicity case for
+MPDH is strong: the current FA3 guarantee already neutralises grinding bias, and FROST
+is justified mainly if `t`-of-`K` availability under committee churn becomes a hard
+requirement. **FROST is a middle option that costs nearly as much as BLS but does not
+deliver BLS's defining property** — so the genuine forks are *keep MPDH* (simplest) or
+*go BLS* (if unbiasable-by-construction is actually required).
