@@ -1,6 +1,6 @@
 # Determ cryptographic stack — C99-native, libsodium-free, modular
 
-**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box). Remaining Phase-0: ref10 Ed25519 scalar/point arithmetic, then the FROST primitives. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
+**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 
 **Companion documents:**
 - `v2.10-DKG-SPEC.md` — FROST-Ed25519 threshold-randomness spec (consumer of this stack)
@@ -83,7 +83,7 @@ Achieved via three substitutions:
 | SHA-256 / SHA-512 | `src/crypto/sha2/` | NIST FIPS 180-4 reference | Public domain | ~1K |
 | HMAC-SHA-256 | `src/crypto/sha2/hmac.c` | RFC 2104 (trivial) | Public domain | ~100 |
 | HKDF-SHA-256 | `src/crypto/sha2/hkdf.c` | RFC 5869 (trivial) | Public domain | ~200 |
-| Ed25519 sign/verify | `src/crypto/ed25519/` | Bernstein's `ref10` (supercop) | Public domain | ~3K |
+| Ed25519 sign/verify | `src/crypto/ed25519/` | **SHIPPED** — constant-time `gf[16]` cswap-ladder (TweetNaCl-derived); `ref10` radix-2^51 is a future perf variant | Public domain | ~330 |
 | X25519 | `src/crypto/curve25519/` | curve25519-donna (Adam Langley) | BSD-3-Clause | ~2K |
 | ChaCha20 | `src/crypto/chacha20/` | RFC 8439 reference | Public domain | ~500 |
 | Poly1305 | `src/crypto/chacha20/poly1305.c` | RFC 8439 reference | Public domain | ~500 |
@@ -114,12 +114,9 @@ src/crypto/
 │   ├── hmac.c
 │   ├── hkdf.c
 │   └── sha2.h
-├── ed25519/                    # Bernstein's ref10 vendored
-│   ├── sign.c
-│   ├── verify.c
-│   ├── keypair.c
-│   ├── (internal field ops, group ops)
-│   └── ed25519.h
+├── ed25519/                    # SHIPPED: constant-time gf[16] (TweetNaCl-derived)
+│   ├── ed25519.c               #   field + scalar + group + RFC 8032 sign/verify
+│   └── ed25519.h               #   (one self-contained file; ref10 split is future)
 ├── curve25519/                 # curve25519-donna vendored
 │   ├── x25519.c
 │   ├── (internal field ops)

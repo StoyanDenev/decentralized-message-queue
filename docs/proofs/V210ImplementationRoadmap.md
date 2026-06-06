@@ -65,6 +65,23 @@ GO/NO-GO.
 > on the HMAC/HKDF/PBKDF2/AEAD APIs, the PBKDF2 RFC 8018 dkLen ceiling, and the
 > SHA-256/512 block-counter width fix. All output-preserving (the byte-equal
 > cross-validation + FAST 151/151 are unchanged).
+>
+> **§3.2 Ed25519 SHIPPED (commit `031be9e`) — the EC prerequisite is met.** The
+> load-bearing §2 blocker below ("no Ed25519 scalar/point backend is linked into
+> the `determ` daemon") is now RESOLVED: `src/crypto/ed25519/ed25519.c` is a
+> from-scratch, constant-time, libsodium-free Ed25519 (RFC 8032) — a `gf[16]`
+> (radix-2^16) field + cswap-ladder scalar multiplication + branchless mod-L
+> reduction in the public-domain TweetNaCl representation, built on the C99
+> SHA-512. `determ test-ed25519-c99` validates it byte-equal vs OpenSSL
+> `EVP_PKEY_ED25519` + the RFC 8032 §7.1 KAT (9/9; FAST 152/152). The backend
+> choice deviates from the originally-planned `ref10` (radix-2^51 + a ~30 KB
+> precomputed base table that is infeasible to hand-vendor) in favor of the
+> smaller, auditable, constant-time TweetNaCl construction — a `ref10` perf
+> variant remains a future optimization, not a blocker. **The next P0 is now the
+> FROST primitives themselves** (keygen/sign/aggregate per RFC 9591), which become
+> implementable on this group-op layer; `frost.cpp` still needs wiring to it.
+> NOTE: the module is additive — the daemon's existing Ed25519 call sites still
+> use OpenSSL `EVP_PKEY_ED25519`; this layer exists for the FROST group ops.
 
 v2.10 replaces the v1 commit-reveal block randomness — `ContribMsg.dh_input`
 commit (`SHA256(secret‖pubkey)`) + `BlockSigMsg`/`creator_dh_secrets` Phase-2
