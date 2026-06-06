@@ -11,6 +11,7 @@
  * No secret-dependent branches or table indexing: the final reduction selects h
  * vs h-p with a constant-time mask, so this is constant-time. */
 #include "determ/crypto/chacha20/chacha20.h"
+#include "determ/crypto/secure_zero.h"
 
 static uint32_t u8to32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -82,6 +83,7 @@ void determ_poly1305(const uint8_t key[32], const uint8_t *m, size_t bytes, uint
         buf[bytes] = 1;
         for (i = bytes + 1; i < 16; i++) buf[i] = 0;
         poly1305_absorb(h, r0, r1, r2, r3, r4, s1, s2, s3, s4, buf, 0u);
+        determ_secure_zero(buf, sizeof buf);   /* holds up to 15 message bytes */
     }
 
     /* Fully carry h. */
@@ -124,4 +126,18 @@ void determ_poly1305(const uint8_t key[32], const uint8_t *m, size_t bytes, uint
     u32to8(tag +  4, h1);
     u32to8(tag +  8, h2);
     u32to8(tag + 12, h3);
+
+    /* Scrub the one-time-key limbs (r,s), the pad, and the accumulator: recovery
+     * of (r,s) lets an attacker forge tags for this (key,nonce). */
+    determ_secure_zero(h, sizeof h);
+    determ_secure_zero(&r0, sizeof r0); determ_secure_zero(&r1, sizeof r1);
+    determ_secure_zero(&r2, sizeof r2); determ_secure_zero(&r3, sizeof r3);
+    determ_secure_zero(&r4, sizeof r4);
+    determ_secure_zero(&s1, sizeof s1); determ_secure_zero(&s2, sizeof s2);
+    determ_secure_zero(&s3, sizeof s3); determ_secure_zero(&s4, sizeof s4);
+    determ_secure_zero(&pad0, sizeof pad0); determ_secure_zero(&pad1, sizeof pad1);
+    determ_secure_zero(&pad2, sizeof pad2); determ_secure_zero(&pad3, sizeof pad3);
+    determ_secure_zero(&h0, sizeof h0); determ_secure_zero(&h1, sizeof h1);
+    determ_secure_zero(&h2, sizeof h2); determ_secure_zero(&h3, sizeof h3);
+    determ_secure_zero(&h4, sizeof h4); determ_secure_zero(&f, sizeof f);
 }

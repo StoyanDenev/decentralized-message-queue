@@ -2,6 +2,7 @@
  * Part of the libsodium-free crypto stack (CRYPTO-C99-SPEC.md Section 3.4).
  * Validated byte-equal against OpenSSL EVP_chacha20 by `determ test-chacha20-c99`. */
 #include "determ/crypto/chacha20/chacha20.h"
+#include "determ/crypto/secure_zero.h"
 
 static uint32_t load32_le(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -33,6 +34,7 @@ static void chacha20_block(const uint32_t in[16], uint8_t out[64]) {
         out[i * 4 + 2] = (uint8_t)(v >> 16);
         out[i * 4 + 3] = (uint8_t)(v >> 24);
     }
+    determ_secure_zero(x, sizeof x);   /* x holds the key words (4..11) + state */
 }
 
 void determ_chacha20(const uint8_t key[32], uint32_t counter,
@@ -58,4 +60,7 @@ void determ_chacha20(const uint8_t key[32], uint32_t counter,
         done += take;
         st[12]++;               /* next block counter */
     }
+    /* st[4..11] holds the 256-bit key; block holds the last keystream block. */
+    determ_secure_zero(st, sizeof st);
+    determ_secure_zero(block, sizeof block);
 }

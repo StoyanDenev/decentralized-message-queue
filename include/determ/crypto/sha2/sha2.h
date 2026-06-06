@@ -37,11 +37,15 @@ void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
 void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]);
 
 /* HMAC (RFC 2104) keyed by SHA-256 / SHA-512. `out` = 32 / 64 bytes. `key`/`msg`
- * may be NULL when their length is 0. */
-void determ_hmac_sha256(const uint8_t *key, size_t keylen,
-                        const uint8_t *msg, size_t msglen, uint8_t out[32]);
-void determ_hmac_sha512(const uint8_t *key, size_t keylen,
-                        const uint8_t *msg, size_t msglen, uint8_t out[64]);
+ * may be NULL when their length is 0. Returns 0 on success, -1 on a memory-
+ * allocation failure or a `keylen+block`/`block+msglen` size_t overflow (in which
+ * case `out` is left unwritten). Secret-bearing intermediates are zeroized before
+ * return. (The int return is backward source-compatible: existing statement-call
+ * sites that ignore it still compile and behave identically for valid inputs.) */
+int determ_hmac_sha256(const uint8_t *key, size_t keylen,
+                       const uint8_t *msg, size_t msglen, uint8_t out[32]);
+int determ_hmac_sha512(const uint8_t *key, size_t keylen,
+                       const uint8_t *msg, size_t msglen, uint8_t out[64]);
 
 /* HKDF-SHA-256 (RFC 5869): extract-then-expand. `salt`/`info` may be NULL when
  * their length is 0 (a NULL/zero salt is treated as HashLen zero bytes per the

@@ -31,10 +31,13 @@ void determ_poly1305(const uint8_t key[32], const uint8_t *msg, size_t msglen,
                      uint8_t tag[16]);
 
 /* ChaCha20-Poly1305 AEAD (RFC 8439 §2.8). key=32, nonce=12, tag=16. encrypt writes
- * `ptlen` ciphertext bytes to `ct` + the tag. decrypt verifies the tag with a
- * constant-time compare and returns 0 on success (writing `ctlen` plaintext bytes
- * to `pt`) or -1 on authentication failure (and writes nothing). */
-void determ_chacha20_poly1305_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+ * `ptlen` ciphertext bytes to `ct` + the tag and returns 0, or -1 on an internal
+ * MAC-buffer allocation failure / length overflow (leaving `tag` unwritten — the
+ * int return is backward source-compatible with prior void call sites). decrypt
+ * verifies the tag with a constant-time compare and returns 0 on success (writing
+ * `ctlen` plaintext bytes to `pt`) or -1 on authentication failure / internal
+ * failure (and writes nothing). The one-time Poly1305 key is zeroized on return. */
+int  determ_chacha20_poly1305_encrypt(const uint8_t key[32], const uint8_t nonce[12],
                                       const uint8_t *aad, size_t aadlen,
                                       const uint8_t *pt, size_t ptlen,
                                       uint8_t *ct, uint8_t tag[16]);

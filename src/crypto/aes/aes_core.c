@@ -8,6 +8,7 @@
  * by `determ test-aes-c99`). Correctness is gated byte-equal against OpenSSL +
  * the FIPS-197 KAT by `determ test-aes-c99`. */
 #include "determ/crypto/aes/aes.h"
+#include "determ/crypto/secure_zero.h"
 #include <string.h>
 
 /* FIPS-197 Figure 7 substitution box — kept ONLY as the reference oracle that
@@ -159,4 +160,7 @@ void determ_aes256_encrypt_block(const determ_aes256_ctx *ctx,
     shift_rows(s);
     for (i = 0; i < 16; i++) s[i] ^= ctx->rk[14 * 16 + i];
     memcpy(out, s, 16);
+    /* s held key-mixed cipher state across all rounds. (The expanded key schedule
+     * lives in caller-owned ctx->rk; the caller is responsible for scrubbing it.) */
+    determ_secure_zero(s, sizeof s);
 }

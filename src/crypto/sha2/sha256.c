@@ -3,6 +3,7 @@
  * Validated against the daemon's OpenSSL backend + NIST KATs by
  * `determ test-sha2-c99`. */
 #include "determ/crypto/sha2/sha2.h"
+#include "determ/crypto/secure_zero.h"
 #include <string.h>
 
 static uint32_t rotr32(uint32_t x, unsigned n) {
@@ -58,6 +59,9 @@ static void sha256_block(uint32_t h[8], const uint8_t p[64]) {
         h[0] += a; h[1] += b; h[2] += c; h[3] += d;
         h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
     }
+    /* w holds key-derived material when the caller (HMAC/PBKDF2) feeds a secret
+     * inner block; scrub it so it does not linger in the reclaimed stack frame. */
+    determ_secure_zero(w, sizeof w);
 }
 
 void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
@@ -70,9 +74,11 @@ void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
     size_t rem;
     size_t padlen;
     uint8_t tail[128];
-    unsigned i;
+    size_t i;   /* size_t (not unsigned): the block loop counts up to `full`,
+                 * which is a size_t — an `unsigned` counter would wrap before
+                 * reaching `full` for inputs >= 256 GiB and never terminate. */
 
-    for (i = 0; i < full; i++) sha256_block(h, data + (size_t)i * 64u);
+    for (i = 0; i < full; i++) sha256_block(h, data + i * 64u);
 
     rem = len - full * 64u;
     if (rem) memcpy(tail, data + full * 64u, rem);
@@ -90,4 +96,6 @@ void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
         out[i * 4u + 2u] = (uint8_t)(h[i] >> 8);
         out[i * 4u + 3u] = (uint8_t)(h[i]);
     }
+    /* tail holds up to the final 127 input bytes (key-derived for keyed callers). */
+    determ_secure_zero(tail, sizeof tail);
 }

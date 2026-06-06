@@ -90,6 +90,8 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
 # C99. The src/*.cpp glob above does not pick up .c files; list them explicitly.
 # Exercised by `determ test-sha2-c99` (byte-equal cross-validation vs OpenSSL +
 # NIST KATs). Not yet wired into any call site — additive, validated module.
+# Shared memory-hygiene primitive (determ_secure_zero) used by every module below.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/secure_zero.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c")
@@ -100,9 +102,9 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/poly1305.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: AES-256 (FIPS-197), the block cipher under
-# AES-256-GCM. Table-based (NOT constant-time) — see aes.h. GHASH + the GCM mode
-# follow. Exercised by `determ test-aes-c99`.
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: AES-256-GCM (FIPS-197 + SP 800-38D),
+# constant-time end to end (arithmetic S-box + branchless GHASH — see aes.h).
+# Exercised by `determ test-aes-c99`.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c")
 

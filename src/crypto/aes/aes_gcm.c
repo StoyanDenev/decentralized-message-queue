@@ -9,6 +9,7 @@
  * computed arithmetically with no key-dependent table lookup. There is no
  * remaining cache-timing channel gating use at a secret-key call site. */
 #include "determ/crypto/aes/aes.h"
+#include "determ/crypto/secure_zero.h"
 #include <string.h>
 
 /* X = X * H over GF(2^128) (NIST SP 800-38D, MSB-first bit order, R=0xe1...). */
@@ -81,6 +82,8 @@ static void gcm_tag(const determ_aes256_ctx *ctx, const uint8_t H[16], const uin
     ghash_mul(X, H);
     determ_aes256_encrypt_block(ctx, J0, ej0);
     for (j = 0; j < 16; j++) tag[j] = (uint8_t)(X[j] ^ ej0[j]);
+    determ_secure_zero(ej0, sizeof ej0);   /* ej0 = E_K(J0): the tag mask */
+    determ_secure_zero(X, sizeof X);
 }
 
 /* GCTR keystream over `in` -> `out`, counter starting at inc32(J0). */
@@ -98,6 +101,7 @@ static void gcm_crypt(const determ_aes256_ctx *ctx, const uint8_t J0[16],
         for (j = 0; j < take; j++) out[done + j] = (uint8_t)(in[done + j] ^ ks[j]);
         done += take;
     }
+    determ_secure_zero(ks, sizeof ks);     /* last AES keystream block */
 }
 
 static int ct_eq16(const uint8_t *a, const uint8_t *b) {
@@ -121,6 +125,8 @@ void determ_aes256_gcm_encrypt(const uint8_t key[32], const uint8_t iv[12],
     J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;    /* J0 = IV || 0^31 || 1 */
     gcm_crypt(&ctx, J0, pt, ptlen, ct);
     gcm_tag(&ctx, H, J0, aad, aadlen, ct, ptlen, tag);
+    determ_secure_zero(&ctx, sizeof ctx);  /* expanded round-key schedule (= the key) */
+    determ_secure_zero(H, sizeof H);        /* GHASH subkey E_K(0^128) */
 }
 
 int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
@@ -137,7 +143,13 @@ int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
     memcpy(J0, iv, 12);
     J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
     gcm_tag(&ctx, H, J0, aad, aadlen, ct, ctlen, expect);
-    if (ct_eq16(expect, tag) != 0) return -1;          /* authentication failure */
+    if (ct_eq16(expect, tag) != 0) {                   /* authentication failure */
+        determ_secure_zero(&ctx, sizeof ctx);
+        determ_secure_zero(H, sizeof H);
+        return -1;
+    }
     gcm_crypt(&ctx, J0, ct, ctlen, pt);
+    determ_secure_zero(&ctx, sizeof ctx);
+    determ_secure_zero(H, sizeof H);
     return 0;
 }

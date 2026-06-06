@@ -3,6 +3,7 @@
  * Validated against the OpenSSL backend + NIST KATs by `determ test-sha2-c99`.
  * SHA-512 is the hash RFC 8032 Ed25519 + RFC 9591 FROST H1..H5 build on. */
 #include "determ/crypto/sha2/sha2.h"
+#include "determ/crypto/secure_zero.h"
 #include <string.h>
 
 static uint64_t rotr64(uint64_t x, unsigned n) {
@@ -63,6 +64,9 @@ static void sha512_block(uint64_t h[8], const uint8_t p[128]) {
         h[0] += a; h[1] += b; h[2] += c; h[3] += d;
         h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
     }
+    /* w holds key-derived material for keyed callers (HMAC-SHA-512, Ed25519
+     * seed-hash, FROST H1..H5); scrub it before the stack frame is reclaimed. */
+    determ_secure_zero(w, sizeof w);
 }
 
 void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]) {
@@ -77,9 +81,11 @@ void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]) {
     size_t rem;
     size_t padlen;
     uint8_t tail[256];
-    unsigned i, j;
+    size_t i, j;   /* size_t (not unsigned): the block loop counts up to `full`
+                    * (a size_t); an `unsigned` counter would wrap before reaching
+                    * `full` for inputs >= 512 GiB and never terminate. */
 
-    for (i = 0; i < full; i++) sha512_block(h, data + (size_t)i * 128u);
+    for (i = 0; i < full; i++) sha512_block(h, data + i * 128u);
 
     rem = len - full * 128u;
     if (rem) memcpy(tail, data + full * 128u, rem);
@@ -96,4 +102,6 @@ void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]) {
     for (i = 0; i < 8u; i++)
         for (j = 0; j < 8u; j++)
             out[i * 8u + j] = (uint8_t)(h[i] >> (56u - 8u * j));
+    /* tail holds up to the final 255 input bytes (key-derived for keyed callers). */
+    determ_secure_zero(tail, sizeof tail);
 }
