@@ -87,7 +87,7 @@ Achieved via three substitutions:
 | X25519 | `src/crypto/x25519/` | **SHIPPED** — constant-time Montgomery cswap-ladder (TweetNaCl-derived), shares the Ed25519 `gf[16]` field lineage; validated vs OpenSSL `EVP_PKEY_X25519` + RFC 7748 §6.1 KAT | Public domain | ~140 |
 | ChaCha20 | `src/crypto/chacha20/` | RFC 8439 reference | Public domain | ~500 |
 | Poly1305 | `src/crypto/chacha20/poly1305.c` | RFC 8439 reference | Public domain | ~500 |
-| XChaCha20-Poly1305 | `src/crypto/chacha20/xchacha20_poly1305.c` | RFC draft + RFC 8439 composition | Public domain | ~500 |
+| XChaCha20-Poly1305 | `src/crypto/chacha20/xchacha20_poly1305.c` | **SHIPPED** — HChaCha20 + the C99 ChaCha20-Poly1305 (draft-irtf-cfrg-xchacha); validated vs OpenSSL inner AEAD + HChaCha20 §2.2.1 KAT | Public domain | ~90 |
 | AES-256-GCM | `src/crypto/aes/` | NIST FIPS 197 + SP 800-38D | Public domain | ~3K |
 | BLAKE2b | `src/crypto/blake2/` | **SHIPPED** — canonical RFC 7693 (keyed + variable-length); the hash Argon2id is built on; validated vs OpenSSL `EVP_blake2b512` + `hashlib.blake2b` KATs | Public domain | ~140 |
 | Argon2id | `src/crypto/argon2/` | P-H-C reference (on the shipped BLAKE2b above) | CC0 / Apache 2.0 | ~2K |
@@ -479,12 +479,18 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Additive — no daemon call site yet (completes the curve25519 family for a future
   libsodium-free DH/handshake consumer).
 
-### 3.4 ChaCha20-Poly1305 + XChaCha20-Poly1305 (~4 days)
+### 3.4 ChaCha20-Poly1305 + XChaCha20-Poly1305 — **SHIPPED**
 
-- Implement from RFC 8439 + XChaCha20 draft
-- Combined AEAD interface
-- Test vectors from RFC 8439 + draft-irtf-cfrg-xchacha
-- Constant-time review (Poly1305 has known CT requirements)
+- ChaCha20 + Poly1305 + ChaCha20-Poly1305 IETF AEAD: `src/crypto/chacha20/`,
+  validated vs OpenSSL `EVP_chacha20` / `EVP_chacha20_poly1305` + RFC 8439 Poly1305
+  KAT by `determ test-chacha20-c99`.
+- **XChaCha20-Poly1305 + HChaCha20 (commit `09849f6`)**: `xchacha20_poly1305.c` —
+  the 192-bit-nonce AEAD = HChaCha20 subkey + the ChaCha20-Poly1305 above, per
+  draft-irtf-cfrg-xchacha. Validated by `determ test-xchacha-c99`: HChaCha20 vs the
+  draft §2.2.1 KAT, and the full AEAD byte-equal vs OpenSSL's inner ChaCha20-Poly1305
+  on the derived (subkey, nonce) — since XChaCha20-Poly1305 IS that composition.
+- Constant-time: ChaCha is ARX (no table/branch); Poly1305 + both AEAD tag compares
+  are branchless aggregate-difference (audit §4).
 
 ### 3.5 AES-256-GCM (~6 days)
 

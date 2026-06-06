@@ -851,3 +851,27 @@ adversarial workflow; its assurance, recorded for coherence:
 A dedicated adversarial audit is a low-priority tracked follow-up. BLAKE2b is the
 prerequisite for the Argon2id password-hash (CRYPTO-C99-SPEC §3.6, not yet shipped);
 no daemon call site consumes BLAKE2b directly yet.
+
+---
+
+## 8e. XChaCha20-Poly1305 (`src/crypto/chacha20/xchacha20_poly1305.c`, commit `09849f6`) — validation basis
+
+The extended-nonce AEAD was not run through the adversarial workflow; its assurance:
+
+1. **It is a composition of already-validated parts.** XChaCha20-Poly1305 is
+   *defined* as `ChaCha20-Poly1305-IETF(HChaCha20(key, N[0:16]), 0⁴‖N[16:24], …)`.
+   The inner ChaCha20-Poly1305 is the §1/§4-clean C99 AEAD already byte-equal to
+   OpenSSL (`test-chacha20-c99`); the wrapper only derives the subkey + nonce.
+2. **HChaCha20 pinned to its spec vector via an independent reference.** The
+   draft §2.2.1 KAT value was produced by a from-scratch Python HChaCha20 (not
+   transcribed from the draft, not my C), and `test-xchacha-c99` asserts the C99
+   `determ_hchacha20` reproduces it.
+3. **The composition validated end-to-end vs OpenSSL.** `test-xchacha-c99` checks
+   the full `determ_xchacha20_poly1305_*` output byte-equal vs OpenSSL's inner
+   `EVP_chacha20_poly1305` on the derived `(subkey, nonce)` over a (pt,aad) grid —
+   so the subkey/nonce derivation + AEAD wiring are confirmed; combined with (2),
+   the whole construction matches the spec. Decrypt rejects a tampered
+   tag/ciphertext/AAD/nonce. The derived subkey is `determ_secure_zero`'d per call.
+
+A dedicated adversarial audit is a low-priority follow-up; no daemon call site
+consumes XChaCha20-Poly1305 yet.
