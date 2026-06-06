@@ -292,9 +292,10 @@ hash):
 - Spec + roadmap: [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.2/§3.8,
   [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 - Tests: `determ test-ed25519-c99` (12 assertions, incl. a 100000-byte extreme-length
-  cross-validation), `determ test-frost-c99` (46 assertions incl. DKG, the
-  distributed sign_partial/aggregate parity, the PSS refresh §6 block, and the §7
-  broader-parameter coverage at t=1 / t=5,n=9), both in `tools/run_all.sh` (FAST).
+  cross-validation), `determ test-frost-c99` (47 assertions incl. DKG, the
+  distributed sign_partial/aggregate parity at t=3 and t=5, the PSS refresh §6
+  block, and the §7 broader-parameter coverage at t=1 / t=5,n=9), both in
+  `tools/run_all.sh` (FAST).
 - References: Komlo–Goldberg 2020 (FROST); RFC 9591 (FROST ciphersuites); RFC 8032
   (Ed25519); Pedersen 1991 (DKG); Feldman 1987 (VSS); Shamir 1979 (secret sharing);
   Bellare–Neven 2006 / forking lemma (Schnorr PoK).

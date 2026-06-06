@@ -11466,6 +11466,33 @@ int main(int argc, char** argv) {
                 check(std::memcmp(rec2, secret, 32)==0, "FROST cov: a different t=5 subset reconstructs the same secret");
                 check(sign_quorum_ok(shares, group_pk, {2,4,6,8,9}, "cov t=5 beacon"),
                       "FROST cov: t=5/n=9 aggregate verifies as Ed25519 (C99 + OpenSSL)");
+                // distributed-path parity at t=5 (witnesses T-1.1 beyond the t=3 §4b case):
+                // per-signer determ_frost_sign_partial + determ_frost_aggregate must be
+                // byte-identical to the centralized determ_frost_sign.
+                {
+                    int signers[5]={1,2,5,7,8}; const char* m="cov t5 distributed"; size_t ml=std::strlen(m);
+                    uint8_t sh[5*32], d[5*32], e[5*32], D[5*32], E[5*32], ref[64], agg[64], partials[5*32];
+                    for(int q=0;q<5;q++){
+                        std::memcpy(&sh[q*32], shares+(signers[q]-1)*32, 32);
+                        uint8_t hd[64],he[64];
+                        std::string ld="cov5d-"+std::to_string(signers[q]);
+                        std::string le="cov5e-"+std::to_string(signers[q]);
+                        determ_sha512((const uint8_t*)ld.data(),ld.size(),hd);
+                        determ_sha512((const uint8_t*)le.data(),le.size(),he);
+                        determ_ed25519_sc_reduce64(hd,&d[q*32]); determ_ed25519_sc_reduce64(he,&e[q*32]);
+                        determ_ed25519_point_basemul(&D[q*32], &d[q*32]);
+                        determ_ed25519_point_basemul(&E[q*32], &e[q*32]);
+                    }
+                    determ_frost_sign(signers, sh, d, e, 5, (const uint8_t*)m, ml, group_pk, ref);
+                    bool pok=true;
+                    for(int q=0;q<5;q++)
+                        if(determ_frost_sign_partial(signers,5,q,&sh[q*32],&d[q*32],&e[q*32],
+                                D,E,(const uint8_t*)m,ml,group_pk,&partials[q*32])!=0) pok=false;
+                    determ_frost_aggregate(signers,5,D,E,partials,(const uint8_t*)m,ml,group_pk,agg);
+                    check(pok && std::memcmp(agg,ref,64)==0 &&
+                          determ_ed25519_verify(group_pk,(const uint8_t*)m,ml,agg)==0,
+                          "FROST cov: t=5/n=9 distributed partials aggregate byte-identical to centralized (T-1.1)");
+                }
             }
         }
 
