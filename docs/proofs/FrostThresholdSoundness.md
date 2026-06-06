@@ -90,9 +90,22 @@ verify under the C99 verifier AND OpenSSL `EVP_DigestVerify`.)*
 loop computes for `i = pos`. `determ_frost_aggregate` outputs `R` (recomputed
 identically) and `z = Σ_{i∈S} z_i`, which is the centralized `z`. Therefore the two
 paths emit bit-for-bit equal 64-byte signatures, and T-1's verification equation
-holds for the distributed result. The shared `R` recompute is also the property that
-defeats selective-abort: any `t`-of-`K` quorum that reaches aggregation derives the
-same `R` regardless of which members participated. ∎
+holds for the distributed result. The shared `R` recompute defeats the *round-2
+withholding* attack within a signing session: once the round-1 commitment set
+`{Dᵢ},{Eᵢ}` is published and the signer set `S` fixed, every aggregator derives the
+same `R` and `c` from those public commitments, so a member that has already
+published its round-1 commitment cannot, by withholding its round-2 partial, change
+the `(R, z)` the remaining `t` honest members of `S` produce. **Scope (important):**
+this is *not* subset-invariance of `R`, and it does not by itself make the aggregate
+an unbiasable beacon. `R = Σ_{i∈S}(Dᵢ + [ρᵢ]Eᵢ)` with
+`ρᵢ = H₁(i, m, {(j,D_j,E_j)}_{j∈S})` depends on *which* subset signs and on its
+freshly sampled nonces, so a different subset — or a re-run with fresh nonces — yields
+a different valid `R` (FROST/Schnorr is a randomized, non-unique signature, unlike the
+unique threshold-BLS used by drand/DFINITY). Using the aggregate as an *unbiasable
+randomness beacon* therefore requires the additional discipline spelled out in
+`V210-PhaseD-RandomnessWiring.md` §1–§2 (a canonical signer set fixed before any
+round-1 reveal + committed/deterministic nonces); without it an adversary that steers
+subset selection or controls some nonces can still grind the output. ∎
 *(Witnessed: `test-frost-c99` asserts `memcmp(aggregate, centralized, 64)==0`, then
 re-verifies the distributed aggregate under both the C99 verifier and OpenSSL, and
 confirms a single tampered partial breaks the signature.)*
@@ -218,11 +231,14 @@ on `f_e` to a share set on `f_{e+1} = f_e + Δ_e` with `Δ_e(0)=0`, so
 what forbids any participant from perturbing the constant term, so the induction
 step cannot be broken by one party). Within any epoch `e`, a `t`-of-`n_e` quorum
 signs by T-1/T-1.1 and the result is a standard Ed25519 signature under `PK_e = PK₀`
-(T-1), verifiable by any RFC 8032 verifier holding only `PK₀`. The selective-abort
-resistance is per-epoch and self-contained: by T-1.1 every `t`-subset that reaches
-aggregation in epoch `e` derives the *same* `R` from the public round-1
-commitments, so a withholding minority cannot bias that epoch's output, and this
-holds independently in each epoch regardless of refreshes. **Committee handover**
+(T-1), verifiable by any RFC 8032 verifier holding only `PK₀`. The *round-2
+withholding* robustness is per-epoch and self-contained: by T-1.1, once a signing
+session's round-1 commitment set is fixed, every aggregator derives the *same* `R`
+from those public commitments, so a member cannot change the session's `(R, z)` by
+withholding its round-2 partial — and this holds independently in each epoch
+regardless of refreshes. (As stated in T-1.1, this is round-2-withholding robustness,
+*not* beacon-grade unbiasability; the latter needs the signer-set + nonce discipline
+of `V210-PhaseD-RandomnessWiring.md` §1–§2.) **Committee handover**
 (membership change at a boundary) is the same algebra: PSS with the new index set
 re-randomises shares onto `f_{e+1}` while preserving `f_{e+1}(0)=s` — retiring an
 old member's share is exactly the "old shares useless after refresh" property of

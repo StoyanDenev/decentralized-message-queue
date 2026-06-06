@@ -48,14 +48,42 @@ a revealed secret can't be *changed*, but a Phase-2 participant can still **sele
 withhold** to veto an unfavourable outcome and force a re-roll. This is the residual
 bias documented as FA3 / S-006.
 
-### Why FROST closes it
+### What FROST changes — and the discipline it requires
 
-A FROST aggregate `R` over a fixed message is **recomputable from ANY t-of-K
-partials** (`FrostThresholdSoundness.md` T-1.1 — every t-subset that reaches
-aggregation derives the *same* `R`). So a withholding minority `< K−t` cannot bias or
-veto the output: the remaining `≥ t` honest members produce the identical `R`. The
-last-revealer advantage disappears — there is nothing to grind, and aborting changes
-nothing as long as a `t`-quorum proceeds.
+The win FROST gives *for free* is **robustness/liveness**, not automatic
+bias-resistance. In a `(t,K)` threshold scheme the key is Shamir-shared, so any `t`
+honest members produce a valid signature: a withholding minority `< K−t` can neither
+halt the round (the remaining `≥ t` still sign) nor change the value of a signing
+session whose round-1 commitments are already fixed (`FrostThresholdSoundness.md`
+T-1.1 — every aggregator derives the same `(R, z)` from a *fixed* commitment set, so a
+member cannot alter the session output by withholding its round-2 partial). That alone
+removes the **halt/veto** lever the v1 commit-reveal exposes (where one missing reveal
+aborts the K-of-K round).
+
+**But raw `R` is not an unbiasable beacon, and FROST is not BLS.** A FROST/Schnorr
+signature is *randomized and non-unique*: `R = Σ_{i∈S}(Dᵢ + [ρᵢ]Eᵢ)` with
+`ρᵢ = H₁(i, m, {(j,D_j,E_j)}_{j∈S})` depends on *which* subset `S` signs and on its
+freshly sampled per-session nonces — so a different subset, or a re-run with fresh
+nonces, yields a different valid `R`. (Threshold **BLS** — drand / DFINITY — *is* a
+unique signature `σ = [s]·H(m)` and is the textbook unbiasable-beacon primitive;
+Determ chose FROST to reuse the Ed25519 stack and avoid pairings — see
+`v2.10-DKG-SPEC.md` Q5.) Consequently an adversary that can **steer subset selection**
+(when `K > t`, influence which `t` aggregate) or **grind its own nonce** (abort after
+seeing the candidate `R` and re-run) retains a last-actor bias unless the protocol
+removes those degrees of freedom.
+
+**The discipline that makes FROST-as-beacon unbiasable** (mandatory, not optional):
+(1) fix a **canonical signer set** before any round-1 commitment is revealed — no
+post-hoc choice among `> t` qualifying subsets (e.g. require the full committee, or a
+height-deterministic subset); and (2) **bind the nonces** — keep FROST's
+commit-then-reveal round-1 structure *and* forbid same-`(seed‖height)` re-signing /
+enforce verifiable nonce derivation — so no member can grind `R`. Under that discipline
+the per-block output is determined once the frozen commitment set is published, and the
+residual reduces to the same **abort ⇒ deterministic re-roll** posture the v1 scheme
+already has (handled economically by suspension slashing). Net: FROST's concrete gain
+over today's commit-reveal beacon is **availability** (a withholding minority can't
+stall the round); matching or beating its *bias* guarantee is a design obligation, not
+a free consequence of using a threshold signature.
 
 ---
 
@@ -71,17 +99,26 @@ Precondition: the committee shares a FROST group key `PK` with per-member shares
   determ_frost_sign_partial(xs, t, pos, s_i, d_i, e_i, D[], E[], msg, PK)` over
   `msg = beacon_seed ‖ LE64(height)` (where `beacon_seed = delay_seed`) — replaces the
   `dh_secret` reveal.
-- **Aggregate.** The producer runs
-  `sig = determ_frost_aggregate(xs, t, D[], E[], partials[], msg, PK)` → `(R, z)`;
-  set `delay_output := R` (or `SHA256(R ‖ z)` to keep a 32-byte field), and fold into
-  `cumulative_rand` exactly as today.
-- **Verify.** The validator checks `determ_frost_verify(sig, PK, msg)` — which is a
-  **standard Ed25519 verification** under the epoch `PK` (`FrostThresholdSoundness.md`
-  T-1). Any t-of-K quorum yields the same `R`, so all honest validators agree.
+- **Aggregate.** Over the **canonical, pre-frozen signer set** (§1 — fixed before any
+  round-1 reveal so it can't be chosen post-hoc), the producer runs
+  `sig = determ_frost_aggregate(xs, t, D[], E[], partials[], msg, PK)` → `(R, z)`; set
+  `delay_output := SHA256(R ‖ z)` (32-byte field) and fold into `cumulative_rand`
+  exactly as today. Once that commitment set is published, every aggregator derives the
+  identical `(R, z)`, so a member can't alter the output by withholding its round-2
+  partial (T-1.1).
+- **Verify.** The validator checks `determ_frost_verify(sig, PK, msg)` — a **standard
+  Ed25519 verification** under the epoch `PK` (`FrostThresholdSoundness.md` T-1) — *and*
+  that the signer set is the height-canonical one (so no subset substitution). Honest
+  validators recomputing over the same published commitment set agree on the one
+  `(R, z)`.
 
-The selective-abort attack is closed; the beacon also becomes *publicly verifiable*
-(a single Ed25519 sig under `PK`) rather than a K-way hash, which helps light clients
-(`FrostThresholdSoundness.md` T-7).
+This converts the v1 **halt/veto** exposure into a robust round (a withholding minority
+`< K−t` can't stall it). The residual *bias* (subset/nonce grinding) is closed only by
+the §1 discipline — a canonical frozen signer set + bound nonces — **not** by threshold
+aggregation alone. The aggregate is also a single Ed25519 sig under a fixed `PK` (vs the
+v1 K-way hash), which a full node verifies in O(1) instead of re-hashing K secrets;
+note this is the beacon-output step only — a light client still performs the O(K)
+committee-signature checks per header either way (`FrostThresholdSoundness.md` T-1/T-7).
 
 ---
 
@@ -174,5 +211,8 @@ flag-day discipline.
 **Recommendation:** treat B→C→D→E as one coordinated consensus effort, owned by
 whoever holds the consensus lane, in a window free of competing F2/S-030 edits to the
 shared files in §6. The FROST primitives + soundness proofs + the libsodium-equivalence
-evidence are all in place to make it a mechanical (if careful) integration rather than
-a research task.
+evidence are all in place, so most of the work is integration plumbing. The one genuine
+**design** obligation (not just wiring) is the beacon-unbiasability discipline of §1 —
+the canonical, pre-frozen signer set + nonce binding that a Schnorr/FROST aggregate
+needs to be a sound beacon (BLS would get this for free; FROST does not). That piece
+must be specified and audited, not merely coded; everything else is mechanical.
