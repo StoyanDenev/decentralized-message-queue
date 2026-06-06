@@ -24,13 +24,17 @@ GO/NO-GO.
 > `determ test-sha2-c99` now runs 14/14 (FAST 149/149). SHA-512 is itself a
 > prerequisite for Ed25519 + the FROST H1..H5 hashes, and HMAC-SHA-256 already
 > backs RPC auth (S-001), so this is squarely on the libsodium-removal / v2.10
-> path. The §3.4 AEAD family has also begun: **C99 ChaCha20 (RFC 8439) shipped
-> (commit `21385ed`)** — `determ test-chacha20-c99` byte-equal vs OpenSSL
-> `EVP_chacha20` (FAST 150/150); Poly1305 + the AEAD combiner follow. (ChaCha20-
-> Poly1305 is chosen ahead of AES-256-GCM because it is constant-time by
-> construction — ARX + limb arithmetic — whereas AES-GCM's GHASH CT is the spec's
-> flagged hard part; AES-256-GCM, which the wallet envelope actually uses, follows
-> with the CT care it needs.) Remaining P0:
+> path. The **§3.4 AEAD family is now complete (commits `21385ed` + `4c9a9a9`):**
+> C99 ChaCha20 (RFC 8439) + Poly1305 + the ChaCha20-Poly1305 AEAD combiner —
+> `determ test-chacha20-c99` validates ChaCha20 + the full AEAD byte-equal vs
+> OpenSSL `EVP_chacha20`/`EVP_chacha20_poly1305` and Poly1305 vs the RFC 8439
+> §2.5.2 KAT (8/8; FAST 150/150). (ChaCha20-Poly1305 was taken ahead of AES-256-GCM
+> because it is constant-time by construction — ARX + limb arithmetic — whereas
+> AES-GCM's GHASH CT is the spec's flagged hard part; AES-256-GCM, which the wallet
+> envelope actually uses, follows with the CT care it needs.) Notably, Poly1305 was
+> the one primitive where an adversarial design workflow caught both agent attempts
+> as buggy and its own fix as unverified — the canonical donna-32 was written by
+> hand and proven only by the KAT + the byte-equal AEAD cross-validation. Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
