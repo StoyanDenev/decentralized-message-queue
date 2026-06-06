@@ -34,7 +34,13 @@ GO/NO-GO.
 > envelope actually uses, follows with the CT care it needs.) Notably, Poly1305 was
 > the one primitive where an adversarial design workflow caught both agent attempts
 > as buggy and its own fix as unverified — the canonical donna-32 was written by
-> hand and proven only by the KAT + the byte-equal AEAD cross-validation. Remaining P0:
+> hand and proven only by the KAT + the byte-equal AEAD cross-validation. **§3.5 has
+> begun: C99 AES-256 block cipher shipped (commit `facf915`)** — `determ test-aes-c99`
+> byte-equal vs OpenSSL `EVP_aes_256_ecb` + the FIPS-197 C.3 KAT (FAST 151/151). It
+> carries a loud, documented CONSTANT-TIME caveat (table-based S-box, not CT) and
+> must be CT-hardened (constant-time S-box / AES-NI / BearSSL per the spec) before
+> replacing OpenSSL at the keyfile-envelope (S-004) call site; GHASH + the GCM mode
+> follow. Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
