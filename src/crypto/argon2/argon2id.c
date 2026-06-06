@@ -132,7 +132,13 @@ int determ_argon2id(uint8_t *out, size_t outlen,
     block *B = NULL; uint8_t lenb[4]; size_t i; uint32_t pass, slice, lane;
     int rc = -1;
 
-    if (outlen < 4 || t_cost < 1 || p < 1) return -1;
+    /* Reject params that would silently truncate in the LE32 H0 encoding (RFC 9106
+     * §3.1 length fields are 32-bit) or overflow uint32 in the segment math. The
+     * p <= UINT32_MAX/8 bound makes both 8*p and p*SYNC_POINTS overflow-free.
+     * (audit ARG2ID-001/-002/-003 + ARGON2ID-003/-005) */
+    if (outlen < 4 || outlen > 0xffffffffULL || t_cost < 1 ||
+        pwdlen > 0xffffffffULL || saltlen > 0xffffffffULL ||
+        p < 1 || p > (UINT32_MAX / 8u)) return -1;
     if (m_cost < 8 * p) m_cost = 8 * p;
     seg = m_cost / (p * SYNC_POINTS);
     if (seg < 1) return -1;

@@ -73,6 +73,7 @@ static void inv25519(gf o, const gf i) {
     for (a = 0; a < 16; a++) c[a] = i[a];
     for (a = 253; a >= 0; a--) { fsqr(c, c); if (a != 2 && a != 4) fmul(c, c, i); }
     for (a = 0; a < 16; a++) o[a] = c[a];
+    determ_secure_zero(c, sizeof c);   /* wipe exponentiation intermediates (audit X25519-MEM-001) */
 }
 
 int determ_x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]) {
