@@ -34,13 +34,19 @@ GO/NO-GO.
 > envelope actually uses, follows with the CT care it needs.) Notably, Poly1305 was
 > the one primitive where an adversarial design workflow caught both agent attempts
 > as buggy and its own fix as unverified — the canonical donna-32 was written by
-> hand and proven only by the KAT + the byte-equal AEAD cross-validation. **§3.5 has
-> begun: C99 AES-256 block cipher shipped (commit `facf915`)** — `determ test-aes-c99`
-> byte-equal vs OpenSSL `EVP_aes_256_ecb` + the FIPS-197 C.3 KAT (FAST 151/151). It
-> carries a loud, documented CONSTANT-TIME caveat (table-based S-box, not CT) and
-> must be CT-hardened (constant-time S-box / AES-NI / BearSSL per the spec) before
-> replacing OpenSSL at the keyfile-envelope (S-004) call site; GHASH + the GCM mode
-> follow. Remaining P0:
+> hand and proven only by the KAT + the byte-equal AEAD cross-validation. **§3.5
+> byte-correctness is complete: the full C99 AES-256-GCM AEAD shipped** — the
+> AES-256 block cipher (commit `facf915`, FIPS-197 C.3 KAT + byte-equal vs OpenSSL
+> `EVP_aes_256_ecb`) plus GHASH over GF(2^128) + the GCM mode (NIST SP 800-38D).
+> `determ test-aes-c99` now runs six assertions: the two block-cipher checks, the
+> full AES-256-GCM (ciphertext AND tag) byte-equal vs OpenSSL `EVP_aes_256_gcm`
+> over a (plaintext,aad)-length grid — the §Q9 gate — plus a GCM decrypt
+> round-trip and tamper rejection of both the tag and the ciphertext (6/6; FAST
+> 151/151). GHASH is written BRANCHLESS / constant-time (mask + reduction use no
+> secret-dependent branch); the AES S-box, however, is table-based and carries a
+> loud, documented CONSTANT-TIME caveat. The **only remaining §3.5 work is S-box
+> CT-hardening** (constant-time S-box / AES-NI / BearSSL per the spec) before the
+> module replaces OpenSSL at the keyfile-envelope (S-004) call site. Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
