@@ -202,6 +202,38 @@ non-identity-`C₀` rejections, per-share VSS, shares-actually-changed, two refr
 subsets reconstructing the original `s`, the old+new mix FAILING to recover `s`,
 and a refreshed quorum signing a valid Ed25519 sig under the unchanged `PK`.)*
 
+### T-7 (Committee lifecycle composition — `PK` is a cross-epoch invariant)
+
+*The full committee lifecycle — DKG keygen `→` distributed threshold signing `→`
+PSS refresh `→` continued signing — composes so that the group public key `PK`
+established once by the DKG is an invariant across an unbounded number of refreshes
+and signing epochs. A verifier anchored on `PK` need never update it.*
+
+**Proof (chaining the prior theorems).** Let `PK₀ = Σᵢ Cᵢ,₀ = [s]B` be the key the
+DKG fixes (T-4), with `s` never assembled anywhere. Index epochs `e = 0,1,2,…`,
+where each `e→e+1` boundary is a PSS refresh. By T-6, a refresh maps the share set
+on `f_e` to a share set on `f_{e+1} = f_e + Δ_e` with `Δ_e(0)=0`, so
+`f_{e+1}(0) = f_e(0) = s` and `PK_{e+1} = [f_{e+1}(0)]B = PK_e`; by induction
+`PK_e = PK₀` for all `e` (the zero-hole gate `determ_frost_pss_verify_commit` is
+what forbids any participant from perturbing the constant term, so the induction
+step cannot be broken by one party). Within any epoch `e`, a `t`-of-`n_e` quorum
+signs by T-1/T-1.1 and the result is a standard Ed25519 signature under `PK_e = PK₀`
+(T-1), verifiable by any RFC 8032 verifier holding only `PK₀`. The selective-abort
+resistance is per-epoch and self-contained: by T-1.1 every `t`-subset that reaches
+aggregation in epoch `e` derives the *same* `R` from the public round-1
+commitments, so a withholding minority cannot bias that epoch's output, and this
+holds independently in each epoch regardless of refreshes. **Committee handover**
+(membership change at a boundary) is the same algebra: PSS with the new index set
+re-randomises shares onto `f_{e+1}` while preserving `f_{e+1}(0)=s` — retiring an
+old member's share is exactly the "old shares useless after refresh" property of
+T-6(c). Hence a light client or on-chain anchor that pins `PK₀` once (at genesis or
+the first DKG) validates every threshold signature the committee ever produces,
+across all refreshes and handovers, with no key update. ∎
+*(This is the contract the v2.10 consensus wiring + light-client beacon verification
+rely on: one fixed `PK` per chain epoch-group; see `V210ImplementationRoadmap.md`
+Phase C/D. Witnessed compositionally — `test-frost-c99` exercises each link: DKG §5,
+distributed sign §"4b", PSS-then-sign-under-unchanged-`PK` §6.)*
+
 ---
 
 ## 4. Robustness / canonicality gates (what the hardening buys)
@@ -259,9 +291,10 @@ hash):
   (`frost_verify` ↔ Ed25519 verify).
 - Spec + roadmap: [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.2/§3.8,
   [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
-- Tests: `determ test-ed25519-c99` (10 assertions), `determ test-frost-c99`
-  (38 assertions incl. DKG, the distributed sign_partial/aggregate parity, and
-  the PSS refresh §6 block), both in `tools/run_all.sh` (FAST).
+- Tests: `determ test-ed25519-c99` (12 assertions, incl. a 100000-byte extreme-length
+  cross-validation), `determ test-frost-c99` (46 assertions incl. DKG, the
+  distributed sign_partial/aggregate parity, the PSS refresh §6 block, and the §7
+  broader-parameter coverage at t=1 / t=5,n=9), both in `tools/run_all.sh` (FAST).
 - References: Komlo–Goldberg 2020 (FROST); RFC 9591 (FROST ciphersuites); RFC 8032
   (Ed25519); Pedersen 1991 (DKG); Feldman 1987 (VSS); Shamir 1979 (secret sharing);
   Bellare–Neven 2006 / forking lemma (Schnorr PoK).

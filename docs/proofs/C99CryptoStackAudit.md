@@ -677,8 +677,11 @@ equation), constant-time, and memory-safety.
 
 **Verdict:** Shamir-Lagrange, constant-time, and memory-safety are **clean**; 0
 Critical / 0 High. The keygen Horner evaluation and Lagrange reconstruction were
-**hand-traced for t = 1, 2, 3, 4** (the self-consistency test only exercises t=3,
-so the t≤2 branches were verified by hand, not by the suite); the signing math was
+**hand-traced for t = 1, 2, 3, 4** (at audit time the suite exercised only t=2/3;
+this gap is now CLOSED — `test-frost-c99` §7 (commit `724d3e2`) exercises the
+degenerate t=1 and a larger t=5/n=9 committee end-to-end: keygen, reconstruct from
+multiple subsets, and a threshold aggregate verified under both the C99 verifier
+and OpenSSL); the signing math was
 confirmed to satisfy `[z]B == R + [c]·group_pk` (so the aggregate is a valid
 Ed25519 signature) with no missing factor, R/c mismatch, or wrong Lagrange index;
 every secret scalar (shares, nonces, dealer secret/coeffs) flows only through the
