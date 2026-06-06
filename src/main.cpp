@@ -19,6 +19,7 @@
 #include <determ/crypto/ed25519/ed25519_group.h> // v2.10 Phase A: Ed25519 scalar/group prims
 #include <determ/crypto/frost/frost.h>        // v2.10 Phase A: C99-native FROST-Ed25519 (RFC 9591)
 #include <determ/crypto/x25519/x25519.h>      // v2.10 Phase 0: C99-native X25519 (RFC 7748, §3.3)
+#include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -431,6 +432,10 @@ In-process tests (deterministic, no network):
                                               X25519 (RFC 7748) byte-equal vs
                                               OpenSSL EVP_PKEY_X25519 + the RFC
                                               7748 §6.1 KAT (§3.3; DH companion)
+  determ test-blake2b-c99                     v2.10 Phase 0: libsodium-free C99
+                                              BLAKE2b (RFC 7693) byte-equal vs
+                                              OpenSSL EVP_blake2b512 + hashlib
+                                              KATs (§3.6 prereq; Argon2id base)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11596,6 +11601,96 @@ int main(int argc, char** argv) {
                   << ": x25519-c99 "
                   << (fail==0 ? "all cross-validation + RFC 7748 KATs matched" : "had failures")
                   << " (libsodium-free C99 X25519 vs OpenSSL — the §Q9 gate; constant-time Montgomery ladder)\n";
+        return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-blake2b-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6 prerequisite: validate the
+        // libsodium-free C99 BLAKE2b (RFC 7693) — (1) the unkeyed 64-byte digest
+        // byte-equal vs OpenSSL EVP_blake2b512 over a fuzzed message-length grid
+        // (the §Q9 gate: full compression / G / SIGMA / IV / finalize); (2) keyed +
+        // variable-length outputs vs python hashlib.blake2b reference vectors
+        // (OpenSSL's EVP exposes only the unkeyed 64-byte digest); (3) incremental
+        // update == one-shot; (4) keyed/varlen wiring + parameter-error handling.
+        using namespace determ;
+        int fail=0;
+        auto check=[&](bool c,const std::string&m){ if(c) std::cout<<"  PASS: "<<m<<"\n"; else {std::cout<<"  FAIL: "<<m<<"\n"; fail++;} };
+        auto hx=[](const uint8_t*p,size_t n){ static const char*H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+
+        // (1) unkeyed 64-byte vs OpenSSL EVP_blake2b512 over fuzzed lengths.
+        {
+            bool ok=true; long at=-1;
+            const size_t lens[]={0,1,63,64,65,127,128,129,200,255,256,1000};
+            for(size_t li=0; li<sizeof(lens)/sizeof(lens[0]) && ok; ++li){
+                size_t L=lens[li]; std::vector<uint8_t> in(L);
+                for(size_t i=0;i<L;i++) in[i]=(uint8_t)((i*131u+L*7u+3u)&0xff);
+                uint8_t mine[64]; determ_blake2b(mine,64,nullptr,0, L?in.data():nullptr, L);
+                uint8_t o[64]; unsigned int ol=64;
+                EVP_Digest(L?in.data():(const uint8_t*)"", L, o, &ol, EVP_blake2b512(), nullptr);
+                if(ol!=64 || std::memcmp(mine,o,64)!=0){ ok=false; at=(long)L; }
+            }
+            check(ok, ok ? "BLAKE2b-512 (unkeyed) C99 == OpenSSL EVP_blake2b512 over fuzzed lengths — the §Q9 gate"
+                         : "BLAKE2b-512 diverges from OpenSSL (len="+std::to_string(at)+")");
+        }
+
+        // (2) keyed + variable-length vs python hashlib.blake2b reference vectors
+        //     (independent BLAKE2 implementation; key="determ-blake2b-key", msg="the quick brown fox").
+        {
+            const uint8_t* key=(const uint8_t*)"determ-blake2b-key"; size_t kl=18;
+            const uint8_t* msg=(const uint8_t*)"the quick brown fox"; size_t ml=19;
+            uint8_t e[64], k64[64], k32[32];
+            determ_blake2b(e,32,nullptr,0,(const uint8_t*)"",0);
+            check(hx(e,32)=="0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8",
+                  "BLAKE2b-256(\"\") matches hashlib.blake2b KAT");
+            uint8_t a32[32]; determ_blake2b(a32,32,nullptr,0,(const uint8_t*)"abc",3);
+            check(hx(a32,32)=="bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319",
+                  "BLAKE2b-256(\"abc\") matches hashlib.blake2b KAT");
+            determ_blake2b(k64,64,key,kl,msg,ml);
+            check(hx(k64,64)=="467b88348d04e56da92f5a3e1104c105f52d2ab78d7ca7a3254960a421f1c52a"
+                              "8179527f3078f36f6b580fa780006accb53de5c4542682a5f2e028931513bd31",
+                  "BLAKE2b-512 keyed matches hashlib.blake2b KAT");
+            determ_blake2b(k32,32,key,kl,msg,ml);
+            check(hx(k32,32)=="445f0e39ac1104d8617762a91cef6cfb95b0426f15d5ede9087cf4b7d07a1106",
+                  "BLAKE2b-256 keyed matches hashlib.blake2b KAT");
+        }
+
+        // (3) incremental update == one-shot (unkeyed-64, keyed-64, unkeyed-32, keyed-32).
+        {
+            std::vector<uint8_t> msg(250); for(size_t i=0;i<msg.size();i++) msg[i]=(uint8_t)(i*7+1);
+            uint8_t key[40]; for(int i=0;i<40;i++) key[i]=(uint8_t)(i*5+2);
+            struct { size_t outlen, keylen; } cfg[]={{64,0},{64,40},{32,0},{32,40}};
+            bool inc_ok=true;
+            for(auto&c:cfg){
+                uint8_t one[64], inc[64];
+                determ_blake2b(one, c.outlen, c.keylen?key:nullptr, c.keylen, msg.data(), msg.size());
+                determ_blake2b_ctx ctx; determ_blake2b_init(&ctx, c.outlen, c.keylen?key:nullptr, c.keylen);
+                size_t off=0; const size_t chunks[]={1,63,64,1,121};   // sums to 250
+                for(size_t ci=0; ci<5; ++ci){ determ_blake2b_update(&ctx, msg.data()+off, chunks[ci]); off+=chunks[ci]; }
+                determ_blake2b_final(&ctx, inc);
+                if(std::memcmp(one,inc,c.outlen)!=0) inc_ok=false;
+            }
+            check(inc_ok, "BLAKE2b incremental update == one-shot (unkeyed/keyed x 64/32-byte out)");
+        }
+
+        // (4) keyed != unkeyed; output-length is in the param block; parameter errors.
+        {
+            const char* m="determ"; size_t ml=6; uint8_t k[16]; for(int i=0;i<16;i++) k[i]=(uint8_t)(i+1);
+            uint8_t a[64], b[64], c32[32], junk[64];
+            determ_blake2b(a,64,nullptr,0,(const uint8_t*)m,ml);
+            determ_blake2b(b,64,k,16,(const uint8_t*)m,ml);
+            check(std::memcmp(a,b,64)!=0, "BLAKE2b keyed output differs from unkeyed");
+            determ_blake2b(c32,32,nullptr,0,(const uint8_t*)m,ml);
+            check(std::memcmp(a,c32,32)!=0, "BLAKE2b-256 is not a prefix of BLAKE2b-512 (output-length in param block)");
+            check(determ_blake2b(junk,0,nullptr,0,(const uint8_t*)m,ml)==-1, "BLAKE2b rejects outlen=0");
+            check(determ_blake2b(junk,65,nullptr,0,(const uint8_t*)m,ml)==-1, "BLAKE2b rejects outlen>64");
+            check(determ_blake2b(junk,64,k,65,(const uint8_t*)m,ml)==-1, "BLAKE2b rejects keylen>64");
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": blake2b-c99 "
+                  << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
+                  << " (libsodium-free C99 BLAKE2b vs OpenSSL EVP_blake2b512 + hashlib.blake2b KATs — RFC 7693; Argon2id prereq)\n";
         return fail==0 ? 0 : 1;
     }
 

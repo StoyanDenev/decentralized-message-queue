@@ -120,6 +120,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/frost/frost.c")
 # companion to the C99 Ed25519. Constant-time Montgomery ladder; validated
 # byte-equal vs OpenSSL EVP_PKEY_X25519 + RFC 7748 §6.1 KAT by `determ test-x25519-c99`.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6 prerequisite: BLAKE2b (RFC 7693), the hash
+# Argon2id is built on. Validated vs OpenSSL EVP_blake2b512 (unkeyed-64 core) +
+# python hashlib.blake2b reference vectors (keyed/var-len) by `determ test-blake2b-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/blake2/blake2b.c")
 
 add_executable(determ ${SOURCES})
 
