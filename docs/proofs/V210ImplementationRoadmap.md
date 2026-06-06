@@ -24,7 +24,13 @@ GO/NO-GO.
 > `determ test-sha2-c99` now runs 14/14 (FAST 149/149). SHA-512 is itself a
 > prerequisite for Ed25519 + the FROST H1..H5 hashes, and HMAC-SHA-256 already
 > backs RPC auth (S-001), so this is squarely on the libsodium-removal / v2.10
-> path. Remaining P0:
+> path. The §3.4 AEAD family has also begun: **C99 ChaCha20 (RFC 8439) shipped
+> (commit `21385ed`)** — `determ test-chacha20-c99` byte-equal vs OpenSSL
+> `EVP_chacha20` (FAST 150/150); Poly1305 + the AEAD combiner follow. (ChaCha20-
+> Poly1305 is chosen ahead of AES-256-GCM because it is constant-time by
+> construction — ARX + limb arithmetic — whereas AES-GCM's GHASH CT is the spec's
+> flagged hard part; AES-256-GCM, which the wallet envelope actually uses, follows
+> with the CT care it needs.) Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
 > the `determ` target, and reconcile the three backend-naming docs. Then the
 > Phase-A FROST primitives (keygen/sign/aggregate) become implementable.
