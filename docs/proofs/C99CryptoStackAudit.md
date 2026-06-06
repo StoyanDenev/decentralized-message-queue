@@ -798,10 +798,13 @@ integration follow-up.
 
 ## 8c. X25519 (`src/crypto/x25519/`, commit `bc87704`) — validation basis
 
-The C99 X25519 (RFC 7748) Diffie-Hellman primitive was **not** put through the
-four-dimension adversarial workflow that §6–§8b applied to the other modules; its
-assurance rests on three pillars instead, recorded here for coherence with the
-rest of the stack:
+The C99 X25519 (RFC 7748) Diffie-Hellman primitive **was** put through the
+four-dimension adversarial workflow (commit `c1caba5`): **1 confirmed finding —
+X25519-MEM-001 (High)**, the unwiped `inv25519` Fermat-exponentiation scratch,
+**remediated** by `determ_secure_zero(c)` after the result copy. (The auditor's
+suggested placement zeroized *before* the copy — which would zero the inverse — so
+it was verified + corrected.) Beyond that audit, its assurance rests on three
+pillars, recorded here for coherence with the rest of the stack:
 
 1. **Shared lineage with the §6-audited Ed25519.** The Montgomery ladder is the
    canonical TweetNaCl `crypto_scalarmult` over the *same* Curve25519 `gf[16]`
@@ -819,16 +822,16 @@ rest of the stack:
    intermediates are `determ_secure_zero`'d before return; the inversion exponent
    (p-2) is a public constant.
 
-A dedicated adversarial audit of `x25519.c` is a low-priority tracked follow-up
-(the cross-validation oracle + provenance make a hidden correctness defect
-improbable). No daemon call site consumes X25519 yet.
+The adversarial audit is now complete (the one finding above is remediated); no
+daemon call site consumes X25519 yet.
 
 ---
 
 ## 8d. BLAKE2b (`src/crypto/blake2/`, commit `695d4f4`) — validation basis
 
-The C99 BLAKE2b (RFC 7693) was likewise **not** run through the four-dimension
-adversarial workflow; its assurance, recorded for coherence:
+The C99 BLAKE2b (RFC 7693) was put through the four-dimension adversarial workflow
+(commit `c1caba5`): **0 confirmed findings** — both the correctness and memory/API
+dimensions came back clean. The cross-validation pillars below also stand:
 
 1. **OpenSSL is a complete oracle for the core.** `test-blake2b-c99` checks the
    unkeyed 64-byte digest byte-equal vs OpenSSL `EVP_blake2b512` over a fuzzed
@@ -848,15 +851,17 @@ adversarial workflow; its assurance, recorded for coherence:
    BLAKE2b-512); `outlen` 0/>64 and `keylen` >64 are rejected. Key material in the
    context is `determ_secure_zero`'d by `determ_blake2b_final`.
 
-A dedicated adversarial audit is a low-priority tracked follow-up. BLAKE2b is the
-prerequisite for the Argon2id password-hash (CRYPTO-C99-SPEC §3.6, not yet shipped);
-no daemon call site consumes BLAKE2b directly yet.
+The adversarial audit is now complete (0 findings). BLAKE2b is the prerequisite for
+the Argon2id password-hash (CRYPTO-C99-SPEC §3.6, now **shipped** — §8f); no daemon
+call site consumes BLAKE2b directly yet.
 
 ---
 
 ## 8e. XChaCha20-Poly1305 (`src/crypto/chacha20/xchacha20_poly1305.c`, commit `09849f6`) — validation basis
 
-The extended-nonce AEAD was not run through the adversarial workflow; its assurance:
+The extended-nonce AEAD was put through the four-dimension adversarial workflow
+(commit `c1caba5`): **0 confirmed findings** (correctness/CT + memory/API both
+clean). Its assurance:
 
 1. **It is a composition of already-validated parts.** XChaCha20-Poly1305 is
    *defined* as `ChaCha20-Poly1305-IETF(HChaCha20(key, N[0:16]), 0⁴‖N[16:24], …)`.
@@ -873,15 +878,22 @@ The extended-nonce AEAD was not run through the adversarial workflow; its assura
    the whole construction matches the spec. Decrypt rejects a tampered
    tag/ciphertext/AAD/nonce. The derived subkey is `determ_secure_zero`'d per call.
 
-A dedicated adversarial audit is a low-priority follow-up; no daemon call site
-consumes XChaCha20-Poly1305 yet.
+The adversarial audit is now complete (0 findings); no daemon call site consumes
+XChaCha20-Poly1305 yet.
 
 ---
 
 ## 8f. Argon2id (`src/crypto/argon2/argon2id.c`, commit `00e3efb`) — validation basis
 
-The memory-hard password hash was not run through the adversarial workflow; its
-assurance rests on a strong external oracle:
+The memory-hard password hash was put through the four-dimension adversarial
+workflow (commit `c1caba5`): **6 confirmed findings, all robustness/hardening
+(zero correctness defects)** — `outlen`/`pwdlen`/`saltlen` > 2^32-1 silently
+LE32-truncating in H0, and `p*SYNC_POINTS`/`8*p` overflowing uint32 for huge `p`
+(UB) — **all remediated** by a consolidated entry guard (`p <= UINT32_MAX/8` bounds
+both products; lengths rejected past 2^32-1), plus an expanded constant-time-posture
+note in the header. The `argon2id/correctness` dimension (incl. the p>1 cross-lane
+path not in the 12/12 grid) came back clean. Its assurance also rests on a strong
+external oracle:
 
 1. **Byte-exact vs libsodium `crypto_pwhash_argon2id`.** A standalone harness
    linking the build tree's `libsodium.a` matched `determ_argon2id` 12/12 over a
@@ -898,7 +910,7 @@ assurance rests on a strong external oracle:
    Argon2id hybrid keeps pass-0's first half data-independent (RFC 9106 §3.4). The
    block memory is `determ_secure_zero`'d before `free`.
 
-A dedicated adversarial audit is a low-priority follow-up (the libsodium byte-equal
-oracle makes a hidden correctness defect improbable). The intended consumer — a
-libsodium-free passphrase keyfile KDF — is the natural next integration step (the
-determ-wallet envelope's `crypto_pwhash` call site).
+The adversarial audit is now complete (6 hardening findings remediated, 0
+correctness defects). The intended consumer — a libsodium-free passphrase keyfile
+KDF — is the natural next integration step (the determ-wallet envelope's
+`crypto_pwhash` call site).
