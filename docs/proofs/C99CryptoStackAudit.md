@@ -663,3 +663,36 @@ message/scalar lengths, the ladder bit counter). No secret-dependent branch,
 index, or table lookup exists. The implementation choice — a table-free `gf[16]`
 form (vs `ref10`'s precomputed base table) — is what makes the whole module
 auditable in one pass.
+
+---
+
+## 7. FROST-Ed25519 module (`src/crypto/frost/frost.c`) — separate audit
+
+The C99 FROST-Ed25519 (RFC 9591; commits `92a85b5` keygen + `ee2d50c` threshold
+sign) was audited by the same adversarial workflow along **four dimensions**:
+Shamir/Lagrange correctness, FROST-signing correctness (vs the Ed25519 verify
+equation), constant-time, and memory-safety.
+
+**Verdict:** Shamir-Lagrange, constant-time, and memory-safety are **clean**; 0
+Critical / 0 High. The keygen Horner evaluation and Lagrange reconstruction were
+**hand-traced for t = 1, 2, 3, 4** (the self-consistency test only exercises t=3,
+so the t≤2 branches were verified by hand, not by the suite); the signing math was
+confirmed to satisfy `[z]B == R + [c]·group_pk` (so the aggregate is a valid
+Ed25519 signature) with no missing factor, R/c mismatch, or wrong Lagrange index;
+every secret scalar (shares, nonces, dealer secret/coeffs) flows only through the
+constant-time scalar/point ops and never into a hash buffer; and the
+`determ_frost_sign` allocation accounting (`rsize = 17 + t·65 + msglen`,
+`csize = 64 + msglen`) lands exactly at each buffer end, is `size_t`-overflow-safe,
+and frees on every path.
+
+**One confirmed Low finding — remediated in `55a0f34`:**
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 7.1 | Low (api_contract) | `determ_frost_sign` did not validate the signer set `xs`, unlike its sibling `determ_frost_reconstruct`. A repeated x-coordinate makes the Lagrange denominator `∏(x_j − x_i)` singular; `sc_invert` maps `inv(0)=0`, collapsing `lambda_i` to 0, so the function **silently produced a wrong signature** instead of an error. | Added the `[1,255]` range + pairwise-distinct guard before the signing math (returns -1, matching the header contract; the `[1,255]` bound also closes the memory-safety dimension's out-of-scope note on the `(u8)xs[i]` binding-factor-tag truncation). A new test asserts a duplicate set `{1,2,2}` is rejected. |
+
+**Documented non-goals (not findings):** the binding-factor encoding is
+self-consistent (signer ⇄ aggregator agree, validated by the aggregate verifying
+under OpenSSL) but **not yet byte-exact to the RFC 9591 ciphersuite vectors** —
+RFC-9591 interop vectors are a tracked follow-up — and the trusted-dealer keygen is
+to be superseded by the DKG ceremony (RFC 9591 §6.6).
