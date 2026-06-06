@@ -220,7 +220,8 @@ hash):
 - Spec + roadmap: [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.2/§3.8,
   [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 - Tests: `determ test-ed25519-c99` (10 assertions), `determ test-frost-c99`
-  (21 assertions incl. DKG), both in `tools/run_all.sh` (FAST).
+  (29 assertions incl. DKG + the distributed sign_partial/aggregate parity),
+  both in `tools/run_all.sh` (FAST).
 - References: Komlo–Goldberg 2020 (FROST); RFC 9591 (FROST ciphersuites); RFC 8032
   (Ed25519); Pedersen 1991 (DKG); Feldman 1987 (VSS); Shamir 1979 (secret sharing);
   Bellare–Neven 2006 / forking lemma (Schnorr PoK).
