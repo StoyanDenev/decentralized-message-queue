@@ -1,6 +1,6 @@
 # Determ: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
 
-**Version 2** · [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+**Version v1.1 (mainnet launch target)** · [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 > **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a DApp hosting platform — there is no smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types are TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE — that's it. The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
@@ -8,7 +8,14 @@
 >
 > **For protocol researchers / auditors:** see [`docs/WHITEPAPER-v1.x.md`](docs/WHITEPAPER-v1.x.md) for the standalone academic-style technical paper, and [`docs/proofs/`](docs/proofs/README.md) for the formal-verification track (F0 + FA1–FA12 analytic proofs, FB1–FB4 TLA+ specs).
 >
-> **What's new in v2:** sharding gains a `ShardingMode` switch — `CURRENT` keeps the v1 1-beacon-S-shards topology, while `EXTENDED` enables latency-grouped regional shard committees that drop in-shard block time to cluster-profile (~125-250 ms) on the public internet. Each profile (cluster / web / regional / global, plus sub-30 ms `_test` variants for CI) pins both a `chain_role` and a `sharding_mode`; there are no separate CLI overrides for either. Selective-abort defense is now commit-reveal (information-theoretic — no wall-clock delay function, no `delay_T` parameter to calibrate).
+> **v1.1 is THE LAUNCH** — single mainnet event, no test/main net before v1.1. All substrate bundles (per [`docs/proofs/IMPLEMENTATION-SEQUENCING.md`](docs/proofs/IMPLEMENTATION-SEQUENCING.md) Bundles 1-5) and application bundles (per [`docs/proofs/V1.1-PLAN.md`](docs/proofs/V1.1-PLAN.md) Bundles A-E) ship together at v1.1 genesis.
+>
+> **Three properties locked at v1.1 launch (immutable for chain lifetime):**
+> 1. **God protocol** (Szabo sense) — K-of-K mutual-distrust default; no trusted third party can be subverted. Default mode; §6.2 Quorum Liveness OPTIONAL is the only documented relaxation, opt-in at genesis.
+> 2. **Decentralized identity provider** — DSSO via T-OPAQUE; K-of-K committee jointly authenticates without any single member learning credentials.
+> 3. **Perfect forward secrecy** — v2.22 per-tx PFS via OTPK; amounts irrecoverable after consumption even under future master-key compromise.
+>
+> **No migrations post-launch.** Post-v1.1 the protocol is locked: no schema migrations, no wire-format breaks, no coordinated consensus-rule changes. In-protocol mechanisms (ROTATE_VIEW_MASTER, ROTATE_AUDIT_KEY, MANIFEST_UPDATE, PUBLISH_OTPK_BATCH) and additive-only changes (new optional fields, new tx types legacy validators fail-closed on) remain allowed. The constraint is load-bearing for **formal verifiability**: the FA1-FA12 analytic proofs, FB1-FB4 TLA+ specs, and ~100 `docs/proofs/` soundness theorems target a *fixed* protocol — migrations would force the entire verification track to rebuild against a new target. Lock once at v1.1, never touch, trust forever.
 
 ---
 

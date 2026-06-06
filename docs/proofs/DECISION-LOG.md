@@ -977,4 +977,39 @@ Plus user direction: ECONOMICS_CONFIG_GUIDANCE recommended config should use `bl
 
 ---
 
+---
+
+## 2026-06-06 (afternoon) — Formal-verifiability rationale for no-migrations + v1.1 three-property achievement frame
+
+### Why the no-migrations constraint is load-bearing, not stylistic
+
+**Question.** Earlier no-migrations decisions ([[Bundle release cadence + "no migrations" project constraint]] 2026-06-03 + [[v1.1-launch model reframe]] 2026-06-06) recorded the constraint but not its load-bearing rationale. Why is it absolute?
+
+**Answer (user direction 2026-06-06).** Formal verifiability requires an immutable target.
+
+The project carries ~100 `docs/proofs/` soundness theorems across FA1-FA12 analytic proof families + FB1-FB4 TLA+ specs + the S-series + the BFT/F2/CrossShard/LightClient/AccountHistory chains. Every one of these proofs is parameterized over a *specific* protocol — specific wire format, specific consensus rules, specific state transitions. A schema migration invalidates the proof targets and forces the entire verification track to rebuild against the new protocol.
+
+The decision is: lock the protocol at v1.1 launch, *never touch it*, and let the formal-verification track stabilize against a single immutable target. The trust property this delivers is qualitatively different from "the current version is verified": it is "the protocol that exists now is the protocol that will exist forever, and the proofs that hold now will hold forever."
+
+**Cascade.** Three properties are now load-bearing-locked at v1.1:
+
+1. **God protocol** (Szabo sense) — K-of-K mutual-distrust default mode. §6.2 Quorum Liveness OPTIONAL is the only documented relaxation, opt-in at genesis.
+2. **Decentralized identity provider** — DSSO via T-OPAQUE (Bundle A); identity primitives ship at launch and persist for chain lifetime.
+3. **Perfect forward secrecy** — v2.22 PRIV-6 per-tx PFS via OTPK; opt-in per-account, capability preserved chain-lifetime.
+
+These three are not just *features* shipping at v1.1 — they are *commitments* the formal-verification track now targets as immutable. The cost of breaking any of them post-launch is not "one migration" — it is the entire FA1-FA12 + FB1-FB4 + S-series track restart against a new protocol, plus the trust degradation of a moving target.
+
+**Files updated.**
+- `README.md` — version header "Version 2" → "Version v1.1"; abstract reframed for v1.1; new §0 introducing the three properties + formal-verifiability rationale
+- `V1.1-PLAN.md` — new §0 three-property achievement frame
+- `IMPLEMENTATION-SEQUENCING.md` — header amended with formal-verifiability rationale paragraph
+- `ECONOMICS_CONFIG_GUIDANCE.md §2.2` — K-of-K FROST assumption footnote (latent t-of-n disambiguation flag from prior crypto-vs-revenue analysis)
+- `Beaconless-v2-SPEC.md` + `AnonAddressDerivationMigration.md` — migration-language tightening: "migration from beacon-bound" → "genesis deployment-type choice" where applicable
+- Memory `dlt-no-migrations-constraint` — formal-verifiability rationale + three-property lock added
+- This DECISION-LOG entry
+
+**Generalization.** When a project constraint is reported as "stylistic" or "preferential" but turns out to be load-bearing for a downstream property (verification, audit, compliance), document the load-bearing-ness explicitly. Future-self (or future-team) will treat a stylistic constraint as negotiable and a load-bearing constraint as foreclosed — the difference matters under pressure. The no-migrations constraint moved from "we don't want to" → "we structurally cannot, because formal verification depends on it" through this clarification.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*

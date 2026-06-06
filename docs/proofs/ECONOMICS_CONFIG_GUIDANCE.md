@@ -68,6 +68,8 @@ The priority tip mechanism is pure validator compensation for prioritization ser
 
 **Composition with FLAT distribution.** v1.x already provides FLAT distribution mode (`subsidy_mode = 0 FLAT`) that splits `total_fees + subsidy_this_block` equally to K creators with dust to `creators[0]`. When subsidy ≈ 0, FLAT distribution applied to priority tips = exactly this policy. **No new mechanism needed for the distribution itself — the recommendation is operator policy on the existing FLAT mode.**
 
+**K-of-K assumption (locked at v1.1 under no-migrations).** The 1/K split assumes K-of-K signing — every registered committee member signs every block (the v1.1 default consensus mode per §6.2). FROST threshold signing is used in v2.10 for block randomness in K-of-K configuration (t = K) at v1.1 launch; the aggregate-is-Ed25519 property delivers the threshold guarantee without changing distribution semantics. Under v1.1 K-of-K consensus the distribution is unambiguous. If a future deployment ever opts into FROST t-of-n with t < K (not part of v1.1; would require design work outside the no-migrations boundary), the distribution rule would need disambiguation between "1/K to all registered members" (free-rider tolerance) and "1/t to actual signers" (signer-only reward). Flagged for forward-compat coherence; see `DECISION-LOG.md 2026-06-06 (afternoon)`.
+
 ### 2.3 Base fee floor + algorithmic adjustment + uncapped priority tip
 
 **Concrete config (requires new mechanism per §5.8):**

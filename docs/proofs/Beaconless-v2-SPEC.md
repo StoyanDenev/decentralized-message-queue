@@ -27,7 +27,7 @@ The artifacts produced by Beaconless v2:
 - **Direct shard-to-shard cross-shard receipt gossip** with Merkle inclusion proofs against source shard's state_root
 - **Per-shard SHARD_TIP observation** for decentralized merge-detection
 - **Cross-shard randomness aggregation** via per-epoch accumulator over signed shard randomness
-- **`AUTONOMOUS_SHARD` chain_role** for the new shard type, enabling migration from beacon-bound to beaconless deployments
+- **`AUTONOMOUS_SHARD` chain_role** for the new shard type, enabling beaconless-deployment selection at genesis (no in-chain migration from beacon-bound — deployment type is a permanent genesis choice per v1.1-launch + no-migrations)
 
 ---
 
@@ -278,7 +278,7 @@ Block {
 
 ### 3.4 New chain_role
 
-- `AUTONOMOUS_SHARD` — new chain_role distinguishing beaconless shards from beacon-bound ones. Existing `SHARD` role continues to interoperate with `BEACON` during migration; `AUTONOMOUS_SHARD` operates independently.
+- `AUTONOMOUS_SHARD` — new chain_role distinguishing beaconless shards from beacon-bound ones. Existing `SHARD` role continues to interoperate with `BEACON` within beacon-bound deployments; `AUTONOMOUS_SHARD` operates independently in beaconless deployments. No in-chain migration between deployment types — each chain is permanently one or the other from genesis.
 
 ---
 
@@ -346,7 +346,7 @@ Block {
 
 - Per-component unit tests via deterministic-simulation framework (S-035 Option 2 — recommended as Beaconless v2 prerequisite).
 - Integration tests for full beaconless deployment (boot 3-5 autonomous shards, verify cross-shard flow without beacon).
-- Migration test (beacon-bound → beaconless flag-day).
+- ~~Migration test (beacon-bound → beaconless flag-day)~~ — removed under v1.1-launch + no-migrations: deployment type is a genesis choice, no flag-day migration path exists.
 - Documentation refresh: PROTOCOL.md, README §sharding, V2-DESIGN.md cross-references.
 
 ---
@@ -361,7 +361,7 @@ Block {
 | Cross-shard receipt with Merkle proofs | 2-3 weeks |
 | Decentralized merge-detection | 1-2 weeks |
 | Cross-shard randomness aggregation | 1-2 weeks |
-| `AUTONOMOUS_SHARD` chain_role + migration | 1-2 weeks |
+| `AUTONOMOUS_SHARD` chain_role + interop (no migration; see §4.7) | ~1 week |
 | Tests + docs | 2 weeks |
 | **Total** | **~3-4 months** |
 
@@ -385,9 +385,7 @@ This is genuinely a multi-month architectural effort — significantly larger th
 
 *Mitigation.* Subset selection is deterministic given the gossip-observed arrival order at epoch boundary — every honest node sees roughly the same arrival order. Subset is recorded in block header for verification. Selective bias requires controlling gossip timing for K-of-K committee of multiple shards simultaneously — same threshold as Byzantine takeover.
 
-**Risk: Migration from beacon-bound to beaconless creates split-brain.** During migration, some shards are still beacon-bound while others are autonomous. Cross-shard receipts may not route correctly.
-
-*Mitigation.* Migration is per-deployment, not per-shard — entire deployment migrates simultaneously at a flag-day epoch boundary. Operator runs migration tooling that coordinates the cut-over. Documented as operator-led process, not gradual rollout.
+**~~Risk: Migration from beacon-bound to beaconless creates split-brain.~~** RESOLVED 2026-06-06 under v1.1-launch + no-migrations: there is no in-chain migration path. Deployment type (beacon-bound or beaconless) is a permanent genesis choice. Split-brain risk is structurally eliminated because no chain ever crosses the boundary. Operators wanting the other model stand up a new chain and migrate via application-level account-balance transfer (out-of-chain operation, not a chain-level migration risk).
 
 **Risk: Spec disagreement during review.** Q1 (Option A vs alternatives) is the highest-impact choice. If review prefers Option B (rotating hub) or Option D (sample-and-attest), substantial revision required.
 
@@ -397,7 +395,7 @@ This is genuinely a multi-month architectural effort — significantly larger th
 
 *Mitigation.* Q2.1 manifest validity: hard invariants consensus-enforced at `MANIFEST_UPDATE` apply path; rejected at validator-level. Manifest-construction tooling also enforces — invalid manifests cannot be built without errors. No operator override path for hard invariants. Soft performance thresholds emit construction-time warnings with `--acknowledge-soft-violations` flag for legitimate experimentation.
 
-**Rollback plan.** If Beaconless v2 ships with a bug discovered after deployment-wide migration:
+**Rollback plan.** If Beaconless v2 ships with a bug discovered after v1.1 launch in beaconless deployments:
 1. Governance pause across all shards.
 2. Revert flag-day; re-deploy beacon for the deployment.
 3. Re-attempt Beaconless v2 after bug fix; new flag-day height.
