@@ -126,6 +126,29 @@ void determ_frost_dkg_share(const uint8_t *poly, int t, int j, uint8_t share_out
 int determ_frost_dkg_verify_share(const uint8_t share[32], int j,
                                   const uint8_t *commitments, int t);
 
+/* ── Proactive Secret Sharing (PSS) refresh (Herzberg et al. 1995) ────────────
+ * Rotate every participant's secret share WITHOUT changing the group secret `s`
+ * or the group public key `[s]B`, defeating a mobile adversary that collects
+ * shares slowly across epochs. Each participant i deals a RANDOM degree-(t-1)
+ * "zero-hole" polynomial δ_i (δ_i(0)=0); participant j's refreshed share is
+ * `s'_j = s_j + Σ_i δ_i(j)` (caller-side scalar adds), which lies on `f+Δ` where
+ * `Δ=Σ_i δ_i` has `Δ(0)=0` — so `(f+Δ)(0)=s` is preserved. δ_i(j) is dealt and
+ * verified with the existing `determ_frost_dkg_share` / `determ_frost_dkg_verify_share`
+ * (the Feldman check is identical; C_0 is simply the identity point). */
+
+/* Emit the Feldman commitments C_k = [δ_k]B (`commitments`, t*32 bytes) for a
+ * zero-hole refresh polynomial `zeropoly` (t*32 bytes, δ_0 MUST be zero). Returns
+ * 0, or -1 if t<1 or the constant term is non-zero (a non-zero hole would shift
+ * the group secret). C_0 is the identity point — checked by the verifier below. */
+int determ_frost_pss_commit(const uint8_t *zeropoly, int t, uint8_t *commitments);
+
+/* Zero-hole proof: confirm a peer's C_0 (`commitment0`) is the identity point
+ * `[0]B` — i.e. that peer's polynomial has δ_0 = 0 and cannot shift the group
+ * secret. Returns 0 if C_0 is the identity, -1 otherwise. (The PSS analogue of
+ * the DKG proof-of-possession; the only fact to prove about the constant term is
+ * that it is zero, which is publicly checkable from C_0 alone.) */
+int determ_frost_pss_verify_commit(const uint8_t commitment0[32]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

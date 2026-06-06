@@ -11282,10 +11282,109 @@ int main(int argc, char** argv) {
             }
         }
 
+        // (6) PROACTIVE SECRET SHARING (PSS) refresh — rotate every share WITHOUT
+        //     changing the group secret or group public key. Each participant deals
+        //     a zero-hole polynomial delta_i (delta_i(0)=0); s'_j = s_j + Σ_i delta_i(j)
+        //     lies on (f+Δ) with (f+Δ)(0)=f(0)=s. A mobile adversary that captured
+        //     ≤ t-1 shares in the old epoch cannot combine them with refreshed ones.
+        {
+            const int t=3, n=5;
+            uint8_t secret[32], coeffs[2*32];
+            sc_from("pss-secret", secret);
+            sc_from("pss-coeff-1", coeffs);
+            sc_from("pss-coeff-2", coeffs+32);
+            uint8_t shares[5*32], group_pk[32], share_pks[5*32];
+            determ_frost_keygen_trusted(secret, coeffs, t, n, shares, group_pk, share_pks);
+
+            // each participant i deals a zero-hole refresh polynomial delta_i.
+            uint8_t zpoly[5][3*32], zcomm[5][3*32];
+            bool commit_ok=true, zero_hole_ok=true;
+            for(int i=0;i<n;i++){
+                for(int k=0;k<32;k++) zpoly[i][k]=0;                     // delta_i(0) = 0
+                sc_from(("pss-d-"+std::to_string(i)+"-1").c_str(), &zpoly[i][32]);
+                sc_from(("pss-d-"+std::to_string(i)+"-2").c_str(), &zpoly[i][64]);
+                if(determ_frost_pss_commit(zpoly[i], t, zcomm[i])!=0) commit_ok=false;
+                if(determ_frost_pss_verify_commit(&zcomm[i][0])!=0) zero_hole_ok=false;
+            }
+            check(commit_ok, "FROST PSS: zero-hole refresh commitments emitted");
+            check(zero_hole_ok, "FROST PSS: every refresh commitment C_0 is the identity (zero-hole proof)");
+
+            // negatives: a non-zero hole is rejected; a non-identity C_0 is rejected.
+            { uint8_t badpoly[3*32], scratch[3*32];
+              std::memcpy(badpoly, zpoly[0], 3*32); badpoly[0]=0x07;     // non-zero constant term
+              check(determ_frost_pss_commit(badpoly, t, scratch)==-1,
+                    "FROST PSS: pss_commit rejects a non-zero-hole polynomial");
+              check(determ_frost_pss_verify_commit(&share_pks[0])!=0,    // [s_1]B != identity
+                    "FROST PSS: pss_verify_commit rejects a non-identity C_0"); }
+
+            // each dealt refresh share passes the standard Feldman VSS check against
+            // its zero-hole commitments (the check sees C_0 = identity transparently).
+            bool refresh_vss=true;
+            for(int j=1;j<=n;j++) for(int i=0;i<n;i++){
+                uint8_t s[32]; determ_frost_dkg_share(zpoly[i], t, j, s);
+                if(determ_frost_dkg_verify_share(s, j, zcomm[i], t)!=0) refresh_vss=false;
+            }
+            check(refresh_vss, "FROST PSS: every dealt refresh share passes the Feldman VSS check");
+
+            // refreshed shares: s'_j = s_j + Σ_i delta_i(j).
+            uint8_t newshares[5*32];
+            for(int j=1;j<=n;j++){
+                uint8_t acc[32]; std::memcpy(acc, shares+(j-1)*32, 32); // s_j
+                for(int i=0;i<n;i++){ uint8_t s[32]; determ_frost_dkg_share(zpoly[i], t, j, s);
+                    determ_ed25519_sc_add(acc, acc, s); }
+                std::memcpy(newshares+(j-1)*32, acc, 32);
+            }
+            bool changed=false;
+            for(int q=0;q<n*32;q++) if(newshares[q]!=shares[q]) changed=true;
+            check(changed, "FROST PSS: refreshed shares differ from the originals");
+
+            // group secret preserved: any t refreshed shares reconstruct the ORIGINAL secret.
+            { int xs[3]={1,3,5}; uint8_t sub[3*32], rec[32];
+              for(int q=0;q<3;q++) std::memcpy(&sub[q*32], newshares+(xs[q]-1)*32, 32);
+              determ_frost_reconstruct(xs, sub, t, rec);
+              check(std::memcmp(rec, secret, 32)==0,
+                    "FROST PSS: t refreshed shares reconstruct the ORIGINAL secret (group key preserved)"); }
+            { int xs[3]={2,3,4}; uint8_t sub[3*32], rec[32];
+              for(int q=0;q<3;q++) std::memcpy(&sub[q*32], newshares+(xs[q]-1)*32, 32);
+              determ_frost_reconstruct(xs, sub, t, rec);
+              check(std::memcmp(rec, secret, 32)==0,
+                    "FROST PSS: a different refreshed subset reconstructs the same secret"); }
+
+            // proactive property: mixing OLD + NEW shares does NOT recover the secret.
+            { int xs[3]={1,2,3}; uint8_t sub[3*32], rec[32];
+              std::memcpy(&sub[0],  shares+0*32,    32);   // old s_1
+              std::memcpy(&sub[32], shares+1*32,    32);   // old s_2
+              std::memcpy(&sub[64], newshares+2*32, 32);   // NEW s'_3
+              determ_frost_reconstruct(xs, sub, t, rec);
+              check(std::memcmp(rec, secret, 32)!=0,
+                    "FROST PSS: mixing old + refreshed shares does NOT recover the secret (mobile-adversary defence)"); }
+
+            // load-bearing: a quorum of REFRESHED shares signs under the UNCHANGED group key.
+            { const char* m="pss beacon round 7"; size_t ml=std::strlen(m);
+              int signers[3]={1,3,5};
+              uint8_t sh[3*32], d3[3*32], e3[3*32], sig[64];
+              for(int q=0;q<3;q++){
+                  std::memcpy(&sh[q*32], newshares+(signers[q]-1)*32, 32);
+                  uint8_t hd[64],he[64];
+                  std::string ld="pss-sd-"+std::to_string(signers[q]);
+                  std::string le="pss-se-"+std::to_string(signers[q]);
+                  determ_sha512((const uint8_t*)ld.data(), ld.size(), hd);
+                  determ_sha512((const uint8_t*)le.data(), le.size(), he);
+                  determ_ed25519_sc_reduce64(hd,&d3[q*32]); determ_ed25519_sc_reduce64(he,&e3[q*32]); }
+              determ_frost_sign(signers, sh, d3, e3, 3, (const uint8_t*)m, ml, group_pk, sig);
+              bool ok=determ_ed25519_verify(group_pk,(const uint8_t*)m,ml,sig)==0;
+              EVP_PKEY* pub=EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519,nullptr,group_pk,32);
+              EVP_MD_CTX* mc=EVP_MD_CTX_new(); EVP_DigestVerifyInit(mc,nullptr,nullptr,nullptr,pub);
+              int ov=EVP_DigestVerify(mc,sig,64,(const uint8_t*)m,ml);
+              EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
+              check(ok && ov==1,
+                    "FROST PSS: a quorum of REFRESHED shares signs a valid Ed25519 sig under the UNCHANGED group key"); }
+        }
+
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": frost-c99 "
-                  << (fail==0 ? "all keygen + DKG + threshold-signing invariants held" : "had failures")
-                  << " (libsodium-free C99 FROST-Ed25519 — DKG/Shamir/Lagrange + a t-of-n aggregate that IS an Ed25519 sig; RFC 9591)\n";
+                  << (fail==0 ? "all keygen + DKG + PSS-refresh + threshold-signing invariants held" : "had failures")
+                  << " (libsodium-free C99 FROST-Ed25519 — DKG/Shamir/Lagrange + PSS share-refresh + a t-of-n aggregate that IS an Ed25519 sig; RFC 9591)\n";
         return fail==0 ? 0 : 1;
     }
 

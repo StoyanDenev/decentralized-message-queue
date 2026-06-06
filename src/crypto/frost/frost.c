@@ -335,3 +335,42 @@ int determ_frost_dkg_verify_share(const u8 share[32], int j, const u8 *commitmen
     determ_ed25519_point_basemul(lhs, share);                    /* [share] B */
     return (memcmp(lhs, acc, 32) == 0) ? 0 : -1;
 }
+
+/* ── Proactive Secret Sharing refresh (Herzberg et al. 1995) ──────────────────
+ * Rotates every participant's secret share WITHOUT changing the group secret
+ * `s` or the group public key `[s]B`, so a "mobile" adversary who collects up to
+ * t-1 shares in one epoch gains nothing once the epoch rolls over: the captured
+ * shares become inconsistent with the refreshed ones. Each participant i picks a
+ * RANDOM degree-(t-1) "zero-hole" polynomial δ_i with δ_i(0)=0; the refresh
+ * polynomial is Δ = Σ_i δ_i, also with Δ(0)=0. Participant j's new share is
+ *   s'_j = s_j + Σ_i δ_i(j) = f(j) + Δ(j) = (f+Δ)(j),
+ * and (f+Δ)(0) = f(0)+0 = s — unchanged. The shares move; the secret does not. */
+
+/* Emit the Feldman commitments C_k = [δ_k]B (t*32 bytes) for a zero-hole refresh
+ * polynomial `zeropoly` (t*32 bytes, δ_0 MUST be the zero scalar). Returns 0, or
+ * -1 if t<1 or the constant term is non-zero (a non-zero hole would shift the
+ * group secret — forbidden). C_0 is therefore the identity point, which any peer
+ * checks with determ_frost_pss_verify_commit. Shares are dealt + verified with
+ * the existing determ_frost_dkg_share / _verify_share (the Feldman check is
+ * identical; it simply sees C_0 = identity). */
+int determ_frost_pss_commit(const u8 *zeropoly, int t, u8 *commitments) {
+    int k;
+    if (t < 1) return -1;
+    for (k = 0; k < 32; k++) if (zeropoly[k] != 0) return -1;     /* δ_0 == 0 required */
+    for (k = 0; k < t; k++)
+        determ_ed25519_point_basemul(&commitments[k * 32], &zeropoly[k * 32]);
+    return 0;
+}
+
+/* The zero-hole proof: confirm a peer's commitment C_0 is the identity point
+ * (i.e. δ_0 = 0, so that peer cannot have shifted the group secret). Returns 0 if
+ * C_0 == [0]B, -1 otherwise. This is the PSS analogue of the DKG proof-of-
+ * possession — no Schnorr PoP is needed because the only fact to prove about the
+ * constant term is that it is zero, which is publicly checkable from C_0 alone. */
+int determ_frost_pss_verify_commit(const u8 commitment0[32]) {
+    u8 zero[32], id[32]; int k;
+    for (k = 0; k < 32; k++) zero[k] = 0;
+    determ_ed25519_point_basemul(id, zero);                       /* identity = [0]B */
+    for (k = 0; k < 32; k++) if (commitment0[k] != id[k]) return -1;
+    return 0;
+}
