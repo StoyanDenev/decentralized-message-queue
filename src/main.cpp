@@ -10959,6 +10959,28 @@ int main(int argc, char** argv) {
                                : "Ed25519 signature diverges from OpenSSL (mlen="+std::to_string(sg_at)+")");
         }
 
+        // (2b) extreme-length correctness: a large multi-block message exercises the
+        //      SHA-512 streaming inside sign/verify well past the grid above (which
+        //      tops out at 200 B). Cross-validate the signature vs OpenSSL at 100000 B.
+        {
+            const size_t ml=100000;
+            uint8_t seed[32]; for(int i=0;i<32;i++) seed[i]=(uint8_t)(i*13+7);
+            std::vector<uint8_t> msg(ml);
+            for(size_t i=0;i<ml;i++) msg[i]=(uint8_t)((i*131u+17u)&0xffu);
+            uint8_t my_pk[32], my_sig[64];
+            determ_ed25519_pubkey_from_seed(seed, my_pk);
+            determ_ed25519_sign(seed, my_pk, msg.data(), ml, my_sig);
+            EVP_PKEY* sk=EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519,nullptr,seed,32);
+            uint8_t o_sig[64]; size_t o_sig_len=64;
+            EVP_MD_CTX* mc=EVP_MD_CTX_new(); EVP_DigestSignInit(mc,nullptr,nullptr,nullptr,sk);
+            EVP_DigestSign(mc, o_sig, &o_sig_len, msg.data(), ml);
+            EVP_MD_CTX_free(mc); EVP_PKEY_free(sk);
+            check(o_sig_len==64 && std::memcmp(my_sig,o_sig,64)==0,
+                  "Ed25519 signature C99 == OpenSSL over a 100000-byte message (extreme-length)");
+            check(determ_ed25519_verify(my_pk, msg.data(), ml, my_sig)==0,
+                  "Ed25519 verify accepts the 100000-byte-message signature");
+        }
+
         // (3) verify: accept a valid signature; reject tampered tag / message / key.
         {
             uint8_t seed[32]; for (int i=0;i<32;i++) seed[i]=(uint8_t)(i*9+1);
@@ -11379,6 +11401,72 @@ int main(int argc, char** argv) {
               EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
               check(ok && ov==1,
                     "FROST PSS: a quorum of REFRESHED shares signs a valid Ed25519 sig under the UNCHANGED group key"); }
+        }
+
+        // (7) BROADER PARAMETER COVERAGE: the audit (§7) hand-traced keygen/Lagrange
+        //     for t=1..4 but the suite previously exercised only t=2/3. Exercise the
+        //     degenerate t=1 (single share == secret; a single-signer aggregate is a
+        //     plain Schnorr/Ed25519 sig) and a larger t=5/n=9 committee end-to-end.
+        {
+            auto sign_quorum_ok = [&](const uint8_t* shares, const uint8_t group_pk[32],
+                                      std::vector<int> signers, const char* msg)->bool{
+                int tt=(int)signers.size(); size_t ml=std::strlen(msg);
+                std::vector<uint8_t> sh(tt*32), d(tt*32), e(tt*32); uint8_t sig[64];
+                for(int q=0;q<tt;q++){
+                    std::memcpy(&sh[q*32], shares+(signers[q]-1)*32, 32);
+                    uint8_t hd[64],he[64];
+                    std::string ld="cov-d-"+std::to_string(signers[q])+"-"+std::to_string(tt);
+                    std::string le="cov-e-"+std::to_string(signers[q])+"-"+std::to_string(tt);
+                    determ_sha512((const uint8_t*)ld.data(), ld.size(), hd);
+                    determ_sha512((const uint8_t*)le.data(), le.size(), he);
+                    determ_ed25519_sc_reduce64(hd,&d[q*32]); determ_ed25519_sc_reduce64(he,&e[q*32]); }
+                if (determ_frost_sign(signers.data(), sh.data(), d.data(), e.data(), tt,
+                                      (const uint8_t*)msg, ml, group_pk, sig)!=0) return false;
+                if (determ_ed25519_verify(group_pk,(const uint8_t*)msg,ml,sig)!=0) return false;
+                EVP_PKEY* pub=EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519,nullptr,group_pk,32);
+                EVP_MD_CTX* mc=EVP_MD_CTX_new(); EVP_DigestVerifyInit(mc,nullptr,nullptr,nullptr,pub);
+                int ov=EVP_DigestVerify(mc,sig,64,(const uint8_t*)msg,ml);
+                EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
+                return ov==1;
+            };
+            // t=1 degenerate: f(x)=secret, every share == secret.
+            {
+                const int t=1, n=3;
+                uint8_t secret[32], dummy[32];          // t-1 = 0 coeffs; pass a valid ptr
+                sc_from("cov-t1-secret", secret); sc_from("cov-t1-dummy", dummy);
+                uint8_t shares[3*32], group_pk[32], share_pks[3*32];
+                check(determ_frost_keygen_trusted(secret, dummy, t, n, shares, group_pk, share_pks)==0,
+                      "FROST cov: keygen(t=1,n=3) succeeds");
+                int xs1[1]={2}; uint8_t sub[32], rec[32];
+                std::memcpy(sub, shares+1*32, 32);
+                determ_frost_reconstruct(xs1, sub, 1, rec);
+                check(std::memcmp(rec, secret, 32)==0, "FROST cov: t=1 reconstruct == secret (degenerate)");
+                check(sign_quorum_ok(shares, group_pk, {3}, "cov t=1 beacon"),
+                      "FROST cov: t=1 single-signer aggregate verifies as Ed25519");
+            }
+            // t=5, n=9 large committee.
+            {
+                const int t=5, n=9;
+                uint8_t secret[32], coeffs[4*32];
+                sc_from("cov-t5-secret", secret);
+                for(int k=0;k<t-1;k++) sc_from(("cov-t5-c"+std::to_string(k)).c_str(), coeffs+k*32);
+                uint8_t shares[9*32], group_pk[32], share_pks[9*32];
+                check(determ_frost_keygen_trusted(secret, coeffs, t, n, shares, group_pk, share_pks)==0,
+                      "FROST cov: keygen(t=5,n=9) succeeds");
+                bool spk=true; for(int i=0;i<n;i++){ uint8_t ee[32]; determ_ed25519_point_basemul(ee, shares+i*32);
+                    if(std::memcmp(ee, share_pks+i*32,32)!=0) spk=false; }
+                check(spk, "FROST cov: t=5/n=9 [s_i]B == share_pk_i for all 9");
+                int xs5[5]={1,3,5,7,9}; uint8_t sub[5*32], rec[32];
+                for(int q=0;q<5;q++) std::memcpy(&sub[q*32], shares+(xs5[q]-1)*32, 32);
+                determ_frost_reconstruct(xs5, sub, 5, rec);
+                check(std::memcmp(rec, secret, 32)==0, "FROST cov: t=5/n=9 reconstruct {1,3,5,7,9} == secret");
+                int xs5b[5]={2,4,6,8,9}; uint8_t sub2[5*32], rec2[32];
+                for(int q=0;q<5;q++) std::memcpy(&sub2[q*32], shares+(xs5b[q]-1)*32, 32);
+                determ_frost_reconstruct(xs5b, sub2, 5, rec2);
+                check(std::memcmp(rec2, secret, 32)==0, "FROST cov: a different t=5 subset reconstructs the same secret");
+                check(sign_quorum_ok(shares, group_pk, {2,4,6,8,9}, "cov t=5 beacon"),
+                      "FROST cov: t=5/n=9 aggregate verifies as Ed25519 (C99 + OpenSSL)");
+            }
         }
 
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
