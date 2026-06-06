@@ -25,6 +25,24 @@ void determ_chacha20(const uint8_t key[32], uint32_t counter,
                      const uint8_t nonce[12],
                      const uint8_t *in, size_t len, uint8_t *out);
 
+/* Poly1305 one-time authenticator (RFC 8439 §2.5). `key` = r(16) || s(16); the
+ * 16-byte tag is written to `tag`. Each key MUST be used for at most one message. */
+void determ_poly1305(const uint8_t key[32], const uint8_t *msg, size_t msglen,
+                     uint8_t tag[16]);
+
+/* ChaCha20-Poly1305 AEAD (RFC 8439 §2.8). key=32, nonce=12, tag=16. encrypt writes
+ * `ptlen` ciphertext bytes to `ct` + the tag. decrypt verifies the tag with a
+ * constant-time compare and returns 0 on success (writing `ctlen` plaintext bytes
+ * to `pt`) or -1 on authentication failure (and writes nothing). */
+void determ_chacha20_poly1305_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                                      const uint8_t *aad, size_t aadlen,
+                                      const uint8_t *pt, size_t ptlen,
+                                      uint8_t *ct, uint8_t tag[16]);
+int  determ_chacha20_poly1305_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                                      const uint8_t *aad, size_t aadlen,
+                                      const uint8_t *ct, size_t ctlen,
+                                      const uint8_t tag[16], uint8_t *pt);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

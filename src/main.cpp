@@ -10820,10 +10820,77 @@ int main(int argc, char** argv) {
             check(std::memcmp(a,b,64)!=0, "ChaCha20 keystream depends on the block counter");
         }
 
+        // (4) Poly1305 RFC 8439 §2.5.2 known-answer vector.
+        {
+            auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+                std::string s; for(size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s; };
+            uint8_t pkey[32] = {0x85,0xd6,0xbe,0x78,0x57,0x55,0x6d,0x33,0x7f,0x44,0x52,0xfe,0x42,0xd5,0x06,0xa8,
+                                0x01,0x03,0x80,0x8a,0xfb,0x0d,0xb2,0xfd,0x4a,0xbf,0xf6,0xaf,0x41,0x49,0xf5,0x1b};
+            const char* pmsg = "Cryptographic Forum Research Group";
+            uint8_t ptag[16];
+            determ_poly1305(pkey, (const uint8_t*)pmsg, std::strlen(pmsg), ptag);
+            check(hx(ptag,16)=="a8061dc1305136c6c22b8baf0c0127a9", "Poly1305 matches RFC 8439 §2.5.2 KAT");
+        }
+
+        // (5) ChaCha20-Poly1305 AEAD cross-validation vs OpenSSL EVP_chacha20_poly1305
+        // (ciphertext AND tag) over a (plaintext,aad)-length grid.
+        {
+            bool aead_ok = true; long aat = -1;
+            const size_t ptl[]  = {0,1,16,63,64,65,128,200};
+            const size_t aadl[] = {0,1,12,16,20};
+            for (size_t pi=0; pi<sizeof(ptl)/sizeof(ptl[0]) && aead_ok; ++pi)
+            for (size_t ai=0; ai<sizeof(aadl)/sizeof(aadl[0]) && aead_ok; ++ai) {
+                size_t pl=ptl[pi], al=aadl[ai];
+                uint8_t key[32], nonce[12];
+                for(int i=0;i<32;i++) key[i]=(uint8_t)((i*41u+pi*7u+ai+1u)&0xffu);
+                for(int i=0;i<12;i++) nonce[i]=(uint8_t)((i*17u+pi+ai*3u+2u)&0xffu);
+                std::vector<uint8_t> pt(pl), aad(al), ct(pl), octt(pl);
+                for(size_t i=0;i<pl;i++) pt[i]=(uint8_t)((i*23u+pi+5u)&0xffu);
+                for(size_t i=0;i<al;i++) aad[i]=(uint8_t)((i*31u+ai+9u)&0xffu);
+                uint8_t mytag[16], otag[16];
+                determ_chacha20_poly1305_encrypt(key,nonce, al?aad.data():nullptr,al,
+                                                 pl?pt.data():nullptr,pl, ct.data(), mytag);
+                EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+                int outl=0;
+                EVP_EncryptInit_ex(c, EVP_chacha20_poly1305(), nullptr, nullptr, nullptr);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr);
+                EVP_EncryptInit_ex(c, nullptr, nullptr, key, nonce);
+                if (al) EVP_EncryptUpdate(c, nullptr, &outl, aad.data(), (int)al);
+                if (pl) EVP_EncryptUpdate(c, octt.data(), &outl, pt.data(), (int)pl);
+                EVP_EncryptFinal_ex(c, octt.data() + (pl?(size_t)outl:0), &outl);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 16, otag);
+                EVP_CIPHER_CTX_free(c);
+                bool ctmatch  = (pl==0) || (std::memcmp(ct.data(), octt.data(), pl)==0);
+                bool tagmatch = std::memcmp(mytag, otag, 16)==0;
+                if (!ctmatch || !tagmatch){ aead_ok=false; aat=(long)(pl*100+al); }
+            }
+            check(aead_ok, aead_ok ? "ChaCha20-Poly1305 AEAD C99 == OpenSSL EVP_chacha20_poly1305 (ciphertext + tag)"
+                                   : "AEAD diverges from OpenSSL (pl*100+al=" + std::to_string(aat) + ")");
+        }
+
+        // (6) AEAD decrypt round-trip + tamper rejection (tag + ciphertext).
+        {
+            uint8_t key[32], nonce[12];
+            for(int i=0;i<32;i++) key[i]=(uint8_t)(i*3+7);
+            for(int i=0;i<12;i++) nonce[i]=(uint8_t)(i+1);
+            const char* msg = "the quick brown fox jumps"; size_t pl=std::strlen(msg);
+            uint8_t aad[5]={1,2,3,4,5};
+            std::vector<uint8_t> ct(pl), back(pl); uint8_t tag[16];
+            determ_chacha20_poly1305_encrypt(key,nonce, aad,5, (const uint8_t*)msg,pl, ct.data(), tag);
+            int r = determ_chacha20_poly1305_decrypt(key,nonce, aad,5, ct.data(),pl, tag, back.data());
+            check(r==0 && std::memcmp(back.data(), msg, pl)==0, "AEAD decrypt round-trips the plaintext");
+            uint8_t badtag[16]; std::memcpy(badtag,tag,16); badtag[0]^=0x01;
+            check(determ_chacha20_poly1305_decrypt(key,nonce, aad,5, ct.data(),pl, badtag, back.data())==-1,
+                  "AEAD decrypt rejects a tampered tag");
+            std::vector<uint8_t> ct2=ct; if(pl) ct2[0]^=0x01;
+            check(determ_chacha20_poly1305_decrypt(key,nonce, aad,5, ct2.data(),pl, tag, back.data())==-1,
+                  "AEAD decrypt rejects tampered ciphertext");
+        }
+
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": chacha20-c99 "
-                  << (fail==0 ? "all cross-validation matched" : "had failures")
-                  << " (libsodium-free C99 ChaCha20 vs OpenSSL EVP_chacha20 — the §Q9 gate)\n";
+                  << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
+                  << " (libsodium-free C99 ChaCha20 + Poly1305 + AEAD vs OpenSSL — the §Q9 gate)\n";
         return fail==0 ? 0 : 1;
     }
 
