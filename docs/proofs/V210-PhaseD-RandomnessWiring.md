@@ -50,15 +50,25 @@ bias documented as FA3 / S-006.
 
 ### What FROST changes — and the discipline it requires
 
-The win FROST gives *for free* is **robustness/liveness**, not automatic
-bias-resistance. In a `(t,K)` threshold scheme the key is Shamir-shared, so any `t`
-honest members produce a valid signature: a withholding minority `< K−t` can neither
-halt the round (the remaining `≥ t` still sign) nor change the value of a signing
-session whose round-1 commitments are already fixed (`FrostThresholdSoundness.md`
-T-1.1 — every aggregator derives the same `(R, z)` from a *fixed* commitment set, so a
-member cannot alter the session output by withholding its round-2 partial). That alone
-removes the **halt/veto** lever the v1 commit-reveal exposes (where one missing reveal
-aborts the K-of-K round).
+The win FROST gives *for free* is **liveness**, not automatic bias-resistance — and
+even that liveness is weaker than "t-of-n just works." Plain FROST is **not
+drop-tolerant within a fixed signing set**: aggregation needs a partial from *every*
+member of the chosen set `S` (a missing signer's private nonces `d_i, e_i` can't be
+interpolated from the public commitments), so a member that commits in round 1 but
+withholds its round-2 partial *stalls that attempt*. The protocol must then re-select a
+different set `S'` and re-run round 1 — which, because `R = Σ_{i∈S'}(Dᵢ+[ρᵢ]Eᵢ)`
+rebinds to `S'`'s commitments and fresh nonces, produces a **different `R`**. So FROST
+tolerates a withholding minority `< K−t` only in the sense that the survivors can still
+produce *a* valid signature (a re-rolled one with a different `R`) — removing the v1
+**halt/veto** lever — **not** in the sense that any `t` reconstruct the *same* value.
+(Threshold **BLS** is the scheme that genuinely absorbs up to `n−t` withholders: its
+partials `σᵢ = [sᵢ]H(m)` Lagrange-interpolate to the *same unique* `σ` from any
+`t`-subset; see below.) What `FrostThresholdSoundness.md` T-1.1 actually guarantees is
+narrower still: once a session's round-1 commitment set is *fixed*, a member that has
+already committed cannot *change* that session's `(R, z)` by withholding its round-2
+partial. (Robustness wrappers like **ROAST** add liveness by multiplexing overlapping
+signing sessions, but each completing session still yields its own `R` — they fix
+liveness, not output-determinism.)
 
 **But raw `R` is not an unbiasable beacon, and FROST is not BLS.** A FROST/Schnorr
 signature is *randomized and non-unique*: `R = Σ_{i∈S}(Dᵢ + [ρᵢ]Eᵢ)` with
@@ -84,6 +94,44 @@ already has (handled economically by suspension slashing). Net: FROST's concrete
 over today's commit-reveal beacon is **availability** (a withholding minority can't
 stall the round); matching or beating its *bias* guarantee is a design obligation, not
 a free consequence of using a threshold signature.
+
+### Why FROST rather than a *disciplined* MPDH / PVSS / VDF beacon?
+
+The bias-closing discipline is **largely primitive-agnostic** — most of it is *not*
+FROST-specific, and the v1 commit-reveal beacon already has the core of it:
+
+- **Anti-grinding (hiding commit)** — Determ's v1 already does this: a hiding
+  `dh_input = SHA256(s_i ‖ pk_i)` revealed only in Phase 2 makes every other secret
+  look uniform at decision time (FA3 / `SelectiveAbort.md` T-3, information-theoretic
+  under SHA-256 preimage resistance). This is the *same* role FROST's round-1 nonce
+  commitment plays. No FROST advantage.
+- **Canonical contributor set** — trivially applies to any committee beacon (the
+  height-deterministic committee is already fixed). No FROST advantage.
+- **VDF / delay hardening** (RANDAO+VDF, Unicorn) — makes the output un-evaluable
+  before the abort deadline so the last revealer can't condition on it. **Primitive-
+  agnostic** — bolts onto an MPDH/commit-reveal seed exactly as onto a FROST aggregate.
+  Determ *deliberately abandoned* the delay-function route (S-009: an iterated-SHA-256
+  "VDF" is only as strong as the honest/ASIC hardware asymmetry, ~10¹⁰×, which collapses
+  the margin) in favour of the hiding-commit structural argument.
+- **PVSS reconstruction** (SCRAPE, HydRand, RandShare) — secret-share each contribution
+  so a withholder's value is *reconstructed* by any `t` honest members → withholding
+  gains nothing. **Applies to MPDH** — but adding it *turns the contributory beacon into
+  a per-round threshold scheme*, paying a DKG-class `O(n²)` dealing+verification cost
+  **every round**, versus FROST amortising one DKG (+ PSS refresh, T-6/T-7) across a
+  whole epoch.
+
+So FROST's genuine, **non-replicable** edge over a disciplined MPDH beacon is **not**
+bias-resistance — it is (1) **amortisation** (one epoch-DKG + cheap 2-round signing
+per block, vs per-round PVSS dealing) and (2) a **succinct, O(1)-verifiable** single
+Ed25519 signature under a fixed `PK` (vs an `O(n)` re-check of all contributions). The
+*one* bias property exclusive to a keyed scheme is **signature uniqueness** — a
+deterministic output from public inputs + a pinned key — which makes the beacon
+unbiasable *by construction*. **BLS** (drand/DFINITY) has it; **FROST/Schnorr does not**
+(randomized nonces); and a **contributory MPDH beacon can *never* have it** — its output
+is by definition a function of fresh per-round entropy, not of public inputs alone. That
+impossibility is exactly why both FROST-as-beacon and commit-reveal need the §1
+discipline, and why a true *unbiasable-by-construction* beacon means moving to a unique
+threshold-VRF/BLS construction.
 
 ---
 
