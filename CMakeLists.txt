@@ -112,6 +112,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c")
 # on the C99 SHA-512. Exercised by `determ test-ed25519-c99` (byte-equal vs
 # OpenSSL EVP_PKEY_ED25519 + RFC 8032 KATs).
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c")
+# v2.10 Phase A / CRYPTO-C99-SPEC §3.2 + RFC 9591: FROST-Ed25519 threshold
+# signatures on the C99 Ed25519 group ops. Keygen (Shamir over the scalar field +
+# Lagrange) + threshold sign. Exercised by `determ test-frost-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/frost/frost.c")
 
 add_executable(determ ${SOURCES})
 

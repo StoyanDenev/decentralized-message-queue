@@ -346,3 +346,96 @@ int determ_ed25519_verify(const u8 pk[32],
     free(buf);
     return rc;
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * FROST-support primitives: scalar arithmetic mod L + Edwards group ops, exposed
+ * so the C99 FROST-Ed25519 layer (src/crypto/frost/) can build threshold keygen /
+ * signing on the same field/group code this module already validates. Scalars are
+ * 32-byte little-endian, reduced mod L; points are 32-byte compressed encodings.
+ * Declared in ed25519_group.h. See frost.c for the consumer.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+static const u8 SC_ONE[32] = { 1 };
+/* L-1 (little-endian): negate via  -b = b*(L-1) mod L */
+static const u8 SC_LM1[32] = {
+    0xec,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10 };
+/* L-2 (little-endian): inversion exponent (a^(L-2) = a^-1 mod L, Fermat) */
+static const u8 SC_LM2[32] = {
+    0xeb,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10 };
+
+/* out = (a*b + c) mod L. */
+void determ_ed25519_sc_muladd(u8 out[32], const u8 a[32], const u8 b[32], const u8 c[32]) {
+    i64 x[64]; int i, j;
+    for (i = 0; i < 64; i++) x[i] = 0;
+    for (i = 0; i < 32; i++) for (j = 0; j < 32; j++) x[i + j] += (i64)a[i] * (i64)b[j];
+    for (i = 0; i < 32; i++) x[i] += (i64)c[i];
+    modL(out, x);
+}
+
+void determ_ed25519_sc_mul(u8 out[32], const u8 a[32], const u8 b[32]) {
+    u8 z[32]; int i; for (i = 0; i < 32; i++) z[i] = 0;
+    determ_ed25519_sc_muladd(out, a, b, z);
+}
+void determ_ed25519_sc_add(u8 out[32], const u8 a[32], const u8 b[32]) {
+    determ_ed25519_sc_muladd(out, a, SC_ONE, b);     /* a*1 + b */
+}
+void determ_ed25519_sc_sub(u8 out[32], const u8 a[32], const u8 b[32]) {
+    determ_ed25519_sc_muladd(out, b, SC_LM1, a);     /* b*(L-1) + a = a - b mod L */
+}
+
+void determ_ed25519_sc_reduce64(const u8 in[64], u8 out[32]) {
+    u8 t[64]; int i; for (i = 0; i < 64; i++) t[i] = in[i];
+    reduce(t);                                       /* 64-byte -> 32-byte mod L */
+    for (i = 0; i < 32; i++) out[i] = t[i];
+}
+
+/* out = a^-1 mod L = a^(L-2). Branches on the PUBLIC constant exponent L-2, not on
+ * the base, so there is no secret-dependent control flow w.r.t. `a`. inv(0)=0. */
+void determ_ed25519_sc_invert(u8 out[32], const u8 a[32]) {
+    u8 r[32], base[32]; int i;
+    for (i = 0; i < 32; i++) { r[i] = SC_ONE[i]; base[i] = a[i]; }
+    for (i = 255; i >= 0; i--) {
+        determ_ed25519_sc_mul(r, r, r);                          /* square */
+        if ((SC_LM2[i >> 3] >> (i & 7)) & 1) determ_ed25519_sc_mul(r, r, base);
+    }
+    for (i = 0; i < 32; i++) out[i] = r[i];
+}
+
+void determ_ed25519_sc_set_small(u8 out[32], uint64_t v) {
+    int i; for (i = 0; i < 32; i++) out[i] = 0;
+    for (i = 0; i < 8; i++) out[i] = (u8)(v >> (8 * i));   /* v < L for the small x-coords */
+}
+
+/* Positive point decompress (the actual point, not the negation unpackneg yields). */
+static int point_unpack(gf r[4], const u8 p[32]) {
+    gf t, chk, num, den, den2, den4, den6;
+    set25519(r[2], gf1);
+    unpack25519(r[1], p);
+    S(num, r[1]); M(den, num, D); Z(num, num, r[2]); A(den, r[2], den);
+    S(den2, den); S(den4, den2); M(den6, den4, den2);
+    M(t, den6, num); M(t, t, den);
+    pow2523(t, t);
+    M(t, t, num); M(t, t, den); M(t, t, den); M(r[0], t, den);
+    S(chk, r[0]); M(chk, chk, den);
+    if (neq25519(chk, num)) M(r[0], r[0], I);
+    S(chk, r[0]); M(chk, chk, den);
+    if (neq25519(chk, num)) return -1;
+    if (par25519(r[0]) != (p[31] >> 7)) Z(r[0], gf0, r[0]);   /* != => positive point */
+    M(r[3], r[0], r[1]);
+    return 0;
+}
+
+void determ_ed25519_point_basemul(u8 out[32], const u8 s[32]) {
+    gf P[4]; scalarbase(P, s); pack(out, P);
+}
+int determ_ed25519_point_mul(u8 out[32], const u8 s[32], const u8 p[32]) {
+    gf P[4], R[4]; if (point_unpack(P, p)) return -1; scalarmult(R, P, s); pack(out, R); return 0;
+}
+int determ_ed25519_point_add(u8 out[32], const u8 a[32], const u8 b[32]) {
+    gf A4[4], B4[4];
+    if (point_unpack(A4, a)) return -1;
+    if (point_unpack(B4, b)) return -1;
+    add(A4, B4); pack(out, A4); return 0;
+}

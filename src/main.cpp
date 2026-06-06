@@ -16,6 +16,8 @@
 #include <determ/crypto/chacha20/chacha20.h>  // v2.10 Phase 0: C99-native ChaCha20 (§3.4)
 #include <determ/crypto/aes/aes.h>            // v2.10 Phase 0: C99-native AES-256 (§3.5)
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
+#include <determ/crypto/ed25519/ed25519_group.h> // v2.10 Phase A: Ed25519 scalar/group prims
+#include <determ/crypto/frost/frost.h>        // v2.10 Phase A: C99-native FROST-Ed25519 (RFC 9591)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -420,6 +422,10 @@ In-process tests (deterministic, no network):
                                               Ed25519 (RFC 8032) byte-equal vs
                                               OpenSSL EVP_PKEY_ED25519 + the RFC
                                               8032 §7.1 KAT (§3.2; FROST prereq)
+  determ test-frost-c99                       v2.10 Phase A: libsodium-free C99
+                                              FROST-Ed25519 keygen — Shamir +
+                                              Lagrange over the Ed25519 scalar
+                                              field (§3.2 / RFC 9591)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -10996,6 +11002,90 @@ int main(int argc, char** argv) {
                   << ": ed25519-c99 "
                   << (fail==0 ? "all cross-validation + RFC 8032 KAT matched" : "had failures")
                   << " (libsodium-free C99 Ed25519 vs OpenSSL — the §Q9 gate; constant-time gf[16] ladder)\n";
+        return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-frost-c99") {
+        // v2.10 Phase A / CRYPTO-C99-SPEC §3.2 + RFC 9591: validate the libsodium-
+        // free C99 FROST-Ed25519 keygen layer — the Ed25519 scalar/group primitives
+        // (sc mul/add/sub/invert + point base/add/mul) and Shamir-over-the-scalar-
+        // field + Lagrange reconstruction. The reconstruction round-trip exercises
+        // the whole scalar field end-to-end; the threshold property (any t-subset
+        // recovers the same secret) is the load-bearing FROST keygen invariant.
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto sc_from = [&](const char* label, uint8_t out[32]) {
+            uint8_t h[64];
+            determ_sha512((const uint8_t*)label, std::strlen(label), h);
+            determ_ed25519_sc_reduce64(h, out);
+        };
+
+        // (1) group homomorphism: [a]B+[b]B == [a+b]B and [k]([a]B) == [k*a]B.
+        {
+            uint8_t a[32],b[32],k[32],ab[32],ka[32];
+            uint8_t Ba[32],Bb[32],Bab[32],sum[32],Bka[32],kBa[32];
+            sc_from("frost-a", a); sc_from("frost-b", b); sc_from("frost-k", k);
+            determ_ed25519_sc_add(ab, a, b);
+            determ_ed25519_point_basemul(Ba, a);
+            determ_ed25519_point_basemul(Bb, b);
+            determ_ed25519_point_basemul(Bab, ab);
+            determ_ed25519_point_add(sum, Ba, Bb);
+            check(std::memcmp(sum, Bab, 32)==0, "FROST group: [a]B + [b]B == [a+b]B");
+            determ_ed25519_sc_mul(ka, k, a);
+            determ_ed25519_point_basemul(Bka, ka);
+            determ_ed25519_point_mul(kBa, k, Ba);
+            check(std::memcmp(Bka, kBa, 32)==0, "FROST group: [k]([a]B) == [k*a]B");
+        }
+
+        // (2) scalar-field sanity: a * a^-1 == 1.
+        {
+            uint8_t a[32], ai[32], one[32];
+            sc_from("frost-inv", a);
+            determ_ed25519_sc_invert(ai, a);
+            determ_ed25519_sc_mul(one, a, ai);
+            uint8_t expect_one[32]={0}; expect_one[0]=1;
+            check(std::memcmp(one, expect_one, 32)==0, "FROST scalar: a * a^-1 == 1 mod L");
+        }
+
+        // (3) trusted-dealer keygen + Lagrange reconstruction (t=3, n=5).
+        {
+            const int t=3, n=5;
+            uint8_t secret[32], coeffs[2*32];
+            sc_from("frost-secret", secret);
+            sc_from("frost-coeff-1", coeffs);
+            sc_from("frost-coeff-2", coeffs+32);
+            uint8_t shares[5*32], group_pk[32], share_pks[5*32];
+            check(determ_frost_keygen_trusted(secret, coeffs, t, n, shares, group_pk, share_pks)==0,
+                  "FROST keygen(t=3,n=5) succeeds");
+            // share-pubkey consistency
+            bool spk=true; for(int i=0;i<n;i++){ uint8_t e[32]; determ_ed25519_point_basemul(e, shares+i*32);
+                if(std::memcmp(e, share_pks+i*32, 32)!=0) spk=false; }
+            check(spk, "FROST keygen: [s_i]B == share_pk_i for all i");
+            // group key ties to secret
+            uint8_t Bs[32]; determ_ed25519_point_basemul(Bs, secret);
+            check(std::memcmp(Bs, group_pk, 32)==0, "FROST keygen: [secret]B == group_pk");
+            // any t-subset reconstructs the secret
+            auto recon = [&](std::vector<int> xs)->bool{
+                std::vector<uint8_t> sub(xs.size()*32);
+                for(size_t q=0;q<xs.size();q++) std::memcpy(&sub[q*32], shares+(xs[q]-1)*32, 32);
+                uint8_t out[32];
+                if (determ_frost_reconstruct(xs.data(), sub.data(), (int)xs.size(), out)!=0) return false;
+                return std::memcmp(out, secret, 32)==0;
+            };
+            check(recon({1,2,3}), "FROST reconstruct from shares {1,2,3} == secret");
+            check(recon({2,4,5}), "FROST reconstruct from shares {2,4,5} == secret");
+            check(recon({1,3,5}), "FROST reconstruct from shares {1,3,5} == secret");
+            // a different t-subset yields the SAME secret (the Shamir invariant)
+            check(recon({3,4,5}), "FROST reconstruct from shares {3,4,5} == secret");
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": frost-c99 "
+                  << (fail==0 ? "all keygen + reconstruction invariants held" : "had failures")
+                  << " (libsodium-free C99 FROST-Ed25519 keygen — Shamir/Lagrange over the scalar field; RFC 9591)\n";
         return fail==0 ? 0 : 1;
     }
 
