@@ -439,3 +439,12 @@ int determ_ed25519_point_add(u8 out[32], const u8 a[32], const u8 b[32]) {
     if (point_unpack(B4, b)) return -1;
     add(A4, B4); pack(out, A4); return 0;
 }
+
+/* 1 iff the 32-byte little-endian scalar s is canonical (s < L), else 0. Lets
+ * higher layers (e.g. the FROST DKG proof-of-possession) apply the same anti-
+ * malleability gate the Ed25519 verifier uses on signature scalars. */
+int determ_ed25519_sc_is_canonical(const u8 s[32]) { return sc_lt_L(s); }
+
+/* 1 iff the 32-byte point encoding p has a canonical y < q (RFC 8032 §5.1.3),
+ * else 0 — the "one point = one encoding" gate used by the Ed25519 verifier. */
+int determ_ed25519_point_is_canonical(const u8 p[32]) { return point_y_is_canonical(p); }

@@ -11209,6 +11209,19 @@ int main(int argc, char** argv) {
             { uint8_t s[32]; determ_frost_dkg_share(poly[0],t,2,s); s[0]^=0x01;
               check(determ_frost_dkg_verify_share(s,2,comm[0],t)==-1,
                     "FROST DKG: a tampered share fails the VSS check"); }
+            // anti-malleability: a mauled PoP (z+L) must be rejected by the
+            // canonical-scalar gate (the original still verifies).
+            {
+                static const uint8_t Lb[32]={0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
+                    0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10};
+                uint8_t mal[64]; std::memcpy(mal, pop[0], 64);
+                unsigned int carry=0;
+                for(int i=0;i<32;i++){ unsigned int tt=(unsigned int)mal[32+i]+Lb[i]+carry;
+                    mal[32+i]=(uint8_t)tt; carry=tt>>8; }
+                check(determ_frost_dkg_verify_pop(&comm[0][0],1,pop[0])==0 &&
+                      determ_frost_dkg_verify_pop(&comm[0][0],1,mal)==-1,
+                      "FROST DKG: a mauled PoP (z+L) is rejected (canonical-scalar gate)");
+            }
         }
 
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")

@@ -48,6 +48,11 @@ int  determ_ed25519_point_mul(uint8_t out[32], const uint8_t s[32], const uint8_
 /* out = P + Q. Returns 0 on success, -1 if P or Q does not decode. */
 int  determ_ed25519_point_add(uint8_t out[32], const uint8_t p[32], const uint8_t q[32]);
 
+/* Canonicality gates (the anti-malleability checks the Ed25519 verifier applies).
+ * 1 iff canonical, else 0: a scalar s < L, or a point encoding with y < q. */
+int  determ_ed25519_sc_is_canonical(const uint8_t s[32]);
+int  determ_ed25519_point_is_canonical(const uint8_t p[32]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

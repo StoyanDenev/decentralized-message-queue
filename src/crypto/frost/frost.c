@@ -235,6 +235,12 @@ int determ_frost_dkg_commit(const u8 *poly, int t, int idx,
 int determ_frost_dkg_verify_pop(const u8 commitment0[32], int idx, const u8 pop[64]) {
     u8 c[32], hbuf[64], cb[86], lhs[32], rhs[32], tmp[32];
     if (idx < 1 || idx > 255) return -1;
+    /* Anti-malleability: reject a non-canonical R encoding (y >= q) or a
+     * non-canonical scalar z (z >= L) — without these, (R, z+L) and the ~19
+     * non-canonical y-encodings of R would re-verify, breaking PoP byte-
+     * uniqueness (matches the Ed25519 verifier's RFC 8032 §5.1.3/§5.1.7 gates). */
+    if (!determ_ed25519_point_is_canonical(pop)) return -1;
+    if (!determ_ed25519_sc_is_canonical(pop + 32)) return -1;
     memcpy(cb, DKG_POP_DOM, 20); cb[20] = 0x02; cb[21] = (u8)idx;
     memcpy(cb + 22, commitment0, 32); memcpy(cb + 54, pop, 32);   /* pop[0..31] = R */
     determ_sha512(cb, sizeof cb, hbuf);
