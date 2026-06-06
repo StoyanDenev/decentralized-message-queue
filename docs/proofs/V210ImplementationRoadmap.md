@@ -21,7 +21,7 @@ GO/NO-GO.
 > and RFC 5869 KATs. **PBKDF2-HMAC-SHA-256 (§3.8b) has also landed (commit
 > `bebba14`)** on top of that HMAC — the KDF the wallet keyfile envelope (S-004)
 > uses at rest — completing the HMAC-based KDF family (HMAC → HKDF + PBKDF2);
-> `determ test-sha2-c99` now runs 14/14 (FAST 149/149). SHA-512 is itself a
+> `determ test-sha2-c99` now runs 18/18 (FAST 149/149 at landing). SHA-512 is itself a
 > prerequisite for Ed25519 + the FROST H1..H5 hashes, and HMAC-SHA-256 already
 > backs RPC auth (S-001), so this is squarely on the libsodium-removal / v2.10
 > path. The **§3.4 AEAD family is now complete (commits `21385ed` + `4c9a9a9`):**
@@ -42,12 +42,14 @@ GO/NO-GO.
 > computed arithmetically — the GF(2^8) inverse via a fixed x^254 addition chain
 > over a branchless field multiply, then the FIPS-197 affine map — so there is no
 > key-dependent table lookup (no cache-timing channel); GHASH was already
-> branchless. `determ test-aes-c99` runs seven assertions: an exhaustive proof
+> branchless. `determ test-aes-c99` runs nine assertions: an exhaustive proof
 > that the constant-time S-box equals the canonical FIPS-197 table over all 256
-> inputs, the two block-cipher checks, the full AES-256-GCM (ciphertext AND tag)
-> byte-equal vs OpenSSL `EVP_aes_256_gcm` over a (plaintext,aad)-length grid — the
-> §Q9 gate — plus a GCM decrypt round-trip and tamper rejection of both the tag
-> and the ciphertext (7/7; FAST 151/151). The module is now CT-clean for the
+> inputs, the FIPS-197 C.3 KAT and the OpenSSL `EVP_aes_256_ecb` block byte-equal,
+> the full AES-256-GCM (ciphertext AND tag) byte-equal vs OpenSSL `EVP_aes_256_gcm`
+> over a (plaintext,aad)-length grid — the §Q9 gate — plus a GCM decrypt round-trip
+> and tamper rejection of the tag, the ciphertext, and the AAD (value-flip +
+> length-mismatch — the AAD-binding negative paths) (9/9; FAST 151/151 at landing).
+> The module is now CT-clean for the
 > keyfile-envelope (S-004) call site; a bitsliced / AES-NI S-box remains an
 > optional throughput optimization, not a security gate. Remaining P0:
 > vendor the `ref10` scalar/point source into `src/crypto/ed25519/`, wire it into
@@ -333,7 +335,7 @@ Phase A's keygen/sign/aggregate cross-validation will reuse verbatim.
 
 **Exact files:**
 - `src/main.cpp` — new `cmd_test_frost_vectors` dispatch branch (mirrors the
-  existing `test-view-root` scenario-27 block at `main.cpp:9792-9844` per
+  existing `test-view-root` scenario-27 block at `main.cpp:12359-12411` per
   `FrostVerifyDelegation.md` §5).
 - `tools/test_frost_vectors.sh` — wrapper; add to `run_all.sh` FAST=1 regex.
 - `tools/vectors/frost_ed25519_rfc9591.json` — vector fixtures (group pubkey,

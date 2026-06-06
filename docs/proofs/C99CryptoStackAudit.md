@@ -654,8 +654,9 @@ the OpenSSL byte-equality oracle does not provide.
 / 0 High. Five confirmed-real findings (one Medium, two Low, two info/duplicate
 restatements of the Medium). **All three actionable findings remediated in commit
 `3a6370f`** — output-preserving on honest inputs (the byte-equal-vs-OpenSSL + RFC
-8032 §7.1 KAT grid is unchanged; FAST 152/152, `test-ed25519-c99` now 10
-assertions incl. a malleability-rejection test).
+8032 §7.1 KAT grid is unchanged; FAST 152/152, `test-ed25519-c99` now 12
+assertions incl. a malleability-rejection test + a 100000-byte extreme-length
+cross-validation).
 
 | # | Severity | Issue | Fix (commit `3a6370f`) |
 |---|---|---|---|

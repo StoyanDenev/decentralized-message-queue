@@ -292,7 +292,7 @@ hash):
 - Spec + roadmap: [CRYPTO-C99-SPEC.md](CRYPTO-C99-SPEC.md) §3.2/§3.8,
   [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 - Tests: `determ test-ed25519-c99` (12 assertions, incl. a 100000-byte extreme-length
-  cross-validation), `determ test-frost-c99` (47 assertions incl. DKG, the
+  cross-validation), `determ test-frost-c99` (48 assertions incl. DKG, the
   distributed sign_partial/aggregate parity at t=3 and t=5, the PSS refresh §6
   block, and the §7 broader-parameter coverage at t=1 / t=5,n=9), both in
   `tools/run_all.sh` (FAST).

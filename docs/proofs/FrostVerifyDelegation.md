@@ -200,7 +200,7 @@ Each surface is exercised by `test-view-root` scenario 27 (the real round-trip t
 | `frost_verify: tampered message REJECTED` | T-1.3 tampered-msg | PASS |
 | `frost_verify: empty-message round-trip PASSES` | edge case (RFC 8032 §5.1 zero-length-message support) | PASS |
 
-The assertions are in `src/main.cpp:9792–9844` (scenario 27 of the `test-view-root` subcommand) and run as part of the `determ test-view-root` regression. They constitute the cryptographic regression for the proof: any future regression that breaks T-1's conclusion (e.g., accidentally weakening `verify` to skip the cofactor check, or mis-encoding `FrostSig` so the `static_assert` flips) is caught at runtime by these five assertions.
+The assertions are in `src/main.cpp:12359–12411` (scenario 27 of the `test-view-root` subcommand) and run as part of the `determ test-view-root` regression. They constitute the cryptographic regression for the proof: any future regression that breaks T-1's conclusion (e.g., accidentally weakening `verify` to skip the cofactor check, or mis-encoding `FrostSig` so the `static_assert` flips) is caught at runtime by these five assertions.
 
 **Out of scope.** The proof does **not** cover:
 
@@ -231,7 +231,7 @@ Downstream consumers of v2.10 (block-validation path under the future `randomnes
 | `src/crypto/frost.cpp` | `frost_verify` implementation (§4) |
 | `include/determ/crypto/frost.hpp` | Type definitions: `Identifier`, `Scalar`, `Point`, `FrostSig` (§1, §4) |
 | `src/crypto/keys.cpp` | `determ::crypto::verify` underlying Ed25519 wrapper (§2.3, L-2) |
-| `src/main.cpp:9792–9844` | `test-view-root` scenario 27 regression (§5) |
+| `src/main.cpp:12359–12411` | `test-view-root` scenario 27 regression (§5) |
 
 ---
 
