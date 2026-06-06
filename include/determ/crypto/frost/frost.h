@@ -56,6 +56,46 @@ int determ_frost_sign(const int *xs, const uint8_t *shares,
                       const uint8_t *msg, size_t msglen,
                       const uint8_t group_pk[32], uint8_t sig[64]);
 
+/* ── Distributed two-round signing (the real protocol, not the centralized
+ * simulation above) ──────────────────────────────────────────────────────────
+ * In production each signer holds ONLY its own secrets and the public round-1
+ * commitments of the others, so determ_frost_sign (which needs every signer's
+ * nonces at once) cannot run on any one node. These two functions split it:
+ *   • round 1 (caller side): each signer picks secret nonces d_i, e_i and
+ *     broadcasts the public commitments D_i = [d_i]B, E_i = [e_i]B
+ *     (determ_ed25519_point_basemul);
+ *   • round 2: determ_frost_sign_partial computes that signer's z_i;
+ *   • aggregation: determ_frost_aggregate sums the z_i and recomputes the shared
+ *     R from the public commitment lists.
+ * Both reuse the SAME internal binding-factor/R/challenge derivation as
+ * determ_frost_sign, so the distributed path is byte-identical to the centralized
+ * one for the same inputs (asserted by determ test-frost-c99). */
+
+/* Round 2 — this signer's partial signature share. `pos` is this signer's index
+ * within the set `xs` (0-based). `share`, `d_self`, `e_self` are this signer's
+ * secret key share and round-1 nonces; `D` and `E` are the PUBLIC round-1
+ * commitment lists of all `t` signers (t*32 bytes each, in `xs` order). Writes
+ * z_out = d_self + e_self·rho_pos + lambda_pos·share·c (32 bytes). Returns 0, or
+ * -1 on bad params (invalid signer set, pos out of range, oversized msg, or a
+ * point-decode failure). */
+int determ_frost_sign_partial(const int *xs, int t, int pos,
+                              const uint8_t share[32], const uint8_t d_self[32],
+                              const uint8_t e_self[32],
+                              const uint8_t *D, const uint8_t *E,
+                              const uint8_t *msg, size_t msglen,
+                              const uint8_t group_pk[32], uint8_t z_out[32]);
+
+/* Aggregate the `t` partial shares `partials` (t*32 bytes, in `xs` order) into the
+ * canonical signature `sig` = R ‖ (Σ z_i) (64 bytes). R is recomputed from the
+ * public commitment lists `D`, `E` so every aggregator derives the identical R
+ * (the property that defeats selective-abort: any t-of-K quorum yields the SAME
+ * R). The result VERIFIES AS A PLAIN ED25519 SIGNATURE under `group_pk`. Returns
+ * 0, or -1 on bad params / a point-decode failure. */
+int determ_frost_aggregate(const int *xs, int t,
+                           const uint8_t *D, const uint8_t *E, const uint8_t *partials,
+                           const uint8_t *msg, size_t msglen,
+                           const uint8_t group_pk[32], uint8_t sig[64]);
+
 /* ── Distributed key generation (Pedersen DKG + Feldman VSS, RFC 9591 §6.6) ──
  * Trustless keygen: NO single party learns the group secret. Each participant i
  * picks a degree-(t-1) polynomial f_i (t scalar coeffs in `poly`, `poly[0]`= its

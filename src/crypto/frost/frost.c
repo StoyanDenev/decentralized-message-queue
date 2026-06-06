@@ -90,72 +90,91 @@ int determ_frost_reconstruct(const int *xs, const u8 *shares, int t, u8 secret_o
     return 0;
 }
 
+/* Signer-set validity: indices in [1,255] (hashed as a u8 binding-factor tag) and
+ * pairwise distinct (a repeated x makes the Lagrange denominator prod(x_j - x_i)
+ * singular -> sc_invert(0)=0 -> a silently WRONG signature). 0 if valid, -1 if not. */
+static int frost_check_signer_set(const int *xs, int t) {
+    int i, k;
+    if (t < 1) return -1;
+    for (i = 0; i < t; i++) {
+        if (xs[i] < 1 || xs[i] > 255) return -1;
+        for (k = i + 1; k < t; k++) if (xs[k] == xs[i]) return -1;
+    }
+    return 0;
+}
+
+/* From the PUBLIC round-1 commitment lists D[],E[] (t*32 each, in xs order),
+ * compute the per-signer binding factors rho[] (t*32), the group commitment R, and
+ * the Ed25519-compatible challenge c = H(R ‖ group_pk ‖ msg) mod L. This is the
+ * single source of truth for those values, shared by the centralized
+ * determ_frost_sign and the per-signer determ_frost_sign_partial /
+ * determ_frost_aggregate so they cannot diverge. Returns 0, or -1 on alloc /
+ * length / point-decode failure. */
+static int frost_binding_and_challenge(const int *xs, int t,
+        const u8 *D, const u8 *E, const u8 *msg, size_t msglen,
+        const u8 group_pk[32], u8 *rho, u8 R_enc[32], u8 c[32]) {
+    int i, k, rc = -1;
+    u8 *rbuf = NULL, *cbuf = NULL, hbuf[64];
+    size_t rsize, csize, off;
+    if (msglen > (size_t)0x10000000) return -1;              /* 256 MiB cap */
+    rsize = 16 + 1 + (size_t)t * 65 + msglen;                /* DOMAIN ‖ idx ‖ list ‖ msg */
+    csize = 64 + msglen;                                     /* R ‖ group_pk ‖ msg */
+    rbuf = (u8 *)malloc(rsize);
+    cbuf = (u8 *)malloc(csize);
+    if (!rbuf || !cbuf) goto done;
+
+    for (k = 0; k < 16; k++) rbuf[k] = FROST_DOMAIN_RHO[k];
+    off = 17;
+    for (i = 0; i < t; i++) {
+        rbuf[off++] = (u8)xs[i];
+        memcpy(rbuf + off, D + i * 32, 32); off += 32;
+        memcpy(rbuf + off, E + i * 32, 32); off += 32;
+    }
+    if (msglen) memcpy(rbuf + off, msg, msglen);
+    for (i = 0; i < t; i++) {
+        rbuf[16] = (u8)xs[i];
+        determ_sha512(rbuf, rsize, hbuf);
+        determ_ed25519_sc_reduce64(hbuf, rho + i * 32);      /* rho_i */
+    }
+    for (i = 0; i < t; i++) {
+        u8 Ti[32], Pi[32];
+        if (determ_ed25519_point_mul(Ti, rho + i * 32, E + i * 32)) goto done;
+        if (determ_ed25519_point_add(Pi, D + i * 32, Ti)) goto done;
+        if (i == 0) { for (k = 0; k < 32; k++) R_enc[k] = Pi[k]; }
+        else if (determ_ed25519_point_add(R_enc, R_enc, Pi)) goto done;
+    }
+    for (k = 0; k < 32; k++) { cbuf[k] = R_enc[k]; cbuf[32 + k] = group_pk[k]; }
+    if (msglen) memcpy(cbuf + 64, msg, msglen);
+    determ_sha512(cbuf, csize, hbuf);
+    determ_ed25519_sc_reduce64(hbuf, c);
+    rc = 0;
+done:
+    if (rbuf) free(rbuf);
+    if (cbuf) free(cbuf);
+    determ_secure_zero(hbuf, sizeof hbuf);
+    return rc;
+}
+
 int determ_frost_sign(const int *xs, const u8 *shares,
                       const u8 *d, const u8 *e, int t,
                       const u8 *msg, size_t msglen,
                       const u8 group_pk[32], u8 sig[64]) {
     int i, k, rc = -1;
-    u8 *Dc = NULL, *Ec = NULL, *rho = NULL, *rbuf = NULL, *cbuf = NULL;
-    u8 R_enc[32], c[32], z[32], zi[32], t1[32], ls[32], lam[32], hbuf[64];
-    size_t rsize, csize, off;
+    u8 *Dc = NULL, *Ec = NULL, *rho = NULL;
+    u8 R_enc[32], c[32], z[32], zi[32], t1[32], ls[32], lam[32];
 
-    if (t < 1) return -1;
-    if (msglen > (size_t)0x10000000) return -1;          /* 256 MiB cap — beacon msgs are tiny */
-    /* Validate the signer set: indices must be in [1,255] (they are hashed as a
-     * u8 binding-factor tag) and pairwise distinct — a repeated x makes the
-     * Lagrange denominator prod(x_j - x_i) singular, which sc_invert maps to
-     * inv(0)=0, collapsing lambda_i to 0 and silently producing a WRONG signature.
-     * Mirrors determ_frost_reconstruct's guards; turns that into a clean -1. */
-    for (i = 0; i < t; i++) {
-        if (xs[i] < 1 || xs[i] > 255) return -1;
-        for (k = i + 1; k < t; k++) if (xs[k] == xs[i]) return -1;
-    }
-
+    if (frost_check_signer_set(xs, t)) return -1;
     Dc  = (u8 *)malloc((size_t)t * 32);
     Ec  = (u8 *)malloc((size_t)t * 32);
     rho = (u8 *)malloc((size_t)t * 32);
-    rsize = 16 + 1 + (size_t)t * 65 + msglen;             /* DOMAIN ‖ idx ‖ list ‖ msg */
-    csize = 64 + msglen;                                  /* R ‖ group_pk ‖ msg */
-    rbuf = (u8 *)malloc(rsize);
-    cbuf = (u8 *)malloc(csize);
-    if (!Dc || !Ec || !rho || !rbuf || !cbuf) goto done;
+    if (!Dc || !Ec || !rho) goto done;
 
     /* round-1 commitments D_i = [d_i] B, E_i = [e_i] B (public). */
     for (i = 0; i < t; i++) {
         determ_ed25519_point_basemul(Dc + i * 32, d + i * 32);
         determ_ed25519_point_basemul(Ec + i * 32, e + i * 32);
     }
-
-    /* binding-factor input: DOMAIN ‖ [signer idx] ‖ commitment-list ‖ msg.
-     * The list + msg are constant across signers; only byte 16 (idx) varies. */
-    for (k = 0; k < 16; k++) rbuf[k] = FROST_DOMAIN_RHO[k];
-    off = 17;
-    for (i = 0; i < t; i++) {
-        rbuf[off++] = (u8)xs[i];
-        memcpy(rbuf + off, Dc + i * 32, 32); off += 32;
-        memcpy(rbuf + off, Ec + i * 32, 32); off += 32;
-    }
-    if (msglen) memcpy(rbuf + off, msg, msglen);
-    for (i = 0; i < t; i++) {
-        rbuf[16] = (u8)xs[i];
-        determ_sha512(rbuf, rsize, hbuf);
-        determ_ed25519_sc_reduce64(hbuf, rho + i * 32);  /* rho_i */
-    }
-
-    /* group commitment R = sum_i ( D_i + [rho_i] E_i ). */
-    for (i = 0; i < t; i++) {
-        u8 Ti[32], Pi[32];
-        if (determ_ed25519_point_mul(Ti, rho + i * 32, Ec + i * 32)) goto done;
-        if (determ_ed25519_point_add(Pi, Dc + i * 32, Ti)) goto done;
-        if (i == 0) { for (k = 0; k < 32; k++) R_enc[k] = Pi[k]; }
-        else if (determ_ed25519_point_add(R_enc, R_enc, Pi)) goto done;
-    }
-
-    /* Ed25519-compatible challenge c = H(R ‖ group_pk ‖ msg) mod L. */
-    for (k = 0; k < 32; k++) { cbuf[k] = R_enc[k]; cbuf[32 + k] = group_pk[k]; }
-    if (msglen) memcpy(cbuf + 64, msg, msglen);
-    determ_sha512(cbuf, csize, hbuf);
-    determ_ed25519_sc_reduce64(hbuf, c);
+    if (frost_binding_and_challenge(xs, t, Dc, Ec, msg, msglen, group_pk, rho, R_enc, c)) goto done;
 
     /* aggregate z = sum_i ( d_i + e_i·rho_i + lambda_i·s_i·c ). */
     for (k = 0; k < 32; k++) z[k] = 0;
@@ -166,7 +185,6 @@ int determ_frost_sign(const int *xs, const u8 *shares,
         determ_ed25519_sc_muladd(zi, ls, c, t1);                            /* ls·c + t1 = z_i */
         determ_ed25519_sc_add(z, z, zi);
     }
-
     for (k = 0; k < 32; k++) { sig[k] = R_enc[k]; sig[32 + k] = z[k]; }
     rc = 0;
 
@@ -174,10 +192,62 @@ done:
     if (Dc)  free(Dc);
     if (Ec)  free(Ec);
     if (rho) free(rho);                                  /* binding factors are public */
-    if (rbuf) free(rbuf);
-    if (cbuf) free(cbuf);
     determ_secure_zero(z, 32);  determ_secure_zero(zi, 32); determ_secure_zero(t1, 32);
-    determ_secure_zero(ls, 32); determ_secure_zero(lam, 32); determ_secure_zero(hbuf, 64);
+    determ_secure_zero(ls, 32); determ_secure_zero(lam, 32);
+    return rc;
+}
+
+/* Per-signer round-2 partial: the signature share z_pos for the signer at position
+ * `pos` in the set `xs`, given ONLY that signer's secret (share, d, e) plus the
+ * PUBLIC round-1 commitment lists D[],E[] of all signers. z_pos = d_pos +
+ * e_pos·rho_pos + lambda_pos·share·c. This is the distributed counterpart of the
+ * inner loop of determ_frost_sign (which has every signer's secrets at once).
+ * Returns 0, or -1 on bad params. */
+int determ_frost_sign_partial(const int *xs, int t, int pos,
+                              const u8 share[32], const u8 d_self[32], const u8 e_self[32],
+                              const u8 *D, const u8 *E,
+                              const u8 *msg, size_t msglen,
+                              const u8 group_pk[32], u8 z_out[32]) {
+    int rc = -1;
+    u8 *rho = NULL;
+    u8 R_enc[32], c[32], lam[32], t1[32], ls[32];
+    if (frost_check_signer_set(xs, t)) return -1;
+    if (pos < 0 || pos >= t) return -1;
+    rho = (u8 *)malloc((size_t)t * 32);
+    if (!rho) return -1;
+    if (frost_binding_and_challenge(xs, t, D, E, msg, msglen, group_pk, rho, R_enc, c)) goto done;
+    frost_lagrange(xs, t, pos, lam);
+    determ_ed25519_sc_muladd(t1, e_self, rho + pos * 32, d_self);   /* e·rho_pos + d */
+    determ_ed25519_sc_mul(ls, lam, share);                         /* lambda·share  */
+    determ_ed25519_sc_muladd(z_out, ls, c, t1);                    /* ls·c + t1     */
+    rc = 0;
+done:
+    if (rho) free(rho);
+    determ_secure_zero(lam, 32); determ_secure_zero(t1, 32); determ_secure_zero(ls, 32);
+    return rc;
+}
+
+/* Aggregate t partial signatures (`partials`, t*32, in xs order) into the
+ * canonical signature R ‖ z, where R is recomputed from the public commitment
+ * lists D[],E[] (so every aggregator gets the same R) and z = Σ partials. Returns
+ * 0, or -1 on bad params. */
+int determ_frost_aggregate(const int *xs, int t,
+                           const u8 *D, const u8 *E, const u8 *partials,
+                           const u8 *msg, size_t msglen,
+                           const u8 group_pk[32], u8 sig[64]) {
+    int i, k, rc = -1;
+    u8 *rho = NULL;
+    u8 R_enc[32], c[32], z[32];
+    if (frost_check_signer_set(xs, t)) return -1;
+    rho = (u8 *)malloc((size_t)t * 32);
+    if (!rho) return -1;
+    if (frost_binding_and_challenge(xs, t, D, E, msg, msglen, group_pk, rho, R_enc, c)) goto done;
+    for (k = 0; k < 32; k++) z[k] = 0;
+    for (i = 0; i < t; i++) determ_ed25519_sc_add(z, z, partials + i * 32);
+    for (k = 0; k < 32; k++) { sig[k] = R_enc[k]; sig[32 + k] = z[k]; }
+    rc = 0;
+done:
+    if (rho) free(rho);
     return rc;
 }
 

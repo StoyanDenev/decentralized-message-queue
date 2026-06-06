@@ -11136,6 +11136,64 @@ int main(int argc, char** argv) {
                 check(determ_frost_sign(dup, sh, d3, e3, 3, (const uint8_t*)msg, mlen, group_pk, sg)==-1,
                       "FROST sign rejects a malformed signer set (duplicate x)");
             }
+            // (4b) DISTRIBUTED two-round signing: each signer computes ONLY its own
+            //      partial (determ_frost_sign_partial, given just its own secrets +
+            //      the public round-1 commitments); determ_frost_aggregate combines
+            //      them. The result must be BYTE-IDENTICAL to the centralized
+            //      determ_frost_sign for the same inputs, and verify as a plain
+            //      Ed25519 signature — proving the per-signer decomposition is sound.
+            {
+                std::vector<int> signers = {2,4,5};
+                int tt=(int)signers.size();
+                std::vector<uint8_t> sh(tt*32), d(tt*32), e(tt*32), D(tt*32), E(tt*32);
+                for(int q=0;q<tt;q++){
+                    std::memcpy(&sh[q*32], shares+(signers[q]-1)*32, 32);
+                    uint8_t hd[64], he[64];
+                    std::string ld="frost-d-"+std::to_string(signers[q]);
+                    std::string le="frost-e-"+std::to_string(signers[q]);
+                    determ_sha512((const uint8_t*)ld.data(), ld.size(), hd);
+                    determ_sha512((const uint8_t*)le.data(), le.size(), he);
+                    determ_ed25519_sc_reduce64(hd, &d[q*32]);
+                    determ_ed25519_sc_reduce64(he, &e[q*32]);
+                    determ_ed25519_point_basemul(&D[q*32], &d[q*32]);  // public round-1 commitments
+                    determ_ed25519_point_basemul(&E[q*32], &e[q*32]);
+                }
+                uint8_t ref[64];  // centralized reference for the same quorum + nonces
+                check(determ_frost_sign(signers.data(), sh.data(), d.data(), e.data(), tt,
+                                        (const uint8_t*)msg, mlen, group_pk, ref)==0,
+                      "FROST centralized sign (reference for distributed-path parity)");
+                std::vector<uint8_t> partials(tt*32);
+                bool all_ok=true;
+                for(int q=0;q<tt;q++)
+                    if (determ_frost_sign_partial(signers.data(), tt, q,
+                            &sh[q*32], &d[q*32], &e[q*32], D.data(), E.data(),
+                            (const uint8_t*)msg, mlen, group_pk, &partials[q*32])!=0) all_ok=false;
+                check(all_ok, "FROST per-signer partials computed (each signer holds only its own secrets)");
+                uint8_t agg[64];
+                check(determ_frost_aggregate(signers.data(), tt, D.data(), E.data(),
+                        partials.data(), (const uint8_t*)msg, mlen, group_pk, agg)==0,
+                      "FROST aggregate of t partials succeeds");
+                check(std::memcmp(agg, ref, 64)==0,
+                      "FROST distributed aggregate is BYTE-IDENTICAL to centralized sign");
+                check(determ_ed25519_verify(group_pk, (const uint8_t*)msg, mlen, agg)==0,
+                      "FROST distributed aggregate verifies as Ed25519 under group_pk");
+                EVP_PKEY* pub=EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519,nullptr,group_pk,32);
+                EVP_MD_CTX* mc=EVP_MD_CTX_new(); EVP_DigestVerifyInit(mc,nullptr,nullptr,nullptr,pub);
+                int ov=EVP_DigestVerify(mc,agg,64,(const uint8_t*)msg,mlen);
+                EVP_MD_CTX_free(mc); EVP_PKEY_free(pub);
+                check(ov==1, "FROST distributed aggregate cross-verifies under OpenSSL");
+                std::vector<uint8_t> bad = partials; bad[0]^=0x01;  // tamper one partial
+                uint8_t aggbad[64];
+                determ_frost_aggregate(signers.data(), tt, D.data(), E.data(),
+                        bad.data(), (const uint8_t*)msg, mlen, group_pk, aggbad);
+                check(determ_ed25519_verify(group_pk, (const uint8_t*)msg, mlen, aggbad)!=0,
+                      "FROST aggregate with a tampered partial fails Ed25519 verify");
+                uint8_t zjunk[32];
+                check(determ_frost_sign_partial(signers.data(), tt, tt /*out of range*/,
+                        &sh[0], &d[0], &e[0], D.data(), E.data(),
+                        (const uint8_t*)msg, mlen, group_pk, zjunk)==-1,
+                      "FROST sign_partial rejects an out-of-range signer position");
+            }
         }
 
         // (5) Distributed Key Generation (Pedersen DKG / Feldman VSS) — TRUSTLESS
