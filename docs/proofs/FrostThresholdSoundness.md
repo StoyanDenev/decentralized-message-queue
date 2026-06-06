@@ -1,5 +1,14 @@
 # FROST-Ed25519 Threshold Scheme — Soundness (FA-Crypto)
 
+> **STATUS / NOTICE.** The v2.10 **FROST-as-block-randomness-beacon** application is
+> **DE-SCOPED** — the project retains the v1 MPDH commit-reveal block beacon (decision +
+> rationale in `V210-PhaseD-RandomnessWiring.md` STATUS + §9). This does **not** retract
+> the FROST C99 primitives or this proof: the theorems below stand as a *signature-scheme*
+> soundness result, and the primitives remain available for other v2 uses (e.g.
+> `Beaconless-v2-SPEC.md` cross-shard randomness, threshold signing). Consensus/randomness
+> design authority is **Stoyan Denev**'s; this document defers to it and is **not
+> co-authored** by the AI assistant.
+
 **Subject:** the libsodium-free C99 FROST-Ed25519 stack — `src/crypto/ed25519/`
 (field/group + RFC 8032 sign/verify) and `src/crypto/frost/` (trusted-dealer +
 DKG keygen, two-round threshold signing, PSS share-refresh). This document is the

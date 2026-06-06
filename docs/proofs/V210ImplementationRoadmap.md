@@ -1,4 +1,16 @@
-# v2.10 Implementation Roadmap — FROST-Ed25519 Threshold Randomness
+# v2.10 Implementation Roadmap — FROST-Ed25519 Threshold Randomness — DE-SCOPED (block beacon)
+
+> **STATUS / NOTICE.** The **FROST-as-block-randomness-beacon** goal of this roadmap
+> (replacing the v1 commit-reveal block beacon — "the last permissionless-readiness gate"
+> below) is **DE-SCOPED**: the project **retains the MPDH commit-reveal block beacon**
+> (decision + rationale in `V210-PhaseD-RandomnessWiring.md` STATUS + §9 — FROST is not a
+> bias upgrade over FA3, and lacks BLS-style uniqueness). The FROST C99 primitives this
+> roadmap delivered are **built, audited, and retained** for other v2 uses
+> (`Beaconless-v2-SPEC.md` cross-shard randomness, threshold signing); only the
+> block-beacon wiring (Phase D) is dropped. Consensus/randomness design authority is
+> **Stoyan Denev**'s; this document defers to it and is **not co-authored** by the AI
+> assistant. Treat the schedule below as the historical scoping that produced the
+> primitives, not an active block-beacon plan.
 
 **Status:** roadmap / scoping only. No code change accompanies this document. It
 records the *verified* state of the v2.10 work (threshold-signature block

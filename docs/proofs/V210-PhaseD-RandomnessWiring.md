@@ -1,4 +1,20 @@
-# v2.10 Phase D — wiring FROST into the block-randomness path (expansion)
+# v2.10 Phase D — wiring FROST into the block-randomness path (expansion) — DE-SCOPED
+
+> **STATUS — DECISION: ADOPT MPDH for the block-randomness beacon.** The project
+> **retains the v1 MPDH commit-reveal block beacon** (`compute_block_rand`). The v2.10
+> **FROST-as-block-beacon** swap described in this document is **DE-SCOPED**: per §9, it
+> is not a bias-resistance upgrade over the existing FA3 commit-reveal guarantee, and the
+> one construction-level property that would justify the threshold machinery (BLS-style
+> uniqueness / unbiasable-by-construction) FROST does not provide. The shipped FROST C99
+> primitives + their soundness proofs (`FrostThresholdSoundness.md`) remain **valid and
+> available for other v2 uses** (e.g. `Beaconless-v2-SPEC.md` cross-shard randomness
+> aggregation, threshold signing) — only the *block-beacon application* is dropped. Read
+> the body below as the analysis behind this decision, not as an active work plan.
+>
+> **NOTICE — design authority.** Determ's consensus and randomness design is owned by
+> **Stoyan Denev**. This document records and defers to that design; it is **not
+> co-authored** by the AI assistant. Earlier revisions that read as *proposing* the FROST
+> beacon are analysis offered for Stoyan's decision — which is the MPDH retention above.
 
 **Scope of this doc.** This is the detailed expansion of the single remaining v2.10
 *consensus-integration* step: replacing the v1 commit-reveal block randomness with a
