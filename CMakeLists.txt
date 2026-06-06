@@ -116,6 +116,10 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c")
 # signatures on the C99 Ed25519 group ops. Keygen (Shamir over the scalar field +
 # Lagrange) + threshold sign. Exercised by `determ test-frost-c99`.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/frost/frost.c")
+# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.3: X25519 (RFC 7748), the Curve25519 DH
+# companion to the C99 Ed25519. Constant-time Montgomery ladder; validated
+# byte-equal vs OpenSSL EVP_PKEY_X25519 + RFC 7748 §6.1 KAT by `determ test-x25519-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c")
 
 add_executable(determ ${SOURCES})
 

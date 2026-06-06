@@ -18,6 +18,7 @@
 #include <determ/crypto/ed25519/ed25519.h>    // v2.10 Phase 0: C99-native Ed25519 (§3.2)
 #include <determ/crypto/ed25519/ed25519_group.h> // v2.10 Phase A: Ed25519 scalar/group prims
 #include <determ/crypto/frost/frost.h>        // v2.10 Phase A: C99-native FROST-Ed25519 (RFC 9591)
+#include <determ/crypto/x25519/x25519.h>      // v2.10 Phase 0: C99-native X25519 (RFC 7748, §3.3)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -426,6 +427,10 @@ In-process tests (deterministic, no network):
                                               FROST-Ed25519 keygen — Shamir +
                                               Lagrange over the Ed25519 scalar
                                               field (§3.2 / RFC 9591)
+  determ test-x25519-c99                      v2.10 Phase 0: libsodium-free C99
+                                              X25519 (RFC 7748) byte-equal vs
+                                              OpenSSL EVP_PKEY_X25519 + the RFC
+                                              7748 §6.1 KAT (§3.3; DH companion)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11507,6 +11512,90 @@ int main(int argc, char** argv) {
                   << ": frost-c99 "
                   << (fail==0 ? "all keygen + DKG + PSS-refresh + threshold-signing invariants held" : "had failures")
                   << " (libsodium-free C99 FROST-Ed25519 — DKG/Shamir/Lagrange + PSS share-refresh + a t-of-n aggregate that IS an Ed25519 sig; RFC 9591)\n";
+        return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-x25519-c99") {
+        // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.3: validate the libsodium-free C99
+        // X25519 (RFC 7748) two ways — (1) byte-equal vs OpenSSL EVP_PKEY_X25519
+        // (public-key derivation + ECDH EVP_PKEY_derive) over a fuzzed scalar grid —
+        // the §Q9 gate — and (2) the canonical RFC 7748 §6.1 known-answer vectors.
+        using namespace determ;
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m){
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){ s.push_back(H[p[i]>>4]); s.push_back(H[p[i]&0xf]); } return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        auto ossl_pub = [](const uint8_t sk[32], uint8_t pub[32])->bool{
+            EVP_PKEY* k = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, sk, 32);
+            if(!k) return false; size_t l=32; int ok=EVP_PKEY_get_raw_public_key(k, pub, &l);
+            EVP_PKEY_free(k); return ok==1 && l==32; };
+        auto ossl_ecdh = [](const uint8_t sk[32], const uint8_t peer[32], uint8_t out[32])->int{
+            EVP_PKEY* a = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, sk, 32);
+            EVP_PKEY* p = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer, 32);
+            int rc=-1; if(a&&p){ EVP_PKEY_CTX* c=EVP_PKEY_CTX_new(a,nullptr);
+                if(c && EVP_PKEY_derive_init(c)==1 && EVP_PKEY_derive_set_peer(c,p)==1){
+                    size_t l=32; if(EVP_PKEY_derive(c,out,&l)==1 && l==32) rc=0; }
+                if(c) EVP_PKEY_CTX_free(c); }
+            if(a) EVP_PKEY_free(a); if(p) EVP_PKEY_free(p); return rc; };
+
+        // (1) cross-validation vs OpenSSL: pubkey derivation + ECDH + DH symmetry.
+        {
+            bool pub_ok=true, dh_ok=true, sym_ok=true; long at=-1;
+            for(int t=0;t<64 && pub_ok && dh_ok && sym_ok;++t){
+                uint8_t a[32], b[32];
+                for(int i=0;i<32;i++){ a[i]=(uint8_t)((i*37u+t*7u+1u)&0xff); b[i]=(uint8_t)((i*53u+t*11u+9u)&0xff); }
+                uint8_t myA[32], myB[32], oA[32], oB[32];
+                determ_x25519_base(myA, a); determ_x25519_base(myB, b);
+                if(!ossl_pub(a,oA) || !ossl_pub(b,oB)){ pub_ok=false; at=t; continue; }
+                if(std::memcmp(myA,oA,32)!=0 || std::memcmp(myB,oB,32)!=0){ pub_ok=false; at=t; continue; }
+                uint8_t ssAB[32], ssBA[32], oss[32];
+                determ_x25519(ssAB, a, myB); determ_x25519(ssBA, b, myA);
+                ossl_ecdh(a, oB, oss);
+                if(std::memcmp(ssAB,oss,32)!=0){ dh_ok=false; at=t; continue; }
+                if(std::memcmp(ssAB,ssBA,32)!=0){ sym_ok=false; at=t; continue; }
+            }
+            check(pub_ok, pub_ok ? "X25519 base-mult C99 == OpenSSL EVP_PKEY_X25519 public key (fuzzed scalars)"
+                                 : "X25519 pubkey diverges from OpenSSL (t="+std::to_string(at)+")");
+            check(dh_ok, dh_ok ? "X25519 ECDH C99 == OpenSSL EVP_PKEY_derive (the §Q9 gate)"
+                               : "X25519 ECDH diverges from OpenSSL (t="+std::to_string(at)+")");
+            check(sym_ok, sym_ok ? "X25519 DH is symmetric: X25519(a,[b]B) == X25519(b,[a]B)"
+                                 : "X25519 DH asymmetry (t="+std::to_string(at)+")");
+        }
+
+        // (2) RFC 7748 §6.1 known-answer vectors (OpenSSL-independent anchor).
+        {
+            auto a = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+            auto b = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+            uint8_t pa[32], pb[32], kab[32], kba[32];
+            determ_x25519_base(pa, a.data()); determ_x25519_base(pb, b.data());
+            check(hx(pa,32)=="8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+                  "X25519 RFC 7748 §6.1: Alice public key matches KAT");
+            check(hx(pb,32)=="de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+                  "X25519 RFC 7748 §6.1: Bob public key matches KAT");
+            determ_x25519(kab, a.data(), pb); determ_x25519(kba, b.data(), pa);
+            check(hx(kab,32)=="4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+                  "X25519 RFC 7748 §6.1: shared secret matches KAT");
+            check(std::memcmp(kab,kba,32)==0, "X25519 RFC 7748 §6.1: both parties derive the same secret");
+        }
+
+        // (3) low-order point rejection: X25519(scalar, all-zero u) is the all-zero
+        //     low-order result and must return -1 (RFC 7748 contributory check).
+        {
+            uint8_t sk[32], lo[32]={0}, out[32];
+            for(int i=0;i<32;i++) sk[i]=(uint8_t)(i*3+1);
+            check(determ_x25519(out, sk, lo)==-1, "X25519 rejects the all-zero low-order point (-1)");
+        }
+
+        std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
+                  << ": x25519-c99 "
+                  << (fail==0 ? "all cross-validation + RFC 7748 KATs matched" : "had failures")
+                  << " (libsodium-free C99 X25519 vs OpenSSL — the §Q9 gate; constant-time Montgomery ladder)\n";
         return fail==0 ? 0 : 1;
     }
 
