@@ -206,7 +206,7 @@ committee-signature checks per header either way (`FrostThresholdSoundness.md` T
 | Layer | Status |
 |---|---|
 | C99 FROST keygen / DKG / `sign_partial` / `aggregate` / `verify` | **SHIPPED + audited** (`src/crypto/frost/`, `test-frost-c99` 47 assertions, `C99CryptoStackAudit.md` §7/§8/§8b) |
-| FROST construction soundness (incl. selective-abort closure) | **PROVEN** (`FrostThresholdSoundness.md` T-1…T-7) |
+| FROST construction soundness (*signature-scheme* — NOT beacon unbiasability; see §1/§9) | **PROVEN** (`FrostThresholdSoundness.md` T-1…T-7) |
 | Phase B — DKG ceremony wire + state machine | **NOT done** (gossip msgs, `dkg.cpp`) |
 | Phase C — epoch-boundary orchestration (`epoch_public_key`) | **NOT done** |
 | Phase D — the randomness-path swap above | **NOT done** (this doc) |
