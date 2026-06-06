@@ -625,6 +625,13 @@ untested. Worth adding to `determ test-*-c99`:
   silently untested.
 - A **deliberate allocation-failure** unit test (malloc interposer) to assert the
   NULL-check fixes from §5.2 once landed.
+- **AEAD AAD-binding** negative paths — **LANDED** (`c9e5cf2`): both `test-aes-c99`
+  and `test-chacha20-c99` now assert decrypt fails under a value-flipped AAD and an
+  AAD-length mismatch (previously only tampered-tag + tampered-ciphertext were
+  exercised). This pins the AAD-binding property that the libsodium-free
+  keyfile-at-rest path (CRYPTO-C99-SPEC §3.5) will rely on once the C99 AES-GCM
+  supersedes today's OpenSSL envelope; it does NOT back the *current* envelope,
+  which uses OpenSSL AES-GCM (`S004KeyfileAtRest.md` threat-matrix row 4).
 
 These additions would not change today's correctness verdict — every primitive is
 byte-equal to OpenSSL over the validated grid and constant-time at the source
