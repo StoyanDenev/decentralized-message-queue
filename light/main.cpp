@@ -112,6 +112,14 @@ void print_usage() {
         "      TX-ROOT (recompute compute_tx_root == stored) + SIGS (committee\n"
         "      Ed25519 over the INTERNALLY-recomputed block_digest — no operator\n"
         "      digest needed, unlike determ-wallet block-verify). One PASS/FAIL.\n"
+        "  verify-chain-file --in <headers> --committee <file>\n"
+        "                    [--genesis-hash <hex>] [--prev-hash <hex>]\n"
+        "                    [--bft] [--json]\n"
+        "      Self-contained OFFLINE whole-chain verifier (file-based dual of\n"
+        "      verify-chain): CONTINUITY (prev_hash walk over an exported headers\n"
+        "      file, anchored by --genesis-hash/--prev-hash) + SIGS (every\n"
+        "      non-genesis header's committee Ed25519 over its self-recomputed\n"
+        "      digest). No daemon. One PASS/FAIL.\n"
         "  verify-state-proof --in <file> [--state-root <hex>]\n"
         "      Verify a state-proof Merkle inclusion against a root.\n"
         "\n"
@@ -805,6 +813,148 @@ int cmd_block_verify(int argc, char** argv) {
                       << "\n";
         }
         std::cout << "\nBLOCK-VERIFY: " << (overall ? "PASS" : "FAIL")
+                  << " (" << passed << " passed, " << failed << " failed)\n";
+    }
+    return overall ? 0 : 2;
+}
+
+// ──────────────────── verify-chain-file ────────────────────────────────
+
+// Self-contained OFFLINE whole-chain verifier — the file-based dual of the
+// online `verify-chain` (which fetches over RPC + anchors genesis via
+// compute_genesis_hash). Given an EXPORTED headers file (the `export-headers` /
+// `headers` RPC `{headers:[...], from, ...}` shape) + a committee file, it
+// verifies the entire exported segment with NO daemon:
+//   CONTINUITY — the prev_hash chain-of-hashes across the headers
+//                (verify_headers), optionally anchored at block 0 via
+//                --genesis-hash or at a mid-chain start via --prev-hash.
+//   SIGS       — every non-genesis header's K-of-K (or ceil(2K/3) --bft)
+//                committee Ed25519 sigs over the INTERNALLY-recomputed digest
+//                (verify_block_sigs per header). A header with empty
+//                creator_block_sigs is the genesis (sig-less) block and is
+//                skipped.
+// The committee is operator-supplied and applied to every block, so this is
+// sound for a segment with NO mid-chain REGISTER/DEREGISTER committee change
+// (same limitation as verify_chain_to_head's genesis-seed); for a rotating
+// committee, segment the file at rotation boundaries. Pure local crypto; no RPC,
+// no daemon, no compute_genesis_hash. (Cross-shard / F2 blocks fail-close in
+// SIGS — see block-verify / F-LBV5.) Exit 0 all pass, 2 a check FAILED, 1 args.
+int cmd_verify_chain_file(int argc, char** argv) {
+    std::string in_path, committee_path, genesis_hash_hex, prev_hash_hex;
+    bool bft = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"           && i + 1 < argc) in_path          = argv[++i];
+        else if (a == "--committee"    && i + 1 < argc) committee_path   = argv[++i];
+        else if (a == "--genesis-hash" && i + 1 < argc) genesis_hash_hex = argv[++i];
+        else if (a == "--prev-hash"    && i + 1 < argc) prev_hash_hex    = argv[++i];
+        else if (a == "--bft")                          bft = true;
+        else if (a == "--json")                         json_out = true;
+        else {
+            std::cerr << "verify-chain-file: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (in_path.empty() || committee_path.empty()) {
+        std::cerr << "verify-chain-file: --in and --committee are required\n";
+        return 1;
+    }
+
+    json doc, committee_json;
+    try {
+        doc = read_json_file(in_path);
+        committee_json = read_json_file(committee_path);
+    } catch (const std::exception& e) {
+        std::cerr << "verify-chain-file: " << e.what() << "\n";
+        return 1;
+    }
+
+    struct CheckResult { std::string name, verdict, detail; };
+    std::vector<CheckResult> checks;
+    int passed = 0, failed = 0;
+
+    // ── CONTINUITY ──
+    bool cont_ok = false;
+    std::string cont_detail;
+    {
+        try {
+            auto r = verify_headers(doc, genesis_hash_hex, prev_hash_hex);
+            cont_ok = r.ok;
+            std::string anchor = genesis_hash_hex.empty()
+                ? (prev_hash_hex.empty() ? "" : " (prev-anchored)")
+                : " (genesis-anchored)";
+            cont_detail = r.ok ? (std::to_string(r.count) + " headers, head "
+                                    + r.block_hash_hex.substr(0, 16) + "..." + anchor)
+                               : r.detail;
+        } catch (const std::exception& e) { cont_detail = e.what(); }
+        if (!json_out)
+            std::cout << "--- CONTINUITY ---\n  " << (cont_ok ? "OK: " : "FAIL: ")
+                      << cont_detail << "\n";
+        checks.push_back({"CONTINUITY", cont_ok ? "PASS" : "FAIL", cont_detail});
+        cont_ok ? ++passed : ++failed;
+    }
+
+    // ── SIGS ── per non-genesis header (only if CONTINUITY passed).
+    if (cont_ok) {
+        std::string detail;
+        bool ok = false;
+        try {
+            const json& headers = doc.is_array()
+                ? doc
+                : (doc.contains("headers") ? doc["headers"] : json::array());
+            if (!headers.is_array() || headers.empty())
+                throw std::runtime_error("no headers array to verify");
+            size_t verified = 0, skipped = 0;
+            for (auto& h : headers) {
+                // A sig-less header (empty creator_block_sigs) is the genesis
+                // block — robust regardless of the export's `from` offset.
+                bool sigless = !h.contains("creator_block_sigs")
+                            || !h["creator_block_sigs"].is_array()
+                            || h["creator_block_sigs"].empty();
+                if (sigless) { ++skipped; continue; }
+                auto vbs = verify_block_sigs(h, committee_json, bft);
+                if (!vbs.ok) {
+                    std::string idx = h.contains("index") && h["index"].is_number()
+                        ? std::to_string(h["index"].get<uint64_t>()) : "?";
+                    throw std::runtime_error("block " + idx + ": " + vbs.detail);
+                }
+                ++verified;
+            }
+            if (verified == 0 && skipped > 0)
+                throw std::runtime_error("only sig-less (genesis) headers present — nothing to sig-verify");
+            ok = true;
+            detail = std::to_string(verified) + " block(s) sig-verified"
+                   + (skipped ? (" (" + std::to_string(skipped) + " sig-less/genesis skipped)") : "")
+                   + " (" + (bft ? "BFT" : "MD") + ")";
+        } catch (const std::exception& e) { detail = e.what(); }
+        if (!json_out)
+            std::cout << "--- SIGS ---\n  " << (ok ? "OK: " : "FAIL: ") << detail << "\n";
+        checks.push_back({"SIGS", ok ? "PASS" : "FAIL", detail});
+        ok ? ++passed : ++failed;
+    } else {
+        checks.push_back({"SIGS", "SKIP", "CONTINUITY failed — not attempted"});
+    }
+
+    bool overall = (failed == 0);
+    if (json_out) {
+        json j;
+        j["audit"]  = overall ? "PASS" : "FAIL";
+        j["passed"] = passed;
+        j["failed"] = failed;
+        json arr = json::array();
+        for (auto& c : checks)
+            arr.push_back({{"check", c.name}, {"verdict", c.verdict}, {"detail", c.detail}});
+        j["checks"] = arr;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "\n=== VERIFY-CHAIN-FILE SUMMARY ===\n";
+        for (auto& c : checks) {
+            std::string pad(c.name.size() < 12 ? 12 - c.name.size() : 1, ' ');
+            std::cout << "  " << c.name << pad << c.verdict
+                      << (c.detail.empty() ? std::string() : "  (" + c.detail + ")")
+                      << "\n";
+        }
+        std::cout << "\nVERIFY-CHAIN-FILE: " << (overall ? "PASS" : "FAIL")
                   << " (" << passed << " passed, " << failed << " failed)\n";
     }
     return overall ? 0 : 2;
@@ -5854,6 +6004,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-headers")        return cmd_verify_headers(sub_argc, sub_argv);
         if (cmd == "verify-block-sigs")     return cmd_verify_block_sigs(sub_argc, sub_argv);
         if (cmd == "block-verify")          return cmd_block_verify(sub_argc, sub_argv);
+        if (cmd == "verify-chain-file")     return cmd_verify_chain_file(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);
         if (cmd == "fetch-headers")         return cmd_fetch_headers(sub_argc, sub_argv);
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
