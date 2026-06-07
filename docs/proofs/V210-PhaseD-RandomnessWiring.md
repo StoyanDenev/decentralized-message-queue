@@ -1,4 +1,5 @@
 > **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+> **SUPERSEDED 2026-06-07 — see `FROST_DEVIATION_NOTICE.md`.** FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST. This document is HISTORICAL: it analysed wiring FROST into block randomness; FROST is no longer on any chain path. The retained block beacon is the v1.x MPDH commit-reveal.
 
 # v2.10 Phase D — wiring FROST into the block-randomness path (expansion) — DE-SCOPED
 
@@ -7,11 +8,13 @@
 > **FROST-as-block-beacon** swap described in this document is **DE-SCOPED**: per §9, it
 > is not a bias-resistance upgrade over the existing FA3 commit-reveal guarantee, and the
 > one construction-level property that would justify the threshold machinery (BLS-style
-> uniqueness / unbiasable-by-construction) FROST does not provide. The shipped FROST C99
-> primitives + their soundness proofs (`FrostThresholdSoundness.md`) remain **valid and
-> available for other v2 uses** (e.g. `Beaconless-v2-SPEC.md` cross-shard randomness
-> aggregation, threshold signing) — only the *block-beacon application* is dropped. Read
-> the body below as the analysis behind this decision, not as an active work plan.
+> uniqueness / unbiasable-by-construction) FROST does not provide. FROST is **removed from
+> the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) —
+> the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer
+> use), not in the chain path or the v1.1 formal-verification surface. Cross-shard
+> randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH),
+> not FROST. Read the body below as the analysis behind this decision, not as an active
+> work plan.
 >
 > **NOTICE — design authority.** Determ's consensus and randomness design is owned by
 > **Stoyan Denev**. This document records and defers to that design; it is **not

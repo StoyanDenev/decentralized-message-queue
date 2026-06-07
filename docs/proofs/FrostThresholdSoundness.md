@@ -9,6 +9,8 @@
 > design authority is **Stoyan Denev**'s; this document defers to it and is **not
 > co-authored** by the AI assistant.
 
+> **SUPERSEDED 2026-06-07 — see `FROST_DEVIATION_NOTICE.md`.** FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST. This proof remains valid as a *signature-scheme* soundness result for the retained library, but FROST is NOT part of the v1.1 chain consensus path or formal-verification surface.
+
 **Subject:** the libsodium-free C99 FROST-Ed25519 stack — `src/crypto/ed25519/`
 (field/group + RFC 8032 sign/verify) and `src/crypto/frost/` (trusted-dealer +
 DKG keygen, two-round threshold signing, PSS share-refresh). This document is the

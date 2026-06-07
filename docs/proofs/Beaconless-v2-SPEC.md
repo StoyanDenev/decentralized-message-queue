@@ -18,7 +18,7 @@
 This spec covers ONLY the architectural removal of the beacon as a special role and the redistribution of beacon functions across shards. It does NOT cover:
 
 - New consensus mechanism — Beaconless v2 reuses the existing K-of-K mutual-distrust consensus per shard. Only the cross-shard coordination layer changes.
-- New cryptographic primitives — none for randomness: cross-shard randomness uses the v1 **MPDH commit-reveal** beacon (no per-shard DKG), plus v2.1 state Merkle root and v2.2 light-client proofs (all already-shipped). The FROST-Ed25519 stack remains available for manifest / committee-log co-signing but is **not required** for cross-shard randomness (Q6 decision, 2026-06-07).
+- New cryptographic primitives — none for randomness: cross-shard randomness uses the v1 **MPDH commit-reveal** beacon (no per-shard DKG), plus v2.1 state Merkle root and v2.2 light-client proofs (all already-shipped). Manifest + committee-log co-signing use **K-of-K Ed25519** signatures (already shipped). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST.
 - Horizontal-scale beyond ~hundreds of shards — Beaconless v2 raises the practical ceiling from ~50 to ~200-500 shards via lazy validation; beyond that, additional sharding-of-sharding work is a v3 concern.
 - Cross-deployment interop — Beaconless v2 is intra-deployment only. Cross-deployment bridges remain v2.23's scope (which also uses light-client mesh, so the infrastructures align).
 
@@ -62,8 +62,8 @@ The deployment manifest contains:
 - List of shard IDs in the deployment
 - Each shard's genesis hash
 - Each shard's initial committee (as of deployment creation)
-- Cryptographic primitives in use (curve25519 family, Ed25519; FROST-Ed25519 optional, for co-signing only)
-- `randomness_aggregation_form: enum { mpdh_commit_reveal (default), frost_threshold, bls_threshold }` — the per-shard cross-shard-randomness primitive (Q6); a **permanent genesis choice** (no-migrations constraint), default `mpdh_commit_reveal`
+- Cryptographic primitives in use (curve25519 family: Ed25519 signatures + X25519 DH). FROST is not a chain primitive (`FROST_DEVIATION_NOTICE.md`); co-signing uses K-of-K Ed25519.
+- `randomness_aggregation_form: enum { mpdh_commit_reveal (default), bls_threshold }` — the per-shard cross-shard-randomness primitive (Q6); a **permanent genesis choice** (no-migrations constraint), default `mpdh_commit_reveal`. (`frost_threshold` removed — FROST is not a chain primitive per `FROST_DEVIATION_NOTICE.md`.)
 - Manifest version (incremented on mutation)
 - Co-signing record (every mutation signed by the existing committee of every shard, K-of-K per shard)
 - **Operator-tunable parameters** (per review-week BL-3, BL-5, BL-6):
@@ -279,9 +279,11 @@ Per-shard committee selection for epoch N+1 mixes `deployment_rand_N+1` with the
 >   re-roll at all), neither MPDH nor FROST suffices — only threshold-BLS does. MPDH is the right
 >   simplification only while the accepted abort⇒re-roll posture holds.
 >
-> The shipped FROST C99 stack is **not wasted** — it remains available for manifest co-signing,
-> committee-log cross-signing, and threshold signing. Only the per-shard *randomness* application moves
-> to MPDH (this decision).
+> FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md`
+> (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible
+> DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard
+> randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST.
+> Manifest/committee-log co-signing use K-of-K Ed25519, not FROST.
 
 ---
 
