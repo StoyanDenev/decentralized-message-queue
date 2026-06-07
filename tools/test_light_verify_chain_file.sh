@@ -175,6 +175,43 @@ json.dump(d,open('$T/headers_stripped.json','w'))"
 set +e; OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers_stripped.json --committee $T/committee.json 2>&1); RC=$?; set -e
 echo "$OUT" | grep -Eq "SIGS        FAIL" && [ $RC -eq 2 ] && assert true "stripped non-genesis sigs -> SIGS FAIL exit 2" || assert false "stripped non-genesis sigs -> SIGS FAIL exit 2"
 
+echo; echo "=== 11. --committee-manifest (2 ranges, same committee) covers [0..H] -> PASS ==="
+M=$((H/2))
+cat > $T/manifest_ok.json <<EOF
+[{"from":0,"to":$M,"committee":"$T/committee.json"},
+ {"from":$((M+1)),"to":9999999,"committee":"$T/committee.json"}]
+EOF
+set +e
+OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers.json --committee-manifest $T/manifest_ok.json 2>&1); RC=$?
+set -e
+echo "$OUT" | grep -E "SIGS|VERIFY-CHAIN-FILE"
+echo "$OUT" | grep -Eq "SIGS        PASS" && [ $RC -eq 0 ] && assert true "manifest 2-range -> PASS exit 0" || assert false "manifest 2-range -> PASS exit 0"
+
+echo; echo "=== 12. NEGATIVE: manifest upper range -> WRONG committee -> SIGS FAIL exit 2 ==="
+python -c "
+import json
+c=json.load(open('$T/committee.json')); arr=c if isinstance(c,list) else c.get('members',c)
+if arr: pk=arr[0]['ed_pub']; arr[0]['ed_pub']=('1' if pk[0]!='1' else '2')+pk[1:]
+json.dump(arr,open('$T/committee_wrong.json','w'))"
+cat > $T/manifest_bad.json <<EOF
+[{"from":0,"to":$M,"committee":"$T/committee.json"},
+ {"from":$((M+1)),"to":9999999,"committee":"$T/committee_wrong.json"}]
+EOF
+set +e; OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers.json --committee-manifest $T/manifest_bad.json 2>&1); RC=$?; set -e
+echo "$OUT" | grep -Eq "SIGS        FAIL" && [ $RC -eq 2 ] && assert true "manifest wrong-committee range -> SIGS FAIL exit 2" || assert false "manifest wrong-committee range -> SIGS FAIL exit 2"
+
+echo; echo "=== 13. NEGATIVE: manifest GAP (uncovered block) -> SIGS FAIL exit 2 ==="
+cat > $T/manifest_gap.json <<EOF
+[{"from":0,"to":$M,"committee":"$T/committee.json"}]
+EOF
+set +e; OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers.json --committee-manifest $T/manifest_gap.json 2>&1); RC=$?; set -e
+echo "$OUT" | grep -Eq "no manifest range covers" && [ $RC -eq 2 ] && assert true "manifest gap -> SIGS FAIL exit 2 (uncovered block)" || assert false "manifest gap -> SIGS FAIL exit 2 (uncovered block)"
+
+echo; echo "=== 14. arg validation: both / neither committee source -> exit 1 ==="
+set +e; $DETERM_LIGHT verify-chain-file --in $T/headers.json --committee $T/committee.json --committee-manifest $T/manifest_ok.json >/dev/null 2>&1; RC_BOTH=$?
+$DETERM_LIGHT verify-chain-file --in $T/headers.json >/dev/null 2>&1; RC_NEITHER=$?; set -e
+[ $RC_BOTH -eq 1 ] && [ $RC_NEITHER -eq 1 ] && assert true "both/neither committee source -> exit 1" || assert false "both/neither committee source -> exit 1 (both=$RC_BOTH neither=$RC_NEITHER)"
+
 echo; echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then echo "  PASS: test_light_verify_chain_file"; exit 0

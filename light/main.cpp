@@ -83,6 +83,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -112,14 +113,16 @@ void print_usage() {
         "      TX-ROOT (recompute compute_tx_root == stored) + SIGS (committee\n"
         "      Ed25519 over the INTERNALLY-recomputed block_digest — no operator\n"
         "      digest needed, unlike determ-wallet block-verify). One PASS/FAIL.\n"
-        "  verify-chain-file --in <headers> --committee <file>\n"
+        "  verify-chain-file --in <headers> (--committee <file> |\n"
+        "                    --committee-manifest <file>)\n"
         "                    [--genesis-hash <hex>] [--prev-hash <hex>]\n"
         "                    [--bft] [--json]\n"
         "      Self-contained OFFLINE whole-chain verifier (file-based dual of\n"
         "      verify-chain): CONTINUITY (prev_hash walk over an exported headers\n"
         "      file, anchored by --genesis-hash/--prev-hash) + SIGS (every\n"
         "      non-genesis header's committee Ed25519 over its self-recomputed\n"
-        "      digest). No daemon. One PASS/FAIL.\n"
+        "      digest). --committee-manifest [{from,to,committee}...] verifies\n"
+        "      ACROSS committee rotations (per-range committee). No daemon.\n"
         "  verify-state-proof --in <file> [--state-root <hex>]\n"
         "      Verify a state-proof Merkle inclusion against a root.\n"
         "\n"
@@ -834,41 +837,79 @@ int cmd_block_verify(int argc, char** argv) {
 //                exempt; a non-genesis header with stripped/empty sigs FAILS
 //                (CONTINUITY does not recompute sigs, so the skip must key on
 //                index, not on emptiness).
-// The committee is operator-supplied and applied to every block, so this is
-// sound for a segment with NO mid-chain REGISTER/DEREGISTER committee change
-// (same limitation as verify_chain_to_head's genesis-seed); for a rotating
-// committee, segment the file at rotation boundaries. Pure local crypto; no RPC,
-// no daemon, no compute_genesis_hash. (Cross-shard / F2 blocks fail-close in
-// SIGS — see block-verify / F-LBV5.) Exit 0 all pass, 2 a check FAILED, 1 args.
+// A single --committee is applied to every block, so it is sound only for a
+// segment with NO mid-chain REGISTER/DEREGISTER committee change (same
+// limitation as verify_chain_to_head's genesis-seed). To verify ACROSS rotation
+// boundaries in one pass, supply --committee-manifest <file> instead: a JSON
+// array [{"from":F,"to":T,"committee":"path"}...] mapping inclusive absolute
+// index ranges to committee files. Each non-genesis header is verified against
+// the committee whose range covers its index; a header no range covers is a
+// SIGS FAIL (uncovered block). Pure local crypto; no RPC, no daemon, no
+// compute_genesis_hash. (Cross-shard / F2 blocks fail-close in SIGS — see
+// block-verify / F-LBV5.) Exit 0 all pass, 2 a check FAILED, 1 args.
 int cmd_verify_chain_file(int argc, char** argv) {
-    std::string in_path, committee_path, genesis_hash_hex, prev_hash_hex;
+    std::string in_path, committee_path, manifest_path, genesis_hash_hex, prev_hash_hex;
     bool bft = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--in"           && i + 1 < argc) in_path          = argv[++i];
-        else if (a == "--committee"    && i + 1 < argc) committee_path   = argv[++i];
-        else if (a == "--genesis-hash" && i + 1 < argc) genesis_hash_hex = argv[++i];
-        else if (a == "--prev-hash"    && i + 1 < argc) prev_hash_hex    = argv[++i];
-        else if (a == "--bft")                          bft = true;
-        else if (a == "--json")                         json_out = true;
+        if      (a == "--in"                && i + 1 < argc) in_path          = argv[++i];
+        else if (a == "--committee"         && i + 1 < argc) committee_path   = argv[++i];
+        else if (a == "--committee-manifest"&& i + 1 < argc) manifest_path    = argv[++i];
+        else if (a == "--genesis-hash"      && i + 1 < argc) genesis_hash_hex = argv[++i];
+        else if (a == "--prev-hash"         && i + 1 < argc) prev_hash_hex    = argv[++i];
+        else if (a == "--bft")                               bft = true;
+        else if (a == "--json")                              json_out = true;
         else {
             std::cerr << "verify-chain-file: unknown arg '" << a << "'\n";
             return 1;
         }
     }
-    if (in_path.empty() || committee_path.empty()) {
-        std::cerr << "verify-chain-file: --in and --committee are required\n";
+    if (in_path.empty()) {
+        std::cerr << "verify-chain-file: --in is required\n";
+        return 1;
+    }
+    if (committee_path.empty() == manifest_path.empty()) {
+        std::cerr << "verify-chain-file: exactly one of --committee / "
+                     "--committee-manifest is required\n";
         return 1;
     }
 
-    json doc, committee_json;
+    json doc, committee_json, manifest_json;
     try {
         doc = read_json_file(in_path);
-        committee_json = read_json_file(committee_path);
+        if (!committee_path.empty()) committee_json = read_json_file(committee_path);
+        else                         manifest_json  = read_json_file(manifest_path);
     } catch (const std::exception& e) {
         std::cerr << "verify-chain-file: " << e.what() << "\n";
         return 1;
     }
+
+    // Per-height committee resolver. Single-committee mode returns the same
+    // committee for every index; manifest mode picks the range that covers idx
+    // and lazily loads (+ caches) its committee file. Returns false if no range
+    // covers idx, so an uncovered block becomes a SIGS FAIL rather than a skip.
+    std::map<std::string, json> committee_cache;
+    auto committee_for = [&](uint64_t idx, json& out, std::string& why) -> bool {
+        if (!committee_path.empty()) { out = committee_json; return true; }
+        if (!manifest_json.is_array()) { why = "manifest is not a JSON array"; return false; }
+        for (auto& e : manifest_json) {
+            if (!e.is_object() || !e.contains("from") || !e.contains("to")
+                || !e.contains("committee")) continue;
+            uint64_t lo = e["from"].get<uint64_t>(), hi = e["to"].get<uint64_t>();
+            if (idx < lo || idx > hi) continue;
+            std::string cp = e["committee"].get<std::string>();
+            auto it = committee_cache.find(cp);
+            if (it == committee_cache.end()) {
+                try { it = committee_cache.emplace(cp, read_json_file(cp)).first; }
+                catch (const std::exception& ex) {
+                    why = "committee file '" + cp + "': " + ex.what(); return false;
+                }
+            }
+            out = it->second; return true;
+        }
+        why = "no manifest range covers block " + std::to_string(idx);
+        return false;
+    };
 
     struct CheckResult { std::string name, verdict, detail; };
     std::vector<CheckResult> checks;
@@ -919,11 +960,13 @@ int cmd_verify_chain_file(int argc, char** argv) {
                 uint64_t idx = (h.contains("index") && h["index"].is_number())
                     ? h["index"].get<uint64_t>() : UINT64_MAX;
                 if (idx == 0) { ++skipped; continue; }  // genesis: no committee sigs
-                auto vbs = verify_block_sigs(h, committee_json, bft);
-                if (!vbs.ok) {
-                    std::string lbl = idx == UINT64_MAX ? "?" : std::to_string(idx);
+                std::string lbl = idx == UINT64_MAX ? "?" : std::to_string(idx);
+                json committee; std::string why;
+                if (!committee_for(idx, committee, why))
+                    throw std::runtime_error("block " + lbl + ": " + why);
+                auto vbs = verify_block_sigs(h, committee, bft);
+                if (!vbs.ok)
                     throw std::runtime_error("block " + lbl + ": " + vbs.detail);
-                }
                 ++verified;
             }
             if (verified == 0 && skipped > 0)
@@ -931,6 +974,7 @@ int cmd_verify_chain_file(int argc, char** argv) {
             ok = true;
             detail = std::to_string(verified) + " block(s) sig-verified"
                    + (skipped ? (" (" + std::to_string(skipped) + " sig-less/genesis skipped)") : "")
+                   + (manifest_path.empty() ? "" : " via " + std::to_string(committee_cache.size()) + "-committee manifest")
                    + " (" + (bft ? "BFT" : "MD") + ")";
         } catch (const std::exception& e) { detail = e.what(); }
         if (!json_out)
