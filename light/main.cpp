@@ -107,6 +107,11 @@ void print_usage() {
         "      Verify the prev_hash chain in a `headers` RPC reply.\n"
         "  verify-block-sigs --header <file> --committee <file> [--bft]\n"
         "      Verify K-of-K committee Ed25519 sigs (or ceil(2K/3) BFT).\n"
+        "  block-verify --block <file> --committee <file> [--bft] [--json]\n"
+        "      Self-contained OFFLINE single-block verifier: STRUCTURE +\n"
+        "      TX-ROOT (recompute compute_tx_root == stored) + SIGS (committee\n"
+        "      Ed25519 over the INTERNALLY-recomputed block_digest — no operator\n"
+        "      digest needed, unlike determ-wallet block-verify). One PASS/FAIL.\n"
         "  verify-state-proof --in <file> [--state-root <hex>]\n"
         "      Verify a state-proof Merkle inclusion against a root.\n"
         "\n"
@@ -624,6 +629,185 @@ int cmd_verify_block_sigs(int argc, char** argv) {
         std::cerr << "verify-block-sigs: " << e.what() << "\n";
         return 1;
     }
+}
+
+// ───────────────────── block-verify ────────────────────────────────────
+
+// Self-contained OFFLINE single-block verifier — the light-client analogue of
+// `determ-wallet block-verify`, but STRICTLY stronger: because determ-light
+// links the block/digest code (`light_compute_block_digest`), it verifies the
+// committee signatures against a digest it RECOMPUTES ITSELF, so NO operator-
+// supplied block_digest is needed (the wallet cannot recompute the digest — it
+// does not link the chain library). Composes three checks over a block JSON +
+// committee file into one PASS/FAIL:
+//   STRUCTURE — required Block::to_json fields present with the right shapes.
+//   TX-ROOT   — recompute compute_tx_root(creator_tx_lists) (the sorted-dedup
+//               union SHA-256, mirroring src/node/producer.cpp::compute_tx_root)
+//               and compare to the stored tx_root.
+//   SIGS      — K-of-K (or ceil(2K/3) with --bft) committee Ed25519 sigs over
+//               the INTERNALLY-recomputed digest (via verify_block_sigs).
+// SCOPE (F-LBV5, see docs/proofs/LightBlockVerifySoundness.md): light_compute_
+// block_digest omits the compute_view_root terms producer.cpp::compute_block_
+// digest binds for cross-shard inbound receipts + F2-reconciled eq/abort sets,
+// so on a cross-shard / F2 block SIGS FAIL-CLOSES (false-negative, never a false
+// PASS — verify those against a full node). Non-cross-shard/non-F2 blocks keep
+// the byte-identical v1 digest, so SIGS is exact there.
+// Pure local crypto: no RPC, no daemon, no genesis anchor. (--block must be an
+// unwrapped Block JSON or a {block:{...}} envelope.) Exit 0 all pass, 2 a check
+// FAILED, 1 args/parse/IO error.
+int cmd_block_verify(int argc, char** argv) {
+    std::string block_path, committee_path;
+    bool bft = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--block"     && i + 1 < argc) block_path     = argv[++i];
+        else if (a == "--committee" && i + 1 < argc) committee_path = argv[++i];
+        else if (a == "--bft")                       bft = true;
+        else if (a == "--json")                      json_out = true;
+        else {
+            std::cerr << "block-verify: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (block_path.empty() || committee_path.empty()) {
+        std::cerr << "block-verify: --block and --committee are required\n";
+        return 1;
+    }
+
+    json block_json, committee_json;
+    try {
+        block_json     = read_json_file(block_path);
+        committee_json = read_json_file(committee_path);
+    } catch (const std::exception& e) {
+        std::cerr << "block-verify: " << e.what() << "\n";
+        return 1;
+    }
+    if (block_json.is_object() && block_json.contains("block")
+        && block_json["block"].is_object()
+        && !block_json.contains("creator_tx_lists"))
+        block_json = block_json["block"];
+    if (!block_json.is_object()) {
+        std::cerr << "block-verify: --block JSON is not an object\n";
+        return 1;
+    }
+
+    struct CheckResult { std::string name, verdict, detail; };
+    std::vector<CheckResult> checks;
+    int passed = 0, failed = 0;
+
+    // ── STRUCTURE ──
+    bool struct_ok = false;
+    std::string struct_detail;
+    {
+        try {
+            struct Req { const char* k; int kind; };  // 0 str / 1 num / 2 arr
+            const Req reqs[] = {
+                {"index", 1}, {"prev_hash", 0}, {"timestamp", 1},
+                {"creators", 2}, {"creator_tx_lists", 2},
+                {"tx_root", 0}, {"creator_block_sigs", 2},
+            };
+            for (auto& r : reqs) {
+                if (!block_json.contains(r.k))
+                    throw std::runtime_error(std::string("missing field '") + r.k + "'");
+                const auto& v = block_json[r.k];
+                bool ok = (r.kind == 0 && v.is_string())
+                       || (r.kind == 1 && v.is_number())
+                       || (r.kind == 2 && v.is_array());
+                if (!ok)
+                    throw std::runtime_error(std::string("field '") + r.k + "' wrong type");
+            }
+            if (block_json["creators"].empty())
+                throw std::runtime_error("creators[] is empty");
+            struct_detail = "well-formed (" + std::to_string(block_json["creators"].size())
+                          + " creators, "
+                          + std::to_string(block_json["creator_block_sigs"].size())
+                          + " creator_block_sigs)";
+            struct_ok = true;
+        } catch (const std::exception& e) { struct_detail = e.what(); }
+        if (!json_out)
+            std::cout << "--- STRUCTURE ---\n  " << (struct_ok ? "OK: " : "FAIL: ")
+                      << struct_detail << "\n";
+        checks.push_back({"STRUCTURE", struct_ok ? "PASS" : "FAIL", struct_detail});
+        struct_ok ? ++passed : ++failed;
+    }
+
+    // ── TX-ROOT ── recompute the sorted-dedup union commitment.
+    if (struct_ok) {
+        std::string detail;
+        bool ok = false;
+        try {
+            std::vector<Hash> uni;
+            for (auto& list : block_json["creator_tx_lists"]) {
+                if (!list.is_array())
+                    throw std::runtime_error("creator_tx_lists entry is not an array");
+                for (auto& hj : list) {
+                    if (!hj.is_string())
+                        throw std::runtime_error("tx_hash is not a string");
+                    uni.push_back(from_hex_arr<32>(hj.get<std::string>()));
+                }
+            }
+            std::sort(uni.begin(), uni.end());
+            uni.erase(std::unique(uni.begin(), uni.end()), uni.end());
+            determ::crypto::SHA256Builder b;
+            for (auto& h : uni) b.append(h);
+            std::string computed = to_hex(b.finalize());
+            std::string stored = block_json["tx_root"].get<std::string>();
+            for (auto& ch : stored) if (ch >= 'A' && ch <= 'F') ch += 32;  // lc
+            ok = (computed == stored);
+            detail = ok ? ("recomputed == stored (" + std::to_string(uni.size()) + " tx)")
+                        : ("mismatch: " + computed + " != stored " + stored);
+        } catch (const std::exception& e) { detail = e.what(); }
+        if (!json_out)
+            std::cout << "--- TX-ROOT ---\n  " << (ok ? "OK: " : "FAIL: ")
+                      << detail << "\n";
+        checks.push_back({"TX-ROOT", ok ? "PASS" : "FAIL", detail});
+        ok ? ++passed : ++failed;
+    } else {
+        checks.push_back({"TX-ROOT", "SKIP", "STRUCTURE failed — not attempted"});
+    }
+
+    // ── SIGS ── verify_block_sigs recomputes the digest internally.
+    if (struct_ok) {
+        std::string detail;
+        bool ok = false;
+        try {
+            auto r = verify_block_sigs(block_json, committee_json, bft);
+            ok = r.ok;
+            detail = ok ? (std::to_string(r.count) + " sig(s) over self-recomputed digest "
+                             + r.digest_hex.substr(0, 16) + "... (" + (bft ? "BFT" : "MD") + ")")
+                        : r.detail;
+        } catch (const std::exception& e) { detail = e.what(); }
+        if (!json_out)
+            std::cout << "--- SIGS ---\n  " << (ok ? "OK: " : "FAIL: ") << detail << "\n";
+        checks.push_back({"SIGS", ok ? "PASS" : "FAIL", detail});
+        ok ? ++passed : ++failed;
+    } else {
+        checks.push_back({"SIGS", "SKIP", "STRUCTURE failed — not attempted"});
+    }
+
+    bool overall = (failed == 0);
+    if (json_out) {
+        json j;
+        j["audit"]  = overall ? "PASS" : "FAIL";
+        j["passed"] = passed;
+        j["failed"] = failed;
+        json arr = json::array();
+        for (auto& c : checks)
+            arr.push_back({{"check", c.name}, {"verdict", c.verdict}, {"detail", c.detail}});
+        j["checks"] = arr;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "\n=== BLOCK-VERIFY SUMMARY ===\n";
+        for (auto& c : checks) {
+            std::string pad(c.name.size() < 10 ? 10 - c.name.size() : 1, ' ');
+            std::cout << "  " << c.name << pad << c.verdict
+                      << (c.detail.empty() ? std::string() : "  (" + c.detail + ")")
+                      << "\n";
+        }
+        std::cout << "\nBLOCK-VERIFY: " << (overall ? "PASS" : "FAIL")
+                  << " (" << passed << " passed, " << failed << " failed)\n";
+    }
+    return overall ? 0 : 2;
 }
 
 // ───────────────────── verify-state-proof ──────────────────────────────
@@ -5669,6 +5853,7 @@ int main(int argc, char** argv) {
     try {
         if (cmd == "verify-headers")        return cmd_verify_headers(sub_argc, sub_argv);
         if (cmd == "verify-block-sigs")     return cmd_verify_block_sigs(sub_argc, sub_argv);
+        if (cmd == "block-verify")          return cmd_block_verify(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);
         if (cmd == "fetch-headers")         return cmd_fetch_headers(sub_argc, sub_argv);
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
