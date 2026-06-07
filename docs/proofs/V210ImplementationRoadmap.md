@@ -1,6 +1,8 @@
 > **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
 
-# v2.10 Implementation Roadmap — FROST-Ed25519 Threshold Randomness — DE-SCOPED (block beacon)
+# v2.10 Implementation Roadmap — FROST-Ed25519 Threshold Randomness — REMOVED FROM v1.1 SCOPE 2026-06-07
+
+> **NOTICE 2026-06-07 — FROST removed from v1.1 chain consensus path entirely.** Per `FROST_DEVIATION_NOTICE.md`, FROST was identified as a Claude-introduced design deviation, not part of Stoyan Denev's original Determ design. The entire FROST chain-integration goal of this roadmap is FORECLOSED for v1.1. Block randomness uses the v1.x commit-reveal protocol (already shipped, unbiasable under SHA-256 preimage resistance); block authentication uses K individual Ed25519 sigs (already shipped); DSSO uses DLT-A composition (X25519 threshold DH + block-anchored DAPP_CALL — see `V1.1-PLAN.md` Bundle A). This document is HISTORICAL and retained for audit history only. Re-introduction of FROST into chain consensus requires Stoyan's explicit sign-off per `FROST_DEVIATION_NOTICE.md §3`.
 
 > **STATUS / NOTICE.** The **FROST-as-block-randomness-beacon** goal of this roadmap
 > (replacing the v1 commit-reveal block beacon — "the last permissionless-readiness gate"

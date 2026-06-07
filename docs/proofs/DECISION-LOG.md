@@ -1041,4 +1041,58 @@ These three are not just *features* shipping at v1.1 — they are *commitments* 
 
 ---
 
+---
+
+## 2026-06-07 — Option C: FROST removed from v1.1 chain consensus path + DLT-A composition for DSSO + FROST provenance NOTICE
+
+### FROST identified as Claude-introduced design deviation; removed from v1.1 scope; DSSO restructured around DLT-native primitives
+
+**Question.** Following the formal-verifiability rationale for no-migrations (2026-06-06 afternoon), re-examination of every primitive in the v1.1-locked surface for load-bearing-ness. FROST was found to be load-bearing only for DSSO assertion-binding; the v1.x commit-reveal protocol already provides unbiasable block randomness, and K individual Ed25519 sigs already provide block authentication. Three sub-questions arose:
+
+1. Can DSSO be implemented without FROST using DLT-native primitives?
+2. Should FROST be removed from the v1.1 chain consensus path entirely?
+3. How to record the design provenance — FROST was Claude-introduced, not part of Stoyan Denev's original Determ design.
+
+**Decisions (Stoyan 2026-06-07).**
+
+1. **DSSO via DLT-A composition (no FROST).** Two crypto legs, both using primitives already shipped:
+   - **T-OPRF leg:** X25519 threshold DH. N DSSO operators each hold scalar share k_i; user sends blinded password as X25519 point P; each operator returns P^k_i; user aggregates via group multiplication = P^(Σ k_i); user unblinds to OPRF output. Mathematically equivalent to single-server OPRF with key = Σ k_i. Uses already-shipped X25519 (commit `bc87704`). No new crypto primitive.
+   - **Assertion-binding leg:** Block-anchored DAPP_CALL. DSSO emits a DAPP_CALL tx ("user U session S valid at block N") into mempool; tx included in block N via union_tx_root; block N signed K-of-K by chain committee (already happens every block). **The chain's K-of-K block signature IS the threshold attestation.** RP verifies (a) block sig K-of-K + (b) Merkle inclusion proof + (c) session signature.
+   - Crypto inventory: Ed25519 + X25519 + SHA-2 + ChaCha20-Poly1305 + DAPP_CALL + state-root proofs. All already shipped. Zero new primitives.
+
+2. **FROST removed from v1.1 chain consensus path entirely.**
+   - v2.10 FROST chain-wiring removed from substrate Bundle 1
+   - Beaconless v2 §4.6 cross-shard randomness switched from FROST threshold sig to commit-reveal aggregation across shards (matches within-shard pattern)
+   - `signature_form` discriminator in §7.1: open question, evaluated separately under FROST-removal cascade
+   - FROST C99 implementation under `src/crypto/frost/` is retained as a library (DApp-layer use post-launch is allowed under DApp authority); it is NOT part of the v1.1 consensus path, NOT part of the v1.1-locked formal-verification surface
+
+3. **`FROST_DEVIATION_NOTICE.md` created** as provenance record. Establishes that FROST was Claude-introduced (not part of Stoyan's original Determ design), records the re-examination + removal, and sets the discipline for future AI-introduced design elements: AI must identify proposals as AI-suggested, cite the original design property the proposal addresses, compare against DLT-native alternatives, and defer to Stoyan for accept/reject before recording in any immutable document.
+
+**Why this matters.** The no-migrations + formal-verifiability frame (per `DECISION-LOG.md 2026-06-06 afternoon` + memory `dlt-no-migrations-constraint`) makes every primitive in the v1.1 surface load-bearing for the chain's lifetime. AI-introduced primitives that propagate into specs + implementation + audit without explicit owner sign-off are a discipline failure mode. FROST is the recorded example. The NOTICE establishes the discipline so future sessions catch it preemptively.
+
+**Cascade effects.**
+- Bundle A (DSSO) effort estimate: ~6-8 weeks → ~4-6 weeks (no FROST chain-wiring; ~2 weeks saved)
+- Bundle 1 (v2.10 FROST chain-wiring) removed from substrate critical path (~2-3 weeks saved)
+- Beaconless v2 §4.6 switched to commit-reveal aggregation (already updated in spec; no new primitive needed)
+- Formal-verification target surface reduced (no FROST DKG, no FROST sign, no PSS proofs needed for v1.1)
+- C99 crypto stack: §3.8 FROST primitives retained as library, not in consensus path
+- Light-client verifier: unchanged (still verifies K individual Ed25519 block sigs)
+- Audit surface for v1.1: reduced (no threshold-cryptography family in consensus path)
+
+**Files updated.**
+- `FROST_DEVIATION_NOTICE.md` — NEW provenance record
+- `V1.1-PLAN.md` — Bundle A reworked for DLT-A composition; §0 three-property frame updated (DSSO mechanism, god-protocol mechanism); companion docs list updated; effort estimate revised
+- `IMPLEMENTATION-SEQUENCING.md` — Bundle 1 FROST chain-wiring removed; FROST_DEVIATION_NOTICE referenced
+- `Beaconless-v2-SPEC.md` — §4.6 cross-shard randomness switched to commit-reveal aggregation (already done in prior session edit by Stoyan)
+- `ECONOMICS_CONFIG_GUIDANCE.md §2.2` — K-of-K FROST forward-compat note removed (moot under FROST removal); replaced with simple K-individual-sigs distribution statement
+- `CRYPTO-C99-SPEC.md` — NOTICE banner at top: §3.8 FROST not in v1.1 consensus path
+- `V210ImplementationRoadmap.md` — NOTICE banner at top: roadmap goal FORECLOSED; document HISTORICAL
+- `README.md` — DSSO mechanism description updated (DLT-A, not T-OPAQUE/FROST); FROST_DEVIATION_NOTICE referenced
+- Memory `dlt-no-migrations-constraint` — DSSO mechanism updated; FROST_DEVIATION_NOTICE referenced
+- This DECISION-LOG entry
+
+**Generalization (added to project meta-discipline).** Any AI-introduced design element that becomes load-bearing in a long-lived artifact must be flagged as such in a NOTICE document. The asymmetry: an AI proposing a design element does not bear the consequences of its permanence. A human owner does. When the consequence is "this primitive is in the chain's immutable surface forever," provenance matters. The FROST case is now the project's worked example of catching AI-introduced drift before launch; the discipline is captured in `FROST_DEVIATION_NOTICE.md §4` for forward-applicability.
+
+---
+
 *End of decision log. Append new entries below as future deliberations conclude.*
