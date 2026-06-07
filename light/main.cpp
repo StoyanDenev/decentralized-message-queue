@@ -119,6 +119,13 @@ void print_usage() {
         "Composite trustless reads (--genesis required):\n"
         "  verify-chain --rpc-port <N> --genesis <file>\n"
         "      Anchor genesis + fetch all headers + verify every committee sig.\n"
+        "  audit --rpc-port <N> --genesis <file> [--json]\n"
+        "      One-shot trust-minimized node audit: composes CHAIN (verify-chain:\n"
+        "      genesis pin + continuity + every committee sig) and SUPPLY\n"
+        "      (supply-trustless: A1 conservation against the signed head) into a\n"
+        "      single PASS/FAIL with a per-check breakdown. SUPPLY is SKIPped (not\n"
+        "      failed) when CHAIN fails. Exit 0 = all pass, 1 = any fail/error —\n"
+        "      suitable as a cron/monitor health gate.\n"
         "  balance-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
         "      Verified chain + state-proof + cross-check daemon's cleartext.\n"
         "  nonce-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
@@ -5493,6 +5500,154 @@ int cmd_rpc_auth(int argc, char** argv) {
     }
 }
 
+// ─────────────────────────────── audit ─────────────────────────────────
+// Composite one-shot trust-minimized node audit. Runs the whole-chain
+// verifiers that need only (--rpc-port, --genesis) and aggregates their
+// verdicts into a single PASS/FAIL with a per-check breakdown and a
+// monitor-friendly exit code (0 = all pass, 1 = any fail / error). It adds
+// NO new verification logic — only orchestration over already-tested
+// primitives — so its soundness is exactly the conjunction of the
+// components it composes (see docs/proofs/LightClientAuditComposition.md):
+//   CHAIN  — genesis pin + prev_hash continuity + per-block K-of-K committee
+//            Ed25519 sigs genesis->head (verify_chain_to_head; FA1 light-
+//            client safety). Also surfaces the head's state-commitment.
+//   SUPPLY — trustless A1 unitary-supply conservation read against the same
+//            committee-signed head (cmd_supply_trustless; SupplyProofSoundness).
+// SUPPLY is attempted only when CHAIN passes (a broken chain makes any state
+// read moot); on CHAIN failure SUPPLY is reported SKIP, never a false PASS.
+int cmd_audit(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--json")                    json_out = true;
+        else {
+            std::cerr << "audit: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty()) {
+        std::cerr << "audit: --rpc-port and --genesis are required\n";
+        return 1;
+    }
+
+    struct CheckResult { std::string name, verdict, detail; };
+    std::vector<CheckResult> checks;
+    int passed = 0, failed = 0, skipped = 0;
+
+    // ── CHAIN ── genesis pin + continuity + every block's committee sigs.
+    // Direct helper call (rather than cmd_verify_chain) so the audit also
+    // learns the head's state-commitment status for the report.
+    std::string head_state_root;
+    {
+        std::string detail;
+        bool ok = false;
+        try {
+            auto genesis = load_genesis(genesis_path);
+            auto committee_seed = build_genesis_committee(genesis);
+            RpcClient rpc(port);
+            if (!rpc.open()) throw std::runtime_error(rpc.last_error());
+            std::string gh = anchor_genesis(rpc, genesis);
+            auto vc = verify_chain_to_head(rpc, committee_seed, gh);
+            head_state_root = vc.head_state_root;
+            detail = "height " + std::to_string(vc.height) + ", "
+                   + std::to_string(vc.headers_verified) + " headers, "
+                   + std::to_string(vc.blocks_with_sigs_verified) + " sig-sets";
+            ok = true;
+        } catch (const std::exception& e) {
+            detail = e.what();
+        }
+        if (!json_out)
+            std::cout << "--- CHAIN ---\n  " << (ok ? "OK: " : "FAIL: ")
+                      << detail << "\n";
+        checks.push_back({"CHAIN", ok ? "PASS" : "FAIL", detail});
+        ok ? ++passed : ++failed;
+    }
+
+    // ── SUPPLY ── trustless A1 supply conservation against the signed head.
+    // Reuses the fully-tested cmd_supply_trustless by synthesizing its argv;
+    // in --json mode its human output is captured to a sink so only the
+    // aggregate JSON reaches stdout.
+    if (checks[0].verdict == "PASS") {
+        std::vector<std::string> args = {
+            "--rpc-port", std::to_string(port), "--genesis", genesis_path};
+        std::vector<char*> av;
+        for (auto& s : args) av.push_back(const_cast<char*>(s.c_str()));
+        std::ostringstream sink;
+        // RAII: restore BOTH cout and cerr streambufs even if the sub-command
+        // throws. Declared AFTER `sink`, so during stack unwind this guard runs
+        // first (un-redirecting the streams) and only then is `sink` destroyed
+        // — never leaving a stream pointing at a freed buffer.
+        struct RdbufGuard {
+            std::streambuf* out_prev{nullptr};
+            std::streambuf* err_prev{nullptr};
+            ~RdbufGuard() {
+                if (out_prev) std::cout.rdbuf(out_prev);
+                if (err_prev) std::cerr.rdbuf(err_prev);
+            }
+        } guard;
+        if (json_out) {
+            // Capture the sub-command's human stdout AND stderr so only the
+            // aggregate JSON reaches the operator; the failure reason is still
+            // surfaced via the per-check `detail` field in the JSON.
+            guard.out_prev = std::cout.rdbuf(sink.rdbuf());
+            guard.err_prev = std::cerr.rdbuf(sink.rdbuf());
+        } else {
+            std::cout << "--- SUPPLY ---\n";
+        }
+        int rc = cmd_supply_trustless(static_cast<int>(av.size()), av.data());
+        if (guard.out_prev) { std::cout.rdbuf(guard.out_prev); guard.out_prev = nullptr; }
+        if (guard.err_prev) { std::cerr.rdbuf(guard.err_prev); guard.err_prev = nullptr; }
+        checks.push_back({"SUPPLY", rc == 0 ? "PASS" : "FAIL",
+                          rc == 0 ? "conserved"
+                                  : "UNVERIFIABLE / mismatch (exit "
+                                      + std::to_string(rc) + ")"});
+        rc == 0 ? ++passed : ++failed;
+    } else {
+        checks.push_back({"SUPPLY", "SKIP", "CHAIN failed — not attempted"});
+        ++skipped;
+    }
+
+    bool overall = (failed == 0);
+
+    if (json_out) {
+        json j;
+        j["audit"]           = overall ? "PASS" : "FAIL";
+        j["passed"]          = passed;
+        j["failed"]          = failed;
+        j["skipped"]         = skipped;
+        j["head_state_root"] = head_state_root;  // "" if pre-S-033
+        json arr = json::array();
+        for (auto& c : checks)
+            arr.push_back({{"check", c.name},
+                           {"verdict", c.verdict},
+                           {"detail", c.detail}});
+        j["checks"] = arr;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "\n=== AUDIT SUMMARY ===\n";
+        for (auto& c : checks) {
+            std::string pad(c.name.size() < 8 ? 8 - c.name.size() : 1, ' ');
+            std::cout << "  " << c.name << pad << c.verdict
+                      << (c.detail.empty() ? std::string()
+                                           : "  (" + c.detail + ")")
+                      << "\n";
+        }
+        std::cout << "  head state_root: "
+                  << (head_state_root.empty() ? "(pre-S-033 / not populated)"
+                                              : head_state_root)
+                  << "\n";
+        std::cout << "\nAUDIT: " << (overall ? "PASS" : "FAIL")
+                  << " (" << passed << " passed, " << failed << " failed, "
+                  << skipped << " skipped)\n";
+    }
+    return overall ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -5518,6 +5673,7 @@ int main(int argc, char** argv) {
         if (cmd == "fetch-headers")         return cmd_fetch_headers(sub_argc, sub_argv);
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
         if (cmd == "verify-chain")          return cmd_verify_chain(sub_argc, sub_argv);
+        if (cmd == "audit")                 return cmd_audit(sub_argc, sub_argv);
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
