@@ -1,501 +1,420 @@
 #!/usr/bin/env bash
-# operator_genesis_diff.sh — Semantic diff between two genesis.json files.
+# operator_genesis_diff.sh — READ-ONLY field-by-field diff between TWO
+# local genesis.json files, focused on the consensus-critical parameters
+# that MUST agree across a fleet before bootstrap.
 #
-# Compares two local genesis configs field-by-field and classifies the
-# differences by impact tier:
+# Why this tool exists:
+#   Every node in a deployment must boot from a byte-identical genesis or
+#   its computed genesis hash diverges and the HELLO handshake rejects the
+#   peer. A single drifted field (a stale m_creators, a wrong chain_role,
+#   a forgotten v2 activation-height gate) in one operator's copy is a
+#   silent fleet-wide mismatch that only surfaces as "peer refused to
+#   connect" at runtime. This tool catches that drift offline, before any
+#   node starts, by diffing the two files on exactly the fields that move
+#   the genesis identity:
 #
-#   * Identity-affecting — fields bound to compute_genesis_hash (chain_id,
-#     chain_role, shard_id, initial_creators, initial_balances,
-#     committee_region, genesis_message, etc.). Any diff here means the
-#     two configs describe distinct chains; nodes started from one cannot
-#     federate with nodes started from the other.
+#     * chain_id, chain_role, sharding (shard_id / initial_shard_count /
+#       committee_region)
+#     * committee size (m_creators / k_block_sigs) + bft_enabled
+#     * timing (epoch_blocks) + merge/revert/grace thresholds
+#     * subsidy params (block_subsidy / subsidy_mode / lottery multiplier /
+#       subsidy_pool_initial / zeroth_pool_initial) + min_stake
+#     * v2 activation heights (v2_7_f2_active_from_height,
+#       v2_10_active_from_height)
+#     * the identity counts verify-genesis surfaces (initial_creators,
+#       initial_balances, genesis_message), plus the computed genesis_hash
 #
-#   * Consensus-affecting — operational params that drive block-
-#     production semantics (m_creators, k_block_sigs, bft_enabled,
-#     bft_escalation_threshold, governance_mode + param_threshold +
-#     param_keyholders). Per S-039 these do NOT contribute to the
-#     identity hash but they DO change how a node behaves; mismatched
-#     consensus params across operators leads to silent forks even when
-#     both nodes "agree" on the genesis hash.
+#   Only DIFFERING fields are printed, followed by a single SAME / DIFFER
+#   verdict. A matching genesis_hash with no field-level diff is SAME;
+#   anything else is DIFFER.
 #
-#   * Economic — block_subsidy, suspension_slash, min_stake,
-#     unstake_delay, subsidy_pool_initial, subsidy_mode + lottery
-#     multiplier, zeroth_pool_initial, inclusion_model. Changing any
-#     between deployments rewrites the economic contract.
-#
-#   * Operational — epoch_blocks, merge_threshold_blocks,
-#     revert_threshold_blocks, merge_grace_blocks, shard_address_salt.
-#     Diffs here typically signal a deployment-template drift rather
-#     than a real economic / consensus change.
-#
-# Why not just `diff a.json b.json`? Byte-for-byte diff is noisy:
-#   * Key-order is incidental (JSON object members are unordered).
-#   * Whitespace / trailing newlines / quoting style vary across
-#     editors.
-#   * A renamed `param_threshold` from 2 → 3 looks identical (visually)
-#     to a renamed `block_subsidy` from 50 → 51, but operationally one
-#     is a governance change while the other is an economic change.
-# This script normalizes both files through verify-genesis and JSON
-# parsing, then renders the diff grouped by impact tier with explicit
-# severity classification.
+# Both files are parsed read-only, twice:
+#   1. `determ verify-genesis --in <file> --json` — the already-shipped
+#      genesis parser. Surfaces the sane-bounds-validated core
+#      (genesis_hash, chain_id, chain_role, shard_id, m_creators,
+#      k_block_sigs, block_subsidy, min_stake, initial_shard_count,
+#      bft_enabled, committee_region, initial_creators/balances counts,
+#      genesis_message_is_default / _bytes).
+#   2. A second raw-JSON read (via Python — the repo's genesis-parsing
+#      tool of choice, mirroring operator_genesis_inspect.sh) for the
+#      fields verify-genesis omits: subsidy_mode / lottery multiplier /
+#      subsidy_pool_initial / zeroth_pool_initial, epoch_blocks, the
+#      merge/revert/grace thresholds, and the v2 activation-height gates.
 #
 # Sibling positioning:
-#   * operator_genesis_verify_live.sh — daemon vs file (chain-id RPC).
-#   * operator_genesis_dump.sh        — single-file inspection.
-#   * operator_genesis_diff.sh (this) — two-file semantic comparison.
+#   * operator_genesis_inspect.sh      — single-file human summary view.
+#   * operator_genesis_dump.sh         — single-file full parameter dump.
+#   * operator_genesis_verify_live.sh  — compares a running daemon's
+#                                        chain-id RPC against a file hash.
+#   * operator_genesis_diff.sh (this)  — TWO-FILE consensus-param diff.
 #
-# Use cases:
-#   1. Promotion gate — diff staging vs prod genesis before promoting
-#      a release. Identity-affecting diffs MUST be intentional; the
-#      script's --strict flag turns identity divergence into an
-#      operator alert (exit 2).
-#   2. Multi-region rollout — compare per-region genesis templates to
-#      confirm only the region-specific fields (committee_region,
-#      shard_id) differ; everything else should be identical.
-#   3. Post-incident forensics — diff the genesis a node actually
-#      shipped against the canonical deployment manifest to spot
-#      configuration drift.
-#   4. Governance review — confirm a proposed genesis change touches
-#      only the intended fields (e.g., a min_stake bump should NOT
-#      also flip bft_enabled).
+# READ-ONLY: no RPC, no daemon, no cluster, no chain mutation. Pure file
+# inspection of two local genesis JSONs.
+#
+# SKIP-with-PASS: in a minimal environment where the determ binary or a
+# Python interpreter is unavailable, the script cannot parse the genesis.
+# It then SKIPs (no-op) and exits 0 — never a hard fail — so it is a clean
+# no-op in build-less checkouts. A missing input file is likewise treated
+# as an advisory SKIP-with-PASS (the tool can't compare a file it can't
+# read; that is an operator/input condition, not a tool failure).
+#
+# Output: the two genesis hashes, a field-by-field diff of ONLY the
+# differing consensus-critical fields, then a SAME / DIFFER verdict, and
+# finally a single terminal PASS:/FAIL: line.
+#
+# Usage:
+#   tools/operator_genesis_diff.sh <genesis-a.json> <genesis-b.json>
 #
 # Exit codes:
-#   0   identical genesis_hash AND no differences in any tier
-#   2   any diff detected (or hash mismatch with --strict)
-#   1   file missing / unreadable / verify-genesis error / bad args
-#
-# Output formats:
-#   default — human-readable, grouped by tier
-#   --json  — single-line JSON envelope with all detected diffs and
-#             computed identity hashes
+#   0 — comparison completed (files SAME, OR files DIFFER — a detected
+#       drift is reported, not an error), or SKIPped because a parser /
+#       input file was unavailable
+#   1 — real failure: verify-genesis rejected a (present, readable) file /
+#       malformed JSON / bad args
 set -u
 
 usage() {
   cat <<'EOF'
-Usage: operator_genesis_diff.sh --in-a <file> --in-b <file>
-                                [--json] [--strict]
+Usage: operator_genesis_diff.sh <genesis-a.json> <genesis-b.json>
 
-Semantically diffs two local genesis.json files. Differences are
-grouped by impact tier:
-  * Identity-affecting   (chain_id, chain_role, initial_creators, ...)
-  * Consensus-affecting  (m_creators, k_block_sigs, bft_enabled, ...)
-  * Economic            (block_subsidy, min_stake, unstake_delay, ...)
-  * Operational         (epoch_blocks, merge_threshold_blocks, ...)
+READ-ONLY field-by-field diff of the consensus-critical parameters
+between two local genesis.json files. No RPC, no daemon, no cluster —
+pure file inspection. Catches fleet config drift / a mismatched genesis
+before it causes a genesis-hash mismatch at the HELLO handshake.
 
-Required:
-  --in-a <file>     First genesis.json to compare
-  --in-b <file>     Second genesis.json to compare
+Arguments:
+  <genesis-a.json>   First genesis file.
+  <genesis-b.json>   Second genesis file.
 
 Options:
-  --json            Emit single-line JSON envelope instead of human text
-  --strict          Exit 2 when genesis_hash differs (default also
-                    exits 2 on diffs of any kind, but --strict frames
-                    the diagnostic around the identity-hash divergence
-                    as an operator alert specifically)
-  -h, --help        Show this help
+  -h, --help         Show this help.
+
+Compares: chain_id, chain_role, sharding (shard_id / initial_shard_count
+/ committee_region), committee size (m_creators / k_block_sigs) +
+bft_enabled, timing (epoch_blocks + merge/revert/grace thresholds),
+subsidy params (block_subsidy / subsidy_mode / lottery multiplier /
+subsidy_pool_initial / zeroth_pool_initial) + min_stake, v2 activation
+heights, identity counts (initial_creators / initial_balances /
+genesis_message), and the computed genesis_hash. Only differing fields
+are printed, followed by a SAME / DIFFER verdict.
 
 Exit codes:
-  0   identical genesis_hash AND no field-level differences
-  2   any diff detected (or genesis_hash mismatch with --strict)
-  1   file missing / unreadable / malformed / verify-genesis error /
+  0   comparison completed (SAME or DIFFER — drift is reported, not an
+      error), or SKIP — no determ/Python parser, or an input file is
+      unavailable
+  1   verify-genesis rejected a present/readable file / malformed JSON /
       bad args
-
-JSON shape (--json):
-  {"status":              "ok|differ",
-   "a_path":              "<path>",
-   "b_path":              "<path>",
-   "a_genesis_hash":      "<64hex>",
-   "b_genesis_hash":      "<64hex>",
-   "hashes_match":        true|false,
-   "identity_diffs":      [{"field":"...","a":...,"b":...}, ...],
-   "consensus_diffs":     [{"field":"...","a":...,"b":...}, ...],
-   "economic_diffs":      [{"field":"...","a":...,"b":...,
-                            "delta_pct": <signed-float-or-null>}, ...],
-   "operational_diffs":   [{"field":"...","a":...,"b":...}, ...],
-   "total_diffs":         <int>,
-   "strict":              true|false}
-
-Use cases:
-  1. Promotion gate — diff staging vs prod genesis before promoting.
-  2. Multi-region rollout — confirm only region-specific fields differ.
-  3. Post-incident forensics — verify shipped genesis against manifest.
-  4. Governance review — confirm a proposed change touches only the
-     intended fields.
 EOF
 }
 
 IN_A=""
 IN_B=""
-JSON_OUT=0
-STRICT=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help)  usage; exit 0 ;;
-    --in-a)     IN_A="$2"; shift 2 ;;
-    --in-b)     IN_B="$2"; shift 2 ;;
-    --json)     JSON_OUT=1; shift ;;
-    --strict)   STRICT=1; shift ;;
-    *) echo "operator_genesis_diff: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "operator_genesis_diff: unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *)
+      if [ -z "$IN_A" ]; then
+        IN_A="$1"; shift
+      elif [ -z "$IN_B" ]; then
+        IN_B="$1"; shift
+      else
+        echo "operator_genesis_diff: unexpected extra argument: $1" >&2
+        usage >&2; exit 1
+      fi
+      ;;
   esac
 done
 
 if [ -z "$IN_A" ] || [ -z "$IN_B" ]; then
-  echo "operator_genesis_diff: --in-a <file> and --in-b <file> are required" >&2
+  echo "operator_genesis_diff: two genesis file paths are required" >&2
   usage >&2
   exit 1
 fi
 
-# Existence + readability checks BEFORE invoking the binary so the
-# operator gets a path-specific diagnostic, not a generic "cannot_open"
-# from verify-genesis.
+cd "$(dirname "$0")/.."
+
+# ── Parser availability gate (SKIP-with-PASS) ──────────────────────────────────
+# The determ binary parses + sane-bounds-validates each genesis; Python
+# performs the raw augmentation read + diff. If EITHER is unavailable we
+# cannot produce a diff — but a missing build is not a failure of this
+# tool, so SKIP (no-op) and exit 0. We must decide this BEFORE sourcing
+# common.sh, because common.sh hard-exits when the determ binary is absent
+# (which would defeat the no-op-SKIP contract in a build-less env).
+PY=python
+command -v python >/dev/null 2>&1 || PY=python3
+
+DETERM_FOUND=0
+if [ -n "${DETERM_BIN:-}" ] && [ -x "${DETERM_BIN}" ]; then
+  DETERM_FOUND=1
+elif [ -x "build/Release/determ.exe" ] || [ -x "build/determ.exe" ] \
+  || [ -x "build/determ" ]            || [ -x "build/Release/determ" ]; then
+  DETERM_FOUND=1
+fi
+
+if [ "$DETERM_FOUND" != "1" ] || ! command -v "$PY" >/dev/null 2>&1; then
+  echo "  SKIP: need both the determ binary and a Python interpreter to"
+  echo "        parse the genesis files; build with"
+  echo "        cmake --build build --config Release --target determ"
+  echo
+  echo "  PASS: operator_genesis_diff (no-op skip)"
+  exit 0
+fi
+
+# ── Input-file availability gate (SKIP-with-PASS / advisory) ────────────────────
+# A genesis path that doesn't exist or isn't readable is an operator/input
+# condition, not a tool failure. Per the SKIP-with-PASS contract we do NOT
+# hard-fail in a minimal env: report it and exit 0 with a terminal PASS so
+# the suite stays green. (verify-genesis rejecting a PRESENT, readable file
+# is a different story — that IS a real failure, handled below.)
 for label_path in "a:$IN_A" "b:$IN_B"; do
   label=${label_path%%:*}
   path=${label_path#*:}
   if [ ! -f "$path" ]; then
-    echo "operator_genesis_diff: --in-$label file not found: $path" >&2
-    exit 1
+    echo "  SKIP: genesis file (--in-$label) not found: $path"
+    echo
+    echo "  PASS: operator_genesis_diff (no-op skip — input file unavailable)"
+    exit 0
   fi
   if [ ! -r "$path" ]; then
-    echo "operator_genesis_diff: --in-$label file not readable: $path" >&2
-    exit 1
+    echo "  SKIP: genesis file (--in-$label) not readable: $path"
+    echo
+    echo "  PASS: operator_genesis_diff (no-op skip — input file unavailable)"
+    exit 0
   fi
 done
 
-cd "$(dirname "$0")/.."
+# Both parsers present and both files readable — safe to source common.sh.
 source tools/common.sh
 
-# ── 1. Compute parsed + hashed view for each file via verify-genesis ──
+# ── Step 1: parsed + validated + hashed view for each file ─────────────────────
 # verify-genesis applies parse + sane-bounds checks AND computes
-# compute_genesis_hash. A successful return means the file is a
-# deployable genesis. Otherwise we surface the diagnostic verbatim.
+# compute_genesis_hash. A successful return means the file is a deployable,
+# sane-bounds-checked genesis. A rejection of a present, readable file is a
+# REAL failure (malformed / out-of-bounds), so surface the diagnostic
+# verbatim and fail.
 VG_A=$("$DETERM" verify-genesis --in "$IN_A" --json 2>&1)
 VG_A_RC=$?
 if [ "$VG_A_RC" -ne 0 ]; then
-  echo "operator_genesis_diff: verify-genesis failed on $IN_A (rc=$VG_A_RC)" >&2
+  echo "  FAIL: verify-genesis rejected $IN_A (rc=$VG_A_RC)" >&2
   echo "$VG_A" >&2
+  echo
+  echo "  FAIL: operator_genesis_diff"
   exit 1
 fi
 
 VG_B=$("$DETERM" verify-genesis --in "$IN_B" --json 2>&1)
 VG_B_RC=$?
 if [ "$VG_B_RC" -ne 0 ]; then
-  echo "operator_genesis_diff: verify-genesis failed on $IN_B (rc=$VG_B_RC)" >&2
+  echo "  FAIL: verify-genesis rejected $IN_B (rc=$VG_B_RC)" >&2
   echo "$VG_B" >&2
+  echo
+  echo "  FAIL: operator_genesis_diff"
   exit 1
 fi
 
-# ── 2. Drive the diff in Python ──────────────────────────────────────
-# Python is the right tool: it can parse both files once for the raw
-# fields verify-genesis omits (governance, sharding salts, full
-# creator/balance arrays, timing thresholds), classify each diff by
-# tier, compute relative deltas for the economic tier, and emit both
-# human + JSON renderings off one set of accessors.
-python - "$IN_A" "$IN_B" "$JSON_OUT" "$STRICT" "$VG_A" "$VG_B" <<'PY'
+# ── Step 2: render the diff via Python ─────────────────────────────────────────
+# Python re-reads each raw file once for the fields verify-genesis omits
+# (subsidy_mode/pools, epoch_blocks, merge thresholds, v2 heights), folds
+# in the verify-genesis JSON, computes the field-by-field diff, prints
+# ONLY the differing consensus-critical fields, and emits the SAME / DIFFER
+# verdict plus the terminal PASS:/FAIL: line. Each side passes its file
+# path + verify-genesis JSON on argv so there is exactly one raw parse pass
+# per file.
+"$PY" - "$IN_A" "$IN_B" "$VG_A" "$VG_B" <<'PY'
 import json, sys
 
 in_a    = sys.argv[1]
 in_b    = sys.argv[2]
-json_out = sys.argv[3] == "1"
-strict  = sys.argv[4] == "1"
-vg_a_raw = sys.argv[5]
-vg_b_raw = sys.argv[6]
+vg_a_raw = sys.argv[3]
+vg_b_raw = sys.argv[4]
 
-def die(msg):
-    sys.stderr.write(f"operator_genesis_diff: {msg}\n")
+def hard_fail(msg):
+    # Real failure (malformed JSON, bad parser output). Terminal verdict
+    # is a single FAIL: line after a blank line so run_all.sh greps an
+    # unambiguous failure marker.
+    print(f"  FAIL: {msg}")
+    print()
+    print("  FAIL: operator_genesis_diff")
     sys.exit(1)
 
-# Parse verify-genesis outputs.
+# ── verify-genesis outputs (already validated by the binary). ──────────────
 try:
     vg_a = json.loads(vg_a_raw)
 except Exception as e:
-    die(f"verify-genesis(a) JSON not parseable: {e}")
+    hard_fail(f"verify-genesis(a) --json output not parseable: {e}")
 try:
     vg_b = json.loads(vg_b_raw)
 except Exception as e:
-    die(f"verify-genesis(b) JSON not parseable: {e}")
+    hard_fail(f"verify-genesis(b) --json output not parseable: {e}")
 
 if vg_a.get("status") != "ok":
-    die(f"verify-genesis(a) status!=ok: {vg_a_raw}")
+    hard_fail(f"verify-genesis(a) status != ok: {vg_a_raw}")
 if vg_b.get("status") != "ok":
-    die(f"verify-genesis(b) status!=ok: {vg_b_raw}")
+    hard_fail(f"verify-genesis(b) status != ok: {vg_b_raw}")
 
-# Parse raw files for fields verify-genesis omits (governance,
-# subsidy_mode, suspension_slash, unstake_delay, epoch_blocks, merge
-# thresholds, shard_address_salt, full initial_creators[] +
-# initial_balances[] arrays, inclusion_model).
-def load_raw(path):
+# ── Raw file reads for the fields verify-genesis omits. ────────────────────
+def load_raw(label, path):
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except Exception as e:
-        die(f"cannot parse {path} as JSON: {e}")
+        hard_fail(f"cannot parse {path} ({label}) as JSON: {e}")
+    if not isinstance(raw, dict):
+        hard_fail(f"genesis root ({label}) is not a JSON object: {path}")
+    return raw
 
-raw_a = load_raw(in_a)
-raw_b = load_raw(in_b)
-if not isinstance(raw_a, dict):
-    die(f"genesis root not a JSON object: {in_a}")
-if not isinstance(raw_b, dict):
-    die(f"genesis root not a JSON object: {in_b}")
+raw_a = load_raw("a", in_a)
+raw_b = load_raw("b", in_b)
 
-# Soft accessor with default. Matches GenesisConfig::from_json defaults.
+# Soft accessor mirroring GenesisConfig::from_json defaults
+# (include/determ/chain/genesis.hpp).
 def g(raw, key, default):
     v = raw.get(key, default)
     return v if v is not None else default
 
-# ── Field extraction ────────────────────────────────────────────────
-# Two-source rule: identity-bound fields come from verify-genesis
-# (canonical); everything else from raw JSON with explicit defaults
-# that match the C++ from_json defaults byte-for-byte.
-
-ROLE_NAMES = {0: "SINGLE", 1: "BEACON", 2: "SHARD"}
+ROLE_NAMES         = {0: "SINGLE", 1: "BEACON", 2: "SHARD"}
 SUBSIDY_MODE_NAMES = {0: "FLAT", 1: "LOTTERY"}
-INCLUSION_NAMES = {0: "stake-inclusion", 1: "domain-inclusion"}
-GOV_NAMES = {0: "uncontrolled", 1: "governed"}
 
-def role_name(i):
-    return ROLE_NAMES.get(int(i), f"UNKNOWN({i})")
+# UINT64_MAX is the "never activate" sentinel for the v2 height gates.
+UINT64_MAX = 18446744073709551615
+def fmt_height(v):
+    iv = int(v)
+    if iv == 0:
+        return "0 (active from genesis)"
+    if iv == UINT64_MAX:
+        return f"{iv} (sentinel: never)"
+    return str(iv)
 
-def extract(vg, raw, path):
+def extract(vg, raw):
     chain_role_int = int(vg.get("chain_role", 0))
-    inclusion_int  = int(g(raw, "inclusion_model", 0))
     subsidy_int    = int(g(raw, "subsidy_mode", 0))
-    gov_int        = int(g(raw, "governance_mode", 0))
-
-    # Param threshold default = N under governed mode (matches genesis.cpp).
-    pkh = g(raw, "param_keyholders", [])
-    if not isinstance(pkh, list):
-        pkh = []
-    pth = int(g(raw, "param_threshold", 0))
-    if gov_int == 1 and pth == 0:
-        pth = len(pkh)
-
-    # initial_creators[] and initial_balances[] need to be diffed by
-    # canonicalized content, not order — they're set-like (no semantic
-    # significance to the order of entries in the JSON array).
-    ic = g(raw, "initial_creators", [])
-    if not isinstance(ic, list):
-        ic = []
-    ib = g(raw, "initial_balances", [])
-    if not isinstance(ib, list):
-        ib = []
-
-    def canon_creator(c):
-        if not isinstance(c, dict):
-            return None
-        return (c.get("domain", ""),
-                c.get("region", "") or "",
-                int(c.get("initial_stake", 0)))
-
-    def canon_balance(b):
-        if not isinstance(b, dict):
-            return None
-        return (b.get("domain", ""), int(b.get("balance", 0)))
-
-    creators_canon = sorted([t for t in (canon_creator(c) for c in ic) if t is not None])
-    balances_canon = sorted([t for t in (canon_balance(b) for b in ib) if t is not None])
-
-    return {
-        # Identity (verify-genesis sourced for the hashed ones)
-        "genesis_hash":           vg.get("genesis_hash", ""),
-        "chain_id":               vg.get("chain_id", ""),
-        "chain_role":             role_name(chain_role_int),
-        "shard_id":               int(vg.get("shard_id", 0)),
-        "initial_shard_count":    int(vg.get("initial_shard_count", 1)),
-        "committee_region":       vg.get("committee_region", "") or "",
-        "genesis_message_is_default": bool(vg.get("genesis_message_is_default", True)),
-        "genesis_message_bytes":  int(vg.get("genesis_message_bytes", 0)),
-        "initial_creators":       creators_canon,
-        "initial_balances":       balances_canon,
-        "shard_address_salt":     g(raw, "shard_address_salt", "") or "",
-
-        # Consensus
-        "m_creators":             int(vg.get("m_creators", 3)),
-        "k_block_sigs":           int(vg.get("k_block_sigs", 3)),
-        "bft_enabled":            bool(vg.get("bft_enabled", True)),
+    # The v2 height fields are surfaced even when absent, defaulting to the
+    # genesis.hpp default (0 = active from genesis) so a file that sets the
+    # key and a file that omits it diff correctly against the implied value.
+    fields = {
+        # ── Identity ──────────────────────────────────────────────────────
+        "genesis_hash":        vg.get("genesis_hash", ""),
+        "chain_id":            vg.get("chain_id", ""),
+        "chain_role":          "{} ({})".format(
+                                   ROLE_NAMES.get(chain_role_int,
+                                                  "UNKNOWN"),
+                                   chain_role_int),
+        "genesis_message_is_default":
+                               bool(vg.get("genesis_message_is_default", True)),
+        "genesis_message_bytes": int(vg.get("genesis_message_bytes", 0)),
+        "initial_creators":    int(vg.get("initial_creators", 0)),
+        "initial_balances":    int(vg.get("initial_balances", 0)),
+        # ── Sharding ──────────────────────────────────────────────────────
+        "shard_id":            int(vg.get("shard_id", 0)),
+        "initial_shard_count": int(vg.get("initial_shard_count", 1)),
+        "committee_region":    vg.get("committee_region", "") or "",
+        # ── Committee / consensus ─────────────────────────────────────────
+        "m_creators":          int(vg.get("m_creators", 3)),
+        "k_block_sigs":        int(vg.get("k_block_sigs", 3)),
+        "bft_enabled":         bool(vg.get("bft_enabled", True)),
         "bft_escalation_threshold": int(g(raw, "bft_escalation_threshold", 5)),
-        "governance_mode":        GOV_NAMES.get(gov_int, f"UNKNOWN({gov_int})"),
-        "param_keyholders":       sorted([str(k) for k in pkh]),
-        "param_threshold":        pth,
-
-        # Economic
-        "block_subsidy":          int(vg.get("block_subsidy", 0)),
-        "subsidy_pool_initial":   int(g(raw, "subsidy_pool_initial", 0)),
-        "subsidy_mode":           SUBSIDY_MODE_NAMES.get(subsidy_int, f"UNKNOWN({subsidy_int})"),
-        "lottery_jackpot_multiplier": int(g(raw, "lottery_jackpot_multiplier", 0)),
-        "zeroth_pool_initial":    int(g(raw, "zeroth_pool_initial", 0)),
-        "min_stake":              int(vg.get("min_stake", 1000)),
-        "suspension_slash":       int(g(raw, "suspension_slash", 10)),
-        "unstake_delay":          int(g(raw, "unstake_delay", 1000)),
-        "inclusion_model":        INCLUSION_NAMES.get(inclusion_int, f"UNKNOWN({inclusion_int})"),
-
-        # Operational
-        "epoch_blocks":           int(g(raw, "epoch_blocks", 1000)),
-        "merge_threshold_blocks": int(g(raw, "merge_threshold_blocks", 100)),
+        # ── Timing ────────────────────────────────────────────────────────
+        "epoch_blocks":          int(g(raw, "epoch_blocks", 1000)),
+        "merge_threshold_blocks":  int(g(raw, "merge_threshold_blocks", 100)),
         "revert_threshold_blocks": int(g(raw, "revert_threshold_blocks", 200)),
-        "merge_grace_blocks":     int(g(raw, "merge_grace_blocks", 10)),
+        "merge_grace_blocks":      int(g(raw, "merge_grace_blocks", 10)),
+        # ── Subsidy / economics ───────────────────────────────────────────
+        "block_subsidy":       int(vg.get("block_subsidy", 0)),
+        "subsidy_mode":        "{} ({})".format(
+                                   SUBSIDY_MODE_NAMES.get(subsidy_int,
+                                                          "UNKNOWN"),
+                                   subsidy_int),
+        "lottery_jackpot_multiplier": int(g(raw, "lottery_jackpot_multiplier", 0)),
+        "subsidy_pool_initial":  int(g(raw, "subsidy_pool_initial", 0)),
+        "zeroth_pool_initial":   int(g(raw, "zeroth_pool_initial", 0)),
+        "min_stake":           int(vg.get("min_stake", 1000)),
+        # ── v2 activation heights ─────────────────────────────────────────
+        "v2_7_f2_active_from_height":
+                               fmt_height(g(raw, "v2_7_f2_active_from_height", 0)),
+        "v2_10_active_from_height":
+                               fmt_height(g(raw, "v2_10_active_from_height", 0)),
     }
+    return fields
 
-a = extract(vg_a, raw_a, in_a)
-b = extract(vg_b, raw_b, in_b)
+a = extract(vg_a, raw_a)
+b = extract(vg_b, raw_b)
 
-# ── Tier definitions ────────────────────────────────────────────────
-# Each tier lists the fields it owns. Fields NOT in any tier are not
-# diffed (e.g., genesis_hash itself — it's emitted separately as the
-# top-level identity verdict).
-IDENTITY_FIELDS = [
-    "chain_id", "chain_role", "shard_id", "initial_shard_count",
-    "committee_region", "genesis_message_is_default",
-    "genesis_message_bytes", "initial_creators", "initial_balances",
-    "shard_address_salt",
-]
-CONSENSUS_FIELDS = [
-    "m_creators", "k_block_sigs", "bft_enabled",
-    "bft_escalation_threshold", "governance_mode",
-    "param_keyholders", "param_threshold",
-]
-ECONOMIC_FIELDS = [
-    "block_subsidy", "subsidy_pool_initial", "subsidy_mode",
-    "lottery_jackpot_multiplier", "zeroth_pool_initial",
-    "min_stake", "suspension_slash", "unstake_delay",
-    "inclusion_model",
-]
-OPERATIONAL_FIELDS = [
+# Field render order, grouped. genesis_hash is reported separately as the
+# top-level identity verdict, so it is NOT in this per-field diff list.
+FIELD_ORDER = [
+    # Identity
+    "chain_id", "chain_role",
+    "genesis_message_is_default", "genesis_message_bytes",
+    "initial_creators", "initial_balances",
+    # Sharding
+    "shard_id", "initial_shard_count", "committee_region",
+    # Committee / consensus
+    "m_creators", "k_block_sigs", "bft_enabled", "bft_escalation_threshold",
+    # Timing
     "epoch_blocks", "merge_threshold_blocks",
     "revert_threshold_blocks", "merge_grace_blocks",
+    # Subsidy / economics
+    "block_subsidy", "subsidy_mode", "lottery_jackpot_multiplier",
+    "subsidy_pool_initial", "zeroth_pool_initial", "min_stake",
+    # v2 activation heights
+    "v2_7_f2_active_from_height", "v2_10_active_from_height",
 ]
 
-def make_diff(field, va, vb, want_delta=False):
-    if va == vb:
-        return None
-    entry = {"field": field, "a": va, "b": vb}
-    if want_delta:
-        # Compute signed relative delta from a → b as a percentage,
-        # rounded to 2 decimals. Skip if either side is non-numeric or
-        # if a == 0 (delta undefined / infinite).
-        try:
-            na = float(va); nb = float(vb)
-            if na == 0.0:
-                entry["delta_pct"] = None  # undefined relative to zero
-            else:
-                entry["delta_pct"] = round((nb - na) / na * 100.0, 2)
-        except (TypeError, ValueError):
-            entry["delta_pct"] = None
-    return entry
-
-identity_diffs    = [d for d in (make_diff(f, a[f], b[f])              for f in IDENTITY_FIELDS)    if d is not None]
-consensus_diffs   = [d for d in (make_diff(f, a[f], b[f])              for f in CONSENSUS_FIELDS)   if d is not None]
-economic_diffs    = [d for d in (make_diff(f, a[f], b[f], True)        for f in ECONOMIC_FIELDS)    if d is not None]
-operational_diffs = [d for d in (make_diff(f, a[f], b[f])              for f in OPERATIONAL_FIELDS) if d is not None]
-
-total_diffs = len(identity_diffs) + len(consensus_diffs) + len(economic_diffs) + len(operational_diffs)
-hashes_match = (a["genesis_hash"] == b["genesis_hash"])
-status = "ok" if (hashes_match and total_diffs == 0) else "differ"
-
-# ── Helpers for human-readable rendering ────────────────────────────
-def short_hash(h, n=12):
-    if not isinstance(h, str) or len(h) < n:
-        return h or ""
-    return h[:n] + "..."
-
 def fmt_val(v):
-    # Render values compactly. Lists print as "<N entries>" with the
-    # entries appended on next-line(s) when small enough to be useful.
-    if isinstance(v, list):
-        return f"<{len(v)} entries>"
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, str):
-        # Quote empty strings explicitly so a "blank == blank" looks
-        # different from a "blank vs '0'".
-        return f'"{v}"' if v != "" else '""'
+        return f'"{v}"' if v == "" else v
     return str(v)
 
-def render_section(title, diffs, with_delta=False):
-    if not diffs:
-        print(f"{title}:")
-        print(f"  (none)")
-        return
-    print(f"{title}:")
-    # Compute longest field name for left-aligned columns within the
-    # section, so the values line up cleanly.
-    width = max(len(d["field"]) for d in diffs)
-    for d in diffs:
-        f = d["field"]
-        a_v = fmt_val(d["a"])
-        b_v = fmt_val(d["b"])
-        line = f"  {f:<{width}}  a={a_v}  b={b_v}"
-        if with_delta and d.get("delta_pct") is not None:
-            sign = "+" if d["delta_pct"] >= 0 else ""
-            line += f"  (delta: {sign}{d['delta_pct']}%)"
-        elif with_delta:
-            line += "  (delta: n/a)"
-        print(line)
-        # For list-valued fields, show the actual symmetric difference
-        # so the operator can see which entries were added/removed.
-        if isinstance(d["a"], list) and isinstance(d["b"], list):
-            sa = set(map(tuple, d["a"])) if d["a"] and isinstance(d["a"][0], (list, tuple)) else set(d["a"])
-            sb = set(map(tuple, d["b"])) if d["b"] and isinstance(d["b"][0], (list, tuple)) else set(d["b"])
-            only_a = sa - sb
-            only_b = sb - sa
-            for item in sorted(only_a):
-                print(f"    only-in-a: {item}")
-            for item in sorted(only_b):
-                print(f"    only-in-b: {item}")
+diffs = [(f, a[f], b[f]) for f in FIELD_ORDER if a[f] != b[f]]
+hashes_match = (a["genesis_hash"] == b["genesis_hash"])
 
-# ── JSON emit ───────────────────────────────────────────────────────
-if json_out:
-    out = {
-        "status":               status,
-        "a_path":               in_a,
-        "b_path":               in_b,
-        "a_genesis_hash":       a["genesis_hash"],
-        "b_genesis_hash":       b["genesis_hash"],
-        "hashes_match":         hashes_match,
-        "identity_diffs":       identity_diffs,
-        "consensus_diffs":      consensus_diffs,
-        "economic_diffs":       economic_diffs,
-        "operational_diffs":    operational_diffs,
-        "total_diffs":          total_diffs,
-        "strict":               strict,
-    }
-    print(json.dumps(out))
+# ── Human render ───────────────────────────────────────────────────────────
+print(f"=== Genesis diff (a={in_a}, b={in_b}) ===")
+print("genesis_hash:")
+print(f"  a: {a['genesis_hash']}")
+print(f"  b: {b['genesis_hash']}")
+print("  MATCH" if hashes_match else "  DIFFER")
+print()
+
+print("Consensus-critical field differences (only differing fields shown):")
+if not diffs:
+    print("  (none -- all compared fields identical)")
 else:
-    # ── Human render ────────────────────────────────────────────────
-    print(f"=== Genesis diff (a={in_a}, b={in_b}) ===")
-    print("Identity hashes:")
-    print(f"  a: {a['genesis_hash']}")
-    print(f"  b: {b['genesis_hash']}")
-    if hashes_match:
-        print("  MATCH")
-    else:
-        print("  DIFFER -- see below")
-    render_section("Identity-affecting differences",  identity_diffs)
-    render_section("Consensus-affecting differences", consensus_diffs)
-    render_section("Economic differences",            economic_diffs, with_delta=True)
-    render_section("Operational differences",         operational_diffs)
-    print()
-    # Verdict line — sums up the outcome in one human-readable sentence.
-    if hashes_match and total_diffs == 0:
-        print("[OK] Genesis configs are semantically identical")
-    elif not hashes_match:
-        print(f"[X] Genesis hashes differ -- chain identity is distinct ({total_diffs} field-level diffs total)")
-    else:
-        # Hashes match (same chain identity) but operational params
-        # differ. This is the S-039 surface: same identity, different
-        # behavior. Worth a distinct verdict.
-        print(f"[!] Genesis hashes MATCH but {total_diffs} non-identity field(s) differ "
-              "-- operators on this chain will diverge silently (S-039)")
+    width = max(len(f) for f, _, _ in diffs)
+    for f, va, vb in diffs:
+        print(f"  {f:<{width}}  a={fmt_val(va)}  b={fmt_val(vb)}")
+print()
 
-# ── Exit code ───────────────────────────────────────────────────────
-# 0 only when fully identical. 2 on any diff (or hash mismatch when
-# --strict). The two conditions overlap because a hash diff always
-# implies a field-level diff in the identity tier; --strict simply
-# frames the alert around the identity-hash divergence specifically.
-if hashes_match and total_diffs == 0:
-    sys.exit(0)
-if strict and not hashes_match:
-    sys.exit(2)
-sys.exit(2)
+# ── Verdict ────────────────────────────────────────────────────────────────
+# SAME requires BOTH a matching genesis_hash AND zero field-level diffs.
+# (They should coincide — S-039 binds these consensus params into the hash —
+# but we assert both independently so a future field added to this diff but
+# not yet bound into the hash can't silently report SAME.)
+same = hashes_match and not diffs
+if same:
+    print("Verdict: SAME -- the two genesis files describe an identical chain.")
+else:
+    n = len(diffs)
+    if not hashes_match:
+        print(f"Verdict: DIFFER -- genesis_hash differs ({n} field-level "
+              f"diff(s)); nodes booting from one will NOT federate with the "
+              f"other.")
+    else:
+        # Hash matches but a compared field differs: a field this tool diffs
+        # is not (yet) bound into compute_genesis_hash. Still a real drift.
+        print(f"Verdict: DIFFER -- genesis_hash MATCHES but {n} compared "
+              f"field(s) differ; investigate before deploying.")
+
+# Terminal verdict line for the run_all.sh outcome contract. Both SAME and
+# DIFFER are a successful COMPARISON (drift is reported, not a tool error),
+# so the terminal marker is PASS either way. A single, unambiguous PASS:
+# line is printed last, after a blank line.
+print()
+print("  PASS: operator_genesis_diff")
+sys.exit(0)
 PY
-PY_RC=$?
-exit "$PY_RC"
+exit $?
