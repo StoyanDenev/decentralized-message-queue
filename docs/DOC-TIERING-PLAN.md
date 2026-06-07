@@ -132,5 +132,9 @@ decisions stop leaking into T3) at near-zero merge/link risk.
 - A few items came back with absolute paths (`C:\sauromatae\...`) — same files as their
   relative entries (SupplyProofSoundness, V1.1-PLAN, V210-PhaseD, V210ImplementationRoadmap,
   UnitTestCoverageMap); de-duplicate on execution.
-- `docs/Improvements.md` and `docs/proofs/Improvements.md` both exist (one may be a stale
-  duplicate) — confirm + dedupe.
+- `docs/Improvements.md` and `docs/proofs/Improvements.md` — **RESOLVED (not a duplicate)**:
+  the former is a C99-architecture candidates doc (104 lines), the latter the enhancement
+  queue (1028 lines). Both legitimate; no dedupe needed.
+- `docs/proofs/SupplyProofSoundness.md` — **RESOLVED → T3 (future)**: the `supply-trustless`
+  command was reverted (R41); the doc is the spec for a future v2.x height-pinned counter read.
+  Reclassified T2→T3; moved to ROADMAP post-1.0.

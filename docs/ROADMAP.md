@@ -18,7 +18,6 @@
 | **v2.7 F2 view reconciliation** | last permissionless-readiness gate (~3–4d) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
 | **C99 crypto stack** — remaining phases | Phase 0 shipped (SHA/HMAC/PBKDF2/ChaCha20/AES/Ed25519/FROST); later phases near-term | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
 | **RPC anti-replay window** | HMAC-auth extension (v2.16+) | `proofs/RpcAuthReplayWindowSoundness.md` |
-| **Trustless supply-counter read** | spec-stage soundness (reconcile T1/T2) | `proofs/SupplyProofSoundness.md` |
 
 ---
 
@@ -34,6 +33,7 @@
 | **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
 | **Portability** — C99 / MINIX reimplementation | `C99-MINIX-PORT.md` |
 | **Launch** — v1.1 mainnet + address-derivation decision | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
+| **Trustless reads** — supply-counter trustless read (deferred) | `proofs/SupplyProofSoundness.md` — command reverted R41; needs daemon-side height-pinned counter read (or raw-value `state_proof`); soundness SU-1..SU-4 stands as the spec |
 | **Full design space** | `V2-DESIGN.md` (v2 themes; 10 of 25 shipped), `V2-DAPP-DESIGN.md` (DApp themes; v2.18/v2.19 substrate shipped) |
 
 ---
