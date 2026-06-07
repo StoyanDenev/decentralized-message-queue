@@ -23361,6 +23361,190 @@ int cmd_param_change_lint(int argc, char** argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// param-change-verify --tx-json <file> --keyholders <file> [--threshold N] [--json]
+//
+// OFFLINE read-only verifier for the K-of-K governance multisig on an ASSEMBLED
+// PARAM_CHANGE — the counterpart to param-change-build (BUILDS the body + the
+// per-keyholder signing preimage) and param-change-lint (activation
+// effectiveness). Reimplements the validator's multisig gate
+// (src/node/validator.cpp:688-725): each (keyholder_index, ed_sig) pair must
+// verify under the keyholder's Ed25519 pubkey over the canonical
+//   sig_msg = name_len(u8) ‖ name ‖ value_len(u16 LE) ‖ value ‖ eff(u64 LE);
+// indices distinct + in range; good_sigs >= threshold. The keyholder pubkey set
+// + threshold are on-chain governance state not carried in the tx, so the
+// operator supplies them via --keyholders (a JSON array of 32-byte pubkey hex,
+// or {keyholders:[...], threshold:N}); --threshold overrides; absent both, the
+// conservative default requires ALL keyholders. Pure local Ed25519
+// (crypto_sign_verify_detached) — no chain-library link, no RPC, no secret
+// material; lets an operator confirm an out-of-band-assembled multisig
+// PARAM_CHANGE is valid BEFORE submission. Exit 0 PASS, 2 threshold-not-met /
+// invalid sig / duplicate-or-out-of-range index, 1 args/parse error.
+int cmd_param_change_verify(int argc, char** argv) {
+    std::string tx_path, kh_path;
+    long long threshold_override = -1;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet param-change-verify --tx-json <file>\n"
+                "         --keyholders <file> [--threshold N] [--json]\n"
+                "  OFFLINE read-only verify of the K-of-K governance multisig on\n"
+                "  an assembled PARAM_CHANGE (reimplements validator.cpp's gate).\n"
+                "  --keyholders is a JSON array of 32-byte pubkey hex, or\n"
+                "  {keyholders:[...], threshold:N}. Each (index, ed_sig) in the tx\n"
+                "  payload must verify over name|value|effective_height under\n"
+                "  keyholder[index]; indices distinct + in range; good >= threshold\n"
+                "  (default = all keyholders). Exit 0 PASS, 2 fail, 1 args/parse.\n";
+            return 0;
+        }
+        else if (a == "--tx-json"    && i + 1 < argc) tx_path = argv[++i];
+        else if (a == "--keyholders" && i + 1 < argc) kh_path = argv[++i];
+        else if (a == "--threshold"  && i + 1 < argc) {
+            try { threshold_override = std::stoll(argv[++i]); }
+            catch (...) { std::cerr << "param-change-verify: --threshold must be an integer\n"; return 1; }
+        }
+        else if (a == "--json")                       json_out = true;
+        else { std::cerr << "param-change-verify: unknown argument '" << a << "'\n"; return 1; }
+    }
+    if (tx_path.empty() || kh_path.empty()) {
+        std::cerr << "param-change-verify: --tx-json and --keyholders are required\n";
+        return 1;
+    }
+
+    nlohmann::json tx;
+    try {
+        std::ifstream f(tx_path);
+        if (!f) { std::cerr << "param-change-verify: cannot open " << tx_path << "\n"; return 1; }
+        tx = nlohmann::json::parse(f);
+    } catch (const std::exception& e) { std::cerr << "param-change-verify: bad tx JSON: " << e.what() << "\n"; return 1; }
+    if (!tx.contains("payload") || !tx["payload"].is_string()) {
+        std::cerr << "param-change-verify: tx-json missing a 'payload' hex string (need an assembled PARAM_CHANGE)\n";
+        return 1;
+    }
+    std::vector<uint8_t> p;
+    try { p = from_hex(tx["payload"].get<std::string>()); }
+    catch (const std::exception& e) { std::cerr << "param-change-verify: payload not hex: " << e.what() << "\n"; return 1; }
+
+    // Decode: name_len u8 | name | value_len u16 LE | value | eff u64 LE | sig_count u8 | (idx u16 LE | sig 64B)*
+    size_t off = 0;
+    auto need = [&](size_t n, const char* what) -> bool {
+        if (p.size() < off + n) { std::cerr << "param-change-verify: payload truncated (" << what << ")\n"; return false; }
+        return true;
+    };
+    if (!need(1, "name_len")) return 1;
+    size_t nlen = p[off++];
+    if (!need(nlen, "name")) return 1;
+    std::string name(reinterpret_cast<const char*>(p.data() + off), nlen); off += nlen;
+    if (!need(2, "value_len")) return 1;
+    size_t vlen = size_t(p[off]) | (size_t(p[off + 1]) << 8); off += 2;
+    if (!need(vlen, "value")) return 1;
+    std::vector<uint8_t> value(p.begin() + off, p.begin() + off + vlen); off += vlen;
+    if (!need(8, "effective_height")) return 1;
+    uint64_t eff = 0;
+    for (int i = 0; i < 8; ++i) eff |= uint64_t(p[off + i]) << (8 * i);
+    off += 8;
+    if (!need(1, "sig_count")) return 1;
+    size_t sigc = p[off++];
+
+    // Rebuild the canonical sig_msg (validator.cpp:693-701).
+    std::vector<uint8_t> sig_msg;
+    sig_msg.push_back(static_cast<uint8_t>(nlen));
+    sig_msg.insert(sig_msg.end(), name.begin(), name.end());
+    sig_msg.push_back(static_cast<uint8_t>(vlen & 0xff));
+    sig_msg.push_back(static_cast<uint8_t>((vlen >> 8) & 0xff));
+    sig_msg.insert(sig_msg.end(), value.begin(), value.end());
+    for (int i = 0; i < 8; ++i) sig_msg.push_back(static_cast<uint8_t>((eff >> (8 * i)) & 0xff));
+
+    // Load keyholder pubkeys + threshold.
+    nlohmann::json kh;
+    try {
+        std::ifstream f(kh_path);
+        if (!f) { std::cerr << "param-change-verify: cannot open " << kh_path << "\n"; return 1; }
+        kh = nlohmann::json::parse(f);
+    } catch (const std::exception& e) { std::cerr << "param-change-verify: bad keyholders JSON: " << e.what() << "\n"; return 1; }
+    const nlohmann::json* kh_arr = nullptr;
+    long long file_threshold = -1;
+    if (kh.is_array()) kh_arr = &kh;
+    else if (kh.is_object() && kh.contains("keyholders") && kh["keyholders"].is_array()) {
+        kh_arr = &kh["keyholders"];
+        if (kh.contains("threshold") && kh["threshold"].is_number()) file_threshold = kh["threshold"].get<long long>();
+    } else { std::cerr << "param-change-verify: --keyholders must be an array or {keyholders:[...], threshold:N}\n"; return 1; }
+    std::vector<std::vector<uint8_t>> pubkeys;
+    for (auto& e : *kh_arr) {
+        if (!e.is_string()) { std::cerr << "param-change-verify: keyholder entries must be pubkey hex strings\n"; return 1; }
+        std::vector<uint8_t> pk;
+        try { pk = from_hex(e.get<std::string>()); }
+        catch (const std::exception& ex) { std::cerr << "param-change-verify: keyholder pubkey not hex: " << ex.what() << "\n"; return 1; }
+        if (pk.size() != 32) { std::cerr << "param-change-verify: keyholder pubkey must be 32 bytes (64 hex)\n"; return 1; }
+        pubkeys.push_back(pk);
+    }
+    long long threshold = threshold_override >= 0 ? threshold_override
+                        : (file_threshold >= 0 ? file_threshold : (long long)pubkeys.size());
+
+    // Verify each (idx, sig).
+    struct SigResult { int index; bool in_range; bool valid; };
+    std::vector<SigResult> results;
+    std::set<int> seen;
+    bool dup = false, oor = false, decode_ok = true;
+    int good = 0;
+    for (size_t s = 0; s < sigc; ++s) {
+        if (!need(2, "sig index")) { decode_ok = false; break; }
+        int idx = int(p[off]) | (int(p[off + 1]) << 8); off += 2;
+        if (!need(64, "sig bytes")) { decode_ok = false; break; }
+        std::vector<uint8_t> sig(p.begin() + off, p.begin() + off + 64); off += 64;
+        bool in_range = (idx >= 0 && (size_t)idx < pubkeys.size());
+        if (!in_range) oor = true;
+        bool distinct = seen.insert(idx).second;
+        if (!distinct) dup = true;
+        bool valid = false;
+        if (in_range && distinct) {
+            valid = (crypto_sign_verify_detached(sig.data(), sig_msg.data(), sig_msg.size(), pubkeys[idx].data()) == 0);
+            if (valid) good++;
+        }
+        results.push_back({idx, in_range, valid});
+    }
+    if (!decode_ok) return 1;
+
+    bool threshold_met = (good >= threshold);
+    bool pass = !dup && !oor && threshold_met;
+
+    if (json_out) {
+        nlohmann::json out;
+        out["name"] = name;
+        out["effective_height"] = eff;
+        out["sig_count"] = sigc;
+        out["good_sigs"] = good;
+        out["threshold"] = threshold;
+        out["distinct"] = !dup;
+        out["all_in_range"] = !oor;
+        out["threshold_met"] = threshold_met;
+        out["verdict"] = pass ? "PASS" : "FAIL";
+        nlohmann::json arr = nlohmann::json::array();
+        for (auto& r : results) arr.push_back({{"index", r.index}, {"in_range", r.in_range}, {"valid", r.valid}});
+        out["sigs"] = arr;
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "name:             " << name << "\n";
+        std::cout << "effective_height: " << eff << "\n";
+        std::cout << "sigs present:     " << sigc << " (keyholders: " << pubkeys.size()
+                  << ", threshold: " << threshold << ")\n";
+        for (auto& r : results)
+            std::cout << "  keyholder[" << r.index << "]: "
+                      << (!r.in_range ? "OUT-OF-RANGE" : (r.valid ? "VALID" : "INVALID")) << "\n";
+        if (dup) std::cout << "  WARNING: duplicate keyholder index\n";
+        std::cout << "good_sigs:        " << good << " / " << threshold << " required\n";
+        std::cout << "\nPARAM-CHANGE-VERIFY: " << (pass ? "PASS" : "FAIL")
+                  << (pass ? " (threshold met, present sigs valid, distinct)"
+                           : (!threshold_met ? " (threshold NOT met)"
+                              : dup ? " (duplicate keyholder index)"
+                              : " (keyholder index out of range)"))
+                  << "\n";
+    }
+    return pass ? 0 : 2;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // rpc-auth --method <m> [--params <json> | --params-file <file>]
 //          --secret <hex> [--verify <hex> | --request <file>] [--json]
 //
@@ -24901,6 +25085,14 @@ void print_usage() {
         "                                             The build-time dual of operator_param_\n"
         "                                             activation_preflight.sh. Exit 0 EFFECTIVE/\n"
         "                                             HOOK_ONLY, 2 INERT_BAD_WIDTH/UNKNOWN, 1 args.\n"
+        "  param-change-verify --tx-json <file>       OFFLINE read-only verify of the K-of-K\n"
+        "    --keyholders <file> [--threshold N]      governance multisig on an ASSEMBLED\n"
+        "    [--json]                                 PARAM_CHANGE (reimplements validator.cpp's\n"
+        "                                             gate): each (index, ed_sig) verifies over\n"
+        "                                             name|value|effective_height under the\n"
+        "                                             operator-supplied keyholder[index] pubkey;\n"
+        "                                             distinct + in-range indices; good >=\n"
+        "                                             threshold. Exit 0 PASS, 2 fail, 1 args.\n"
         "  rpc-auth --method <m>                      OFFLINE computor + verifier for the S-001\n"
         "           [--params <json> |                (v2.16) RPC HMAC-auth tag — the wallet-side\n"
         "            --params-file <file>]            dual of RpcServer::verify_auth / rpc_call's\n"
@@ -25015,6 +25207,7 @@ int main(int argc, char** argv) {
     if (cmd == "subsidy-schedule") return cmd_subsidy_schedule(argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
     if (cmd == "param-change-lint")  return cmd_param_change_lint(argc - 2, argv + 2);
+    if (cmd == "param-change-verify") return cmd_param_change_verify(argc - 2, argv + 2);
     if (cmd == "rpc-auth")        return cmd_rpc_auth       (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
