@@ -274,6 +274,35 @@ $DETERM submit-param-change \
 
 After block 50 finalizes, `snapshot inspect` shows `min_stake: 2000`. Whitelist of mutable parameters: see `docs/PROTOCOL.md` §13. Off-list parameters (committee size K, sharding mode) require a new chain genesis.
 
+### Offline / air-gapped authoring (determ-wallet)
+
+`submit-param-change` builds, signs, and submits in one RPC call. For an air-gapped keyholder setup, `determ-wallet` (which never touches a daemon) splits the authoring into a build → lint → verify pipeline you run *before* submission:
+
+```bash
+W=./build/Release/determ-wallet
+
+# 1. Build the unsigned PARAM_CHANGE body + the per-keyholder signing preimage.
+$W param-change-build --name MIN_STAKE --value 2000 \
+   --effective-height 50 --nonce 0 --from node1 --out pc.json
+
+# 2. LINT it before anyone signs — catches the silent-no-op trap where a
+#    whitelisted numeric scalar (MIN_STAKE / SUSPENSION_SLASH / UNSTAKE_DELAY)
+#    carries a value that is not exactly 8 bytes and would activate to nothing.
+$W param-change-lint --tx-json pc.json
+#   → verdict: EFFECTIVE          (INERT_BAD_WIDTH / UNKNOWN_NAME would warn)
+
+# 3. Each keyholder signs pc.json's `keyholder_sig_message_hex` preimage offline
+#    (an Ed25519 sig over name|value|effective_height); the (index, ed_sig)
+#    pairs are assembled into the tx payload + a keyholder-pubkey file.
+
+# 4. VERIFY the assembled K-of-K multisig offline, before it ever reaches a node.
+$W param-change-verify --tx-json assembled.json \
+   --keyholders keyholders.json --threshold 3
+#   → PARAM-CHANGE-VERIFY: PASS
+```
+
+Lint and verify answer **different** questions: a bad-width value can carry a perfectly valid multisig (`verify` PASS) yet still silently no-op at activation (`lint` INERT_BAD_WIDTH) — run both before you submit. The runtime counterpart that audits an already-staged change on-chain is `tools/operator_param_activation_preflight.sh`.
+
 ## 11. Wallet recovery (A2)
 
 The `determ-wallet` binary is separate from the chain daemon. Generate a recovery setup for any 32-byte secret (typically your Ed25519 seed):
@@ -358,7 +387,33 @@ The `determ-light` binary is a trust-minimized light-client wallet. Unlike `dete
 determ-light verify-state-root --rpc-port 7778 --genesis genesis.json --height 150
 ```
 
-The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `verify-state-proof`, `fetch-headers`, `fetch-state-proof`, `verify-chain`, `balance-trustless`, `nonce-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `watch-head`, `export-headers`, `verify-archive`, `account-history`, `verify-tx-inclusion`, `verify-state-root`, `version`.
+### Daemon-free verification from exported files
+
+The steps above re-fetch from a live daemon on every run. To verify a chain segment **offline** — from a checkpoint bundle, with no daemon at verify time — export the headers + committee once, then verify the files:
+
+```bash
+L=./build/Release/determ-light
+
+# Export the inputs (the only steps that touch a daemon):
+$L fetch-headers    --rpc-port 8771 --from 0 --count 50 --out headers.json
+$L fetch-validators --rpc-port 8771                      --out committee.json
+
+# Verify the whole segment with NO daemon: prev_hash continuity + every
+# non-genesis block's committee signatures over its self-recomputed digest.
+$L verify-chain-file --in headers.json --committee committee.json
+#   → VERIFY-CHAIN-FILE: PASS
+
+# If the committee rotated mid-segment, --committee-manifest maps inclusive
+# index ranges to committee files. committee-diff tells you WHETHER two
+# snapshots' signing sets differ (so you know whether one committee covers a
+# span, or you must segment / use a manifest):
+$L committee-diff --a committee.json --b committee_later.json
+#   → SIGNING SET: IDENTICAL        (one --committee covers the span)
+```
+
+This path never calls `compute_genesis_hash`, so it is unaffected by the cross-platform genesis-hash gap; `--genesis-hash <hex>` optionally pins block 0 to a known hash.
+
+The full subcommand surface lives in [CLI-REFERENCE.md](CLI-REFERENCE.md) §determ-light: `verify-headers`, `verify-block-sigs`, `block-verify`, `verify-state-proof`, `fetch-headers`, `fetch-validators`, `fetch-state-proof`, `verify-chain`, `verify-chain-file`, `committee-diff`, `committee-at-height`, `balance-trustless`, `nonce-trustless`, `stake-trustless`, `supply-trustless`, `sign-tx`, `submit-tx`, `verify-and-submit`, `watch-head`, `export-headers`, `verify-archive`, `account-history`, `verify-tx-inclusion`, `verify-receipt-inclusion`, `verify-state-root`, `version`.
 
 ## 13. Under-quorum merge (R4, EXTENDED mode only)
 
