@@ -161,6 +161,20 @@ json.dump(d,open('$T/headers_badsig.json','w'))"
 set +e; OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers_badsig.json --committee $T/committee.json 2>&1); RC=$?; set -e
 echo "$OUT" | grep -Eq "SIGS        FAIL" && [ $RC -eq 2 ] && assert true "tampered sig -> SIGS FAIL exit 2" || assert false "tampered sig -> SIGS FAIL exit 2"
 
+echo; echo "=== 10. NEGATIVE: STRIPPED sigs on a non-genesis block -> SIGS FAIL exit 2 ==="
+# Closes the emptiness-skip hole: creator_block_sigs are NOT recomputed by
+# CONTINUITY (stored-linkage walk), so a stripped real block must FAIL in SIGS,
+# not be silently skipped as if it were genesis. The skip keys on index==0 only.
+python -c "
+import json
+d=json.load(open('$T/headers.json')); hs=d['headers']
+for h in hs:                                  # first NON-genesis block (index>0)
+    if h.get('index',0) != 0 and h.get('creator_block_sigs'):
+        h['creator_block_sigs']=[]; break     # strip its committee sigs
+json.dump(d,open('$T/headers_stripped.json','w'))"
+set +e; OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers_stripped.json --committee $T/committee.json 2>&1); RC=$?; set -e
+echo "$OUT" | grep -Eq "SIGS        FAIL" && [ $RC -eq 2 ] && assert true "stripped non-genesis sigs -> SIGS FAIL exit 2" || assert false "stripped non-genesis sigs -> SIGS FAIL exit 2"
+
 echo; echo "=== Test summary ==="
 echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then echo "  PASS: test_light_verify_chain_file"; exit 0

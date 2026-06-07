@@ -830,9 +830,10 @@ int cmd_block_verify(int argc, char** argv) {
 //                --genesis-hash or at a mid-chain start via --prev-hash.
 //   SIGS       — every non-genesis header's K-of-K (or ceil(2K/3) --bft)
 //                committee Ed25519 sigs over the INTERNALLY-recomputed digest
-//                (verify_block_sigs per header). A header with empty
-//                creator_block_sigs is the genesis (sig-less) block and is
-//                skipped.
+//                (verify_block_sigs per header). ONLY index 0 (the genesis) is
+//                exempt; a non-genesis header with stripped/empty sigs FAILS
+//                (CONTINUITY does not recompute sigs, so the skip must key on
+//                index, not on emptiness).
 // The committee is operator-supplied and applied to every block, so this is
 // sound for a segment with NO mid-chain REGISTER/DEREGISTER committee change
 // (same limitation as verify_chain_to_head's genesis-seed); for a rotating
@@ -906,22 +907,27 @@ int cmd_verify_chain_file(int argc, char** argv) {
                 throw std::runtime_error("no headers array to verify");
             size_t verified = 0, skipped = 0;
             for (auto& h : headers) {
-                // A sig-less header (empty creator_block_sigs) is the genesis
-                // block — robust regardless of the export's `from` offset.
-                bool sigless = !h.contains("creator_block_sigs")
-                            || !h["creator_block_sigs"].is_array()
-                            || h["creator_block_sigs"].empty();
-                if (sigless) { ++skipped; continue; }
+                // ONLY the true genesis (index 0) is exempt from committee-sig
+                // verification — it carries no committee sigs by construction and
+                // is anchored instead via --genesis-hash in CONTINUITY. We key the
+                // skip on `index`, NOT on empty creator_block_sigs: those sigs are
+                // not recomputed by CONTINUITY (verify_headers walks the STORED
+                // block_hash linkage), so an emptiness-based skip would let an
+                // attacker STRIP a real block's sigs to dodge verification. A
+                // non-genesis header with absent/empty sigs therefore flows into
+                // verify_block_sigs and FAILS (zero present sigs), as it must.
+                uint64_t idx = (h.contains("index") && h["index"].is_number())
+                    ? h["index"].get<uint64_t>() : UINT64_MAX;
+                if (idx == 0) { ++skipped; continue; }  // genesis: no committee sigs
                 auto vbs = verify_block_sigs(h, committee_json, bft);
                 if (!vbs.ok) {
-                    std::string idx = h.contains("index") && h["index"].is_number()
-                        ? std::to_string(h["index"].get<uint64_t>()) : "?";
-                    throw std::runtime_error("block " + idx + ": " + vbs.detail);
+                    std::string lbl = idx == UINT64_MAX ? "?" : std::to_string(idx);
+                    throw std::runtime_error("block " + lbl + ": " + vbs.detail);
                 }
                 ++verified;
             }
             if (verified == 0 && skipped > 0)
-                throw std::runtime_error("only sig-less (genesis) headers present — nothing to sig-verify");
+                throw std::runtime_error("only the genesis header present — no committee-signed block to verify");
             ok = true;
             detail = std::to_string(verified) + " block(s) sig-verified"
                    + (skipped ? (" (" + std::to_string(skipped) + " sig-less/genesis skipped)") : "")
