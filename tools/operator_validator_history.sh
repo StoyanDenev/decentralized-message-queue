@@ -247,9 +247,7 @@ TMP_AGG=$(mktemp)
 # cost — jq + bash per block would multiply that 3-4×. The walk
 # accumulates per-domain counters in a single dict and writes one TSV
 # row per target domain plus one JSON-blob row per event.
-"$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_TARGETS" "$TMP_AGG" <<'PY' || {
-  echo "operator_validator_history: block walk failed" >&2; exit 1;
-}
+if ! "$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_TARGETS" "$TMP_AGG" <<'PY'
 import json, subprocess, sys
 
 determ, port, from_h, to_h, targets_path, out_path = sys.argv[1:7]
@@ -411,6 +409,9 @@ with open(out_path, "w", encoding="utf-8") as f:
         }
         f.write(json.dumps(rec) + "\n")
 PY
+then
+  echo "operator_validator_history: block walk failed" >&2; exit 1
+fi
 
 # ── Step 4: classify + emit ──────────────────────────────────────────────────
 # Reload aggregated rows and produce the final per-domain record with

@@ -220,9 +220,7 @@ printf '%s' "$STAKES_JSON" | jq -r '.[] | [.domain, .stake] | @tsv' >"$TMP_STAKE
 #   domain<TAB>blocks_present<TAB>subsidy_earned<TAB>fees_earned
 # Plus a one-line TMP_WIN: <window_seconds>\t<first_ts>\t<last_ts>\t<empty_blocks>
 "$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$EST_PER_BLOCK_SUBSIDY" \
-                     "$TMP_STAKES" "$TMP_LEDGER" "$TMP_WIN" <<'PY' || {
-  echo "operator_stake_yield: block walk failed" >&2; exit 1;
-}
+                     "$TMP_STAKES" "$TMP_LEDGER" "$TMP_WIN" <<'PY'
 import json, subprocess, sys
 from collections import defaultdict
 
@@ -335,6 +333,10 @@ with open(win_path, "w", encoding="utf-8") as f:
     f.write(f"{window_seconds}\t{first_ts if first_ts is not None else 0}\t"
             f"{last_ts  if last_ts  is not None else 0}\t{empty_blocks}\n")
 PY
+if [ "$?" -ne 0 ]; then
+  echo "operator_stake_yield: block walk failed" >&2
+  exit 1
+fi
 
 # Read window metadata.
 WIN_LINE=$(head -1 "$TMP_WIN" 2>/dev/null || echo "0\t0\t0\t0")

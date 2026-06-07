@@ -232,9 +232,7 @@ fi
 #               [retention:u8][metadata_len:u16 LE][metadata:bytes]
 #   if op == 1: (no further bytes — tx.from identifies the entry)
 # tx.from carries the DApp's owning DETERM domain.
-"$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_TXS" <<'PY' || {
-  echo "operator_dapp_registration_audit: block scan failed" >&2; exit 1;
-}
+"$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_TXS" <<'PY' || { echo "operator_dapp_registration_audit: block scan failed" >&2; exit 1; }
 import json, subprocess, sys
 
 determ, port, from_h, to_h, out_path = sys.argv[1:6]

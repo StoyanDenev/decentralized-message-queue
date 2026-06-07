@@ -187,8 +187,6 @@ trap 'rm -f "$TMP_DOMAINS" "$TMP_PERBLOCK" "$TMP_META" "$TMP_SNAP" 2>/dev/null' 
 
 python - "$DETERM" "$PORT" "$FROM" "$TO" \
         "$TMP_DOMAINS" "$TMP_PERBLOCK" "$TMP_META" <<'PY' || {
-  echo "operator_account_growth: block-walk failed" >&2; exit 1;
-}
 import json, subprocess, sys
 from collections import defaultdict
 
@@ -321,6 +319,8 @@ spike_str = str(spike_block) if spike_block >= 0 else "-"
 with open(meta_path, "w", encoding="utf-8") as f:
     f.write(f"{peak_block}\t{peak_count}\t{spike_str}\t{spike_count}\n")
 PY
+  echo "operator_account_growth: block-walk failed" >&2; exit 1;
+}
 if [ "$?" -ne 0 ]; then
   echo "operator_account_growth: block-walk failed" >&2
   exit 1

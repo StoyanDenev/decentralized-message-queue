@@ -259,9 +259,7 @@ trap 'rm -f "$TMP_AGG"' EXIT
 # cost. The Python pass produces the final JSON envelope (window meta,
 # per-validator counts, chi-squared statistic, p-value, anomaly flags)
 # in one go — the bash side reads the envelope back and renders.
-"$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_AGG" "$POOL_JSON" <<'PY' || {
-  echo "operator_block_creator_fairness: block walk / chi-squared failed" >&2; exit 1;
-}
+"$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_AGG" "$POOL_JSON" <<'PY'
 import json, subprocess, sys, math
 
 determ, port, from_h, to_h, out_path, pool_json = sys.argv[1:7]
@@ -480,6 +478,10 @@ out = {
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(json.dumps(out))
 PY
+if [ "$?" -ne 0 ]; then
+  echo "operator_block_creator_fairness: block walk / chi-squared failed" >&2
+  exit 1
+fi
 
 # ── Step 4: render ────────────────────────────────────────────────────────────
 RAW=$(cat "$TMP_AGG")

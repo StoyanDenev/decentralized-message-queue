@@ -129,9 +129,7 @@ trap 'rm -f "$TMP_CHANGES" "$TMP_PENDING" 2>/dev/null' EXIT
 # Drive the scan + decode in Python — handles hex parsing, varint
 # layout (u8 name_len / u16 LE value_len / u64 LE effective_height),
 # and tolerates type-field-as-int vs type-field-as-string both.
-python - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_CHANGES" <<'PY' || {
-  echo "operator_param_history: block scan failed" >&2; exit 1;
-}
+python - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_CHANGES" <<'PY'
 import json, subprocess, sys
 
 determ, port, from_h, to_h, out_path = sys.argv[1:6]
@@ -222,6 +220,10 @@ with open(out_path, "w", encoding="utf-8") as f:
         dv = r["decoded_value"] if r["decoded_value"] is not None else ""
         f.write(f'{r["staged_at_block"]}\t{r["effective_height"]}\t{r["name"]}\t{r["value_hex"]}\t{r["value_bytes"]}\t{dv}\n')
 PY
+if [ "$?" -ne 0 ]; then
+  echo "operator_param_history: block scan failed" >&2
+  exit 1
+fi
 
 # Optional pending overlay.
 TMP_PENDING=""

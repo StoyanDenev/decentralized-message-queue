@@ -349,9 +349,6 @@ fi
 "$PYTHON" - "$DETERM_ABS" "$PORT" "$ACCOUNT" "$FROM" "$TO" \
               "$ACCOUNT_BAL" "$EST_PER_BLOCK_SUBSIDY" "$SHOW_FEES" \
               "$TMP_OUT" <<'PY' || {
-  echo "operator_account_balance_history: block-walk failed" >&2
-  exit 1
-}
 import json, subprocess, sys
 from collections import deque
 
@@ -750,6 +747,9 @@ result = {
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(result, f)
 PY
+  echo "operator_account_balance_history: block-walk failed" >&2
+  exit 1
+}
 
 # ── Step 5: render envelope (JSON or human table) ─────────────────────────────
 "$PYTHON" - "$JSON_OUT" "$ANOM_ONLY" "$TMP_OUT" <<'PY'

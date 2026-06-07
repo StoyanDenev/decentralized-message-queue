@@ -238,9 +238,7 @@ trap 'rm -f "$TMP_STATS" 2>/dev/null' EXIT
 EXTREME_THRESH_S=$(( EXPECTED_WINDOW_S * 10 ))
 if [ "$EXTREME_THRESH_S" -lt 30 ]; then EXTREME_THRESH_S=30; fi
 
-python - "$DETERM" "$PORT" "$FROM" "$TO" "$EXTREME_THRESH_S" "$TMP_STATS" <<'PY' || {
-  echo "operator_chain_freshness: block-walk failed" >&2; exit 1;
-}
+python - "$DETERM" "$PORT" "$FROM" "$TO" "$EXTREME_THRESH_S" "$TMP_STATS" <<'PY'
 import json
 import subprocess
 import sys

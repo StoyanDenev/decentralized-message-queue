@@ -229,9 +229,7 @@ trap 'rm -f "$TMP_STATS" 2>/dev/null' EXIT
 STALL_THRESH_MS=$(( EXPECTED_MS * 10 ))
 if [ "$STALL_THRESH_MS" -lt 3000 ]; then STALL_THRESH_MS=3000; fi
 
-python - "$DETERM" "$PORT" "$FROM" "$TO" "$STALL_THRESH_MS" "$TMP_STATS" <<'PY' || {
-  echo "operator_consensus_latency: block-walk failed" >&2; exit 1;
-}
+python - "$DETERM" "$PORT" "$FROM" "$TO" "$STALL_THRESH_MS" "$TMP_STATS" <<'PY'
 import subprocess, sys
 
 determ, port, from_h, to_h, stall_ms, out_path = sys.argv[1:7]

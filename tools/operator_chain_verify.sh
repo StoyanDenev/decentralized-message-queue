@@ -271,7 +271,7 @@ while [ "$CURSOR" -le "$TO" ]; do
     # Use python3 if available — it's the only portable way to do
     # this without jq across Git Bash on Windows + Linux/Mac.
     if command -v python3 >/dev/null 2>&1; then
-      python3 - "$COMBINED" <<PY
+      python3 - "$COMBINED" <<< "$PAGE" > "$TMPDIR/pagecount.txt" <<PY || {
 import json, sys
 combined_path = sys.argv[1]
 with open(combined_path) as f:
@@ -281,7 +281,7 @@ combined["headers"].extend(page.get("headers", []))
 with open(combined_path, "w") as f:
     json.dump(combined, f)
 print(len(page.get("headers", [])))
-PY <<< "$PAGE" > "$TMPDIR/pagecount.txt" || {
+PY
         echo "operator_chain_verify: python3 page-merge failed (from=$CURSOR)" >&2
         exit 1
       }

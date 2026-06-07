@@ -10,18 +10,13 @@
 # `bash -n`, so a CRLF-but-syntactically-valid script passes on Windows
 # git-bash and on Linux/Mac alike — only genuine syntax errors fail.
 #
-# Quarantine: a set of pre-existing broken scripts (committed with CRLF +
-# unterminated/indented `PY` heredocs, discovered R43 by this very guard) is
-# listed below. A quarantined script that still fails is reported as
-# `quarantine:` (KNOWN-BROKEN, tracked) and does NOT fail the guard — so the
-# suite stays green while the debt is explicit and visible. The guard's
-# forward value is real: any NEW (non-quarantined) script that fails to parse
-# turns this test RED. A quarantined script that NOW parses is reported as
-# `fixed:` so the list can be pruned.
-#
-# Tracking: the quarantined scripts are slated for repair (CRLF->LF + heredoc
-# terminator fix, no logic change) as a dedicated task. When all are fixed,
-# empty QUARANTINE below and this guard enforces zero syntax errors tree-wide.
+# Quarantine: an optional escape hatch (QUARANTINE below) for a path that must
+# land broken before its fix — a quarantined script that fails is reported as
+# `quarantine:` and does NOT fail the guard, while a NEW (non-quarantined)
+# failure turns the test RED. QUARANTINE is currently EMPTY: the 11 scripts
+# this guard discovered broken at R43 have all been repaired, so the guard now
+# enforces zero syntax errors across every tools/*.sh. Prefer fixing over
+# quarantining.
 #
 # Pure text/parse check — needs NO determ binary, never SKIPs. run_all judges
 # outcome from the single terminal `  PASS:` / `  FAIL:` marker.
@@ -30,20 +25,13 @@
 set -u
 cd "$(dirname "$0")/.."
 
-# Known-broken (R43 discovery) — repair tracked separately. Keep sorted.
-QUARANTINE="
-tools/operator_account_balance_history.sh
-tools/operator_account_growth.sh
-tools/operator_block_creator_fairness.sh
-tools/operator_chain_freshness.sh
-tools/operator_chain_verify.sh
-tools/operator_committee_rotation.sh
-tools/operator_consensus_latency.sh
-tools/operator_dapp_registration_audit.sh
-tools/operator_param_history.sh
-tools/operator_stake_yield.sh
-tools/operator_validator_history.sh
-"
+# Quarantine list — EMPTY. The 11 scripts discovered broken at R43 (committed
+# CRLF + a `cmd <<'PY' || { echo…; exit 1; }` heredoc whose handler body was
+# swallowed into the heredoc, leaving the `{` group unterminated) were all
+# REPAIRED — the guard now enforces zero syntax errors across every tools/*.sh.
+# Re-add a path here only as a temporary measure if a genuinely-broken script
+# must land before its fix; prefer fixing.
+QUARANTINE=""
 is_quarantined() { printf '%s\n' "$QUARANTINE" | grep -qxF "$1"; }
 
 OK=0; NEW_BAD=0; QUAR=0; FIXED=0

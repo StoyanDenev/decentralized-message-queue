@@ -199,8 +199,6 @@ trap 'rm -f "$TMP_AGG"' EXIT
 # object with all aggregates as a single line so the bash side can pipe
 # it straight to jq.
 "$PYTHON" - "$DETERM" "$PORT" "$FROM" "$TO" "$TMP_AGG" <<'PY' || {
-  echo "operator_committee_rotation: block walk failed" >&2; exit 1;
-}
 import json, subprocess, sys
 
 determ, port, from_h, to_h, out_path = sys.argv[1:6]
@@ -302,6 +300,8 @@ out = {
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(json.dumps(out))
 PY
+  echo "operator_committee_rotation: block walk failed" >&2; exit 1;
+}
 
 # ── Step 3: classify anomalies ────────────────────────────────────────────────
 # Anomaly detection is done in jq so it's coherent with the JSON output.
