@@ -134,6 +134,9 @@ void print_usage() {
         "RPC fetch primitives:\n"
         "  fetch-headers --rpc-port <N> --from <I> --count <M> [--out <file>]\n"
         "      Fetch headers [I, I+M) from 127.0.0.1:N.\n"
+        "  fetch-validators --rpc-port <N> [--out <file>]\n"
+        "      Fetch the current committee set (validators RPC) — the committee\n"
+        "      input for verify-chain-file / committee-diff, determ-light-only.\n"
         "  fetch-state-proof --rpc-port <N> --ns <NS> --key <K> [--out <file>]\n"
         "      Fetch a state-proof for (NS, K) from 127.0.0.1:N.\n"
         "\n"
@@ -1208,6 +1211,57 @@ int cmd_fetch_headers(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "fetch-headers: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ────────────────────── fetch-validators ───────────────────────────────
+
+// Fetch the current committee/creator set via the `validators` RPC and save it
+// (the bare array of {domain, ed_pub, active_from, registered_at, stake,
+// region} the daemon's rpc_validators emits). Completes the determ-light-only
+// offline workflow: fetch-headers + fetch-validators give an operator both
+// inputs for verify-chain-file / committee-diff using ONLY the trust-minimized
+// binary (no full determ node needed). This is an unauthenticated read fetch,
+// like fetch-headers; the committee it returns is daemon-asserted — derive the
+// genuine height-correct set trustlessly via committee-at-height when soundness
+// matters. Exit 0 success, 1 RPC failure / args error.
+int cmd_fetch_validators(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string out_path;
+    bool have_port = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--out"    && i + 1 < argc) {
+            out_path = argv[++i];
+        } else {
+            std::cerr << "fetch-validators: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port) {
+        std::cerr << "fetch-validators: --rpc-port is required\n";
+        return 1;
+    }
+    try {
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "fetch-validators: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        auto reply = rpc.call("validators", json::object());
+        size_t n = reply.is_array() ? reply.size() : 0;
+        if (out_path.empty()) {
+            std::cout << reply.dump() << "\n";
+        } else {
+            write_json_file(out_path, reply);
+            std::cout << "OK: wrote " << n << " validator(s) to " << out_path << "\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "fetch-validators: " << e.what() << "\n";
         return 1;
     }
 }
@@ -6182,6 +6236,7 @@ int main(int argc, char** argv) {
         if (cmd == "committee-diff")        return cmd_committee_diff(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);
         if (cmd == "fetch-headers")         return cmd_fetch_headers(sub_argc, sub_argv);
+        if (cmd == "fetch-validators")      return cmd_fetch_validators(sub_argc, sub_argv);
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
         if (cmd == "verify-chain")          return cmd_verify_chain(sub_argc, sub_argv);
         if (cmd == "audit")                 return cmd_audit(sub_argc, sub_argv);
