@@ -14220,6 +14220,233 @@ int cmd_block_tx_root(int argc, char** argv) {
     return 0;
 }
 
+// ── block-verify ─────────────────────────────────────────────────────────────
+//
+// One-shot OFFLINE single-block verifier. Composes three checks over a block
+// JSON into a single PASS/FAIL with a monitor-friendly exit code, adding NO new
+// cryptographic logic of its own beyond a structural well-formedness pass:
+//   STRUCTURE — the block JSON carries the required Block::to_json fields with
+//               the right shapes (index/timestamp numbers, prev_hash/tx_root
+//               strings, creators[] non-empty, creator_tx_lists[]/creator_block_sigs[]
+//               arrays). Catches a truncated / wrong-shape block before the
+//               crypto checks run.
+//   TX-ROOT   — recompute compute_tx_root(creator_tx_lists) and compare to the
+//               stored tx_root (delegates to block-tx-root --check, which
+//               mirrors src/node/producer.cpp::compute_tx_root byte-for-byte).
+//   SIGS      — BFT-style ceil(2P/3)-quorum (P = present sigs) Ed25519
+//               committee-signature verification over the OPERATOR-SUPPLIED
+//               block_digest (delegates to committee-signature-verify, which
+//               reads creator_block_sigs[]).
+//               Attempted ONLY when BOTH --committee and --block-digest are
+//               given; otherwise SKIP — the wallet does not link the chain
+//               library and cannot itself recompute the digest (see
+//               docs/proofs/OfflineBlockVerifySoundness.md for the trust
+//               boundary this implies).
+// Reuses the fully-tested cmd_block_tx_root + cmd_committee_signature_verify by
+// synthesizing their argv (mirrors determ-light `audit`). Pure local crypto: no
+// RPC, no daemon, no chain-library link.
+//
+// Exit codes: 0 all attempted checks pass, 2 a check FAILED, 1 args/parse/IO.
+int cmd_block_verify(int argc, char** argv) {
+    std::string block_path, committee_path, digest_hex;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--block-json"   && i + 1 < argc) block_path     = argv[++i];
+        else if (a == "--committee"    && i + 1 < argc) committee_path = argv[++i];
+        else if (a == "--block-digest" && i + 1 < argc) digest_hex     = argv[++i];
+        else if (a == "--json")                         json_out       = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet block-verify --block-json <file>\n"
+                "                  [--committee <file>] [--block-digest <hex64>]\n"
+                "                  [--json]\n"
+                "\n"
+                "  One-shot OFFLINE single-block verifier. Composes three checks\n"
+                "  over a block JSON into one PASS/FAIL:\n"
+                "    STRUCTURE  block JSON well-formedness (required Block fields\n"
+                "               + shapes; creators[] non-empty).\n"
+                "    TX-ROOT    recompute compute_tx_root(creator_tx_lists) and\n"
+                "               compare to the stored tx_root (== the daemon's\n"
+                "               validator accept gate; via block-tx-root --check).\n"
+                "    SIGS       ceil(2P/3)-quorum Ed25519 committee-sig\n"
+                "               verification over the OPERATOR-SUPPLIED\n"
+                "               --block-digest (via committee-signature-verify).\n"
+                "               Attempted only when BOTH --committee and\n"
+                "               --block-digest are given; otherwise SKIP (the\n"
+                "               wallet cannot recompute the digest — it does not\n"
+                "               link the chain library; obtain the digest from\n"
+                "               `determ verify-block-sigs`).\n"
+                "\n"
+                "  Pure local crypto: no RPC, no daemon. (--block-json must be a\n"
+                "  file path holding an UNWRAPPED Block — the `block-info --json`\n"
+                "  shape, NOT a {block:{...}} envelope; the composite re-opens it\n"
+                "  for each delegated check, so stdin is not supported.) --json\n"
+                "  emits an aggregate\n"
+                "  {audit, passed, failed, skipped, checks:[...]}.\n"
+                "\n"
+                "  Exit codes: 0 all attempted checks pass, 2 a check FAILED,\n"
+                "  1 args / parse / IO error.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "block-verify: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet block-verify --block-json <file> "
+                         "[--committee <file>] [--block-digest <hex64>] [--json]\n";
+            return 1;
+        }
+    }
+    if (block_path.empty()) {
+        std::cerr << "Usage: determ-wallet block-verify --block-json <file> "
+                     "[--committee <file>] [--block-digest <hex64>] [--json]\n"
+                     "  (--block-json is required)\n";
+        return 1;
+    }
+    if (block_path == "-") {
+        std::cerr << "block-verify: --block-json must be a file path (stdin is "
+                     "not supported — the composite re-opens the file per check)\n";
+        return 1;
+    }
+
+    struct CheckResult { std::string name, verdict, detail; };
+    std::vector<CheckResult> checks;
+    int passed = 0, failed = 0, skipped = 0;
+
+    // ── STRUCTURE ── parse the block JSON once + check well-formedness.
+    bool struct_ok = false;
+    std::string struct_detail;
+    {
+        try {
+            std::ifstream f(block_path);
+            if (!f) throw std::runtime_error("cannot open --block-json: " + block_path);
+            nlohmann::json bj; f >> bj;
+            // Require an UNWRAPPED Block (the shape `determ block-info --json`
+            // emits). A {block:{...}} envelope is rejected here so STRUCTURE
+            // agrees with the delegated block-tx-root, which also requires the
+            // top-level Block shape (unwrap it first with `jq .block` if needed).
+            if (!bj.is_object()) throw std::runtime_error("block JSON is not an object");
+            if (bj.contains("block") && bj["block"].is_object()
+                && !bj.contains("creator_tx_lists"))
+                throw std::runtime_error(
+                    "looks like a {block:{...}} envelope — pass the unwrapped "
+                    "Block (e.g. `jq .block`)");
+            // Required fields + shapes (0 string, 1 number, 2 array).
+            struct Req { const char* k; int kind; };
+            const Req reqs[] = {
+                {"index", 1}, {"prev_hash", 0}, {"timestamp", 1},
+                {"creators", 2}, {"creator_tx_lists", 2},
+                {"tx_root", 0}, {"creator_block_sigs", 2},
+            };
+            for (auto& r : reqs) {
+                if (!bj.contains(r.k))
+                    throw std::runtime_error(std::string("missing field '") + r.k + "'");
+                const auto& v = bj[r.k];
+                bool ok = (r.kind == 0 && v.is_string())
+                       || (r.kind == 1 && v.is_number())
+                       || (r.kind == 2 && v.is_array());
+                if (!ok)
+                    throw std::runtime_error(std::string("field '") + r.k + "' wrong type");
+            }
+            if (bj["creators"].empty())
+                throw std::runtime_error("creators[] is empty (a block has >=1 creator)");
+            struct_detail = "well-formed (" + std::to_string(bj["creators"].size())
+                          + " creators, "
+                          + std::to_string(bj["creator_block_sigs"].size())
+                          + " creator_block_sigs)";
+            struct_ok = true;
+        } catch (const std::exception& e) {
+            struct_detail = e.what();
+        }
+        if (!json_out)
+            std::cout << "--- STRUCTURE ---\n  "
+                      << (struct_ok ? "OK: " : "FAIL: ") << struct_detail << "\n";
+        checks.push_back({"STRUCTURE", struct_ok ? "PASS" : "FAIL", struct_detail});
+        struct_ok ? ++passed : ++failed;
+    }
+
+    // run_sub: invoke a delegated sub-command, capturing its stdout+stderr to a
+    // sink in --json mode so only the aggregate JSON reaches the operator
+    // (RAII-restored even under exception). Mirrors determ-light `audit`.
+    auto run_sub = [&](const std::string& name, int (*fn)(int, char**),
+                       std::vector<std::string> args) -> int {
+        std::vector<char*> av;
+        for (auto& s : args) av.push_back(const_cast<char*>(s.c_str()));
+        std::ostringstream sink;
+        struct RdbufGuard {
+            std::streambuf* o{nullptr}; std::streambuf* e{nullptr};
+            ~RdbufGuard() { if (o) std::cout.rdbuf(o); if (e) std::cerr.rdbuf(e); }
+        } g;
+        if (json_out) { g.o = std::cout.rdbuf(sink.rdbuf());
+                        g.e = std::cerr.rdbuf(sink.rdbuf()); }
+        else          std::cout << "--- " << name << " ---\n";
+        int rc = fn(static_cast<int>(av.size()), av.data());
+        if (g.o) { std::cout.rdbuf(g.o); g.o = nullptr; }
+        if (g.e) { std::cerr.rdbuf(g.e); g.e = nullptr; }
+        return rc;
+    };
+
+    // ── TX-ROOT ── only if STRUCTURE passed (a malformed block can't be hashed).
+    if (struct_ok) {
+        int rc = run_sub("TX-ROOT", cmd_block_tx_root,
+                         {"--block-json", block_path, "--check"});
+        checks.push_back({"TX-ROOT", rc == 0 ? "PASS" : "FAIL",
+                          rc == 0 ? "recomputed == stored"
+                                  : "mismatch / error (exit " + std::to_string(rc) + ")"});
+        rc == 0 ? ++passed : ++failed;
+    } else {
+        checks.push_back({"TX-ROOT", "SKIP", "STRUCTURE failed — not attempted"});
+        ++skipped;
+    }
+
+    // ── SIGS ── only if STRUCTURE passed AND a committee + digest were supplied.
+    if (struct_ok && !committee_path.empty() && !digest_hex.empty()) {
+        int rc = run_sub("SIGS", cmd_committee_signature_verify,
+                         {"--block", block_path, "--committee", committee_path,
+                          "--block-digest", digest_hex});
+        checks.push_back({"SIGS", rc == 0 ? "PASS" : "FAIL",
+                          rc == 0 ? "quorum met + all sigs verify"
+                                  : "quorum not met / error (exit "
+                                      + std::to_string(rc) + ")"});
+        rc == 0 ? ++passed : ++failed;
+    } else if (struct_ok) {
+        checks.push_back({"SIGS", "SKIP",
+                          "needs both --committee and --block-digest — not attempted"});
+        ++skipped;
+    } else {
+        checks.push_back({"SIGS", "SKIP", "STRUCTURE failed — not attempted"});
+        ++skipped;
+    }
+
+    bool overall = (failed == 0);
+
+    if (json_out) {
+        nlohmann::json j;
+        j["audit"]   = overall ? "PASS" : "FAIL";
+        j["passed"]  = passed;
+        j["failed"]  = failed;
+        j["skipped"] = skipped;
+        nlohmann::json arr = nlohmann::json::array();
+        for (auto& c : checks)
+            arr.push_back({{"check", c.name},
+                           {"verdict", c.verdict},
+                           {"detail", c.detail}});
+        j["checks"] = arr;
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "\n=== BLOCK-VERIFY SUMMARY ===\n";
+        for (auto& c : checks) {
+            std::string pad(c.name.size() < 10 ? 10 - c.name.size() : 1, ' ');
+            std::cout << "  " << c.name << pad << c.verdict
+                      << (c.detail.empty() ? std::string() : "  (" + c.detail + ")")
+                      << "\n";
+        }
+        std::cout << "\nBLOCK-VERIFY: " << (overall ? "PASS" : "FAIL")
+                  << " (" << passed << " passed, " << failed << " failed, "
+                  << skipped << " skipped)\n";
+    }
+    return overall ? 0 : 2;
+}
+
 // ── derive-tx-hash ───────────────────────────────────────────────────────────
 //
 // Recompute the canonical tx_hash from a signed tx envelope. The chain
@@ -23491,6 +23718,18 @@ void print_usage() {
         "                                             union size. Pass `-` to --block-json for stdin.\n"
         "                                             Exit 0 success (or --check match), 1 args/parse/\n"
         "                                             IO error, 2 --check mismatch.\n"
+        "  block-verify --block-json <file>           OFFLINE one-shot single-block verifier. Composes\n"
+        "               [--committee <file>]          STRUCTURE (block JSON well-formedness) + TX-ROOT\n"
+        "               [--block-digest <hex64>]      (recompute compute_tx_root == stored, via block-\n"
+        "               [--json]                       tx-root --check) + SIGS (ceil(2P/3)-quorum committee\n"
+        "                                             Ed25519 over the operator-supplied block_digest,\n"
+        "                                             via committee-signature-verify) into ONE PASS/\n"
+        "                                             FAIL. SIGS runs only when both --committee and\n"
+        "                                             --block-digest are given, else SKIP (the wallet\n"
+        "                                             cannot recompute the digest — no chain-lib link).\n"
+        "                                             Pure local crypto; no RPC/daemon. --json emits\n"
+        "                                             {audit, passed, failed, skipped, checks:[...]}.\n"
+        "                                             Exit 0 all pass, 2 a check FAILED, 1 args/parse.\n"
         "  receipt-key [--namespace i|m|p]            OFFLINE deriver for the composite state-root\n"
         "              i: --src-shard <S>             leaf-key bytes (i:/m:/p:) — the exact hex body\n"
         "                 --tx-hash <hex64>           the `state_proof` RPC expects for a composite-\n"
@@ -24095,6 +24334,7 @@ int main(int argc, char** argv) {
     if (cmd == "verify-batch")    return cmd_verify_batch   (argc - 2, argv + 2);
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "block-tx-root")   return cmd_block_tx_root  (argc - 2, argv + 2);
+    if (cmd == "block-verify")    return cmd_block_verify   (argc - 2, argv + 2);
     if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
     if (cmd == "shard-route")     return cmd_shard_route    (argc - 2, argv + 2);
     if (cmd == "address-classify") return cmd_address_classify(argc - 2, argv + 2);
