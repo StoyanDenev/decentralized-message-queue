@@ -8707,10 +8707,17 @@ int main(int argc, char** argv) {
                   "compute_block_digest: creator_dh_inputs sensitivity (INCLUDED)");
         }
 
-        // === EXCLUSION list: S-030 D2 territory + Phase-2-reveal
-        //     subset. Mutating these MUST NOT change the digest.
-        //     This is the explicit "two blocks can share a digest"
-        //     surface that v2.7 F2 reconciles. ===
+        // === EXCLUSION list (non-F2 / v1-sentinel path + genuine residual).
+        //     For a NON-F2 block (all creator_view_*_roots zero — the v1
+        //     sentinel), the evidence/receipt SETS are NOT bound, so mutating
+        //     them MUST NOT change the digest. The shipped v2.7 F2 closes this
+        //     for the three pool-fed dimensions (inbound / equivocation /
+        //     abort) ON F2 BLOCKS — asserted in the F2 POSITIVE BINDING section
+        //     below. The genuinely-uncovered residual after F2 is exactly
+        //     partner_subset_hash + timestamp (assertions 18-19); state_root is
+        //     bound via block_hash (S-033/S-038); delay_output / creator_dh_
+        //     secrets / cumulative_rand are intentional Phase-2-reveal
+        //     exclusions. See docs/proofs/S030-D2-Analysis.md. ===
 
         // 12. delay_output excluded (Phase-2-reveal).
         {
@@ -8736,7 +8743,9 @@ int main(int argc, char** argv) {
                   "compute_block_digest: cumulative_rand EXCLUDED");
         }
 
-        // 15. abort_events excluded (S-030 D2 — v2.7 F2 territory).
+        // 15. abort_events excluded on the NON-F2 path (zero abort view
+        //     roots = v1 sentinel). On an F2 block the abort set IS bound —
+        //     see assertion 25.
         {
             Block b = baseline;
             AbortEvent ae;
@@ -8744,10 +8753,12 @@ int main(int argc, char** argv) {
             ae.event_hash = patterned_hash(0xE4);
             b.abort_events.push_back(ae);
             check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: abort_events EXCLUDED (S-030 D2 / F2)");
+                  "compute_block_digest: abort_events EXCLUDED on non-F2 path (zero view roots)");
         }
 
-        // 16. equivocation_events excluded (S-030 D2 — v2.7 F2 territory).
+        // 16. equivocation_events excluded on the NON-F2 path (zero eq view
+        //     roots = v1 sentinel). On an F2 block the eq set IS bound — see
+        //     assertion 23.
         {
             Block b = baseline;
             EquivocationEvent ev;
@@ -8759,7 +8770,7 @@ int main(int argc, char** argv) {
             ev.sig_b = patterned_sig(0xE8);
             b.equivocation_events.push_back(ev);
             check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: equivocation_events EXCLUDED (S-030 D2 / F2)");
+                  "compute_block_digest: equivocation_events EXCLUDED on non-F2 path (zero view roots)");
         }
 
         // 17. state_root excluded from digest (S-033 / v2.1 — apply-time
@@ -8783,14 +8794,124 @@ int main(int argc, char** argv) {
                   "compute_block_digest: partner_subset_hash EXCLUDED");
         }
 
-        // 19. timestamp excluded (assembler-proposed; v2.7 F2 will add
-        //     this to the digest via the ±30s validation pattern).
+        // 19. timestamp excluded — this is one of the two genuinely-uncovered
+        //     S-030-D2 residual fields the shipped v2.7 F2 did NOT close (the
+        //     other is partner_subset_hash, assertion 18). Binding timestamp
+        //     needs the assembler-proposed ±30s validation pattern, deferred
+        //     with partner_subset_hash. See docs/proofs/S030-D2-Analysis.md §5.
         {
             Block b = baseline;
             b.timestamp = 999;
             check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: timestamp EXCLUDED (v2.7 F2 territory)");
+                  "compute_block_digest: timestamp EXCLUDED (S-030-D2 residual, not closed by F2)");
         }
+
+        // === F2 POSITIVE BINDING (shipped v2.7 F2 — the three pool-fed
+        //     dimensions ARE bound into the digest on an F2 block). These
+        //     lock in the strip/add-detection property: a relayer cannot
+        //     remove or alter an admitted inbound receipt / equivocation /
+        //     abort entry after the K-of-K sig without changing the digest.
+        //     Mirror of producer.cpp::compute_block_digest gates:
+        //       inbound — binds when inbound_receipts non-empty;
+        //       eq/abort — bind when any creator_view_{eq,abort}_root non-zero.
+        //     See SECURITY.md §S-030 D2 + docs/proofs/F2-SPEC.md. ===
+
+        auto make_receipt = [&](uint8_t base) {
+            CrossShardReceipt r;
+            r.src_shard = 0; r.dst_shard = 1;
+            r.src_block_index = 7;
+            r.src_block_hash = patterned_hash(base);
+            r.tx_hash = patterned_hash(base + 1);
+            r.from = "src"; r.to = "dst";
+            r.amount = 5; r.fee = 1; r.nonce = 3;
+            return r;
+        };
+
+        // 20. inbound_receipts INCLUDED when present (gate: non-empty). A
+        //     non-cross-shard block has none and keeps the v1 digest; the
+        //     moment an inbound receipt is admitted it joins the digest.
+        {
+            Block b = baseline;
+            b.inbound_receipts.push_back(make_receipt(0xC0));
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: inbound_receipts INCLUDED when present (F2 / S-016)");
+        }
+
+        // 21. inbound_receipts SET-sensitive — two blocks with different
+        //     admitted inbound sets get different digests (the strip/add gap
+        //     S-030-D2 documented, now closed for inbound).
+        {
+            Block b1 = baseline; b1.inbound_receipts = {make_receipt(0xC0)};
+            Block b2 = baseline; b2.inbound_receipts = {make_receipt(0xC0), make_receipt(0xC4)};
+            check(compute_block_digest(b1) != compute_block_digest(b2),
+                  "compute_block_digest: inbound_receipts SET-sensitive (strip/add detected)");
+        }
+
+        // 22. F2 eq-block gate fires: a non-zero creator_view_eq_roots entry
+        //     marks the block as F2-reconciled for the equivocation dimension,
+        //     so the eq set joins the digest (distinguishable from a non-F2
+        //     block — assertion 16).
+        Hash dig_f2_eq;
+        {
+            Block b = baseline;
+            b.creator_view_eq_roots = {patterned_hash(0xD0), Hash{}, Hash{}};
+            dig_f2_eq = compute_block_digest(b);
+            check(dig_f2_eq != dig_baseline,
+                  "compute_block_digest: F2 eq-block gate fires on non-zero view root");
+        }
+
+        // 23. equivocation_events BOUND within an F2 eq-block (adding an event
+        //     to the reconciled set changes the digest — strip/add closed).
+        {
+            Block b = baseline;
+            b.creator_view_eq_roots = {patterned_hash(0xD0), Hash{}, Hash{}};
+            EquivocationEvent ev;
+            ev.equivocator = "mallory";
+            ev.block_index = 42;
+            ev.digest_a = patterned_hash(0xD1);
+            ev.digest_b = patterned_hash(0xD2);
+            ev.sig_a = patterned_sig(0xD3);
+            ev.sig_b = patterned_sig(0xD4);
+            b.equivocation_events.push_back(ev);
+            check(compute_block_digest(b) != dig_f2_eq,
+                  "compute_block_digest: equivocation_events BOUND in F2 eq-block (set sealed)");
+        }
+
+        // 24. F2 abort-block gate fires: a non-zero creator_view_abort_roots
+        //     entry marks the block F2-reconciled for the abort dimension.
+        Hash dig_f2_ab;
+        {
+            Block b = baseline;
+            b.creator_view_abort_roots = {patterned_hash(0xD8), Hash{}, Hash{}};
+            dig_f2_ab = compute_block_digest(b);
+            check(dig_f2_ab != dig_baseline,
+                  "compute_block_digest: F2 abort-block gate fires on non-zero view root");
+        }
+
+        // 25. abort_events BOUND within an F2 abort-block (adding an event to
+        //     the reconciled set changes the digest — strip/add closed).
+        {
+            Block b = baseline;
+            b.creator_view_abort_roots = {patterned_hash(0xD8), Hash{}, Hash{}};
+            AbortEvent ae;
+            ae.round = 1;
+            ae.event_hash = patterned_hash(0xD9);
+            b.abort_events.push_back(ae);
+            check(compute_block_digest(b) != dig_f2_ab,
+                  "compute_block_digest: abort_events BOUND in F2 abort-block (set sealed)");
+        }
+
+        // NOTE (intentionally NOT asserted): an eq-only F2 block and an
+        // abort-only F2 block that both carry EMPTY event sets produce the
+        // SAME digest — compute_view_root({}) is dimension-agnostic and the
+        // digest carries no dimension separator. That is correct: the eq-vs-
+        // abort distinction is bound by the per-creator view ROOTS in
+        // signing_bytes (authenticated via creator_ed_sigs — block.hpp:404),
+        // not by the Phase-2 digest. The digest's job is to seal the event-set
+        // CONTENTS, which it does whenever the sets are non-empty (assertions
+        // 23 + 25). A naive "dimensions must differ at the digest" check would
+        // wrongly fail here; the real cross-dimension protection lives in the
+        // validator's check_eqabort_reconciliation, not compute_block_digest.
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": block-digest " << (fail == 0 ? "all assertions" : "had failures")
