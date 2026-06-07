@@ -123,6 +123,11 @@ void print_usage() {
         "      non-genesis header's committee Ed25519 over its self-recomputed\n"
         "      digest). --committee-manifest [{from,to,committee}...] verifies\n"
         "      ACROSS committee rotations (per-range committee). No daemon.\n"
+        "  committee-diff --a <file> --b <file> [--json]\n"
+        "      Offline diff of two committee files (validators --json shape):\n"
+        "      added / removed / key-rotated / region- + stake-changed members.\n"
+        "      Companion to --committee-manifest — tells you whether the SIGNING\n"
+        "      set changed (exit 0 identical, 2 differs). No daemon.\n"
         "  verify-state-proof --in <file> [--state-root <hex>]\n"
         "      Verify a state-proof Merkle inclusion against a root.\n"
         "\n"
@@ -1008,6 +1013,125 @@ int cmd_verify_chain_file(int argc, char** argv) {
                   << " (" << passed << " passed, " << failed << " failed)\n";
     }
     return overall ? 0 : 2;
+}
+
+// ──────────────────────── committee-diff ───────────────────────────────
+
+// Offline diff of two committee files (the `determ validators --json` shape: a
+// bare array, or {members:[...]}, of {domain, ed_pub, region, stake, ...}).
+// Reports which members were ADDED / REMOVED / KEY-ROTATED (same domain, new
+// ed_pub) / REGION-CHANGED / STAKE-CHANGED / UNCHANGED between snapshot A and B.
+//
+// Purpose: the companion to verify-chain-file --committee-manifest. A single
+// --committee is sound only across a NO-rotation segment; committee-diff tells
+// an operator WHETHER the SIGNING set changed between two validator snapshots,
+// so they know whether one committee covers a headers segment or must build a
+// manifest. The "signing set" verdict keys on the (domain, ed_pub) pairs that
+// verify_block_sigs actually uses — REGION/STAKE-only changes do NOT alter it
+// (they don't affect signature verification). Pure local JSON, no daemon, no
+// crypto. Exit 0 signing set IDENTICAL, 2 signing set DIFFERS, 1 args/parse.
+int cmd_committee_diff(int argc, char** argv) {
+    std::string a_path, b_path;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--help" || a == "-h") {
+            std::cout << "Usage: determ-light committee-diff --a <file> --b <file> [--json]\n"
+                         "  Offline diff of two committee files (validators --json shape).\n"
+                         "  Reports added / removed / key-rotated / region- + stake-changed\n"
+                         "  members. SIGNING SET verdict keys on (domain, ed_pub).\n"
+                         "  Exit 0 signing set IDENTICAL, 2 DIFFERS, 1 args/parse.\n";
+            return 0;
+        }
+        if      (a == "--a"   && i + 1 < argc) a_path = argv[++i];
+        else if (a == "--b"   && i + 1 < argc) b_path = argv[++i];
+        else if (a == "--json")                json_out = true;
+        else { std::cerr << "committee-diff: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (a_path.empty() || b_path.empty()) {
+        std::cerr << "committee-diff: --a and --b are required\n";
+        return 1;
+    }
+    json A, B;
+    try { A = read_json_file(a_path); B = read_json_file(b_path); }
+    catch (const std::exception& e) { std::cerr << "committee-diff: " << e.what() << "\n"; return 1; }
+
+    struct Member { std::string ed_pub, region; long long stake; bool has_stake; };
+    auto normalize = [](const json& doc, std::map<std::string, Member>& out, std::string& why) -> bool {
+        const json* arr = nullptr;
+        if (doc.is_array()) arr = &doc;
+        else if (doc.is_object() && doc.contains("members") && doc["members"].is_array()) arr = &doc["members"];
+        else { why = "committee file is neither an array nor {members:[...]}"; return false; }
+        for (auto& m : *arr) {
+            if (!m.is_object() || !m.contains("domain")) { why = "member missing 'domain'"; return false; }
+            Member mem;
+            mem.ed_pub = m.contains("ed_pub") && m["ed_pub"].is_string() ? m["ed_pub"].get<std::string>() : "";
+            for (auto& ch : mem.ed_pub) if (ch >= 'A' && ch <= 'F') ch += 32;  // lc for compare
+            mem.region = m.contains("region") ? (m["region"].is_string() ? m["region"].get<std::string>()
+                                                                         : m["region"].dump()) : "";
+            mem.has_stake = m.contains("stake") && m["stake"].is_number();
+            mem.stake = mem.has_stake ? m["stake"].get<long long>() : 0;
+            out[m["domain"].get<std::string>()] = mem;
+        }
+        return true;
+    };
+    std::map<std::string, Member> ma, mb;
+    std::string why;
+    if (!normalize(A, ma, why) || !normalize(B, mb, why)) {
+        std::cerr << "committee-diff: " << why << "\n";
+        return 1;
+    }
+
+    std::vector<std::string> added, removed, rotated, region_chg, stake_chg;
+    size_t unchanged = 0;
+    for (auto& kv : mb) if (!ma.count(kv.first)) added.push_back(kv.first);
+    for (auto& kv : ma) {
+        auto it = mb.find(kv.first);
+        if (it == mb.end()) { removed.push_back(kv.first); continue; }
+        if (it->second.ed_pub != kv.second.ed_pub) { rotated.push_back(kv.first); continue; }
+        // ed_pub unchanged: region + stake are independent secondary deltas
+        // (neither alters the verify_block_sigs signing set).
+        bool secondary = false;
+        if (it->second.region != kv.second.region) { region_chg.push_back(kv.first); secondary = true; }
+        if (it->second.has_stake && kv.second.has_stake && it->second.stake != kv.second.stake) {
+            stake_chg.push_back(kv.first); secondary = true;
+        }
+        if (!secondary) ++unchanged;
+    }
+    // The verify_block_sigs signing set changes iff a member is added, removed,
+    // or its ed_pub rotated; region/stake-only changes leave it intact.
+    bool signing_identical = added.empty() && removed.empty() && rotated.empty();
+
+    auto join = [](const std::vector<std::string>& v) {
+        std::string s; for (size_t i = 0; i < v.size(); ++i) { if (i) s += ", "; s += v[i]; } return s;
+    };
+    if (json_out) {
+        json j;
+        j["signing_set"] = signing_identical ? "IDENTICAL" : "DIFFERS";
+        j["added"]         = added;
+        j["removed"]       = removed;
+        j["key_rotated"]   = rotated;
+        j["region_changed"]= region_chg;
+        j["stake_changed"] = stake_chg;
+        j["unchanged"]     = unchanged;
+        j["a_size"]        = ma.size();
+        j["b_size"]        = mb.size();
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "=== COMMITTEE-DIFF (A=" << ma.size() << " members, B=" << mb.size() << ") ===\n";
+        std::cout << "  added         (" << added.size()      << "): " << join(added)      << "\n";
+        std::cout << "  removed       (" << removed.size()    << "): " << join(removed)    << "\n";
+        std::cout << "  key-rotated   (" << rotated.size()    << "): " << join(rotated)    << "\n";
+        std::cout << "  region-changed(" << region_chg.size() << "): " << join(region_chg) << "\n";
+        std::cout << "  stake-changed (" << stake_chg.size()  << "): " << join(stake_chg)  << "\n";
+        std::cout << "  unchanged     (" << unchanged         << ")\n";
+        std::cout << "\nSIGNING SET: " << (signing_identical ? "IDENTICAL" : "DIFFERS")
+                  << (signing_identical
+                        ? " (one --committee covers a segment spanning these two snapshots)"
+                        : " (rotation — segment the headers file / use --committee-manifest)")
+                  << "\n";
+    }
+    return signing_identical ? 0 : 2;
 }
 
 // ───────────────────── verify-state-proof ──────────────────────────────
@@ -6055,6 +6179,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-block-sigs")     return cmd_verify_block_sigs(sub_argc, sub_argv);
         if (cmd == "block-verify")          return cmd_block_verify(sub_argc, sub_argv);
         if (cmd == "verify-chain-file")     return cmd_verify_chain_file(sub_argc, sub_argv);
+        if (cmd == "committee-diff")        return cmd_committee_diff(sub_argc, sub_argv);
         if (cmd == "verify-state-proof")    return cmd_verify_state_proof(sub_argc, sub_argv);
         if (cmd == "fetch-headers")         return cmd_fetch_headers(sub_argc, sub_argv);
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
