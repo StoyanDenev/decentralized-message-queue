@@ -23202,6 +23202,165 @@ int cmd_param_change_build(int argc, char** argv) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// param-change-lint  (--name <P> --value-hex <hex> | --tx-json <file>) [--json]
+//
+// OFFLINE build-time lint for a governance PARAM_CHANGE — predicts, BEFORE the
+// tx is ever submitted, whether activation will actually mutate the intended
+// consensus scalar or silently no-op (or be rejected outright). The wallet-side,
+// build-time dual of tools/operator_param_activation_preflight.sh (which audits
+// already-staged on-chain entries at runtime). Reimplements two source rules
+// (wallet TCB separation — no chain-library link):
+//   (1) the governance whitelist (src/node/validator.cpp:677-685 kWhitelist —
+//       9 names; an off-list name is REJECTED by the validator, so the tx never
+//       lands), and
+//   (2) the activation width rule (src/chain/chain.cpp:476-485): the three
+//       numeric chain-scalars MIN_STAKE / SUSPENSION_SLASH / UNSTAKE_DELAY are
+//       decoded by a parse_u64 that requires EXACTLY 8 bytes (`value.size()!=8`
+//       → returns false → the scalar is never written → silent no-op at the
+//       activation height). The other six whitelisted names have no chain-
+//       instance storage and are forwarded to the Node-installed param hook
+//       (chain.cpp:486-493), so their effect is HOOK-dependent — the wallet
+//       can't know whether the operator's Node wired the hook.
+// Verdicts: EFFECTIVE (numeric scalar, 8-byte value — will set the scalar) /
+// INERT_BAD_WIDTH (whitelisted numeric scalar but value != 8 bytes — the silent
+// trap) / HOOK_ONLY (whitelisted, hook-forwarded — effect depends on Node hook)
+// / UNKNOWN_NAME (off-whitelist — validator rejects the tx). Exit 0 EFFECTIVE or
+// HOOK_ONLY, 2 INERT_BAD_WIDTH or UNKNOWN_NAME (won't do what you intend), 1
+// args/parse error.
+int cmd_param_change_lint(int argc, char** argv) {
+    std::string name, value_hex, tx_path;
+    bool have_name = false, have_value = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet param-change-lint\n"
+                "         (--name <P> --value-hex <hex> | --tx-json <file>) [--json]\n"
+                "  OFFLINE build-time lint of a governance PARAM_CHANGE: predicts\n"
+                "  whether activation EFFECTIVE-ly sets a scalar, silently no-ops\n"
+                "  (INERT_BAD_WIDTH: a whitelisted numeric scalar — MIN_STAKE /\n"
+                "  SUSPENSION_SLASH / UNSTAKE_DELAY — whose value is not exactly\n"
+                "  8 bytes), is HOOK_ONLY, or is an UNKNOWN_NAME the validator\n"
+                "  rejects. --tx-json reads name+value_hex from a param-change-build\n"
+                "  output. Exit 0 EFFECTIVE/HOOK_ONLY, 2 INERT_BAD_WIDTH/UNKNOWN,\n"
+                "  1 args/parse.\n";
+            return 0;
+        }
+        else if (a == "--name"      && i + 1 < argc) { name = argv[++i]; have_name = true; }
+        else if (a == "--value-hex" && i + 1 < argc) { value_hex = argv[++i]; have_value = true; }
+        else if (a == "--tx-json"   && i + 1 < argc) { tx_path = argv[++i]; }
+        else if (a == "--json")                      { json_out = true; }
+        else {
+            std::cerr << "param-change-lint: unknown argument '" << a << "'\n";
+            return 1;
+        }
+    }
+
+    // Source of inputs: either a built tx-json (param-change-build output) or
+    // direct --name/--value-hex. --tx-json is mutually exclusive with the pair.
+    if (!tx_path.empty()) {
+        if (have_name || have_value) {
+            std::cerr << "param-change-lint: --tx-json is mutually exclusive with "
+                         "--name/--value-hex\n";
+            return 1;
+        }
+        std::ifstream f(tx_path);
+        if (!f) { std::cerr << "param-change-lint: cannot open " << tx_path << "\n"; return 1; }
+        nlohmann::json j;
+        try { j = nlohmann::json::parse(std::string(std::istreambuf_iterator<char>(f), {})); }
+        catch (const std::exception& e) { std::cerr << "param-change-lint: bad JSON: " << e.what() << "\n"; return 1; }
+        // Prefer decoding the authoritative on-chain `payload` (what actually
+        // gets applied) per the PARAM_CHANGE wire layout in
+        // src/node/validator.cpp:650-671: [name_len u8][name][value_len u16 LE]
+        // [value][effective_height u64][sig_count u8][sigs...]. Fall back to the
+        // param-change-build convenience field value_hex + a "name" field.
+        if (j.contains("payload") && j["payload"].is_string()) {
+            std::vector<uint8_t> p;
+            try { p = from_hex(j["payload"].get<std::string>()); }
+            catch (const std::exception& e) { std::cerr << "param-change-lint: payload not hex: " << e.what() << "\n"; return 1; }
+            size_t off = 0;
+            if (p.size() < 1) { std::cerr << "param-change-lint: payload truncated (name_len)\n"; return 1; }
+            size_t nlen = p[off++];
+            if (p.size() < off + nlen) { std::cerr << "param-change-lint: payload truncated (name)\n"; return 1; }
+            name.assign(reinterpret_cast<const char*>(p.data() + off), nlen); off += nlen;
+            if (p.size() < off + 2) { std::cerr << "param-change-lint: payload truncated (value_len)\n"; return 1; }
+            size_t vlen = size_t(p[off]) | (size_t(p[off + 1]) << 8); off += 2;
+            if (p.size() < off + vlen) { std::cerr << "param-change-lint: payload truncated (value)\n"; return 1; }
+            std::vector<uint8_t> vbytes(p.begin() + off, p.begin() + off + vlen);
+            value_hex = to_hex(vbytes);
+        } else if (j.contains("name") && j["name"].is_string()) {
+            name = j["name"].get<std::string>();
+            value_hex = (j.contains("value_hex") && j["value_hex"].is_string()) ? j["value_hex"].get<std::string>() : "";
+        } else {
+            std::cerr << "param-change-lint: tx-json has neither a 'payload' hex nor a 'name' field\n";
+            return 1;
+        }
+    } else {
+        if (!have_name) { std::cerr << "param-change-lint: --name (or --tx-json) is required\n"; return 1; }
+        if (!have_value) { std::cerr << "param-change-lint: --value-hex (or --tx-json) is required\n"; return 1; }
+    }
+
+    // Compute the value byte length with STRICT hex validation (the shared
+    // from_hex is lenient — istringstream >> hex reads "0" out of "0g" without
+    // failing — which a lint must not silently accept).
+    for (char c : value_hex) {
+        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex) { std::cerr << "param-change-lint: --value-hex contains a non-hex character\n"; return 1; }
+    }
+    if (value_hex.size() % 2 != 0) { std::cerr << "param-change-lint: --value-hex has odd length\n"; return 1; }
+    size_t value_bytes = value_hex.size() / 2;
+
+    // Mirror src/node/validator.cpp:677-685 kWhitelist (9 names) and
+    // src/chain/chain.cpp:483-485 numeric chain-scalars (parse_u64, 8 bytes).
+    static const std::set<std::string> kWhitelist = {
+        "tx_commit_ms", "block_sig_ms", "abort_claim_ms",
+        "bft_escalation_threshold", "SUSPENSION_SLASH",
+        "MIN_STAKE", "UNSTAKE_DELAY",
+        "param_keyholders", "param_threshold",
+    };
+    static const std::set<std::string> kNumericScalars = {
+        "MIN_STAKE", "SUSPENSION_SLASH", "UNSTAKE_DELAY",
+    };
+
+    std::string verdict, detail;
+    if (kWhitelist.find(name) == kWhitelist.end()) {
+        verdict = "UNKNOWN_NAME";
+        detail  = "not on the governance whitelist — validator REJECTS this tx (it never lands)";
+    } else if (kNumericScalars.find(name) != kNumericScalars.end()) {
+        if (value_bytes == 8) {
+            verdict = "EFFECTIVE";
+            detail  = "numeric chain-scalar with an 8-byte value — sets the scalar at the activation height";
+        } else {
+            verdict = "INERT_BAD_WIDTH";
+            detail  = "numeric chain-scalar but value is " + std::to_string(value_bytes)
+                    + " bytes, not 8 — parse_u64 rejects it, the scalar is NEVER written (silent no-op at activation)";
+        }
+    } else {
+        verdict = "HOOK_ONLY";
+        detail  = "no chain-instance storage — forwarded to the Node-installed param hook; effect depends on whether the operator's Node wired the hook";
+    }
+
+    bool ok = (verdict == "EFFECTIVE" || verdict == "HOOK_ONLY");
+    if (json_out) {
+        nlohmann::json out = {
+            {"name", name},
+            {"value_bytes", value_bytes},
+            {"value_hex", value_hex},
+            {"verdict", verdict},
+            {"detail", detail},
+            {"effective", ok},
+        };
+        std::cout << out.dump(2) << "\n";
+    } else {
+        std::cout << "name:        " << name << "\n";
+        std::cout << "value_bytes: " << value_bytes << "\n";
+        std::cout << "verdict:     " << verdict << "\n";
+        std::cout << "  " << detail << "\n";
+    }
+    return ok ? 0 : 2;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // rpc-auth --method <m> [--params <json> | --params-file <file>]
 //          --secret <hex> [--verify <hex> | --request <file>] [--json]
 //
@@ -24733,6 +24892,15 @@ void print_usage() {
         "                                             lowercase (S-028). No network, no RPC, no\n"
         "                                             secret material. Exit 0 built, 1 args/\n"
         "                                             validation error.\n"
+        "  param-change-lint                          OFFLINE build-time lint of a PARAM_CHANGE:\n"
+        "    (--name <P> --value-hex <hex>            predicts EFFECTIVE / INERT_BAD_WIDTH (a\n"
+        "     | --tx-json <file>) [--json]            whitelisted numeric scalar MIN_STAKE/\n"
+        "                                             SUSPENSION_SLASH/UNSTAKE_DELAY whose value\n"
+        "                                             != 8 bytes silently no-ops at activation) /\n"
+        "                                             HOOK_ONLY / UNKNOWN_NAME (validator rejects).\n"
+        "                                             The build-time dual of operator_param_\n"
+        "                                             activation_preflight.sh. Exit 0 EFFECTIVE/\n"
+        "                                             HOOK_ONLY, 2 INERT_BAD_WIDTH/UNKNOWN, 1 args.\n"
         "  rpc-auth --method <m>                      OFFLINE computor + verifier for the S-001\n"
         "           [--params <json> |                (v2.16) RPC HMAC-auth tag — the wallet-side\n"
         "            --params-file <file>]            dual of RpcServer::verify_auth / rpc_call's\n"
@@ -24846,6 +25014,7 @@ int main(int argc, char** argv) {
     if (cmd == "supply-audit")    return cmd_supply_audit    (argc - 2, argv + 2);
     if (cmd == "subsidy-schedule") return cmd_subsidy_schedule(argc - 2, argv + 2);
     if (cmd == "param-change-build") return cmd_param_change_build(argc - 2, argv + 2);
+    if (cmd == "param-change-lint")  return cmd_param_change_lint(argc - 2, argv + 2);
     if (cmd == "rpc-auth")        return cmd_rpc_auth       (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
