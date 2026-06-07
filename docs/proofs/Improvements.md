@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Improvements — post-v1.0 enhancement queue
 
 **Purpose.** Capture enhancements identified during pre-implementation review (May 2026) that are deliberately *out of v1.0 scope*. Preserves the rationale for deferral and the design context so future planning sessions can pick items up without rediscovering the analysis.

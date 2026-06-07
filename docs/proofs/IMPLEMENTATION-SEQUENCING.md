@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Implementation sequencing — bundled-release plan
 
 **Status:** planning artifact. Resolves the execution sequence for the 41 design decisions + 4 spec amendments resolved during pre-implementation review week (May 2026). Approach C (bundled releases): each bundle ships as a discrete release; related decisions land together rather than incrementally.

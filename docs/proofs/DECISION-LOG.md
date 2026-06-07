@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Decision Log — design deliberation history
 
 **Purpose.** Append-only log of the deliberation behind decisions captured in the spec files. The specs are authoritative for *what* was decided; this log is authoritative for *why* — the rejected alternatives, mid-review reversals, user-driven amendments, and cross-decision trade-offs that don't survive in spec text alone.

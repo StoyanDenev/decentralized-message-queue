@@ -1,3 +1,5 @@
+> **TIER: NEAR-TERM — 1.0.x in-flight.** Committed/imminent but NOT yet shipped; not part of the 1.0-authoritative set. Roadmap index: docs/ROADMAP.md
+
 # F2 view-reconciliation primitives — analytic invariants
 
 > **⚠ Implementation status (corrected 2026-06-05).** The reconciliation

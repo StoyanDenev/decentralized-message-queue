@@ -1,0 +1,60 @@
+# Determ — Roadmap & Future Directions (NON-AUTHORITATIVE)
+
+> **This file is the single entry point for everything NOT in the Determ 1.0-authoritative
+> doc set.** Specs linked here are design-stage: they do **not** describe shipped code and
+> are **not** coherence-maintained against `src/`. The shipped system is documented in the
+> 1.0-authoritative set — `README.md`, `PROTOCOL.md`, `SECURITY.md`, `WHITEPAPER-v1.x.md`,
+> `CLI-REFERENCE.md`, `QUICKSTART.md`, and the `proofs/` that back shipped code.
+>
+> Tiering rationale + the full per-file inventory: `docs/DOC-TIERING-PLAN.md`.
+> Design deliberation trail: `proofs/DECISION-LOG.md` and `proofs/Improvements.md`.
+
+---
+
+## Near-term (1.0.x trajectory) — committed, imminent, not yet shipped
+
+| Item | Status | Docs |
+|---|---|---|
+| **v2.7 F2 view reconciliation** | last permissionless-readiness gate (~3–4d) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
+| **C99 crypto stack** — remaining phases | Phase 0 shipped (SHA/HMAC/PBKDF2/ChaCha20/AES/Ed25519/FROST); later phases near-term | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
+| **RPC anti-replay window** | HMAC-auth extension (v2.16+) | `proofs/RpcAuthReplayWindowSoundness.md` |
+| **Trustless supply-counter read** | spec-stage soundness (reconcile T1/T2) | `proofs/SupplyProofSoundness.md` |
+
+---
+
+## Post-1.0 design space — speculative, not in the 1.0 freeze
+
+| Theme | Docs |
+|---|---|
+| **Scaling** — beaconless cross-shard architecture | `proofs/Beaconless-v2-SPEC.md` (cross-shard randomness now **MPDH commit-reveal**, §Q6, 2026-06-07) |
+| **Privacy** — confidential transactions | `proofs/v2.22-PRIVACY-SPEC.md`, `proofs/PFS_DEPLOYMENT_GUIDANCE.md` |
+| **Identity** — distributed IdP / DSSO + key rotation | Theme 9 / v2.25 (in `V2-DESIGN.md`), `proofs/v2.26-ROTATION-SPEC.md` |
+| **Threshold crypto** — DKG ceremony | `proofs/v2.10-DKG-SPEC.md` — **block-beacon application DE-SCOPED**; the DKG is retained for Beaconless-v2 cross-shard randomness + DSSO |
+| **Post-quantum** — Dilithium/Falcon migration | v2.8 (in `V2-DESIGN.md`) |
+| **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
+| **Portability** — C99 / MINIX reimplementation | `C99-MINIX-PORT.md` |
+| **Launch** — v1.1 mainnet + address-derivation decision | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
+| **Full design space** | `V2-DESIGN.md` (v2 themes; 10 of 25 shipped), `V2-DAPP-DESIGN.md` (DApp themes; v2.18/v2.19 substrate shipped) |
+
+---
+
+## Decommissioned / de-scoped
+
+| Item | Outcome |
+|---|---|
+| **v2.10 FROST-as-block-beacon** | **De-scoped** — the v1 **MPDH commit-reveal** block beacon is retained (not a bias upgrade over FA3; lacks BLS-style uniqueness). The FROST C99 primitives are retained for non-beacon uses. See `proofs/V210-PhaseD-RandomnessWiring.md` §9, `proofs/V210ImplementationRoadmap.md`, and `proofs/DECISION-LOG.md` 2026-06-07. |
+
+---
+
+## Rationale archive (process / meta — retained, not coherence-maintained)
+
+`proofs/DECISION-LOG.md` · `proofs/Improvements.md` · `proofs/IMPLEMENTATION-SEQUENCING.md` ·
+`proofs/F2-V210-IMPLEMENTATION-PLAN.md` · `proofs/MAINNET_READINESS.md` ·
+`proofs/PRE-IMPLEMENTATION-REVIEW.md` · `proofs/DAPP_SDK_GUIDANCE.md` ·
+`proofs/ECONOMICS_CONFIG_GUIDANCE.md` · `proofs/UnitTestCoverageMap.md` ·
+`proofs/LightClientCompositionMap.md` · `proofs/tla/CHECK-RESULTS.md` · `UNIT-TESTS.md`
+
+---
+
+*Authority: Stoyan Denev. This index is maintained by hand; tier assignments come from
+`docs/DOC-TIERING-PLAN.md`. Not co-authored by the AI assistant.*

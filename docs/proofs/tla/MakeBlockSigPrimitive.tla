@@ -1,3 +1,5 @@
+\* TIER: NEAR-TERM — 1.0.x in-flight. Committed/imminent but not yet shipped; not 1.0-authoritative. Roadmap index: docs/ROADMAP.md
+
 --------------------------- MODULE MakeBlockSigPrimitive ---------------------------
 (*
 FB40 — TLA+ specification of the K-of-K Phase-2 `make_block_sig`

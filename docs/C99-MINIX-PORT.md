@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # Determ — C99 / Minix Reference-Implementation Plan
 
 **Status:** design target (planning). **Goal:** a portable **C99** implementation of

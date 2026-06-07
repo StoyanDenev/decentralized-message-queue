@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Mainnet Readiness — tracking artifact
 
 **Status:** scaffold (created 2026-05-24; reframed 2026-06-06 for v1.1 launch model). Beta has not started; criteria status fields are placeholders to be populated by integration threads as the v1.1 launch bundles complete and beta progresses.

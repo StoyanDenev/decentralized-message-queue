@@ -1,3 +1,5 @@
+> **TIER: NEAR-TERM — 1.0.x in-flight.** Committed/imminent but NOT yet shipped; not part of the 1.0-authoritative set. Roadmap index: docs/ROADMAP.md
+
 # S-030 D2: Block-digest field-coverage analysis
 
 This document is a focused supplementary analysis to FA1 (`Safety.md`). It explains why a naive extension of `compute_block_digest()` is the wrong fix for the D2 dimension of S-030 — even though it looks like a one-line patch — and what the correct fix requires.

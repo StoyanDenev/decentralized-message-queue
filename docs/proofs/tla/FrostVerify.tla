@@ -1,3 +1,5 @@
+\* TIER: NEAR-TERM — 1.0.x in-flight. Committed/imminent but not yet shipped; not 1.0-authoritative. Roadmap index: docs/ROADMAP.md
+
 --------------------------- MODULE FrostVerify ---------------------------
 (*
 FB23 — TLA+ specification of the FROST-Ed25519 verify primitive's

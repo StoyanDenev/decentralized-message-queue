@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # PFS_ONLY deployment guidance — regulatory framework for operators
 
 **Audience.** Operator legal, compliance, and risk teams evaluating whether to deploy Determ accounts in `PFS_ONLY` mode (per v2.22-PRIVACY-SPEC.md §Q5 PRIV-6). Regulators reviewing a deployment that uses `PFS_ONLY`.

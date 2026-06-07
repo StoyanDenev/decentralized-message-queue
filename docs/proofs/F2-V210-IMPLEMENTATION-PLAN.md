@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # v2.7 F2 + v2.10 implementation plan
 
 **Status:** living plan. Sub-steps 0, 1, 3 (helpers only) shipped — see per-sub-step status tags below. v2.10 Phase A frost_verify also shipped as the first FROST primitive.

@@ -1,3 +1,5 @@
+> **TIER: NEAR-TERM — 1.0.x in-flight.** Committed/imminent but NOT yet shipped; not part of the 1.0-authoritative set. Roadmap index: docs/ROADMAP.md
+
 # F2 view reconciliation — design specification
 
 **Status:** specification only. No code. Resolves the 9 open design questions identified in the post-mortem of the prior naive F2 attempt. Implementation should not begin until this document's design choices are reviewed and committed.

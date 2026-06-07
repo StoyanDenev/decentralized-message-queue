@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # UnitTestCoverageMap — Meta-proof: in-process unit tests ↔ FA / S closures
 
 **Scope.** This is the meta-proof for S-035 Option 1: it formalizes the

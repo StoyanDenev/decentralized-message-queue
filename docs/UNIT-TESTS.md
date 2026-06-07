@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Unit Tests — Coverage Map + Extension Guide
 
 This document is the comprehensive reference for the in-process unit-test

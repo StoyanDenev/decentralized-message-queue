@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # Anon-address derivation lock-in — resolving the v1.1 `pubkey_form` design choice
 
 **REFRAMED 2026-06-06.** Originally titled "Anon-address derivation migration" under the prior two-event launch model where the analysis covered crossing a v1.0 → v1.1 boundary. Under v1.1-launch + no-migrations, this is **not a migration analysis** — it is a **pre-launch genesis lock-in analysis** for the address-derivation formula that v1.1 mainnet will commit to permanently. There is no live chain to migrate from; the question is purely which formula to bake into v1.1 genesis. Per the formal-verifiability rationale in `DECISION-LOG.md 2026-06-06 (afternoon)`, this decision is final at v1.1 launch — the address-derivation formula is part of the immutable surface the FA1-FA12 + light-client proof families target.

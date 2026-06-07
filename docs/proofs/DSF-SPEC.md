@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # Deterministic-Simulation Framework (DSF) — design specification
 
 **Status:** specification only. No code. Resolves the design for S-035 Option 2 (deterministic simulation framework). Implementation should not begin until this document's design choices are reviewed and committed. **Recommended sequencing: ship before Phase A** (rather than as a Phase D prerequisite as previously planned) — subsumes A10 NH1 Stage 1 streams 1 + 2, provides Byzantine coverage for every Phase A through D item as it lands.

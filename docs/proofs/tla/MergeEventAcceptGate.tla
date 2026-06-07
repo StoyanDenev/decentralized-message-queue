@@ -1,3 +1,5 @@
+\* TIER: NEAR-TERM — 1.0.x in-flight. Committed/imminent but not yet shipped; not 1.0-authoritative. Roadmap index: docs/ROADMAP.md
+
 --------------------------- MODULE MergeEventAcceptGate ---------------------------
 (*
 FB49 — TLA+ specification of the R7 MERGE_EVENT accept-gate + apply

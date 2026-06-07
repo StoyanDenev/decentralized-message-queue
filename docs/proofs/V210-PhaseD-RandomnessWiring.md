@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # v2.10 Phase D — wiring FROST into the block-randomness path (expansion) — DE-SCOPED
 
 > **STATUS — DECISION: ADOPT MPDH for the block-randomness beacon.** The project

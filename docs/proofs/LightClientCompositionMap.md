@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # LightClientCompositionMap — capstone composition lattice for the light-client proof family
 
 This is a **reading guide and integration map**, not a new proof. Over R39 + R40 the `determ-light.exe` light-client grew a family of independently-written soundness proofs. Each was authored against its own subcommand and threat sub-model; each cites `Preliminaries.md` for the base cryptographic assumptions and `LightClientThreatModel.md` for the per-invocation pipeline. What no single document supplies is the **global picture**: which theorem rests on which, which base assumption (A1 / A2 / A3 / A4) bottoms out each chain, and which `determ-light` subcommand each guarantee actually backs. This capstone assembles that picture as a composition lattice so a reviewer does not have to reconstruct it from six documents.

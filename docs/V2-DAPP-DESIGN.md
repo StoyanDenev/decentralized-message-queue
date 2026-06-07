@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # Determ v2 — DApp support design
 
 Companion to [`V2-DESIGN.md`](V2-DESIGN.md). Scopes Theme 7 (application layer): how third-party decentralized applications can use Determ as their trust anchor without requiring Determ itself to execute application logic.

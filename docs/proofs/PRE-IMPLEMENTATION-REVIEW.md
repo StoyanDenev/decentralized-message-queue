@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Pre-implementation review — six formal specifications
 
 **Purpose.** Consolidated review checklist for all six formal specifications resolved during the cascade-resolution sessions. Designed for a focused review week (~5 working days) clearing all decisions before Phase 0 engineering begins.

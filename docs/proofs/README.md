@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Determ — Formal proofs index
 
 This directory contains the per-property analytic proofs for Determ's consensus, sharding, and slashing mechanisms. Each proof is self-contained: a theorem statement, the cryptographic and behavioral assumptions it depends on, the proof itself, and an implementation cross-reference so a reviewer can match the math to the code.

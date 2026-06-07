@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # v2.10 Implementation Roadmap — FROST-Ed25519 Threshold Randomness — DE-SCOPED (block beacon)
 
 > **STATUS / NOTICE.** The **FROST-as-block-randomness-beacon** goal of this roadmap

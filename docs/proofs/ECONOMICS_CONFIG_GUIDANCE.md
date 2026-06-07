@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Economics configuration guidance — recommended operator defaults
 
 **Audience.** Operators configuring v1.0 mainnet deployments. Foundation/SDK consumers planning DApp economics. Reviewers evaluating deployment economic integrity.

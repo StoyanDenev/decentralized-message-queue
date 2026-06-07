@@ -1,3 +1,5 @@
+\* TIER: NEAR-TERM — 1.0.x in-flight. Committed/imminent but not yet shipped; not 1.0-authoritative. Roadmap index: docs/ROADMAP.md
+
 --------------------------- MODULE F2ViewReconciliation ---------------------------
 (*
 FB22 — TLA+ specification of the v2.7 F2 view-reconciliation primitives.

@@ -1,3 +1,5 @@
+> **TIER: NEAR-TERM — 1.0.x in-flight.** Committed/imminent but NOT yet shipped; not part of the 1.0-authoritative set. Roadmap index: docs/ROADMAP.md
+
 # SupplyProofSoundness — trust-minimized `c:`-namespace supply-counter read soundness
 
 This document formalizes the security of a **trust-minimized supply-counter read** by the light client: the new `determ-light supply-trustless` command (sibling-agent work this round) lets an operator learn the chain's five A1 supply accumulators — `genesis_total`, `accumulated_subsidy`, `accumulated_slashed`, `accumulated_inbound`, `accumulated_outbound` — from a *single untrusted daemon* and verify each locally against a committee-signed `state_root`, so that even a Byzantine daemon cannot make an honest light client act on a wrong supply figure. The read targets the **`c:` supply-counter namespace** of the S-033 state-commitment surface (which, at the wire/leaf level, is the composite `k:c:` sub-namespace inside the `k:` constants prefix — see §1.2).

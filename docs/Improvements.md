@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # Optimized Architecture (C99) — Post-v1.0 design candidates
 
 This document outlines the C99 struct definitions for a set of architectural optimizations targeting a post-v1.0 chain. Each item is **deferred** (not in v1.0 scope) and is classified individually against the no-migrations constraint per `docs/proofs/Improvements.md` §6.1.

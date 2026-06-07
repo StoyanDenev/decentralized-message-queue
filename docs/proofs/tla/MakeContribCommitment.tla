@@ -1,3 +1,5 @@
+\* TIER: NEAR-TERM — 1.0.x in-flight. Committed/imminent but not yet shipped; not 1.0-authoritative. Roadmap index: docs/ROADMAP.md
+
 --------------------------- MODULE MakeContribCommitment ---------------------------
 (*
 FB24 — TLA+ specification of the v2.7 F2 `make_contrib_commitment`

@@ -1,3 +1,5 @@
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+
 # Beaconless v2 architecture — design specification
 
 **Status:** specification only. No code. Resolves the 6 interlinked design questions for removing the beacon as a special role from Determ's regional-sharding architecture. Implementation should not begin until this document's design choices are reviewed and committed, and until v2 + Theme 9 has substantially shipped (Beaconless v2 is the natural next major architectural effort after v2 + Theme 9, not parallel with it).

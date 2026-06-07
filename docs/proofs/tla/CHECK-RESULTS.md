@@ -1,3 +1,5 @@
+> **TIER: PROCESS / ARCHIVE.** Deliberation/meta; retained for rationale but NOT coherence-maintained as part of the 1.0 set. Roadmap index: docs/ROADMAP.md
+
 # FB21 — TLA+ model-check transcripts (template)
 
 This document records the outcome of running TLC against the TLA+ specifications in this directory. Each entry includes the command, configuration, state-space size, invariants verified, and any counter-examples found.
