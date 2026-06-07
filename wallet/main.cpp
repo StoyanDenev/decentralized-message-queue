@@ -14447,6 +14447,228 @@ int cmd_block_verify(int argc, char** argv) {
     return overall ? 0 : 2;
 }
 
+// ── merkle-root ──────────────────────────────────────────────────────────────
+//
+// OFFLINE compute of the S-033 committed state_root (or any committee-signed
+// Merkle root) from a FULL leaf set — the inverse of state-proof-verify (which
+// checks ONE leaf's path against a root). merkle-root takes EVERY leaf and
+// rebuilds the whole tree, so an auditor holding a complete state set can
+// recompute its root and compare it to a committee-signed header's state_root
+// (a full-state recompute, not a single-leaf membership check).
+//
+// Reproduces src/crypto/merkle.cpp::merkle_root byte-for-byte (the wallet does
+// NOT link the chain library — TCB separation):
+//   sort leaves by raw key bytes (lexicographic);
+//   leaf_hash  = SHA-256(0x00 || u32_be(key_len) || key || value_hash);
+//   build balanced binary tree, duplicating the last node on an odd row;
+//   inner_hash = SHA-256(0x01 || left || right);
+//   root = SHA-256(0x02 || u32_be(leaf_count) || inner_root)   (S-040 wrap).
+//   An empty leaf set yields the all-zero root (no wrap), as the chain emits.
+//
+// Exit codes: 0 success (or --check match), 1 args/parse/IO, 2 --check mismatch.
+int cmd_merkle_root(int argc, char** argv) {
+    std::string leaves_path, check_hex;
+    bool have_check = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--leaves" && i + 1 < argc) leaves_path = argv[++i];
+        else if (a == "--check"  && i + 1 < argc) { check_hex = argv[++i]; have_check = true; }
+        else if (a == "--json")                   json_out = true;
+        else if (a == "--help" || a == "-h") {
+            std::cout <<
+                "Usage: determ-wallet merkle-root --leaves <file> [--check <hex64>]\n"
+                "                                 [--json]\n"
+                "\n"
+                "  OFFLINE compute of the S-033 committed state_root from a FULL\n"
+                "  leaf set — the inverse of state-proof-verify (which checks ONE\n"
+                "  leaf's path). Rebuilds the whole sorted-leaves balanced binary\n"
+                "  Merkle tree + the S-040 leaf-count wrap, byte-for-byte per\n"
+                "  src/crypto/merkle.cpp::merkle_root:\n"
+                "    leaf  = SHA-256(0x00 || u32_be(key_len) || key || value_hash)\n"
+                "    inner = SHA-256(0x01 || left || right)   (duplicate-last odd)\n"
+                "    root  = SHA-256(0x02 || u32_be(leaf_count) || inner_root)\n"
+                "  Leaves are sorted by raw key bytes before hashing. An empty leaf\n"
+                "  set yields the all-zero root. Pure local SHA-256; no RPC/daemon.\n"
+                "\n"
+                "  --leaves <file>  REQUIRED. JSON array of leaf objects, each\n"
+                "                   {value_hash:<64-hex>, key:<string> | key_hex:<hex>}.\n"
+                "                   `key` is UTF-8 bytes (ASCII namespaces a:/s:/r:/\n"
+                "                   d:/k:/c:); `key_hex` supplies a binary key (the\n"
+                "                   composite i:/m:/p: keys). Exactly one per entry.\n"
+                "  --check <hex64>  Compare the computed root to this expected root\n"
+                "                   (a committee-signed header's state_root); prints\n"
+                "                   VALID/INVALID and exits 2 on mismatch.\n"
+                "  --json           Emit {root, leaf_count[, expected, match]}.\n"
+                "\n"
+                "  Exit: 0 success (or --check match), 1 args/parse/IO, 2 mismatch.\n";
+            return 0;
+        }
+        else {
+            std::cerr << "merkle-root: unknown argument '" << a << "'\n";
+            std::cerr << "Usage: determ-wallet merkle-root --leaves <file> "
+                         "[--check <hex64>] [--json]\n";
+            return 1;
+        }
+    }
+    if (leaves_path.empty()) {
+        std::cerr << "Usage: determ-wallet merkle-root --leaves <file> "
+                     "[--check <hex64>] [--json]\n  (--leaves is required)\n";
+        return 1;
+    }
+
+    auto sha256 = [](const std::vector<uint8_t>& in) {
+        std::array<uint8_t, 32> out{};
+        SHA256(in.data(), in.size(), out.data());
+        return out;
+    };
+    auto be_u32 = [](std::vector<uint8_t>& buf, uint32_t v) {
+        buf.push_back(static_cast<uint8_t>((v >> 24) & 0xff));
+        buf.push_back(static_cast<uint8_t>((v >> 16) & 0xff));
+        buf.push_back(static_cast<uint8_t>((v >> 8)  & 0xff));
+        buf.push_back(static_cast<uint8_t>( v        & 0xff));
+    };
+    auto leaf_hash = [&](const std::vector<uint8_t>& key,
+                         const std::array<uint8_t, 32>& vh) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 4 + key.size() + 32);
+        buf.push_back(0x00);
+        be_u32(buf, static_cast<uint32_t>(key.size()));
+        buf.insert(buf.end(), key.begin(), key.end());
+        buf.insert(buf.end(), vh.begin(), vh.end());
+        return sha256(buf);
+    };
+    auto inner_hash = [&](const std::array<uint8_t, 32>& l,
+                          const std::array<uint8_t, 32>& r) {
+        std::vector<uint8_t> buf;
+        buf.reserve(1 + 32 + 32);
+        buf.push_back(0x01);
+        buf.insert(buf.end(), l.begin(), l.end());
+        buf.insert(buf.end(), r.begin(), r.end());
+        return sha256(buf);
+    };
+
+    struct Leaf { std::vector<uint8_t> key; std::array<uint8_t, 32> vh; };
+    std::vector<Leaf> leaves;
+    try {
+        nlohmann::json j;
+        std::ifstream f(leaves_path);
+        if (!f) {
+            std::cerr << "merkle-root: cannot open --leaves file: "
+                      << leaves_path << "\n";
+            return 1;
+        }
+        f >> j;
+        if (!j.is_array()) {
+            std::cerr << "merkle-root: --leaves must be a JSON array of leaf "
+                         "objects\n";
+            return 1;
+        }
+        size_t idx = 0;
+        for (auto& e : j) {
+            if (!e.is_object()) {
+                std::cerr << "merkle-root: leaf[" << idx << "] must be an "
+                             "object\n";
+                return 1;
+            }
+            if (!e.contains("value_hash") || !e["value_hash"].is_string()) {
+                std::cerr << "merkle-root: leaf[" << idx << "] missing string "
+                             "'value_hash'\n";
+                return 1;
+            }
+            std::vector<uint8_t> vhv;
+            try { vhv = from_hex(e["value_hash"].get<std::string>()); }
+            catch (std::exception& ex) {
+                std::cerr << "merkle-root: leaf[" << idx << "] value_hash "
+                             "invalid hex: " << ex.what() << "\n";
+                return 1;
+            }
+            if (vhv.size() != 32) {
+                std::cerr << "merkle-root: leaf[" << idx << "] value_hash must "
+                             "be 32 bytes (64 hex)\n";
+                return 1;
+            }
+            bool hk = e.contains("key_hex") && e["key_hex"].is_string();
+            bool hs = e.contains("key")     && e["key"].is_string();
+            if (hk == hs) {
+                std::cerr << "merkle-root: leaf[" << idx << "] needs exactly one "
+                             "of 'key' (UTF-8) or 'key_hex' (binary)\n";
+                return 1;
+            }
+            std::vector<uint8_t> kb;
+            if (hk) {
+                try { kb = from_hex(e["key_hex"].get<std::string>()); }
+                catch (std::exception& ex) {
+                    std::cerr << "merkle-root: leaf[" << idx << "] key_hex "
+                                 "invalid hex: " << ex.what() << "\n";
+                    return 1;
+                }
+            } else {
+                std::string ks = e["key"].get<std::string>();
+                kb.assign(ks.begin(), ks.end());
+            }
+            Leaf lf;
+            lf.key = std::move(kb);
+            std::copy(vhv.begin(), vhv.end(), lf.vh.begin());
+            leaves.push_back(std::move(lf));
+            ++idx;
+        }
+    } catch (std::exception& e) {
+        std::cerr << "merkle-root: --leaves is not valid JSON: " << e.what()
+                  << "\n";
+        return 1;
+    }
+
+    // Compute merkle_root byte-for-byte: sort by key; build; S-040 wrap.
+    std::array<uint8_t, 32> root{};  // all-zero default (empty leaf set)
+    size_t leaf_count = leaves.size();
+    if (leaf_count > 0) {
+        std::sort(leaves.begin(), leaves.end(),
+                  [](const Leaf& a, const Leaf& b) { return a.key < b.key; });
+        std::vector<std::array<uint8_t, 32>> row;
+        row.reserve(leaf_count);
+        for (auto& l : leaves) row.push_back(leaf_hash(l.key, l.vh));
+        while (row.size() > 1) {
+            if (row.size() % 2 == 1) row.push_back(row.back());
+            std::vector<std::array<uint8_t, 32>> next;
+            next.reserve(row.size() / 2);
+            for (size_t i = 0; i + 1 < row.size(); i += 2)
+                next.push_back(inner_hash(row[i], row[i + 1]));
+            row = std::move(next);
+        }
+        std::vector<uint8_t> wbuf;
+        wbuf.reserve(1 + 4 + 32);
+        wbuf.push_back(0x02);
+        be_u32(wbuf, static_cast<uint32_t>(leaf_count));
+        wbuf.insert(wbuf.end(), row[0].begin(), row[0].end());
+        root = sha256(wbuf);
+    }
+
+    std::string root_hex = to_hex(root);
+    bool match = false;
+    if (have_check) {
+        std::string exp = check_hex;
+        std::transform(exp.begin(), exp.end(), exp.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        match = (exp == root_hex);
+    }
+
+    if (json_out) {
+        nlohmann::json out;
+        out["root"] = root_hex;
+        out["leaf_count"] = leaf_count;
+        if (have_check) { out["expected"] = check_hex; out["match"] = match; }
+        std::cout << out.dump() << "\n";
+    } else {
+        std::cout << "root:       " << root_hex << "\n"
+                  << "leaf_count: " << leaf_count << "\n";
+        if (have_check)
+            std::cout << "expected:   " << check_hex << "\n"
+                      << "match:      " << (match ? "true" : "false") << "\n"
+                      << (match ? "VALID\n" : "INVALID\n");
+    }
+    return (have_check && !match) ? 2 : 0;
+}
+
 // ── derive-tx-hash ───────────────────────────────────────────────────────────
 //
 // Recompute the canonical tx_hash from a signed tx envelope. The chain
@@ -23730,6 +23952,19 @@ void print_usage() {
         "                                             Pure local crypto; no RPC/daemon. --json emits\n"
         "                                             {audit, passed, failed, skipped, checks:[...]}.\n"
         "                                             Exit 0 all pass, 2 a check FAILED, 1 args/parse.\n"
+        "  merkle-root --leaves <file>                OFFLINE compute of the S-033 committed state_root\n"
+        "              [--check <hex64>] [--json]      from a FULL leaf set — the inverse of state-proof-\n"
+        "                                             verify (which checks ONE leaf's path). Rebuilds the\n"
+        "                                             whole sorted-leaves balanced binary Merkle tree +\n"
+        "                                             S-040 leaf-count wrap byte-for-byte per src/crypto/\n"
+        "                                             merkle.cpp::merkle_root (leaf=SHA256(0x00||u32_be(\n"
+        "                                             key_len)||key||value_hash), inner=SHA256(0x01||L||R),\n"
+        "                                             root=SHA256(0x02||u32_be(leaf_count)||inner_root)).\n"
+        "                                             Leaves {value_hash, key|key_hex} sorted by raw key\n"
+        "                                             bytes; empty set => all-zero root. --check compares\n"
+        "                                             to a committee-signed header's state_root (VALID/\n"
+        "                                             INVALID, exit 2 on mismatch). Pure local SHA-256; no\n"
+        "                                             RPC/daemon. Exit 0 ok/match, 1 args/parse, 2 mismatch.\n"
         "  receipt-key [--namespace i|m|p]            OFFLINE deriver for the composite state-root\n"
         "              i: --src-shard <S>             leaf-key bytes (i:/m:/p:) — the exact hex body\n"
         "                 --tx-hash <hex64>           the `state_proof` RPC expects for a composite-\n"
@@ -24335,6 +24570,7 @@ int main(int argc, char** argv) {
     if (cmd == "derive-tx-hash")  return cmd_derive_tx_hash (argc - 2, argv + 2);
     if (cmd == "block-tx-root")   return cmd_block_tx_root  (argc - 2, argv + 2);
     if (cmd == "block-verify")    return cmd_block_verify   (argc - 2, argv + 2);
+    if (cmd == "merkle-root")     return cmd_merkle_root    (argc - 2, argv + 2);
     if (cmd == "receipt-key")     return cmd_receipt_key    (argc - 2, argv + 2);
     if (cmd == "shard-route")     return cmd_shard_route    (argc - 2, argv + 2);
     if (cmd == "address-classify") return cmd_address_classify(argc - 2, argv + 2);
