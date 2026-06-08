@@ -18,7 +18,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.4 Atomic block apply (A9) | ✅ shipped | A9 Phase 1-2D + COMPOSABLE_BATCH tx |
 | v2.5 Registry cache (S-032) | ✅ shipped | Cached registry view; S-032 closed |
 | v2.6 Gossip broadcast out of lock | ✅ shipped | All 5 broadcast sites release unique_lock before broadcast |
-| v2.7 F2 view reconciliation | ⏳ spec resolved, implementation pending | S-030 D2 closure. F2-SPEC.md per-field rules formalized: union (+V11) for evidence, union (+V10) for aborts, intersection for inbound_receipts, deterministic for the rest. ~3-4d to ship from spec-review acceptance |
+| v2.7 F2 view reconciliation | ✅ shipped | S-030 D2 closure COMPLETE at the digest layer. Pool-fed dims via F2 (union +V11 evidence / union +V10 aborts / intersection inbound — commits `a727cb2` / `48c4b45`); `partner_subset_hash` bound directly (`8585a50`, deterministic from merge state); `timestamp` bound via deterministic median reconciliation (`f99eeb8`). Every apply-affecting field is now digest-bound or pinned by a digest-bound commitment → "≤1 block instance per height" at the consensus layer. Proofs: `S030-D2-Analysis.md`, `Safety.md` §5.3, `TimestampReconciliationSoundness.md`, `PartnerSubsetDigestBindingSoundness.md`, FB55/FB56. |
 | v2.8 Post-quantum signature migration (Dilithium) | ⏳ not started | NH4 prerequisite |
 | v2.9 Distributed VRF for committee selection | 🔒 deferred (post-v2.10) | Deep design sketch in §v2.9: Option A (per-validator ECVRF on curve25519 family via RFC 9381) recommended over Option B (threshold ECVRF on BLS12-381) to preserve curve-family minimalism. ~2-3 weeks Option A from spec-acceptance. Closes residual per-output independence in randomness; was specced to layer FA3-c on v2.10's FA3-b — but v2.10's block-beacon is now de-scoped (MPDH retained, see v2.10 row), so any future VRF work layers on the retained MPDH/FA3 beacon instead |
 | v2.10 Threshold randomness aggregation | ⏸️ **block-beacon DE-SCOPED** | Decision: retain the v1 MPDH commit-reveal block beacon (`docs/proofs/V210-PhaseD-RandomnessWiring.md` §9 — FROST is not a bias upgrade over FA3 and lacks BLS-style unbiasable-by-construction uniqueness). Residual selective-abort handled under MPDH by re-roll + suspension slashing. FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **DLT-A** (X25519 threshold DH), not FROST. Block-beacon design authority: Stoyan Denev |
@@ -39,7 +39,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.25 Distributed identity provider (DSSO) | 🔄 reclassified as post-v1.0 DApp (2026-05-24) | Theme 9 originally framed DSSO as chain-level substrate; reclassified as a chain-aware DApp on top of v2.18 + v2.19 + v2.26 substrate per `proofs/DECISION-LOG.md` 2026-05-24 entry and `proofs/Improvements.md §8.1`. Substrate spec below preserved as historical reference. |
 | v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
-**Shipped: 10. Active: 1 (v2.10). Partial: 1 (v2.20). Outstanding: 10. Reclassified: 1 (v2.25 → post-v1.0 DApp per 2026-05-24). Deferred: 3 (v2.9, v2.13, v2.21+).**
+**Shipped: 11 (v2.7 F2 + partner_subset_hash + timestamp-median digest closures landed — S-030-D2 fully consensus-closed). Active: 0 (v2.10 block-beacon DE-SCOPED, see its row). Partial: 1 (v2.20). Outstanding: 9. Reclassified: 1 (v2.25 → post-v1.0 DApp per 2026-05-24). Deferred: 3 (v2.9, v2.13, v2.21+).**
 
 For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
@@ -165,7 +165,7 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 3. Wire format: per-field Merkle root (32B) + full list per member in `ContribMsg`; suggested cap 64 events per type per member. ✅
 4. Phase-1 commit binding: `make_contrib_commitment` extended with three new view roots; single Ed25519 sig binds all three. ✅
 5. Phase-2 sig semantics: Phase-2 signs over the reconciled canonical lists, not any member's individual view. Members may sign over evidence they didn't personally observe, but each event must individually pass V10/V11 verification. ✅
-6. Timestamp inclusion: in v2.7 scope (assembler-proposes-members-bound-check). ✅
+6. Timestamp inclusion: ✅ SHIPPED (commit `f99eeb8`) — deterministic median reconciliation of the K Phase-1-committed proposer times (the assembler-proposes/members-validate pattern, realized as a lower-median over signed commits); bound into `compute_block_digest`. Soundness: `TimestampReconciliationSoundness.md`, FB55.
 7. Validator-side caching: none in initial ship (K × pool-size work is bounded constant). ✅
 8. Monitoring metrics: 4 counters/gauges (`f2_view_divergence_count`, `f2_round_aborts_attributed_to_view_drift`, `f2_canonical_list_size_per_field`, `f2_evidence_inclusion_latency_blocks`). ✅
 9. FA1 proof update: textual only (no structural proof change); D2 footnote removed from `Safety.md` §5.3; "≤ 1 block instance per height" replaces "≤ 1 digest per height + footnote." ✅
@@ -173,8 +173,8 @@ Commit is atomic: either all of the block's mutations land or none. Reads agains
 See `docs/proofs/F2-SPEC.md` for the full per-question rationale, wire-format details, implementation work units, regression-test plan, and rollback plan.
 
 **Cost (revised, spec already in tree).**
-- Specification: **shipped** (F2-SPEC.md exists; review pending).
-- Implementation: 1-2 days focused work given the spec.
+- Specification: **shipped** (F2-SPEC.md).
+- Implementation: **SHIPPED** — pool-fed dims (`a727cb2` / `48c4b45`) + `partner_subset_hash` (`8585a50`) + `timestamp` median reconciliation (`f99eeb8`); S-030-D2 fully consensus-closed. Proofs: `S030-D2-Analysis.md`, `Safety.md` §5.3, `TimestampReconciliationSoundness.md`, `PartnerSubsetDigestBindingSoundness.md`, FB55/FB56.
 - Testing: 0.5-1 day for the 5 regression test cases.
 - Migration tooling + genesis update: 0.5 day.
 - Documentation refresh (Safety.md §5.3 D2 footnote removal, S030-D2-Analysis.md status update): 0.5 day.
@@ -1925,7 +1925,7 @@ Szabo's "God Protocol" requires three properties: **perfect execution** (determi
 | S-011 (abort-claim cartel) | S-010 stake floor + FA6 equivocation slashing bound | ✅ shipped (no code change needed; closed by economic argument + existing slashing) |
 | S-012 (snapshot trust) | v2.1 state_root + v2.3 snapshot verification | ✅ shipped |
 | S-030 D1 (validate-apply) | v2.1 state_root indirect closure (via signing_bytes + apply-time check) | ✅ effective |
-| S-030 D2 (block_digest) | v2.1 state_root apply-layer closure (shipped) + v2.7 F2 consensus-layer closure (spec resolved in F2-SPEC.md; implementation ~3-4d) | 🟠 partial (apply-layer ✅; consensus-layer awaits F2 implementation) |
+| S-030 D2 (block_digest) | v2.1 state_root apply-layer closure (shipped) + v2.7 F2 consensus-layer closure (SHIPPED — pool-fed `a727cb2`/`48c4b45` + partner_subset_hash `8585a50` + timestamp median `f99eeb8`) | ✅ closed at the consensus layer (every apply-affecting field digest-bound or pinned by a digest-bound commitment; apply-layer S-033 retained as belt-and-suspenders) |
 | S-031 (global mutex) | v2.4 A9 + v2.5 + v2.6 + async chain.save | ✅ shipped (all 6 layers) |
 | S-032 (registry rebuild) | v2.5 incremental cache | ✅ shipped |
 | S-033 (no state commitment) | v2.1 Merkle root + Block.state_root | ✅ shipped |
