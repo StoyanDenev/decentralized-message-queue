@@ -164,6 +164,31 @@ if $DETERM_LIGHT help 2>&1 | grep -q -- "--persist"; then
 else echo "  FAIL: --persist not in help"; fail=$((fail+1)); fi
 
 echo ""
+echo "=== (D) verify-chain --resume arg contract (LSP-6; suffix verify is daemon-bound) ==="
+
+# The live resume (verify the suffix above a cached anchor, the fallback-to-full
+# paths, and the fork-below-anchor hard error) needs a running cluster and is
+# exercised on WSL2/CI. Here we pin the deterministic offline arg contract.
+
+# 13. --resume is accepted (the error is the missing genesis / unreachable
+#     daemon, NOT an 'unknown arg' parse failure).
+OUT=$($DETERM_LIGHT verify-chain --rpc-port 59996 --genesis "$T/nope.json" --resume --state "$T/r.json" 2>&1)
+if ! echo "$OUT" | grep -q "unknown arg"; then
+    echo "  PASS: verify-chain accepts --resume"; pass=$((pass+1))
+else echo "  FAIL: verify-chain rejected --resume ($OUT)"; fail=$((fail+1)); fi
+
+# 14. --resume + --persist accepted together (the steady-state loop).
+OUT=$($DETERM_LIGHT verify-chain --rpc-port 59996 --genesis "$T/nope.json" --resume --persist --state "$T/r.json" 2>&1)
+if ! echo "$OUT" | grep -q "unknown arg"; then
+    echo "  PASS: verify-chain accepts --resume + --persist together"; pass=$((pass+1))
+else echo "  FAIL: --resume + --persist rejected together ($OUT)"; fail=$((fail+1)); fi
+
+# 15. --resume documented in help.
+if $DETERM_LIGHT help 2>&1 | grep -q -- "--resume"; then
+    echo "  PASS: --resume listed in help"; pass=$((pass+1))
+else echo "  FAIL: --resume not in help"; fail=$((fail+1)); fi
+
+echo ""
 echo "=== Test summary ==="
 echo "  $pass pass / $fail fail"
 if [ "$fail" -eq 0 ]; then echo "  PASS: test_light_state"; exit 0

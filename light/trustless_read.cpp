@@ -78,49 +78,53 @@ std::string anchor_genesis(RpcClient& rpc,
     return expected_hex;
 }
 
-VerifiedChain verify_chain_to_head(
-    RpcClient& rpc,
-    const std::map<std::string, PubKey>& committee_seed,
-    const std::string& genesis_hash_hex) {
+namespace {
 
-    VerifiedChain vc;
-
-    // Determine current height by asking for block 0 with count=1 (the
-    // reply carries `height` at the daemon's tip).
+// Ask the daemon for its current tip height (the `headers` reply carries the
+// tip's block-count in `height`). Throws if the field is missing.
+uint64_t fetch_head_height(RpcClient& rpc) {
     auto first_page = rpc.call("headers", {{"from", 0}, {"count", 1}});
     if (!first_page.contains("height")) {
         throw std::runtime_error(
             "verify-chain: daemon's headers reply missing 'height' field");
     }
-    uint64_t head_height = first_page["height"].get<uint64_t>();
-    if (head_height == 0) {
-        // Chain hasn't produced any blocks; the verify-chain becomes a
-        // genesis-anchor only — no headers to chain.
-        vc.height = 0;
-        vc.headers_verified = 0;
-        vc.blocks_with_sigs_verified = 0;
-        return vc;
-    }
+    return first_page["height"].get<uint64_t>();
+}
+
+// Shared page-walk: committee-verify blocks [start_from, head_height) with
+// prev_hash continuity. For start_from==0 the first page is genesis-anchored via
+// genesis_hash_hex; for start_from>0 the first page's first header must have
+// prev_hash == initial_prev_anchor (the previously-verified anchor block_hash).
+// This is the single verified core shared by verify_chain_to_head (start_from=0)
+// and verify_chain_from_anchor (start_from=anchor_height) — the per-block logic
+// is byte-identical between the two so the resume path inherits the exact T-L2
+// guarantee of the from-genesis walk.
+VerifiedChain verify_chain_walk(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const std::string& genesis_hash_hex,
+    uint64_t start_from,
+    const std::string& initial_prev_anchor,
+    uint64_t head_height) {
+
+    VerifiedChain vc;
 
     // Build a JSON committee shape verify_block_sigs can consume.
-    auto build_committee_json = [&]() {
-        json arr = json::array();
-        for (auto& [domain, pk] : committee_seed) {
-            arr.push_back({{"domain", domain}, {"ed_pub", to_hex(pk)}});
-        }
-        return json{{"members", arr}};
-    };
-    json committee_json = build_committee_json();
+    json committee_arr = json::array();
+    for (auto& [domain, pk] : committee_seed) {
+        committee_arr.push_back({{"domain", domain}, {"ed_pub", to_hex(pk)}});
+    }
+    json committee_json = json{{"members", committee_arr}};
 
     // Walk headers in pages of 256 (the daemon's HEADERS_PAGE_MAX).
     constexpr uint32_t PAGE = 256;
-    std::string prev_anchor = "";       // empty = "use genesis-hash"
-    std::string last_block_hash;
+    std::string prev_anchor = initial_prev_anchor;  // "" = use genesis-hash
+    std::string last_block_hash = initial_prev_anchor;
     std::string last_state_root;
     size_t headers_seen = 0;
     size_t sigs_verified = 0;
 
-    for (uint64_t from = 0; from < head_height; from += PAGE) {
+    for (uint64_t from = start_from; from < head_height; from += PAGE) {
         uint32_t want = static_cast<uint32_t>(
             std::min<uint64_t>(PAGE, head_height - from));
         auto page = rpc.call(
@@ -133,7 +137,27 @@ VerifiedChain verify_chain_to_head(
                 + std::to_string(from));
         }
 
-        // Chain check for THIS page.
+        // Index-contiguity gate (the paired resume-soundness defense): the page
+        // MUST be exactly the indices [from, from+count) in order. This rejects a
+        // malicious daemon that returns a header claiming index 0 inside a resume
+        // suffix to divert verify_headers into its genesis branch and dodge the
+        // anchor + committee-sig checks; it also rejects index gaps. For the
+        // genesis walk (from==0) it is the natural 0,1,2,... invariant.
+        for (size_t i = 0; i < page["headers"].size(); ++i) {
+            uint64_t got = page["headers"][i].value("index", ~uint64_t{0});
+            uint64_t exp = from + static_cast<uint64_t>(i);
+            if (got != exp) {
+                throw std::runtime_error(
+                    "verify-chain: non-contiguous header index in page from="
+                    + std::to_string(from) + " — expected index "
+                    + std::to_string(exp) + ", got " + std::to_string(got));
+            }
+        }
+
+        // Chain check for THIS page. Index-0 (genesis) page uses the genesis
+        // anchor; every other page (including the resume suffix's first page)
+        // must chain onto the running prev_anchor — which on the FIRST resume
+        // page is the persisted, previously-verified anchor block_hash.
         auto vh = (from == 0)
             ? verify_headers(page, genesis_hash_hex, "")
             : verify_headers(page, "",            prev_anchor);
@@ -151,12 +175,16 @@ VerifiedChain verify_chain_to_head(
             // Genesis block (index 0) is the chain seed — by construction
             // it has zero creator_block_sigs (no committee produced it;
             // it's the deterministic GenesisConfig→Block transform). The
-            // genesis anchor at line 188 above already cross-checked
-            // block 0's block_hash against compute_genesis_hash, which
-            // is the load-bearing integrity check for genesis. Skip
-            // sig verification on index 0.
+            // genesis anchor already cross-checked block 0's block_hash
+            // against compute_genesis_hash, which is the load-bearing
+            // integrity check for genesis. Skip sig verification on index 0.
             uint64_t idx = h.value("index", uint64_t{0});
-            if (idx == 0) continue;
+            // Skip the sig check ONLY for the genuine genesis block — i.e. index
+            // 0 reached on the from-genesis walk's first page (from == 0). The
+            // index-contiguity gate above already guarantees idx==0 ⟺ from==0,
+            // but gating on `from` here makes the suffix walk's never-skip
+            // property explicit and independent of that gate (defense in depth).
+            if (idx == 0 && from == 0) continue;
             auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
             if (!vbs.ok) {
                 // BFT mode fallback: a BFT-escalated block has at most
@@ -177,12 +205,71 @@ VerifiedChain verify_chain_to_head(
         }
     }
 
+    // Walked-count gate: we must have verified EXACTLY the [start_from,
+    // head_height) range — no short page silently truncated the walk while we
+    // still report head_height as the verified tip. (Catches a daemon serving a
+    // short FINAL page; non-final short pages already break prev_hash continuity.
+    // Also hardens the from-genesis verify_chain_to_head, which shares this walk.)
+    if (headers_seen != head_height - start_from) {
+        throw std::runtime_error(
+            "verify-chain: walked " + std::to_string(headers_seen)
+            + " headers but expected " + std::to_string(head_height - start_from)
+            + " for range [" + std::to_string(start_from) + ", "
+            + std::to_string(head_height) + ") — daemon served a short page");
+    }
+
     vc.height = head_height;
     vc.head_block_hash = last_block_hash;
     vc.head_state_root = last_state_root;
     vc.headers_verified = headers_seen;
     vc.blocks_with_sigs_verified = sigs_verified;
     return vc;
+}
+
+}  // namespace
+
+VerifiedChain verify_chain_to_head(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const std::string& genesis_hash_hex) {
+
+    uint64_t head_height = fetch_head_height(rpc);
+    if (head_height == 0) {
+        // Chain hasn't produced any blocks; the verify-chain becomes a
+        // genesis-anchor only — no headers to chain.
+        return VerifiedChain{};  // all-zero / empty
+    }
+    return verify_chain_walk(rpc, committee_seed, genesis_hash_hex,
+                             /*start_from=*/0, /*initial_prev_anchor=*/"",
+                             head_height);
+}
+
+ResumeResult verify_chain_from_anchor(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    uint64_t anchor_height,
+    const std::string& anchor_block_hash) {
+
+    ResumeResult rr;
+    uint64_t head_height = fetch_head_height(rpc);
+    if (head_height <= anchor_height) {
+        // Daemon is not strictly ahead of the anchor (lagging head, exactly at
+        // the anchor, or a rollback): there is no suffix to verify and we cannot
+        // confirm the anchor from above. Signal the caller to fall back to a
+        // full verify_chain_to_head — never silently claim a resume succeeded.
+        rr.resumed = false;
+        return rr;
+    }
+    // Verify ONLY the suffix [anchor_height, head_height). The first suffix
+    // block (index anchor_height) must chain onto anchor_block_hash; if it does
+    // not, verify_chain_walk throws (a fork/rollback below the anchor surfaces
+    // as a hard error rather than a silent from-genesis re-verification).
+    rr.vc = verify_chain_walk(rpc, committee_seed, /*genesis_hash_hex=*/"",
+                              /*start_from=*/anchor_height,
+                              /*initial_prev_anchor=*/anchor_block_hash,
+                              head_height);
+    rr.resumed = true;
+    return rr;
 }
 
 AccountView read_account_trustless(

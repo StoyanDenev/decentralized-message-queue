@@ -87,6 +87,34 @@ VerifiedChain verify_chain_to_head(
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex);
 
+// LSP-6 fast-resume. Given a previously-verified anchor (anchor_height ==
+// a prior VerifiedChain.height, anchor_block_hash == its head_block_hash),
+// verify ONLY the suffix the daemon has added ABOVE the anchor. The first
+// suffix block (index == anchor_height) must have prev_hash == anchor_block_hash
+// (enforced by verify_headers' continuity gate); under SHA-256 collision
+// resistance that block_hash transitively commits the entire skipped prefix
+// 0..anchor_height-1, which LSP-1 already committee-verified when the anchor was
+// written. The CALLER MUST have re-pinned the genesis first (the persisted
+// anchor.genesis_hash == the locally-recomputed compute_genesis_hash — LSP-2);
+// this function assumes that gate has passed.
+//
+// Returns {resumed=false} WITHOUT verifying anything when the daemon's head is
+// not strictly above the anchor (nothing new, or a rollback) — the caller falls
+// back to a full verify_chain_to_head. Returns {resumed=true, vc} after verifying
+// the suffix (vc.height = daemon tip; vc.headers_verified /
+// blocks_with_sigs_verified count ONLY the suffix). THROWS if the suffix does not
+// chain onto anchor_block_hash (a fork/rollback below the anchor) — a real
+// anomaly that must surface, never be silently re-verified from genesis.
+struct ResumeResult {
+    bool          resumed{false};
+    VerifiedChain vc;
+};
+ResumeResult verify_chain_from_anchor(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    uint64_t anchor_height,
+    const std::string& anchor_block_hash);
+
 // Composite: fetch a state-proof for the "a:" + domain key, verify it
 // against the head's state_root, and decode the value_hash back to
 // (balance, next_nonce). The decode reproduces chain.cpp's accounts_

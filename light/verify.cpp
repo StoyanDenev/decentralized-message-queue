@@ -170,6 +170,20 @@ VerifyResult verify_headers(const nlohmann::json& headers_json,
         std::string first_prev = h_get(headers[0], "prev_hash", 64);
 
         if (first_index == 0) {
+            // RESUME-SOUNDNESS GATE: if the caller supplied a mid-chain anchor
+            // (prev_hash_hex non-empty), a header claiming genesis (index 0) is
+            // illegal — reject it. Without this, a malicious daemon serving a
+            // resume suffix could set index=0 to divert into this binding-free
+            // genesis branch (when genesis_hash_hex is empty) and thereby dodge
+            // BOTH the anchor prev_hash check below AND the caller's per-block
+            // committee-sig check (which skips index 0). See the index-contiguity
+            // gate in trustless_read.cpp::verify_chain_walk for the paired defense.
+            if (!prev_hash_hex.empty()) {
+                r.detail = "FAIL: header claims genesis (index 0) but a mid-chain "
+                           "prev_hash anchor was supplied — refusing to treat a "
+                           "suffix header as genesis";
+                return r;
+            }
             std::string zero64(64, '0');
             if (first_prev != zero64) {
                 r.detail = "FAIL: genesis header (index 0) has non-zero prev_hash: "

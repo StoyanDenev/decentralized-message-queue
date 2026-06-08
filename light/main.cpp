@@ -146,11 +146,17 @@ void print_usage() {
         "      Fetch a state-proof for (NS, K) from 127.0.0.1:N.\n"
         "\n"
         "Composite trustless reads (--genesis required):\n"
-        "  verify-chain --rpc-port <N> --genesis <file> [--persist [--state <path>]]\n"
+        "  verify-chain --rpc-port <N> --genesis <file> [--resume] [--persist [--state <path>]]\n"
         "      Anchor genesis + fetch all headers + verify every committee sig.\n"
         "      --persist caches the verified anchor (genesis pin + head height /\n"
         "      block_hash / state_root) to <path> (default: $DETERM_LIGHT_STATE,\n"
         "      else ~/.determ-light/state.json) — written only AFTER full verify.\n"
+        "      --resume re-pins the genesis against a cached anchor and verifies\n"
+        "      ONLY the suffix the daemon added above it (skips re-walking the\n"
+        "      committee-signed prefix); always falls back to a full verify when\n"
+        "      the anchor is absent/corrupt/wrong-chain or the daemon hasn't\n"
+        "      advanced — never weaker than a full verify. Pair with --persist for\n"
+        "      the steady-state resume-then-advance loop.\n"
         "  state (--show | --clear | --selftest | --verify-anchor --genesis <file>) [--state <path>]\n"
         "      Manage the persisted anchor cache (offline; no daemon). --show\n"
         "      prints + validates it; --clear deletes it; --selftest runs the\n"
@@ -1340,6 +1346,7 @@ int cmd_verify_chain(int argc, char** argv) {
     std::string genesis_path;
     bool have_port = false;
     bool persist = false;
+    bool resume = false;
     std::string state_path;  // empty → default_state_path()
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -1347,6 +1354,7 @@ int cmd_verify_chain(int argc, char** argv) {
             port = parse_u16("--rpc-port", argv[++i]); have_port = true;
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if (a == "--persist") persist = true;
+        else if (a == "--resume") resume = true;
         else if (a == "--state" && i + 1 < argc) state_path = argv[++i];
         else {
             std::cerr << "verify-chain: unknown arg '" << a << "'\n";
@@ -1366,11 +1374,71 @@ int cmd_verify_chain(int argc, char** argv) {
             return 1;
         }
         std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+
+        // --resume (LSP-6): if a valid, genesis-pinned anchor is cached, verify
+        // ONLY the suffix the daemon added above it instead of re-walking from
+        // genesis. Always falls back to a full verify when the anchor is absent,
+        // corrupt, for a different chain (genesis re-pin fails — LSP-2), or the
+        // daemon hasn't advanced past it; so --resume is never weaker than a
+        // full verify, only faster when the cache is usable. A suffix that does
+        // NOT chain onto the anchor (a fork/rollback below it) is a HARD error,
+        // not a silent fallback.
+        const std::string sp = state_path.empty() ? default_state_path() : state_path;
+        VerifiedChain vc;
+        std::string resume_note;  // "" = full verify; else a RESUMED-from note
+        bool did_resume = false;
+        if (resume && light_state_exists(sp)) {
+            // Load the anchor under a fallback guard: a CORRUPT cache is an
+            // optimization-cache fault, not a security fault, so we fall back to
+            // a full verify (the sound ground truth) instead of hard-failing.
+            LightState st;
+            bool anchor_loaded = false;
+            try { st = load_light_state(sp); anchor_loaded = true; }
+            catch (const std::exception& e) {
+                resume_note = "(--resume: cached anchor is corrupt (" + std::string(e.what())
+                            + ") — fell back to full verify)";
+            }
+            if (anchor_loaded) {
+                if (st.genesis_hash == genesis_hash_hex && st.head_height > 0) {
+                    // verify_chain_from_anchor is intentionally NOT guarded: a
+                    // suffix that does not chain onto the anchor (a fork/rollback
+                    // below it) THROWS and surfaces as a hard error — masking it
+                    // with a from-genesis re-verify would hide a real fork.
+                    auto rr = verify_chain_from_anchor(
+                        rpc, committee_seed, st.head_height, st.head_block_hash);
+                    if (rr.resumed) {
+                        vc = rr.vc;
+                        did_resume = true;
+                        resume_note = "RESUMED from cached anchor at height "
+                                    + std::to_string(st.head_height)
+                                    + " (verified " + std::to_string(rr.vc.headers_verified)
+                                    + " suffix headers; skipped re-verifying the "
+                                    + "committee-signed prefix per LSP-1/LSP-6)";
+                    } else {
+                        resume_note = "(--resume: daemon not ahead of cached anchor at "
+                                    "height " + std::to_string(st.head_height)
+                                    + " — fell back to full verify)";
+                    }
+                } else {
+                    resume_note = "(--resume: cached anchor is for a different chain "
+                                  "or empty — genesis re-pin failed; fell back to full verify)";
+                }
+            }
+        } else if (resume) {
+            resume_note = "(--resume: no cached anchor at " + sp
+                        + " — fell back to full verify)";
+        }
+        if (!did_resume) {
+            vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        }
+
         std::cout << "OK\n"
-                  << "  genesis pin:        matches (" << genesis_hash_hex << ")\n"
-                  << "  height:             " << vc.height << "\n"
-                  << "  headers verified:   " << vc.headers_verified << "\n"
+                  << "  genesis pin:        matches (" << genesis_hash_hex << ")\n";
+        if (!resume_note.empty())
+            std::cout << "  resume:             " << resume_note << "\n";
+        std::cout << "  height:             " << vc.height << "\n"
+                  << "  headers verified:   " << vc.headers_verified
+                  << (did_resume ? " (suffix only)" : "") << "\n"
                   << "  blocks (sigs):      " << vc.blocks_with_sigs_verified << "\n"
                   << "  head block_hash:    " << vc.head_block_hash << "\n";
         if (!vc.head_state_root.empty())
@@ -1383,6 +1451,8 @@ int cmd_verify_chain(int argc, char** argv) {
         // committee-verify above succeeds — never on an unverified head. The
         // genesis_hash is the LOCAL recompute (genesis_hash_hex), so the pin a
         // later run re-checks is the operator's own, not the daemon's claim.
+        // (When paired with --resume, this advances the cached anchor to the new
+        // verified tip — the steady-state `verify-chain --resume --persist` loop.)
         if (persist) {
             LightState s;
             s.schema_version  = 1;
@@ -1390,8 +1460,7 @@ int cmd_verify_chain(int argc, char** argv) {
             s.head_height     = vc.height;
             s.head_block_hash = vc.head_block_hash;
             s.head_state_root = vc.head_state_root;  // "" on a pre-S-033 chain
-            std::string sp = state_path.empty() ? default_state_path() : state_path;
-            save_light_state(sp, s);
+            save_light_state(sp, s);             // sp computed above (shared with --resume)
             std::cout << "  persisted anchor:   " << sp << "\n";
         }
         return 0;
