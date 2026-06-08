@@ -8,6 +8,7 @@
 
 #include "trustless_read.hpp"
 #include "verify.hpp"
+#include "persist.hpp"          // anchored_head's LSP-6 resume path
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
 #include <determ/crypto/sha256.hpp>
@@ -272,19 +273,80 @@ ResumeResult verify_chain_from_anchor(
     return rr;
 }
 
+AnchoredHead anchored_head(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    bool resume,
+    const std::string& state_path) {
+
+    AnchoredHead out;
+    // Always anchor genesis first (fail-closed if the daemon's block 0 doesn't
+    // hash to the LOCAL compute_genesis_hash). This is the operator's own pin.
+    out.genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+    if (resume) {
+        const std::string sp = state_path.empty() ? default_state_path() : state_path;
+        if (light_state_exists(sp)) {
+            // Load under a fallback guard: a CORRUPT cache is an optimization
+            // fault, not a security fault → fall back to a full verify.
+            LightState st;
+            bool anchor_loaded = false;
+            try { st = load_light_state(sp); anchor_loaded = true; }
+            catch (const std::exception& e) {
+                out.note = "(--resume: cached anchor is corrupt (" + std::string(e.what())
+                         + ") — full verify)";
+            }
+            if (anchor_loaded) {
+                if (st.genesis_hash == out.genesis_hash_hex && st.head_height > 0) {
+                    // NOT guarded: a suffix that does not chain onto the anchor
+                    // (a fork/rollback below it) THROWS — a hard error, never a
+                    // silent from-genesis re-verify that would mask the fork.
+                    auto rr = verify_chain_from_anchor(
+                        rpc, committee_seed, st.head_height, st.head_block_hash);
+                    if (rr.resumed) {
+                        out.vc = rr.vc;
+                        out.resumed = true;
+                        out.note = "RESUMED from cached anchor at height "
+                                 + std::to_string(st.head_height)
+                                 + " (verified " + std::to_string(rr.vc.headers_verified)
+                                 + " suffix headers)";
+                        return out;
+                    }
+                    out.note = "(--resume: daemon not ahead of cached anchor at height "
+                             + std::to_string(st.head_height) + " — full verify)";
+                } else {
+                    out.note = "(--resume: cached anchor is for a different chain or empty "
+                               "— genesis re-pin failed; full verify)";
+                }
+            }
+        } else {
+            out.note = "(--resume: no cached anchor at " + sp + " — full verify)";
+        }
+    }
+
+    // Full from-genesis verify (the default, and every fallback path above).
+    out.vc = verify_chain_to_head(rpc, committee_seed, out.genesis_hash_hex);
+    return out;
+}
+
 AccountView read_account_trustless(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const determ::chain::GenesisConfig& genesis,
-    const std::string& domain) {
+    const std::string& domain,
+    bool resume,
+    const std::string& state_path) {
 
     AccountView av;
 
-    // 1. Anchor genesis.
-    std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
-
-    // 2. Verify the header chain end-to-end.
-    auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+    // 1+2. Anchor genesis + verify the header chain to the head — full from
+    //      genesis, or (resume) only the suffix above a cached anchor. anchored_head
+    //      is the single source of truth for that decision (with resume=false this
+    //      is byte-identical to anchor_genesis + verify_chain_to_head).
+    auto ah = anchored_head(rpc, committee_seed, genesis, resume, state_path);
+    std::string genesis_hash_hex = ah.genesis_hash_hex;
+    VerifiedChain vc = ah.vc;  // mutable: the race-window logic below advances it
 
     if (vc.head_state_root.empty()) {
         throw std::runtime_error(

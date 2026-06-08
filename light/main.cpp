@@ -178,10 +178,16 @@ void print_usage() {
         "      failed) when CHAIN fails. Exit 0 = all pass, 1 = any fail/error —\n"
         "      suitable as a cron/monitor health gate.\n"
         "  balance-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
+        "                    [--resume [--state <path>]]\n"
         "      Verified chain + state-proof + cross-check daemon's cleartext.\n"
+        "      --resume reuses a cached committee-verified anchor (verify only the\n"
+        "      suffix above it) instead of re-verifying from genesis each call;\n"
+        "      falls back to a full verify when the cache is absent/unusable.\n"
         "  nonce-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
+        "                  [--resume [--state <path>]]\n"
         "      Same as balance-trustless but extracts next_nonce.\n"
         "  stake-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
+        "                  [--resume [--state <path>]]\n"
         "      Verified chain + state-proof (s: namespace) + cross-check the\n"
         "      daemon's `stake_info` cleartext. Prints the committee-verified\n"
         "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
@@ -211,7 +217,7 @@ void print_usage() {
         "      false ELIGIBLE. Distinct from stake-trustless, which reports the\n"
         "      raw (locked, unlock_height) pair but does NOT compute the\n"
         "      height-relative eligibility verdict.\n"
-        "  supply-trustless --rpc-port <N> --genesis <file> [--json]\n"
+        "  supply-trustless --rpc-port <N> --genesis <file> [--json] [--resume [--state <path>]]\n"
         "      Verified chain + the five A1 supply counters from the `c:`\n"
         "      namespace (genesis_total, accumulated_subsidy/inbound/slashed/\n"
         "      outbound), each Merkle-verified against the SAME committee-\n"
@@ -1373,64 +1379,18 @@ int cmd_verify_chain(int argc, char** argv) {
             std::cerr << "verify-chain: " << rpc.last_error() << "\n";
             return 1;
         }
-        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
-
-        // --resume (LSP-6): if a valid, genesis-pinned anchor is cached, verify
-        // ONLY the suffix the daemon added above it instead of re-walking from
-        // genesis. Always falls back to a full verify when the anchor is absent,
-        // corrupt, for a different chain (genesis re-pin fails — LSP-2), or the
-        // daemon hasn't advanced past it; so --resume is never weaker than a
-        // full verify, only faster when the cache is usable. A suffix that does
-        // NOT chain onto the anchor (a fork/rollback below it) is a HARD error,
-        // not a silent fallback.
+        // Anchor genesis + verify to head — full from genesis, or (--resume,
+        // LSP-6) only the suffix above a cached anchor. anchored_head is the
+        // SINGLE source of truth for the resume-or-full decision (shared with the
+        // trustless reads): re-pin genesis, fall back to a full verify when the
+        // anchor is absent / corrupt / wrong-chain / not-ahead (never weaker), and
+        // a fork below the anchor is a HARD error (verify_chain_from_anchor throws).
         const std::string sp = state_path.empty() ? default_state_path() : state_path;
-        VerifiedChain vc;
-        std::string resume_note;  // "" = full verify; else a RESUMED-from note
-        bool did_resume = false;
-        if (resume && light_state_exists(sp)) {
-            // Load the anchor under a fallback guard: a CORRUPT cache is an
-            // optimization-cache fault, not a security fault, so we fall back to
-            // a full verify (the sound ground truth) instead of hard-failing.
-            LightState st;
-            bool anchor_loaded = false;
-            try { st = load_light_state(sp); anchor_loaded = true; }
-            catch (const std::exception& e) {
-                resume_note = "(--resume: cached anchor is corrupt (" + std::string(e.what())
-                            + ") — fell back to full verify)";
-            }
-            if (anchor_loaded) {
-                if (st.genesis_hash == genesis_hash_hex && st.head_height > 0) {
-                    // verify_chain_from_anchor is intentionally NOT guarded: a
-                    // suffix that does not chain onto the anchor (a fork/rollback
-                    // below it) THROWS and surfaces as a hard error — masking it
-                    // with a from-genesis re-verify would hide a real fork.
-                    auto rr = verify_chain_from_anchor(
-                        rpc, committee_seed, st.head_height, st.head_block_hash);
-                    if (rr.resumed) {
-                        vc = rr.vc;
-                        did_resume = true;
-                        resume_note = "RESUMED from cached anchor at height "
-                                    + std::to_string(st.head_height)
-                                    + " (verified " + std::to_string(rr.vc.headers_verified)
-                                    + " suffix headers; skipped re-verifying the "
-                                    + "committee-signed prefix per LSP-1/LSP-6)";
-                    } else {
-                        resume_note = "(--resume: daemon not ahead of cached anchor at "
-                                    "height " + std::to_string(st.head_height)
-                                    + " — fell back to full verify)";
-                    }
-                } else {
-                    resume_note = "(--resume: cached anchor is for a different chain "
-                                  "or empty — genesis re-pin failed; fell back to full verify)";
-                }
-            }
-        } else if (resume) {
-            resume_note = "(--resume: no cached anchor at " + sp
-                        + " — fell back to full verify)";
-        }
-        if (!did_resume) {
-            vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
-        }
+        auto ah = anchored_head(rpc, committee_seed, genesis, resume, sp);
+        const std::string& genesis_hash_hex = ah.genesis_hash_hex;
+        const VerifiedChain& vc = ah.vc;
+        const std::string& resume_note = ah.note;
+        const bool did_resume = ah.resumed;
 
         std::cout << "OK\n"
                   << "  genesis pin:        matches (" << genesis_hash_hex << ")\n";
@@ -1795,8 +1755,8 @@ int cmd_cross_check(int argc, char** argv) {
 int cmd_account_trustless(int argc, char** argv,
                            bool want_balance, const std::string& cmd_name) {
     uint16_t port = 0;
-    std::string genesis_path, domain;
-    bool have_port = false, json_out = false;
+    std::string genesis_path, domain, state_path;
+    bool have_port = false, json_out = false, resume = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
@@ -1804,6 +1764,8 @@ int cmd_account_trustless(int argc, char** argv,
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--resume")                  resume       = true;
+        else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
         else {
             std::cerr << cmd_name << ": unknown arg '" << a << "'\n";
             return 1;
@@ -1823,8 +1785,11 @@ int cmd_account_trustless(int argc, char** argv,
             return 1;
         }
         std::string canon_domain = normalize_anon_address(domain);
+        // --resume reuses a cached committee-verified anchor (verify only the
+        // suffix above it) instead of re-verifying from genesis on every read;
+        // falls back to a full verify when the cache is absent/unusable.
         auto view = read_account_trustless(rpc, committee_seed, genesis,
-                                            canon_domain);
+                                            canon_domain, resume, state_path);
         if (json_out) {
             json out = {
                 {"domain",        canon_domain},
@@ -1878,16 +1843,18 @@ StakeView read_stake_trustless(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const determ::chain::GenesisConfig& genesis,
-    const std::string& domain) {
+    const std::string& domain,
+    bool resume = false,
+    const std::string& state_path = "") {
 
     StakeView sv;
 
-    // 1. Anchor genesis (fail-closed if block 0 != compute_genesis_hash).
-    std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
-
-    // 2. Verify the header chain end-to-end (prev_hash continuity +
-    //    per-block committee sigs), capturing the head's state_root.
-    auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+    // 1+2. Anchor genesis + verify the header chain — full, or (resume) only the
+    //      suffix above a cached anchor. anchored_head is the single source of
+    //      truth (resume=false ≡ anchor_genesis + verify_chain_to_head).
+    auto ah = anchored_head(rpc, committee_seed, genesis, resume, state_path);
+    std::string genesis_hash_hex = ah.genesis_hash_hex;
+    VerifiedChain vc = ah.vc;  // mutable: the race-window logic below advances it
 
     if (vc.head_state_root.empty()) {
         throw std::runtime_error(
@@ -2029,8 +1996,8 @@ StakeView read_stake_trustless(
 
 int cmd_stake_trustless(int argc, char** argv) {
     uint16_t port = 0;
-    std::string genesis_path, domain;
-    bool have_port = false, json_out = false;
+    std::string genesis_path, domain, state_path;
+    bool have_port = false, json_out = false, resume = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
@@ -2038,6 +2005,8 @@ int cmd_stake_trustless(int argc, char** argv) {
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--resume")                  resume       = true;
+        else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
         else {
             std::cerr << "stake-trustless: unknown arg '" << a << "'\n";
             return 1;
@@ -2058,7 +2027,7 @@ int cmd_stake_trustless(int argc, char** argv) {
         }
         std::string canon_domain = normalize_anon_address(domain);
         auto view = read_stake_trustless(rpc, committee_seed, genesis,
-                                         canon_domain);
+                                         canon_domain, resume, state_path);
         if (json_out) {
             json out = {
                 {"domain",        canon_domain},
@@ -5263,14 +5232,16 @@ const char* supply_verdict_str(SupplyVerdict v) {
 // times against one head and composes the public closed form.
 int cmd_supply_trustless(int argc, char** argv) {
     uint16_t port = 0;
-    std::string genesis_path;
-    bool have_port = false, json_out = false;
+    std::string genesis_path, state_path;
+    bool have_port = false, json_out = false, resume = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
             port = parse_u16("--rpc-port", argv[++i]); have_port = true;
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--resume")                  resume       = true;
+        else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
         else {
             std::cerr << "supply-trustless: unknown arg '" << a << "'\n";
             return 1;
@@ -5307,11 +5278,12 @@ int cmd_supply_trustless(int argc, char** argv) {
             std::cerr << "supply-trustless: " << rpc.last_error() << "\n";
             return 1;
         }
-        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
-
-        // Committee-verify the header chain end-to-end, capturing the
-        // head's state_root (the single anchor for ALL five c: proofs).
-        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        // Anchor genesis + committee-verify the header chain end-to-end (full,
+        // or --resume the suffix above a cached anchor), capturing the head's
+        // state_root (the single anchor for ALL five c: proofs).
+        auto ah = anchored_head(rpc, committee_seed, genesis, resume, state_path);
+        std::string genesis_hash_hex = ah.genesis_hash_hex;
+        VerifiedChain vc = ah.vc;
         if (vc.head_state_root.empty()) {
             throw std::runtime_error(
                 "chain has not activated state_root (S-033) — head header "

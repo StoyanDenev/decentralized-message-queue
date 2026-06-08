@@ -115,6 +115,35 @@ ResumeResult verify_chain_from_anchor(
     uint64_t anchor_height,
     const std::string& anchor_block_hash);
 
+// The committee-verified head a read/verify composite anchors against, obtained
+// either by a full from-genesis verify or — when `resume` is set and a valid,
+// genesis-pinned cached anchor exists and the daemon is ahead of it — by the
+// LSP-6 fast-resume suffix walk. This is the SINGLE source of truth for the
+// "resume-or-full" decision: cmd_verify_chain and every composite trustless read
+// route through it, so they all inherit the same (adversarially-verified) resume
+// soundness + genesis re-pin + fallback rules rather than reimplementing them.
+struct AnchoredHead {
+    std::string   genesis_hash_hex;  // the LOCAL compute_genesis_hash recompute
+    VerifiedChain vc;                // the verified head (full or resumed suffix tip)
+    bool          resumed{false};    // true iff the cached anchor was usable + consumed
+    std::string   note;              // "" on a plain full verify; else a resume/fallback note
+};
+
+// Always anchors genesis first (anchor_genesis). If `resume` and a valid
+// genesis-pinned anchor is cached at `state_path` (empty → default_state_path())
+// and the daemon's head is strictly above it, verifies ONLY the suffix above the
+// anchor (verify_chain_from_anchor); otherwise — absent / corrupt / wrong-chain /
+// not-ahead anchor — falls back to a full verify_chain_to_head (NEVER weaker). A
+// fork below the anchor THROWS (verify_chain_from_anchor's hard error). With
+// resume=false this is exactly anchor_genesis + verify_chain_to_head, so existing
+// callers are byte-for-byte unaffected.
+AnchoredHead anchored_head(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    bool resume,
+    const std::string& state_path);
+
 // Composite: fetch a state-proof for the "a:" + domain key, verify it
 // against the head's state_root, and decode the value_hash back to
 // (balance, next_nonce). The decode reproduces chain.cpp's accounts_
@@ -124,11 +153,16 @@ ResumeResult verify_chain_from_anchor(
 // daemon's `account` RPC, recomputes the hash, and confirms it matches
 // value_hash. If the daemon lies about the cleartext, the hash check
 // fails and the function throws.
+// resume / state_path (default off / default cache) route the head-anchoring
+// through anchored_head; with resume=false the behavior is byte-identical to the
+// original full from-genesis verify, so existing callers need no change.
 AccountView read_account_trustless(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const determ::chain::GenesisConfig& genesis,
-    const std::string& domain);
+    const std::string& domain,
+    bool resume = false,
+    const std::string& state_path = "");
 
 // Helper: build the genesis committee seed map (domain → ed_pub) from
 // the genesis config's initial_creators. Used by verify-chain and the
