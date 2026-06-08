@@ -884,11 +884,17 @@ void Node::start_contrib_phase() {
         std::sort(f2_abort_view.begin(), f2_abort_view.end());
         if (f2_abort_view.size() > F2_VIEW_LIST_CAP) f2_abort_view.resize(F2_VIEW_LIST_CAP);
     }
+    // S-030-D2 timestamp reconciliation: commit this node's local wall-clock
+    // into the Phase-1 ContribMsg (signed). The assembler medians the K
+    // committed times into the canonical block timestamp at build_body, and
+    // compute_block_digest binds it. now_unix() > 0 so the reconciliation gate
+    // (all proposer_times non-zero) fires on production blocks.
     ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
                                           block_index, prev_hash,
                                           current_aborts_.size(),
                                           snap, my_commit,
-                                          f2_eq_view, f2_abort_view, f2_inbound_view);
+                                          f2_eq_view, f2_abort_view, f2_inbound_view,
+                                          static_cast<uint64_t>(now_unix()));
     pending_contribs_[cfg_.domain] = my_contrib;
     gossip_.broadcast(net::make_contrib(my_contrib));
 

@@ -76,6 +76,18 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
     if (b.partner_subset_hash != zero) {
         h.append(b.partner_subset_hash);
     }
+    // S-030-D2 (timestamp dimension): bind the canonical block timestamp when
+    // the header carries per-creator proposer times (a reconciled block) —
+    // again mirroring producer.cpp::compute_block_digest. creator_proposer_times
+    // survives the rpc_headers strip (it is not one of the four stripped heavy
+    // collections), so the light client has both it AND b.timestamp and binds
+    // the same value the committee signed. A header where a daemon tampered the
+    // timestamp post-signing then fails the sig check (the digest no longer
+    // matches the K signatures). Empty (legacy header) appends nothing → v1
+    // digest. Field order matches the node: ..., partner_subset_hash, timestamp.
+    if (!b.creator_proposer_times.empty()) {
+        h.append(b.timestamp);
+    }
     return h.finalize();
 }
 

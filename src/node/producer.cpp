@@ -62,6 +62,10 @@ json ContribMsg::to_json() const {
         out["view_abort_list"]   = ab_arr;
         out["view_inbound_list"] = in_arr;
     }
+    // S-030-D2 timestamp reconciliation: emit proposer_time ONLY when non-zero,
+    // so legacy / test contribs that don't commit a time keep byte-identical
+    // JSON (and the make_contrib_commitment v1 short-circuit).
+    if (proposer_time != 0) out["proposer_time"] = proposer_time;
     return out;
 }
 
@@ -94,6 +98,9 @@ ContribMsg ContribMsg::from_json(const json& j) {
             m.tx_hashes.push_back(from_hex_arr<32>(h.get<std::string>()));
     }
     m.dh_input = from_hex_arr<32>(json_require_hex(j, "dh_input", 64));
+    // S-030-D2 timestamp reconciliation: optional committed local time.
+    // Absent on legacy / pre-feature contribs → 0 (no reconciliation).
+    m.proposer_time = j.value("proposer_time", uint64_t{0});
 
     // v2.7 F2: optional view-reconciliation fields (per F2-SPEC.md §Q1/Q3/Q4).
     // Backward-compat: pre-F2 ContribMsg omits these; default to zero/empty.
@@ -221,7 +228,8 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               const Hash& dh_input,
                               const Hash& view_eq_root,
                               const Hash& view_abort_root,
-                              const Hash& view_inbound_root) {
+                              const Hash& view_inbound_root,
+                              uint64_t proposer_time) {
     SHA256Builder inner;
     for (auto& h : sorted_tx_hashes) inner.append(h);
     Hash inner_root = inner.finalize();
@@ -256,7 +264,30 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
         b.append(view_abort_root);
         b.append(view_inbound_root);
     }
+    // S-030-D2 timestamp reconciliation: bind the member's committed local
+    // time when non-zero, AFTER the F2 block, behind its own domain separator
+    // so it can't be confused with an F2 view root or a v1 pre-image. Zero
+    // (legacy / test contribs) appends nothing → byte-identical commitment.
+    // The Phase-1 signature over this commitment is what stops a member from
+    // equivocating on the time it later contributes to the median.
+    if (proposer_time != 0) {
+        b.append(std::string("DTM-TS-v1"));
+        b.append(proposer_time);
+    }
     return b.finalize();
+}
+
+// S-030-D2: deterministic lower-median of K committed proposer times. Sorts a
+// copy and returns sorted[(K-1)/2] — always one of the committed values, so the
+// result is integer + deterministic, and under f < K/3 Byzantine members it
+// always lands within the honest-clock spread (the order statistic at index
+// (K-1)/2 is flanked by honest values on both sides when f ≤ (K-1)/2, which
+// f < K/3 implies for K ≥ 3). Returns 0 for an empty input (no reconciliation).
+uint64_t reconcile_median_time(const std::vector<uint64_t>& times) {
+    if (times.empty()) return 0;
+    std::vector<uint64_t> v = times;
+    std::sort(v.begin(), v.end());
+    return v[(v.size() - 1) / 2];
 }
 
 Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists) {
@@ -643,6 +674,21 @@ Hash compute_block_digest(const Block& b) {
     if (!is_zero_hash_(b.partner_subset_hash)) {
         h.append(b.partner_subset_hash);
     }
+    // S-030-D2 (timestamp dimension): bind the canonical block timestamp ONLY
+    // when the block carries per-creator proposer times — i.e. it went through
+    // timestamp reconciliation (build_body set b.timestamp = lower-median of the
+    // K committed times). That median is a deterministic function of the K
+    // signed Phase-1 commits, so every honest assembler digests the identical
+    // value (no gossip-async divergence — the §5 obstacle to a RAW timestamp).
+    // A legacy / pre-feature block (empty creator_proposer_times, timestamp =
+    // assembler wall-clock) appends nothing, keeping the byte-identical v1
+    // digest. The validator re-derives the median from creator_proposer_times
+    // and rejects on mismatch; the per-creator times are authenticated via
+    // creator_ed_sigs (the Phase-1 commitment binds proposer_time). Field order:
+    // inbound, eq, abort, partner_subset_hash, timestamp.
+    if (!b.creator_proposer_times.empty()) {
+        h.append(b.timestamp);
+    }
     return h.finalize();
 }
 
@@ -668,14 +714,16 @@ ContribMsg make_contrib(const NodeKey& key,
                          const Hash& dh_input,
                          const std::vector<Hash>& view_eq_list,
                          const std::vector<Hash>& view_abort_list,
-                         const std::vector<Hash>& view_inbound_list) {
+                         const std::vector<Hash>& view_inbound_list,
+                         uint64_t proposer_time) {
     ContribMsg m;
-    m.block_index = block_index;
-    m.signer      = domain;
-    m.prev_hash   = prev_hash;
-    m.aborts_gen  = aborts_gen;
-    m.tx_hashes   = tx_snapshot;
-    m.dh_input    = dh_input;
+    m.block_index   = block_index;
+    m.signer        = domain;
+    m.prev_hash     = prev_hash;
+    m.aborts_gen    = aborts_gen;
+    m.tx_hashes     = tx_snapshot;
+    m.dh_input      = dh_input;
+    m.proposer_time = proposer_time;
     std::sort(m.tx_hashes.begin(), m.tx_hashes.end());
     m.tx_hashes.erase(std::unique(m.tx_hashes.begin(), m.tx_hashes.end()),
                       m.tx_hashes.end());
@@ -708,7 +756,8 @@ ContribMsg make_contrib(const NodeKey& key,
 
     Hash commit = make_contrib_commitment(
         block_index, prev_hash, m.tx_hashes, dh_input,
-        m.view_eq_root, m.view_abort_root, m.view_inbound_root);
+        m.view_eq_root, m.view_abort_root, m.view_inbound_root,
+        m.proposer_time);
     m.ed_sig = sign(key, commit.data(), commit.size());
     return m;
 }
@@ -769,6 +818,29 @@ Block build_body(
         // the block's evidence set (subset-of-union).
         b.creator_view_eq_lists.push_back(c.view_eq_list);
         b.creator_view_abort_lists.push_back(c.view_abort_list);
+        // S-030-D2 timestamp reconciliation: carry each member's committed
+        // local time (selection order, parallel to creators).
+        b.creator_proposer_times.push_back(c.proposer_time);
+    }
+
+    // S-030-D2 timestamp reconciliation: when EVERY committee member committed
+    // a non-zero proposer_time (production path), the canonical block timestamp
+    // is the deterministic lower-median of those K committed times — a pure
+    // function of the K signed Phase-1 commits, so every honest assembler
+    // computes the identical value and compute_block_digest can bind it without
+    // the gossip-async divergence §2/§5 of S030-D2-Analysis.md warns about.
+    // Otherwise (any member legacy / zero — pre-activation or test) fall back to
+    // the assembler's wall-clock (b.timestamp set above) and DROP the
+    // proposer-times vector so the block keeps its byte-identical v1 shape (no
+    // creator_proposer_times field, timestamp NOT digest-bound).
+    {
+        bool all_set = !b.creator_proposer_times.empty();
+        for (uint64_t t : b.creator_proposer_times) if (t == 0) { all_set = false; break; }
+        if (all_set) {
+            b.timestamp = reconcile_median_time(b.creator_proposer_times);
+        } else {
+            b.creator_proposer_times.clear();  // legacy: keep v1 block shape
+        }
     }
 
     // v2.7 F2 / S-030-D2 (eq/abort dimension): reconcile equivocation/abort

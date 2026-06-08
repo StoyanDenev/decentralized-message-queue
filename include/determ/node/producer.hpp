@@ -52,6 +52,24 @@ struct ContribMsg {
     std::vector<Hash>  view_inbound_list;   // sorted, capped at 64 per Q3
     // ─── end v2.7 F2 ────────────────────────────────────────────────────────
 
+    // ─── S-030-D2 timestamp reconciliation field ────────────────────────────
+    // Each committee member commits its local wall-clock (now_unix) at Phase-1
+    // commit time. At the Phase 1→2 boundary the assembler reconciles the K
+    // committed times to a deterministic LOWER-MEDIAN (build_body), sets it as
+    // the canonical block timestamp, and compute_block_digest binds that
+    // timestamp — closing the last S-030-D2 ✗ row. Bound into
+    // make_contrib_commitment ONLY when non-zero (legacy/test contribs with
+    // proposer_time == 0 keep the byte-identical v1 commitment). Per
+    // S030-D2-Analysis.md §5: a raw timestamp cannot be digest-bound because
+    // honest clocks differ within the validator's ±30s window; committing each
+    // member's time in Phase-1 (signed) and reconciling to the median makes the
+    // bound value a deterministic function of the K signed commits — every
+    // honest assembler computes the identical digest, no spurious round aborts.
+    // The lower-median (sorted[(K-1)/2]) is robust: under f < K/3 it always
+    // lands within the honest-clock spread.
+    uint64_t           proposer_time{0};
+    // ─── end S-030-D2 timestamp reconciliation ───────────────────────────────
+
     Signature          ed_sig{};      // Ed25519 over commit message
 
     nlohmann::json    to_json() const;
@@ -136,12 +154,24 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               const Hash& dh_input,
                               const Hash& view_eq_root = Hash{},
                               const Hash& view_abort_root = Hash{},
-                              const Hash& view_inbound_root = Hash{});
+                              const Hash& view_inbound_root = Hash{},
+                              // S-030-D2: each member's committed local time.
+                              // Bound ONLY when non-zero — a zero keeps the
+                              // byte-identical pre-feature commitment, exactly
+                              // like the all-zero view-root short-circuit above.
+                              uint64_t proposer_time = 0);
 
 // Canonical tx_root: union of K-committee tx_hashes lists. Used in strong
 // mode (K=M_pool, every creator on committee) — censorship requires every
 // creator to omit a tx.
 Hash compute_tx_root(const std::vector<std::vector<Hash>>& creator_tx_lists);
+
+// S-030-D2: deterministic lower-median of the K committed proposer times —
+// the canonical block timestamp. sorted[(K-1)/2]; 0 for empty input. Robust
+// under f < K/3 (the chosen order statistic is honest-flanked). The producer
+// (build_body), the validator, and the light client all call this so they
+// agree on the bound timestamp byte-for-byte.
+uint64_t reconcile_median_time(const std::vector<uint64_t>& times);
 
 // ─── v2.7 F2 view reconciliation helpers ───────────────────────────────────
 //
@@ -340,7 +370,12 @@ ContribMsg make_contrib(const crypto::NodeKey& key,
                          const Hash& dh_input,
                          const std::vector<Hash>& view_eq_list      = {},
                          const std::vector<Hash>& view_abort_list   = {},
-                         const std::vector<Hash>& view_inbound_list = {});
+                         const std::vector<Hash>& view_inbound_list = {},
+                         // S-030-D2: the committing member's local wall-clock
+                         // (now_unix). Stored in the ContribMsg + bound into the
+                         // Phase-1 commitment when non-zero. Default 0 = legacy /
+                         // test contribs (byte-identical v1 commitment).
+                         uint64_t proposer_time = 0);
 
 BlockSigMsg make_block_sig(const crypto::NodeKey& key,
                             const std::string& domain,

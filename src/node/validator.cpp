@@ -164,11 +164,20 @@ BlockValidator::Result BlockValidator::check_creator_tx_commitments(
         auto vr_at = [](const std::vector<Hash>& v, size_t idx) -> Hash {
             return idx < v.size() ? v[idx] : Hash{};
         };
+        // S-030-D2: recompute WITH creator i's committed proposer_time too, so
+        // the Phase-1 sig authenticates it. Absent (legacy block, size 0) -> 0
+        // -> the make_contrib_commitment proposer_time==0 short-circuit
+        // reproduces the byte-identical pre-feature commit. Tampering a
+        // proposer_time then fails this sig check (so the median is trustworthy).
+        auto pt_at = [](const std::vector<uint64_t>& v, size_t idx) -> uint64_t {
+            return idx < v.size() ? v[idx] : 0;
+        };
         Hash commit = make_contrib_commitment(b.index, b.prev_hash, list,
                                                 b.creator_dh_inputs[i],
                                                 vr_at(b.creator_view_eq_roots, i),
                                                 vr_at(b.creator_view_abort_roots, i),
-                                                vr_at(b.creator_view_inbound_roots, i));
+                                                vr_at(b.creator_view_inbound_roots, i),
+                                                pt_at(b.creator_proposer_times, i));
         if (!verify(e->pubkey, commit.data(), commit.size(), b.creator_ed_sigs[i]))
             return {false, "creator commit sig invalid: " + b.creators[i]};
     }
@@ -1294,6 +1303,24 @@ BlockValidator::Result BlockValidator::check_timestamp(const Block& b) const {
     // last-N-blocks check (Bitcoin-style) is the v2 path if drift
     // becomes a measurement concern; today the wall-clock check is
     // just a sanity bound, not a consensus-defining property.
+    // S-030-D2 timestamp reconciliation: when the block carries per-creator
+    // proposer times (a production reconciled block), the canonical timestamp
+    // MUST equal the deterministic lower-median of those committed times — the
+    // exact value compute_block_digest binds. So a tampered timestamp both
+    // fails here AND breaks the K-of-K digest signatures. The per-creator times
+    // are authenticated by creator_ed_sigs (check_creator_commits binds each
+    // proposer_time into the Phase-1 commitment), so a malicious assembler
+    // cannot forge the median inputs. Legacy / pre-feature blocks (empty
+    // vector) skip this and rely only on the ±30s wall-clock bound below.
+    if (!b.creator_proposer_times.empty()) {
+        if (b.creator_proposer_times.size() != b.creators.size())
+            return {false, "creator_proposer_times size != creators size"};
+        for (uint64_t t : b.creator_proposer_times)
+            if (t == 0) return {false, "creator_proposer_times has a zero entry"};
+        if (b.timestamp != reconcile_median_time(b.creator_proposer_times))
+            return {false, "timestamp != median(creator_proposer_times)"};
+    }
+
     constexpr int64_t kTimestampWindowSec = 30;
     int64_t diff = b.timestamp - now_unix();
     if (diff > kTimestampWindowSec || diff < -kTimestampWindowSec)

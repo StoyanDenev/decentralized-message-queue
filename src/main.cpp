@@ -876,8 +876,19 @@ Additional in-process tests:
   determ test-block-timestamp                 Block.timestamp hash-surface scope —
                                               IN compute_hash + signing_bytes;
                                               NOT in state_root; NOT in
-                                              compute_block_digest (committee-sig
-                                              path excludes consensus-time meta)
+                                              compute_block_digest on a NON-
+                                              reconciled block (empty
+                                              creator_proposer_times). See
+                                              test-timestamp-reconciliation for
+                                              the reconciled-block binding.
+  determ test-timestamp-reconciliation        S-030-D2 timestamp dimension:
+                                              reconcile_median_time (lower-median,
+                                              Byzantine-robust) + compute_block_
+                                              digest binds timestamp iff
+                                              creator_proposer_times present +
+                                              make_contrib_commitment binds
+                                              proposer_time iff non-zero (16
+                                              assertions)
   determ test-node-registry                   NodeRegistry::build_from_chain +
                                               eligible_in_region — FA8 R2 region-
                                               aware committee selection. Min-stake
@@ -29932,6 +29943,117 @@ int main(int argc, char** argv) {
     // light-client equivalence proofs (proofs assume state_root depends
     // only on accounts/stakes/registry/etc, NOT on consensus-time
     // metadata).
+    if (cmd == "test-timestamp-reconciliation") {
+        // S-030-D2 timestamp dimension: the deterministic median reconciliation
+        // that makes the block timestamp digest-bindable WITHOUT the §5
+        // gossip-async divergence (honest clocks differ within ±30s, so a raw
+        // append would make honest members sign divergent digests). Covers
+        // reconcile_median_time (the order statistic), the compute_block_digest
+        // gate (bound iff creator_proposer_times present), the
+        // make_contrib_commitment gate (proposer_time bound iff non-zero), and
+        // the ContribMsg JSON round-trip. No keys/registry/Chain needed — these
+        // are the pure new primitives.
+        using namespace determ;
+        using namespace determ::chain;
+        using node::reconcile_median_time;
+        using node::compute_block_digest;
+        using node::make_contrib_commitment;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) std::cout << "  PASS: " << msg << "\n";
+            else { std::cout << "  FAIL: " << msg << "\n"; fail++; }
+        };
+
+        // === reconcile_median_time: deterministic lower-median ===
+        check(reconcile_median_time({}) == 0,
+              "median: empty input -> 0 (no reconciliation)");
+        check(reconcile_median_time({42}) == 42,
+              "median: single value -> itself");
+        check(reconcile_median_time({30, 10, 20}) == 20,
+              "median: K=3 -> middle element (order-independent)");
+        check(reconcile_median_time({5, 1, 4, 2, 3}) == 3,
+              "median: K=5 -> middle element");
+        check(reconcile_median_time({40, 10, 30, 20}) == 20,
+              "median: K=4 -> lower-median (index (K-1)/2)");
+        check(reconcile_median_time({7, 3, 9, 1, 5}) ==
+              reconcile_median_time({1, 3, 5, 7, 9}),
+              "median: deterministic across input permutations");
+        // K=7, f=2: two outliers (one ~0, one huge) cannot drag the median out
+        // of the honest cluster {100..104}. sorted -> index 3 -> 102.
+        {
+            uint64_t m = reconcile_median_time({999999, 100, 1, 102, 101, 104, 103});
+            check(m >= 100 && m <= 104,
+                  "median: K=7 f=2 stays within honest cluster (Byzantine outliers cannot move it)");
+        }
+
+        auto make_block = [](std::vector<uint64_t> times, uint64_t ts) {
+            Block b;
+            b.index = 5;
+            b.creators = {"a", "b", "c"};
+            b.creator_proposer_times = times;
+            b.timestamp = ts;
+            return b;
+        };
+
+        // === compute_block_digest timestamp gate ===
+        Block recon = make_block({1000, 1010, 1020}, 1010);  // median = 1010
+        Hash dig_recon = compute_block_digest(recon);
+        {
+            Block b = recon; b.timestamp = 9999;
+            check(compute_block_digest(b) != dig_recon,
+                  "digest: timestamp BOUND when creator_proposer_times present");
+        }
+        {
+            Block b0; b0.index = 5; b0.creators = {"a","b","c"}; b0.timestamp = 1010;
+            Hash d0 = compute_block_digest(b0);
+            Block b1 = b0; b1.timestamp = 9999;
+            check(compute_block_digest(b1) == d0,
+                  "digest: timestamp NOT bound when creator_proposer_times empty (v1 shape)");
+        }
+        {
+            // Two reconciled blocks, same median (1010) but different raw times.
+            // The digest binds the median (b.timestamp), NOT the raw times (those
+            // are authenticated via creator_ed_sigs + re-derived by the validator).
+            Block a = make_block({1000, 1010, 1020}, 1010);
+            Block b = make_block({1005, 1010, 1015}, 1010);
+            check(compute_block_digest(a) == compute_block_digest(b),
+                  "digest: binds the median value (b.timestamp), not the raw per-creator times");
+        }
+
+        // === make_contrib_commitment proposer_time gate ===
+        std::vector<Hash> txs; Hash prev{}, dh{};
+        Hash c_v1  = make_contrib_commitment(5, prev, txs, dh);
+        Hash c_pt0 = make_contrib_commitment(5, prev, txs, dh, Hash{}, Hash{}, Hash{}, 0);
+        Hash c_pt1 = make_contrib_commitment(5, prev, txs, dh, Hash{}, Hash{}, Hash{}, 1000);
+        Hash c_pt2 = make_contrib_commitment(5, prev, txs, dh, Hash{}, Hash{}, Hash{}, 2000);
+        check(c_v1 == c_pt0,
+              "commitment: proposer_time=0 keeps byte-identical v1 commitment");
+        check(c_pt1 != c_v1,
+              "commitment: non-zero proposer_time changes the commitment (signed binding)");
+        check(c_pt1 != c_pt2,
+              "commitment: different proposer_time -> different commitment");
+
+        // === ContribMsg JSON round-trip ===
+        {
+            node::ContribMsg m; m.block_index = 5; m.signer = "a"; m.proposer_time = 123456;
+            auto j = m.to_json();
+            check(j.contains("proposer_time") &&
+                  j["proposer_time"].get<uint64_t>() == 123456,
+                  "ContribMsg: proposer_time emitted in JSON when non-zero");
+            auto m2 = node::ContribMsg::from_json(j);
+            check(m2.proposer_time == 123456,
+                  "ContribMsg: proposer_time survives JSON round-trip");
+            node::ContribMsg z; z.block_index = 5; z.signer = "a"; z.proposer_time = 0;
+            check(!z.to_json().contains("proposer_time"),
+                  "ContribMsg: proposer_time=0 omitted from JSON (byte-identical v1)");
+        }
+
+        std::cout << (fail == 0
+            ? "\n  PASS: timestamp-reconciliation all assertions\n"
+            : "\n  FAIL: timestamp-reconciliation had failures\n");
+        return fail == 0 ? 0 : 1;
+    }
+
     if (cmd == "test-block-timestamp") {
         using namespace determ;
         using namespace determ::chain;

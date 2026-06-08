@@ -440,6 +440,15 @@ json Block::to_json() const {
         j["creator_view_abort_lists"] = jval;
     }
 
+    // S-030-D2 timestamp reconciliation: per-creator committed times. Emitted
+    // only when present (production reconciled blocks); pre-feature / legacy /
+    // test blocks omit the field entirely, so their JSON stays byte-identical.
+    if (!creator_proposer_times.empty()) {
+        json jpt = json::array();
+        for (uint64_t t : creator_proposer_times) jpt.push_back(t);
+        j["creator_proposer_times"] = jpt;
+    }
+
     json jds = json::array();
     for (auto& h : creator_dh_secrets) jds.push_back(to_hex(h));
     j["creator_dh_secrets"] = jds;
@@ -571,6 +580,12 @@ Block Block::from_json(const json& j) {
     if (j.contains("creator_dh_secrets")) {
         for (auto& h : json_require_array(j, "creator_dh_secrets"))
             b.creator_dh_secrets.push_back(from_hex_arr<32>(h.get<std::string>()));
+    }
+    // S-030-D2 timestamp reconciliation: per-creator committed times (optional;
+    // absent on pre-feature / legacy blocks → empty vector, timestamp not bound).
+    if (j.contains("creator_proposer_times")) {
+        for (auto& t : json_require_array(j, "creator_proposer_times"))
+            b.creator_proposer_times.push_back(t.get<uint64_t>());
     }
 
     // S-018: optional fields with wrong-type detection. The

@@ -425,6 +425,16 @@ struct Block {
     // fields — see docs/proofs/EqAbortViewDigestExtension.md.
     std::vector<std::vector<Hash>>    creator_view_eq_lists;
     std::vector<std::vector<Hash>>    creator_view_abort_lists;
+    // S-030-D2 timestamp reconciliation: per-creator committed local times
+    // (committee order, parallel to creators). Each entry is the proposer_time
+    // creator i bound into its Phase-1 commit (authenticated by
+    // creator_ed_sigs, so it needs no separate hash binding). The canonical
+    // block timestamp is reconcile_median_time(creator_proposer_times); the
+    // validator re-derives it and rejects on mismatch, and compute_block_digest
+    // binds `timestamp` when this vector is non-empty. Empty for pre-feature /
+    // legacy / test blocks (then `timestamp` is the assembler's wall-clock and
+    // is NOT digest-bound — byte-identical v1 shape). See S030-D2-Analysis.md §5.
+    std::vector<uint64_t>             creator_proposer_times;
 
     Hash                     tx_root{};
     Hash                     delay_seed{};
