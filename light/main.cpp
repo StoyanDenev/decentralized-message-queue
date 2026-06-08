@@ -143,7 +143,7 @@ void print_usage() {
         "Composite trustless reads (--genesis required):\n"
         "  verify-chain --rpc-port <N> --genesis <file>\n"
         "      Anchor genesis + fetch all headers + verify every committee sig.\n"
-        "  cross-check --genesis <file> --rpc-port <N> --rpc-port <M> [...] [--json]\n"
+        "  cross-check --genesis <file> (--rpc-port <N> | --peer <host:port>) x2+ [--json]\n"
         "      Multi-peer divergence detector: independently committee-verify each\n"
         "      daemon from the pinned genesis, then require peers sharing a height to\n"
         "      agree on block_hash + state_root. Disagreement at a shared height =\n"
@@ -1383,47 +1383,61 @@ int cmd_verify_chain(int argc, char** argv) {
 // genesis-anchor or chain verification makes the whole check UNVERIFIABLE
 // (fail-closed) — you cannot cross-check against a peer you cannot verify.
 //
-// Peers are localhost:<port> here (matching the local-cluster test pattern);
-// cross-HOST peers await an RpcClient host:port extension — see the
-// MultiPeerCrossCheck soundness doc for the spec + the follow-up.
+// Peers: --rpc-port <N> targets localhost:<N> (the local-cluster pattern);
+// --peer <host:port> targets a remote daemon (resolved via RpcClient's
+// getaddrinfo host path). Cross-HOST peering is the strongest form of this
+// defense (independent operators / machines). See MultiPeerCrossCheckSoundness.md.
 //
 // Exit codes: 0 AGREE (all shared-height groups consistent), 2 DIVERGENCE,
 // 3 INCONCLUSIVE (no two peers share a height this round — retry as they
 // converge), 1 UNVERIFIABLE (a peer failed verification) or usage error.
 int cmd_cross_check(int argc, char** argv) {
     std::string genesis_path;
-    std::vector<uint16_t> ports;
+    std::vector<std::pair<std::string, uint16_t>> endpoints;  // (host, port)
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--rpc-port" && i + 1 < argc) ports.push_back(parse_u16("--rpc-port", argv[++i]));
-        else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
-        else if (a == "--json")                     json_out = true;
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            endpoints.push_back({"127.0.0.1", parse_u16("--rpc-port", argv[++i])});
+        } else if (a == "--peer" && i + 1 < argc) {
+            // host:port (cross-HOST peer). Split on the LAST ':'.
+            std::string hp = argv[++i];
+            auto pos = hp.rfind(':');
+            if (pos == std::string::npos || pos == 0 || pos + 1 >= hp.size()) {
+                std::cerr << "cross-check: --peer expects host:port (got '" << hp << "')\n";
+                return 1;
+            }
+            endpoints.push_back({hp.substr(0, pos),
+                                 parse_u16("--peer port", hp.substr(pos + 1))});
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--json")                      json_out = true;
         else { std::cerr << "cross-check: unknown arg '" << a << "'\n"; return 1; }
     }
-    if (genesis_path.empty() || ports.size() < 2) {
-        std::cerr << "cross-check: --genesis and at least two --rpc-port <N> are required\n";
+    if (genesis_path.empty() || endpoints.size() < 2) {
+        std::cerr << "cross-check: --genesis and at least two peers "
+                     "(--rpc-port <N> for localhost and/or --peer <host:port>) are required\n";
         return 1;
     }
 
-    struct PeerView { uint16_t port; uint64_t height; std::string block_hash, state_root; };
+    struct PeerView { std::string label; uint64_t height; std::string block_hash, state_root; };
     std::vector<PeerView> peers;
     try {
         auto genesis = load_genesis(genesis_path);
         auto committee_seed = build_genesis_committee(genesis);
-        for (uint16_t p : ports) {
-            RpcClient rpc(p);
+        for (auto& ep : endpoints) {
+            std::string label = ep.first + ":" + std::to_string(ep.second);
+            RpcClient rpc(ep.first, ep.second);
             if (!rpc.open()) {
-                std::cerr << "cross-check: peer " << p << " UNVERIFIABLE (fail-closed): "
+                std::cerr << "cross-check: peer " << label << " UNVERIFIABLE (fail-closed): "
                           << rpc.last_error() << "\n";
                 return 1;
             }
             try {
                 std::string gh = anchor_genesis(rpc, genesis);
                 auto vc = verify_chain_to_head(rpc, committee_seed, gh);
-                peers.push_back({p, vc.height, vc.head_block_hash, vc.head_state_root});
+                peers.push_back({label, vc.height, vc.head_block_hash, vc.head_state_root});
             } catch (const std::exception& e) {
-                std::cerr << "cross-check: peer " << p << " UNVERIFIABLE (fail-closed): "
+                std::cerr << "cross-check: peer " << label << " UNVERIFIABLE (fail-closed): "
                           << e.what() << "\n";
                 return 1;
             }
@@ -1456,9 +1470,9 @@ int cmd_cross_check(int argc, char** argv) {
             if (q.block_hash != ref.block_hash || q.state_root != ref.state_root) {
                 divergence = true;
                 diag += "  DIVERGENCE at height " + std::to_string(kv.first) + ":\n"
-                      + "    peer " + std::to_string(ref.port) + ": block_hash=" + ref.block_hash
+                      + "    peer " + ref.label + ": block_hash=" + ref.block_hash
                       + " state_root=" + ref.state_root + "\n"
-                      + "    peer " + std::to_string(q.port)   + ": block_hash=" + q.block_hash
+                      + "    peer " + q.label   + ": block_hash=" + q.block_hash
                       + " state_root=" + q.state_root + "\n";
             }
         }
@@ -1468,7 +1482,7 @@ int cmd_cross_check(int argc, char** argv) {
         nlohmann::json j;
         j["peers"] = nlohmann::json::array();
         for (auto& pv : peers)
-            j["peers"].push_back({{"port", pv.port}, {"height", pv.height},
+            j["peers"].push_back({{"peer", pv.label}, {"height", pv.height},
                                   {"block_hash", pv.block_hash}, {"state_root", pv.state_root}});
         j["min_height"] = min_h;
         j["max_height"] = max_h;
@@ -1478,7 +1492,7 @@ int cmd_cross_check(int argc, char** argv) {
         std::cout << "cross-check: " << peers.size() << " peers, heights "
                   << min_h << ".." << max_h << "\n";
         for (auto& pv : peers)
-            std::cout << "  peer " << pv.port << ": height " << pv.height
+            std::cout << "  peer " << pv.label << ": height " << pv.height
                       << " block_hash " << pv.block_hash << "\n";
         if (divergence) std::cout << diag << "VERDICT: DIVERGENCE (committee-signed fork detected)\n";
         else if (!any_shared)

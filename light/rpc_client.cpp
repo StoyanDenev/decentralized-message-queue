@@ -13,6 +13,10 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#ifndef _WIN32
+#  include <netdb.h>   // getaddrinfo / addrinfo / freeaddrinfo (POSIX); Win32 gets them from <ws2tcpip.h>
+#endif
 
 namespace determ::light {
 
@@ -88,7 +92,14 @@ std::optional<std::string> read_line(sock_t s, std::string& inbuf) {
 } // namespace
 
 RpcClient::RpcClient(uint16_t port)
-    : port_(port), sock_(kInvalidSock) {
+    : host_("127.0.0.1"), port_(port), sock_(kInvalidSock) {
+#ifdef _WIN32
+    (void)winsock();
+#endif
+}
+
+RpcClient::RpcClient(std::string host, uint16_t port)
+    : host_(std::move(host)), port_(port), sock_(kInvalidSock) {
 #ifdef _WIN32
     (void)winsock();
 #endif
@@ -106,24 +117,64 @@ bool RpcClient::open() {
         return false;
     }
 #endif
-    sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_ == kInvalidSock) {
-        last_error_ = "socket() failed";
+    // Loopback fast path — UNCHANGED from the original (every existing
+    // command + the port-only ctor route here). A non-loopback host takes
+    // the getaddrinfo branch below; this preserves the loopback path
+    // byte-for-byte so the 18 existing determ-light commands are unaffected.
+    const bool is_loopback =
+        host_.empty() || host_ == "127.0.0.1" || host_ == "localhost";
+    if (is_loopback) {
+        sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_ == kInvalidSock) {
+            last_error_ = "socket() failed";
+            return false;
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons(port_);
+#ifdef _WIN32
+        addr.sin_addr.s_addr = htonl(0x7F000001UL);
+#else
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#endif
+        if (::connect(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            close_sock(sock_);
+            sock_ = kInvalidSock;
+            last_error_ = "connect() to 127.0.0.1:" + std::to_string(port_)
+                        + " failed (daemon not running?)";
+            return false;
+        }
+        last_error_.clear();
+        return true;
+    }
+
+    // Host path — resolve host_:port_ via getaddrinfo (IPv4) and connect to
+    // the first address that accepts. Enables cross-HOST multi-peer
+    // cross-check. The socket family/proto come from the resolved addrinfo.
+    struct addrinfo hints{};
+    hints.ai_family   = AF_INET;       // IPv4 (matches the daemon's listen socket)
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = nullptr;
+    const std::string portstr = std::to_string(port_);
+    const int gai = ::getaddrinfo(host_.c_str(), portstr.c_str(), &hints, &res);
+    if (gai != 0 || res == nullptr) {
+        if (res) ::freeaddrinfo(res);
+        last_error_ = "getaddrinfo(" + host_ + ":" + portstr + ") failed";
         return false;
     }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port_);
-#ifdef _WIN32
-    addr.sin_addr.s_addr = htonl(0x7F000001UL);
-#else
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-#endif
-    if (::connect(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close_sock(sock_);
-        sock_ = kInvalidSock;
-        last_error_ = "connect() to 127.0.0.1:" + std::to_string(port_)
-                    + " failed (daemon not running?)";
+    for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        sock_t s = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (s == kInvalidSock) continue;
+        if (::connect(s, p->ai_addr, static_cast<int>(p->ai_addrlen)) == 0) {
+            sock_ = s;
+            break;
+        }
+        close_sock(s);
+    }
+    ::freeaddrinfo(res);
+    if (sock_ == kInvalidSock) {
+        last_error_ = "connect() to " + host_ + ":" + portstr
+                    + " failed (daemon not running / unreachable?)";
         return false;
     }
     last_error_.clear();

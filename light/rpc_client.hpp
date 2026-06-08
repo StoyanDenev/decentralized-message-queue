@@ -52,7 +52,15 @@ constexpr sock_t kInvalidSock = -1;
 
 class RpcClient {
 public:
+    // Loopback client — connects to 127.0.0.1:port (the original behavior;
+    // every existing determ-light command uses this and keeps the exact
+    // INADDR_LOOPBACK fast path in open()).
     explicit RpcClient(uint16_t port);
+    // Host client — connects to host:port, resolved via getaddrinfo (IPv4).
+    // host "127.0.0.1" / "localhost" / "" routes through the same loopback
+    // fast path; any other host takes the getaddrinfo branch. Enables
+    // cross-HOST multi-peer cross-check without touching the loopback path.
+    RpcClient(std::string host, uint16_t port);
     ~RpcClient();
 
     RpcClient(const RpcClient&) = delete;
@@ -79,8 +87,10 @@ public:
     const std::string& last_error() const { return last_error_; }
 
     uint16_t port() const { return port_; }
+    const std::string& host() const { return host_; }
 
 private:
+    std::string    host_;      // "127.0.0.1" for the loopback ctor
     uint16_t       port_;
     sock_t         sock_;
     std::string    inbuf_;     // leftover bytes between read_line calls

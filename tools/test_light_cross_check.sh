@@ -53,6 +53,29 @@ else
     echo "  FAIL: cross-check not listed in help"; fail=$((fail+1))
 fi
 
+# 6. --peer requires host:port form (malformed → usage error).
+OUT=$($DETERM_LIGHT cross-check --genesis /tmp/determ_cc_nope.json --peer localhost 2>&1)
+rc=$?
+if [ "$rc" = "1" ] && echo "$OUT" | grep -q "expects host:port"; then
+    echo "  PASS: --peer rejects malformed host:port (exit 1)"; pass=$((pass+1))
+else echo "  FAIL: --peer malformed not rejected (exit $rc)"; fail=$((fail+1)); fi
+
+# 7. a single --peer is still < 2 peers → usage error.
+$DETERM_LIGHT cross-check --genesis /tmp/determ_cc_nope.json --peer host.example:7778 >/dev/null 2>&1
+ck $? 1 "single --peer rejected (needs >= 2 peers)"
+
+# 8. mixed --peer + --rpc-port counts as 2 peers (passes the >=2 gate, then
+#    fails on the missing genesis — a DIFFERENT error than the count gate).
+OUT=$($DETERM_LIGHT cross-check --genesis /tmp/determ_cc_nope.json --peer 127.0.0.1:7778 --rpc-port 7779 2>&1)
+if echo "$OUT" | grep -qiE "genesis|UNVERIFIABLE" && ! echo "$OUT" | grep -q "at least two peers"; then
+    echo "  PASS: --peer + --rpc-port mix counts as 2 peers (passes count gate)"; pass=$((pass+1))
+else echo "  FAIL: mixed --peer/--rpc-port count gate ($OUT)"; fail=$((fail+1)); fi
+
+# 9. --peer host:port shown in help.
+if $DETERM_LIGHT help 2>&1 | grep -q "peer <host:port>"; then
+    echo "  PASS: --peer <host:port> listed in help"; pass=$((pass+1))
+else echo "  FAIL: --peer not in help"; fail=$((fail+1)); fi
+
 echo ""
 echo "=== (B) best-effort live AGREE (2 daemons, same genesis) ==="
 T="$(mktemp -d 2>/dev/null || echo /tmp/determ_cc_$$)"; mkdir -p "$T"
