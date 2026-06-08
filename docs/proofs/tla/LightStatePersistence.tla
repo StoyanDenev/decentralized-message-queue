@@ -158,29 +158,36 @@ A temporal property pins the fail-closed-on-tamper liveness face:
            tamper changes WHERE verification starts, never WHETHER it is verified.
 
 --------------------------------------------------------------------------
-LSP-6 — the resume CONSUMER — is the EXPLICITLY NOT-YET-MODELED boundary.
+LSP-6 — the resume CONSUMER — is now SHIPPED (commit `22c04fa`) and MODELED here.
 
-This increment ships the cache + writer + management surface; it does NOT yet
-make `verify-chain` CONSUME the cache to skip work. The current verify-chain
-re-verifies 0..head from genesis on EVERY run regardless of any persisted anchor
-(LightStatePersistenceSoundness.md §3 LSP-6 / §4), so reading the cache
-trust-reduces nothing yet. This spec therefore models the cache LIFECYCLE
-(write / load / re-verify / tamper) but NOT the fast-resume optimization
-`verify_chain_from_anchor` (re-verify only headers ABOVE head_height, chaining
-from head_block_hash, after re-pinning genesis). Modeling that consumer would add:
-a daemon-supplied suffix `head_height+1 .. new_head`, the prev_hash continuity
-link from the persisted `head_block_hash` (a daemon serving a fork BELOW the
-anchor breaks the link and is caught), and the committee re-verify of the suffix.
-Those actions are deliberately ABSENT here — ReVerifyAnchor models only the
-offline genesis re-pin gate (`state --verify-anchor`, the SHIPPED security-critical
-half of the resume), not the suffix-verify. When the daemon-bound resume lands,
-its forward-verify soundness is the FB57+ follow-up; until then the persisted
-anchor is a correctness- and ergonomics-neutral substrate whose only live effect
-is the management surface + the --persist write, both fully modeled here. The
-single-slot, head-only abstraction also reflects §4: the cache stores the verified
-HEAD, not the full committee history or a checkpoint chain (committee rotation
-across a long offline gap is re-derived by the resume's forward verify, not
-cached) — out of scope for this lifecycle spec.
+`verify-chain --resume` (`verify_chain_from_anchor`, light/trustless_read.cpp)
+re-pins the genesis against the cached anchor (LSP-2, ReVerifyAnchor) then verifies
+ONLY the suffix the daemon added above it, skipping the committee-signed prefix.
+The ResumeVerify action below models the daemon's suffix offering as a finite
+nondeterministic choice over the cases that matter for soundness:
+
+  * a corrupt or wrong-chain anchor ⇒ FALLBACK to a full verify (never weaker);
+  * the daemon not ahead of the anchor ⇒ FALLBACK;
+  * an honest suffix that chains onto the cached head_block_hash at the correct
+    next index ⇒ RESUMED (a new committee-verified head);
+  * a suffix that does NOT chain onto the anchor (a fork/rollback below it) ⇒
+    REJECTED (a HARD error, never a silent from-genesis re-verify);
+  * the ADVERSARIAL index-0 diversion (a malicious daemon serving a first suffix
+    header claiming index 0, to divert verify_headers into its binding-free
+    genesis branch and dodge the anchor + committee-sig checks) ⇒ REJECTED by the
+    index-contiguity gate (a suffix's first index must be anchor_height, not 0) +
+    the verify_headers anchored-page guard.
+
+INV_ResumeSound + INV_ResumeNoFalseAccept pin that a RESUMED verdict is reached
+ONLY for a valid, genesis-pinned anchor AND a genuinely-chaining honest suffix —
+the index-0 and fork offerings NEVER yield RESUMED. The prefix-skip soundness
+(each suffix block's K-of-K sig binds its index+prev_hash, so block_hash ==
+anchor transitively re-validates the skipped prefix under A1+A2) is the
+cryptographic content abstracted by "the honest suffix chains onto the verified
+anchor handle"; it is argued in full in LightStatePersistenceSoundness.md §3
+LSP-6. The single-slot, head-only abstraction reflects §4: the cache stores the
+verified HEAD, not the full committee history (committee rotation across a long
+offline gap is re-derived by the suffix verify, not cached).
 
 --------------------------------------------------------------------------
 Companion analytic source: `docs/proofs/LightStatePersistenceSoundness.md`
@@ -224,6 +231,17 @@ BAD       == "BAD"           \* the fail-closed Load verdict (LSP-4 sentinel)
 Unverified == "UNVERIFIED"   \* anchorVerdict before any ReVerifyAnchor
 Good      == "GOOD"          \* hex-shape flag: all fields well-formed
 Bad       == "BAD_HEX"       \* hex-shape flag: a malformed (short/non-hex/missing) field
+ResumeNone == "RESUME_NONE"  \* resumeResult before any ResumeVerify (LSP-6)
+
+\* The daemon's suffix offering on a `verify-chain --resume` attempt (LSP-6):
+\*   "extends"   — an honest suffix chaining onto the cached head_block_hash at
+\*                 the correct next index (index == anchor_height) → RESUMED;
+\*   "fork"      — a suffix that does NOT chain onto the anchor (prev_hash break /
+\*                 rollback below it) → REJECTED (hard error);
+\*   "index0"    — the adversarial index-0 diversion (first suffix header claims
+\*                 index 0) → REJECTED by the index-contiguity gate;
+\*   "not_ahead" — daemon head <= anchor height (nothing new) → FALLBACK.
+Offerings == {"none", "extends", "fork", "index0", "not_ahead"}
 
 \* The set of schema versions + genesis symbols + hex-shape flags.
 Schemas    == {SchemaCurrent, SchemaStale}
@@ -273,9 +291,12 @@ VARIABLES
     disk,           \* the on-disk record (a Records triple) or Empty
     provenance,     \* "self" | "attacker" | "none" — who wrote the on-disk record
     loaded,         \* last Load verdict: Empty | BAD | a Records triple
-    anchorVerdict   \* last ReVerifyAnchor verdict: Unverified | "PASS" | "MISMATCH"
+    anchorVerdict,  \* last ReVerifyAnchor verdict: Unverified | "PASS" | "MISMATCH"
+    resumeOffering, \* daemon's suffix offering on the last ResumeVerify (Offerings)
+    resumeResult    \* last ResumeVerify verdict: ResumeNone | RESUMED | FALLBACK | REJECTED
 
-vars == <<localGenesis, verifiedHead, disk, provenance, loaded, anchorVerdict>>
+vars == <<localGenesis, verifiedHead, disk, provenance, loaded, anchorVerdict,
+          resumeOffering, resumeResult>>
 
 ----------------------------------------------------------------------------
 \* §2. Helpers.
@@ -304,6 +325,8 @@ Init ==
     /\ provenance    = "none"
     /\ loaded        = Empty
     /\ anchorVerdict = Unverified
+    /\ resumeOffering = "none"
+    /\ resumeResult   = ResumeNone
 
 ----------------------------------------------------------------------------
 \* §4. Actions.
@@ -316,7 +339,8 @@ Init ==
 VerifyRun ==
     /\ verifiedHead = NoHead
     /\ verifiedHead' = HeadPin
-    /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict>>
+    /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict,
+                   resumeOffering, resumeResult>>
 
 \* WriteAnchor: cmd_verify_chain --persist calls save_light_state. ENABLED ONLY
 \* after a committee-verified head exists (verifiedHead # NoHead) — the LSP-1
@@ -328,7 +352,8 @@ WriteAnchor ==
     /\ verifiedHead /= NoHead
     /\ disk'       = <<SchemaCurrent, localGenesis, Good>>
     /\ provenance' = "self"
-    /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict>>
+    /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict,
+                   resumeOffering, resumeResult>>
 
 \* Load: load_light_state parses + validates the on-disk record. An ABSENT file is
 \* the graceful "no anchor" (loaded = Empty, exit 0). A present record is accepted
@@ -337,7 +362,8 @@ WriteAnchor ==
 \* record. Models `state --show` / the load step of `--verify-anchor`.
 Load ==
     /\ loaded' = LoadVerdict(disk)
-    /\ UNCHANGED <<localGenesis, verifiedHead, disk, provenance, anchorVerdict>>
+    /\ UNCHANGED <<localGenesis, verifiedHead, disk, provenance, anchorVerdict,
+                   resumeOffering, resumeResult>>
 
 \* ReVerifyAnchor: `state --verify-anchor --genesis <file>` — the offline LSP-2
 \* genesis re-pin gate (the SHIPPED security-critical half of the LSP-6 resume).
@@ -352,7 +378,8 @@ ReVerifyAnchor ==
     /\ IF WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis
        THEN anchorVerdict' = "PASS"        \* exit 0: anchor is for THIS chain
        ELSE anchorVerdict' = "MISMATCH"    \* exit 2 (wrong chain) or fail-closed (corrupt)
-    /\ UNCHANGED <<localGenesis, verifiedHead, disk, provenance, loaded>>
+    /\ UNCHANGED <<localGenesis, verifiedHead, disk, provenance, loaded,
+                   resumeOffering, resumeResult>>
 
 \* Tamper: an attacker rewrites the local state.json (the trusted-local model's
 \* in-scope adversary, present ONLY to witness that the genesis-pin / fail-closed
@@ -367,14 +394,48 @@ Tamper ==
     /\ \E sc \in Schemas, g \in Genatures, hx \in HexShapes :
           /\ disk'       = <<sc, g, hx>>
           /\ provenance' = "attacker"
-    /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict>>
+    /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict,
+                   resumeOffering, resumeResult>>
 
 \* Clear: `state --clear` deletes the cache file (a benign management action).
 \* Resets the on-disk record to Empty; the next Load is the graceful "no anchor".
 Clear ==
     /\ disk'       = Empty
     /\ provenance' = "none"
-    /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict>>
+    /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict,
+                   resumeOffering, resumeResult>>
+
+\* ResumeVerify: `verify-chain --resume` (verify_chain_from_anchor). Reads the
+\* cache and either RESUMES (verifies only the suffix above the anchor), FALLS
+\* BACK to a full verify, or REJECTS (hard error). The daemon's suffix is a finite
+\* nondeterministic offering. Decision order matches the code (main.cpp resume
+\* control flow + trustless_read.cpp::verify_chain_from_anchor):
+\*   1. anchor corrupt OR wrong-chain (not WellFormed, or pin != local genesis,
+\*      LSP-2) ⇒ FALLBACK to a full verify (never weaker than a full verify);
+\*   2. daemon not ahead ("not_ahead") ⇒ FALLBACK (nothing new to verify);
+\*   3. honest chaining suffix ("extends") ⇒ RESUMED, producing a verified head;
+\*   4. fork-below-anchor ("fork") OR the index-0 diversion ("index0") ⇒ REJECTED
+\*      (the prev_hash continuity break / the index-contiguity gate — a hard error,
+\*      never a silent from-genesis re-verify). Enabled only when a record is on
+\*      disk (a resume with no cache falls back; modeled by requiring disk /= Empty
+\*      here and leaving the no-cache→full-verify routing to VerifyRun).
+ResumeVerify ==
+    /\ disk /= Empty
+    /\ \E offer \in (Offerings \ {"none"}) :
+         /\ resumeOffering' = offer
+         /\ IF ~(WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis)
+            THEN /\ resumeResult' = "FALLBACK"      \* corrupt / wrong-chain anchor
+                 /\ verifiedHead' = verifiedHead
+            ELSE IF offer = "not_ahead"
+            THEN /\ resumeResult' = "FALLBACK"      \* daemon not ahead of anchor
+                 /\ verifiedHead' = verifiedHead
+            ELSE IF offer = "extends"
+            THEN /\ resumeResult' = "RESUMED"       \* honest suffix chains onto anchor
+                 /\ verifiedHead' = HeadPin         \* the new committee-verified tip
+            ELSE \* offer \in {"fork", "index0"}
+                 /\ resumeResult' = "REJECTED"      \* fork-below / index-0 diversion
+                 /\ verifiedHead' = verifiedHead
+    /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict>>
 
 ----------------------------------------------------------------------------
 \* §5. Next-state relation + spec. A verify run produces a verified head; the
@@ -386,6 +447,7 @@ Next ==
     \/ WriteAnchor
     \/ Load
     \/ ReVerifyAnchor
+    \/ ResumeVerify
     \/ Tamper
     \/ Clear
 
@@ -410,6 +472,8 @@ TypeOK ==
     /\ provenance    \in {"none", "self", "attacker"}
     /\ loaded        \in (Records \cup {Empty, BAD})
     /\ anchorVerdict \in {Unverified, "PASS", "MISMATCH"}
+    /\ resumeOffering \in Offerings
+    /\ resumeResult   \in {ResumeNone, "RESUMED", "FALLBACK", "REJECTED"}
 
 \* LSP-1 / INV_NoUnverifiedWrite. Every SELF-written on-disk record was written
 \* while a committee-verified head existed. State-form: if the cache holds a
@@ -463,6 +527,27 @@ INV_ReadSound ==
         /\ WellFormed(loaded)
         /\ (provenance = "self" /\ disk = loaded) => (PinnedGenesis(loaded) = localGenesis)
 
+\* LSP-6 / INV_ResumeSound. A RESUMED verdict is reached ONLY for a valid,
+\* genesis-pinned anchor: verify-chain --resume re-pins the genesis (LSP-2) and
+\* falls back to a full verify on a corrupt or wrong-chain cache, so it can NEVER
+\* report "resumed from this anchor" when the anchor is malformed or for a
+\* different chain. The resume is therefore never weaker than a full verify (the
+\* skipped prefix is exactly the one the cached, genesis-pinned, committee-verified
+\* anchor already covered).
+INV_ResumeSound ==
+    (resumeResult = "RESUMED") =>
+        (disk /= Empty /\ WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis)
+
+\* LSP-6 / INV_ResumeNoFalseAccept. A RESUMED verdict implies the daemon's suffix
+\* offering was a genuinely-chaining honest suffix ("extends"): the fork-below-
+\* anchor and the adversarial index-0 diversion offerings are ALWAYS REJECTED,
+\* never RESUMED. This is the resume-soundness fix an adversarial verifier forced
+\* (the index-0 header that diverted verify_headers into its binding-free genesis
+\* branch) — closed by the index-contiguity gate + the verify_headers anchored-page
+\* guard, abstracted here as: only "extends" reaches RESUMED.
+INV_ResumeNoFalseAccept ==
+    (resumeResult = "RESUMED") => (resumeOffering = "extends")
+
 ----------------------------------------------------------------------------
 \* §7. Temporal property.
 
@@ -498,10 +583,11 @@ Prop_TamperNeverLoadsAccepted ==
 \* Companion analytic source:
 \*   docs/proofs/LightStatePersistenceSoundness.md (LSP-1..LSP-6). LSP-1 =
 \*     INV_NoUnverifiedWrite; LSP-2 = INV_GenesisPinned; LSP-3 = INV_SchemaGated;
-\*     LSP-4 = INV_FailClosed; LSP-5 = INV_ReadSound; LSP-6 = the NOT-yet-modeled
-\*     resume CONSUMER boundary documented in the header (the fast-resume
-\*     verify_chain_from_anchor is the marked daemon-bound follow-up; only the
-\*     offline genesis re-pin half — ReVerifyAnchor — is shipped and modeled).
+\*     LSP-4 = INV_FailClosed; LSP-5 = INV_ReadSound; LSP-6 = INV_ResumeSound +
+\*     INV_ResumeNoFalseAccept (the resume CONSUMER is SHIPPED, commit 22c04fa, and
+\*     modeled via the ReVerifyAnchor genesis re-pin gate + the ResumeVerify suffix
+\*     walk; the prefix-skip cryptographic content is abstracted by "the honest
+\*     'extends' suffix chains onto the verified anchor handle").
 \*   docs/proofs/StateRootAnchorSoundness.md (SR-1) — the head_state_root the cache
 \*     stores; the one field allowed empty ("") on a pre-S-033 chain (LSP-4's
 \*     state_root exception, persist.cpp:127-129).
@@ -545,10 +631,21 @@ Prop_TamperNeverLoadsAccepted ==
 \*       verified head).
 \*   light/verify.cpp:57            : light_compute_block_digest — the per-block
 \*       digest verify_chain_to_head's committee-sig check is taken over (the
-\*       A1/A2 chain verification abstracted by VerifyRun).
+\*       A1/A2 chain verification abstracted by VerifyRun). Binds index + prev_hash,
+\*       so a suffix block's K-of-K sig forces its anchor link (LSP-6 prefix-skip).
+\*   light/trustless_read.cpp (verify_chain_from_anchor) : the LSP-6 resume CONSUMER
+\*       — re-pin genesis, fall back when the daemon is not ahead, else suffix-walk
+\*       from the cached head_block_hash (ResumeVerify / INV_ResumeSound).
+\*   light/trustless_read.cpp (verify_chain_walk index-contiguity gate) + light/verify.cpp
+\*       (verify_headers anchored-page guard rejecting an index-0 header when a
+\*       prev_hash anchor is supplied) : the resume-soundness fix — a suffix's first
+\*       index must be anchor_height, not 0 (ResumeVerify "index0" → REJECTED /
+\*       INV_ResumeNoFalseAccept).
+\*   light/main.cpp (cmd_verify_chain --resume control flow) : corrupt/wrong-chain/
+\*       not-ahead fallback + fork-below-anchor hard error + --resume --persist loop.
 \*
 \* Runtime regression:
-\*   tools/test_light_state.sh (20 offline assertions) — state --selftest round-trip
+\*   tools/test_light_state.sh (23 offline assertions) — state --selftest round-trip
 \*     + 5 fail-closed reject paths (malformed JSON / bad schema_version / short
 \*     genesis_hash / missing field / empty-state_root round-trip — LSP-3 / LSP-4 /
 \*     INV_FailClosed / INV_SchemaGated); --show / --clear graceful-absence +

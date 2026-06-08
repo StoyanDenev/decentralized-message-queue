@@ -35,6 +35,12 @@ head_block_hash, head_state_root}`.
   supplied genesis locally and reports PASS (exit 0, anchor is for this chain) or
   MISMATCH (exit 2, stale/wrong-chain cache). This is the exact gate the LSP-6
   resume must run before trusting an anchor, landed and tested ahead of it.
+- **Resume** (`verify-chain --resume`, `verify_chain_from_anchor`): re-pins the
+  genesis against the cached anchor (LSP-2) then verifies ONLY the suffix above
+  it (`verify_chain_walk` anchored at `head_block_hash`), skipping the
+  committee-signed prefix; falls back to a full verify when the anchor is
+  absent/corrupt/wrong-chain or the daemon hasn't advanced (LSP-6). Pair with
+  `--persist` for the steady-state resume-then-advance loop.
 - **Path resolution** (`default_state_path`): `--state <path>` ›
   `$DETERM_LIGHT_STATE` › `<home>/.determ-light/state.json`.
 
@@ -97,34 +103,49 @@ wrong-chain head into a later decision; the worst a tampered-but-well-formed fil
 achieves within the threat model is moving the resume origin, which LSP-6's
 forward re-verification then validates.
 
-**LSP-6 (Resume soundness — the follow-up boundary, stated honestly).** This
-increment ships the cache + writer + management surface. It does NOT yet make
-`verify-chain` *consume* the cache to skip work: the current `verify-chain`
-re-verifies `0..head` from genesis on every run regardless of any persisted
-anchor, so reading the cache trust-reduces nothing *yet*. The fast-resume
-optimization — `verify_chain_from_anchor`: re-verify only headers ABOVE
-`head_height`, chaining from `head_block_hash`, after re-pinning `genesis_hash`
-(LSP-2) — is the marked daemon-bound next increment. Its soundness will rest on:
-prev_hash continuity from the persisted `head_block_hash` (a daemon serving a
-fork *below* the anchor breaks the link and is caught) + committee-verifying the
-suffix `head_height+1 .. new_head`. Until then, persistence is a correctness- and
-ergonomics-neutral substrate whose only live effect is the `state` management
-surface and the `--persist` write — both fully exercised offline.
+**LSP-6 (Resume soundness — SHIPPED, commit `22c04fa`).** `verify-chain --resume`
+consumes the cached anchor and verifies ONLY the suffix above it, skipping the
+committee-signed prefix `0..anchor_height-1`. Flow: (1) re-pin genesis (LSP-2 — a
+wrong-chain/absent/corrupt anchor falls back to a full verify, never weaker); (2)
+if the daemon's head ≤ `anchor_height`, fall back (nothing new); else (3)
+`verify_chain_from_anchor` walks the suffix `[anchor_height, head)` with
+`prev_anchor = head_block_hash`, so the FIRST suffix block's `prev_hash` must
+equal the cached anchor hash, and committee-verifies every suffix block's K-of-K
+sigs. **Prefix-skip soundness:** `light_compute_block_digest` binds both `index`
+and `prev_hash` (byte-identical to the producer's `compute_block_digest` for
+non-F2 blocks), so each suffix block's K-of-K Ed25519 signature forces its
+`prev_hash` to a committee-attested value; by induction from the anchor and under
+A1+A2, a `block_hash` equal to the cached anchor IS the previously-verified
+block (its hash transitively commits the whole prefix), so re-verifying the
+prefix is redundant. A suffix that does NOT chain onto the anchor (a fork/rollback
+*below* it) is a HARD error, never silently re-verified from genesis (which would
+mask the fork). **Adversarial hardening:** a pre-merge adversarial verifier found
+that a malicious daemon could serve a suffix header claiming `index 0`, diverting
+`verify_headers` into its binding-free genesis branch (anchor `prev_hash` ignored)
+while the per-block loop skipped the sig check for index 0 — a false `RESUMED OK`
+on an unsigned, daemon-chosen head. Closed three ways: `verify_headers` rejects an
+index-0 header when an anchor was supplied (`verify.cpp`); `verify_chain_walk`
+asserts page indices are contiguous from `from` so a suffix's first index must be
+`anchor_height` not 0 (`trustless_read.cpp`); and the genesis sig-skip is gated on
+`from==0` plus a walked-count gate (`headers_seen == head - start_from`) that also
+hardens the from-genesis walk against a short final page.
 
 ## 4. What it does NOT do (honest limitations)
 
-- **No trust reduction yet** — see LSP-6. The fast-resume consumer is the
-  follow-up; this increment is the validated substrate it builds on.
 - **Local-tamper is out of scope** — §2. The file is trusted-local; integrity
   against its own host is not a goal (and not achievable without a separate root
   of trust the medium tier does not assume).
 - **Single-anchor, head-only** — the cache stores the verified head, not the full
   committee history or a checkpoint chain. Committee rotation across a long
-  offline gap is re-derived by the resume's forward verify, not cached.
+  offline gap is re-derived by the resume's forward suffix verify, not cached.
+- **Live resume path is cluster-bound** — the offline `--resume` *arg contract*
+  (accepted; fallback when no/absent/corrupt anchor) is deterministically tested
+  on every host; the live suffix-verify + fallback verdicts need a block-minting
+  cluster (WSL2/CI), like every other determ-light composite.
 
 ## 5. Test surface
 
-`tools/test_light_state.sh` — 20 offline assertions, deterministic on every host
+`tools/test_light_state.sh` — 23 offline assertions, deterministic on every host
 (the persistence module is daemon-free): (A) `state --selftest` (the in-binary
 round-trip + 5 fail-closed reject paths: malformed JSON, bad `schema_version`,
 short `genesis_hash`, missing field, empty-`state_root` round-trip); (B)
@@ -133,8 +154,13 @@ mode-flag / unknown-arg / `$DETERM_LIGHT_STATE`-override contract; (C2)
 `--verify-anchor` PASS on a matching genesis + MISMATCH-exit-2 on a wrong-chain
 anchor + the no-`--genesis` / absent-cache usage gates (the LSP-2 gate); (C)
 `verify-chain --persist`/`--state` arg acceptance + the LSP-1 no-write-on-failed-
-verify guarantee. The cluster-bound live `--persist` write (a real verified head
-landing in the cache) and the LSP-6 resume path are exercised on WSL2 / CI.
+verify guarantee; (D) `verify-chain --resume` arg contract (accepted alone and
+with `--persist`; in help). The cluster-bound live `--persist` write (a real
+verified head landing in the cache) and the live LSP-6 resume suffix-verify +
+fallback verdicts are exercised on WSL2 / CI. The resume soundness fix (index-0
+diversion) is additionally pinned by the index-contiguity + walked-count gates in
+`verify_chain_walk`, which `tools/test_light_verify_chain_file.sh` exercises on a
+cluster (tampered-prev_hash / stripped-sig negatives).
 
 ## 6. Cross-references
 
