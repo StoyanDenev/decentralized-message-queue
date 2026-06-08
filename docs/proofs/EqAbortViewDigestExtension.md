@@ -526,6 +526,28 @@ producer/validator hashing or ordering skew before it can stall the chain.
 - `bash -n tools/test_f2_eqabort_reconciliation.sh`; add it to `run_all.sh` and the
   `FAST=1` regex; add the help-text line.
 - Run the new test + the §4.2 backward-compat set as a cluster pass.
+
+### 4.5 In-process unit coverage of the digest-binding half
+
+The §4.1-item-4 digest-removal property and the §4.2 empty-field-skip property are
+now also witnessed **at the unit level** — fast, deterministic, no cluster — by
+`determ test-block-digest` (`tools/test_block_digest.sh`), assertions 22–25:
+
+- **Gate fires only on F2 blocks.** Assertion 22 (eq) / 24 (abort) set a single
+  non-zero `creator_view_eq_roots` / `creator_view_abort_roots` entry and assert the
+  digest changes vs. the non-F2 baseline — confirming the empty-`view_root` sentinel
+  branch (the §4.2 empty-field skip) is the *only* path that keeps the v1 digest.
+- **Set sealed on F2 blocks.** Assertion 23 (eq) / 25 (abort) add an event to an
+  F2-marked block and assert the digest changes — the digest-layer half of the §4.1
+  item-4 digest-removal attack (a post-sign strip/add alters `compute_block_digest`,
+  so the stored K-of-K signatures cannot re-verify).
+- The complementary EXCLUSION assertions 15–16 confirm the same eq/abort events are
+  *unbound* on the non-F2 (zero-view-root) path — pinning the F2 activation boundary
+  exactly where `producer.cpp:619`/`:625`'s `any_nonzero(...)` gate sits.
+
+These unit assertions cover the digest-binding precondition; the cluster test (§4.1)
+remains the end-to-end witness that signature gathering and `check_eqabort_reconciliation`
+rejection compose correctly on top of it.
 - Bump the shell-test count across the doc surfaces and add the test name to
   UNIT-TESTS / SECURITY / CLI-REFERENCE per the standard threading rule.
 
