@@ -8821,26 +8821,48 @@ int main(int argc, char** argv) {
                   "compute_block_digest: state_root EXCLUDED (apply-time gate)");
         }
 
-        // 18. partner_subset_hash excluded (R4 Phase 3 merge —
-        //     covered by signing_bytes, not by the K-of-K Phase-2
-        //     digest).
+        // 18. partner_subset_hash BOUND when non-zero (S-030-D2 partner
+        //     dimension closed). Unlike the pool-fed eq/abort/inbound fields,
+        //     partner_subset_hash is DETERMINISTIC — every committee member at
+        //     a merged height computes it identically from merge state
+        //     (S030-D2-Analysis.md §3.2) — so binding it raw is gossip-async-
+        //     safe. A non-zero value changes the digest, so the K-of-K Phase-2
+        //     signature now attests to it and a post-sign strip/alter breaks
+        //     verification. Mirrors signing_bytes' conditional binding
+        //     (block.cpp:323). See producer.cpp::compute_block_digest.
         {
             Block b = baseline;
             b.partner_subset_hash = patterned_hash(0xEA);
-            check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: partner_subset_hash EXCLUDED");
+            check(compute_block_digest(b) != dig_baseline,
+                  "compute_block_digest: partner_subset_hash BOUND when non-zero (S-030-D2 closed)");
         }
 
-        // 19. timestamp excluded — this is one of the two genuinely-uncovered
-        //     S-030-D2 residual fields the shipped v2.7 F2 did NOT close (the
-        //     other is partner_subset_hash, assertion 18). Binding timestamp
-        //     needs the assembler-proposed ±30s validation pattern, deferred
-        //     with partner_subset_hash. See docs/proofs/S030-D2-Analysis.md §5.
+        // 18b. ...but the binding is CONDITIONAL on non-zero: the default
+        //      zero-hash (every non-merged block) contributes nothing, so the
+        //      digest stays byte-identical to the v1 digest. This is the
+        //      backward-compat gate that keeps all pre-R4 / non-merge blocks
+        //      hash-stable (baseline has a zero partner_subset_hash).
+        {
+            Block b = baseline;
+            b.partner_subset_hash = Hash{};  // explicit default zero
+            check(compute_block_digest(b) == dig_baseline,
+                  "compute_block_digest: zero partner_subset_hash keeps byte-identical v1 digest");
+        }
+
+        // 19. timestamp excluded — now the SOLE genuinely-uncovered S-030-D2
+        //     residual digest field (partner_subset_hash was closed in
+        //     assertion 18). timestamp CANNOT be bound the same way: honest
+        //     members' clocks differ within the validator's ±30s window, so a
+        //     raw append would make two honest members sign divergent digests
+        //     and spuriously abort the round. Binding it needs the assembler-
+        //     proposed / members-validate-±30s reconciliation (a ContribMsg
+        //     wire-format change, F2-SPEC §6.3 review-gated), and timestamp
+        //     does not drive deterministic apply. See S030-D2-Analysis.md §5.
         {
             Block b = baseline;
             b.timestamp = 999;
             check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: timestamp EXCLUDED (S-030-D2 residual, not closed by F2)");
+                  "compute_block_digest: timestamp EXCLUDED (sole S-030-D2 residual; §5 non-fix)");
         }
 
         // === F2 POSITIVE BINDING (shipped v2.7 F2 — the three pool-fed

@@ -37,13 +37,23 @@ using determ::util::json_require_array;
 // upstream source lives at src/node/producer.cpp:577-591; if the
 // upstream byte-order or field set ever changes, mirror it here.
 //
-// IMPORTANT: producer.cpp's compute_block_digest does NOT include
-// transactions, abort_events, cross_shard_receipts, inbound_receipts,
-// initial_state, partner_subset_hash, or state_root — only the
-// per-creator Phase-1 commits + index/prev_hash/tx_root/delay_seed
-// + consensus_mode/bft_proposer. That's the load-bearing invariant
-// that makes header-only sync sound: the digest is recomputable from
-// the fields that survive the rpc_headers strip.
+// IMPORTANT: producer.cpp's compute_block_digest binds the per-creator
+// Phase-1 commits + index/prev_hash/tx_root/delay_seed + consensus_mode/
+// bft_proposer (the v1 core, always), PLUS two classes of conditional
+// appendage:
+//   (1) the F2 view roots over the rpc_headers-STRIPPED collections
+//       (inbound_receipts / equivocation_events / abort_events). The light
+//       client cannot reconstruct these from a stripped header, so it does
+//       NOT bind them and FAIL-CLOSES on F2 / cross-shard blocks (false-
+//       negative, never false-PASS — verify those against a full node).
+//   (2) partner_subset_hash (R4/R7 merged-signing), which SURVIVES the
+//       rpc_headers strip (node.cpp::rpc_headers keeps it alongside
+//       state_root). Because the value is present in the stripped header,
+//       the light client CAN bind it exactly — so it mirrors producer's
+//       conditional-on-non-zero append below, keeping header-only sync sound
+//       for merged-but-non-F2 blocks. (transactions / cross_shard_receipts /
+//       initial_state / state_root are not in the digest at all.)
+// If the upstream byte-order or field set ever changes, mirror it here.
 Hash light_compute_block_digest(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
     h.append(b.index);
@@ -57,6 +67,15 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
+    // S-030-D2 (partner_subset_hash dimension): bind when non-zero, exactly
+    // mirroring producer.cpp::compute_block_digest's trailing conditional
+    // append. Deterministic field that survives the header strip, so this
+    // keeps the light digest byte-identical to the node's for merged blocks
+    // (and byte-identical to the v1 digest for every non-merged header).
+    Hash zero{};
+    if (b.partner_subset_hash != zero) {
+        h.append(b.partner_subset_hash);
+    }
     return h.finalize();
 }
 

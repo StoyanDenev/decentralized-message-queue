@@ -667,10 +667,13 @@ int cmd_verify_block_sigs(int argc, char** argv) {
 //               the INTERNALLY-recomputed digest (via verify_block_sigs).
 // SCOPE (F-LBV5, see docs/proofs/LightBlockVerifySoundness.md): light_compute_
 // block_digest omits the compute_view_root terms producer.cpp::compute_block_
-// digest binds for cross-shard inbound receipts + F2-reconciled eq/abort sets,
-// so on a cross-shard / F2 block SIGS FAIL-CLOSES (false-negative, never a false
-// PASS — verify those against a full node). Non-cross-shard/non-F2 blocks keep
-// the byte-identical v1 digest, so SIGS is exact there.
+// digest binds for cross-shard inbound receipts + F2-reconciled eq/abort sets
+// (those need the rpc_headers-STRIPPED collections to reconstruct), so on a
+// cross-shard / F2 block SIGS FAIL-CLOSES (false-negative, never a false PASS —
+// verify those against a full node). It DOES bind partner_subset_hash (S-030-D2
+// merge dimension), which survives the header strip, so merged-but-non-F2
+// blocks verify exactly. Non-cross-shard/non-F2 blocks keep the byte-identical
+// v1 digest, so SIGS is exact there.
 // Pure local crypto: no RPC, no daemon, no genesis anchor. (--block must be an
 // unwrapped Block JSON or a {block:{...}} envelope.) Exit 0 all pass, 2 a check
 // FAILED, 1 args/parse/IO error.

@@ -628,6 +628,21 @@ Hash compute_block_digest(const Block& b) {
         for (auto& a : b.abort_events) akeys.push_back(hash_abort_event(a));
         h.append(compute_view_root(akeys));
     }
+    // S-030-D2 (partner_subset_hash dimension): bind the R4 merged-signing
+    // partner-subset commitment into the digest ONLY when non-zero. Unlike
+    // the pool-fed eq/abort/inbound fields above, partner_subset_hash is NOT
+    // a gossip-async per-member view — it is DETERMINISTIC: every committee
+    // member at a merged height computes the identical value from the merge
+    // state (S030-D2-Analysis.md §3.2), so binding it raw cannot reintroduce
+    // the gossip-async digest divergence §2 warns about. Conditional-on-
+    // non-zero mirrors signing_bytes (block.cpp:323) so every non-merged
+    // block keeps a byte-identical v1 digest. Closes the partner_subset_hash
+    // ✗ row: a relayer that strips/alters the partner commitment after the
+    // K-of-K Phase-2 signature now changes the digest, so the signatures no
+    // longer verify. Field order: inbound, eq, abort, partner_subset_hash.
+    if (!is_zero_hash_(b.partner_subset_hash)) {
+        h.append(b.partner_subset_hash);
+    }
     return h.finalize();
 }
 
