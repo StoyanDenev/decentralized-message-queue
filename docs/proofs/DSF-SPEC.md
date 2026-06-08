@@ -312,7 +312,7 @@ DSF subsumes A10's largest two streams:
 
 **Risk: Virtual-clock + virtual-network abstractions introduce subtle production bugs.** Threading `Clock&` and `Transport&` through every consensus path touches many files.
 
-*Mitigation.* Mechanical refactor only. Production behavior is unchanged because `RealClock` and `AsioTransport` are pass-through wrappers. Existing 136 in-process unit tests + integration tests catch regressions immediately.
+*Mitigation.* Mechanical refactor only. Production behavior is unchanged because `RealClock` and `AsioTransport` are pass-through wrappers. Existing 152 in-process unit tests + integration tests catch regressions immediately.
 
 **Risk: Scenarios reveal real bugs in production code.** Likely outcome — DSF is built to find Byzantine bugs.
 

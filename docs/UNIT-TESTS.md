@@ -69,13 +69,14 @@ during development. Each new test wrapper must be added to the
 
 ## 2. Current coverage map
 
-136 subcommands; 2705 assertions; runs in <60s with no flakes.
+152 subcommands; 2718 assertions; runs in <60s with no flakes.
 
 ### 2.1 Cryptographic primitives
 
 | Subcommand | What it tests | Wrapper | FA-track |
 |---|---|---|---|
 | `determ test-sha256` | SHA-256 wrapper + `SHA256Builder` (10 assertions): NIST FIPS 180-4 published test vectors (empty input, "abc", 56-byte input exercising the >55-byte padding path), `SHA256Builder` ↔ one-shot equivalence, multi-piece incremental append correctness, **Preliminaries §1.3 big-endian uint64_t / int64_t encoding** that every signing-bytes / compute-block-digest / merkle-leaf-hash path depends on for cross-platform protocol determinism. | `tools/test_sha256.sh` | all hash claims |
+| `determ test-ed25519-scalar-reduce` | `determ_ed25519_sc_reduce64` (64→32 scalar reduction mod L) + `determ_ed25519_sc_is_canonical` edge/boundary contract (13 assertions): the existing test-ed25519-c99 / test-frost-c99 reduce only SHA-512 outputs / fuzzed seeds (happy path); this pins the PATHOLOGICAL-input guarantee that load-bears every Ed25519 signature + FROST share — output is ALWAYS canonical (< L) for any 64-byte input, with exact identities reduce(0)=0, reduce(L)=0 (the order boundary), reduce(L-1)=L-1, reduce(42)=42, reduce(L+7)=7 (modular wrap), reduce(2^256-1) canonical, determinism, canonical over 256 patterned inputs, and the sc_is_canonical(L)=false / sc_is_canonical(L-1)=true witness. No external oracle — L is a public constant. | `tools/test_ed25519_scalar_reduce_edge.sh` | A1 (Ed25519) / FROST |
 | `determ test-ed25519` | Ed25519 sign/verify + `generate_node_key` (10 assertions): key-shape, sign+verify round-trip, tampered-message rejection, tampered-signature rejection, wrong-pubkey rejection, RFC-8032 determinism (same key+msg → same sig), empty-message edge case, distinct-key distinct-sig, cross-key verify rejection, 4 KB long-message streaming. Every signature claim in the protocol reduces to Ed25519 EUF-CMA. | `tools/test_ed25519.sh` | FA1 / FA2 / FA5 / FA6 / FA7 / FA10 |
 | `determ test-merkle` | v2.1 Merkle primitives (12 assertions): `merkle_root` + `merkle_proof` + `merkle_verify` + `merkle_leaf_hash` + `merkle_inner_hash` over balanced + unbalanced + edge-case (empty / single-leaf) leaf sets. Round-trip, tampering detection (value_hash / sibling-hash / target_index), domain separation (leaf vs inner), determinism, sort-invariance. | `tools/test_merkle.sh` | FA1 |
 | `determ test-committee-selection` | `crypto::select_m_creators` (S-020 hybrid: both rejection-sampling at 2K≤N AND partial-Fisher-Yates at 2K>N branches), `select_after_abort_m`, `epoch_committee_seed` (13 assertions): determinism, seed-sensitivity, branch coverage at both sides of the 2K vs N threshold, edge cases (K=N, K=1), distinct-without-replacement, in-range invariant, shard-salt sensitivity. | `tools/test_committee_selection.sh` | FA1 / FA2 / FA5 / FA8 |

@@ -3,7 +3,7 @@
 # UnitTestCoverageMap — Meta-proof: in-process unit tests ↔ FA / S closures
 
 **Scope.** This is the meta-proof for S-035 Option 1: it formalizes the
-coverage map between the 136 in-process `determ test-*` subcommands and the
+coverage map between the 152 in-process `determ test-*` subcommands and the
 FA-track safety theorems + S-* security findings + crypto / wire-format
 primitives they pin.
 
@@ -13,7 +13,7 @@ primitives they pin.
 - `docs/UNIT-TESTS.md` — per-test description (assertions + surface motivation)
 - `docs/SECURITY.md` §S-035 — finding registration + Option 1 / 2 / 3 status
 - `docs/CLI-REFERENCE.md` §"S-035 Option 1 seed" — per-subcommand surface
-- `tools/test_*.sh` — wrappers (200 total; the 136 in-process subset wraps
+- `tools/test_*.sh` — wrappers (200 total; the 152 in-process subset wraps
   the `determ test-*` surface; the remaining wrappers are network-level
   integration tests outside the in-process scope of this proof)
 - `tools/run_all.sh` — canonical self-counting source of truth for the
@@ -29,7 +29,7 @@ paths:
 
 | # | Option | Status (in-session) |
 |---|---|---|
-| 1 | Per-feature unit tests (gtest/Catch2-shape) | 🟡 seeded with 136 in-process `determ test-*` subcommands; continues incrementally |
+| 1 | Per-feature unit tests (gtest/Catch2-shape) | 🟡 seeded with 152 in-process `determ test-*` subcommands; continues incrementally |
 | 2 | Deterministic Simulation Framework (DSF) | 🔥 spec resolved (`docs/proofs/DSF-SPEC.md`); implementation pending |
 | 3 | Path portability (`tools/common.sh`) | ✅ shipped |
 
@@ -39,7 +39,7 @@ load-bearing surface against silent regression. The 136-subcommand seed is
 the seed; the remaining gaps are the "extension targets" enumerated in
 §3 below.
 
-**Why a meta-proof.** §S-035's resolution table claims the 136 in-process
+**Why a meta-proof.** §S-035's resolution table claims the 152 in-process
 tests "cover the cryptographic foundations under every FA-track safety
 proof." That claim has not been individually audited per-test against
 per-FA / per-S item — it has only been asserted in aggregate. This proof
@@ -54,7 +54,7 @@ Merkle"). Reverse-map (§4) reports test-count-per-target so coverage
 imbalance is visible.
 
 **Scope clarification — in-process vs network-level tests.** This proof
-covers the 136 in-process subcommands wrapped by 136 of the 200
+covers the 152 in-process subcommands wrapped by 136 of the 200
 `tools/test_*.sh` scripts (specifically those whose body invokes
 `$DETERM test-<name>`). The remaining shell scripts are network-level
 integration tests (multi-node gossip, RPC round-trips, snapshot bootstrap
@@ -67,7 +67,7 @@ isolatable function under test.
 
 ## 2. Coverage map table
 
-The table below maps each of the 136 in-process `determ test-*` subcommands
+The table below maps each of the 152 in-process `determ test-*` subcommands
 to its target FA / FB / S item or named primitive. Per-test descriptions
 (assertion counts, surface motivation) live in `docs/UNIT-TESTS.md` §2 and
 are NOT duplicated here.
@@ -268,7 +268,7 @@ multiple FA theorems.
 | `test-tx-signing-determinism` | wire format / FA1 / determinism | `Transaction::signing_bytes` byte-identical across replays for same Transaction |
 | `test-transaction` | tx-level FA1 + S-018 | `Transaction::signing_bytes` + `compute_hash` + Ed25519 sign/verify + 10 TxType JSON round-trips |
 
-**Total: 136 in-process tests across 15 categories.** (`tools/run_all.sh`
+**Total: 152 in-process tests across 15 categories.** (`tools/run_all.sh`
 is the canonical self-counting source for the `determ test-*` subcommand
 total; the per-category breakdown above enumerates an earlier 117-test seed
 and is not re-enumerated here.)
@@ -705,7 +705,7 @@ F-1 / §3.2 zero-coverage items.
 - `src/main.cpp` — every `test-<feature>` subcommand implementation;
   136 distinct branches under `cmd == "test-..."` (verified by
   `grep -cE 'cmd == "test-' src/main.cpp`).
-- `tools/test_*.sh` — 200 wrappers total; the 136 in-process subset wraps
+- `tools/test_*.sh` — 200 wrappers total; the 152 in-process subset wraps
   the `determ test-*` surface (verified by cross-reference with the
   136 source-side entries).
 - `tools/common.sh` — Option 3 path-portability layer

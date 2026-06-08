@@ -645,7 +645,7 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 ### 3.15 Migration of existing callers (~5 days)
 
 - Refactor every libsodium call site to `determ::crypto::` API
-- Existing 136 in-process test subcommands continue passing
+- Existing 152 in-process test subcommands continue passing
 - New `determ test-crypto-*` subcommands added per primitive
 - libsodium removed from build
 

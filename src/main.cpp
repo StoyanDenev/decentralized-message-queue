@@ -426,6 +426,10 @@ In-process tests (deterministic, no network):
                                               Ed25519 (RFC 8032) byte-equal vs
                                               OpenSSL EVP_PKEY_ED25519 + the RFC
                                               8032 §7.1 KAT (§3.2; FROST prereq)
+  determ test-ed25519-scalar-reduce          sc_reduce64 (64->32 mod L) +
+                                              sc_is_canonical edge/boundary
+                                              contract: output always < L, exact
+                                              identities at 0 / L / L-1 / L+k
   determ test-frost-c99                       v2.10 Phase A: libsodium-free C99
                                               FROST-Ed25519 keygen — Shamir +
                                               Lagrange over the Ed25519 scalar
@@ -11066,6 +11070,89 @@ int main(int argc, char** argv) {
                   << ": aes-c99 "
                   << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
                   << " (libsodium-free C99 AES-256-GCM vs OpenSSL — the §Q9 gate; constant-time S-box + branchless GHASH)\n";
+        return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-ed25519-scalar-reduce") {
+        // Edge / boundary coverage for determ_ed25519_sc_reduce64 (the 64->32
+        // scalar reduction mod L) + determ_ed25519_sc_is_canonical. The existing
+        // test-ed25519-c99 / test-frost-c99 exercise sc_reduce64 only on SHA-512
+        // outputs / fuzzed seeds (happy path); this pins the PATHOLOGICAL-input
+        // contract: the output is ALWAYS canonical (< L) for ANY 64-byte input,
+        // with exact identities at 0, L, L-1, L+k, and small canonical values. A
+        // bug here (non-canonical output, or wrong value at the L boundary) would
+        // corrupt every Ed25519 signature + FROST share, so it is a load-bearing
+        // primitive. Properties are checked WITHOUT an external oracle — the
+        // group order L is a public constant and sc_is_canonical is the witness.
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        // L (Ed25519 group order, 2^252 + 27742317...493) little-endian, 32 bytes.
+        const uint8_t L[32] = {
+            0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
+            0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,
+            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10 };
+        auto is_zero32 = [](const uint8_t* p){ for (int i=0;i<32;i++) if (p[i]) return false; return true; };
+        auto eq32 = [](const uint8_t* a, const uint8_t* b){ for (int i=0;i<32;i++) if (a[i]!=b[i]) return false; return true; };
+
+        uint8_t in[64], out[32], out2[32];
+
+        // 1. reduce(0^64) == 0, canonical.
+        std::memset(in, 0, 64); determ_ed25519_sc_reduce64(in, out);
+        check(is_zero32(out), "reduce(0^64) == 0");
+        check(determ_ed25519_sc_is_canonical(out)==1, "reduce(0^64) is canonical");
+
+        // 2. reduce(0xff^64) is canonical (< L) — the all-bits-set pathological input.
+        std::memset(in, 0xff, 64); determ_ed25519_sc_reduce64(in, out);
+        check(determ_ed25519_sc_is_canonical(out)==1, "reduce(0xff^64) is canonical (< L)");
+
+        // 3. reduce(L padded to 64) == 0   (L ≡ 0 mod L, the exact boundary).
+        std::memset(in, 0, 64); std::memcpy(in, L, 32); determ_ed25519_sc_reduce64(in, out);
+        check(is_zero32(out), "reduce(L) == 0 (L ≡ 0 mod L)");
+
+        // 4. reduce(L-1) == L-1, canonical   (identity on the largest canonical value).
+        uint8_t Lm1[32]; std::memcpy(Lm1, L, 32); Lm1[0] = (uint8_t)(L[0]-1); // 0xed-1, no borrow
+        std::memset(in, 0, 64); std::memcpy(in, Lm1, 32); determ_ed25519_sc_reduce64(in, out);
+        check(eq32(out, Lm1), "reduce(L-1) == L-1 (identity on canonical)");
+        check(determ_ed25519_sc_is_canonical(out)==1, "reduce(L-1) is canonical");
+
+        // 5. reduce(small k) == k   (identity on a small canonical scalar).
+        std::memset(in, 0, 64); in[0] = 42; determ_ed25519_sc_reduce64(in, out);
+        uint8_t k42[32]; std::memset(k42,0,32); k42[0]=42;
+        check(eq32(out, k42), "reduce(42) == 42 (identity on small canonical)");
+
+        // 6. reduce(L+7) == 7   (modular wrap; L[0]=0xed, +7=0xf4, no carry).
+        std::memset(in, 0, 64); std::memcpy(in, L, 32); in[0] = (uint8_t)(L[0]+7);
+        determ_ed25519_sc_reduce64(in, out);
+        uint8_t k7[32]; std::memset(k7,0,32); k7[0]=7;
+        check(eq32(out, k7), "reduce(L+7) == 7 (modular wrap past the order)");
+
+        // 7. reduce(2^256-1: 0xff low 32, 0 high 32) is canonical.
+        std::memset(in, 0, 64); std::memset(in, 0xff, 32); determ_ed25519_sc_reduce64(in, out);
+        check(determ_ed25519_sc_is_canonical(out)==1, "reduce(2^256-1) is canonical");
+
+        // 8. determinism: same input -> byte-identical output.
+        std::memset(in, 0xab, 64); determ_ed25519_sc_reduce64(in, out);
+        determ_ed25519_sc_reduce64(in, out2);
+        check(eq32(out,out2), "reduce is deterministic (same input -> same output)");
+
+        // 9. canonical for many patterned 64-byte inputs (fixed pattern, no RNG).
+        bool all_canon = true;
+        for (int t = 0; t < 256 && all_canon; ++t) {
+            for (int j = 0; j < 64; ++j) in[j] = (uint8_t)((t*131 + j*97 + 17) & 0xff);
+            determ_ed25519_sc_reduce64(in, out);
+            if (determ_ed25519_sc_is_canonical(out) != 1) all_canon = false;
+        }
+        check(all_canon, "reduce(arbitrary) is canonical for 256 patterned inputs");
+
+        // 10. sc_is_canonical witness sanity: L is NOT canonical, L-1 IS.
+        check(determ_ed25519_sc_is_canonical(L)==0, "sc_is_canonical(L) == false (L not < L)");
+        check(determ_ed25519_sc_is_canonical(Lm1)==1, "sc_is_canonical(L-1) == true");
+
+        std::cout << "\n  " << (fail==0?"PASS":"FAIL") << ": ed25519-scalar-reduce "
+                  << (fail==0?"all assertions":"had failures") << "\n";
         return fail==0 ? 0 : 1;
     }
 
