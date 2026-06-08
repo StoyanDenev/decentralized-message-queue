@@ -143,6 +143,12 @@ void print_usage() {
         "Composite trustless reads (--genesis required):\n"
         "  verify-chain --rpc-port <N> --genesis <file>\n"
         "      Anchor genesis + fetch all headers + verify every committee sig.\n"
+        "  cross-check --genesis <file> --rpc-port <N> --rpc-port <M> [...] [--json]\n"
+        "      Multi-peer divergence detector: independently committee-verify each\n"
+        "      daemon from the pinned genesis, then require peers sharing a height to\n"
+        "      agree on block_hash + state_root. Disagreement at a shared height =\n"
+        "      a committee-signed fork (DIVERGENCE, exit 2). A behind peer is benign\n"
+        "      lag. Exit 0 AGREE / 2 DIVERGENCE / 3 INCONCLUSIVE / 1 UNVERIFIABLE.\n"
         "  audit --rpc-port <N> --genesis <file> [--json]\n"
         "      One-shot trust-minimized node audit: composes CHAIN (verify-chain:\n"
         "      genesis pin + continuity + every committee sig) and SUPPLY\n"
@@ -1357,6 +1363,133 @@ int cmd_verify_chain(int argc, char** argv) {
         std::cerr << "verify-chain: " << e.what() << "\n";
         return 1;
     }
+}
+
+// ──────────────────────── cross-check (multi-peer divergence detector) ────────
+//
+// Closes the single-daemon limitation every light-client proof flags
+// (LightClientCompositionMap §6 "single-daemon (no multi-peer cross-check)"):
+// verify N independent daemons against the SAME pinned genesis, then require
+// every pair of peers reporting the SAME height to agree on (block_hash,
+// state_root). Two genesis-anchored, committee-verified chains that disagree at
+// a shared height is a provable committee-signed fork / equivocation — a single
+// honest canonical chain has exactly one block per height — so it is reported as
+// DIVERGENCE and fails closed. A peer merely BEHIND is benign LAG (not an
+// attack; not compared, only reported). Soundness rests on the same {A1
+// committee-sig EUF-CMA, A2 SHA-256 collision} the per-peer verify-chain already
+// assumes; the cross-check adds eclipse / equivocation DETECTION across peers
+// WITHOUT weakening any single-peer guarantee (each peer is independently
+// fully verified before any comparison). A peer that fails its own
+// genesis-anchor or chain verification makes the whole check UNVERIFIABLE
+// (fail-closed) — you cannot cross-check against a peer you cannot verify.
+//
+// Peers are localhost:<port> here (matching the local-cluster test pattern);
+// cross-HOST peers await an RpcClient host:port extension — see the
+// MultiPeerCrossCheck soundness doc for the spec + the follow-up.
+//
+// Exit codes: 0 AGREE (all shared-height groups consistent), 2 DIVERGENCE,
+// 3 INCONCLUSIVE (no two peers share a height this round — retry as they
+// converge), 1 UNVERIFIABLE (a peer failed verification) or usage error.
+int cmd_cross_check(int argc, char** argv) {
+    std::string genesis_path;
+    std::vector<uint16_t> ports;
+    bool json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) ports.push_back(parse_u16("--rpc-port", argv[++i]));
+        else if (a == "--genesis"  && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--json")                     json_out = true;
+        else { std::cerr << "cross-check: unknown arg '" << a << "'\n"; return 1; }
+    }
+    if (genesis_path.empty() || ports.size() < 2) {
+        std::cerr << "cross-check: --genesis and at least two --rpc-port <N> are required\n";
+        return 1;
+    }
+
+    struct PeerView { uint16_t port; uint64_t height; std::string block_hash, state_root; };
+    std::vector<PeerView> peers;
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        for (uint16_t p : ports) {
+            RpcClient rpc(p);
+            if (!rpc.open()) {
+                std::cerr << "cross-check: peer " << p << " UNVERIFIABLE (fail-closed): "
+                          << rpc.last_error() << "\n";
+                return 1;
+            }
+            try {
+                std::string gh = anchor_genesis(rpc, genesis);
+                auto vc = verify_chain_to_head(rpc, committee_seed, gh);
+                peers.push_back({p, vc.height, vc.head_block_hash, vc.head_state_root});
+            } catch (const std::exception& e) {
+                std::cerr << "cross-check: peer " << p << " UNVERIFIABLE (fail-closed): "
+                          << e.what() << "\n";
+                return 1;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "cross-check: " << e.what() << "\n";
+        return 1;
+    }
+
+    // Group peers by height; require intra-group agreement on (block_hash, state_root).
+    std::map<uint64_t, std::vector<size_t>> by_height;
+    for (size_t i = 0; i < peers.size(); ++i) by_height[peers[i].height].push_back(i);
+    // NB: explicit comparisons, not std::min/std::max — <windows.h> (pulled in
+    // via rpc_client.hpp on Win32) #defines min/max macros that mangle std::min.
+    uint64_t min_h = peers[0].height, max_h = peers[0].height;
+    for (auto& pv : peers) {
+        if (pv.height < min_h) min_h = pv.height;
+        if (pv.height > max_h) max_h = pv.height;
+    }
+
+    bool any_shared = false, divergence = false;
+    std::string diag;
+    for (auto& kv : by_height) {
+        const auto& idxs = kv.second;
+        if (idxs.size() < 2) continue;
+        any_shared = true;
+        const auto& ref = peers[idxs[0]];
+        for (size_t k = 1; k < idxs.size(); ++k) {
+            const auto& q = peers[idxs[k]];
+            if (q.block_hash != ref.block_hash || q.state_root != ref.state_root) {
+                divergence = true;
+                diag += "  DIVERGENCE at height " + std::to_string(kv.first) + ":\n"
+                      + "    peer " + std::to_string(ref.port) + ": block_hash=" + ref.block_hash
+                      + " state_root=" + ref.state_root + "\n"
+                      + "    peer " + std::to_string(q.port)   + ": block_hash=" + q.block_hash
+                      + " state_root=" + q.state_root + "\n";
+            }
+        }
+    }
+
+    if (json_out) {
+        nlohmann::json j;
+        j["peers"] = nlohmann::json::array();
+        for (auto& pv : peers)
+            j["peers"].push_back({{"port", pv.port}, {"height", pv.height},
+                                  {"block_hash", pv.block_hash}, {"state_root", pv.state_root}});
+        j["min_height"] = min_h;
+        j["max_height"] = max_h;
+        j["verdict"] = divergence ? "DIVERGENCE" : (any_shared ? "AGREE" : "INCONCLUSIVE");
+        std::cout << j.dump(2) << "\n";
+    } else {
+        std::cout << "cross-check: " << peers.size() << " peers, heights "
+                  << min_h << ".." << max_h << "\n";
+        for (auto& pv : peers)
+            std::cout << "  peer " << pv.port << ": height " << pv.height
+                      << " block_hash " << pv.block_hash << "\n";
+        if (divergence) std::cout << diag << "VERDICT: DIVERGENCE (committee-signed fork detected)\n";
+        else if (!any_shared)
+            std::cout << "VERDICT: INCONCLUSIVE — no two peers share a height this round; "
+                         "retry as they converge\n";
+        else std::cout << "VERDICT: AGREE — all peers sharing a height agree on block_hash + state_root"
+                       << (min_h != max_h ? " (some peers lag — benign)" : "") << "\n";
+    }
+    if (divergence) return 2;
+    if (!any_shared) return 3;
+    return 0;
 }
 
 // ────────────────────── balance-trustless / nonce-trustless ────────────
@@ -6242,6 +6375,7 @@ int main(int argc, char** argv) {
         if (cmd == "fetch-validators")      return cmd_fetch_validators(sub_argc, sub_argv);
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
         if (cmd == "verify-chain")          return cmd_verify_chain(sub_argc, sub_argv);
+        if (cmd == "cross-check")           return cmd_cross_check(sub_argc, sub_argv);
         if (cmd == "audit")                 return cmd_audit(sub_argc, sub_argv);
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
