@@ -128,13 +128,37 @@ shamir::Share parse_share(const std::string& blob) {
     return s;
 }
 
+// Guarded CLI integer-argument parses. A non-numeric value passed to a bare
+// std::sto* would throw std::invalid_argument out of main -> std::terminate ->
+// process abort (a fail-open crash with no diagnostic). Each helper prints
+// "<cmd>: <flag> must be an integer" to stderr and returns false so the caller
+// can `return 1`. Per-type to preserve range (e.g. --fee needs full u64 via
+// stoull). Trailing-garbage tolerance matches the existing guarded sites
+// (plain std::sto*, no width/range check) to avoid behaviour drift.
+inline bool arg_i32(const char* cmd, const char* flag, const char* v, int& out) {
+    try { out = std::stoi(v); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+inline bool arg_u32(const char* cmd, const char* flag, const char* v, uint32_t& out) {
+    try { out = static_cast<uint32_t>(std::stoul(v)); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+inline bool arg_i64(const char* cmd, const char* flag, const char* v, int64_t& out) {
+    try { out = static_cast<int64_t>(std::stoll(v)); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+inline bool arg_u64(const char* cmd, const char* flag, const char* v, uint64_t& out) {
+    try { out = static_cast<uint64_t>(std::stoull(v)); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+
 int cmd_shamir_split(int argc, char** argv) {
     std::string secret_hex;
     int threshold = 0, share_count = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "-t" && i + 1 < argc) threshold   = std::stoi(argv[++i]);
-        else if (a == "-n" && i + 1 < argc) share_count = std::stoi(argv[++i]);
+        if      (a == "-t" && i + 1 < argc) { if (!arg_i32("shamir split", "-t", argv[++i], threshold)) return 1; }
+        else if (a == "-n" && i + 1 < argc) { if (!arg_i32("shamir split", "-n", argv[++i], share_count)) return 1; }
         else if (a.size() && a[0] != '-')   secret_hex  = a;
     }
     if (secret_hex.empty() || threshold <= 0 || share_count <= 0) {
@@ -217,8 +241,8 @@ int cmd_shamir_split_raw(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--secret"    && i + 1 < argc) secret_hex = argv[++i];
-        else if (a == "--threshold" && i + 1 < argc) threshold  = std::stoi(argv[++i]);
-        else if (a == "--shares"    && i + 1 < argc) shares     = std::stoi(argv[++i]);
+        else if (a == "--threshold" && i + 1 < argc) { if (!arg_i32("shamir-split", "--threshold", argv[++i], threshold)) return 1; }
+        else if (a == "--shares"    && i + 1 < argc) { if (!arg_i32("shamir-split", "--shares", argv[++i], shares)) return 1; }
         else if (a == "--json")                      json_out   = true;
     }
     if (secret_hex.empty() || threshold < 0 || shares < 0) {
@@ -942,7 +966,7 @@ int cmd_envelope_encrypt(int argc, char** argv) {
         if      (a == "--plaintext" && i + 1 < argc) plaintext_hex = argv[++i];
         else if (a == "--password"  && i + 1 < argc) password      = argv[++i];
         else if (a == "--aad"       && i + 1 < argc) aad_hex       = argv[++i];
-        else if (a == "--iters"     && i + 1 < argc) iters         = static_cast<uint32_t>(std::stoul(argv[++i]));
+        else if (a == "--iters"     && i + 1 < argc) { if (!arg_u32("envelope encrypt", "--iters", argv[++i], iters)) return 1; }
     }
     if (plaintext_hex.empty() || password.empty()) {
         std::cerr << "Usage: determ-wallet envelope encrypt "
@@ -2583,7 +2607,7 @@ int cmd_backup_verify(int argc, char** argv) {
         std::string a = argv[i];
         if      (a == "--shares"    && i + 1 < argc) shares_path    = argv[++i];
         else if (a == "--envelopes" && i + 1 < argc) envelopes_path = argv[++i];
-        else if (a == "--threshold" && i + 1 < argc) threshold      = std::stoi(argv[++i]);
+        else if (a == "--threshold" && i + 1 < argc) { if (!arg_i32("backup-verify", "--threshold", argv[++i], threshold)) return 1; }
         else if (a == "--json")                       json_out       = true;
     }
     if (shares_path.empty() || envelopes_path.empty()) {
@@ -6483,8 +6507,8 @@ int cmd_create_recovery(int argc, char** argv) {
         else if (a == "--password" && i + 1 < argc) password    = argv[++i];
         else if (a == "--out"      && i + 1 < argc) out_path    = argv[++i];
         else if (a == "--scheme"   && i + 1 < argc) scheme      = argv[++i];
-        else if (a == "-t"         && i + 1 < argc) threshold   = std::stoi(argv[++i]);
-        else if (a == "-n"         && i + 1 < argc) share_count = std::stoi(argv[++i]);
+        else if (a == "-t"         && i + 1 < argc) { if (!arg_i32("create-recovery", "-t", argv[++i], threshold)) return 1; }
+        else if (a == "-n"         && i + 1 < argc) { if (!arg_i32("create-recovery", "-n", argv[++i], share_count)) return 1; }
     }
     if (seed_hex.empty() || password.empty() || out_path.empty()
         || threshold <= 0 || share_count <= 0) {
@@ -6621,7 +6645,7 @@ int cmd_opaque_handshake(int argc, char** argv) {
         std::string a = argv[i];
         if      (a == "--mode"        && i + 1 < argc) mode        = argv[++i];
         else if (a == "--password"    && i + 1 < argc) password    = argv[++i];
-        else if (a == "--guardian-id" && i + 1 < argc) guardian_id = std::stoi(argv[++i]);
+        else if (a == "--guardian-id" && i + 1 < argc) { if (!arg_i32("opaque-handshake", "--guardian-id", argv[++i], guardian_id)) return 1; }
         else if (a == "--record"      && i + 1 < argc) record_hex  = argv[++i];
     }
     if (mode.empty() || password.empty() || guardian_id < 0 || guardian_id > 255) {
@@ -16751,8 +16775,8 @@ int cmd_bulk_send(int argc, char** argv) {
         if      (a == "--priv-keyfile"  && i + 1 < argc) priv_keyfile = argv[++i];
         else if (a == "--batch-file"    && i + 1 < argc) batch_file   = argv[++i];
         else if (a == "--rpc-port"      && i + 1 < argc) rpc_port     = std::atoi(argv[++i]);
-        else if (a == "--fee"           && i + 1 < argc) default_fee  = std::stoull(argv[++i]);
-        else if (a == "--starting-nonce" && i + 1 < argc) starting_nonce_override = std::stoll(argv[++i]);
+        else if (a == "--fee"           && i + 1 < argc) { if (!arg_u64("bulk-send", "--fee", argv[++i], default_fee)) return 1; }
+        else if (a == "--starting-nonce" && i + 1 < argc) { if (!arg_i64("bulk-send", "--starting-nonce", argv[++i], starting_nonce_override)) return 1; }
         else if (a == "--dry-run")                        dry_run             = true;
         else if (a == "--continue-on-error")              continue_on_error   = true;
         else if (a == "--json")                           json_out            = true;
@@ -17291,8 +17315,8 @@ int cmd_bulk_stake(int argc, char** argv) {
         if      (a == "--priv-keyfile"   && i + 1 < argc) priv_keyfile = argv[++i];
         else if (a == "--stake-list"     && i + 1 < argc) stake_list   = argv[++i];
         else if (a == "--rpc-port"       && i + 1 < argc) rpc_port     = std::atoi(argv[++i]);
-        else if (a == "--fee"            && i + 1 < argc) default_fee  = std::stoull(argv[++i]);
-        else if (a == "--starting-nonce" && i + 1 < argc) starting_nonce_override = std::stoll(argv[++i]);
+        else if (a == "--fee"            && i + 1 < argc) { if (!arg_u64("bulk-stake", "--fee", argv[++i], default_fee)) return 1; }
+        else if (a == "--starting-nonce" && i + 1 < argc) { if (!arg_i64("bulk-stake", "--starting-nonce", argv[++i], starting_nonce_override)) return 1; }
         else if (a == "--dry-run")                        dry_run             = true;
         else if (a == "--continue-on-error")              continue_on_error   = true;
         else if (a == "--json")                           json_out            = true;
@@ -18463,9 +18487,9 @@ int cmd_tx_history_export(int argc, char** argv) {
         std::string a = argv[i];
         if      (a == "--rpc-port"             && i + 1 < argc) rpc_port      = std::atoi(argv[++i]);
         else if (a == "--accounts"             && i + 1 < argc) accounts_in   = argv[++i];
-        else if (a == "--from"                 && i + 1 < argc) from_h_arg    = std::stoll(argv[++i]);
-        else if (a == "--to"                   && i + 1 < argc) to_h_arg      = std::stoll(argv[++i]);
-        else if (a == "--last"                 && i + 1 < argc) last_n_arg    = std::stoll(argv[++i]);
+        else if (a == "--from"                 && i + 1 < argc) { if (!arg_i64("tx-history-export", "--from", argv[++i], from_h_arg)) return 1; }
+        else if (a == "--to"                   && i + 1 < argc) { if (!arg_i64("tx-history-export", "--to", argv[++i], to_h_arg)) return 1; }
+        else if (a == "--last"                 && i + 1 < argc) { if (!arg_i64("tx-history-export", "--last", argv[++i], last_n_arg)) return 1; }
         else if (a == "--out"                  && i + 1 < argc) out_path      = argv[++i];
         else if (a == "--include-empty-blocks")                 include_empty = true;
         else if (a == "--json") {/* default; no-op */}
@@ -18982,10 +19006,10 @@ int cmd_account_balance_history(int argc, char** argv) {
         std::string a = argv[i];
         if      (a == "--rpc-port"             && i + 1 < argc) rpc_port = std::atoi(argv[++i]);
         else if (a == "--account"              && i + 1 < argc) account_in = argv[++i];
-        else if (a == "--from"                 && i + 1 < argc) from_h_arg = std::stoll(argv[++i]);
-        else if (a == "--to"                   && i + 1 < argc) to_h_arg   = std::stoll(argv[++i]);
-        else if (a == "--last"                 && i + 1 < argc) last_n_arg = std::stoll(argv[++i]);
-        else if (a == "--checkpoint-every"     && i + 1 < argc) checkpoint_every_arg = std::stoll(argv[++i]);
+        else if (a == "--from"                 && i + 1 < argc) { if (!arg_i64("account-balance-history", "--from", argv[++i], from_h_arg)) return 1; }
+        else if (a == "--to"                   && i + 1 < argc) { if (!arg_i64("account-balance-history", "--to", argv[++i], to_h_arg)) return 1; }
+        else if (a == "--last"                 && i + 1 < argc) { if (!arg_i64("account-balance-history", "--last", argv[++i], last_n_arg)) return 1; }
+        else if (a == "--checkpoint-every"     && i + 1 < argc) { if (!arg_i64("account-balance-history", "--checkpoint-every", argv[++i], checkpoint_every_arg)) return 1; }
         else if (a == "--out"                  && i + 1 < argc) out_path   = argv[++i];
         else if (a == "--include-empty-blocks")                 include_empty = true;
         else if (a == "--json") {/* default; no-op */}
