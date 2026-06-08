@@ -10,8 +10,9 @@ fork / equivocation served by a divergent daemon.
 
 ## 1. Mechanism
 
-Given a pinned `--genesis` file and ≥2 daemon endpoints (`--rpc-port`, localhost
-this iteration — see §6), for each peer independently:
+Given a pinned `--genesis` file and ≥2 daemon endpoints (`--rpc-port <N>` for
+localhost and/or `--peer <host:port>` for remote/cross-host — see §4), for each
+peer independently:
 
 1. `anchor_genesis` — recompute the genesis hash locally and reject the peer if
    its block 0 doesn't match (the `LightClientThreatModel.md` T-L1 anchor).
@@ -89,11 +90,16 @@ property (T-L1..T-L4, SR-1, TI-1, etc.).
   AGREE and the cross-check is silent. Multi-peer detection requires ≥1
   *independent honest* peer in the query set — the operator's responsibility.
   (This reduces to A_byz_committee: a forged chain still needs K-of-K sigs.)
-- **Localhost-only (this iteration).** `RpcClient` connects to `127.0.0.1:<port>`,
-  so "peers" are distinct local daemons (the local-cluster pattern). True
-  cross-HOST redundancy — the strongest eclipse defense — awaits an `RpcClient`
-  host:port extension; tracked as the documented follow-up. The agreement logic
-  is host-agnostic, so the extension is additive.
+- **Cross-host peers (now supported, commit `9fed9ad`).** `--rpc-port <N>` targets
+  `127.0.0.1:<N>` (the local-cluster pattern); `--peer <host:port>` targets a
+  remote daemon, resolved via `RpcClient`'s getaddrinfo host path — so true
+  cross-HOST redundancy (independent operators / machines), the strongest form of
+  this eclipse defense, is available. The loopback fast path is preserved
+  byte-for-byte (the host branch fires only for a non-loopback host), so the
+  agreement logic and every other determ-light command are unchanged. Residual:
+  the eclipse defense is only as strong as the *independence* of the chosen hosts
+  (querying N endpoints behind one malicious operator is still a collude set — see
+  the bullet above).
 - **Not a non-membership / liveness proof.** AGREE attests consistency among the
   queried peers at shared heights at one instant; it does not prove the chain is
   live, that a specific tx is included, or that no peer is withholding (the
