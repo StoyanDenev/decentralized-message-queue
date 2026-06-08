@@ -416,7 +416,17 @@ int cmd_shamir_verify(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--shares"    && i + 1 < argc) shares_path = argv[++i];
-        else if (a == "--threshold" && i + 1 < argc) threshold   = std::stoi(argv[++i]);
+        else if (a == "--threshold" && i + 1 < argc) {
+            // Guard std::stoi: an empty/non-numeric --threshold would throw
+            // std::invalid_argument out of main (std::terminate / process
+            // abort — a fail-open crash on the share-set sanity gate). Mirror
+            // cmd_shamir_rotate's guarded parse → clean exit 1.
+            try { threshold = std::stoi(argv[++i]); }
+            catch (...) {
+                std::cerr << "shamir-verify: --threshold must be an integer\n";
+                return 1;
+            }
+        }
         else if (a == "--json")                       json_out    = true;
     }
     if (shares_path.empty()) {
