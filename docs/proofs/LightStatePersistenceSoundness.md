@@ -40,7 +40,12 @@ head_block_hash, head_state_root}`.
   it (`verify_chain_walk` anchored at `head_block_hash`), skipping the
   committee-signed prefix; falls back to a full verify when the anchor is
   absent/corrupt/wrong-chain or the daemon hasn't advanced (LSP-6). Pair with
-  `--persist` for the steady-state resume-then-advance loop.
+  `--persist` for the steady-state resume-then-advance loop. The resume-or-full
+  decision lives in the shared `anchored_head` helper (`trustless_read.cpp`), the
+  SINGLE source of truth that `cmd_verify_chain` AND the composite trustless reads
+  (`balance/nonce/stake/supply-trustless`, all `--resume`-capable) route through —
+  so every reader inherits the same adversarially-verified resume soundness +
+  genesis re-pin + fallback rules rather than reimplementing them.
 - **Path resolution** (`default_state_path`): `--state <path>` ›
   `$DETERM_LIGHT_STATE` › `<home>/.determ-light/state.json`.
 
