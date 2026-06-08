@@ -25,7 +25,7 @@ The honest version: an in-tree implementation attempt landed, broke the equivoca
 | `creator_dh_secrets` (Phase 2 reveals) | ✓ | ✗ (revealed after digest is signed) |
 | `delay_output` (Phase 2 derived) | ✓ | ✗ (derived after digest is signed) |
 | `cumulative_rand` (Phase 2 derived) | ✓ | ✗ (derived after digest is signed) |
-| `timestamp` | ✓ | ✗ |
+| `timestamp` | ✓ | ✓ (conditional: bound when the block carries `creator_proposer_times`, i.e. went through median reconciliation — commit `f99eeb8`, §5) |
 | `abort_events` | ✓ | ✓ (conditional: bound when the block carries a non-zero abort view root — v2.7 F2, commit `48c4b45`, see note) |
 | `equivocation_events` | ✓ | ✓ (conditional: bound when the block carries a non-zero eq view root — v2.7 F2, commit `48c4b45`, see note) |
 | `cross_shard_receipts` | ✓ | ✗ (deterministically derived from the committee tx set, which `tx_root` + `creator_tx_lists` already bind) |
@@ -59,8 +59,8 @@ The "✗" rows below the Phase-2 reveal block are the D2 gap. They're part of th
 > SUBSET (not exact-cardinality) because the event hashes include observer-dependent
 > forensic fields; see `EqAbortViewDigestExtension.md`. `cross_shard_receipts` is
 > deterministically derived from the committee tx set (already bound via `tx_root`);
-> `timestamp` remains the residual ✗ row (the §5 non-fix); `partner_subset_hash`
-> is now bound — see the note below.
+> `partner_subset_hash` is now bound (note below) and `timestamp` is now bound
+> via median reconciliation (§5, commit `f99eeb8`), so NO ✗ rows remain.
 >
 > **Note (`partner_subset_hash` now bound — commit `8585a50`).** The R4/R7
 > merged-signing partner-subset commitment is now appended to `compute_block_digest`
@@ -72,7 +72,8 @@ The "✗" rows below the Phase-2 reveal block are the D2 gap. They're part of th
 > gate keeps every non-merged block byte-identical to the v1 digest. The light client
 > mirrors the same append (`light/verify.cpp`); the field survives the `rpc_headers`
 > strip (kept alongside `state_root`), so header-only sync stays sound for merged-but-
-> non-F2 blocks. That leaves `timestamp` as the sole residual ✗ row (§5).
+> non-F2 blocks. `timestamp` is now bound too via median reconciliation (§5), so
+> no S-030-D2 digest ✗ rows remain.
 
 **Conditional binding note.** `partner_subset_hash` and `state_root` are bound into `signing_bytes` only when their value is non-zero — a backward-compat shim that preserves byte-identical hashes for pre-feature blocks. On a freshly-deployed chain pre-S-033 (zero state_root on every block), the conditional binding contributes nothing; D2 is fully open. On a post-S-033 chain where the producer auto-populates state_root, the binding is active on every block, and S-033's indirect closure (§3.5) is in effect.
 
@@ -208,19 +209,29 @@ The current `compute_block_digest()` still doesn't cover the ✗-row fields — 
 
 8. **The equivocation/abort dimensions' consensus-layer fix is now SHIPPED (commit `48c4b45`).** Same structural closure as inbound (item 7) but with the UNION rule: `equivocation_events` + `abort_events` are bound into `compute_block_digest` as the committee-wide `reconcile_union` of the members' committed Phase-1 views, and the validator enforces block-evidence ⊆ union. So the two-instance gossip-layer attack is closed for all three pool-fed dimensions (inbound + eq + abort). The remaining ✗ rows are `cross_shard_receipts` (deterministically derived from the bound tx set) and `timestamp` (the §5 non-fix) — neither an independently-gossiped committee-view pool; `partner_subset_hash` is now bound too (item 9).
 
-9. **The `partner_subset_hash` dimension is now SHIPPED (commit `8585a50`).** Distinct from items 7+8: this one needed NO view-reconciliation. `partner_subset_hash` is the R4/R7 merged-signing partner-subset commitment, and it is DETERMINISTIC — every committee member at a merged height computes the identical value from the merge state (§3.2) — so `compute_block_digest` binds it raw (conditional on non-zero, mirroring `signing_bytes` at block.cpp:323) with no gossip-async divergence risk. A relayer that strips/alters it after the K-of-K Phase-2 signature now breaks digest verification. The light client mirrors the append (`light/verify.cpp`); the field survives the `rpc_headers` strip, so header-only sync stays sound for merged-but-non-F2 blocks. That leaves `timestamp` (§5) as the sole genuinely-uncovered residual digest field.
+9. **The `partner_subset_hash` dimension is now SHIPPED (commit `8585a50`).** Distinct from items 7+8: this one needed NO view-reconciliation. `partner_subset_hash` is the R4/R7 merged-signing partner-subset commitment, and it is DETERMINISTIC — every committee member at a merged height computes the identical value from the merge state (§3.2) — so `compute_block_digest` binds it raw (conditional on non-zero, mirroring `signing_bytes` at block.cpp:323) with no gossip-async divergence risk. A relayer that strips/alters it after the K-of-K Phase-2 signature now breaks digest verification. The light client mirrors the append (`light/verify.cpp`); the field survives the `rpc_headers` strip, so header-only sync stays sound for merged-but-non-F2 blocks.
+
+10. **The `timestamp` dimension is now SHIPPED (commit `f99eeb8`).** The last ✗ row, closed via the median reconciliation in §5 (Phase-1 `proposer_time` commit → deterministic lower-median at `build_body` → digest binding → validator re-derivation). With this, **every S-030-D2 digest dimension is closed**: the three pool-fed views via v2.7 F2 (items 7+8), `partner_subset_hash` directly (item 9), and `timestamp` via median reconciliation (this item). `cross_shard_receipts` is the only ✗ that stays ✗ — but it is deterministically derived from the committee tx set (already bound via `tx_root` + `creator_tx_lists`), not an independent divergence vector. The consensus-layer D2 closure is therefore complete: no two distinct block instances can both collect K-of-K signatures.
 
 For permissioned / consortium deployments, S-033's partial closure is the practical solution. For permissionless deployments wanting to honor the "any single honest validator suffices" claim literally (and to prevent two-instance gossip-layer attacks even when both fail apply on honest nodes), v2.7 F2 view reconciliation ships the consensus-layer structural fix — now live for all three pool-fed dimensions (inbound + equivocation + abort) per items 7 + 8.
 
 ---
 
-## 5. The non-fix: timestamp inclusion
+## 5. Timestamp inclusion — the "non-fix" that became the fix (SHIPPED, commit `f99eeb8`)
 
 A separate question: should `timestamp` be included in `compute_block_digest()`?
 
-Today it isn't. Honest members' local clocks differ within `±30s` (the validator's window). If `timestamp` were in the digest, two members with clocks differing by 200ms would sign different digests. Spurious rounds aborts.
+**The original obstacle (why a RAW append is wrong).** Honest members' local clocks differ within `±30s` (the validator's window). If the raw `timestamp` were in the digest, two members with clocks differing by 200ms would sign different digests → spurious round aborts. So `timestamp` cannot be hashed in the way `tx_root` is.
 
-The way to include `timestamp` is to have the assembler propose a specific value at the Phase 1→2 transition and other members verify it's within their `±30s` window before signing. This is doable but interacts with the same view-reconciliation problem above — best handled together.
+**The fix (shipped).** The same Phase-1-commit-then-reconcile pattern that closes the pool-fed dimensions (§3) applies — just with a numeric median instead of a set union/intersection:
+
+1. **Phase-1 commit.** Each member's `ContribMsg` carries `proposer_time` = its local `now_unix()`, bound into `make_contrib_commitment` (behind the `DTM-TS-v1` domain separator, only when non-zero — so legacy/test contribs keep the byte-identical v1 commitment). The Phase-1 Ed25519 signature authenticates the committed time, so a member cannot equivocate on the time it contributes to the median.
+2. **Reconcile at the Phase 1→2 boundary.** `build_body` sets the canonical `b.timestamp = reconcile_median_time(creator_proposer_times)` — the deterministic **lower-median** `sorted[(K-1)/2]` of the K committed times. This is a pure function of the K signed Phase-1 commits, so every honest assembler computes the identical value (no gossip-async divergence). Under `f < K/3` the lower-median is honest-flanked (the order statistic at index `(K-1)/2` lies within the honest-clock spread), so a Byzantine minority cannot bias it — the standard BFT-time median.
+3. **Digest binding.** `compute_block_digest` appends `b.timestamp` when `creator_proposer_times` is non-empty (the activation signal — a legacy block keeps the v1 digest). Field order: inbound, eq, abort, `partner_subset_hash`, `timestamp`.
+4. **Validator.** `check_creator_commits` recomputes each creator's Phase-1 commit WITH its `proposer_time` (so the per-creator time is sig-authenticated). `check_timestamp` re-derives the median from `creator_proposer_times` and rejects on `size != creators`, any zero entry, or `timestamp != median`; the existing `±30s` wall-clock bound is retained as a liveness sanity (the median is ~`now`, so it stays in-window).
+5. **Light client.** `light_compute_block_digest` mirrors the append. `creator_proposer_times` survives the `rpc_headers` strip (kept like `state_root` / `partner_subset_hash`), so header-only sync stays sound — a daemon that tampers `b.timestamp` post-signing fails the light sig check.
+
+Backward-compat: when any committed `proposer_time` is zero (pre-activation / test), `build_body` drops `creator_proposer_times` and falls back to the assembler wall-clock, so the block keeps its byte-identical v1 shape and `timestamp` is NOT digest-bound. Regression: `determ test-timestamp-reconciliation` (16 assertions) + FAST=1 (every non-reconciled block byte-identical). With this, **all S-030-D2 digest ✗ rows are closed** (`cross_shard_receipts` remains derived-not-independent via `tx_root`).
 
 ---
 
