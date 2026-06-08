@@ -30,7 +30,7 @@ The honest version: an in-tree implementation attempt landed, broke the equivoca
 | `equivocation_events` | ✓ | ✓ (conditional: bound when the block carries a non-zero eq view root — v2.7 F2, commit `48c4b45`, see note) |
 | `cross_shard_receipts` | ✓ | ✗ (deterministically derived from the committee tx set, which `tx_root` + `creator_tx_lists` already bind) |
 | `inbound_receipts` | ✓ | ✓ (conditional: bound when non-empty — commit `a727cb2`, see note) |
-| `partner_subset_hash` | ✓ (conditional: non-zero only) | ✗ |
+| `partner_subset_hash` | ✓ (conditional: non-zero only) | ✓ (conditional: bound when non-zero — deterministic from merge state per §3.2; commit `8585a50`, see note) |
 | `state_root` (S-033) | ✓ (conditional: non-zero only) | ✗ |
 | `initial_state` (genesis only) | ✓ | ✗ (genesis is not committee-signed) |
 
@@ -59,7 +59,20 @@ The "✗" rows below the Phase-2 reveal block are the D2 gap. They're part of th
 > SUBSET (not exact-cardinality) because the event hashes include observer-dependent
 > forensic fields; see `EqAbortViewDigestExtension.md`. `cross_shard_receipts` is
 > deterministically derived from the committee tx set (already bound via `tx_root`);
-> `partner_subset_hash` + `timestamp` remain the residual ✗ rows.
+> `timestamp` remains the residual ✗ row (the §5 non-fix); `partner_subset_hash`
+> is now bound — see the note below.
+>
+> **Note (`partner_subset_hash` now bound — commit `8585a50`).** The R4/R7
+> merged-signing partner-subset commitment is now appended to `compute_block_digest`
+> when non-zero, mirroring the `signing_bytes` conditional binding (block.cpp:323).
+> Unlike the three pool-fed rows above, this needed no view-reconciliation: per §3.2,
+> `partner_subset_hash` is DETERMINISTIC — every committee member at a merged height
+> computes the identical value from the merge state, so binding it raw cannot
+> reintroduce the gossip-async digest divergence §2 warns against. The conditional
+> gate keeps every non-merged block byte-identical to the v1 digest. The light client
+> mirrors the same append (`light/verify.cpp`); the field survives the `rpc_headers`
+> strip (kept alongside `state_root`), so header-only sync stays sound for merged-but-
+> non-F2 blocks. That leaves `timestamp` as the sole residual ✗ row (§5).
 
 **Conditional binding note.** `partner_subset_hash` and `state_root` are bound into `signing_bytes` only when their value is non-zero — a backward-compat shim that preserves byte-identical hashes for pre-feature blocks. On a freshly-deployed chain pre-S-033 (zero state_root on every block), the conditional binding contributes nothing; D2 is fully open. On a post-S-033 chain where the producer auto-populates state_root, the binding is active on every block, and S-033's indirect closure (§3.5) is in effect.
 
@@ -193,7 +206,9 @@ The current `compute_block_digest()` still doesn't cover the ✗-row fields — 
 
 7. **The inbound dimension's consensus-layer fix is now SHIPPED (commit `a727cb2`).** For `inbound_receipts` specifically, the structural F2 closure is no longer pending: the admitted set is the deterministic committee-wide intersection (F2 sites 1+3), and `compute_block_digest` now binds that set directly (the conditional ✓ row in §1). So even the two-instance gossip-layer attack is closed for inbound — two distinct admitted inbound sets cannot both collect K-of-K signatures, because they yield different digests. The remaining dimensions (`equivocation_events` / `abort_events` / `cross_shard_receipts` / `partner_subset_hash`) still rely on the apply-layer S-033 closure pending the same treatment.
 
-8. **The equivocation/abort dimensions' consensus-layer fix is now SHIPPED (commit `48c4b45`).** Same structural closure as inbound (item 7) but with the UNION rule: `equivocation_events` + `abort_events` are bound into `compute_block_digest` as the committee-wide `reconcile_union` of the members' committed Phase-1 views, and the validator enforces block-evidence ⊆ union. So the two-instance gossip-layer attack is closed for all three pool-fed dimensions (inbound + eq + abort). The remaining ✗ rows are `cross_shard_receipts` (deterministically derived from the bound tx set), `partner_subset_hash`, and `timestamp` (the §5 non-fix) — none of which is an independently-gossiped committee-view pool.
+8. **The equivocation/abort dimensions' consensus-layer fix is now SHIPPED (commit `48c4b45`).** Same structural closure as inbound (item 7) but with the UNION rule: `equivocation_events` + `abort_events` are bound into `compute_block_digest` as the committee-wide `reconcile_union` of the members' committed Phase-1 views, and the validator enforces block-evidence ⊆ union. So the two-instance gossip-layer attack is closed for all three pool-fed dimensions (inbound + eq + abort). The remaining ✗ rows are `cross_shard_receipts` (deterministically derived from the bound tx set) and `timestamp` (the §5 non-fix) — neither an independently-gossiped committee-view pool; `partner_subset_hash` is now bound too (item 9).
+
+9. **The `partner_subset_hash` dimension is now SHIPPED (commit `8585a50`).** Distinct from items 7+8: this one needed NO view-reconciliation. `partner_subset_hash` is the R4/R7 merged-signing partner-subset commitment, and it is DETERMINISTIC — every committee member at a merged height computes the identical value from the merge state (§3.2) — so `compute_block_digest` binds it raw (conditional on non-zero, mirroring `signing_bytes` at block.cpp:323) with no gossip-async divergence risk. A relayer that strips/alters it after the K-of-K Phase-2 signature now breaks digest verification. The light client mirrors the append (`light/verify.cpp`); the field survives the `rpc_headers` strip, so header-only sync stays sound for merged-but-non-F2 blocks. That leaves `timestamp` (§5) as the sole genuinely-uncovered residual digest field.
 
 For permissioned / consortium deployments, S-033's partial closure is the practical solution. For permissionless deployments wanting to honor the "any single honest validator suffices" claim literally (and to prevent two-instance gossip-layer attacks even when both fail apply on honest nodes), v2.7 F2 view reconciliation ships the consensus-layer structural fix — now live for all three pool-fed dimensions (inbound + equivocation + abort) per items 7 + 8.
 

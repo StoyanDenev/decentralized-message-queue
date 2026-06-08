@@ -366,7 +366,7 @@ The equality checks at lines `483, 487, 491` are direct `std::vector<Hash>` equa
 
 ### 5.3 How T-1..T-6 close S-030 D2 (consensus-layer)
 
-S-030 D2 (per `S030-D2-Analysis.md` §1) is the gap that `compute_block_digest` does not bind `equivocation_events`, `abort_events`, `inbound_receipts`, `partner_subset_hash`, `timestamp` — fields covered by `signing_bytes` but not by the K-of-K Phase-2 signature. Pre-F2, two distinct block instances could share the same `block_digest` (and therefore the same K signatures) but differ in these fields; honest nodes applying the two instances would diverge in state for one block.
+S-030 D2 (per `S030-D2-Analysis.md` §1) was originally the gap that `compute_block_digest` did not bind `equivocation_events`, `abort_events`, `inbound_receipts`, `partner_subset_hash`, `timestamp` — fields covered by `signing_bytes` but not by the K-of-K Phase-2 signature. Pre-F2, two distinct block instances could share the same `block_digest` (and therefore the same K signatures) but differ in these fields; honest nodes applying the two instances would diverge in state for one block. The three pool-fed dimensions (eq/abort/inbound) are now bound by the shipped F2 reconciliation, and `partner_subset_hash` is bound directly (commit `8585a50`, deterministic from merge state); `timestamp` (the §5 non-fix) is the sole remaining unbound field.
 
 F2's closure is structural, not a one-line digest extension (the naive extension breaks under gossip-async per `S030-D2-Analysis.md` §2). The structural fix layers:
 

@@ -80,9 +80,11 @@ digest(B) = SHA256(
   ‖ (B.creator_dh_inputs[i])_i )
 ```
 
-`B.state_root` does **not** appear. The light client recomputes this byte-for-byte in `light/verify.cpp::light_compute_block_digest` (lines 47-61), which carries the explicit invariant comment (verify.cpp:40-46):
+`B.state_root` does **not** appear. The light client recomputes the digest byte-for-byte in `light/verify.cpp::light_compute_block_digest`, which carries the explicit invariant comment:
 
-> *"producer.cpp's compute_block_digest does NOT include transactions, abort_events, cross_shard_receipts, inbound_receipts, initial_state, partner_subset_hash, or state_root — only the per-creator Phase-1 commits + index/prev_hash/tx_root/delay_seed + consensus_mode/bft_proposer."*
+> *"producer.cpp's compute_block_digest does NOT include transactions, cross_shard_receipts, initial_state, or state_root. It binds the v1 core (per-creator Phase-1 commits + index/prev_hash/tx_root/delay_seed + consensus_mode/bft_proposer), the conditional F2 view-root appendages (inbound/eq/abort — which the light client omits and fail-closes on, since they need the rpc_headers-stripped collections), and partner_subset_hash when non-zero (S-030-D2; survives the header strip, so the light client binds it too)."*
+
+For this proof the load-bearing fact is unchanged: `state_root` is excluded from the digest (so the producer can populate it post-signature — §3.1 below). The partner_subset_hash binding (commit `8585a50`) is orthogonal and does not touch the state_root argument.
 
 The exclusion is deliberate and load-bearing for S-038: because the digest excludes `state_root`, the producer can populate `body.state_root` (via the tentative-chain dry-run, `S033StateRootNamespaceCoverage.md §2.3`) *after* the committee has gathered its signatures over the digest, without invalidating those signatures. The regression `determ test-domain-separation` (per `S033StateRootNamespaceCoverage.md §8`, assertion family) pins exactly this: *"state_root mutation leaves block_digest unchanged AND changes Block::compute_hash."*
 
