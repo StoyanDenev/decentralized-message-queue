@@ -18,6 +18,9 @@
 //   fetch-headers            Fetch headers from the daemon's RPC
 //   fetch-state-proof        Fetch a state-proof from the daemon's RPC
 //   verify-chain             Composite: anchor + verify all to head
+//                            (--persist caches the verified anchor)
+//   cross-check              Multi-peer divergence detector (eclipse defense)
+//   state                    Manage the persisted-anchor cache (offline)
 //   balance-trustless        Composite: verify chain + state-proof balance
 //   nonce-trustless          Composite: verify chain + state-proof nonce
 //   stake-trustless          Composite: verify chain + state-proof stake
@@ -65,6 +68,7 @@
 #include "account_history.hpp"
 #include "verify_tx_inclusion.hpp"
 #include "verify_state_root.hpp"
+#include "persist.hpp"
 
 #include <determ/chain/block.hpp>
 #include <determ/chain/genesis.hpp>
@@ -79,6 +83,7 @@
 #include <cstring>
 #include <iterator>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -141,8 +146,15 @@ void print_usage() {
         "      Fetch a state-proof for (NS, K) from 127.0.0.1:N.\n"
         "\n"
         "Composite trustless reads (--genesis required):\n"
-        "  verify-chain --rpc-port <N> --genesis <file>\n"
+        "  verify-chain --rpc-port <N> --genesis <file> [--persist [--state <path>]]\n"
         "      Anchor genesis + fetch all headers + verify every committee sig.\n"
+        "      --persist caches the verified anchor (genesis pin + head height /\n"
+        "      block_hash / state_root) to <path> (default: $DETERM_LIGHT_STATE,\n"
+        "      else ~/.determ-light/state.json) — written only AFTER full verify.\n"
+        "  state (--show | --clear | --selftest) [--state <path>]\n"
+        "      Manage the persisted anchor cache (offline; no daemon). --show\n"
+        "      prints + validates it; --clear deletes it; --selftest runs the\n"
+        "      offline round-trip + fail-closed reject-path checks of the module.\n"
         "  cross-check --genesis <file> (--rpc-port <N> | --peer <host:port>) x2+ [--json]\n"
         "      Multi-peer divergence detector: independently committee-verify each\n"
         "      daemon from the pinned genesis, then require peers sharing a height to\n"
@@ -1324,11 +1336,15 @@ int cmd_verify_chain(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path;
     bool have_port = false;
+    bool persist = false;
+    std::string state_path;  // empty → default_state_path()
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
             port = parse_u16("--rpc-port", argv[++i]); have_port = true;
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if (a == "--persist") persist = true;
+        else if (a == "--state" && i + 1 < argc) state_path = argv[++i];
         else {
             std::cerr << "verify-chain: unknown arg '" << a << "'\n";
             return 1;
@@ -1358,9 +1374,169 @@ int cmd_verify_chain(int argc, char** argv) {
             std::cout << "  head state_root:    " << vc.head_state_root << "\n";
         else
             std::cout << "  head state_root:    (not populated — pre-S-033 chain)\n";
+
+        // --persist: cache the just-verified anchor so a future invocation can
+        // resume from it. The anchor is only ever written AFTER the full
+        // committee-verify above succeeds — never on an unverified head. The
+        // genesis_hash is the LOCAL recompute (genesis_hash_hex), so the pin a
+        // later run re-checks is the operator's own, not the daemon's claim.
+        if (persist) {
+            LightState s;
+            s.schema_version  = 1;
+            s.genesis_hash    = genesis_hash_hex;
+            s.head_height     = vc.height;
+            s.head_block_hash = vc.head_block_hash;
+            s.head_state_root = vc.head_state_root;  // "" on a pre-S-033 chain
+            std::string sp = state_path.empty() ? default_state_path() : state_path;
+            save_light_state(sp, s);
+            std::cout << "  persisted anchor:   " << sp << "\n";
+        }
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "verify-chain: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ──────────────────────── state (persisted-anchor cache management) ───────────
+//
+// Offline cache-management surface for the persisted light-client anchor (see
+// persist.hpp). No daemon contact:
+//   state --show     [--state <path>]   print + VALIDATE the cached anchor
+//   state --clear    [--state <path>]   delete the cache file
+//   state --selftest [--state <path>]   offline round-trip + reject-path self-test
+//
+// --selftest exercises the persist module end-to-end with NO daemon: it writes a
+// synthetic state, reads it back asserting byte-equality, then asserts every
+// fail-closed reject path (malformed JSON, wrong schema_version, short hex). This
+// is how save/load/validate is verified on a host where the cluster can't mint
+// blocks. It writes only to a temp path it then removes (never the real cache,
+// unless --state explicitly points there — then it restores nothing, by design).
+int cmd_state(int argc, char** argv) {
+    enum { SHOW, CLEAR, SELFTEST, NONE } mode = NONE;
+    std::string state_path;  // empty → default_state_path()
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--show")     mode = SHOW;
+        else if (a == "--clear")    mode = CLEAR;
+        else if (a == "--selftest") mode = SELFTEST;
+        else if (a == "--state" && i + 1 < argc) state_path = argv[++i];
+        else {
+            std::cerr << "state: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (mode == NONE) {
+        std::cerr << "state: one of --show / --clear / --selftest is required\n";
+        return 1;
+    }
+    const std::string path = state_path.empty() ? default_state_path() : state_path;
+
+    try {
+        if (mode == SHOW) {
+            if (!light_state_exists(path)) {
+                std::cout << "no persisted anchor at " << path << "\n"
+                          << "  (run `verify-chain --persist` to create one)\n";
+                return 0;  // absence is not an error
+            }
+            LightState s = load_light_state(path);  // throws if corrupt → fail-closed
+            std::cout << "persisted anchor (" << path << ")\n"
+                      << "  schema_version:     " << s.schema_version << "\n"
+                      << "  genesis_hash:       " << s.genesis_hash << "\n"
+                      << "  head_height:        " << s.head_height << "\n"
+                      << "  head_block_hash:    " << s.head_block_hash << "\n"
+                      << "  head_state_root:    "
+                      << (s.head_state_root.empty() ? "(pre-S-033 chain)" : s.head_state_root)
+                      << "\n";
+            return 0;
+        }
+        if (mode == CLEAR) {
+            if (!light_state_exists(path)) {
+                std::cout << "no persisted anchor at " << path << " (nothing to clear)\n";
+                return 0;
+            }
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::path(path), ec);
+            if (ec) {
+                std::cerr << "state: cannot remove '" << path << "': " << ec.message() << "\n";
+                return 1;
+            }
+            std::cout << "cleared persisted anchor at " << path << "\n";
+            return 0;
+        }
+        // SELFTEST — offline round-trip + reject-path verification.
+        const std::string tp = state_path.empty()
+            ? (std::filesystem::temp_directory_path() / "determ-light-selftest.json").string()
+            : path;  // honor an explicit --state target if the operator gave one
+        int checks = 0, fails = 0;
+        auto check = [&](bool cond, const std::string& name) {
+            ++checks;
+            if (cond) { std::cout << "  PASS " << name << "\n"; }
+            else      { std::cout << "  FAIL " << name << "\n"; ++fails; }
+        };
+
+        // (1) round-trip: save → load → byte-equal
+        LightState in;
+        in.schema_version  = 1;
+        in.genesis_hash    = std::string(64, 'a');
+        in.head_height     = 12345;
+        in.head_block_hash = std::string(64, 'b');
+        in.head_state_root = std::string(64, 'c');
+        save_light_state(tp, in);
+        LightState out = load_light_state(tp);
+        check(out.schema_version == in.schema_version &&
+              out.genesis_hash == in.genesis_hash &&
+              out.head_height == in.head_height &&
+              out.head_block_hash == in.head_block_hash &&
+              out.head_state_root == in.head_state_root,
+              "round-trip preserves every field");
+
+        // (2) empty state_root round-trips as empty (pre-S-033 chain)
+        LightState in2 = in; in2.head_state_root.clear();
+        save_light_state(tp, in2);
+        check(load_light_state(tp).head_state_root.empty(),
+              "empty head_state_root round-trips as empty");
+
+        // (3) malformed JSON → reject
+        { std::ofstream f(tp, std::ios::binary | std::ios::trunc); f << "{ not json"; }
+        bool rejected = false;
+        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
+        check(rejected, "malformed JSON is rejected (fail-closed)");
+
+        // (4) wrong schema_version → reject
+        { std::ofstream f(tp, std::ios::binary | std::ios::trunc);
+          f << "{\"schema_version\":999,\"genesis_hash\":\"" << std::string(64,'a')
+            << "\",\"head_height\":1,\"head_block_hash\":\"" << std::string(64,'b')
+            << "\",\"head_state_root\":\"\"}"; }
+        rejected = false;
+        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
+        check(rejected, "unsupported schema_version is rejected");
+
+        // (5) short / non-hex genesis_hash → reject
+        { std::ofstream f(tp, std::ios::binary | std::ios::trunc);
+          f << "{\"schema_version\":1,\"genesis_hash\":\"deadbeef\",\"head_height\":1,"
+               "\"head_block_hash\":\"" << std::string(64,'b') << "\",\"head_state_root\":\"\"}"; }
+        rejected = false;
+        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
+        check(rejected, "short genesis_hash is rejected");
+
+        // (6) missing required field → reject
+        { std::ofstream f(tp, std::ios::binary | std::ios::trunc);
+          f << "{\"schema_version\":1,\"head_height\":1}"; }
+        rejected = false;
+        try { load_light_state(tp); } catch (const std::exception&) { rejected = true; }
+        check(rejected, "missing genesis_hash/head_block_hash is rejected");
+
+        // cleanup the temp file (only when we used the default temp target)
+        if (state_path.empty()) {
+            std::error_code ec; std::filesystem::remove(std::filesystem::path(tp), ec);
+        }
+
+        std::cout << (fails == 0 ? "SELFTEST PASS " : "SELFTEST FAIL ")
+                  << (checks - fails) << "/" << checks << " checks\n";
+        return fails == 0 ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::cerr << "state: " << e.what() << "\n";
         return 1;
     }
 }
@@ -6390,6 +6566,7 @@ int main(int argc, char** argv) {
         if (cmd == "fetch-state-proof")     return cmd_fetch_state_proof(sub_argc, sub_argv);
         if (cmd == "verify-chain")          return cmd_verify_chain(sub_argc, sub_argv);
         if (cmd == "cross-check")           return cmd_cross_check(sub_argc, sub_argv);
+        if (cmd == "state")                 return cmd_state(sub_argc, sub_argv);
         if (cmd == "audit")                 return cmd_audit(sub_argc, sub_argv);
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
