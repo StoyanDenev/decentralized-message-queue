@@ -1416,10 +1416,40 @@ static int cmd_start(int argc, char** argv) {
     }
 }
 
+// Guarded CLI integer-argument parses. A bare std::sto* throws
+// std::invalid_argument out of main on a non-numeric value ->
+// std::terminate -> process abort (fail-open crash). Each prints
+// "<cmd>: <flag> must be an integer" and returns false so the caller
+// can `return 1`. Per-type to preserve range (e.g. amounts/fees need
+// full u64 via stoull). Plain std::sto* (no width check) to match the
+// wallet's guarded sites.
+static bool arg_i32(const char* cmd, const char* flag, const char* v, int& out) {
+    try { out = std::stoi(v); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+static bool arg_u32(const char* cmd, const char* flag, const char* v, uint32_t& out) {
+    try { out = static_cast<uint32_t>(std::stoul(v)); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+static bool arg_i64(const char* cmd, const char* flag, const char* v, int64_t& out) {
+    try { out = static_cast<int64_t>(std::stoll(v)); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+static bool arg_u64(const char* cmd, const char* flag, const char* v, uint64_t& out) {
+    try { out = static_cast<uint64_t>(std::stoull(v)); return true; }
+    catch (...) { std::cerr << cmd << ": " << flag << " must be an integer\n"; return false; }
+}
+
 static uint16_t get_rpc_port(int argc, char** argv) {
     for (int i = 0; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--rpc-port")
-            return static_cast<uint16_t>(std::stoi(argv[i + 1]));
+        if (std::string(argv[i]) == "--rpc-port") {
+            try {
+                return static_cast<uint16_t>(std::stoi(argv[i + 1]));
+            } catch (...) {
+                std::cerr << "determ: --rpc-port must be an integer\n";
+                std::exit(1);
+            }
+        }
     return 7778;
 }
 
@@ -1469,11 +1499,12 @@ static int cmd_register(int argc, char** argv) {
 static int cmd_send(int argc, char** argv) {
     if (argc < 2) { std::cerr << "Usage: determ send <to_domain> <amount> [--fee <n>]\n"; return 1; }
     std::string to     = argv[0];
-    uint64_t    amount = std::stoull(argv[1]);
+    uint64_t    amount = 0;
+    if (!arg_u64("send", "<amount>", argv[1], amount)) return 1;
     uint64_t    fee    = 0;
     uint16_t    port   = get_rpc_port(argc, argv);
     for (int i = 2; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--fee") fee = std::stoull(argv[i + 1]);
+        if (std::string(argv[i]) == "--fee") { if (!arg_u64("send", "--fee", argv[i + 1], fee)) return 1; }
     return submit_tx_with_retry(port, "send",
         {{"to", to}, {"amount", amount}, {"fee", fee}});
 }
@@ -1635,7 +1666,8 @@ static int cmd_show_block(int argc, char** argv) {
         std::cerr << "Usage: determ show-block <index> [--rpc-port N]\n";
         return 1;
     }
-    uint64_t index = std::stoull(argv[0]);
+    uint64_t index = 0;
+    if (!arg_u64("show-block", "<index>", argv[0], index)) return 1;
     uint16_t port = get_rpc_port(argc, argv);
     try {
         json params = {{"index", index}};
@@ -2201,9 +2233,8 @@ static int cmd_headers(int argc, char** argv) {
     std::string peer_str;
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
-        if      (a == "--from")  from_index = std::stoull(argv[i + 1]);
-        else if (a == "--count") count = static_cast<uint32_t>(
-                                            std::stoul(argv[i + 1]));
+        if      (a == "--from")  { if (!arg_u64("headers", "--from", argv[i + 1], from_index)) return 1; }
+        else if (a == "--count") { if (!arg_u32("headers", "--count", argv[i + 1], count)) return 1; }
         else if (a == "--peer")  peer_str = argv[i + 1];
     }
 
@@ -2500,8 +2531,7 @@ static int cmd_chain_summary(int argc, char** argv) {
     bool json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--last" && i + 1 < argc)
-            last_n = static_cast<uint32_t>(std::stoul(argv[i + 1]));
+        if      (a == "--last" && i + 1 < argc) { if (!arg_u32("chain-summary", "--last", argv[i + 1], last_n)) return 1; }
         else if (a == "--json") json_out = true;
     }
     uint16_t port = get_rpc_port(argc, argv);
@@ -2624,7 +2654,7 @@ static int cmd_pending_params(int argc, char** argv) {
         if (a == "--json") json_out = true;
         else if (a == "--at-height" && i + 1 < argc) {
             have_at_height = true;
-            at_height = std::stoull(argv[i + 1]);
+            if (!arg_u64("pending-params", "--at-height", argv[i + 1], at_height)) return 1;
         }
     }
     uint16_t port = get_rpc_port(argc, argv);
@@ -2741,7 +2771,8 @@ static int cmd_block_hash(int argc, char** argv) {
         std::cerr << "Usage: determ block-hash <index> [--rpc-port N]\n";
         return 1;
     }
-    uint64_t index = std::stoull(argv[0]);
+    uint64_t index = 0;
+    if (!arg_u64("block-hash", "<index>", argv[0], index)) return 1;
     uint16_t port = get_rpc_port(argc, argv);
     try {
         json params = {{"index", index}};
@@ -3514,7 +3545,8 @@ static int cmd_abort_records(int argc, char** argv) {
         if (a == "--json") json_out = true;
         else if (a == "--top" && i + 1 < argc) {
             have_top = true;
-            top_n = static_cast<size_t>(std::stoul(argv[i + 1]));
+            try { top_n = static_cast<size_t>(std::stoul(argv[i + 1])); }
+            catch (...) { std::cerr << "abort-records: --top must be an integer\n"; return 1; }
         }
     }
     uint16_t port = get_rpc_port(argc, argv);
@@ -3728,8 +3760,7 @@ static int cmd_snapshot_create(int argc, char** argv) {
     for (int i = 0; i < argc - 1; ++i) {
         std::string a = argv[i];
         if (a == "--out")     out_path = argv[i + 1];
-        if (a == "--headers") header_count = static_cast<uint32_t>(
-                                    std::stoul(argv[i + 1]));
+        if (a == "--headers") { if (!arg_u32("snapshot create", "--headers", argv[i + 1], header_count)) return 1; }
     }
     uint16_t port = get_rpc_port(argc, argv);
     try {
@@ -3779,8 +3810,7 @@ static int cmd_snapshot_fetch(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--peer")    peer_str    = argv[i + 1];
         if (a == "--out")     out_path    = argv[i + 1];
-        if (a == "--headers") header_count = static_cast<uint32_t>(
-                                    std::stoul(argv[i + 1]));
+        if (a == "--headers") { if (!arg_u32("snapshot fetch", "--headers", argv[i + 1], header_count)) return 1; }
     }
     if (peer_str.empty() || out_path.empty()) {
         std::cerr << "Usage: determ snapshot fetch --peer host:port "
@@ -4378,21 +4408,23 @@ static int cmd_balance(int argc, char** argv) {
 
 static int cmd_stake(int argc, char** argv) {
     if (argc < 1) { std::cerr << "Usage: determ stake <amount> [--fee <n>]\n"; return 1; }
-    uint64_t amount = std::stoull(argv[0]);
+    uint64_t amount = 0;
+    if (!arg_u64("stake", "<amount>", argv[0], amount)) return 1;
     uint64_t fee    = 0;
     uint16_t port   = get_rpc_port(argc, argv);
     for (int i = 1; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--fee") fee = std::stoull(argv[i + 1]);
+        if (std::string(argv[i]) == "--fee") { if (!arg_u64("stake", "--fee", argv[i + 1], fee)) return 1; }
     return submit_tx_with_retry(port, "stake", {{"amount", amount}, {"fee", fee}});
 }
 
 static int cmd_unstake(int argc, char** argv) {
     if (argc < 1) { std::cerr << "Usage: determ unstake <amount> [--fee <n>]\n"; return 1; }
-    uint64_t amount = std::stoull(argv[0]);
+    uint64_t amount = 0;
+    if (!arg_u64("unstake", "<amount>", argv[0], amount)) return 1;
     uint64_t fee    = 0;
     uint16_t port   = get_rpc_port(argc, argv);
     for (int i = 1; i < argc - 1; ++i)
-        if (std::string(argv[i]) == "--fee") fee = std::stoull(argv[i + 1]);
+        if (std::string(argv[i]) == "--fee") { if (!arg_u64("unstake", "--fee", argv[i + 1], fee)) return 1; }
     return submit_tx_with_retry(port, "unstake", {{"amount", amount}, {"fee", fee}});
 }
 
@@ -4428,7 +4460,7 @@ static int cmd_genesis_tool_peer_info(int argc, char** argv) {
                           // → global pool member (CURRENT-mode + legacy).
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string(argv[i]) == "--data-dir") data_dir = argv[i + 1];
-        if (std::string(argv[i]) == "--stake")    stake    = std::stoull(argv[i + 1]);
+        if (std::string(argv[i]) == "--stake")    { if (!arg_u64("genesis-tool peer-info", "--stake", argv[i + 1], stake)) return 1; }
         if (std::string(argv[i]) == "--region")   region   = argv[i + 1];
     }
 
@@ -5000,7 +5032,8 @@ static int cmd_send_anon(int argc, char** argv) {
         return 1;
     }
     std::string to     = argv[0];
-    uint64_t    amount = std::stoull(argv[1]);
+    uint64_t    amount = 0;
+    if (!arg_u64("send_anon", "<amount>", argv[1], amount)) return 1;
     std::string priv_hex = argv[2];
     uint64_t    fee    = 0;
     uint16_t    port   = get_rpc_port(argc, argv);
@@ -5009,8 +5042,8 @@ static int cmd_send_anon(int argc, char** argv) {
     // for confirmations. -1 = auto-fetch via RPC (default).
     int64_t     nonce_override = -1;
     for (int i = 3; i < argc - 1; ++i) {
-        if (std::string(argv[i]) == "--fee")   fee = std::stoull(argv[i + 1]);
-        else if (std::string(argv[i]) == "--nonce") nonce_override = std::stoll(argv[i + 1]);
+        if (std::string(argv[i]) == "--fee")   { if (!arg_u64("send_anon", "--fee", argv[i + 1], fee)) return 1; }
+        else if (std::string(argv[i]) == "--nonce") { if (!arg_i64("send_anon", "--nonce", argv[i + 1], nonce_override)) return 1; }
     }
 
     crypto::NodeKey key;
@@ -5093,8 +5126,8 @@ static int cmd_submit_param_change(int argc, char** argv) {
         else if (a == "--from")             from_domain = argv[i + 1];
         else if (a == "--name")             name = argv[i + 1];
         else if (a == "--value-hex")        value_hex = argv[i + 1];
-        else if (a == "--effective-height") effective_height = std::stoull(argv[i + 1]);
-        else if (a == "--fee")              fee = std::stoull(argv[i + 1]);
+        else if (a == "--effective-height") { if (!arg_u64("submit-param-change", "--effective-height", argv[i + 1], effective_height)) return 1; }
+        else if (a == "--fee")              { if (!arg_u64("submit-param-change", "--fee", argv[i + 1], fee)) return 1; }
         else if (a == "--keyholder-sig") {
             std::string s = argv[i + 1];
             auto colon = s.find(':');
@@ -5232,13 +5265,13 @@ static int cmd_submit_merge_event(int argc, char** argv) {
         if      (a == "--priv")              priv_hex = argv[i + 1];
         else if (a == "--from")              from_domain = argv[i + 1];
         else if (a == "--event")             event_str = argv[i + 1];
-        else if (a == "--shard-id")          shard_id   = static_cast<uint32_t>(std::stoul(argv[i + 1]));
-        else if (a == "--partner-id")        partner_id = static_cast<uint32_t>(std::stoul(argv[i + 1]));
-        else if (a == "--effective-height")  effective_height       = std::stoull(argv[i + 1]);
+        else if (a == "--shard-id")          { if (!arg_u32("submit-merge-event", "--shard-id", argv[i + 1], shard_id)) return 1; }
+        else if (a == "--partner-id")        { if (!arg_u32("submit-merge-event", "--partner-id", argv[i + 1], partner_id)) return 1; }
+        else if (a == "--effective-height")  { if (!arg_u64("submit-merge-event", "--effective-height", argv[i + 1], effective_height)) return 1; }
         else if (a == "--evidence-window-start")
-                                              evidence_window_start = std::stoull(argv[i + 1]);
+                                             { if (!arg_u64("submit-merge-event", "--evidence-window-start", argv[i + 1], evidence_window_start)) return 1; }
         else if (a == "--refugee-region")    refugee_region = argv[i + 1];
-        else if (a == "--fee")               fee  = std::stoull(argv[i + 1]);
+        else if (a == "--fee")               { if (!arg_u64("submit-merge-event", "--fee", argv[i + 1], fee)) return 1; }
     }
     if (priv_hex.empty() || from_domain.empty() || event_str.empty()) {
         std::cerr << "Usage: determ submit-merge-event "
@@ -5322,9 +5355,9 @@ static int cmd_submit_dapp_register(int argc, char** argv) {
         else if (a == "--service-pubkey")  service_pubkey_hex = argv[i + 1];
         else if (a == "--endpoint-url")    endpoint_url = argv[i + 1];
         else if (a == "--topics")          topics_csv = argv[i + 1];
-        else if (a == "--retention")       retention = uint8_t(std::stoi(argv[i + 1]));
+        else if (a == "--retention")       { try { retention = uint8_t(std::stoi(argv[i + 1])); } catch (...) { std::cerr << "submit-dapp-register: --retention must be an integer\n"; return 1; } }
         else if (a == "--metadata-hex")    metadata_hex = argv[i + 1];
-        else if (a == "--fee")             fee  = std::stoull(argv[i + 1]);
+        else if (a == "--fee")             { if (!arg_u64("submit-dapp-register", "--fee", argv[i + 1], fee)) return 1; }
     }
     // --deactivate is a flag (no value)
     for (int i = 0; i < argc; ++i) {
@@ -5453,8 +5486,8 @@ static int cmd_submit_dapp_call(int argc, char** argv) {
         else if (a == "--to")          to_domain = argv[i + 1];
         else if (a == "--topic")       topic = argv[i + 1];
         else if (a == "--payload-hex") payload_hex = argv[i + 1];
-        else if (a == "--amount")      amount = std::stoull(argv[i + 1]);
-        else if (a == "--fee")         fee  = std::stoull(argv[i + 1]);
+        else if (a == "--amount")      { if (!arg_u64("submit-dapp-call", "--amount", argv[i + 1], amount)) return 1; }
+        else if (a == "--fee")         { if (!arg_u64("submit-dapp-call", "--fee", argv[i + 1], fee)) return 1; }
     }
     if (priv_hex.empty() || from_domain.empty() || to_domain.empty()) {
         std::cerr << "Usage: determ submit-dapp-call --priv <hex> --from <domain>\n"
