@@ -27,10 +27,14 @@ head_block_hash, head_state_root}`.
   field-naming `std::runtime_error` on malformed JSON / unknown `schema_version`
   / missing / wrong-length / non-hex field. A clean return is a well-formed,
   schema-current state — never a partial one.
-- **Manage** (`state --show | --clear | --selftest`,
+- **Manage** (`state --show | --clear | --selftest | --verify-anchor`,
   `light/main.cpp::cmd_state`): offline (no daemon). `--show` loads + validates +
   prints; `--clear` deletes; `--selftest` runs the in-binary round-trip +
-  reject-path checks.
+  reject-path checks; **`--verify-anchor --genesis <file>`** is the concrete
+  offline form of the LSP-2 gate — it recomputes `compute_genesis_hash` from the
+  supplied genesis locally and reports PASS (exit 0, anchor is for this chain) or
+  MISMATCH (exit 2, stale/wrong-chain cache). This is the exact gate the LSP-6
+  resume must run before trusting an anchor, landed and tested ahead of it.
 - **Path resolution** (`default_state_path`): `--state <path>` ›
   `$DETERM_LIGHT_STATE` › `<home>/.determ-light/state.json`.
 
@@ -64,7 +68,12 @@ supplies on the resuming run (LSP-6); a state whose `genesis_hash` ≠ the
 recomputed genesis of the supplied config is rejected. So an attacker who swaps
 in a state file from a *different* chain (eclipse-onto-another-chain) cannot make
 a resume silently adopt it — the anchor is only honored under the operator's own
-genesis. (This is the persisted analog of the T-L1 anchor.)
+genesis. (This is the persisted analog of the T-L1 anchor.) **This gate is now a
+concrete, independently-testable subcommand** — `state --verify-anchor --genesis
+<file>` recomputes `compute_genesis_hash` locally and returns PASS / MISMATCH —
+so the security-critical half of the LSP-6 resume is exercised offline *before*
+the daemon-bound resume consumes it. (Test: `tools/test_light_state.sh` (C2)
+asserts PASS on a matching genesis and MISMATCH-exit-2 on a wrong-chain anchor.)
 
 **LSP-3 (Schema-version gate).** `load_light_state` rejects any
 `schema_version ≠ 1` with a diagnostic, rather than misreading a field set a
@@ -115,12 +124,14 @@ surface and the `--persist` write — both fully exercised offline.
 
 ## 5. Test surface
 
-`tools/test_light_state.sh` — 15 offline assertions, deterministic on every host
+`tools/test_light_state.sh` — 20 offline assertions, deterministic on every host
 (the persistence module is daemon-free): (A) `state --selftest` (the in-binary
 round-trip + 5 fail-closed reject paths: malformed JSON, bad `schema_version`,
 short `genesis_hash`, missing field, empty-`state_root` round-trip); (B)
 `--show`/`--clear` graceful-absence + valid-show + fail-closed-on-corrupt +
-mode-flag / unknown-arg / `$DETERM_LIGHT_STATE`-override contract; (C)
+mode-flag / unknown-arg / `$DETERM_LIGHT_STATE`-override contract; (C2)
+`--verify-anchor` PASS on a matching genesis + MISMATCH-exit-2 on a wrong-chain
+anchor + the no-`--genesis` / absent-cache usage gates (the LSP-2 gate); (C)
 `verify-chain --persist`/`--state` arg acceptance + the LSP-1 no-write-on-failed-
 verify guarantee. The cluster-bound live `--persist` write (a real verified head
 landing in the cache) and the LSP-6 resume path are exercised on WSL2 / CI.

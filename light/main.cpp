@@ -151,10 +151,13 @@ void print_usage() {
         "      --persist caches the verified anchor (genesis pin + head height /\n"
         "      block_hash / state_root) to <path> (default: $DETERM_LIGHT_STATE,\n"
         "      else ~/.determ-light/state.json) — written only AFTER full verify.\n"
-        "  state (--show | --clear | --selftest) [--state <path>]\n"
+        "  state (--show | --clear | --selftest | --verify-anchor --genesis <file>) [--state <path>]\n"
         "      Manage the persisted anchor cache (offline; no daemon). --show\n"
         "      prints + validates it; --clear deletes it; --selftest runs the\n"
-        "      offline round-trip + fail-closed reject-path checks of the module.\n"
+        "      offline round-trip + fail-closed reject-path checks of the module;\n"
+        "      --verify-anchor recomputes the genesis hash from <file> locally and\n"
+        "      checks the cached anchor is for THAT chain (PASS 0 / MISMATCH 2) —\n"
+        "      the offline genesis re-pin gate a future verify-chain --resume runs.\n"
         "  cross-check --genesis <file> (--rpc-port <N> | --peer <host:port>) x2+ [--json]\n"
         "      Multi-peer divergence detector: independently committee-verify each\n"
         "      daemon from the pinned genesis, then require peers sharing a height to\n"
@@ -1413,13 +1416,16 @@ int cmd_verify_chain(int argc, char** argv) {
 // blocks. It writes only to a temp path it then removes (never the real cache,
 // unless --state explicitly points there — then it restores nothing, by design).
 int cmd_state(int argc, char** argv) {
-    enum { SHOW, CLEAR, SELFTEST, NONE } mode = NONE;
-    std::string state_path;  // empty → default_state_path()
+    enum { SHOW, CLEAR, SELFTEST, VERIFY, NONE } mode = NONE;
+    std::string state_path;    // empty → default_state_path()
+    std::string genesis_path;  // for --verify-anchor
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--show")     mode = SHOW;
-        else if (a == "--clear")    mode = CLEAR;
-        else if (a == "--selftest") mode = SELFTEST;
+        if      (a == "--show")          mode = SHOW;
+        else if (a == "--clear")         mode = CLEAR;
+        else if (a == "--selftest")      mode = SELFTEST;
+        else if (a == "--verify-anchor") mode = VERIFY;
+        else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if (a == "--state" && i + 1 < argc) state_path = argv[++i];
         else {
             std::cerr << "state: unknown arg '" << a << "'\n";
@@ -1427,7 +1433,11 @@ int cmd_state(int argc, char** argv) {
         }
     }
     if (mode == NONE) {
-        std::cerr << "state: one of --show / --clear / --selftest is required\n";
+        std::cerr << "state: one of --show / --clear / --selftest / --verify-anchor is required\n";
+        return 1;
+    }
+    if (mode == VERIFY && genesis_path.empty()) {
+        std::cerr << "state --verify-anchor: --genesis <file> is required\n";
         return 1;
     }
     const std::string path = state_path.empty() ? default_state_path() : state_path;
@@ -1449,6 +1459,35 @@ int cmd_state(int argc, char** argv) {
                       << (s.head_state_root.empty() ? "(pre-S-033 chain)" : s.head_state_root)
                       << "\n";
             return 0;
+        }
+        if (mode == VERIFY) {
+            // Offline LSP-2 genesis re-pin gate (the offline half of the LSP-6
+            // resume): does the persisted anchor belong to the chain the
+            // operator's --genesis describes? Recompute the genesis hash LOCALLY
+            // (compute_genesis_hash, no daemon) and compare to the cached pin.
+            // This is exactly the check a future `verify-chain --resume` must run
+            // before trusting an anchor as a verification starting point.
+            if (!light_state_exists(path)) {
+                std::cerr << "state --verify-anchor: no persisted anchor at " << path
+                          << " (run `verify-chain --persist` first)\n";
+                return 1;
+            }
+            LightState s = load_light_state(path);  // throws → fail-closed
+            auto genesis = load_genesis(genesis_path);
+            std::string local_hex = to_hex(determ::chain::compute_genesis_hash(genesis));
+            if (s.genesis_hash == local_hex) {
+                std::cout << "PASS: persisted anchor matches --genesis\n"
+                          << "  genesis_hash:       " << local_hex << "\n"
+                          << "  head_height:        " << s.head_height << "\n"
+                          << "  head_block_hash:    " << s.head_block_hash << "\n"
+                          << "  (anchor is for THIS chain; a resume could start from it)\n";
+                return 0;
+            }
+            std::cout << "MISMATCH: persisted anchor is for a DIFFERENT chain\n"
+                      << "  cached genesis_hash:  " << s.genesis_hash << "\n"
+                      << "  --genesis recompute:  " << local_hex << "\n"
+                      << "  (stale/wrong-chain cache — clear it before resuming)\n";
+            return 2;
         }
         if (mode == CLEAR) {
             if (!light_state_exists(path)) {

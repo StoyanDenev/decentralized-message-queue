@@ -98,6 +98,52 @@ if $DETERM_LIGHT help 2>&1 | grep -q "state (--show"; then
 else echo "  FAIL: state not listed in help"; fail=$((fail+1)); fi
 
 echo ""
+echo "=== (C2) state --verify-anchor offline genesis re-pin gate (LSP-2) ==="
+# Craft a minimal genesis (chain_id + shard params — all load_genesis needs) and
+# read its authoritative LOCAL genesis hash off `shard-route --json` (which prints
+# compute_genesis_hash). This is fully offline — the LSP-6 resume's genesis gate.
+SALT=$(printf '0%.0s' $(seq 1 64))
+cat > "$T/gen.json" <<EOF
+{
+  "chain_id": "light-state-test",
+  "initial_shard_count": 1,
+  "shard_address_salt": "$SALT"
+}
+EOF
+GH=$($DETERM_LIGHT shard-route --genesis "$T/gen.json" --address alice --json 2>/dev/null \
+     | "${PY:-python}" -c "import json,sys;print(json.load(sys.stdin).get('genesis_hash',''))" 2>/dev/null)
+if [ -n "$GH" ] && [ ${#GH} -eq 64 ]; then
+    # 13. matching anchor → PASS (exit 0)
+    printf '{"schema_version":1,"genesis_hash":"%s","head_height":7,"head_block_hash":"%s","head_state_root":""}\n' \
+        "$GH" "$H64b" > "$SP"
+    $DETERM_LIGHT state --verify-anchor --genesis "$T/gen.json" --state "$SP" >/dev/null 2>&1
+    ck $? 0 "--verify-anchor PASS on matching genesis"
+
+    # 14. wrong-chain anchor → MISMATCH (exit 2)
+    printf '{"schema_version":1,"genesis_hash":"%s","head_height":7,"head_block_hash":"%s","head_state_root":""}\n' \
+        "$H64a" "$H64b" > "$SP"
+    $DETERM_LIGHT state --verify-anchor --genesis "$T/gen.json" --state "$SP" >/dev/null 2>&1
+    ck $? 2 "--verify-anchor MISMATCH on wrong-chain anchor (exit 2)"
+else
+    echo "  SKIP: --verify-anchor PASS/MISMATCH (could not derive local genesis hash;"
+    echo "        shard-route --json unavailable on this host — usage paths below still run)"
+fi
+
+# 15. --verify-anchor without --genesis → usage error (exit 1).
+$DETERM_LIGHT state --verify-anchor --state "$SP" >/dev/null 2>&1
+ck $? 1 "--verify-anchor without --genesis rejected"
+
+# 16. --verify-anchor with no cached anchor → exit 1 (can't verify nothing).
+rm -f "$SP"
+$DETERM_LIGHT state --verify-anchor --genesis "$T/gen.json" --state "$SP" >/dev/null 2>&1
+ck $? 1 "--verify-anchor on absent cache rejected"
+
+# 17. --verify-anchor listed in help.
+if $DETERM_LIGHT help 2>&1 | grep -q -- "--verify-anchor"; then
+    echo "  PASS: --verify-anchor listed in help"; pass=$((pass+1))
+else echo "  FAIL: --verify-anchor not in help"; fail=$((fail+1)); fi
+
+echo ""
 echo "=== (C) verify-chain --persist arg contract (write is daemon-bound) ==="
 
 # 10. --persist + --state are accepted (the error is the missing genesis file /
