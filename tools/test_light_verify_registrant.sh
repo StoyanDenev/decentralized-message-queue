@@ -28,7 +28,7 @@
 #      subcommand listed in `help`.
 #   B. Best-effort LIVE INCLUDED leg: stands up a single-creator node and
 #      asserts the node's own domain → INCLUDED (exit 0, ACTIVE), an
-#      unregistered domain → NOT-INCLUDED (exit 2, sound verified negative),
+#      unregistered domain → NOT-INCLUDED (exit 0, sound verified negative),
 #      and wrong --genesis → fail-closed. SKIPs (exit 0) when the local
 #      cluster can't mint blocks on this host, mirroring the other verify-*
 #      cluster tests.
@@ -244,17 +244,21 @@ else
 fi
 
 echo
-echo "=== ASSERTION 2: unregistered domain → NOT-INCLUDED (exit 2) ==="
+echo "=== ASSERTION 2: unregistered domain → NOT-INCLUDED (exit 0) ==="
+# NOT-INCLUDED is a SOUND verified negative → exit 0, matching the whole
+# InclusionVerdict reader family (verify-dapp-registration / -receipt-inclusion /
+# -merge-state / -param-change all return 0 for INCLUDED AND NOT-INCLUDED; only
+# UNVERIFIABLE is non-zero at 3).
 set +e
 OUT=$($DETERM_LIGHT verify-registrant --rpc-port 8906 \
         --genesis $T/node_gen.json --domain not_a_validator_xyz 2>&1)
 RC=$?
 set -e
 echo "$OUT"
-if [ "$RC" = "2" ] && echo "$OUT" | grep -qE "^NOT-INCLUDED"; then
-  assert "true" "unregistered domain → NOT-INCLUDED, exit 2 (sound verified negative)"
+if [ "$RC" = "0" ] && echo "$OUT" | grep -qE "^NOT-INCLUDED"; then
+  assert "true" "unregistered domain → NOT-INCLUDED, exit 0 (sound verified negative)"
 else
-  assert "false" "unregistered domain → NOT-INCLUDED/exit2 (got rc=$RC)"
+  assert "false" "unregistered domain → NOT-INCLUDED/exit0 (got rc=$RC)"
 fi
 NOFP2=$(echo "$OUT" | grep -qE "^INCLUDED" && echo false || echo true)
 assert "$NOFP2" "unregistered domain never yields a false INCLUDED"

@@ -4480,10 +4480,11 @@ int cmd_verify_registrant(int argc, char** argv) {
                 std::cout << "  detail:            " << detail << "\n";
         }
 
-        // Exit codes match verify-dapp-registration: INCLUDED / NOT-INCLUDED
-        // → 0 (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        // Exit codes match verify-dapp-registration and the whole InclusionVerdict
+        // reader family (verify-tx-inclusion / -receipt-inclusion / -merge-state /
+        // -param-change): INCLUDED / NOT-INCLUDED → 0 (both sound verified answers);
+        // UNVERIFIABLE → 3 (refused to assert); args/transport → 1.
         if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
-        if (verdict == InclusionVerdict::NOT_INCLUDED) return 2;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "verify-registrant: " << e.what() << "\n";
