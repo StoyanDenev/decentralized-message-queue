@@ -67,6 +67,9 @@ struct AccountHistoryOptions {
     uint64_t    to{0};
     uint64_t    step{1};      // default stride is 1 (every height in range)
     bool        json_out{false};
+    uint64_t    wait_seconds{0}; // --wait: hold-and-wait for the next block when
+                                 // a sampled height is the chain head (0 = off,
+                                 // fail-closed at the head, unchanged behaviour)
 };
 
 // Run the account-history flow. Returns 0 on success, non-zero on any

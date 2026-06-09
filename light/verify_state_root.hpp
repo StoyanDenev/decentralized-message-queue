@@ -107,10 +107,17 @@ struct StateRootResult {
 // ok=false in the result with a populated `detail`, not thrown — so the
 // caller can report a clean error and exit non-zero without a stack
 // trace.
+//
+// `max_wait_seconds` (default 0 = no wait, behaviour unchanged) is forwarded to
+// committee_bound_state_root in the H>=1 branch: when `height` is the chain head
+// (no committee-signed successor yet) the helper polls up to max_wait_seconds for
+// the next block, then binds the held root. Default 0 fails closed at the head
+// exactly as before.
 StateRootResult verify_state_root_at(
     RpcClient&  rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex,
-    uint64_t    height);
+    uint64_t    height,
+    uint64_t    max_wait_seconds = 0);
 
 } // namespace determ::light

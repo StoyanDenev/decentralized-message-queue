@@ -109,7 +109,8 @@ struct HistoryRow {
 // the post-genesis-apply commitment when S-033 is active).
 std::string verify_header_state_root_at(RpcClient& rpc,
                                         const json& committee_json,
-                                        uint64_t idx) {
+                                        uint64_t idx,
+                                        uint64_t max_wait_seconds = 0) {
     if (idx == 0) {
         auto page = rpc.call("headers", {{"from", idx}, {"count", 1}});
         if (!page.contains("headers") || !page["headers"].is_array()
@@ -122,7 +123,8 @@ std::string verify_header_state_root_at(RpcClient& rpc,
         // it has no committee-signed successor in a 1-block chain.
         return page["headers"][0].value("state_root", std::string{});
     }
-    return committee_bound_state_root(rpc, committee_json, idx);
+    return committee_bound_state_root(rpc, committee_json, idx,
+                                      max_wait_seconds);
 }
 
 // Incrementally verifies the prev_hash chain from the pinned genesis,
@@ -261,7 +263,8 @@ int run_account_history(const AccountHistoryOptions& opts) {
         //    genesis + re-verifies the chain internally; that is the
         //    load-bearing proof for the trajectory's balance/nonce.
         AccountView head_view = read_account_trustless(
-            rpc, committee_seed, genesis, canon_domain);
+            rpc, committee_seed, genesis, canon_domain,
+            /*resume=*/false, /*state_path=*/"", opts.wait_seconds);
 
         // 5. Walk the sampled heights. For each h: chain to genesis +
         //    committee-verify header[h] -> trustless state_root_h.
@@ -282,7 +285,8 @@ int run_account_history(const AccountHistoryOptions& opts) {
 
             // Committee-verify the header at h -> its state_root.
             row.state_root_hex =
-                verify_header_state_root_at(rpc, committee_json, h);
+                verify_header_state_root_at(rpc, committee_json, h,
+                                            opts.wait_seconds);
 
             // Balance/nonce: the daemon serves a Merkle state-proof only
             // at the head (no height param on state_proof/account RPCs).

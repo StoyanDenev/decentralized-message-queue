@@ -180,16 +180,18 @@ void print_usage() {
         "      failed) when CHAIN fails. Exit 0 = all pass, 1 = any fail/error —\n"
         "      suitable as a cron/monitor health gate.\n"
         "  balance-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
-        "                    [--resume [--state <path>]]\n"
+        "                    [--resume [--state <path>]] [--wait <seconds>]\n"
         "      Verified chain + state-proof + cross-check daemon's cleartext.\n"
         "      --resume reuses a cached committee-verified anchor (verify only the\n"
         "      suffix above it) instead of re-verifying from genesis each call;\n"
         "      falls back to a full verify when the cache is absent/unusable.\n"
+        "      --wait <s> blocks up to s seconds for the next block when the\n"
+        "      anchor is the chain head (default 0 = fail closed at the head).\n"
         "  nonce-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
-        "                  [--resume [--state <path>]]\n"
+        "                  [--resume [--state <path>]] [--wait <seconds>]\n"
         "      Same as balance-trustless but extracts next_nonce.\n"
         "  stake-trustless --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
-        "                  [--resume [--state <path>]]\n"
+        "                  [--resume [--state <path>]] [--wait <seconds>]\n"
         "      Verified chain + state-proof (s: namespace) + cross-check the\n"
         "      daemon's `stake_info` cleartext. Prints the committee-verified\n"
         "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
@@ -220,6 +222,7 @@ void print_usage() {
         "      raw (locked, unlock_height) pair but does NOT compute the\n"
         "      height-relative eligibility verdict.\n"
         "  supply-trustless --rpc-port <N> --genesis <file> [--json] [--resume [--state <path>]]\n"
+        "                   [--wait <seconds>]\n"
         "      Verified chain + the five A1 supply counters from the `c:`\n"
         "      namespace (genesis_total, accumulated_subsidy/inbound/slashed/\n"
         "      outbound), each Merkle-verified against the SAME committee-\n"
@@ -237,7 +240,7 @@ void print_usage() {
         "      cross-checked, not independently re-derived — the S-040\n"
         "      leaf_count boundary).\n"
         "  account-history --rpc-port <N> --genesis <file> --domain <D>\n"
-        "                  --from <H1> --to <H2> [--step <S>] [--json]\n"
+        "                  --from <H1> --to <H2> [--step <S>] [--json] [--wait <seconds>]\n"
         "      Verified balance/nonce trajectory over a height range. For\n"
         "      each sampled height the row's state_root is read from a\n"
         "      committee-verified header chained back to the pinned genesis;\n"
@@ -245,6 +248,7 @@ void print_usage() {
         "      daemon's state_proof RPC serves the head only). --step\n"
         "      defaults to 1; --to must be <= the daemon's head index.\n"
         "  verify-state-root --rpc-port <N> --genesis <file> --height <H> [--json]\n"
+        "                    [--wait <seconds>]\n"
         "      Report the committee-verified state_root at height H. Anchors\n"
         "      genesis, chains header[H] back to block 0, verifies header[H]'s\n"
         "      K-of-K (MD) / ceil(2K/3) (BFT) committee sigs, and prints the\n"
@@ -334,6 +338,7 @@ void print_usage() {
         "      it), unlike state-proofs which the daemon serves head-only.\n"
         "  verify-receipt-inclusion --rpc-port <N> --genesis <file>\n"
         "                           --src-shard <S> --tx-hash <hex> [--json]\n"
+        "                           [--wait <seconds>]\n"
         "      Prove (or disprove) that the cross-shard inbound receipt\n"
         "      (src_shard=<S>, tx_hash=<hex>) has been applied on this shard\n"
         "      — i.e. is a member of the committee-verified `i:`\n"
@@ -353,7 +358,7 @@ void print_usage() {
         "      INCLUDED.\n"
         "  verify-merge-state --rpc-port <N> --genesis <file>\n"
         "                     --shard-id <S> --partner-id <P>\n"
-        "                     --refugee-region <R> [--json]\n"
+        "                     --refugee-region <R> [--json] [--wait <seconds>]\n"
         "      Prove (or disprove) that shard <S> is currently merged into\n"
         "      partner <P> with refugee region <R> — i.e. that the exact\n"
         "      record (partner_id=<P>, refugee_region=<R>) is a member of the\n"
@@ -373,7 +378,7 @@ void print_usage() {
         "      never a false INCLUDED.\n"
         "  verify-param-change --rpc-port <N> --genesis <file>\n"
         "                     --effective-height <H> --idx <I> --name <NAME>\n"
-        "                     [--value-hex <HEX>] [--json]\n"
+        "                     [--value-hex <HEX>] [--json] [--wait <seconds>]\n"
         "      Prove (or disprove) that a staged governance parameter change\n"
         "      — the entry at index <I> within effective-height bucket <H>,\n"
         "      named <NAME> with value <HEX> — is currently a member of the\n"
@@ -396,7 +401,7 @@ void print_usage() {
         "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
         "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
         "  verify-param-value --rpc-port <N> --genesis <file>\n"
-        "                     --name <NAME> --value <U64> [--json]\n"
+        "                     --name <NAME> --value <U64> [--json] [--wait <seconds>]\n"
         "      Prove (or disprove) that the CURRENT effective value of the\n"
         "      governance-activated consensus scalar <NAME> equals <U64>, by\n"
         "      Merkle-anchoring its committed `k:` (genesis-pinned constants)\n"
@@ -423,7 +428,7 @@ void print_usage() {
         "      proof, or daemon refusal → UNVERIFIABLE (exit 3), never a false\n"
         "      MATCH.\n"
         "  verify-dapp-registration --rpc-port <N> --genesis <file>\n"
-        "                          --domain <D> [--json]\n"
+        "                          --domain <D> [--json] [--wait <seconds>]\n"
         "      Prove (or disprove) that domain <D> is CURRENTLY a registered\n"
         "      DApp — i.e. that it is a member of the committee-verified `d:`\n"
         "      (dapp_registry) namespace, the v2.18 sibling of the a:/s:/i:/m:/\n"
@@ -445,7 +450,7 @@ void print_usage() {
         "      cleartext/leaf mismatch, or daemon refusal → UNVERIFIABLE\n"
         "      (exit 3), never a false INCLUDED.\n"
         "  verify-registrant --rpc-port <N> --genesis <file>\n"
-        "                    --domain <D> [--json]\n"
+        "                    --domain <D> [--json] [--wait <seconds>]\n"
         "      Prove (or disprove) that domain <D> is CURRENTLY a registered\n"
         "      VALIDATOR — i.e. a member of the committee-verified `r:`\n"
         "      (registrants) namespace, the validator-set sibling of the\n"
@@ -468,7 +473,7 @@ void print_usage() {
         "      value_hash mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
         "      never a false INCLUDED/NOT-INCLUDED.\n"
         "  verify-account --rpc-port <N> --genesis <file>\n"
-        "                 {--pubkey <64-hex> | --address <0x...>} [--json]\n"
+        "                 {--pubkey <64-hex> | --address <0x...>} [--json] [--wait <seconds>]\n"
         "      Derive an anon-account's canonical address LOCALLY and prove\n"
         "      whether it EXISTS on-chain. With --pubkey the address is\n"
         "      `make_anon_address` of the 32-byte Ed25519 key (\"0x\" +\n"
@@ -1798,6 +1803,7 @@ int cmd_account_trustless(int argc, char** argv,
     uint16_t port = 0;
     std::string genesis_path, domain, state_path;
     bool have_port = false, json_out = false, resume = false;
+    uint64_t wait_seconds = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
@@ -1807,6 +1813,8 @@ int cmd_account_trustless(int argc, char** argv,
         else if   (a == "--json")                    json_out     = true;
         else if   (a == "--resume")                  resume       = true;
         else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << cmd_name << ": unknown arg '" << a << "'\n";
             return 1;
@@ -1830,7 +1838,8 @@ int cmd_account_trustless(int argc, char** argv,
         // suffix above it) instead of re-verifying from genesis on every read;
         // falls back to a full verify when the cache is absent/unusable.
         auto view = read_account_trustless(rpc, committee_seed, genesis,
-                                            canon_domain, resume, state_path);
+                                            canon_domain, resume, state_path,
+                                            wait_seconds);
         if (json_out) {
             json out = {
                 {"domain",        canon_domain},
@@ -1886,7 +1895,8 @@ StakeView read_stake_trustless(
     const determ::chain::GenesisConfig& genesis,
     const std::string& domain,
     bool resume = false,
-    const std::string& state_path = "") {
+    const std::string& state_path = "",
+    uint64_t max_wait_seconds = 0) {
 
     StakeView sv;
 
@@ -1957,7 +1967,7 @@ StakeView read_stake_trustless(
         }
         uint64_t anchor_index = proof_height - 1;
         std::string attested = determ::light::committee_bound_state_root(
-            rpc, committee_json, anchor_index);
+            rpc, committee_json, anchor_index, max_wait_seconds);
         if (attested != proof_root) {
             throw std::runtime_error("stake-trustless: SECURITY — committee-attested "
                 "state_root at index " + std::to_string(anchor_index) + " = " + attested
@@ -2013,6 +2023,7 @@ int cmd_stake_trustless(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, domain, state_path;
     bool have_port = false, json_out = false, resume = false;
+    uint64_t wait_seconds = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
@@ -2022,6 +2033,8 @@ int cmd_stake_trustless(int argc, char** argv) {
         else if   (a == "--json")                    json_out     = true;
         else if   (a == "--resume")                  resume       = true;
         else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "stake-trustless: unknown arg '" << a << "'\n";
             return 1;
@@ -2042,7 +2055,8 @@ int cmd_stake_trustless(int argc, char** argv) {
         }
         std::string canon_domain = normalize_anon_address(domain);
         auto view = read_stake_trustless(rpc, committee_seed, genesis,
-                                         canon_domain, resume, state_path);
+                                         canon_domain, resume, state_path,
+                                         wait_seconds);
         if (json_out) {
             json out = {
                 {"domain",        canon_domain},
@@ -2306,6 +2320,8 @@ int cmd_account_history(int argc, char** argv) {
             opts.to = parse_u64("--to", argv[++i]); have_to = true;
         } else if (a == "--step"    && i + 1 < argc) {
             opts.step = parse_u64("--step", argv[++i]);
+        } else if (a == "--wait"    && i + 1 < argc) {
+            opts.wait_seconds = parse_u64("--wait", argv[++i]);
         } else if (a == "--json") {
             opts.json_out = true;
         } else {
@@ -2333,6 +2349,7 @@ int cmd_verify_state_root(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path;
     uint64_t height = 0;
+    uint64_t wait_seconds = 0;
     bool have_port = false, have_height = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -2342,6 +2359,8 @@ int cmd_verify_state_root(int argc, char** argv) {
         else if   (a == "--height"  && i + 1 < argc) {
             height = parse_u64("--height", argv[++i]); have_height = true;
         } else if (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-state-root: unknown arg '" << a << "'\n";
             return 1;
@@ -2364,7 +2383,7 @@ int cmd_verify_state_root(int argc, char** argv) {
         std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
 
         auto r = verify_state_root_at(rpc, committee_seed,
-                                      genesis_hash_hex, height);
+                                      genesis_hash_hex, height, wait_seconds);
 
         if (json_out) {
             json out = {
@@ -2868,6 +2887,7 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, tx_hash_hex;
     uint64_t src_shard = 0;
+    uint64_t wait_seconds = 0;
     bool have_port = false, have_shard = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -2878,6 +2898,8 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
             src_shard = parse_u64("--src-shard", argv[++i]); have_shard = true;
         } else if (a == "--tx-hash"   && i + 1 < argc) tx_hash_hex  = argv[++i];
         else if   (a == "--json")                      json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-receipt-inclusion: unknown arg '" << a << "'\n";
             return 1;
@@ -3028,7 +3050,8 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
                             determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index);
+                                rpc, committee_json, anchor_index,
+                                wait_seconds);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-receipt-inclusion: SECURITY — "
@@ -3153,6 +3176,7 @@ int cmd_verify_merge_state(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, refugee_region;
     uint64_t shard_id = 0, partner_id = 0;
+    uint64_t wait_seconds = 0;
     bool have_port = false, have_shard = false, have_partner = false,
          have_region = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
@@ -3167,6 +3191,8 @@ int cmd_verify_merge_state(int argc, char** argv) {
         } else if (a == "--refugee-region" && i + 1 < argc) {
             refugee_region = argv[++i]; have_region = true;
         } else if (a == "--json")                      json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-merge-state: unknown arg '" << a << "'\n";
             return 1;
@@ -3340,7 +3366,8 @@ int cmd_verify_merge_state(int argc, char** argv) {
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
                             determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index);
+                                rpc, committee_json, anchor_index,
+                                wait_seconds);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-merge-state: SECURITY — "
@@ -3476,6 +3503,7 @@ int cmd_verify_param_change(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, name, value_hex;
     uint64_t eff_height = 0, idx = 0;
+    uint64_t wait_seconds = 0;
     bool have_port = false, have_eff = false, have_idx = false,
          have_name = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
@@ -3491,6 +3519,8 @@ int cmd_verify_param_change(int argc, char** argv) {
             name = argv[++i]; have_name = true;
         } else if (a == "--value-hex" && i + 1 < argc) value_hex = argv[++i];
         else if   (a == "--json")                      json_out  = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-param-change: unknown arg '" << a << "'\n";
             return 1;
@@ -3668,7 +3698,8 @@ int cmd_verify_param_change(int argc, char** argv) {
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
                             determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index);
+                                rpc, committee_json, anchor_index,
+                                wait_seconds);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-param-change: SECURITY — "
@@ -3821,6 +3852,7 @@ int cmd_verify_param_value(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, name;
     uint64_t value = 0;
+    uint64_t wait_seconds = 0;
     bool have_port = false, have_name = false, have_value = false,
          json_out = false;
     for (int i = 0; i < argc; ++i) {
@@ -3833,6 +3865,8 @@ int cmd_verify_param_value(int argc, char** argv) {
         } else if (a == "--value"   && i + 1 < argc) {
             value = parse_u64("--value", argv[++i]); have_value = true;
         } else if (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-param-value: unknown arg '" << a << "'\n";
             return 1;
@@ -3967,7 +4001,8 @@ int cmd_verify_param_value(int argc, char** argv) {
                     uint64_t anchor_index = proof_height - 1;
                     std::string attested =
                         determ::light::committee_bound_state_root(
-                            rpc, committee_json, anchor_index);
+                            rpc, committee_json, anchor_index,
+                            wait_seconds);
                     if (attested != proof_root) {
                         throw std::runtime_error(
                             "verify-param-value: SECURITY — committee-attested "
@@ -4089,6 +4124,7 @@ int cmd_verify_param_value(int argc, char** argv) {
 int cmd_verify_registrant(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, domain;
+    uint64_t wait_seconds = 0;
     bool have_port = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -4097,6 +4133,8 @@ int cmd_verify_registrant(int argc, char** argv) {
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-registrant: unknown arg '" << a << "'\n";
             return 1;
@@ -4291,7 +4329,8 @@ int cmd_verify_registrant(int argc, char** argv) {
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
                             determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index);
+                                rpc, committee_json, anchor_index,
+                                wait_seconds);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-registrant: SECURITY — "
@@ -4434,6 +4473,7 @@ int cmd_verify_registrant(int argc, char** argv) {
 int cmd_verify_dapp_registration(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, domain;
+    uint64_t wait_seconds = 0;
     bool have_port = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -4442,6 +4482,8 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-dapp-registration: unknown arg '" << a << "'\n";
             return 1;
@@ -4631,7 +4673,8 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
                             determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index);
+                                rpc, committee_json, anchor_index,
+                                wait_seconds);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-dapp-registration: SECURITY — "
@@ -4798,6 +4841,7 @@ const char* account_exist_verdict_str(AccountExistVerdict v) {
 int cmd_verify_account(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, pubkey_hex, address_in;
+    uint64_t wait_seconds = 0;
     bool have_port = false, json_out = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -4807,6 +4851,8 @@ int cmd_verify_account(int argc, char** argv) {
         else if   (a == "--pubkey"  && i + 1 < argc) pubkey_hex   = argv[++i];
         else if   (a == "--address" && i + 1 < argc) address_in   = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-account: unknown arg '" << a << "'\n";
             return 1;
@@ -4995,7 +5041,8 @@ int cmd_verify_account(int argc, char** argv) {
                         uint64_t anchor_index = proof_height - 1;
                         std::string attested =
                             determ::light::committee_bound_state_root(
-                                rpc, committee_json, anchor_index);
+                                rpc, committee_json, anchor_index,
+                                wait_seconds);
                         if (attested != proof_root) {
                             throw std::runtime_error(
                                 "verify-account: SECURITY — committee-attested "
@@ -5450,6 +5497,7 @@ const char* supply_verdict_str(SupplyVerdict v) {
 int cmd_supply_trustless(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, state_path;
+    uint64_t wait_seconds = 0;
     bool have_port = false, json_out = false, resume = false;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -5459,6 +5507,8 @@ int cmd_supply_trustless(int argc, char** argv) {
         else if   (a == "--json")                    json_out     = true;
         else if   (a == "--resume")                  resume       = true;
         else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "supply-trustless: unknown arg '" << a << "'\n";
             return 1;
@@ -5646,7 +5696,8 @@ int cmd_supply_trustless(int argc, char** argv) {
                     uint64_t anchor_index = proof_height - 1;
                     std::string attested =
                         determ::light::committee_bound_state_root(
-                            rpc, committee_json, anchor_index);
+                            rpc, committee_json, anchor_index,
+                            wait_seconds);
                     if (attested != proof_root) {
                         throw std::runtime_error(
                             "supply-trustless: SECURITY — committee-attested "

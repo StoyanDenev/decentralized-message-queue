@@ -13,8 +13,10 @@
 #include <determ/chain/genesis.hpp>
 #include <determ/crypto/sha256.hpp>
 #include <determ/types.hpp>
+#include <chrono>
 #include <fstream>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace determ::light {
@@ -332,7 +334,8 @@ AnchoredHead anchored_head(
 
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const json& committee_json,
-                                       uint64_t anchor_index) {
+                                       uint64_t anchor_index,
+                                       uint64_t max_wait_seconds) {
     // 1. Fetch the FULL block at anchor_index (NOT the stripped header).
     //    The full body carries the heavy fields signing_bytes needs, so
     //    block_hash = compute_hash() is recomputable locally — the
@@ -364,14 +367,37 @@ std::string committee_bound_state_root(RpcClient& rpc,
     //    digest binds prev_hash, so its committee sigs transitively commit
     //    the anchor's block_hash — and hence the anchor's state_root.
     uint64_t succ = anchor_index + 1;
+    auto succ_present = [](const json& p) {
+        return p.contains("headers") && p["headers"].is_array()
+            && !p["headers"].empty();
+    };
     auto pg = rpc.call("headers", {{"from", succ}, {"count", 1}});
-    if (!pg.contains("headers") || !pg["headers"].is_array()
-        || pg["headers"].empty()) {
+    // HOLD-AND-WAIT (S-042 head-read fix). When the anchor IS the chain head its
+    // successor does not exist yet, so the binding cannot complete. The caller
+    // has ALREADY captured the proof for this anchor and the anchor block is
+    // immutable + retained, so we wait for the next block to be produced and
+    // then bind the HELD proof — we never re-fetch the proof (which would race a
+    // state change). Poll up to max_wait_seconds (1s between attempts). With
+    // max_wait_seconds == 0 this loop does not run and the head case fails closed
+    // immediately, exactly as before.
+    for (uint64_t waited = 0; waited < max_wait_seconds && !succ_present(pg);
+         ++waited) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        pg = rpc.call("headers", {{"from", succ}, {"count", 1}});
+    }
+    if (!succ_present(pg)) {
         throw std::runtime_error(
             "state_root at index " + std::to_string(anchor_index)
-            + " has NO committee-signed successor yet (it is the chain "
-              "head) — refusing to report an unbound head state_root; "
-              "retry once the chain advances one block");
+            + " has NO committee-signed successor yet (it is the chain head)"
+            + (max_wait_seconds > 0
+                   ? " after waiting " + std::to_string(max_wait_seconds)
+                         + "s for the next block"
+                   : "")
+            + " — refusing to report an unbound head state_root"
+            + (max_wait_seconds > 0
+                   ? ""
+                   : "; pass --wait <seconds> to block for the next block, or "
+                     "retry once the chain advances one block"));
     }
     auto& succ_hdr = pg["headers"][0];
     if (succ_hdr.value("index", ~uint64_t{0}) != succ) {
@@ -416,7 +442,8 @@ AccountView read_account_trustless(
     const determ::chain::GenesisConfig& genesis,
     const std::string& domain,
     bool resume,
-    const std::string& state_path) {
+    const std::string& state_path,
+    uint64_t max_wait_seconds) {
 
     AccountView av;
 
@@ -489,7 +516,8 @@ AccountView read_account_trustless(
 
     uint64_t anchor_index = proof_height - 1;
     std::string attested =
-        committee_bound_state_root(rpc, committee_json, anchor_index);
+        committee_bound_state_root(rpc, committee_json, anchor_index,
+                                   max_wait_seconds);
     if (attested != proof_root) {
         throw std::runtime_error(
             "trustless-read: SECURITY — committee-attested state_root at "

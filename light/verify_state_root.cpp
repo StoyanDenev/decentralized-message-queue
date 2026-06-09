@@ -103,7 +103,8 @@ StateRootResult verify_state_root_at(
     RpcClient&  rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const std::string& genesis_hash_hex,
-    uint64_t    height) {
+    uint64_t    height,
+    uint64_t    max_wait_seconds) {
 
     StateRootResult res;
     res.height = height;
@@ -191,7 +192,8 @@ StateRootResult verify_state_root_at(
         json committee_json = build_committee_json(committee_seed);
         try {
             std::string attested =
-                committee_bound_state_root(rpc, committee_json, height);
+                committee_bound_state_root(rpc, committee_json, height,
+                                           max_wait_seconds);
             res.state_root_hex = attested;
             res.state_root_present = !attested.empty();
             res.committee_verified = true;

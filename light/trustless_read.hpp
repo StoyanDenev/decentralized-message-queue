@@ -156,13 +156,20 @@ AnchoredHead anchored_head(
 // resume / state_path (default off / default cache) route the head-anchoring
 // through anchored_head; with resume=false the behavior is byte-identical to the
 // original full from-genesis verify, so existing callers need no change.
+//
+// `max_wait_seconds` (default 0 = no wait, behaviour unchanged) is forwarded to
+// committee_bound_state_root: when the anchor is the chain head (its state_root
+// has no committee-signed successor yet) the reader polls up to max_wait_seconds
+// for the next block, then binds the already-held proof. Default 0 fails closed
+// at the head exactly as before.
 AccountView read_account_trustless(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
     const determ::chain::GenesisConfig& genesis,
     const std::string& domain,
     bool resume = false,
-    const std::string& state_path = "");
+    const std::string& state_path = "",
+    uint64_t max_wait_seconds = 0);
 
 // Helper: build the genesis committee seed map (domain → ed_pub) from
 // the genesis config's initial_creators. Used by verify-chain and the
@@ -200,8 +207,20 @@ build_genesis_committee(const determ::chain::GenesisConfig& cfg);
 // state_root). `committee_json` is the {members:[...]} shape
 // verify_block_sigs consumes (built once by the caller from the
 // genesis-seeded committee).
+//
+// `max_wait_seconds` (default 0 = no wait, behaviour unchanged) enables the
+// HOLD-AND-WAIT path for the chain-head case: when the anchor IS the current
+// head its state_root has no committee-signed successor yet, so binding cannot
+// complete. Because the caller has ALREADY captured the proof for this anchor
+// and the anchor block is immutable + retained, we simply poll for the next
+// block to be produced (up to max_wait_seconds, 1s between attempts) and then
+// bind the HELD proof — we NEVER re-fetch the proof (which would race a state
+// change). This is the sound, reader-side fix for the S-042 head-read regression
+// (the daemon serves the proof at the head, whose root is not yet bindable). With
+// max_wait_seconds=0 the head case fails closed immediately, exactly as before.
 std::string committee_bound_state_root(RpcClient& rpc,
                                        const nlohmann::json& committee_json,
-                                       uint64_t anchor_index);
+                                       uint64_t anchor_index,
+                                       uint64_t max_wait_seconds = 0);
 
 } // namespace determ::light
