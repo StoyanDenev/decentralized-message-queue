@@ -122,14 +122,14 @@ The K-of-K committee signature in Phase 2 is produced by `make_block_sig` (`src/
 m.ed_sig = sign(key, block_digest.data(), block_digest.size());   // producer.cpp:673
 ```
 
-`block_digest` is computed by `compute_block_digest` (`src/node/producer.cpp:577-591`):
+`block_digest` is computed by `compute_block_digest` (`src/node/producer.cpp:608-693`; common-case prefix 610-620):
 
 ```cpp
 Hash compute_block_digest(const Block& b) {
     SHA256Builder h;
     h.append(b.index);
     h.append(b.prev_hash);
-    h.append(b.tx_root);                 // ← producer.cpp:581 — TX-ROOT IS BOUND
+    h.append(b.tx_root);                 // ← producer.cpp:612 — TX-ROOT IS BOUND
     h.append(b.delay_seed);
     h.append(static_cast<uint8_t>(b.consensus_mode));
     h.append(b.bft_proposer);
@@ -142,14 +142,14 @@ Hash compute_block_digest(const Block& b) {
 }
 ```
 
-Line `producer.cpp:581` (`h.append(b.tx_root)`) places the 32-byte `tx_root` field directly into the SHA-256 preimage of the digest each committee member signs. The light-client recomputes the *identical* digest in `light_compute_block_digest` (`light/verify.cpp:47-61`), which carries a "byte-for-byte copy of `producer.cpp::compute_block_digest`" comment and likewise binds `tx_root`:
+Line `producer.cpp:612` (`h.append(b.tx_root)`) places the 32-byte `tx_root` field directly into the SHA-256 preimage of the digest each committee member signs. The light-client recomputes the *identical* digest in `light_compute_block_digest` (`light/verify.cpp:57-92`), which carries a "byte-for-byte copy of `producer.cpp::compute_block_digest`" comment and likewise binds `tx_root`:
 
 ```cpp
 Hash light_compute_block_digest(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
     h.append(b.index);
     h.append(b.prev_hash);
-    h.append(b.tx_root);                 // ← light/verify.cpp:51 — same binding, light side
+    h.append(b.tx_root);                 // ← light/verify.cpp:61 — same binding, light side
     h.append(b.delay_seed);
     h.append(static_cast<uint8_t>(b.consensus_mode));
     h.append(b.bft_proposer);
@@ -170,8 +170,8 @@ The canonical specification agrees: `README.md §7.4` states `block_digest` is `
 
 `tx_root` (the transaction-set commitment) and `state_root` (the post-apply state commitment, S-033) are distinct fields of `struct Block` (`include/determ/chain/block.hpp:403` and `:484` respectively). `verify-tx-inclusion` reads back `tx_root`; the `LightClientThreatModel.md` T-L3/T-L4 reads read back `state_root`. The two are committed independently:
 
-- `tx_root` is in `compute_block_digest` *unconditionally* (`producer.cpp:581`, every block).
-- `state_root` is bound into the **block hash** via `signing_bytes` only when non-zero (`block.cpp:345-350`), and notably is **not** in `compute_block_digest` at all (the comment at `verify.cpp:40-46` enumerates the digest's field set and `state_root` is absent).
+- `tx_root` is in `compute_block_digest` *unconditionally* (`producer.cpp:612`, every block).
+- `state_root` is bound into the **block hash** via `signing_bytes` only when non-zero (`block.cpp:345-350`), and notably is **not** in `compute_block_digest` at all (the comment at `verify.cpp:40-56` enumerates the digest's field set and `state_root` is absent).
 
 This independence is why `verify-tx-inclusion` needs **no** S-033/S-038 deployment prerequisite. Unlike the balance/nonce reads (which throw `chain has not activated state_root` on a pre-S-033 chain — `LightClientThreatModel.md` §5.5), the inclusion verifier works on *every* block, including pre-S-033 blocks, because `tx_root` has been in the digest since v1.
 
@@ -274,7 +274,7 @@ TI-3 is the load-bearing gate: it converts "committee signed a 32-byte commitmen
 
 The verdict in that regime should therefore be labeled `UNVERIFIABLE` for the inclusion question (or, at most, a clearly-caveated "daemon-asserted" answer), never a cryptographic `INCLUDED` / `NOT-INCLUDED`.
 
-**Determ is not in this regime.** §3.1 establishes by direct source reading (`producer.cpp:581`, `verify.cpp:51`) that `compute_block_digest` **does** bind `tx_root`. TI-4's hypothesis is false for Determ. TI-4 is retained in this document for three reasons: (1) to make the conditional nature of TI-1..TI-3 explicit — they are *contingent* on the §3.1 binding, not free; (2) as a regression tripwire — if a future refactor of `compute_block_digest` ever drops `tx_root` from the digest (or the light-side `light_compute_block_digest` drifts out of sync), the scheme silently falls into the TI-4 regime, and this theorem is the documented warning that the inclusion proof would lose its cryptographic footing; (3) honesty about the boundary an external auditor must check. The tripwire is partially mechanized: `tools/test_light_verify_block_sigs.sh` boots a real cluster and verifies a producer-generated block, so a digest/light-digest divergence that dropped `tx_root` would surface as a sig-verify failure there (Lemma L-2 reasoning).  ∎
+**Determ is not in this regime.** §3.1 establishes by direct source reading (`producer.cpp:612`, `verify.cpp:61`) that `compute_block_digest` **does** bind `tx_root`. TI-4's hypothesis is false for Determ. TI-4 is retained in this document for three reasons: (1) to make the conditional nature of TI-1..TI-3 explicit — they are *contingent* on the §3.1 binding, not free; (2) as a regression tripwire — if a future refactor of `compute_block_digest` ever drops `tx_root` from the digest (or the light-side `light_compute_block_digest` drifts out of sync), the scheme silently falls into the TI-4 regime, and this theorem is the documented warning that the inclusion proof would lose its cryptographic footing; (3) honesty about the boundary an external auditor must check. The tripwire is partially mechanized: `tools/test_light_verify_block_sigs.sh` boots a real cluster and verifies a producer-generated block, so a digest/light-digest divergence that dropped `tx_root` would surface as a sig-verify failure there (Lemma L-2 reasoning).  ∎
 
 ### 4.5 Why MerkleTreeSoundness.md MT-4 does not apply verbatim
 
@@ -300,7 +300,7 @@ To make TI-1..TI-3 concrete, we walk the two attacks an auditor is most likely t
 
 **Lemma TL-1 (recompute byte-equivalence).** The verifier's `tx_root` recompute over a served body is byte-identical to the producer's `compute_tx_root` over the same transaction-hash set. *Proof.* Both evaluate `compute_tx_root` (`producer.cpp:262-270`): insert each `Hash` into a `std::set<Hash>` (which imposes the unique, ascending ordering), then `SHA256Builder::append` each in iteration order and `finalize`. The verifier obtains each leaf as `Transaction::compute_hash(tx_i^A)` (`block.cpp:31-34`), the same function the producer used to populate `creator_tx_lists` from the mempool. `std::set<Hash>` ordering, `SHA256Builder` append semantics, and `Transaction::compute_hash` are all platform-independent pure functions (no allocator-dependent ordering, no ABI variation), so the recompute is reproducible across the verifier and producer. Hence `S_A = S⋆ ⇒ r_A = r⋆` exactly (not merely with high probability), and the converse direction is the A2 argument of §4.1. □
 
-**Lemma TL-2 (digest binds `tx_root`, light ↔ chain).** `light_compute_block_digest` (`light/verify.cpp:47-61`) and `compute_block_digest` (`producer.cpp:577-591`) append `b.tx_root` at the same position in the same field order, so the digest the verifier computes for a header equals the digest the committee signed, byte-for-byte, *including* the `tx_root` contribution. *Proof.* Field-by-field inspection (§3.1): both append `index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer`, then per-creator `creators ‖ creator_tx_lists ‖ creator_ed_sigs ‖ creator_dh_inputs`. This is the byte-equivalence `LightClientThreatModel.md` Lemma L-2 establishes for the whole digest; TL-2 is the specialization to the `tx_root` field, which is the one this proof depends on. The "keep in sync" comment header (`verify.cpp:32-46`) is the maintenance contract; `tools/test_light_verify_block_sigs.sh` is the runtime tripwire (§4.4). □
+**Lemma TL-2 (digest binds `tx_root`, light ↔ chain).** `light_compute_block_digest` (`light/verify.cpp:57-92`) and `compute_block_digest` (`producer.cpp:608-693`) append `b.tx_root` at the same position in the same field order, so the digest the verifier computes for a header equals the digest the committee signed, byte-for-byte, *including* the `tx_root` contribution. *Proof.* Field-by-field inspection (§3.1): both append `index, prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer`, then per-creator `creators ‖ creator_tx_lists ‖ creator_ed_sigs ‖ creator_dh_inputs`. This is the byte-equivalence `LightClientThreatModel.md` Lemma L-2 establishes for the whole digest; TL-2 is the specialization to the `tx_root` field, which is the one this proof depends on. The "keep in sync" comment header (`verify.cpp:32-56`) is the maintenance contract; `tools/test_light_verify_block_sigs.sh` is the runtime tripwire (§4.4). □
 
 **Lemma TL-3 (fail-closed exit).** Every inconsistency the inclusion verifier can detect (genesis mismatch, header sig/continuity failure, missing block `B`, `r_A ≠ r⋆`, committee-not-in-seed) results in `UNVERIFIABLE` via a thrown `std::runtime_error` propagated to a non-zero exit code, never a silent downgrade to a verdict. *Proof.* By inheritance from `LightClientThreatModel.md` Lemma L-6 for the reused T-L1/T-L2 surfaces, plus the §4.3 structural property that the membership decision is reached only on the `r_A == r⋆` branch. There is no code path from a detected inconsistency to `INCLUDED`/`NOT-INCLUDED`. □
 
@@ -369,14 +369,14 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | Step 1 (T-L1) | `anchor_genesis` | `light/trustless_read.cpp:52-79` | Genesis-hash anchor (reused; `LightClientThreatModel.md` T-L1). |
 | Step 2 (T-L2) | `verify_block_sigs` | `light/verify.cpp:190-283` | Per-block Ed25519 sig-set verify over the recomputed digest. |
 | Step 2 (T-L2) | `verify_headers` | `light/verify.cpp:104-188` | prev_hash continuity binding block `B` to the genesis-anchored prefix. |
-| §3.1 binding (light) | `light_compute_block_digest` | `light/verify.cpp:47-61` | Recomputes the committee-signed digest; **binds `tx_root` at line 51**. |
-| §3.1 binding (chain) | `compute_block_digest` | `src/node/producer.cpp:577-591` | The producer's signed digest; **binds `tx_root` at line 581**. |
+| §3.1 binding (light) | `light_compute_block_digest` | `light/verify.cpp:57-92` | Recomputes the committee-signed digest; **binds `tx_root` at line 61**. |
+| §3.1 binding (chain) | `compute_block_digest` | `src/node/producer.cpp:608-693` | The producer's signed digest; **binds `tx_root` at line 612**. |
 | §3.1 binding (sign) | `make_block_sig` | `src/node/producer.cpp:662-675` | K-of-K Ed25519 signature over `block_digest` (line 673). |
 | §3.3 commitment | `compute_tx_root` | `src/node/producer.cpp:262-270` | Flat SHA-256 over the sorted union of tx hashes (the union-tx-root). |
 | §3.3 tx hash | `Transaction::compute_hash` / `signing_bytes` | `src/chain/block.cpp:17-34` | The leaf hashes `tx_root` commits to; content-binding (TI-1 note). |
 | §3.3 chain gate | `BlockValidator` tx_root check | `src/node/validator.cpp:161-167` | Rejects `tx_root != compute_tx_root(creator_tx_lists)` at apply. |
-| §3.2 / §3.4 field set | `Block` struct + digest comment | `include/determ/chain/block.hpp:403`,`:484`; `light/verify.cpp:40-46` | `tx_root` vs `state_root` independence; digest field-coverage boundary. |
-| §3.4 / TI-4 boundary | S-030 D2 analysis | `src/node/producer.cpp:565-576`; `docs/proofs/S030-D2-Analysis.md` | What the digest excludes; why inclusion is unaffected. |
+| §3.2 / §3.4 field set | `Block` struct + digest comment | `include/determ/chain/block.hpp:403`,`:484`; `light/verify.cpp:40-56` | `tx_root` vs `state_root` independence; digest field-coverage boundary. |
+| §3.4 / TI-4 boundary | S-030 D2 analysis | `src/node/producer.cpp:586-607`; `docs/proofs/S030-D2-Analysis.md` | What the digest excludes; why inclusion is unaffected. |
 | Body resolution | `build_body` + finalize | `src/node/producer.cpp:679-...`; `README.md §7.4` | Body = `union(creator_tx_lists)` resolved + sorted; `tx_root` set at line 724. |
 | RPC transport | `RpcClient::call` | `light/rpc_client.cpp:141-169` | Generic JSON-RPC the body/header fetch rides on. |
 
@@ -393,7 +393,7 @@ Integration test:
 
 - **Spec.** Complete (this document).
 - **Implementation.** `determ-light verify-tx-inclusion` shipped in sibling E3 (`light/verify_tx_inclusion.cpp` / `.hpp`; dispatched from `light/main.cpp::cmd_verify_tx_inclusion`; regression `tools/test_light_verify_tx_inclusion.sh`). The reused primitives (`anchor_genesis`, `verify_headers`, `verify_block_sigs`, `light_compute_block_digest`) were already shipped (`LightClientThreatModel.md` commits `f597c44` + `5e74097`).
-- **Regime (the headline finding).** **STRONG.** The committee-signed `compute_block_digest` binds `tx_root` (`producer.cpp:581`, mirrored light-side at `verify.cpp:51`); `tx_root` is the validator-enforced union-tx-root commitment to the transaction-hash set (`producer.cpp:262-270`, `validator.cpp:161-167`); and the verifier recomputes `tx_root` from the served body and gates on the match (TI-3). TI-1 (sound positive inclusion) and TI-2 (sound non-inclusion) hold, reducing to A1 (committee-sig unforgeability) + A2 (collision resistance). TI-4 (degraded daemon-trust regime) is **not** Determ's case; it is documented as a regression tripwire and an honesty boundary.
+- **Regime (the headline finding).** **STRONG.** The committee-signed `compute_block_digest` binds `tx_root` (`producer.cpp:612`, mirrored light-side at `verify.cpp:61`); `tx_root` is the validator-enforced union-tx-root commitment to the transaction-hash set (`producer.cpp:262-270`, `validator.cpp:161-167`); and the verifier recomputes `tx_root` from the served body and gates on the match (TI-3). TI-1 (sound positive inclusion) and TI-2 (sound non-inclusion) hold, reducing to A1 (committee-sig unforgeability) + A2 (collision resistance). TI-4 (degraded daemon-trust regime) is **not** Determ's case; it is documented as a regression tripwire and an honesty boundary.
 - **Cryptographic assumptions used.** A1 (Ed25519 EUF-CMA, `Preliminaries.md` §2.2), A2 (SHA-256 collision resistance, §2.1), and transitively A3 (second-preimage on the tx-hash content-binding, TI-1 note). **A4** (CSPRNG) is not used by the inclusion verifier.
 - **Adversary model.** `A_daemon` (malicious single daemon controlling RPC), reused from `LightClientThreatModel.md` §2.1. Out of scope: `A_crypto`, `A_local`, `A_net`, `A_genesis`.
 - **Composes with.** `LightClientThreatModel.md` (T-L1 + T-L2, reused), `Censorship.md` (FA2 — the union-tx-root inclusion this verifier reads back), `Safety.md` (FA1 — per-block sig primitive), `LightClientArchiveSoundness.md` (sibling — header sequences vs tx membership), `MerkleTreeSoundness.md` (MT-4 — analogous result for the sibling `state_root` surface; **not** applied verbatim — §4.5).

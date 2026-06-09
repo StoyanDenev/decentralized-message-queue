@@ -126,7 +126,7 @@ Throughout, let `(S, H)` be the queried `(src_shard, tx_hash)`, `R := state_root
 
 **Statement.** Under (A1) Ed25519 EUF-CMA + (A2) SHA-256 collision resistance, in the **S-033-active interior regime** (`state_root(h) ≠ 0` and a committee-signed successor block `h+1` exists on the operator's pinned chain), the `state_root R` that `verify-receipt-inclusion` anchors and verifies the `i:` proof against equals the genuine `state_root_T(h)` of the pinned chain at `h`, except with probability `≤ K · 2⁻¹²⁸ + 2⁻¹²⁸` per invocation. Consequently the root the `i:` leaf is checked against is *committee-certified*, not daemon-asserted.
 
-**Proof.** This is `StateRootAnchorSoundness.md` **SR-1** applied at the height the `i:` proof is anchored at, identical to `StakeProofSoundness.md` SP-1 and `LightClientThreatModel.md` T-L4's inline anchoring at `trustless_read.cpp:277-285`. The binding of `state_root(h)` to the committee is **transitive-forward**, not a direct signature: the committee directly Ed25519-signs `compute_block_digest(h)` (`producer.cpp:577-591`), which carries `index, prev_hash, tx_root, …` but **NOT** `state_root` (the `light/verify.cpp:40-46` exclusion comment). `state_root(h)` is bound into `Block::signing_bytes(h)` (when non-zero, via the S-033 zero-skip shim, `block.cpp:336-350`) and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`:
+**Proof.** This is `StateRootAnchorSoundness.md` **SR-1** applied at the height the `i:` proof is anchored at, identical to `StakeProofSoundness.md` SP-1 and `LightClientThreatModel.md` T-L4's inline anchoring at `trustless_read.cpp:277-285`. The binding of `state_root(h)` to the committee is **transitive-forward**, not a direct signature: the committee directly Ed25519-signs `compute_block_digest(h)` (`producer.cpp:608-693`), which carries `index, prev_hash, tx_root, …` but **NOT** `state_root` (the `light/verify.cpp:40-46` exclusion comment). `state_root(h)` is bound into `Block::signing_bytes(h)` (when non-zero, via the S-033 zero-skip shim, `block.cpp:336-350`) and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`:
 
 $$
 \text{state\_root}(h) \in \text{signing\_bytes}(h) \in \text{block\_hash}(h) = \text{prev\_hash}(h+1) \in \text{digest}(h+1).
@@ -313,7 +313,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | RI-1 (committee-anchor) | race-window dispatch in the read flow | `light/trustless_read.cpp:226-307` | Anchor the `i:` proof's `state_root` to a committee-signed header; three-branch `proof_height < / == / >`. |
 | RI-1 (T-L2) | `verify_block_sigs` | `light/verify.cpp:190-283` | Per-block Ed25519 K-of-K committee-sig verify over `light_compute_block_digest`. |
 | RI-1 (T-L2) | `verify_headers` | `light/verify.cpp:104-188` | prev_hash continuity walk from genesis (SR-2 genesis-binding). |
-| RI-1 (binding) | `compute_block_digest` (excludes `state_root`) | `src/node/producer.cpp:577-591`; `light/verify.cpp:40-61` | The committee-signed digest; `state_root` absent → transitive-forward binding (SR-1). |
+| RI-1 (binding) | `compute_block_digest` (excludes `state_root`) | `src/node/producer.cpp:608-693`; `light/verify.cpp:57-92` | The committee-signed digest; `state_root` absent → transitive-forward binding (SR-1). |
 | RI-1 (binding) | `Block::signing_bytes` / `compute_hash` | `src/chain/block.cpp:336-364` | Binds `state_root` into `block_hash` when non-zero (S-033 shim). |
 | RI-2 | `verify_state_proof` | `light/verify.cpp:285-349` | Parse proof JSON, delegate to `merkle_verify`; consumes `key_bytes` directly (`:304-305`); `--state-root` override. |
 | RI-2 | `merkle_verify` | `src/crypto/merkle.cpp:113-141` | Recompute root from `i:` leaf + siblings; range/underflow/exact-consume gates. |
@@ -364,7 +364,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `src/chain/chain.cpp:1358-1381` — inbound-receipt admission + insert (`:1373-1374`); the apply-side record RI reads back.
 - `include/determ/chain/chain.hpp:605` — `applied_inbound_receipts_ : std::set<std::pair<ShardId, Hash>>`.
 - `src/node/node.cpp:3287-3336` — `Node::rpc_state_proof` (`i:` declined at `:3294`, `:3312-3313`; single envelope `:3325-3335`).
-- `src/node/producer.cpp:577-591` — `compute_block_digest` (excludes `state_root`).
+- `src/node/producer.cpp:608-693` — `compute_block_digest` (excludes `state_root`).
 - `src/chain/block.cpp:336-364` — `Block::signing_bytes` / `compute_hash` (binds `state_root` when non-zero).
 - `src/crypto/merkle.cpp:25-34` — `merkle_leaf_hash` (length-prefixed key; MT-2).
 - `src/crypto/merkle.cpp:113-141` — `merkle_verify`.

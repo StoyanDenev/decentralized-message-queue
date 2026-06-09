@@ -127,7 +127,7 @@ MT-4 is the cryptographic core that T-L3 *is*, and that SR-1 / AH-1 Gate-3 invok
 | **TI-3** | Tampered-body detection: the recompute-`tx_root`-from-body-and-match gate fires before the membership scan; any body whose recomputed root ≠ committee-signed root → `UNVERIFIABLE`. **The gate that makes TI-1/TI-2 sound.** | A2 |
 | **TI-4** | Degradation honesty: the counterfactual regime where `tx_root` is NOT in the digest would degrade to daemon-trust; documented as a regression tripwire — explicitly NOT Determ's case (Determ is **STRONG**). | (honesty boundary) |
 
-Key structural facts: `tx_root` IS in the committee-signed digest (`producer.cpp:581`, mirrored `light/verify.cpp:51`), so TI is in the **strong regime**; `tx_root` is a **flat SHA-256 over the sorted union of tx hashes**, NOT a Merkle tree — so MT-4 does not apply verbatim (§4.5 of TI), and TI uses a direct `tx_root`-recompute collision argument. TI needs **no** S-033 prerequisite (`tx_root` ⊥ `state_root`, independent block fields).
+Key structural facts: `tx_root` IS in the committee-signed digest (`producer.cpp:612`, mirrored `light/verify.cpp:61`), so TI is in the **strong regime**; `tx_root` is a **flat SHA-256 over the sorted union of tx hashes**, NOT a Merkle tree — so MT-4 does not apply verbatim (§4.5 of TI), and TI uses a direct `tx_root`-recompute collision argument. TI needs **no** S-033 prerequisite (`tx_root` ⊥ `state_root`, independent block fields).
 
 ### 3.5 AccountHistorySoundness.md — AH-1..AH-4 (the trajectory)
 
@@ -219,7 +219,7 @@ Each edge below is a "rests-on" relation proved in the cited home document. The 
 
 - **AH-2 (trajectory) ← AH-1 + genesis-linkage (the `IncrementalChainWalker` single pass).** Each row binds the root from its *own* committee-verified `header[h]`; the only inter-row coupling is the one-time genesis anchor + the per-height prev_hash linkage to the genesis-rooted chain (a single monotonic pass via `IncrementalChainWalker::advance_to`). No shared root couples row values; cross-height confusion = A2 collision. *(`AccountHistorySoundness.md` AH-2 + AH-L2/AH-L3.)*
 
-- **TI-1 (tx-inclusion) ← T-L2 + tx_root-in-digest (A1 + A2), parallel to SR-1 (state_root sibling).** `verify-tx-inclusion` reuses T-L1 + T-L2 to obtain a committee-signed `tx_root` (the digest binds `tx_root` at `producer.cpp:581`), then recomputes `tx_root` from the served body and gates on the match (TI-3, A2). `tx_root` is the **sibling commitment** to `state_root`: both are fields the committee signs, but `tx_root` is a flat SHA-256 over the tx-hash set (not a Merkle tree), so MT-4 does NOT apply verbatim — TI uses a direct recompute collision argument. *(`TxInclusionProofSoundness.md` TI-1/TI-3 §3-§4; `tx_root` ⊥ `state_root` per §3.2.)*
+- **TI-1 (tx-inclusion) ← T-L2 + tx_root-in-digest (A1 + A2), parallel to SR-1 (state_root sibling).** `verify-tx-inclusion` reuses T-L1 + T-L2 to obtain a committee-signed `tx_root` (the digest binds `tx_root` at `producer.cpp:612`), then recomputes `tx_root` from the served body and gates on the match (TI-3, A2). `tx_root` is the **sibling commitment** to `state_root`: both are fields the committee signs, but `tx_root` is a flat SHA-256 over the tx-hash set (not a Merkle tree), so MT-4 does NOT apply verbatim — TI uses a direct recompute collision argument. *(`TxInclusionProofSoundness.md` TI-1/TI-3 §3-§4; `tx_root` ⊥ `state_root` per §3.2.)*
 
 - **AR-1 (archive) ← T-L1 + T-L2 offline.** AR-1 is T-L1 (genesis equality, AR-1 clause b) + T-L2 (per-header committee-sig, AR-1 clause c) + continuity (AR-1 clause a) applied to **frozen archive bytes** instead of live RPC. **AR-2 (temporal) ← purity:** `verify-archive` is a pure function of (archive bytes, genesis bytes), so the verdict is time-invariant — genuinely new, no online analog. **AR-3 (range-completeness caveat):** acceptance proves validity of *contained* headers, not completeness (`exported_at_height` is an unverified claim; `from>0` slices float) — a scope limitation, not a crypto break. **AR-4 = T-L2's committee caveat** (static `K_0`, fail-closed on rotation). *(`LightClientArchiveSoundness.md` AR-1..AR-4 + §5.1.)*
 
@@ -327,7 +327,7 @@ Inherited uniformly from `LightClientThreatModel.md` §6: **no persistence** (ev
 |---|---|
 | `light/main.cpp` (dispatch lines 933–948) | The subcommand dispatcher (§5). |
 | `light/trustless_read.cpp` / `.hpp` | `anchor_genesis` (T-L1), `verify_chain_to_head`, `read_account_trustless` (T-L4 + race-window), `build_genesis_committee` (the `K_0` seed, §6.2). |
-| `light/verify.cpp` / `.hpp` | `verify_headers` (continuity), `verify_block_sigs` (T-L2), `light_compute_block_digest` (L-2; binds `tx_root` at `:51`), `verify_state_proof` → `merkle_verify` (T-L3/MT-4). |
+| `light/verify.cpp` / `.hpp` | `verify_headers` (continuity), `verify_block_sigs` (T-L2), `light_compute_block_digest` (L-2; binds `tx_root` at `:61`), `verify_state_proof` → `merkle_verify` (T-L3/MT-4). |
 | `light/account_history.cpp` / `.hpp` | `run_account_history` (AH-1/AH-2), `verify_header_state_root_at` (SR-1 per height), `IncrementalChainWalker::advance_to` (genesis-linkage single pass). |
 | `light/verify_tx_inclusion.cpp` / `.hpp` | `verify-tx-inclusion` (TI-1/TI-2/TI-3). |
 | `light/verify_archive.cpp` / `.hpp` | `verify-archive` (AR-1 offline / AR-2). |
@@ -337,7 +337,7 @@ Inherited uniformly from `LightClientThreatModel.md` §6: **no persistence** (ev
 | `light/rpc_client.cpp` / `.hpp` | `RpcClient::call` (the JSON-RPC transport every fetch rides on). |
 | `light/keyfile.cpp` / `.hpp` | `load_light_keyfile` (plaintext keyfile shape; §6.6). |
 | `src/crypto/merkle.cpp` + `include/determ/crypto/merkle.hpp` | `merkle_leaf_hash` / `merkle_inner_hash` / `merkle_root` / `merkle_proof` / `merkle_verify` (MT-1..MT-5). |
-| `src/node/producer.cpp` | `compute_block_digest` (`:577-591`, binds `tx_root` at `:581`), `compute_tx_root` (`:262-270`), `make_block_sig`. |
+| `src/node/producer.cpp` | `compute_block_digest` (`:608-693`, binds `tx_root` at `:612`), `compute_tx_root` (`:262-270`), `make_block_sig`. |
 
 ### determ-light test scripts (`tools/`)
 

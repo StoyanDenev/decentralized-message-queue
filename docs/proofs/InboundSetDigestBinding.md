@@ -1,6 +1,6 @@
 # Inbound-set digest binding — S-030 D2 removal-gap closure (inbound dimension)
 
-This document formalizes the inbound-set digest binding shipped in commit `a727cb2`: the extension of `compute_block_digest` (`src/node/producer.cpp:577-606`) that appends a single Merkle root over the sorted `hash_cross_shard_receipt` keys of `inbound_receipts` into the K-of-K block-signature target — closing the S-030 D2 *removal gap* for the inbound dimension. Pre-`a727cb2`, the inbound-receipt set was bound only structurally (via `check_inbound_receipts`' subset-only intersection test) and via `signing_bytes`/`state_root`, but **not** by the digest the K committee signers actually sign; a relayer could therefore strip an admitted inbound receipt after the K-of-K signatures gathered, and the two block instances would share an identical `block_digest` (and so an identical valid K-of-K signature bundle). This proof shows the one-line digest append closes that gap at the strongest (signature) layer.
+This document formalizes the inbound-set digest binding shipped in commit `a727cb2`: the extension of `compute_block_digest` (`src/node/producer.cpp:608-693`) that appends a single Merkle root over the sorted `hash_cross_shard_receipt` keys of `inbound_receipts` into the K-of-K block-signature target — closing the S-030 D2 *removal gap* for the inbound dimension. Pre-`a727cb2`, the inbound-receipt set was bound only structurally (via `check_inbound_receipts`' subset-only intersection test) and via `signing_bytes`/`state_root`, but **not** by the digest the K committee signers actually sign; a relayer could therefore strip an admitted inbound receipt after the K-of-K signatures gathered, and the two block instances would share an identical `block_digest` (and so an identical valid K-of-K signature bundle). This proof shows the one-line digest append closes that gap at the strongest (signature) layer.
 
 The four theorems below pin the contract:
 
@@ -23,7 +23,7 @@ Let `vr(R) := compute_view_root(keys(R))` (`src/node/producer.cpp:335-340`) — 
 
 Let `digest_v1(b)` denote the pre-`a727cb2` block digest: an `SHA256Builder` fed, in order, with
 `b.index ‖ b.prev_hash ‖ b.tx_root ‖ b.delay_seed ‖ uint8(b.consensus_mode) ‖ b.bft_proposer ‖ (b.creators[i])_i ‖ (b.creator_tx_lists[i][j])_{i,j} ‖ (b.creator_ed_sigs[i])_i ‖ (b.creator_dh_inputs[i])_i`,
-then `finalize()` (`src/node/producer.cpp:578-589,605`). Let `digest_v2(b)` denote the shipped `compute_block_digest(b)` at `:577-606`, which is `digest_v1`'s byte stream followed, **iff** `R` is non-empty, by one extra `h.append(vr(R))` (`:598-604`).
+then `finalize()` (`src/node/producer.cpp:610-620,692`). Let `digest_v2(b)` denote the shipped `compute_block_digest(b)` at `:608-693`, which is `digest_v1`'s byte stream followed, **iff** `R` is non-empty, by one extra `h.append(vr(R))` (`:629-635`).
 
 **Theorem T-1 (Order-independent binding).** For every `Block b` and every permutation `σ` of `b.inbound_receipts` into `b'` (`b'` equal to `b` in all fields except `b'.inbound_receipts = σ(b.inbound_receipts)`, with `set(keys(b'.inbound_receipts)) = set(keys(b.inbound_receipts))`):
 
@@ -63,7 +63,7 @@ where `creator_view_inbound_lists` are the committee's Phase-1-committed inbound
 
 ### 2.1 S-030 D2 — the block-digest field-coverage gap (inbound slice)
 
-S-030 D2 (per `S030-D2-Analysis.md` §1) is the gap that the K-of-K committee signature target — `compute_block_digest` — historically excluded the pool-fed evidence and receipt lists (`equivocation_events`, `abort_events`, `inbound_receipts`), even though `Block::signing_bytes` covers them. The exclusion left a one-block window in which two valid K-of-K-signed block instances could differ in those fields behind the same digest. The original source comment at `:565-576` records this and warns that a *naive* digest extension does not work because gossip-async view drift makes members' tentative bodies diverge, so the K signatures never gather and the round stalls.
+S-030 D2 (per `S030-D2-Analysis.md` §1) is the gap that the K-of-K committee signature target — `compute_block_digest` — historically excluded the pool-fed evidence and receipt lists (`equivocation_events`, `abort_events`, `inbound_receipts`), even though `Block::signing_bytes` covers them. The exclusion left a one-block window in which two valid K-of-K-signed block instances could differ in those fields behind the same digest. The original source comment at `:586-607` records this and warns that a *naive* digest extension does not work because gossip-async view drift makes members' tentative bodies diverge, so the K signatures never gather and the round stalls.
 
 `S030-D2-Analysis.md` §2 makes the failure mode precise: if `compute_block_digest` simply appended each member's *locally observed* evidence/receipt pool, two honest members with momentarily different gossip views would compute different digests, sign different targets, and the K-of-K gather would fail. The naive extension trades a safety gap for a liveness failure.
 
@@ -73,7 +73,7 @@ This asymmetry is load-bearing and is exactly why `F2-SPEC.md` §Q1 assigns **in
 
 ### 2.2 The subset-only residual the digest closes
 
-Even after sites 1+3, `check_inbound_receipts` (`src/node/validator.cpp:1168-1185`) enforces only a **subset** relationship: every admitted receipt's key must lie *inside* `reconcile_intersection`. It does **not** enforce that the admitted set equals the intersection, nor that the producer included every eligible receipt. This is by design — a producer may legitimately admit fewer receipts than the intersection allows (e.g. ones already credited in an earlier block are filtered at `:899` / `:1156-1158`). But the subset-only test has a corollary attack surface: a relayer can *remove* an admitted receipt from `b.inbound_receipts` after the K-of-K signatures gather and the shrunk set still passes the subset test (a subset of a subset is a subset). Pre-`a727cb2`, that stripped block carried the *same* `compute_block_digest` value as the original — so the same K-of-K signatures verified against it. The receiving shard would then never credit the stripped receipt, silently dropping a cross-shard transfer that the committee had attested. The `:590-597` source comment names this precisely: *"check_inbound_receipts' intersection test is subset-only — so without this a relayer could STRIP an inbound receipt after signing and the two versions would share a digest (the S-030-D2 removal gap)."* T-3 is the formal statement that the digest append closes it.
+Even after sites 1+3, `check_inbound_receipts` (`src/node/validator.cpp:1168-1185`) enforces only a **subset** relationship: every admitted receipt's key must lie *inside* `reconcile_intersection`. It does **not** enforce that the admitted set equals the intersection, nor that the producer included every eligible receipt. This is by design — a producer may legitimately admit fewer receipts than the intersection allows (e.g. ones already credited in an earlier block are filtered at `:899` / `:1156-1158`). But the subset-only test has a corollary attack surface: a relayer can *remove* an admitted receipt from `b.inbound_receipts` after the K-of-K signatures gather and the shrunk set still passes the subset test (a subset of a subset is a subset). Pre-`a727cb2`, that stripped block carried the *same* `compute_block_digest` value as the original — so the same K-of-K signatures verified against it. The receiving shard would then never credit the stripped receipt, silently dropping a cross-shard transfer that the committee had attested. The `:621-628` source comment names this precisely: *"check_inbound_receipts' intersection test is subset-only — so without this a relayer could STRIP an inbound receipt after signing and the two versions would share a digest (the S-030-D2 removal gap)."* T-3 is the formal statement that the digest append closes it.
 
 ---
 
@@ -119,7 +119,7 @@ Line `336` set-coerces (dedup + canonical lexicographic sort via `std::set<Hash>
 ### 3.3 The digest extension (the object of this proof)
 
 ```cpp
-// src/node/producer.cpp:577-606
+// src/node/producer.cpp:608-693
 Hash compute_block_digest(const Block& b) {
     SHA256Builder h;
     h.append(b.index);
@@ -145,7 +145,7 @@ Hash compute_block_digest(const Block& b) {
 }
 ```
 
-**Mechanism.** The first ten `append` calls (`:579-589`) are exactly the pre-`a727cb2` (v1) byte stream — unchanged. The conditional at `:598` gates the new behavior on `!b.inbound_receipts.empty()`. When the gate fires, `:599-602` build `ikeys = [ key(R[0]), …, key(R[n-1]) ]` in receipt-vector order, and `:603` appends a single 32-byte `compute_view_root(ikeys)` = `vr(R)` to the same builder. When the gate does not fire, the builder reaches `finalize()` at `:605` having consumed only the v1 stream. The append is a single fixed-width 32-byte field, unambiguously positioned as the final segment of the pre-image whenever present.
+**Mechanism.** The first ten `append` calls (`:610-620`) are exactly the pre-`a727cb2` (v1) byte stream — unchanged. The conditional at `:629` gates the new behavior on `!b.inbound_receipts.empty()`. When the gate fires, `:630-633` build `ikeys = [ key(R[0]), …, key(R[n-1]) ]` in receipt-vector order, and `:634` appends a single 32-byte `compute_view_root(ikeys)` = `vr(R)` to the same builder. When the gate does not fire, the builder reaches `finalize()` at `:692` having consumed only the v1 stream. The append is a single fixed-width 32-byte field, unambiguously positioned as the final segment of the pre-image whenever present.
 
 ### 3.4 Producer- and validator-side intersection enforcement (sites 1+3 context for T-4)
 
@@ -196,14 +196,14 @@ The producer admits only receipts whose key is in the intersection (`:900-902`);
 
 ### 4.1 Proof of T-1 (Order-independent binding)
 
-Fix `b` and a permutation `b'` of its `inbound_receipts` with `set(keys(b'.inbound_receipts)) = set(keys(b.inbound_receipts))`. All digested fields except `inbound_receipts` are identical between `b` and `b'`, so the `:579-589` byte stream is identical. For the conditional segment:
+Fix `b` and a permutation `b'` of its `inbound_receipts` with `set(keys(b'.inbound_receipts)) = set(keys(b.inbound_receipts))`. All digested fields except `inbound_receipts` are identical between `b` and `b'`, so the `:610-620` byte stream is identical. For the conditional segment:
 
 - If `b.inbound_receipts` is empty, then `b'.inbound_receipts` is too (a permutation preserves length), and neither appends — digests equal by the empty branch (this reduces to T-2).
 - If non-empty, both append `compute_view_root(ikeys)`. By `compute_view_root`'s §3.2 mechanism, the output is a function of `set(ikeys) = set(keys(·))` alone (the `std::set<Hash>` coercion at `:336` erases the vector order before hashing). Since `set(keys(b'.inbound_receipts)) = set(keys(b.inbound_receipts))` by hypothesis, the two appended roots are byte-equal. (Formally this is `F2ViewReconciliationAnalysis.md` T-3 specialized to the within-list, K=1 case.)
 
 In both cases the full pre-image fed to `finalize()` is identical, so the digests are equal.    ∎
 
-**Implementation citation.** `src/node/producer.cpp:336` (set-coerce) + `:599-603` (build keys in receipt order, then root). The reorder cannot reach the digest because the order is destroyed at `:336` before any byte is hashed.
+**Implementation citation.** `src/node/producer.cpp:336` (set-coerce) + `:630-634` (build keys in receipt order, then root). The reorder cannot reach the digest because the order is destroyed at `:336` before any byte is hashed.
 
 ### 4.2 Proof of T-2 (Empty-set short-circuit preserves the v1 digest)
 
@@ -211,7 +211,7 @@ Fix `b` with `b.inbound_receipts.empty()`. The condition at `:598` (`!b.inbound_
 
 **Corollary T-2.1 (no v1-block regression).** Every block produced on a SINGLE/BEACON chain, and every cross-shard-chain block that happens to admit no inbound receipts, hashes byte-identically before and after `a727cb2`. No pre-`a727cb2` block, signature, or stored chain head re-hashes to a different digest. The change is non-breaking on the entire v1 surface; an external client computing block digests by the pre-`a727cb2` field list still matches on every non-cross-shard block.
 
-**Implementation citation.** `src/node/producer.cpp:598` (the gate) + `:1136-1140` of `validator.cpp` (SINGLE/BEACON chains require `inbound_receipts` empty, so the gate provably never fires there).
+**Implementation citation.** `src/node/producer.cpp:629` (the gate) + `:1136-1140` of `validator.cpp` (SINGLE/BEACON chains require `inbound_receipts` empty, so the gate provably never fires there).
 
 ### 4.3 Proof of T-3 (post-signing strip is detectable)
 
@@ -225,7 +225,7 @@ Let `b` have non-empty `inbound_receipts` and a K-of-K bundle `(σ_i)` that veri
 
 Combining Steps 1–3: the probability that a post-signing inbound-set alteration goes undetected is bounded by the A2 collision term `2^{-128}` plus the A1 forgery term, i.e. `2^{-128} + negl(λ)`.    ∎
 
-**Implementation citation.** `src/node/producer.cpp:598-604` (digest binds `vr`) + `src/node/validator.cpp:442-456` (single `compute_block_digest` recomputation; per-creator Ed25519 `verify` against it). Producer and validator invoke the identical `compute_block_digest` symbol (the same translation unit, `:577`), so there is no producer/validator digest skew for an honest input — the only way to change the validator's recomputed digest is to change a digested field, and `inbound_receipts`' admitted-key set is now one.
+**Implementation citation.** `src/node/producer.cpp:629-635` (digest binds `vr`) + `src/node/validator.cpp:442-456` (single `compute_block_digest` recomputation; per-creator Ed25519 `verify` against it). Producer and validator invoke the identical `compute_block_digest` symbol (the same translation unit, `:608`), so there is no producer/validator digest skew for an honest input — the only way to change the validator's recomputed digest is to change a digested field, and `inbound_receipts`' admitted-key set is now one.
 
 ### 4.4 Proof of T-4 (the bound set is the deterministic committee-wide intersection)
 
@@ -262,7 +262,7 @@ The inbound digest binding is exercised end-to-end by the cross-shard regression
 - `tools/test_cross_shard_transfer.sh` — full source→destination credit path; a stripped inbound receipt would fail destination credit (the T-3 attack manifests as a dropped credit), and a digest that did not bind the set would let the strip through silently.
 - The `compute_view_root` order-independence + dedup + content-sensitivity properties underpinning T-1 are unit-tested in `determ test-view-root` (`tools/test_view_root.sh`), scenarios 1–8 (see `F2ViewReconciliationAnalysis.md` §6).
 - `hash_cross_shard_receipt`'s field coverage (the T-3 Step-1 distinguishing argument) and `reconcile_intersection` (T-4) are exercised across the cross-shard suite's receipt round-trip assertions.
-- **The digest-layer half of T-3 is now witnessed directly by `determ test-block-digest` (`tools/test_block_digest.sh`), assertions 20–21**: assertion 20 (`inbound_receipts INCLUDED when present`) confirms an admitted inbound receipt joins `compute_block_digest` (the binding exists — gated on non-empty, mirroring `producer.cpp:598`), and assertion 21 (`inbound_receipts SET-sensitive`) constructs two blocks differing only by one inbound receipt and asserts their digests differ — so a K-of-K signature computed over the original digest cannot re-verify against a strip/add-mutated block. This is the load-bearing half of the strip-after-sign attack at the digest level (the signature-re-verification step is mechanical given a changed digest).
+- **The digest-layer half of T-3 is now witnessed directly by `determ test-block-digest` (`tools/test_block_digest.sh`), assertions 20–21**: assertion 20 (`inbound_receipts INCLUDED when present`) confirms an admitted inbound receipt joins `compute_block_digest` (the binding exists — gated on non-empty, mirroring `producer.cpp:629`), and assertion 21 (`inbound_receipts SET-sensitive`) constructs two blocks differing only by one inbound receipt and asserts their digests differ — so a K-of-K signature computed over the original digest cannot re-verify against a strip/add-mutated block. This is the load-bearing half of the strip-after-sign attack at the digest level (the signature-re-verification step is mechanical given a changed digest).
 
 A targeted end-to-end regression that constructs a K-of-K-signed cross-shard block, strips one admitted inbound receipt, and asserts the *stored signatures* themselves FAIL re-verification (closing the loop from "digest changed" to "stored sig invalid") remains a recommended follow-up; the digest-change precondition it depends on is now covered by `test-block-digest` assertions 20–21 above (not just transitively via the credit-path suite).
 
@@ -270,7 +270,7 @@ A targeted end-to-end regression that constructs a K-of-K-signed cross-shard blo
 
 ## 7. Status
 
-**Shipped (commit `a727cb2`).** `compute_block_digest` (`src/node/producer.cpp:577-606`) appends `compute_view_root` over the sorted `hash_cross_shard_receipt` keys of `inbound_receipts` when non-empty, skipped when empty. Verified against the current tree: the conditional gate at `:598`, the key-build loop at `:599-602`, and the single root append at `:603` match this proof byte-for-byte; the v1 byte stream at `:579-589` is unchanged. The full cross-shard suite passes.
+**Shipped (commit `a727cb2`).** `compute_block_digest` (`src/node/producer.cpp:608-693`) appends `compute_view_root` over the sorted `hash_cross_shard_receipt` keys of `inbound_receipts` when non-empty, skipped when empty. Verified against the current tree: the conditional gate at `:629`, the key-build loop at `:630-633`, and the single root append at `:634` match this proof byte-for-byte; the v1 byte stream at `:610-620` is unchanged. The full cross-shard suite passes.
 
 This proof does not change any code; it consolidates the argument that the inbound dimension of the S-030 D2 removal gap is closed at the signature layer — a relayer can no longer strip an admitted inbound receipt after K-of-K signing without breaking K-of-K verification (T-3), the change is byte-identical on all non-cross-shard blocks (T-2), the binding is order-independent (T-1), and the bound set is the deterministic committee-wide intersection rather than the producer's local timing (T-4). The equivocation/abort dimensions are now closed at the digest layer too (§5; commit `48c4b45`, the union analog of the carry+reconcile+digest pattern) and retain the apply-layer backstop.
 
@@ -278,7 +278,7 @@ This proof does not change any code; it consolidates the argument that the inbou
 
 ## 8. References
 
-- `src/node/producer.cpp:577-606` — `compute_block_digest`, the primary object of this proof (the `a727cb2` inbound append at `:590-604`).
+- `src/node/producer.cpp:608-693` — `compute_block_digest`, the primary object of this proof (the `a727cb2` inbound append at `:629-635`).
 - `src/node/producer.cpp:312-326` — `hash_cross_shard_receipt` (per-receipt key; the `"DTM-F2-RCPT-v1"` domain-separated SHA-256).
 - `src/node/producer.cpp:335-340` — `compute_view_root` (order-independent set root; T-1).
 - `src/node/producer.cpp:357-372` — `reconcile_intersection` (the rule whose output is digested under composition; T-4).

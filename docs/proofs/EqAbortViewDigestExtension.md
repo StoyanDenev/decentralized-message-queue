@@ -133,7 +133,7 @@ them. The closure requires:
    Contrast the inbound path at `producer.cpp:891-904`, which filters to
    `reconcile_intersection(b.creator_view_inbound_lists)`.
 3. **`compute_block_digest` does not bind eq/abort, and the validator does not
-   enforce them.** `producer.cpp:598-604` binds only `inbound_receipts`. The
+   enforce them.** `producer.cpp:629-635` binds only `inbound_receipts`. The
    validator's `check_inbound_receipts` (`validator.cpp:1168-1185`) enforces only
    inbound; `validate_view_reconciliation` exists but is **not called** anywhere in the
    validator path.
@@ -289,8 +289,8 @@ eq/abort (`producer.cpp:452-453`).
 
 ### Step 5 — bind the reconciled eq/abort sets into `compute_block_digest`
 
-**File:** `src/node/producer.cpp` · **Symbol:** `compute_block_digest` (577-606),
-immediately after the inbound binding (598-604):
+**File:** `src/node/producer.cpp` · **Symbol:** `compute_block_digest` (608-693),
+immediately after the inbound binding (629-635):
 
 ```cpp
 // v2.7 F2 / S-030-D2: bind the reconciled equivocation/abort UNION into the
@@ -407,7 +407,7 @@ boundary, *before* digesting. The argument is a four-step chain, each link verif
 3. **The K signed commits are identical across honest members at Phase-2.** By the
    time the digest is computed, every honest member has gathered the same K Phase-1
    commits (this is already required to compute `tx_root`/`creator_tx_lists`, which
-   the v1 digest binds — producer.cpp:581 (`tx_root`) + 586-587 (`creator_tx_lists`)).
+   the v1 digest binds — producer.cpp:612 (`tx_root`) + 617-618 (`creator_tx_lists`)).
    The eq/abort lists ride in those same
    commits. So the *input* to `reconcile_union` is identical across honest members ⇒
    the *output* (and thus the digest) is identical ⇒ K signatures gather.
@@ -543,7 +543,7 @@ now also witnessed **at the unit level** — fast, deterministic, no cluster —
   so the stored K-of-K signatures cannot re-verify).
 - The complementary EXCLUSION assertions 15–16 confirm the same eq/abort events are
   *unbound* on the non-F2 (zero-view-root) path — pinning the F2 activation boundary
-  exactly where `producer.cpp:619`/`:625`'s `any_nonzero(...)` gate sits.
+  exactly where `producer.cpp:650`/`:656`'s `any_nonzero(...)` gate sits.
 
 These unit assertions cover the digest-binding precondition; the cluster test (§4.1)
 remains the end-to-end witness that signature gathering and `check_eqabort_reconciliation`

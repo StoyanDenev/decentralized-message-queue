@@ -279,8 +279,8 @@ layouts must stay identical by discipline; the guard is CBF-3.
 
 The single highest-stakes mirror. Canonical: `src/node/producer.cpp::compute_block_digest`
 (the bytes the K-of-K committee signs in Phase 2). Mirror: `light/verify.cpp:57-92`. The file's
-own header comment (`light/verify.cpp:32-56`) is explicit: "COPY OF producer.cpp:577-591 — keep in
-sync ... If the upstream byte-order or field set ever changes, mirror it here." The mirror
+own header comment (`light/verify.cpp:32-56`) is explicit: "COPY OF producer.cpp::compute_block_digest
+(src/node/producer.cpp:608-693) — keep in sync ... If the upstream byte-order or field set ever changes, mirror it here." The mirror
 replicates the producer's two trailing **conditional** appends:
 
 - `partner_subset_hash` bound only when non-zero (`light/verify.cpp:75-78`, mirroring producer) —
