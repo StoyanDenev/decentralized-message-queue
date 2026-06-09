@@ -66,6 +66,7 @@
 #include "watch.hpp"
 #include "export.hpp"
 #include "verify_archive.hpp"
+#include "verify_state_bundle.hpp"
 #include "account_history.hpp"
 #include "verify_tx_inclusion.hpp"
 #include "verify_state_root.hpp"
@@ -303,6 +304,20 @@ void print_usage() {
         "      re-verifies committee sigs when the archive retained them\n"
         "      (--include-committee-sigs at export). --require-sigs makes a\n"
         "      sigs-stripped archive fail.\n"
+        "  export-state-bundle --rpc-port <N> --genesis <file> --namespace <ns>\n"
+        "                      --key <K> --out <file>\n"
+        "      Build an OFFLINE state-proof bundle: the FULL anchor block whose\n"
+        "      state_root proves (ns,key), the committee-signed successor header\n"
+        "      that binds it via prev_hash, and the Merkle state-proof. The\n"
+        "      binding is re-verified before the bundle is written, so an\n"
+        "      unbindable (chain-head) bundle is never produced.\n"
+        "  verify-state-bundle --in <bundle> --genesis <file> [--json]\n"
+        "      OFFLINE re-verification of a state-proof bundle (no daemon, no\n"
+        "      RPC). Pins the chain identity, recomputes the anchor block_hash,\n"
+        "      verifies the successor's committee sigs, requires\n"
+        "      successor.prev_hash == recomputed anchor block_hash (binding the\n"
+        "      state_root), then Merkle-verifies the proof against that bound\n"
+        "      root. VERIFIED -> exit 0; tamper/forgery -> UNVERIFIABLE exit 3.\n"
         "\n"
         "Trustless inclusion proof (--genesis required):\n"
         "  verify-tx-inclusion --rpc-port <N> --genesis <file>\n"
@@ -2659,6 +2674,54 @@ int cmd_verify_archive(int argc, char** argv) {
         return 1;
     }
     return run_verify_archive(opts);
+}
+
+// ──────────────────────── export-state-bundle ──────────────────────────
+
+int cmd_export_state_bundle(int argc, char** argv) {
+    ExportStateBundleOptions opts;
+    bool have_port = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port"  && i + 1 < argc) {
+            opts.rpc_port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis"   && i + 1 < argc) opts.genesis_path = argv[++i];
+        else if   (a == "--namespace" && i + 1 < argc) opts.ns           = argv[++i];
+        else if   (a == "--key"       && i + 1 < argc) opts.key          = argv[++i];
+        else if   (a == "--out"       && i + 1 < argc) opts.out_path     = argv[++i];
+        else {
+            std::cerr << "export-state-bundle: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || opts.genesis_path.empty() || opts.ns.empty()
+        || opts.key.empty() || opts.out_path.empty()) {
+        std::cerr << "export-state-bundle: --rpc-port, --genesis, --namespace, "
+                     "--key, --out are required\n";
+        return 1;
+    }
+    return run_export_state_bundle(opts);
+}
+
+// ──────────────────────── verify-state-bundle ──────────────────────────
+
+int cmd_verify_state_bundle(int argc, char** argv) {
+    VerifyStateBundleOptions opts;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--in"      && i + 1 < argc) opts.in_path      = argv[++i];
+        else if (a == "--genesis" && i + 1 < argc) opts.genesis_path = argv[++i];
+        else if (a == "--json")                    opts.json_out     = true;
+        else {
+            std::cerr << "verify-state-bundle: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (opts.in_path.empty() || opts.genesis_path.empty()) {
+        std::cerr << "verify-state-bundle: --in and --genesis are required\n";
+        return 1;
+    }
+    return verify_state_bundle(opts);
 }
 
 // ──────────────────────── verify-tx-inclusion ──────────────────────────
@@ -6789,6 +6852,8 @@ int main(int argc, char** argv) {
         if (cmd == "watch-head")            return cmd_watch_head(sub_argc, sub_argv);
         if (cmd == "export-headers")        return cmd_export_headers(sub_argc, sub_argv);
         if (cmd == "verify-archive")        return cmd_verify_archive(sub_argc, sub_argv);
+        if (cmd == "export-state-bundle")   return cmd_export_state_bundle(sub_argc, sub_argv);
+        if (cmd == "verify-state-bundle")   return cmd_verify_state_bundle(sub_argc, sub_argv);
         if (cmd == "verify-tx-inclusion")   return cmd_verify_tx_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-receipt-inclusion") return cmd_verify_receipt_inclusion(sub_argc, sub_argv);
         if (cmd == "verify-merge-state")    return cmd_verify_merge_state(sub_argc, sub_argv);

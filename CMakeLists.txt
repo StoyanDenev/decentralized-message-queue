@@ -269,6 +269,7 @@ add_executable(determ-light
   light/watch.cpp
   light/export.cpp
   light/verify_archive.cpp
+  light/verify_state_bundle.cpp
   light/account_history.cpp
   light/verify_tx_inclusion.cpp
   light/verify_state_root.cpp
