@@ -29,12 +29,12 @@ using determ::util::json_require;
 using determ::util::json_require_hex;
 using determ::util::json_require_array;
 
-// COPY OF producer.cpp:577-591 — keep in sync.
+// COPY OF producer.cpp::compute_block_digest (src/node/producer.cpp:608-693) — keep in sync.
 //
 // Computes the digest the K-of-K committee signs in Phase 2. The light
 // client must recompute this byte-for-byte to verify each committee
 // member's Ed25519 signature against compute_block_digest(block). The
-// upstream source lives at src/node/producer.cpp:577-591; if the
+// upstream source lives at src/node/producer.cpp:608-693; if the
 // upstream byte-order or field set ever changes, mirror it here.
 //
 // IMPORTANT: producer.cpp's compute_block_digest binds the per-creator
