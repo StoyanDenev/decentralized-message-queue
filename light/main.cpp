@@ -39,6 +39,7 @@
 //   verify-param-change      Prove gov param change (eff,idx) is staged (p:)
 //   verify-param-value       Prove current effective consensus scalar (k:)
 //   verify-dapp-registration Prove domain D is a registered DApp (d:)
+//   verify-registrant        Prove domain D is a registered validator (r:)
 //   verify-account           Derive anon-addr + prove EXISTS / NOT-CREATED (a:)
 //   verify-equivocation      OFFLINE re-verify an EquivocationEvent (FA6 V11)
 //   shard-route              OFFLINE genesis-pinned address-to-shard routing
@@ -428,6 +429,29 @@ void print_usage() {
         "      are sound verdicts anchored to the head height; any tamper,\n"
         "      cleartext/leaf mismatch, or daemon refusal → UNVERIFIABLE\n"
         "      (exit 3), never a false INCLUDED.\n"
+        "  verify-registrant --rpc-port <N> --genesis <file>\n"
+        "                    --domain <D> [--json]\n"
+        "      Prove (or disprove) that domain <D> is CURRENTLY a registered\n"
+        "      VALIDATOR — i.e. a member of the committee-verified `r:`\n"
+        "      (registrants) namespace, the validator-set sibling of the\n"
+        "      a:/s:/d: trustless readers. Anchors genesis, committee-verifies\n"
+        "      the header chain to head, fetches the `r:`-namespace state-proof\n"
+        "      (simple key: the daemon prepends \"r:\" to the raw domain), and\n"
+        "      Merkle-verifies it against the committee-signed state_root. The\n"
+        "      load-bearing cross-check: the daemon's `account` registry\n"
+        "      cleartext (ed_pub, registered_at, active_from, inactive_from,\n"
+        "      region) is re-hashed locally — SHA256 over the\n"
+        "      build_state_leaves `r:` encoding — and must equal the proof's\n"
+        "      value_hash, so a daemon lie about ANY registrant field is\n"
+        "      detected, not propagated. On INCLUDED the verdict also reports\n"
+        "      ACTIVE vs INACTIVE derived from the committee-attested\n"
+        "      active_from / inactive_from vs the anchored head height. A null\n"
+        "      `account` registry is consistent ONLY with a state_proof\n"
+        "      not_found (else the daemon contradicts itself → UNVERIFIABLE).\n"
+        "      INCLUDED → exit 0; sound NOT-INCLUDED (not_found for the exact\n"
+        "      r: key) → exit 2; any tamper, value_hash mismatch, or daemon\n"
+        "      refusal → UNVERIFIABLE (exit 3), never a false INCLUDED/NOT-\n"
+        "      INCLUDED.\n"
         "  verify-account --rpc-port <N> --genesis <file>\n"
         "                 {--pubkey <64-hex> | --address <0x...>} [--json]\n"
         "      Derive an anon-account's canonical address LOCALLY and prove\n"
@@ -4121,6 +4145,352 @@ int cmd_verify_param_value(int argc, char** argv) {
     }
 }
 
+// ───────────────────────────── verify-registrant ───────────────────────
+//
+// Trust-minimized INCLUDED / NOT-INCLUDED / UNVERIFIABLE verdict on whether
+// a domain IS (or is NOT) a registered VALIDATOR at the committee-verified
+// head, anchored to the `r:` (registrants) S-033 namespace. This is the
+// validator-set sibling of verify-dapp-registration (the `d:` DApp reader):
+// both are simple-key namespaces (the daemon prepends the prefix to the raw
+// domain bytes), and both cross-check the daemon's cleartext fields against
+// the committee-signed leaf value_hash so a daemon lie about ANY registrant
+// field is detected, never propagated.
+//
+// The cleartext source is the `account` RPC's `registry` object (ed_pub,
+// registered_at, active_from, inactive_from, region). A null/absent
+// `registry` means the domain is NOT a registrant — consistent ONLY with a
+// state_proof not_found for the exact `r:` key; any other combination is an
+// inconsistent daemon and fails closed (UNVERIFIABLE).
+int cmd_verify_registrant(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain;
+    bool have_port = false, json_out = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else {
+            std::cerr << "verify-registrant: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "verify-registrant: "
+                     "--rpc-port, --genesis, --domain are required\n";
+        return 1;
+    }
+
+    InclusionVerdict verdict = InclusionVerdict::UNVERIFIABLE;
+    std::string detail;
+    std::string state_root_used;
+    uint64_t    anchored_height = 0;
+    // Committee-verified registrant fields (populated only on INCLUDED).
+    std::string ed_pub_hex, region;
+    uint64_t registered_at = 0, active_from = 0, inactive_from = 0;
+    bool active = false;
+
+    try {
+        // Pin the chain identity first (fail-closed if block 0 != genesis).
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-registrant: " << rpc.last_error() << "\n";
+            return 1;
+        }
+        std::string genesis_hash_hex = anchor_genesis(rpc, genesis);
+
+        // `r:` is a simple-key namespace — the daemon prepends "r:" to the
+        // raw domain bytes (no hex-encoded composite body). Compute the
+        // canonical key locally so we can bind the proof's key_bytes to it.
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + domain.size());
+        local_key.push_back('r'); local_key.push_back(':');
+        local_key.insert(local_key.end(), domain.begin(), domain.end());
+
+        // Committee-verify the header chain end-to-end, capturing the
+        // head's state_root (the anchor for the Merkle inclusion).
+        auto vc = verify_chain_to_head(rpc, committee_seed, genesis_hash_hex);
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so `r:` state-proofs cannot be "
+                "anchored");
+        }
+
+        // Fetch the `r:`-namespace state-proof for this domain.
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "r"}, {"key", domain}});
+
+        // not_found for our exact key → a sound NOT-INCLUDED (no such
+        // validator registered at the verified head). Any other refusal →
+        // fail-closed UNVERIFIABLE (we will not assert membership either way).
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].is_string()
+                ? proof["error"].get<std::string>()
+                : proof["error"].dump();
+            if (err == "not_found") {
+                verdict = InclusionVerdict::NOT_INCLUDED;
+                detail  = "daemon reports no `r:` leaf for domain '" + domain
+                        + "' — no such validator is registered at the verified "
+                          "head (state_proof not_found)";
+                // Cross-check the cleartext: the `account` RPC's registry must
+                // ALSO be null/absent, else the daemon contradicts itself.
+                auto acc = rpc.call("account", {{"address", domain}});
+                bool reg_null = !acc.contains("registry")
+                              || acc["registry"].is_null();
+                if (!reg_null) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "state_proof returned not_found for `r:" + domain
+                            + "` but the `account` RPC returns a non-null "
+                              "registry object — inconsistent daemon "
+                              "(refusing to assert NOT-INCLUDED)";
+                }
+            } else {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "daemon refused the `r:` state-proof: " + err
+                        + " (cannot prove registration trustlessly)";
+            }
+        } else {
+            // Bind the proof to THIS domain: its key_bytes must equal the
+            // locally-computed canonical key. A mismatch means the daemon
+            // served a proof for a different leaf → UNVERIFIABLE.
+            std::string proof_key_hex =
+                proof.value("key_bytes", std::string{});
+            std::string local_key_hex =
+                to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                verdict = InclusionVerdict::UNVERIFIABLE;
+                detail  = "proof.key_bytes=" + proof_key_hex
+                        + " does not match the canonical r: key "
+                        + local_key_hex
+                        + " (daemon served a proof for a different leaf)";
+            } else {
+                // Fetch the cleartext registrant via `account` and recompute
+                // the committed leaf value_hash from it. This is the
+                // load-bearing cross-check: a daemon could serve an honest
+                // proof for the right key while lying in the cleartext; the
+                // hash recomputation forces consistency.
+                auto acc = rpc.call("account", {{"address", domain}});
+                if (acc.contains("error") && !acc["error"].is_null()) {
+                    throw std::runtime_error(
+                        "state_proof served an `r:` leaf for '" + domain
+                        + "' but the account RPC refused it: "
+                        + acc["error"].dump() + " (inconsistent daemon)");
+                }
+                if (!acc.contains("registry") || acc["registry"].is_null()) {
+                    // The state-proof said the leaf exists but the cleartext
+                    // registry is null — inconsistent daemon, fail closed.
+                    throw std::runtime_error(
+                        "state_proof served an `r:` leaf for '" + domain
+                        + "' but the account RPC returns a null registry "
+                          "object (inconsistent daemon)");
+                }
+
+                const json& reg = acc["registry"];
+                ed_pub_hex    = reg.value("ed_pub",        std::string{});
+                region        = reg.value("region",        std::string{});
+                registered_at = reg.value("registered_at", uint64_t{0});
+                active_from   = reg.value("active_from",   uint64_t{0});
+                inactive_from = reg.value("inactive_from", uint64_t{0});
+
+                // Decode the 64-hex ed_pub back to the 32 raw bytes the leaf
+                // hashes (from_hex throws on malformed hex → exit 1).
+                std::vector<uint8_t> ed_pub = from_hex(ed_pub_hex);
+                if (ed_pub.size() != 32) {
+                    throw std::runtime_error(
+                        "account registry ed_pub is not 32 bytes (got "
+                        + std::to_string(ed_pub.size()) + ")");
+                }
+
+                // Recompute the committed leaf value_hash byte-for-byte
+                // matching chain.cpp build_state_leaves "r:" branch:
+                //   ed_pub(32) || registered_at(u64 BE) || active_from(u64 BE)
+                //   || inactive_from(u64 BE) || region.size()(u64 BE)
+                //   || region(raw bytes)
+                determ::crypto::SHA256Builder hb;
+                hb.append(ed_pub.data(), ed_pub.size());
+                hb.append(registered_at);
+                hb.append(active_from);
+                hb.append(inactive_from);
+                hb.append(static_cast<uint64_t>(region.size()));
+                hb.append(region);
+                Hash expected_value_hash = hb.finalize();
+
+                Hash proof_value_hash = from_hex_arr<32>(
+                    proof.value("value_hash", std::string{}));
+                if (proof_value_hash != expected_value_hash) {
+                    verdict = InclusionVerdict::UNVERIFIABLE;
+                    detail  = "proof.value_hash=" + to_hex(proof_value_hash)
+                            + " does not match the recomputed hash of the "
+                              "account registry for '" + domain + "'="
+                            + to_hex(expected_value_hash)
+                            + " — daemon is lying about the registrant "
+                              "fields OR proving a different leaf";
+                } else {
+                    // Anchor the proof's claimed state_root to a
+                    // committee-signed header (the chain may have advanced
+                    // during the round-trip), mirroring verify-param-change.
+                    uint64_t proof_height =
+                        proof.value("height", uint64_t{0});
+                    std::string proof_root =
+                        proof.value("state_root", std::string{});
+                    std::string anchor_root = vc.head_state_root;
+                    uint64_t    anchor_at   = vc.height;
+
+                    if (proof_height < vc.height) {
+                        throw std::runtime_error(
+                            "proof.height=" + std::to_string(proof_height)
+                            + " is BEFORE verified-chain head="
+                            + std::to_string(vc.height)
+                            + " — daemon is serving stale state");
+                    }
+                    if (proof_height > vc.height) {
+                        json committee_json;
+                        {
+                            json arr = json::array();
+                            for (auto& [domain_, pk] : committee_seed)
+                                arr.push_back({{"domain", domain_},
+                                               {"ed_pub", to_hex(pk)}});
+                            committee_json = json{{"members", arr}};
+                        }
+                        uint64_t anchor_index = proof_height - 1;
+                        auto pg = rpc.call("headers",
+                            {{"from", anchor_index}, {"count", 1}});
+                        if (!pg.contains("headers")
+                            || !pg["headers"].is_array()
+                            || pg["headers"].empty()) {
+                            throw std::runtime_error(
+                                "cannot fetch header at index="
+                                + std::to_string(anchor_index)
+                                + " (proof.height="
+                                + std::to_string(proof_height) + ")");
+                        }
+                        auto& h = pg["headers"][0];
+                        std::string hdr_root =
+                            h.value("state_root", std::string{});
+                        if (hdr_root != proof_root) {
+                            throw std::runtime_error(
+                                "proof.state_root=" + proof_root
+                                + " does not match header["
+                                + std::to_string(anchor_index)
+                                + "].state_root=" + hdr_root);
+                        }
+                        auto vbs = verify_block_sigs(h, committee_json,
+                                                     /*bft=*/false);
+                        if (!vbs.ok)
+                            vbs = verify_block_sigs(h, committee_json,
+                                                    /*bft=*/true);
+                        if (!vbs.ok) {
+                            throw std::runtime_error(
+                                "header[" + std::to_string(anchor_index)
+                                + "] committee-sig check failed: "
+                                + vbs.detail);
+                        }
+                        if (anchor_index >= vc.height) {
+                            auto walk = rpc.call("headers",
+                                {{"from", vc.height - 1},
+                                 {"count", proof_height - vc.height + 2}});
+                            auto vh = verify_headers(walk, "", "");
+                            if (!vh.ok) {
+                                throw std::runtime_error(
+                                    "prev_hash walk vc.height->proof.height: "
+                                    + vh.detail);
+                            }
+                        }
+                        anchor_root = proof_root;
+                        anchor_at   = proof_height;
+                    } else if (proof_root != vc.head_state_root) {
+                        throw std::runtime_error(
+                            "proof.state_root=" + proof_root
+                            + " does not match verified head state_root="
+                            + vc.head_state_root);
+                    }
+
+                    // Merkle-verify the proof against the committee-signed
+                    // root. We already bound key_bytes + value_hash to the
+                    // canonical registrant above, so a pass here is a sound
+                    // INCLUDED.
+                    auto vsp = verify_state_proof(proof, anchor_root);
+                    if (!vsp.ok) {
+                        verdict = InclusionVerdict::UNVERIFIABLE;
+                        detail  = "merkle verification failed: " + vsp.detail;
+                    } else {
+                        verdict = InclusionVerdict::INCLUDED;
+                        state_root_used = anchor_root;
+                        anchored_height = anchor_at;
+                        // active/inactive is now a verified verdict: the
+                        // active_from / inactive_from we hashed are
+                        // committee-attested, so derive the lifecycle status
+                        // against the committee-anchored head height. A
+                        // registrant is ACTIVE once active_from <= height and
+                        // not yet deactivated (inactive_from == 0 sentinel, or
+                        // inactive_from > height).
+                        bool activated   = (active_from <= anchored_height);
+                        bool deactivated = (inactive_from != 0
+                                            && inactive_from <= anchored_height);
+                        active = activated && !deactivated;
+                    }
+                }
+            }
+        }
+
+        bool included = (verdict == InclusionVerdict::INCLUDED);
+        if (json_out) {
+            json out = {
+                {"included",  included},
+                {"verdict",   verdict_str(verdict)},
+                {"domain",    domain},
+                {"namespace", "r"},
+            };
+            if (included) {
+                out["active"]        = active;
+                out["ed_pub"]        = ed_pub_hex;
+                out["region"]        = region;
+                out["registered_at"] = registered_at;
+                out["active_from"]   = active_from;
+                out["inactive_from"] = inactive_from;
+            }
+            if (!state_root_used.empty()) {
+                out["state_root"] = state_root_used;
+                out["height"]     = anchored_height;
+            }
+            if (!detail.empty()) out["detail"] = detail;
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << verdict_str(verdict) << "\n"
+                      << "  genesis pin:       matches (" << genesis_hash_hex << ")\n"
+                      << "  namespace:         r (registrants)\n"
+                      << "  domain:            " << domain << "\n";
+            if (verdict == InclusionVerdict::INCLUDED) {
+                std::cout << "  status:            "
+                          << (active ? "ACTIVE" : "INACTIVE (deactivated/pending)") << "\n"
+                          << "  ed_pub:            " << ed_pub_hex << "\n"
+                          << "  region:            " << region << "\n"
+                          << "  registered_at:     " << registered_at << "\n"
+                          << "  active_from:       " << active_from << "\n"
+                          << "  inactive_from:     " << inactive_from << "\n"
+                          << "  state_root:        " << state_root_used << "\n"
+                          << "  anchored at H:     " << anchored_height << "\n";
+            }
+            if (!detail.empty())
+                std::cout << "  detail:            " << detail << "\n";
+        }
+
+        // Exit codes match verify-dapp-registration: INCLUDED / NOT-INCLUDED
+        // → 0 (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
+        if (verdict == InclusionVerdict::NOT_INCLUDED) return 2;
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-registrant: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // ─────────────────────── verify-dapp-registration ──────────────────────
 //
 // Trustless reader for the `d:` (dapp_registry) namespace — the v2.18
@@ -6672,6 +7042,7 @@ int main(int argc, char** argv) {
         if (cmd == "verify-param-change")   return cmd_verify_param_change(sub_argc, sub_argv);
         if (cmd == "verify-param-value")    return cmd_verify_param_value(sub_argc, sub_argv);
         if (cmd == "verify-dapp-registration") return cmd_verify_dapp_registration(sub_argc, sub_argv);
+        if (cmd == "verify-registrant")     return cmd_verify_registrant(sub_argc, sub_argv);
         if (cmd == "verify-account")        return cmd_verify_account(sub_argc, sub_argv);
         if (cmd == "verify-equivocation")   return cmd_verify_equivocation(sub_argc, sub_argv);
         if (cmd == "shard-route")           return cmd_shard_route(sub_argc, sub_argv);
