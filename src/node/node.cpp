@@ -2728,6 +2728,10 @@ json Node::rpc_account(const std::string& addr) const {
         r["registered_at"] = reg_entry->registered_at;
         r["active_from"]   = reg_entry->active_from;
         r["inactive_from"] = reg_entry->inactive_from;
+        r["region"]        = reg_entry->region;  // completes the r:-leaf field set
+                                                  // (SHA256 over ed_pub||registered_at||
+                                                  // active_from||inactive_from||region) so a
+                                                  // light client can trustlessly verify-registrant
         j["registry"] = r;
         j["stake"]    = stake;
     } else {
