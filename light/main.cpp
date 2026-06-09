@@ -279,7 +279,9 @@ void print_usage() {
         "      Submit a pre-signed tx via the daemon's submit_tx RPC.\n"
         "  verify-and-submit --rpc-port <N> --genesis <file> --keyfile <path>\n"
         "                    --to <addr> --amount <N> --fee <N> [--out <file>]\n"
-        "      Composite: nonce-trustless + sign-tx + submit-tx.\n"
+        "                    [--resume [--state <path>]]\n"
+        "      Composite: nonce-trustless + sign-tx + submit-tx. --resume reuses a\n"
+        "      cached committee-verified anchor for the embedded nonce read.\n"
         "\n"
         "Monitoring:\n"
         "  watch-head --rpc-port <N> --genesis <file> [--count <N>] [--interval <s>]\n"
@@ -2499,8 +2501,8 @@ int cmd_submit_tx(int argc, char** argv) {
 
 int cmd_verify_and_submit(int argc, char** argv) {
     uint16_t port = 0;
-    std::string genesis_path, keyfile_path, to_str, out_path;
-    bool have_port = false, have_amount = false, have_fee = false;
+    std::string genesis_path, keyfile_path, to_str, out_path, state_path;
+    bool have_port = false, have_amount = false, have_fee = false, resume = false;
     uint64_t amount = 0, fee = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
@@ -2512,6 +2514,8 @@ int cmd_verify_and_submit(int argc, char** argv) {
         else if   (a == "--amount"  && i + 1 < argc) { amount = parse_u64("--amount", argv[++i]); have_amount = true; }
         else if   (a == "--fee"     && i + 1 < argc) { fee    = parse_u64("--fee",    argv[++i]); have_fee    = true; }
         else if   (a == "--out"     && i + 1 < argc) out_path     = argv[++i];
+        else if   (a == "--resume")                  resume       = true;
+        else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
         else {
             std::cerr << "verify-and-submit: unknown arg '" << a << "'\n";
             return 1;
@@ -2534,9 +2538,10 @@ int cmd_verify_and_submit(int argc, char** argv) {
             std::cerr << "verify-and-submit: " << rpc.last_error() << "\n";
             return 1;
         }
-        // 3. Trustless-read the sender's nonce.
+        // 3. Trustless-read the sender's nonce (--resume reuses a cached anchor
+        //    for the verification, same as the standalone trustless reads).
         auto view = read_account_trustless(rpc, committee_seed, genesis,
-                                            kf.anon_address);
+                                            kf.anon_address, resume, state_path);
         // 4. Sign locally with the verified nonce.
         std::string canonical_to = normalize_anon_address(to_str);
         if (canonical_to != to_str) {
