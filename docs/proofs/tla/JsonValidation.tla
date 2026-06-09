@@ -728,7 +728,7 @@ TypeOK ==
 \*   AbortEvent::from_json            @ src/chain/block.cpp:110-113 (Wire)
 \*   EquivocationEvent::from_json     @ src/chain/block.cpp:139-144 (Wire / RPC)
 \*   CrossShardReceipt::from_json     @ src/chain/block.cpp:220-229 (Wire)
-\*   Block::from_json                 @ src/chain/block.cpp:451-545 (Wire / Snapshot)
+\*   Block::from_json                 @ src/chain/block.cpp:506-642 (Wire / Snapshot)
 \*   GenesisAlloc::from_json          @ src/chain/block.cpp:86      (Snapshot / Genesis)
 \*   ContribMsg::from_json            @ src/node/producer.cpp:68-137  (Wire)
 \*   AbortClaimMsg::from_json         @ src/node/producer.cpp:152-162 (Wire)

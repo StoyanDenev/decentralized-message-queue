@@ -344,7 +344,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | `cmd_verify_registrant` (the reader) | `light/main.cpp:4164-4492` |
 | Genesis anchor / committee-sig verify | `light/trustless_read.cpp:43-186`; `light/verify.cpp:104-283` |
 | Merkle state-proof verify | `light/verify.cpp:285-349`; `src/crypto/merkle.cpp:113-141` |
-| CLI dispatch | `light/main.cpp:7045` (`verify-registrant` → `cmd_verify_registrant`) |
+| CLI dispatch | `light/main.cpp:6863` (`verify-registrant` → `cmd_verify_registrant`, defined at `:4089`) |
 | `state_proof` RPC contract | `docs/PROTOCOL.md` §10.2 |
 | `r:` canonical Merkle-leaf row | `docs/PROTOCOL.md` §4.1.1 |
 | REGISTER/DEREGISTER apply rules | `docs/PROTOCOL.md` §3.3 |

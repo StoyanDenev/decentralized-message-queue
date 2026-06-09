@@ -169,7 +169,7 @@ S-018-flavored diagnostic on scalar misuse.
 | `AbortEvent::from_json` | `src/chain/block.cpp:110-113` | baked into BLOCK |
 | `EquivocationEvent::from_json` | `src/chain/block.cpp:139-144` | RPC submit_equivocation + gossip evidence |
 | `CrossShardReceipt::from_json` | `src/chain/block.cpp:220-229` | CROSS_SHARD_RECEIPT_BUNDLE gossip + BLOCK inbound |
-| `Block::from_json` | `src/chain/block.cpp:451-545` | BLOCK gossip + BEACON_HEADER + SHARD_TIP + snapshot replay |
+| `Block::from_json` | `src/chain/block.cpp:506-642` | BLOCK gossip + BEACON_HEADER + SHARD_TIP + snapshot replay |
 | `GenesisAlloc::from_json` | `src/chain/block.cpp:86` | snapshot initial_state + genesis-tool initial_balances |
 | `ContribMsg::from_json` | `src/node/producer.cpp:68-137` | Phase-1 gossip |
 | `AbortClaimMsg::from_json` | `src/node/producer.cpp:152-162` | abort-claim gossip |

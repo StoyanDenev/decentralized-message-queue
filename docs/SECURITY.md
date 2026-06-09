@@ -927,7 +927,7 @@ Optional fields with defaults (`CrossShardReceipt::from_json` with `j.value(...)
 
 **Severity:** Medium (was) • **Status:** ✅ Moot — see M-F. With the iteration removed, there's no inner loop allocating contexts. • **Sources:** Architectural Analysis §3.6
 
-**What's open.** `delay_hash_compute` at `src/crypto/delay_hash.cpp:6-12`:
+**What's open.** Nothing — the iteration was removed (M-F). The former `delay_hash_compute` (in the since-deleted `src/crypto/delay_hash.cpp`) looked like:
 ```cpp
 Hash delay_hash_compute(const Hash& seed, uint64_t T) {
     Hash cur = seed;

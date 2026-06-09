@@ -682,7 +682,7 @@ TypeOK ==
 \*                   safety) → INV-3, point 5 (test coverage) → TLC
 \*                   enumeration, point 6 (memory bound) → INV-1 +
 \*                   INV-6.
-\*   §3 implementation citation → src/net/rate_limiter.hpp:36-152
+\*   §3 implementation citation → include/determ/net/rate_limiter.hpp:36-152
 \*   (the function under test; ~150 LOC post-F-1).
 \*
 \* SECURITY.md §S-014 : closure narrative; F-1 mitigation
