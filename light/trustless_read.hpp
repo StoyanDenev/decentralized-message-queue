@@ -171,4 +171,37 @@ AccountView read_account_trustless(
 std::map<std::string, PubKey>
 build_genesis_committee(const determ::chain::GenesisConfig& cfg);
 
+// Return the COMMITTEE-BOUND state_root committed by the block at
+// `anchor_index` — never the daemon's bare state_root FIELD.
+//
+// WHY THIS EXISTS (soundness-critical): the committee signs
+// compute_block_digest, which EXCLUDES state_root. state_root is bound
+// to the block ONLY via Block::signing_bytes → block_hash =
+// SHA256(signing_bytes || creator_block_sigs). But the `headers` RPC
+// strips the heavy fields signing_bytes needs (transactions,
+// cross_shard_receipts, inbound_receipts, initial_state), so a light
+// client CANNOT recompute block_hash from a stripped header — and a
+// malicious daemon can swap the state_root FIELD after the committee
+// signed. This helper fetches the FULL block (so block_hash is
+// recomputable), then binds that recomputed block_hash to a
+// COMMITTEE-SIGNED successor header via successor.prev_hash == recomputed
+// block_hash. The successor's committee sigs (over its OWN digest,
+// which DOES bind prev_hash) thus transitively commit the anchor's
+// state_root.
+//
+// Returns the anchor block's state_root hex (empty string if the block
+// carries a zero state_root, i.e. a pre-S-033 / unpopulated block).
+//
+// Throws std::runtime_error on: out-of-range anchor, malformed block,
+// no committee-signed successor yet (anchor is the chain head), a
+// successor whose committee sigs fail, or — the load-bearing check — a
+// successor.prev_hash that does not equal the recomputed anchor
+// block_hash (the daemon forged the block body, e.g. a swapped
+// state_root). `committee_json` is the {members:[...]} shape
+// verify_block_sigs consumes (built once by the caller from the
+// genesis-seeded committee).
+std::string committee_bound_state_root(RpcClient& rpc,
+                                       const nlohmann::json& committee_json,
+                                       uint64_t anchor_index);
+
 } // namespace determ::light

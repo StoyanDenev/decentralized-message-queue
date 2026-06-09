@@ -20,6 +20,7 @@
 
 #include "verify_state_root.hpp"
 #include "verify.hpp"
+#include "trustless_read.hpp"   // committee_bound_state_root (successor binding)
 
 #include <determ/types.hpp>
 #include <nlohmann/json.hpp>
@@ -150,7 +151,7 @@ StateRootResult verify_state_root_at(
     auto& h = page["headers"][0];
     res.block_hash_hex = h.value("block_hash", std::string{});
 
-    // ── 4. Anchor header[H] + extract its state_root ─────────────────────
+    // ── 4. Anchor header[H] + extract its COMMITTEE-BOUND state_root ──────
     if (height == 0) {
         // Genesis carries NO committee sigs by construction (it is the
         // deterministic GenesisConfig->Block transform). It is already
@@ -158,50 +159,56 @@ StateRootResult verify_state_root_at(
         // first-page genesis-anchored verify_headers in walk_chain_to
         // above (which checks block 0's block_hash == genesis_hash_hex).
         // Report its state_root directly; committee_size / sigs_verified
-        // stay 0. Mirrors verify_chain_to_head / account-history /
+        // stay 0. Genesis is NOT routed through the successor helper — a
+        // one-block chain has no successor, and genesis is already pinned
+        // by the genesis-hash anchor (not by a committee that never
+        // produced it). Mirrors verify_chain_to_head / account-history /
         // verify-tx-inclusion's index-0 handling.
         res.committee_verified = true;
         res.committee_size = 0;
         res.sigs_verified = 0;
-    } else {
-        json committee_json = build_committee_json(committee_seed);
-        auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
-        if (!vbs.ok) {
-            // BFT-mode fallback: a BFT-escalated block has up to
-            // K - ceil(2K/3) sentinel-zero slots. Retry once at the BFT
-            // threshold and accept if it passes (identical to
-            // verify_chain_to_head / verify_header_state_root_at).
-            vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
+
+        // state_root field on the genesis header. Empty on a pre-S-033
+        // chain (the header carries no state_root); flag that distinctly
+        // so the caller can report "(not populated)" instead of a bogus
+        // empty root. (Genesis's own field is read directly because it is
+        // pinned by the genesis-hash anchor, not by a successor.)
+        std::string sr = h.value("state_root", std::string{});
+        if (!sr.empty()) {
+            res.state_root_hex = sr;
+            res.state_root_present = true;
         }
-        if (!vbs.ok) {
-            // Committee sigs do NOT verify. Fail closed: report ok=false
-            // and NEVER surface a state_root the committee didn't sign.
+    } else {
+        // For H >= 1 the state_root field on a STRIPPED header is NOT
+        // committee-attested (the committee signs compute_block_digest,
+        // which EXCLUDES state_root). Bind it the sound way:
+        // committee_bound_state_root() fetches the FULL block at H,
+        // recomputes its block_hash, and confirms the committee-signed
+        // SUCCESSOR(H+1).prev_hash == that recomputed block_hash. This is
+        // the ONLY path that ties H's state_root to a committee signature.
+        // Requesting the exact head (height == head_index) fails closed
+        // here — the head has no signed successor yet — which is INTENDED.
+        json committee_json = build_committee_json(committee_seed);
+        try {
+            std::string attested =
+                committee_bound_state_root(rpc, committee_json, height);
+            res.state_root_hex = attested;
+            res.state_root_present = !attested.empty();
+            res.committee_verified = true;
+        } catch (const std::runtime_error& e) {
+            // Clean handled error (matches this file's fail-closed style):
+            // report ok=false + detail and return — NEVER surface a
+            // state_root that is not committee-bound.
             res.committee_verified = false;
-            res.detail = "committee-sig verification FAILED for header at "
-                         "index " + std::to_string(height) + ": " + vbs.detail
-                       + " — refusing to report a state_root that is not "
-                         "committee-attested";
+            res.detail = e.what();
             return res;
         }
-        res.committee_verified = true;
-        res.sigs_verified = vbs.count;
-        // committee_size = |creators| of header[H]. verify_block_sigs
-        // surfaces the verified-sig count but not the committee size, so
-        // read creators[] from the (now committee-attested) header. The
-        // sigs were verified over light_compute_block_digest(h), which
-        // binds creators[], so this length is itself committee-attested.
+        // committee_size = |creators| of header[H]. The header chained to
+        // the pinned genesis (walk_chain_to) and its state_root is now
+        // committee-bound via the successor; read creators[] for reporting.
         if (h.contains("creators") && h["creators"].is_array()) {
             res.committee_size = h["creators"].size();
         }
-    }
-
-    // state_root field on the verified header. Empty on a pre-S-033 chain
-    // (the header carries no state_root); flag that distinctly so the
-    // caller can report "(not populated)" instead of a bogus empty root.
-    std::string sr = h.value("state_root", std::string{});
-    if (!sr.empty()) {
-        res.state_root_hex = sr;
-        res.state_root_present = true;
     }
 
     res.ok = true;

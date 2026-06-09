@@ -144,20 +144,20 @@ Throughout, fix one of the two reads. For the `m:` read let `S` be the queried r
 
 **Statement.** Under (A1) Ed25519 EUF-CMA + (A2) SHA-256 collision resistance, in the **S-033-active interior regime** (`state_root(h) ≠ 0` and a committee-signed successor block `h+1` exists on the operator's pinned chain), the `state_root R` that either read anchors and verifies the composite proof against equals the genuine `state_root_T(h)` of the pinned chain at `h`, except with probability `≤ K · 2⁻¹²⁸ + 2⁻¹²⁸` per invocation. Consequently the root the `m:`/`p:` leaf is checked against is *committee-certified*, not daemon-asserted.
 
-**Proof.** This is `StateRootAnchorSoundness.md` **SR-1** applied at the height the composite proof is anchored at, identical to `StakeProofSoundness.md` SP-1 and `ReceiptInclusionProofSoundness.md` RI-1's inline anchoring at `trustless_read.cpp:277-285`. The binding of `state_root(h)` to the committee is **transitive-forward**, not a direct signature: the committee directly Ed25519-signs `compute_block_digest(h)` (`producer.cpp::compute_block_digest`), which carries `index, prev_hash, tx_root, …` but **NOT** `state_root` (the `light/verify.cpp` digest-exclusion comment). `state_root(h)` is bound into `Block::signing_bytes(h)` (when non-zero, via the S-033 zero-skip shim) and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`:
+**Proof.** This is `StateRootAnchorSoundness.md` **SR-1** applied at the height the composite proof is anchored at, and is discharged by the now-shipped binding step `light/trustless_read.cpp::committee_bound_state_root` (`:333-411`) that the `a:` / `s:` / `i:` reads also route through. The binding of `state_root(h)` to the committee is **transitive-forward**, not a direct signature: the committee directly Ed25519-signs `compute_block_digest(h)` (`producer.cpp::compute_block_digest`), which carries `index, prev_hash, tx_root, …` but **NOT** `state_root` (the `light/verify.cpp` digest-exclusion comment). `state_root(h)` is bound into `Block::signing_bytes(h)` (when non-zero, via the S-033 zero-skip shim) and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`:
 
 $$
 \text{state\_root}(h) \in \text{signing\_bytes}(h) \in \text{block\_hash}(h) = \text{prev\_hash}(h+1) \in \text{digest}(h+1).
 $$
 
-Suppose the invocation anchors `R_A ≠ state_root_T(h)`. The SR-1 case split (reproduced for the composite-proof anchoring at `trustless_read.cpp:269-285`):
+Suppose the invocation anchors `R_A ≠ state_root_T(h)`. `committee_bound_state_root` fetches the **FULL** block at `h` via the `"block"` RPC (`Node::rpc_block`, `node.cpp:2623-2627`), recomputes `block_hash(h)` over its `signing_bytes` (which carry `state_root`, §3.2 of `StateRootAnchorSoundness.md`), fetches the committee-signed successor at `h+1`, verifies its sigs, and requires `successor.prev_hash == recomputed block_hash(h)` (`trustless_read.cpp:391-406`). The SR-1 case split:
 
-- **Case (i): the daemon kept the served `block_hash(h)` equal to the genuine `block_hash_T(h)`.** The served header has `state_root = R_A ≠ state_root_T(h)`, so its `signing_bytes` differ; for it to hash to the same `block_hash_T(h)` is a SHA-256 collision, `≤ 2⁻¹²⁸` (A2).
-- **Case (ii): the daemon changed `block_hash(h)` to be internally consistent with `R_A`.** Then `prev_hash(h+1)` as served must equal the new `block_hash_A(h) ≠ block_hash_T(h)`. To accept `h+1` with a different `prev_hash`, the daemon must present `required` valid signatures over a different digest — an Ed25519 forgery for each of `required ≤ K` distinct committee members, `≤ K · 2⁻¹²⁸` (A1). This reuses T-L2's reduction verbatim.
+- **Case (i): the recomputed `block_hash(h)` over the `R_A` body equals the genuine `block_hash_T(h)`.** The body carries `state_root = R_A ≠ state_root_T(h)`, so its `signing_bytes` differ from the genuine ones; for them to hash to the same `block_hash_T(h)` is a SHA-256 collision, `≤ 2⁻¹²⁸` (A2).
+- **Case (ii): the recomputed `block_hash(h)` differs from `block_hash_T(h)`.** Then it cannot equal the committee-signed `prev_hash(h+1) = block_hash_T(h)` — so the helper's binding check throws (the `R_A` body is rejected) — unless the daemon also presents a successor whose committee-signed `digest(h+1)` carries the forged `prev_hash`, an Ed25519 forgery for each of `required ≤ K` distinct committee members, `≤ K · 2⁻¹²⁸` (A1). This reuses T-L2's reduction verbatim.
 
 Summing the exhaustive cases, `Pr[A_daemon anchors R_A ≠ state_root_T(h)] ≤ K · 2⁻¹²⁸ + 2⁻¹²⁸`. The genesis- and height-binding of the *whole walk* is supplied by SR-2 + SR-3 + T-L1's genesis anchor; CR-1 inherits them.
 
-**Head-block boundary.** If the operator queries a slot at the chain *head*, that block's `state_root` has no signed successor yet, so it is committee-certified only once a successor is produced; the shipped flow handles this via the race-window dispatch matching a head-height proof byte-for-byte against `vc.head_state_root` (`trustless_read.cpp:302-307`; `LightClientThreatModel.md` L-5). CR-2 below proves Merkle-path soundness *given* such an `R`; CR-1 is the committee-binding of `R`.
+**Head-block boundary.** If the operator queries a slot whose anchor is the chain *head*, that block's `state_root` has no committee-signed successor yet, so `committee_bound_state_root` **fails closed** — it finds no successor at `head+1` and throws *"NO committee-signed successor yet … retry once the chain advances one block"* (`trustless_read.cpp:366-375`). The read lands in `UNVERIFIABLE` rather than reporting an unbound head root; an anchor becomes verifiable once a successor is produced (`StateRootAnchorSoundness.md §6.3`). CR-2 below proves Merkle-path soundness *given* a committee-bound `R`; CR-1 is the committee-binding of `R`.
 
 **Concrete-security bound.** `Pr[A_daemon wins CR-1] ≤ K · 2⁻¹²⁸ + 2⁻¹²⁸` per invocation; for `K ≤ 64`, `≤ 2⁻¹²¹`.   ∎
 
@@ -256,7 +256,7 @@ CR-2 *is* MT-4 applied at the `m:` / `p:` leaf, with **MT-2** (leaf/inner + key 
 
 ### 5.2 `StateRootAnchorSoundness.md` — the committee binding
 
-CR-1 *is* SR-1 applied at the height the composite proof is anchored at, plus SR-2 (genesis-binding) + SR-3 (height-binding) inherited for the walk. The transitive-forward `state_root(h) ∈ signing_bytes(h) ∈ block_hash(h) = prev_hash(h+1) ∈ digest(h+1)` chain is the SR-series mechanism (`state_root` is **not** in `compute_block_digest`; it is committee-bound transitively forward via the successor block's signed digest); CR-1 names the composite reads as consumers of it, exactly as `LightClientThreatModel.md` T-L4 does for the `a:` read.
+CR-1 *is* SR-1 applied at the height the composite proof is anchored at, plus SR-2 (genesis-binding) + SR-3 (height-binding) inherited for the walk. The transitive-forward `state_root(h) ∈ signing_bytes(h) ∈ block_hash(h) = prev_hash(h+1) ∈ digest(h+1)` chain is the SR-series mechanism (`state_root` is **not** in `compute_block_digest`; it is committee-bound transitively forward via the successor block's signed digest). That mechanism is now **implemented** in `light/trustless_read.cpp::committee_bound_state_root` (`:333-411`) — full-block recompute via the `"block"` RPC + committee-signed successor `prev_hash` match, head fails closed (`StateRootAnchorSoundness.md §6.4`, `docs/SECURITY.md §S-042`). CR-1 names the composite reads as consumers of it, exactly as `LightClientThreatModel.md` T-L4 does for the `a:` read.
 
 ### 5.3 `S033StateRootNamespaceCoverage.md` — the namespace surface
 
@@ -316,7 +316,9 @@ Per-theorem citation table for an auditor walking from theorem to code.
 
 | Theorem | Component | File:lines | Role |
 |---|---|---|---|
-| CR-1 | committee-anchor (race-window) | `light/trustless_read.cpp:226-307` | Anchor the composite proof's `state_root` to a committee-signed header. |
+| CR-1 | `committee_bound_state_root` | `light/trustless_read.cpp:333-411` | **The implemented binding:** full-block recompute via the `"block"` RPC + committee-signed successor `prev_hash` match; head fails closed (`:366-375`). The composite reads route their reported `state_root` through it (S-042). |
+| CR-1 | committee-anchor (race-window) | `light/trustless_read.cpp:226-307` | Race-window dispatch that selects the anchor index the helper above binds. |
+| CR-1 | `Node::rpc_block` (full block) | `src/node/node.cpp:2623-2627` | the `"block"` RPC returning the UNSTRIPPED body so the recompute is possible (the stripped `"headers"` RPC cannot — `node.cpp:2658-2661`). |
 | CR-1 | `verify_block_sigs` | `light/verify.cpp:190-283` | Per-block Ed25519 K-of-K committee-sig verify. |
 | CR-1 | `verify_headers` | `light/verify.cpp:104-188` | prev_hash continuity walk from genesis (SR-2 genesis-binding). |
 | CR-1 | `anchor_genesis` | `light/trustless_read.cpp:52-79` | T-L1 genesis pin. |
@@ -373,6 +375,8 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `src/crypto/merkle.cpp:113-141` — `merkle_verify`.
 - `light/verify.cpp:285-349` — `verify_state_proof`.
 - `light/trustless_read.cpp:188-350` — `read_account_trustless` (template); race-window dispatch l.226-307.
+- `light/trustless_read.cpp:333-411` — `committee_bound_state_root` (the implemented CR-1 binding: full-block recompute + successor `prev_hash` match; head fails closed l.366-375).
+- `src/node/node.cpp:2623-2627` — `Node::rpc_block` (full unstripped block, enabling the recompute).
 
 ### Companion proofs
 - `docs/proofs/Preliminaries.md` (F0) — §2.0 canonical labels; §2.1 SHA-256 (A2/A3); §2.2 Ed25519 EUF-CMA (A1).
@@ -395,4 +399,5 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `docs/SECURITY.md §S-033` — state_root commitment closure.
 - `docs/SECURITY.md §S-038` — producer-side state_root population.
 - `docs/SECURITY.md §S-040` — `leaf_count` root-binding (root-wrapper hash), CLOSED (CR-4).
+- `docs/SECURITY.md §S-042` — light-client `state_root` committee-binding via `committee_bound_state_root`, CLOSED (CR-1 discharge).
 - NIST FIPS 180-4 — SHA-256 (A2). RFC 8032 — Ed25519 (A1).

@@ -330,6 +330,86 @@ AnchoredHead anchored_head(
     return out;
 }
 
+std::string committee_bound_state_root(RpcClient& rpc,
+                                       const json& committee_json,
+                                       uint64_t anchor_index) {
+    // 1. Fetch the FULL block at anchor_index (NOT the stripped header).
+    //    The full body carries the heavy fields signing_bytes needs, so
+    //    block_hash = compute_hash() is recomputable locally — the
+    //    stripped `headers` RPC cannot give us this.
+    json full = rpc.call("block", {{"index", anchor_index}});
+    if (full.is_null()) {
+        throw std::runtime_error(
+            "full block " + std::to_string(anchor_index)
+            + " out of range — cannot bind its state_root");
+    }
+    if (full.contains("error") && !full["error"].is_null()) {
+        throw std::runtime_error(
+            "full block " + std::to_string(anchor_index)
+            + " RPC error: " + full["error"].dump());
+    }
+
+    // 2. Parse + recompute block_hash from the full body.
+    determ::chain::Block b;
+    try {
+        b = determ::chain::Block::from_json(full);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "malformed full block " + std::to_string(anchor_index)
+            + ": " + e.what());
+    }
+    Hash recomputed = b.compute_hash();
+
+    // 3. Fetch the committee-signed SUCCESSOR header (index anchor+1). Its
+    //    digest binds prev_hash, so its committee sigs transitively commit
+    //    the anchor's block_hash — and hence the anchor's state_root.
+    uint64_t succ = anchor_index + 1;
+    auto pg = rpc.call("headers", {{"from", succ}, {"count", 1}});
+    if (!pg.contains("headers") || !pg["headers"].is_array()
+        || pg["headers"].empty()) {
+        throw std::runtime_error(
+            "state_root at index " + std::to_string(anchor_index)
+            + " has NO committee-signed successor yet (it is the chain "
+              "head) — refusing to report an unbound head state_root; "
+              "retry once the chain advances one block");
+    }
+    auto& succ_hdr = pg["headers"][0];
+    if (succ_hdr.value("index", ~uint64_t{0}) != succ) {
+        throw std::runtime_error(
+            "daemon returned wrong index for successor header");
+    }
+
+    // 4. Verify the successor's committee sigs (MD first, BFT fallback).
+    auto vbs = verify_block_sigs(succ_hdr, committee_json, /*bft=*/false);
+    if (!vbs.ok) vbs = verify_block_sigs(succ_hdr, committee_json, /*bft=*/true);
+    if (!vbs.ok) {
+        throw std::runtime_error(
+            "successor header " + std::to_string(succ)
+            + " committee-sig check failed: " + vbs.detail);
+    }
+
+    // 5. THE load-bearing binding: the committee-signed successor's
+    //    prev_hash MUST equal the recomputed anchor block_hash. A daemon
+    //    that swapped the anchor's state_root FIELD (which is inside
+    //    signing_bytes → block_hash) produces a recomputed block_hash that
+    //    no longer matches the prev_hash the committee signed over.
+    std::string succ_prev = succ_hdr.value("prev_hash", std::string{});
+    std::string recomputed_hex = to_hex(recomputed);
+    if (succ_prev != recomputed_hex) {
+        throw std::runtime_error(
+            "SECURITY — successor(" + std::to_string(succ)
+            + ").prev_hash=" + succ_prev
+            + " != recomputed block_hash(" + std::to_string(anchor_index)
+            + ")=" + recomputed_hex
+            + " — the daemon forged the block body (e.g. a swapped "
+              "state_root); the committee never signed this state");
+    }
+
+    // 6. Bound. Report the anchor's state_root (empty if zero/unpopulated).
+    Hash zero{};
+    return (b.state_root != zero) ? to_hex(b.state_root) : std::string{};
+}
+
 AccountView read_account_trustless(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
@@ -372,15 +452,22 @@ AccountView read_account_trustless(
         throw std::runtime_error("trustless-read: " + vsp.detail);
     }
 
-    // 5. Anchor the proof's claimed state_root to a committee-signed
-    //    header. Because the chain may have advanced during the
-    //    round-trip, the proof's `height` can be > vc.height. We
-    //    fetch the header at proof.height and confirm its state_root
-    //    matches the proof's claimed root. Then we verify that
-    //    header's committee sigs in isolation against the same
-    //    committee seed we used in step 2 — by induction this binds
-    //    the proof to a committee-attested state, even when the
-    //    chain advanced past vc.height during the round-trip.
+    // 5. Anchor the proof's claimed state_root to a COMMITTEE-BOUND root.
+    //    The committee signs compute_block_digest, which EXCLUDES
+    //    state_root — so the daemon's state_root FIELD on any header is
+    //    NOT directly committee-attested and can be swapped after signing.
+    //    committee_bound_state_root() fetches the FULL anchor block,
+    //    recomputes its block_hash, and binds it to the committee-signed
+    //    SUCCESSOR header via successor.prev_hash == recomputed block_hash
+    //    (the successor's digest DOES bind prev_hash). This transitively
+    //    commits the anchor's state_root. Requesting the exact head index
+    //    fails closed inside the helper (no signed successor yet) — by
+    //    design: we never report an unbound head state_root.
+    //
+    //    proof.height is the count of applied blocks; the LAST applied
+    //    block lives at index proof.height - 1 and its state_root is the
+    //    post-apply commitment (block.state_root is "the state after
+    //    applying THIS block"). So the anchor index is proof.height - 1.
     uint64_t proof_height = proof.value("height", uint64_t{0});
     std::string proof_root = proof.value("state_root", std::string{});
     if (proof_height < vc.height) {
@@ -389,71 +476,29 @@ AccountView read_account_trustless(
             + " is BEFORE verified-chain head=" + std::to_string(vc.height)
             + " — daemon is serving stale state");
     }
-    if (proof_height > vc.height) {
-        // Build committee-json for the per-header sig check.
-        json committee_json;
-        {
-            json arr = json::array();
-            for (auto& [domain_, pk] : committee_seed) {
-                arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
-            }
-            committee_json = json{{"members", arr}};
+
+    // Build the committee-json shape verify_block_sigs consumes — once.
+    json committee_json;
+    {
+        json arr = json::array();
+        for (auto& [domain_, pk] : committee_seed) {
+            arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
         }
-        // proof.height is the count of applied blocks; the LAST applied
-        // block lives at index proof.height - 1 and its state_root is
-        // the post-apply commitment (block.state_root is "the state
-        // after applying THIS block"). So we anchor the proof root to
-        // the header at index proof.height - 1.
-        uint64_t anchor_index = proof_height - 1;
-        auto pg = rpc.call("headers",
-            {{"from", anchor_index}, {"count", 1}});
-        if (!pg.contains("headers") || !pg["headers"].is_array()
-            || pg["headers"].empty()) {
-            throw std::runtime_error(
-                "trustless-read: cannot fetch header at index="
-                + std::to_string(anchor_index)
-                + " (proof.height=" + std::to_string(proof_height) + ")");
-        }
-        auto& h = pg["headers"][0];
-        std::string hdr_root = h.value("state_root", std::string{});
-        if (hdr_root != proof_root) {
-            throw std::runtime_error(
-                "trustless-read: proof.state_root=" + proof_root
-                + " does not match header[" + std::to_string(anchor_index)
-                + "].state_root=" + hdr_root);
-        }
-        // Verify the committee signed off on this header.
-        auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
-        if (!vbs.ok) {
-            vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
-        }
-        if (!vbs.ok) {
-            throw std::runtime_error(
-                "trustless-read: header[" + std::to_string(anchor_index)
-                + "] committee-sig check failed: " + vbs.detail);
-        }
-        // Also confirm the new header chains to the previously-verified
-        // head via a prev_hash walk — refetch the headers between
-        // vc.height and the anchor for completeness.
-        if (anchor_index >= vc.height) {
-            auto walk = rpc.call("headers",
-                {{"from", vc.height - 1}, {"count", proof_height - vc.height + 2}});
-            auto vh = verify_headers(walk, "", "");
-            if (!vh.ok) {
-                throw std::runtime_error(
-                    "trustless-read: prev_hash walk vc.height→proof.height: "
-                    + vh.detail);
-            }
-        }
-        vc.head_state_root = proof_root;
-        vc.height = proof_height;
-        vc.head_block_hash = h.value("block_hash", std::string{});
-    } else if (proof_root != vc.head_state_root) {
-        throw std::runtime_error(
-            "trustless-read: proof.state_root=" + proof_root
-            + " does not match verified head state_root="
-            + vc.head_state_root);
+        committee_json = json{{"members", arr}};
     }
+
+    uint64_t anchor_index = proof_height - 1;
+    std::string attested =
+        committee_bound_state_root(rpc, committee_json, anchor_index);
+    if (attested != proof_root) {
+        throw std::runtime_error(
+            "trustless-read: SECURITY — committee-attested state_root at "
+            "index " + std::to_string(anchor_index) + " = " + attested
+            + " does NOT match proof.state_root = " + proof_root
+            + " — daemon served a proof against an unattested root");
+    }
+    vc.head_state_root = attested;
+    vc.height = proof_height;
 
     // 5. Now fetch the cleartext account fields via the daemon's
     //    `account` RPC, recompute the leaf hash, and confirm it

@@ -2659,14 +2659,22 @@ json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
             h.erase("cross_shard_receipts");
             h.erase("inbound_receipts");
             h.erase("initial_state");
-            // Light clients need block_hash to verify the prev_hash
-            // chain (each subsequent header's prev_hash should equal
-            // this header's block_hash). compute_hash uses
-            // signing_bytes which includes the heavy fields the client
-            // doesn't have, so the server-side hash is included
-            // explicitly here. The client trusts this value indirectly
-            // via committee signatures on compute_block_digest (which
-            // *is* recomputable from header fields alone).
+            // Light clients use block_hash to display/check the prev_hash
+            // chain (each subsequent header's prev_hash should equal this
+            // header's block_hash). compute_hash uses signing_bytes, which
+            // includes the heavy fields stripped above, so the client cannot
+            // recompute it from a stripped header — hence the server-side
+            // hash is included explicitly here. NOTE: this served block_hash
+            // is a CONVENIENCE for prev_hash-continuity display only; it is
+            // NOT a trust anchor for state_root. The committee signs
+            // compute_block_digest, which EXCLUDES both block_hash and
+            // state_root, so a malicious daemon can swap either field on a
+            // stripped header without breaking the committee sigs.
+            // Trust-minimized light readers therefore recompute block_hash
+            // from the FULL block (the "block" RPC, which returns the
+            // unstripped body) and bind state_root via the successor block's
+            // committee-signed prev_hash (committee_bound_state_root in the
+            // light client) — they never trust this served field.
             h["block_hash"] = to_hex(blk.compute_hash());
             headers.push_back(std::move(h));
         }

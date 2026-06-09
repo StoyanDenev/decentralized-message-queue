@@ -1923,7 +1923,15 @@ StakeView read_stake_trustless(
             + " is BEFORE verified-chain head=" + std::to_string(vc.height)
             + " — daemon is serving stale state");
     }
-    if (proof_height > vc.height) {
+    // SOUNDNESS: the committee signs compute_block_digest, which EXCLUDES
+    // state_root. The daemon's state_root FIELD on a stripped header is NOT
+    // committee-attested and can be swapped after signing, so we do NOT
+    // trust it. Bind proof_root to the COMMITTEE-SIGNED root committed by
+    // the block at proof_height-1 via committee_bound_state_root (fetches
+    // the full block, recomputes block_hash, verifies the successor
+    // header's sigs, requires successor.prev_hash == recomputed hash). This
+    // is identical to read_account_trustless / verify_state_root_at.
+    {
         json committee_json;
         {
             json arr = json::array();
@@ -1933,50 +1941,16 @@ StakeView read_stake_trustless(
             committee_json = json{{"members", arr}};
         }
         uint64_t anchor_index = proof_height - 1;
-        auto pg = rpc.call("headers",
-            {{"from", anchor_index}, {"count", 1}});
-        if (!pg.contains("headers") || !pg["headers"].is_array()
-            || pg["headers"].empty()) {
-            throw std::runtime_error(
-                "stake-trustless: cannot fetch header at index="
-                + std::to_string(anchor_index)
-                + " (proof.height=" + std::to_string(proof_height) + ")");
+        std::string attested = determ::light::committee_bound_state_root(
+            rpc, committee_json, anchor_index);
+        if (attested != proof_root) {
+            throw std::runtime_error("stake-trustless: SECURITY — committee-attested "
+                "state_root at index " + std::to_string(anchor_index) + " = " + attested
+                + " does NOT match proof.state_root = " + proof_root
+                + " — daemon served a proof against an unattested root");
         }
-        auto& h = pg["headers"][0];
-        std::string hdr_root = h.value("state_root", std::string{});
-        if (hdr_root != proof_root) {
-            throw std::runtime_error(
-                "stake-trustless: proof.state_root=" + proof_root
-                + " does not match header[" + std::to_string(anchor_index)
-                + "].state_root=" + hdr_root);
-        }
-        auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
-        if (!vbs.ok) {
-            vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
-        }
-        if (!vbs.ok) {
-            throw std::runtime_error(
-                "stake-trustless: header[" + std::to_string(anchor_index)
-                + "] committee-sig check failed: " + vbs.detail);
-        }
-        if (anchor_index >= vc.height) {
-            auto walk = rpc.call("headers",
-                {{"from", vc.height - 1}, {"count", proof_height - vc.height + 2}});
-            auto vh = verify_headers(walk, "", "");
-            if (!vh.ok) {
-                throw std::runtime_error(
-                    "stake-trustless: prev_hash walk vc.height→proof.height: "
-                    + vh.detail);
-            }
-        }
-        vc.head_state_root = proof_root;
+        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
         vc.height = proof_height;
-        vc.head_block_hash = h.value("block_hash", std::string{});
-    } else if (proof_root != vc.head_state_root) {
-        throw std::runtime_error(
-            "stake-trustless: proof.state_root=" + proof_root
-            + " does not match verified head state_root="
-            + vc.head_state_root);
     }
 
     // 6. Fetch the cleartext (locked, unlock_height) via `stake_info`,
@@ -2973,7 +2947,13 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
                             + std::to_string(vc.height)
                             + " — daemon is serving stale state");
                     }
-                    if (proof_height > vc.height) {
+                    // SOUNDNESS: the committee signs compute_block_digest,
+                    // which EXCLUDES state_root, so the daemon's state_root
+                    // FIELD is NOT committee-attested. Bind proof_root to the
+                    // COMMITTEE-SIGNED root committed by block proof_height-1
+                    // via committee_bound_state_root (full-block recompute +
+                    // successor-sig binding), never the bare header field.
+                    {
                         json committee_json;
                         {
                             json arr = json::array();
@@ -2983,56 +2963,22 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
                             committee_json = json{{"members", arr}};
                         }
                         uint64_t anchor_index = proof_height - 1;
-                        auto pg = rpc.call("headers",
-                            {{"from", anchor_index}, {"count", 1}});
-                        if (!pg.contains("headers")
-                            || !pg["headers"].is_array()
-                            || pg["headers"].empty()) {
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index);
+                        if (attested != proof_root) {
                             throw std::runtime_error(
-                                "cannot fetch header at index="
-                                + std::to_string(anchor_index)
-                                + " (proof.height="
-                                + std::to_string(proof_height) + ")");
+                                "verify-receipt-inclusion: SECURITY — "
+                                "committee-attested state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an "
+                                  "unattested root");
                         }
-                        auto& h = pg["headers"][0];
-                        std::string hdr_root =
-                            h.value("state_root", std::string{});
-                        if (hdr_root != proof_root) {
-                            throw std::runtime_error(
-                                "proof.state_root=" + proof_root
-                                + " does not match header["
-                                + std::to_string(anchor_index)
-                                + "].state_root=" + hdr_root);
-                        }
-                        auto vbs = verify_block_sigs(h, committee_json,
-                                                     /*bft=*/false);
-                        if (!vbs.ok)
-                            vbs = verify_block_sigs(h, committee_json,
-                                                    /*bft=*/true);
-                        if (!vbs.ok) {
-                            throw std::runtime_error(
-                                "header[" + std::to_string(anchor_index)
-                                + "] committee-sig check failed: "
-                                + vbs.detail);
-                        }
-                        if (anchor_index >= vc.height) {
-                            auto walk = rpc.call("headers",
-                                {{"from", vc.height - 1},
-                                 {"count", proof_height - vc.height + 2}});
-                            auto vh = verify_headers(walk, "", "");
-                            if (!vh.ok) {
-                                throw std::runtime_error(
-                                    "prev_hash walk vc.height->proof.height: "
-                                    + vh.detail);
-                            }
-                        }
-                        anchor_root = proof_root;
+                        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                        vc.height = proof_height;
+                        anchor_root = attested;
                         anchor_at   = proof_height;
-                    } else if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
                     }
 
                     // Merkle-verify the proof against the committee-signed
@@ -3313,7 +3259,13 @@ int cmd_verify_merge_state(int argc, char** argv) {
                             + std::to_string(vc.height)
                             + " — daemon is serving stale state");
                     }
-                    if (proof_height > vc.height) {
+                    // SOUNDNESS: the committee signs compute_block_digest,
+                    // which EXCLUDES state_root, so the daemon's state_root
+                    // FIELD is NOT committee-attested. Bind proof_root to the
+                    // COMMITTEE-SIGNED root committed by block proof_height-1
+                    // via committee_bound_state_root (full-block recompute +
+                    // successor-sig binding), never the bare header field.
+                    {
                         json committee_json;
                         {
                             json arr = json::array();
@@ -3323,56 +3275,22 @@ int cmd_verify_merge_state(int argc, char** argv) {
                             committee_json = json{{"members", arr}};
                         }
                         uint64_t anchor_index = proof_height - 1;
-                        auto pg = rpc.call("headers",
-                            {{"from", anchor_index}, {"count", 1}});
-                        if (!pg.contains("headers")
-                            || !pg["headers"].is_array()
-                            || pg["headers"].empty()) {
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index);
+                        if (attested != proof_root) {
                             throw std::runtime_error(
-                                "cannot fetch header at index="
-                                + std::to_string(anchor_index)
-                                + " (proof.height="
-                                + std::to_string(proof_height) + ")");
+                                "verify-merge-state: SECURITY — "
+                                "committee-attested state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an "
+                                  "unattested root");
                         }
-                        auto& h = pg["headers"][0];
-                        std::string hdr_root =
-                            h.value("state_root", std::string{});
-                        if (hdr_root != proof_root) {
-                            throw std::runtime_error(
-                                "proof.state_root=" + proof_root
-                                + " does not match header["
-                                + std::to_string(anchor_index)
-                                + "].state_root=" + hdr_root);
-                        }
-                        auto vbs = verify_block_sigs(h, committee_json,
-                                                     /*bft=*/false);
-                        if (!vbs.ok)
-                            vbs = verify_block_sigs(h, committee_json,
-                                                    /*bft=*/true);
-                        if (!vbs.ok) {
-                            throw std::runtime_error(
-                                "header[" + std::to_string(anchor_index)
-                                + "] committee-sig check failed: "
-                                + vbs.detail);
-                        }
-                        if (anchor_index >= vc.height) {
-                            auto walk = rpc.call("headers",
-                                {{"from", vc.height - 1},
-                                 {"count", proof_height - vc.height + 2}});
-                            auto vh = verify_headers(walk, "", "");
-                            if (!vh.ok) {
-                                throw std::runtime_error(
-                                    "prev_hash walk vc.height->proof.height: "
-                                    + vh.detail);
-                            }
-                        }
-                        anchor_root = proof_root;
+                        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                        vc.height = proof_height;
+                        anchor_root = attested;
                         anchor_at   = proof_height;
-                    } else if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
                     }
 
                     // Merkle-verify the proof against the committee-signed
@@ -3669,7 +3587,13 @@ int cmd_verify_param_change(int argc, char** argv) {
                             + std::to_string(vc.height)
                             + " — daemon is serving stale state");
                     }
-                    if (proof_height > vc.height) {
+                    // SOUNDNESS: the committee signs compute_block_digest,
+                    // which EXCLUDES state_root, so the daemon's state_root
+                    // FIELD is NOT committee-attested. Bind proof_root to the
+                    // COMMITTEE-SIGNED root committed by block proof_height-1
+                    // via committee_bound_state_root (full-block recompute +
+                    // successor-sig binding), never the bare header field.
+                    {
                         json committee_json;
                         {
                             json arr = json::array();
@@ -3679,56 +3603,22 @@ int cmd_verify_param_change(int argc, char** argv) {
                             committee_json = json{{"members", arr}};
                         }
                         uint64_t anchor_index = proof_height - 1;
-                        auto pg = rpc.call("headers",
-                            {{"from", anchor_index}, {"count", 1}});
-                        if (!pg.contains("headers")
-                            || !pg["headers"].is_array()
-                            || pg["headers"].empty()) {
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index);
+                        if (attested != proof_root) {
                             throw std::runtime_error(
-                                "cannot fetch header at index="
-                                + std::to_string(anchor_index)
-                                + " (proof.height="
-                                + std::to_string(proof_height) + ")");
+                                "verify-param-change: SECURITY — "
+                                "committee-attested state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an "
+                                  "unattested root");
                         }
-                        auto& h = pg["headers"][0];
-                        std::string hdr_root =
-                            h.value("state_root", std::string{});
-                        if (hdr_root != proof_root) {
-                            throw std::runtime_error(
-                                "proof.state_root=" + proof_root
-                                + " does not match header["
-                                + std::to_string(anchor_index)
-                                + "].state_root=" + hdr_root);
-                        }
-                        auto vbs = verify_block_sigs(h, committee_json,
-                                                     /*bft=*/false);
-                        if (!vbs.ok)
-                            vbs = verify_block_sigs(h, committee_json,
-                                                    /*bft=*/true);
-                        if (!vbs.ok) {
-                            throw std::runtime_error(
-                                "header[" + std::to_string(anchor_index)
-                                + "] committee-sig check failed: "
-                                + vbs.detail);
-                        }
-                        if (anchor_index >= vc.height) {
-                            auto walk = rpc.call("headers",
-                                {{"from", vc.height - 1},
-                                 {"count", proof_height - vc.height + 2}});
-                            auto vh = verify_headers(walk, "", "");
-                            if (!vh.ok) {
-                                throw std::runtime_error(
-                                    "prev_hash walk vc.height->proof.height: "
-                                    + vh.detail);
-                            }
-                        }
-                        anchor_root = proof_root;
+                        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                        vc.height = proof_height;
+                        anchor_root = attested;
                         anchor_at   = proof_height;
-                    } else if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
                     }
 
                     // Merkle-verify the proof against the committee-signed
@@ -3996,7 +3886,13 @@ int cmd_verify_param_value(int argc, char** argv) {
                         + std::to_string(vc.height)
                         + " — daemon is serving stale state");
                 }
-                if (proof_height > vc.height) {
+                // SOUNDNESS: the committee signs compute_block_digest, which
+                // EXCLUDES state_root, so the daemon's state_root FIELD is
+                // NOT committee-attested. Bind proof_root to the COMMITTEE-
+                // SIGNED root committed by block proof_height-1 via
+                // committee_bound_state_root (full-block recompute +
+                // successor-sig binding), never the bare header field.
+                {
                     json committee_json;
                     {
                         json arr = json::array();
@@ -4006,56 +3902,22 @@ int cmd_verify_param_value(int argc, char** argv) {
                         committee_json = json{{"members", arr}};
                     }
                     uint64_t anchor_index = proof_height - 1;
-                    auto pg = rpc.call("headers",
-                        {{"from", anchor_index}, {"count", 1}});
-                    if (!pg.contains("headers")
-                        || !pg["headers"].is_array()
-                        || pg["headers"].empty()) {
+                    std::string attested =
+                        determ::light::committee_bound_state_root(
+                            rpc, committee_json, anchor_index);
+                    if (attested != proof_root) {
                         throw std::runtime_error(
-                            "cannot fetch header at index="
-                            + std::to_string(anchor_index)
-                            + " (proof.height="
-                            + std::to_string(proof_height) + ")");
+                            "verify-param-value: SECURITY — committee-attested "
+                            "state_root at index "
+                            + std::to_string(anchor_index) + " = " + attested
+                            + " does NOT match proof.state_root = " + proof_root
+                            + " — daemon served a proof against an "
+                              "unattested root");
                     }
-                    auto& h = pg["headers"][0];
-                    std::string hdr_root =
-                        h.value("state_root", std::string{});
-                    if (hdr_root != proof_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match header["
-                            + std::to_string(anchor_index)
-                            + "].state_root=" + hdr_root);
-                    }
-                    auto vbs = verify_block_sigs(h, committee_json,
-                                                 /*bft=*/false);
-                    if (!vbs.ok)
-                        vbs = verify_block_sigs(h, committee_json,
-                                                /*bft=*/true);
-                    if (!vbs.ok) {
-                        throw std::runtime_error(
-                            "header[" + std::to_string(anchor_index)
-                            + "] committee-sig check failed: "
-                            + vbs.detail);
-                    }
-                    if (anchor_index >= vc.height) {
-                        auto walk = rpc.call("headers",
-                            {{"from", vc.height - 1},
-                             {"count", proof_height - vc.height + 2}});
-                        auto vh = verify_headers(walk, "", "");
-                        if (!vh.ok) {
-                            throw std::runtime_error(
-                                "prev_hash walk vc.height->proof.height: "
-                                + vh.detail);
-                        }
-                    }
-                    anchor_root = proof_root;
+                    vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                    vc.height = proof_height;
+                    anchor_root = attested;
                     anchor_at   = proof_height;
-                } else if (proof_root != vc.head_state_root) {
-                    throw std::runtime_error(
-                        "proof.state_root=" + proof_root
-                        + " does not match verified head state_root="
-                        + vc.head_state_root);
                 }
 
                 // Merkle-verify the proof against the committee-signed root.
@@ -4348,7 +4210,13 @@ int cmd_verify_registrant(int argc, char** argv) {
                             + std::to_string(vc.height)
                             + " — daemon is serving stale state");
                     }
-                    if (proof_height > vc.height) {
+                    // SOUNDNESS: the committee signs compute_block_digest,
+                    // which EXCLUDES state_root, so the daemon's state_root
+                    // FIELD is NOT committee-attested. Bind proof_root to the
+                    // COMMITTEE-SIGNED root committed by block proof_height-1
+                    // via committee_bound_state_root (full-block recompute +
+                    // successor-sig binding), never the bare header field.
+                    {
                         json committee_json;
                         {
                             json arr = json::array();
@@ -4358,56 +4226,22 @@ int cmd_verify_registrant(int argc, char** argv) {
                             committee_json = json{{"members", arr}};
                         }
                         uint64_t anchor_index = proof_height - 1;
-                        auto pg = rpc.call("headers",
-                            {{"from", anchor_index}, {"count", 1}});
-                        if (!pg.contains("headers")
-                            || !pg["headers"].is_array()
-                            || pg["headers"].empty()) {
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index);
+                        if (attested != proof_root) {
                             throw std::runtime_error(
-                                "cannot fetch header at index="
-                                + std::to_string(anchor_index)
-                                + " (proof.height="
-                                + std::to_string(proof_height) + ")");
+                                "verify-registrant: SECURITY — "
+                                "committee-attested state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an "
+                                  "unattested root");
                         }
-                        auto& h = pg["headers"][0];
-                        std::string hdr_root =
-                            h.value("state_root", std::string{});
-                        if (hdr_root != proof_root) {
-                            throw std::runtime_error(
-                                "proof.state_root=" + proof_root
-                                + " does not match header["
-                                + std::to_string(anchor_index)
-                                + "].state_root=" + hdr_root);
-                        }
-                        auto vbs = verify_block_sigs(h, committee_json,
-                                                     /*bft=*/false);
-                        if (!vbs.ok)
-                            vbs = verify_block_sigs(h, committee_json,
-                                                    /*bft=*/true);
-                        if (!vbs.ok) {
-                            throw std::runtime_error(
-                                "header[" + std::to_string(anchor_index)
-                                + "] committee-sig check failed: "
-                                + vbs.detail);
-                        }
-                        if (anchor_index >= vc.height) {
-                            auto walk = rpc.call("headers",
-                                {{"from", vc.height - 1},
-                                 {"count", proof_height - vc.height + 2}});
-                            auto vh = verify_headers(walk, "", "");
-                            if (!vh.ok) {
-                                throw std::runtime_error(
-                                    "prev_hash walk vc.height->proof.height: "
-                                    + vh.detail);
-                            }
-                        }
-                        anchor_root = proof_root;
+                        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                        vc.height = proof_height;
+                        anchor_root = attested;
                         anchor_at   = proof_height;
-                    } else if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
                     }
 
                     // Merkle-verify the proof against the committee-signed
@@ -4716,7 +4550,13 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                             + std::to_string(vc.height)
                             + " — daemon is serving stale state");
                     }
-                    if (proof_height > vc.height) {
+                    // SOUNDNESS: the committee signs compute_block_digest,
+                    // which EXCLUDES state_root, so the daemon's state_root
+                    // FIELD is NOT committee-attested. Bind proof_root to the
+                    // COMMITTEE-SIGNED root committed by block proof_height-1
+                    // via committee_bound_state_root (full-block recompute +
+                    // successor-sig binding), never the bare header field.
+                    {
                         json committee_json;
                         {
                             json arr = json::array();
@@ -4726,56 +4566,22 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                             committee_json = json{{"members", arr}};
                         }
                         uint64_t anchor_index = proof_height - 1;
-                        auto pg = rpc.call("headers",
-                            {{"from", anchor_index}, {"count", 1}});
-                        if (!pg.contains("headers")
-                            || !pg["headers"].is_array()
-                            || pg["headers"].empty()) {
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index);
+                        if (attested != proof_root) {
                             throw std::runtime_error(
-                                "cannot fetch header at index="
-                                + std::to_string(anchor_index)
-                                + " (proof.height="
-                                + std::to_string(proof_height) + ")");
+                                "verify-dapp-registration: SECURITY — "
+                                "committee-attested state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an "
+                                  "unattested root");
                         }
-                        auto& h = pg["headers"][0];
-                        std::string hdr_root =
-                            h.value("state_root", std::string{});
-                        if (hdr_root != proof_root) {
-                            throw std::runtime_error(
-                                "proof.state_root=" + proof_root
-                                + " does not match header["
-                                + std::to_string(anchor_index)
-                                + "].state_root=" + hdr_root);
-                        }
-                        auto vbs = verify_block_sigs(h, committee_json,
-                                                     /*bft=*/false);
-                        if (!vbs.ok)
-                            vbs = verify_block_sigs(h, committee_json,
-                                                    /*bft=*/true);
-                        if (!vbs.ok) {
-                            throw std::runtime_error(
-                                "header[" + std::to_string(anchor_index)
-                                + "] committee-sig check failed: "
-                                + vbs.detail);
-                        }
-                        if (anchor_index >= vc.height) {
-                            auto walk = rpc.call("headers",
-                                {{"from", vc.height - 1},
-                                 {"count", proof_height - vc.height + 2}});
-                            auto vh = verify_headers(walk, "", "");
-                            if (!vh.ok) {
-                                throw std::runtime_error(
-                                    "prev_hash walk vc.height->proof.height: "
-                                    + vh.detail);
-                            }
-                        }
-                        anchor_root = proof_root;
+                        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                        vc.height = proof_height;
+                        anchor_root = attested;
                         anchor_at   = proof_height;
-                    } else if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
                     }
 
                     // Merkle-verify the proof against the committee-signed
@@ -5108,7 +4914,13 @@ int cmd_verify_account(int argc, char** argv) {
                             + std::to_string(vc.height)
                             + " — daemon is serving stale state");
                     }
-                    if (proof_height > vc.height) {
+                    // SOUNDNESS: the committee signs compute_block_digest,
+                    // which EXCLUDES state_root, so the daemon's state_root
+                    // FIELD is NOT committee-attested. Bind proof_root to the
+                    // COMMITTEE-SIGNED root committed by block proof_height-1
+                    // via committee_bound_state_root (full-block recompute +
+                    // successor-sig binding), never the bare header field.
+                    {
                         json committee_json;
                         {
                             json arr = json::array();
@@ -5118,56 +4930,22 @@ int cmd_verify_account(int argc, char** argv) {
                             committee_json = json{{"members", arr}};
                         }
                         uint64_t anchor_index = proof_height - 1;
-                        auto pg = rpc.call("headers",
-                            {{"from", anchor_index}, {"count", 1}});
-                        if (!pg.contains("headers")
-                            || !pg["headers"].is_array()
-                            || pg["headers"].empty()) {
+                        std::string attested =
+                            determ::light::committee_bound_state_root(
+                                rpc, committee_json, anchor_index);
+                        if (attested != proof_root) {
                             throw std::runtime_error(
-                                "cannot fetch header at index="
-                                + std::to_string(anchor_index)
-                                + " (proof.height="
-                                + std::to_string(proof_height) + ")");
+                                "verify-account: SECURITY — committee-attested "
+                                "state_root at index "
+                                + std::to_string(anchor_index) + " = " + attested
+                                + " does NOT match proof.state_root = " + proof_root
+                                + " — daemon served a proof against an "
+                                  "unattested root");
                         }
-                        auto& h = pg["headers"][0];
-                        std::string hdr_root =
-                            h.value("state_root", std::string{});
-                        if (hdr_root != proof_root) {
-                            throw std::runtime_error(
-                                "proof.state_root=" + proof_root
-                                + " does not match header["
-                                + std::to_string(anchor_index)
-                                + "].state_root=" + hdr_root);
-                        }
-                        auto vbs = verify_block_sigs(h, committee_json,
-                                                     /*bft=*/false);
-                        if (!vbs.ok)
-                            vbs = verify_block_sigs(h, committee_json,
-                                                    /*bft=*/true);
-                        if (!vbs.ok) {
-                            throw std::runtime_error(
-                                "header[" + std::to_string(anchor_index)
-                                + "] committee-sig check failed: "
-                                + vbs.detail);
-                        }
-                        if (anchor_index >= vc.height) {
-                            auto walk = rpc.call("headers",
-                                {{"from", vc.height - 1},
-                                 {"count", proof_height - vc.height + 2}});
-                            auto vh = verify_headers(walk, "", "");
-                            if (!vh.ok) {
-                                throw std::runtime_error(
-                                    "prev_hash walk vc.height->proof.height: "
-                                    + vh.detail);
-                            }
-                        }
-                        anchor_root = proof_root;
+                        vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                        vc.height = proof_height;
+                        anchor_root = attested;
                         anchor_at   = proof_height;
-                    } else if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
                     }
 
                     // Merkle-verify the proof against the committee-signed
@@ -5784,7 +5562,16 @@ int cmd_supply_trustless(int argc, char** argv) {
                         + std::to_string(vc.height)
                         + " — daemon is serving stale state");
                 }
-                if (proof_height > vc.height) {
+                // SOUNDNESS: the committee signs compute_block_digest, which
+                // EXCLUDES state_root, so the daemon's state_root FIELD is
+                // NOT committee-attested. Resolve the single anchor root from
+                // the FIRST counter's proof by binding proof_root to the
+                // COMMITTEE-SIGNED root committed by block proof_height-1 via
+                // committee_bound_state_root (full-block recompute +
+                // successor-sig binding), never the bare header field. Every
+                // later counter must then match this exact attested root (the
+                // split-root guard below), closing the split-read attack.
+                {
                     json committee_json;
                     {
                         json arr = json::array();
@@ -5794,57 +5581,22 @@ int cmd_supply_trustless(int argc, char** argv) {
                         committee_json = json{{"members", arr}};
                     }
                     uint64_t anchor_index = proof_height - 1;
-                    auto pg = rpc.call("headers",
-                        {{"from", anchor_index}, {"count", 1}});
-                    if (!pg.contains("headers") || !pg["headers"].is_array()
-                        || pg["headers"].empty()) {
+                    std::string attested =
+                        determ::light::committee_bound_state_root(
+                            rpc, committee_json, anchor_index);
+                    if (attested != proof_root) {
                         throw std::runtime_error(
-                            "cannot fetch header at index="
-                            + std::to_string(anchor_index)
-                            + " (proof.height=" + std::to_string(proof_height)
-                            + ")");
+                            "supply-trustless: SECURITY — committee-attested "
+                            "state_root at index "
+                            + std::to_string(anchor_index) + " = " + attested
+                            + " does NOT match proof.state_root = " + proof_root
+                            + " — daemon served a proof against an "
+                              "unattested root");
                     }
-                    auto& h = pg["headers"][0];
-                    std::string hdr_root = h.value("state_root", std::string{});
-                    if (hdr_root != proof_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match header["
-                            + std::to_string(anchor_index)
-                            + "].state_root=" + hdr_root);
-                    }
-                    auto vbs = verify_block_sigs(h, committee_json,
-                                                 /*bft=*/false);
-                    if (!vbs.ok)
-                        vbs = verify_block_sigs(h, committee_json,
-                                                /*bft=*/true);
-                    if (!vbs.ok) {
-                        throw std::runtime_error(
-                            "header[" + std::to_string(anchor_index)
-                            + "] committee-sig check failed: " + vbs.detail);
-                    }
-                    if (anchor_index >= vc.height) {
-                        auto walk = rpc.call("headers",
-                            {{"from", vc.height - 1},
-                             {"count", proof_height - vc.height + 2}});
-                        auto vh = verify_headers(walk, "", "");
-                        if (!vh.ok) {
-                            throw std::runtime_error(
-                                "prev_hash walk vc.height->proof.height: "
-                                + vh.detail);
-                        }
-                    }
-                    anchor_root = proof_root;
+                    vc.head_state_root = attested;  // downstream reporting uses the ATTESTED root
+                    vc.height = proof_height;
+                    anchor_root = attested;
                     anchor_at   = proof_height;
-                } else {
-                    if (proof_root != vc.head_state_root) {
-                        throw std::runtime_error(
-                            "proof.state_root=" + proof_root
-                            + " does not match verified head state_root="
-                            + vc.head_state_root);
-                    }
-                    anchor_root = vc.head_state_root;
-                    anchor_at   = vc.height;
                 }
             } else if (proof_root != anchor_root) {
                 // Split-root attack: this counter is anchored to a

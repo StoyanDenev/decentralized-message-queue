@@ -86,40 +86,43 @@ struct HistoryRow {
     uint64_t    balance_proven_at_height{0};
 };
 
-// Fetch + verify the committee-signed header at block index `idx`.
-// Returns the header's state_root. Throws (with a height-bearing
-// diagnostic) on fetch failure or committee-sig failure. Genesis
-// (idx == 0) skips sig verification — by construction it has zero
-// creator_block_sigs and was already pinned by anchor_genesis; we read
-// its state_root directly (genesis blocks carry the post-genesis-apply
-// commitment when S-033 is active).
+// Return the COMMITTEE-BOUND state_root committed by the block at index
+// `idx`. Throws (with a height-bearing diagnostic) on any soundness
+// failure.
+//
+// SOUNDNESS: the committee signs compute_block_digest, which EXCLUDES
+// state_root. The daemon's state_root FIELD on a stripped header is NOT
+// committee-attested and can be swapped after signing, so we do NOT
+// trust it. For idx >= 1 we route through committee_bound_state_root,
+// which fetches the FULL block at idx, recomputes its block_hash,
+// verifies the SUCCESSOR header's committee sigs, and requires
+// successor.prev_hash == recomputed hash — transitively binding the
+// returned state_root. NOTE: this fails closed at the chain HEAD (no
+// committee-signed successor exists yet); account-history must sample
+// indices that have a signed successor.
+//
+// Genesis (idx == 0) is the single special-case: it has zero
+// creator_block_sigs by construction and was already pinned by
+// anchor_genesis, and in a 1-block chain it has no committee-signed
+// successor to bind through. Genesis is pinned by the genesis-hash
+// anchor, so we read its state_root FIELD directly (genesis blocks carry
+// the post-genesis-apply commitment when S-033 is active).
 std::string verify_header_state_root_at(RpcClient& rpc,
                                         const json& committee_json,
                                         uint64_t idx) {
-    auto page = rpc.call("headers", {{"from", idx}, {"count", 1}});
-    if (!page.contains("headers") || !page["headers"].is_array()
-        || page["headers"].empty()) {
-        throw std::runtime_error(
-            "account-history: daemon returned no header at index "
-            + std::to_string(idx));
-    }
-    auto& h = page["headers"][0];
-
-    if (idx != 0) {
-        auto vbs = verify_block_sigs(h, committee_json, /*bft=*/false);
-        if (!vbs.ok) {
-            // BFT-mode fallback, identical to verify_chain_to_head.
-            vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
-        }
-        if (!vbs.ok) {
+    if (idx == 0) {
+        auto page = rpc.call("headers", {{"from", idx}, {"count", 1}});
+        if (!page.contains("headers") || !page["headers"].is_array()
+            || page["headers"].empty()) {
             throw std::runtime_error(
-                "account-history: committee-sig verification FAILED for "
-                "header at index " + std::to_string(idx) + ": " + vbs.detail
-                + " — refusing to trust the daemon's state_root at this "
-                  "height");
+                "account-history: daemon returned no header at index "
+                + std::to_string(idx));
         }
+        // Genesis is pinned by the genesis-hash anchor (anchor_genesis);
+        // it has no committee-signed successor in a 1-block chain.
+        return page["headers"][0].value("state_root", std::string{});
     }
-    return h.value("state_root", std::string{});
+    return committee_bound_state_root(rpc, committee_json, idx);
 }
 
 // Incrementally verifies the prev_hash chain from the pinned genesis,

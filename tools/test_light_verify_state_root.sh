@@ -10,16 +10,32 @@
 # the trust anchor an auditor would then feed to an out-of-band
 # state-proof check, or compare across two independent observers.
 #
-# Trust model (load-bearing): the root is NOT the daemon's word — it is
-# read from a header that (a) chains back to the pinned genesis via an
-# unbroken prev_hash walk and (b) carries K-of-K (MD) / ceil(2K/3) (BFT)
-# committee Ed25519 sigs this client verified locally. A daemon that lies
-# about a historical state_root fails the committee-sig check and the
-# command fails closed (non-zero exit) — never a bare daemon-reported root.
+# Trust model (load-bearing): the root is NOT the daemon's word. SOUNDNESS
+# UPDATE — the committee signs compute_block_digest, which EXCLUDES
+# state_root, so a header's bare state_root FIELD is NOT committee-attested
+# (a malicious daemon could swap it after signing). For H >= 1 the root is
+# now bound the sound way: committee_bound_state_root() fetches the FULL
+# block at H, recomputes its block_hash, verifies the SUCCESSOR header
+# (H+1)'s committee sigs, and requires successor.prev_hash == that
+# recomputed hash — so the successor's signature transitively commits H's
+# state_root. A daemon that swaps the state_root at H breaks the recomputed
+# block_hash, the successor.prev_hash bind fails, and the command fails
+# closed (non-zero exit) — never a bare daemon-reported root.
+#
+# CONSEQUENCES OF THE SUCCESSOR-BINDING MODEL (this test asserts them):
+#   * sigs_verified is now 0 for H >= 1. Attestation comes from the
+#     SUCCESSOR(H+1)'s sigs, NOT from header[H]'s own sigs, so the result no
+#     longer counts header[H]'s sigs. committee_size still reports
+#     |creators| of header[H] for context, but it is NOT equal to
+#     sigs_verified anymore. (Genesis H==0 also reports sigs_verified=0,
+#     committee_size=0 — pinned by the genesis hash, not a committee.)
+#   * A query at the EXACT head index FAILS CLOSED: the head has no
+#     committee-signed successor yet, so there is nothing to bind H's root
+#     to. This is intended — we never report an unbound head root.
 #
 # Assertions:
-#   1. verify-state-root at a mid-height H → exit 0, non-empty state_root,
-#      committee_verified=true.
+#   1. verify-state-root at a mid-height H (which HAS a signed successor) →
+#      exit 0, non-empty state_root, committee_verified=true.
 #   2. The reported root EQUALS the state_root in the committee-verified
 #      header at H (cross-checked against `fetch-headers --from H --count 1`).
 #   3. Genesis anchor mismatch (wrong --genesis) → fail-closed non-zero exit
@@ -27,10 +43,15 @@
 #   4. Height beyond head (--height huge) → clean handled error (rc=1, not a
 #      crash / not rc=2 unhandled), diagnostic names the head bound.
 #   5. The command never emits a root without committee_verified=true: the
-#      mid-height --json record has committee_verified=true AND sigs_verified
-#      equal to the committee size (full K-of-K at that header).
+#      mid-height --json record has committee_verified=true, a non-empty
+#      64-hex state_root, and (NEW semantics) sigs_verified == 0 while
+#      committee_size == the genesis committee size. We do NOT assert
+#      sigs_verified == committee_size anymore — that was the old
+#      header-self-sig model; attestation is now via the successor.
 #   6. (bonus) --json output parses with the documented shape
 #      {height, state_root, committee_size, sigs_verified, committee_verified}.
+#   7. (NEW) verify-state-root at the EXACT head index FAILS CLOSED (no
+#      committee-signed successor exists yet) — exit non-zero, no bare root.
 #
 # Cluster-bound (boots 3 nodes) — do NOT add to FAST=1.
 #
@@ -274,21 +295,28 @@ else
     assert "false" "--json shape ok (got rc=$JRC shape_ok=$SHAPE_OK)"
 fi
 
-# Assertion 5: never emits a root without committee_verified=true, and the
-# full committee signed (sigs_verified == committee_size, MD K-of-K).
+# Assertion 5: never emits a root without committee_verified=true. NEW
+# successor-binding semantics — the root at H>=1 is attested by the SIGNED
+# SUCCESSOR(H+1), not by header[H]'s own sigs, so sigs_verified is 0 here
+# (we do NOT assert sigs_verified == committee_size anymore). committee_size
+# still reports |creators| of header[H] (>= 1) for context. The load-bearing
+# checks are: committee_verified=true AND a non-empty 64-hex root.
 CV_OK=$(cat $T/vsr_mid.json | $PY -c "
 import json, sys
 try:
     d = json.loads(sys.stdin.read())
     cv = d.get('committee_verified') is True
-    full = (d.get('sigs_verified') == d.get('committee_size')
-            and d.get('committee_size', 0) >= 1)
+    # Successor-binding model: sigs_verified is 0 for H>=1 (attestation is
+    # via the successor header's sigs, not header[H]'s own). committee_size
+    # is still the genesis committee (>= 1) for reporting context.
+    sigs_zero = (d.get('sigs_verified') == 0)
+    csize_ok = (d.get('committee_size', 0) >= 1)
     nonempty = len(d.get('state_root','')) == 64
-    print('true' if (cv and full and nonempty) else 'false')
+    print('true' if (cv and sigs_zero and csize_ok and nonempty) else 'false')
 except Exception:
     print('false')
 ")
-assert "$CV_OK" "root reported only with committee_verified=true + full K-of-K (sigs==committee_size)"
+assert "$CV_OK" "root reported only with committee_verified=true + non-empty 64-hex root (successor-bound: sigs_verified==0, committee_size>=1)"
 
 echo
 echo "=== 5. Reported root == committee-verified header[H].state_root (assertion 2) ==="
@@ -361,6 +389,47 @@ if [ "$BEYOND_RC" = "1" ] \
 else
     assert "false" "height beyond head → clean error (got rc=$BEYOND_RC)"
 fi
+
+echo
+echo "=== 7b. EXACT head index fails closed — no signed successor (assertion 7) ==="
+# The committee-bound attestation for index H is the SUCCESSOR(H+1)'s
+# committee signature over a digest that binds prev_hash == block_hash(H).
+# At the chain HEAD there is no successor yet, so there is nothing to bind
+# the head's state_root to. verify-state-root at the exact head index must
+# therefore FAIL CLOSED (non-zero exit, committee_verified=false in --json),
+# NOT report a bare daemon root. We sample the head index observed at the
+# verify-state-root call; re-probe to avoid a race where the chain advanced.
+HEAD_NOW=$($DETERM status --rpc-port $R1 2>/dev/null | $PY -c "
+import sys,json
+try: print(json.load(sys.stdin).get('height',0))
+except: print(0)")
+HEAD_IDX_NOW=$((HEAD_NOW - 1))
+set +e
+HEAD_OUT=$($DETERM_LIGHT verify-state-root --rpc-port $R1 --genesis $T/gen.json \
+             --height $HEAD_IDX_NOW --json 2>&1)
+HEAD_RC=$?
+set -e
+echo "$HEAD_OUT" | tail -1
+# INVARIANT under test: a committee-unbound (head) index is NEVER reported
+# as verified. Two acceptable outcomes:
+#   (a) rc != 0  → fail-closed. The --json object, if any, must NOT claim
+#       committee_verified=true (it carries false, or an error line).
+#   (b) rc == 0  → only sound if the chain ADVANCED between the status probe
+#       and the call, so this index gained a signed successor; then the
+#       result must be genuinely committee_verified=true.
+HEAD_OK=$(echo "$HEAD_OUT" | tail -1 | HEAD_RC=$HEAD_RC $PY -c "
+import json, sys, os
+rc = int(os.environ.get('HEAD_RC', '1'))
+try:
+    cv = json.loads(sys.stdin.read()).get('committee_verified')
+except Exception:
+    cv = None   # non-JSON error text on the head index — a fail-closed form
+if rc != 0:
+    print('true' if cv is not True else 'false')      # must not claim verified
+else:
+    print('true' if cv is True else 'false')          # advanced → must be sound
+")
+assert "$HEAD_OK" "exact head index fails closed (rc=$HEAD_RC; head index has no signed successor to bind its root)"
 
 echo
 echo "=== 8. Genesis (H=0) anchored by hash, no committee sigs ==="
