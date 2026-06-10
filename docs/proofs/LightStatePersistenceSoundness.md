@@ -39,8 +39,12 @@ head_block_hash, head_state_root}`.
   genesis against the cached anchor (LSP-2) then verifies ONLY the suffix above
   it (`verify_chain_walk` anchored at `head_block_hash`), skipping the
   committee-signed prefix; falls back to a full verify when the anchor is
-  absent/corrupt/wrong-chain or the daemon hasn't advanced (LSP-6). Pair with
-  `--persist` for the steady-state resume-then-advance loop. The resume-or-full
+  absent/corrupt/wrong-chain (LSP-6). With a VALID genesis-pinned anchor the
+  cache is load-bearing evidence, not just an optimization: a daemon whose head
+  is BELOW the anchor is REFUSED (a fork-free chain never regresses), and a
+  daemon exactly AT it must present the cached anchor block itself (LSP-7 —
+  pre-LSP-7 both cases silently full-verified and accepted the stale chain).
+  Pair with `--persist` for the steady-state resume-then-advance loop. The resume-or-full
   decision lives in the shared `anchored_head` helper (`trustless_read.cpp`), the
   SINGLE source of truth that `cmd_verify_chain` AND the composite trustless reads
   (`balance/nonce/stake/supply-trustless`, all `--resume`-capable) route through —
@@ -58,7 +62,10 @@ defending the file against its own host buys nothing. The security the code DOES
 provide is that a stale, wrong-chain, or corrupt cache cannot cause the client to
 *accept an unverified chain* — it can at worst change *where* verification starts,
 and the genesis pin + forward re-verification (LSP-2, LSP-6) catch a divergent
-chain there. **No new cryptographic assumption** beyond the per-run
+chain there. LSP-7 adds the converse: a valid cache also makes a stale DAEMON
+detectable — the cached committee-verified height is a floor the daemon's head
+must meet, turning "the daemon regressed below what I once verified" from a
+silently-accepted full verify into a hard error. **No new cryptographic assumption** beyond the per-run
 `verify-chain` base {A1 Ed25519 EUF-CMA, A2 SHA-256 collision resistance}
 (`Preliminaries.md` §2.0–§2.2).
 
@@ -135,6 +142,39 @@ asserts page indices are contiguous from `from` so a suffix's first index must b
 `from==0` plus a walked-count gate (`headers_seen == head - start_from`) that also
 hardens the from-genesis walk against a short final page.
 
+**LSP-7 (Head monotonicity — SHIPPED).** With a valid genesis-pinned anchor at
+height `H`, `anchored_head` (`light/trustless_read.cpp`) measures the daemon's
+head itself (`fetch_head_height`) and enforces, fail-closed:
+
+- **G1 (regression):** daemon head `< H` → throw *"is BELOW the previously
+  committee-verified anchor … a fork-free chain never regresses"*. The cache
+  proves the chain reached `H` under committee signatures; an honest fork-free
+  chain can never serve a lower head, so the daemon is serving stale or
+  truncated state (e.g. an old-snapshot restore). The operator clears the cache
+  (`state --clear`) only for an intentional chain reset.
+- **G2 (same-height fork):** daemon head `== H` → full verify, then the
+  verified tip's `block_hash` MUST equal the cached `head_block_hash` (a
+  same-height fork at the anchor passes a plain full verify — only the cache
+  comparison catches it). If a block lands between the gate's head fetch and
+  the full verify's own (real on fast-block test clusters), the anchor is bound
+  explicitly via the LSP-6 suffix walk instead of being silently dropped — the
+  ==-race path.
+- **G3 (between-queries regression):** head measured `> H` but the suffix
+  walk's own fetch finds it `≤ H` → throw (heads only advance on an honest
+  daemon; a head that moved down between two queries is inconsistent).
+
+Pre-LSP-7, G1 and G2 fell back to a full from-genesis verify that ACCEPTED the
+daemon's chain at face value — the cache held the proof of regression and the
+code ignored it. Unchanged: the absent/corrupt/wrong-chain fallbacks (no
+trusted anchor exists to gate against; a corrupt cache stays an optimization
+fault, not a security fault) and `resume=false` (cache untouched). LSP-7 is
+unconditional given LSP-1/LSP-2 (the gate compares two heights and two hashes;
+no new cryptographic assumption). The source shape is locked by the offline
+guard `tools/test_light_resume_monotonicity_guard.sh` (I1-I3 the three throws,
+I4 the gate's own head measurement, I5 the pre-LSP-7 fail-open marker stays
+gone, I6 both suffix-walk call sites — the ==-race binding can't be silently
+removed; `SELFTEST=1` proves each detector live).
+
 ## 4. What it does NOT do (honest limitations)
 
 - **Local-tamper is out of scope** — §2. The file is trusted-local; integrity
@@ -145,17 +185,28 @@ hardens the from-genesis walk against a short final page.
   offline gap is re-derived by the resume's forward suffix verify, not cached.
 - **Live resume path is cluster-bound** — the offline `--resume` *arg contract*
   (accepted; fallback when no/absent/corrupt anchor) is deterministically tested
-  on every host; the live suffix-verify + fallback verdicts need a block-minting
-  cluster (WSL2/CI), like every other determ-light composite.
+  on every host; the live suffix-verify + fallback verdicts AND the live LSP-7
+  legs (a daemon restored below the anchor → hard error; the ==-height
+  cross-check verdicts) need a block-minting cluster (WSL2/CI), like every
+  other determ-light composite. The LSP-7 source shape is held offline by
+  `tools/test_light_resume_monotonicity_guard.sh` meanwhile.
+- **LSP-7 floors at the cache, not at "now"** — the monotonicity floor is the
+  LAST PERSISTED verified height. A daemon stale by less than one cache-write
+  interval still passes; cross-invocation freshness beyond the floor remains
+  the F-1 limitation (`LightClientThreatModel.md` §5), operationally probed by
+  `tools/operator_light_freshness_probe.sh`.
 
 ## 5. Test surface
 
-`tools/test_light_state.sh` — 23 offline assertions, deterministic on every host
+`tools/test_light_state.sh` — 27 offline assertions, deterministic on every host
 (the persistence module is daemon-free): (A) `state --selftest` (the in-binary
 round-trip + 5 fail-closed reject paths: malformed JSON, bad `schema_version`,
 short `genesis_hash`, missing field, empty-`state_root` round-trip); (B)
 `--show`/`--clear` graceful-absence + valid-show + fail-closed-on-corrupt +
-mode-flag / unknown-arg / `$DETERM_LIGHT_STATE`-override contract; (C2)
+mode-flag / unknown-arg / `$DETERM_LIGHT_STATE`-override contract, plus the
+`--show --json` machine-readable surface (present/head_height/age_seconds on a
+valid anchor; `present=false` exit-0 on an absent cache; corrupt cache stays
+fail-closed under `--json`; `--json` rejected outside `--show`); (C2)
 `--verify-anchor` PASS on a matching genesis + MISMATCH-exit-2 on a wrong-chain
 anchor + the no-`--genesis` / absent-cache usage gates (the LSP-2 gate); (C)
 `verify-chain --persist`/`--state` arg acceptance + the LSP-1 no-write-on-failed-

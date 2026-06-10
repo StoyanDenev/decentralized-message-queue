@@ -3,7 +3,11 @@
 FB57 — TLA+ specification of the determ-light PERSISTED-ANCHOR CACHE lifecycle
 (SHIPPED feature; the `verify-chain --persist` writer + `state` management
 subcommand + `light/persist.{hpp,cpp}` module). Machine-checkable companion to
-`docs/proofs/LightStatePersistenceSoundness.md` (theorems LSP-1..LSP-6).
+`docs/proofs/LightStatePersistenceSoundness.md` (theorems LSP-1..LSP-7; this
+model covers LSP-1..LSP-6 — LSP-7's head-monotonicity gates are arithmetic
+comparisons over the live daemon head, source-guarded offline by
+tools/test_light_resume_monotonicity_guard.sh; a model extension would add a
+RegressedDaemon action + INV_MonotoneResume).
 
 This is the state-machine model of the "validated, genesis-pinned,
 schema-versioned, fail-closed cache" the medium-tier light client uses to
@@ -167,7 +171,11 @@ The ResumeVerify action below models the daemon's suffix offering as a finite
 nondeterministic choice over the cases that matter for soundness:
 
   * a corrupt or wrong-chain anchor ⇒ FALLBACK to a full verify (never weaker);
-  * the daemon not ahead of the anchor ⇒ FALLBACK;
+  * the daemon not ahead of the anchor ⇒ FALLBACK at THIS layer (the
+    verify_chain_from_anchor function's resumed=false); since LSP-7 the CALLER
+    (anchored_head) no longer accepts that fallback silently — head BELOW the
+    anchor throws, head AT it triggers the full-verify + anchor-hash
+    cross-check. The caller-layer gates are outside this model (see header);
   * an honest suffix that chains onto the cached head_block_hash at the correct
     next index ⇒ RESUMED (a new committee-verified head);
   * a suffix that does NOT chain onto the anchor (a fork/rollback below it) ⇒
@@ -191,9 +199,10 @@ offline gap is re-derived by the suffix verify, not cached).
 
 --------------------------------------------------------------------------
 Companion analytic source: `docs/proofs/LightStatePersistenceSoundness.md`
-(LSP-1..LSP-6). Empirical pin: `tools/test_light_state.sh` (20 offline
+(LSP-1..LSP-7; LSP-7 head-monotonicity is outside this model — see header).
+Empirical pin: `tools/test_light_state.sh` (27 offline
 assertions — `state --selftest` round-trip + 5 fail-closed reject paths;
-`--show`/`--clear` graceful-absence + fail-closed-on-corrupt;
+`--show`/`--clear`/`--show --json` graceful-absence + fail-closed-on-corrupt;
 `--verify-anchor` PASS / MISMATCH-exit-2; `--persist` arg acceptance + the LSP-1
 no-write-on-failed-verify guarantee).
 
@@ -412,7 +421,10 @@ Clear ==
 \* control flow + trustless_read.cpp::verify_chain_from_anchor):
 \*   1. anchor corrupt OR wrong-chain (not WellFormed, or pin != local genesis,
 \*      LSP-2) ⇒ FALLBACK to a full verify (never weaker than a full verify);
-\*   2. daemon not ahead ("not_ahead") ⇒ FALLBACK (nothing new to verify);
+\*   2. daemon not ahead ("not_ahead") ⇒ FALLBACK (nothing new to verify at the
+\*      verify_chain_from_anchor layer; since LSP-7 the anchored_head CALLER
+\*      converts this to a throw (head < anchor) or a full-verify + anchor-hash
+\*      cross-check (head == anchor) — caller gates not modeled, see header);
 \*   3. honest chaining suffix ("extends") ⇒ RESUMED, producing a verified head;
 \*   4. fork-below-anchor ("fork") OR the index-0 diversion ("index0") ⇒ REJECTED
 \*      (the prev_hash continuity break / the index-contiguity gate — a hard error,
@@ -581,7 +593,8 @@ Prop_TamperNeverLoadsAccepted ==
 \*   action-gating discipline this spec mirrors.
 \*
 \* Companion analytic source:
-\*   docs/proofs/LightStatePersistenceSoundness.md (LSP-1..LSP-6). LSP-1 =
+\*   docs/proofs/LightStatePersistenceSoundness.md (LSP-1..LSP-7; LSP-7
+\*     head-monotonicity is source-guarded, not modeled here). LSP-1 =
 \*     INV_NoUnverifiedWrite; LSP-2 = INV_GenesisPinned; LSP-3 = INV_SchemaGated;
 \*     LSP-4 = INV_FailClosed; LSP-5 = INV_ReadSound; LSP-6 = INV_ResumeSound +
 \*     INV_ResumeNoFalseAccept (the resume CONSUMER is SHIPPED, commit 22c04fa, and
@@ -645,7 +658,7 @@ Prop_TamperNeverLoadsAccepted ==
 \*       not-ahead fallback + fork-below-anchor hard error + --resume --persist loop.
 \*
 \* Runtime regression:
-\*   tools/test_light_state.sh (23 offline assertions) — state --selftest round-trip
+\*   tools/test_light_state.sh (27 offline assertions) — state --selftest round-trip
 \*     + 5 fail-closed reject paths (malformed JSON / bad schema_version / short
 \*     genesis_hash / missing field / empty-state_root round-trip — LSP-3 / LSP-4 /
 \*     INV_FailClosed / INV_SchemaGated); --show / --clear graceful-absence +
