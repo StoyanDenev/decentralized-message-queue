@@ -161,6 +161,18 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
                               // like the all-zero view-root short-circuit above.
                               uint64_t proposer_time = 0);
 
+// Message-form overload (S-043 hardening): recompute the commitment a given
+// ContribMsg was signed over, extracting EVERY bound field from the message
+// itself. The multi-arg form above has trailing default-zero args, so a
+// verification-side recompute that forgets one (e.g. proposer_time) silently
+// compiles and produces the WRONG pre-feature digest — the exact root cause of
+// S-043 (Node::on_contrib's 7-arg recompute rejected every production contrib;
+// total multi-node liveness outage; see docs/SECURITY.md §S-043). EVERY
+// receiver-side recompute MUST use this overload, not the multi-arg form, so
+// there are no args to mismatch and a future bound field is added in ONE place.
+// Output is byte-identical to the field-form call with the message's fields.
+Hash make_contrib_commitment(const ContribMsg& m);
+
 // Canonical tx_root: union of K-committee tx_hashes lists. Used in strong
 // mode (K=M_pool, every creator on committee) — censorship requires every
 // creator to omit a tx.

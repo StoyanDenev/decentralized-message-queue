@@ -2132,21 +2132,21 @@ void Node::on_contrib(const ContribMsg& msg) {
     //
     // S-030-D2 timestamp reconciliation: the sender ALSO binds its committed
     // proposer_time (DTM-TS-v1 tail, non-zero on every production contrib —
-    // start_contrib_round passes now_unix()). The recompute here must pass it
-    // too, or the recomputed digest is the pre-feature shape and EVERY honest
+    // start_contrib_round passes now_unix()). The recompute MUST bind it too,
+    // or the recomputed digest is the pre-feature shape and EVERY honest
     // production contrib fails this sig check — Phase-1 never gathers K
     // contribs and the cluster spirals through abort rounds without ever
-    // minting a block (the regression that shipped with the f99eeb8 sender/
-    // validator halves: validator.cpp::check_creator_commits passed the time,
-    // this gossip-side recompute did not). msg.proposer_time == 0 (legacy)
-    // keeps the byte-identical pre-feature commitment via the helper's
-    // short-circuit, exactly like the all-zero view roots.
-    Hash commit = make_contrib_commitment(msg.block_index, msg.prev_hash,
-                                            msg.tx_hashes, msg.dh_input,
-                                            msg.view_eq_root,
-                                            msg.view_abort_root,
-                                            msg.view_inbound_root,
-                                            msg.proposer_time);
+    // minting a block (S-043: shipped with f99eeb8's sender +
+    // validator.cpp::check_creator_commits halves, but this gossip-side
+    // recompute kept a 7-arg call that defaulted proposer_time=0).
+    //
+    // S-043 hardening: the message-form overload binds EVERY signed field
+    // straight from `msg`, so this recompute CANNOT silently omit proposer_time
+    // (or a future bound field) via a trailing default-zero arg — there are no
+    // args to mismatch. msg.proposer_time == 0 (legacy) keeps the byte-identical
+    // pre-feature commitment via the helper's short-circuit, like the all-zero
+    // view roots. Output is byte-identical to the full field-form call.
+    Hash commit = make_contrib_commitment(msg);
     if (!crypto::verify(entry->pubkey, commit.data(), commit.size(), msg.ed_sig)) {
         std::cerr << "[node] invalid Contrib sig from " << msg.signer << "\n";
         return;
@@ -2189,13 +2189,7 @@ void Node::on_contrib(const ContribMsg& msg) {
         // this digest becomes the slashing evidence's digest_a, and sig_a
         // verifies downstream only against the FULL commitment the
         // equivocator actually signed (DTM-TS-v1 tail included).
-        Hash existing_commit = make_contrib_commitment(
-            existing->second.block_index, existing->second.prev_hash,
-            existing->second.tx_hashes,   existing->second.dh_input,
-            existing->second.view_eq_root,
-            existing->second.view_abort_root,
-            existing->second.view_inbound_root,
-            existing->second.proposer_time);
+        Hash existing_commit = make_contrib_commitment(existing->second);
         // commit (declared above for the sig-verify path) is the new
         // message's commitment (full, F2-view-root-bound).
         //

@@ -277,6 +277,17 @@ Hash make_contrib_commitment(uint64_t block_index, const Hash& prev_hash,
     return b.finalize();
 }
 
+// Message-form overload (S-043 hardening). Extracts EVERY field the commitment
+// binds straight from the message, so a verification-side recompute cannot
+// silently omit one via a trailing default-zero arg (the S-043 root cause).
+// Byte-identical to the field-form call with these same fields.
+Hash make_contrib_commitment(const ContribMsg& m) {
+    return make_contrib_commitment(m.block_index, m.prev_hash, m.tx_hashes,
+                                    m.dh_input, m.view_eq_root,
+                                    m.view_abort_root, m.view_inbound_root,
+                                    m.proposer_time);
+}
+
 // S-030-D2: deterministic lower-median of K committed proposer times. Sorts a
 // copy and returns sorted[(K-1)/2] — always one of the committed values, so the
 // result is integer + deterministic, and under f < K/3 Byzantine members it
