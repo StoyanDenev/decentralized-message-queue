@@ -164,12 +164,26 @@ done
 
 echo
 echo "=== Test summary ==="
+FAILS=0
 if $ALL_PASS; then
-  echo "  PASS: bearer-wallet TRANSFER round-trip across 3 nodes via send_anon + submit_tx"
-  echo "  - anon account A (key-derived address) signed offline"
-  echo "  - submit_tx RPC accepted external signed tx"
-  echo "  - tx gossiped, included in block, applied"
-  echo "  - both A (debited) and B (credited) balances consistent across cluster"
+  echo "  ok:  bearer-wallet TRANSFER round-trip across 3 nodes via send_anon + submit_tx"
+  echo "  ok:  anon account A (key-derived address) signed offline"
+  echo "  ok:  submit_tx RPC accepted external signed tx"
+  echo "  ok:  tx gossiped, included in block, applied"
+  echo "  ok:  both A (debited) and B (credited) balances consistent across cluster"
 else
-  echo "  FAIL: balance mismatch — see logs"
+  echo "  bad: balance mismatch — A/B did not converge to $EXPECTED_A/$EXPECTED_B on all 3 nodes"
+  FAILS=$((FAILS+1))
+  echo "  --- diagnostics: node log tails ---"
+  for n in 1 2 3; do
+    echo "  -- $T/n$n/log (last 10 lines) --"
+    tail -10 "$T/n$n/log" 2>/dev/null | sed 's/^/    | /'
+  done
+fi
+if [ "$FAILS" -eq 0 ]; then
+  echo "  PASS: test_bearer"
+  exit 0
+else
+  echo "  FAIL: test_bearer ($FAILS checks failed)"
+  exit 1
 fi

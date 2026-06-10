@@ -157,7 +157,10 @@ echo "=== 7. Poll up to 30s for escalation (break early on first BFT block) ==="
 for i in $(seq 1 60); do
   sleep 0.5
   read MD_NOW BFT_NOW <<< "$(count_bft_blocks 1)"
-  if [ "$BFT_NOW" -gt 0 ]; then
+  # Numeric guard: count_bft_blocks emits the '-' sentinel while
+  # chain.json is unreadable/mid-write; reject it explicitly instead of
+  # relying on [ -gt ]'s integer error (same poll cadence either way).
+  if [[ "$BFT_NOW" =~ ^[0-9]+$ ]] && [ "$BFT_NOW" -gt 0 ]; then
     H_NOW=$(get_height 8771)
     echo "  BFT block seen after ${i}*0.5s: height=$H_NOW  MD=$MD_NOW  BFT=$BFT_NOW"
     break
@@ -169,23 +172,38 @@ read MD_FINAL BFT_FINAL <<< "$(count_bft_blocks 1)"
 LAST_PROPOSER=$(last_bft_proposer 1)
 
 echo
-echo "=== 8. Verify ==="
+echo "=== 8. Tail of n1 log (escalation evidence) ==="
+# Diagnostics print ABOVE the verdict; raw node-log lines are prefixed
+# so they can never collide with run_all.sh's ^\s*PASS:/^\s*FAIL: grep
+# over the last 10 output lines.
+tail -25 $T/n1/log 2>/dev/null | sed 's/^/    | /'
+
+echo
+echo "=== 9. Verify ==="
+FAILS=0
 echo "  pre-kill: height=$H_PRE   MD=$MD_PRE   BFT=$BFT_PRE"
 echo "  post-60s: height=$H_FINAL MD=$MD_FINAL BFT=$BFT_FINAL"
 echo "  last BFT proposer: $LAST_PROPOSER"
 
-if [ "$BFT_FINAL" -gt 0 ]; then
-  echo "  PASS: chain produced BFT-mode blocks after kill (escalation worked)"
+# Numeric guard: BFT_FINAL is '-' when chain.json was unreadable — that
+# sentinel must land in the bad: branch, not error out of [ -gt ].
+if [[ "$BFT_FINAL" =~ ^[0-9]+$ ]] && [ "$BFT_FINAL" -gt 0 ]; then
+  echo "  ok:  chain produced BFT-mode blocks after kill (escalation worked)"
   if [ "$LAST_PROPOSER" = "node1" ] || [ "$LAST_PROPOSER" = "node2" ]; then
-    echo "  PASS: BFT proposer is one of the live nodes ($LAST_PROPOSER)"
+    echo "  ok:  BFT proposer is one of the live nodes ($LAST_PROPOSER)"
   else
-    echo "  WARN: BFT proposer is unexpected: $LAST_PROPOSER"
+    echo "  warn: BFT proposer is unexpected: $LAST_PROPOSER"
   fi
 else
-  echo "  FAIL: no BFT blocks produced. Chain probably stalled in MD mode"
-  echo "  before escalating. Check logs in $T/n*/log."
+  echo "  bad: no BFT blocks produced. Chain probably stalled in MD mode"
+  echo "       before escalating. Check logs in $T/n*/log."
+  FAILS=$((FAILS+1))
 fi
 
-echo
-echo "=== 9. Tail of n1 log (escalation evidence) ==="
-tail -25 $T/n1/log
+if [ "$FAILS" -eq 0 ]; then
+  echo "  PASS: test_bft_escalation"
+  exit 0
+else
+  echo "  FAIL: test_bft_escalation ($FAILS checks failed)"
+  exit 1
+fi

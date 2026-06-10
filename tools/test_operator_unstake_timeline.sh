@@ -34,10 +34,12 @@ trap cleanup EXIT INT
 rm -rf $T
 mkdir -p $T
 
+# Per-check lines use "  ok:"/"  bad:" so a stray "PASS:" can never land in
+# run_all.sh's last-10-lines marker window; only the final verdict uses PASS:/FAIL:.
 pass_count=0; fail_count=0
 assert() {
-  if [ "$1" = "true" ]; then echo "  PASS: $2"; pass_count=$((pass_count + 1))
-  else echo "  FAIL: $2"; fail_count=$((fail_count + 1)); fi
+  if [ "$1" = "true" ]; then echo "  ok:  $2"; pass_count=$((pass_count + 1))
+  else echo "  bad: $2"; fail_count=$((fail_count + 1)); fi
 }
 
 SCRIPT=tools/operator_unstake_timeline.sh
@@ -145,7 +147,9 @@ if [ "${H:-0}" -lt "2" ]; then
   echo "        (likely a build / environment issue — the script's input"
   echo "        validation tests above still cover the contract)"
   echo "  log tail:"
-  tail -10 $T/n1/log | sed 's/^/    /'
+  # "    | " prefix: raw node-log lines can never collide with run_all.sh's
+  # ^\s*PASS:/^\s*FAIL: marker grep.
+  tail -10 $T/n1/log | sed 's/^/    | /'
 else
   echo "  node1 height=$H"
 
@@ -190,7 +194,12 @@ else
 fi
 
 echo
-echo "─────────────────────────────────────────────────────────"
-echo "  ${pass_count} PASS,  ${fail_count} FAIL"
-echo "─────────────────────────────────────────────────────────"
-[ "$fail_count" = "0" ] && exit 0 || exit 1
+echo "=== Test summary ==="
+echo "  checks: $pass_count ok, $fail_count failed"
+if [ "$fail_count" = "0" ]; then
+  echo "  PASS: test_operator_unstake_timeline"
+  exit 0
+else
+  echo "  FAIL: test_operator_unstake_timeline ($fail_count checks failed)"
+  exit 1
+fi

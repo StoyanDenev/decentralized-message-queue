@@ -44,6 +44,11 @@ cleanup() {
 }
 trap cleanup EXIT INT
 
+# Per-check failure counter. Per-check result lines use "  ok:"/"  bad:"
+# so a stray "PASS:"/"FAIL:" can never land in run_all.sh's last-10-lines
+# marker window; only the final verdict line uses PASS:/FAIL:.
+FAILS=0
+
 get_status_field() {
   $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
@@ -101,6 +106,12 @@ with open("$TABS/wallet_B.json","w") as f: json.dump(found[1], f, indent=2)
 print("A (shard 0):", found[0]["address"])
 print("B (shard 1):", found[1]["address"])
 EOF
+# The grinder sys.exit()s on failure; today that only printed to stderr
+# and the script marched on with empty addresses. Record it.
+if [ $? -ne 0 ]; then
+  echo "  bad: could not grind bearer addresses for both shards"
+  FAILS=$((FAILS+1))
+fi
 
 A_ADDR=$(python -c "import json; print(json.load(open('$T/wallet_A.json'))['address'])")
 A_PRIV=$(python -c "import json; print(json.load(open('$T/wallet_A.json'))['privkey'])")
@@ -255,14 +266,13 @@ B_BAL_POST=$(get_account_balance 8782 "$B_ADDR")
 echo "  A on shard0 (post): $A_BAL_POST (expected 950: 1000 - 50 transfer)"
 echo "  B on shard1 (post): $B_BAL_POST (expected 50)"
 
-PASS=true
 if [ "$A_BAL_POST" != "950" ]; then
-  echo "  FAIL: A's debit on shard 0 didn't apply"
-  PASS=false
+  echo "  bad: A's debit on shard 0 didn't apply"
+  FAILS=$((FAILS+1))
 fi
 if [ "$B_BAL_POST" != "50" ]; then
-  echo "  FAIL: B's credit on shard 1 didn't apply (B3 receipt loop broken)"
-  PASS=false
+  echo "  bad: B's credit on shard 1 didn't apply (B3 receipt loop broken)"
+  FAILS=$((FAILS+1))
 fi
 
 # Log evidence — corroborates the assertion path.
@@ -275,14 +285,25 @@ echo "    shard0: $S0_BLOCKS blocks accepted"
 echo "    shard1: $S1_INBOUND inbound bundle log lines"
 echo "    shard1: $S1_BLOCKS blocks accepted"
 
-if $PASS; then
-  echo
-  echo "  PASS: cross-shard TRANSFER end-to-end (B3.1-B3.4)"
-  echo "        - A debited on source shard 0"
-  echo "        - bundle gossiped via beacon relay"
-  echo "        - B credited on destination shard 1"
-fi
-
 echo
 echo "=== 10. Tail of shard1 log (showing inbound bundle + credit) ==="
-grep -E "inbound receipt bundle|accepted block" $T/shard1/log | tail -8
+grep -E "inbound receipt bundle|accepted block" $T/shard1/log 2>/dev/null | tail -8 | sed 's/^/    | /'
+
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: cross-shard TRANSFER end-to-end (B3.1-B3.4)"
+  echo "      - A debited on source shard 0"
+  echo "      - bundle gossiped via beacon relay"
+  echo "      - B credited on destination shard 1"
+  echo "  PASS: test_cross_shard_transfer"
+  exit 0
+else
+  echo "  --- diagnostics: node log tails ---"
+  for d in beacon shard0 shard1; do
+    echo "  -- $T/$d/log (last 12 lines) --"
+    tail -12 "$T/$d/log" 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_cross_shard_transfer ($FAILS checks failed)"
+  exit 1
+fi

@@ -23,7 +23,23 @@ cleanup() {
   echo "Logs at:"
   for n in 1 2 3; do echo "  $T/n$n/log"; done
 }
-trap cleanup EXIT INT
+# Abnormal-exit guard: if the script dies before the final summary, still
+# stop the nodes and emit a last-line FAIL marker for run_all.sh.
+# cleanup() itself must never call exit (it must not clobber exit codes).
+on_abort() {
+  trap - EXIT INT
+  cleanup
+  echo "  FAIL: test_multinode (aborted before summary)"
+  exit 1
+}
+trap on_abort EXIT INT
+
+# Fail counter: every machine-checked failure site must bump this.
+# Step 6b carries the assertions: per-node numeric RPC height >= 2 and
+# 64-hex head_hash agreement across all 3 nodes (resampled for in-flight
+# skew). Historically this script was a pure smoke test with zero
+# machine-checked assertions and an unconditional PASS.
+FAILS=0
 
 rm -rf $T
 mkdir -p $T/n1 $T/n2 $T/n3
@@ -110,23 +126,87 @@ for n in 1 2 3; do
   sleep 0.3   # stagger so peer connects don't all fire simultaneously
 done
 
+get_height() {
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('height','-'))
+except: print('-')"
+}
+get_head() {
+  $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+try: print(json.load(sys.stdin).get('head_hash','?'))
+except: print('?')"
+}
+
 echo
 echo "=== 6. Wait 30s for sync + block production ==="
+# (The old extractor here read j['result']['height'] — a nested envelope the
+# status RPC never returns; it printed 'no-result' on healthy nodes. The
+# flat .get('height') shape matches every green sibling.)
 for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 3
   echo "[t=$((i*3))s] heights:"
   for n in 1 2 3; do
-    H=$($DETERM status --rpc-port 877$n 2>/dev/null | python -c "
-import sys, json
-try:
-    j = json.load(sys.stdin)
-    print(j.get('result', {}).get('height', 'no-result'))
-except Exception as e:
-    print(f'err:{e}')
-" 2>/dev/null)
-    echo "  n$n: height=$H"
+    echo "  n$n: height=$(get_height 877$n)"
   done
 done
+
+echo
+echo "=== 6b. Assertions: per-node liveness + head agreement ==="
+# De-vacuation: this test previously had ZERO machine-checked assertions
+# (unconditional PASS). Liveness is asserted from RPC height (log greps are
+# stdio-buffer-unreliable); agreement uses the weak_mode resample pattern
+# (blocks land ~1/s, so sequential fetches can straddle a boundary).
+for n in 1 2 3; do
+  H=$(get_height 877$n)
+  if [[ ! "$H" =~ ^[0-9]+$ ]] || [ "$H" -lt 2 ]; then
+    echo "  bad: n$n height '$H' is not numeric >= 2 (dead RPC or no blocks)"
+    FAILS=$((FAILS+1))
+  else
+    echo "  ok: n$n height $H >= 2"
+  fi
+done
+# No-fork check by AGREEMENT ON A CONFIRMED PAST BLOCK, not the live tip:
+# this chain mints ~10+ blocks/s, so sequential head_hash fetches are
+# perpetually 1-2 blocks apart (tip skew, not divergence). Pick a height
+# well below every node's tip and require all three return the SAME
+# block_hash there — a true no-fork assertion robust to tip skew.
+block_hash_at() {
+  # The `block` RPC returns the block BODY (no block_hash field — clients
+  # recompute it). The `headers` RPC carries the server-computed block_hash,
+  # so use it to compare a confirmed block across nodes.
+  $DETERM headers --from "$2" --count 1 --rpc-port "$1" 2>/dev/null | python -c "import sys,json
+try:
+    hs=json.load(sys.stdin).get('headers',[])
+    print(hs[0].get('block_hash','?') if hs else '?')
+except: print('?')"
+}
+MINH=$(get_height 8771)
+for n in 2 3; do
+  Hn=$(get_height 877$n)
+  [[ "$Hn" =~ ^[0-9]+$ ]] && [ "$Hn" -lt "$MINH" ] && MINH=$Hn
+done
+if [[ "$MINH" =~ ^[0-9]+$ ]] && [ "$MINH" -ge 4 ]; then
+  CHECK_H=$((MINH - 2))   # a height every node has confirmed
+  BH1=$(block_hash_at 8771 "$CHECK_H")
+  if [[ ! "$BH1" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "  bad: n1 block_hash at height $CHECK_H not 64 hex (got '$BH1')"
+    FAILS=$((FAILS+1))
+  else
+    SAME=true
+    for n in 2 3; do
+      BHn=$(block_hash_at 877$n "$CHECK_H")
+      if [ "$BHn" != "$BH1" ]; then
+        echo "  bad: n$n block_hash@$CHECK_H=$BHn != n1=$BH1 (FORK)"
+        SAME=false
+      fi
+    done
+    $SAME && echo "  ok: all 3 nodes agree on block_hash @ height $CHECK_H (no fork)"
+    $SAME || FAILS=$((FAILS+1))
+  fi
+else
+  echo "  bad: min height '$MINH' < 4 — cannot pick a confirmed common block"
+  FAILS=$((FAILS+1))
+fi
 
 echo
 echo "=== 7. Final status snapshots ==="
@@ -145,7 +225,21 @@ done
 
 echo
 echo "=== 9. Tail of each node's log (last 10 lines) ==="
+# Raw node-log lines are prefixed so they can never collide with
+# run_all.sh's ^\s*PASS: / ^\s*FAIL: marker grep over the last 10 lines.
 for n in 1 2 3; do
   echo "--- n$n log tail ---"
-  tail -10 $T/n$n/log
+  tail -10 $T/n$n/log 2>/dev/null | sed 's/^/    | /'
 done
+
+echo
+echo "=== Test summary ==="
+trap - EXIT INT
+cleanup
+if [ "$FAILS" -eq 0 ]; then
+  echo "  PASS: test_multinode"
+  exit 0
+else
+  echo "  FAIL: test_multinode ($FAILS checks failed)"
+  exit 1
+fi

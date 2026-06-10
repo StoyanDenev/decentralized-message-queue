@@ -116,19 +116,21 @@ echo
 echo "=== 6. Verify ==="
 echo "  heights: n1=$H1  n2=$H2  n3=$H3"
 
-PASS=true
-if [ "$H1" = "-" ] || [ "$H1" = "0" ]; then
-  echo "  FAIL: chain didn't advance under DOMAIN_INCLUSION (stake=0)"
-  PASS=false
+FAILS=0
+# Sentinel-hardened: get_status_field returns '-' on dead RPC; require a
+# real numeric height >= 1 (rejects '-', '0', and any garbage value).
+if ! [[ "$H1" =~ ^[0-9]+$ ]] || [ "$H1" -eq 0 ]; then
+  echo "  bad: chain didn't advance under DOMAIN_INCLUSION (stake=0) (n1 height='$H1')"
+  FAILS=$((FAILS+1))
 fi
 
 # Verify min_stake = 0 was actually loaded by inspecting the log.
 GOV_LOG=$(grep "inclusion=domain-inclusion" $T/n1/log | head -1)
 if [ -z "$GOV_LOG" ]; then
-  echo "  FAIL: n1 didn't log inclusion=domain-inclusion"
-  PASS=false
+  echo "  bad: n1 didn't log inclusion=domain-inclusion"
+  FAILS=$((FAILS+1))
 else
-  echo "  PASS: n1 booted with inclusion=domain-inclusion"
+  echo "  ok: n1 booted with inclusion=domain-inclusion"
 fi
 
 # Verify all 3 nodes agree on the chain by comparing prev_hash at a fixed
@@ -141,27 +143,42 @@ except: print('')"
 HEAD1=$(get_prev_hash 8771 4)
 HEAD2=$(get_prev_hash 8772 4)
 HEAD3=$(get_prev_hash 8773 4)
+# Sentinel-hardened: get_prev_hash returns '' on dead RPC / parse failure;
+# require HEAD1 to be a real 64-hex hash so non-hash placeholders can't
+# "agree" across N dead or misbehaving RPCs (the old -n guard only
+# rejected the all-empty case).
 HEADS_AGREE=false
-if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && [ -n "$HEAD1" ]; then
+if [[ "$HEAD1" =~ ^[0-9a-f]{64}$ ]] && [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ]; then
   HEADS_AGREE=true
 fi
 
 if $HEADS_AGREE; then
-  echo "  PASS: all 3 validators agree on head_hash (consensus works without stake)"
+  echo "  ok: all 3 validators agree on head_hash (consensus works without stake)"
 else
-  echo "  FAIL: head_hash mismatch after retries (n1=$HEAD1, n2=$HEAD2, n3=$HEAD3)"
-  PASS=false
-fi
-
-if $PASS; then
-  echo
-  echo "  PASS: DOMAIN_INCLUSION mode validated end-to-end"
-  echo "  - validators registered with DNS-style names (validator{N}.example.com)"
-  echo "  - no stake locked (--stake 0)"
-  echo "  - chain progressed normally (height $H1 in 25s)"
-  echo "  - K-of-K mutual-distrust consensus held; nodes agree on head"
+  echo "  bad: head_hash mismatch after retries (n1=$HEAD1, n2=$HEAD2, n3=$HEAD3)"
+  FAILS=$((FAILS+1))
 fi
 
 echo
 echo "=== 7. Tail of n1 log (showing governance + min_stake) ==="
-grep "genesis loaded" $T/n1/log | head -1
+grep "genesis loaded" $T/n1/log 2>/dev/null | head -1 | sed 's/^/    | /'
+
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: DOMAIN_INCLUSION mode validated end-to-end"
+  echo "      - validators registered with DNS-style names (validator{N}.example.com)"
+  echo "      - no stake locked (--stake 0)"
+  echo "      - chain progressed normally (height $H1 in 25s)"
+  echo "      - K-of-K mutual-distrust consensus held; nodes agree on head"
+  echo "  PASS: test_domain_registry"
+  exit 0
+else
+  echo "  --- diagnostics: node log tails ---"
+  for n in 1 2 3; do
+    echo "  -- $T/n$n/log (last 12 lines) --"
+    tail -12 $T/n$n/log 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_domain_registry ($FAILS checks failed)"
+  exit 1
+fi

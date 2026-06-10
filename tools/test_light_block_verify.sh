@@ -32,6 +32,7 @@ source tools/common.sh
 if [ -z "${DETERM_LIGHT:-}" ] || [ ! -x "$DETERM_LIGHT" ]; then
     echo "  SKIP: determ-light binary not found; build with"
     echo "        cmake --build build --config Release --target determ-light"
+    echo "  PASS: test_light_block_verify (SKIP — determ-light binary not built)"
     exit 0
 fi
 
@@ -43,13 +44,24 @@ cleanup() {
   sleep 1
   for pid in "${NODE_PIDS[@]:-}"; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; done
 }
-trap cleanup EXIT INT
+# Abnormal-exit guard: `set -e` is active for parts of the body below, so a
+# failing unguarded command would otherwise exit without a final marker.
+# Stop the nodes and emit a last-line FAIL marker for run_all.sh.
+on_abort() {
+  trap - EXIT INT
+  cleanup
+  echo "  FAIL: test_light_block_verify (aborted before summary)"
+  exit 1
+}
+trap on_abort EXIT INT
 rm -rf $T; mkdir -p $T/n1 $T/n2 $T/n3
 
+# Per-check lines use "  ok:"/"  bad:" so a stray "PASS:" can never land in
+# run_all.sh's last-10-lines marker window; only the final verdict uses PASS:/FAIL:.
 pass_count=0; fail_count=0
 assert() {
-  if [ "$1" = "true" ]; then echo "  PASS: $2"; pass_count=$((pass_count + 1))
-  else echo "  FAIL: $2"; fail_count=$((fail_count + 1)); fi
+  if [ "$1" = "true" ]; then echo "  ok:  $2"; pass_count=$((pass_count + 1))
+  else echo "  bad: $2"; fail_count=$((fail_count + 1)); fi
 }
 
 echo "=== 1. Init + start 3-node cluster ==="
@@ -115,7 +127,9 @@ echo; echo "=== 4. block-verify (text) PASS on real block ==="
 set +e
 OUT=$($DETERM_LIGHT block-verify --block $T/block.json --committee $T/committee.json 2>&1); RC=$?
 set -e
-echo "$OUT" | grep -E "STRUCTURE|TX-ROOT|SIGS|BLOCK-VERIFY"
+# Raw verifier output prefixed "    | " so it can't collide with run_all.sh's
+# marker grep (also keeps this diagnostic pipeline from tripping set -e).
+echo "$OUT" | grep -E "STRUCTURE|TX-ROOT|SIGS|BLOCK-VERIFY" | sed 's/^/    | /'
 assert "$([ $RC -eq 0 ] && echo true || echo false)" "block-verify exit 0 on real block"
 echo "$OUT" | grep -q "BLOCK-VERIFY: PASS" && assert true "summary PASS" || assert false "summary PASS"
 echo "$OUT" | grep -Eq "STRUCTURE PASS" && echo "$OUT" | grep -Eq "TX-ROOT   PASS" && echo "$OUT" | grep -Eq "SIGS      PASS" \
@@ -167,6 +181,11 @@ set +e; OUT=$($DETERM_LIGHT block-verify --block $T/malformed.json --committee $
 echo "$OUT" | grep -Eq "STRUCTURE FAIL" && [ $RC -eq 2 ] && assert true "malformed -> STRUCTURE FAIL exit 2" || assert false "malformed -> STRUCTURE FAIL exit 2"
 
 echo; echo "=== Test summary ==="
-echo "  $pass_count pass / $fail_count fail"
+echo "  checks: $pass_count ok, $fail_count failed"
+set +e   # negative-test blocks left -e enabled; teardown runs in the
+         # script's true -u-only mode so a dead-PID kill can't abort before
+         # the final marker (would exit 1 with 0 failures otherwise).
+trap - EXIT INT
+cleanup
 if [ "$fail_count" = "0" ]; then echo "  PASS: test_light_block_verify"; exit 0
-else echo "  FAIL: test_light_block_verify"; exit 1; fi
+else echo "  FAIL: test_light_block_verify ($fail_count checks failed)"; exit 1; fi

@@ -37,6 +37,11 @@ cleanup() {
 }
 trap cleanup EXIT INT
 
+# Per-check failure counter. Per-check result lines use "  ok:"/"  bad:"
+# so a stray "PASS:"/"FAIL:" can never land in run_all.sh's last-10-lines
+# marker window; only the final verdict line uses PASS:/FAIL:.
+FAILS=0
+
 rm -rf $T
 mkdir -p $T/donor1 $T/donor2 $T/donor3
 
@@ -176,12 +181,27 @@ echo "  live min_stake: $MIN_STAKE_LIVE (expected 2000)"
 echo
 echo "=== Test summary ==="
 if [ "$MIN_STAKE_LIVE" = "2000" ]; then
-  echo "  PASS: governance PARAM_CHANGE end-to-end"
+  echo "  ok: governance PARAM_CHANGE end-to-end"
   echo "  - governed-mode genesis built with 3-of-3 keyholders"
   echo "  - PARAM_CHANGE accepted by validator (multisig + whitelist)"
   echo "  - chain advanced past effective_height"
   echo "  - activate_pending_params mutated chain state"
   echo "  - snapshot inspect reports MIN_STAKE = 2000"
 else
-  echo "  FAIL: min_stake did not activate (saw '$MIN_STAKE_LIVE')"
+  echo "  bad: min_stake did not activate (saw '$MIN_STAKE_LIVE')"
+  FAILS=$((FAILS+1))
+fi
+
+if [ "$FAILS" -eq 0 ]; then
+  echo "  PASS: test_governance_param_change"
+  exit 0
+else
+  echo
+  echo "  --- diagnostics: donor log tails ---"
+  for n in 1 2 3; do
+    echo "  -- $T/donor$n/log (last 12 lines) --"
+    tail -12 "$T/donor$n/log" 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_governance_param_change ($FAILS checks failed)"
+  exit 1
 fi

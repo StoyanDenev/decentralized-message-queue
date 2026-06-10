@@ -127,11 +127,12 @@ done
 
 echo
 echo "=== Wait for height >= 5 (poll, ceiling ~120s) ==="
-# K<M hybrid rounds cannot early-advance phase 1 (early exit needs all M
-# contribs; only the K selected members contribute), so every round runs
-# the full tx_commit/block_sig windows -> ~10s+/block at 2000ms timers.
-# Poll instead of a fixed sleep so the assertion bar (>=3 post-genesis
-# blocks) is met deterministically or the ceiling fails loudly.
+# Rounds early-advance the moment all K SELECTED contribs arrive
+# (node.cpp: pending_contribs_.size() == current_creator_domains_.size()),
+# so a healthy K<M chain produces ~1 block/s here. The generous ceiling
+# absorbs abort-churn rounds (a straggle costs a full timer window plus
+# re-selection). Poll instead of a fixed sleep so the assertion bar
+# (>=3 post-genesis blocks) is met deterministically or fails loudly.
 for i in $(seq 1 120); do
   H=$(get_height 8771)
   if [[ "$H" =~ ^[0-9]+$ ]] && [ "$H" -ge 5 ]; then

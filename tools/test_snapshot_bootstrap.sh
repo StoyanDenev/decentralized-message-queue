@@ -36,6 +36,11 @@ cleanup() {
 }
 trap cleanup EXIT INT
 
+# Per-check failure counter. Per-check result lines use "  ok:"/"  bad:"
+# so a stray "PASS:"/"FAIL:" can never land in run_all.sh's last-10-lines
+# marker window; only the final verdict line uses PASS:/FAIL:.
+FAILS=0
+
 rm -rf $T
 mkdir -p $T/donor1 $T/donor2 $T/donor3 $T/receiver
 
@@ -179,33 +184,48 @@ RECV_HEAD=$($DETERM status --rpc-port 8799 2>/dev/null \
 echo "  receiver chain height: $RECV_H (expected $((SNAP_H + 1)) — height = block_count)"
 echo "  receiver head_hash:    ${RECV_HEAD:0:24}..."
 
-PASS=true
 # height in the snapshot is the block index of the head; chain.height()
 # returns the block count == index + 1 for index-1 chains, but the
 # Block::index field is the block height. Either H == SNAP_H or
 # H == SNAP_H + 1 depending on how we count. Compare head_hash —
 # that's the canonical check.
-if [ "$RECV_HEAD" != "$SNAP_HEAD" ]; then
-  echo "  FAIL: receiver head_hash doesn't match snapshot head_hash"
-  PASS=false
+# Sentinel-hardened: a failed `snapshot create` leaves SNAP_HEAD empty and
+# a dead receiver RPC leaves RECV_HEAD empty — two empty sentinels would
+# "agree" and vacuously pass. Require a real 64-hex snapshot head first.
+if ! [[ "$SNAP_HEAD" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "  bad: snapshot head_hash '$SNAP_HEAD' is not a 64-hex hash (snapshot create failed?)"
+  FAILS=$((FAILS+1))
+elif [ "$RECV_HEAD" != "$SNAP_HEAD" ]; then
+  echo "  bad: receiver head_hash doesn't match snapshot head_hash"
+  FAILS=$((FAILS+1))
+else
+  echo "  ok: receiver head_hash matches snapshot head_hash"
 fi
 
 # Check restoration log line.
 if grep -q "restored from snapshot" $T/receiver/log; then
-  echo "  log: 'restored from snapshot' line present"
+  echo "  ok: log 'restored from snapshot' line present"
 else
-  echo "  FAIL: receiver log missing 'restored from snapshot'"
-  PASS=false
-fi
-
-if $PASS; then
-  echo
-  echo "  PASS: receiver fast-bootstrapped from snapshot"
-  echo "        - no genesis required"
-  echo "        - state (accounts/stakes/registrants) installed directly"
-  echo "        - head_hash verified against snapshot"
+  echo "  bad: receiver log missing 'restored from snapshot'"
+  FAILS=$((FAILS+1))
 fi
 
 echo
-echo "=== 9. Tail of receiver log ==="
-grep -E "restored|loaded|accepted block" $T/receiver/log | head -8
+echo "=== 9. Receiver log evidence (diagnostics) ==="
+grep -E "restored|loaded|accepted block" $T/receiver/log 2>/dev/null | head -8 | sed 's/^/    | /'
+
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: receiver fast-bootstrapped from snapshot"
+  echo "      - no genesis required"
+  echo "      - state (accounts/stakes/registrants) installed directly"
+  echo "      - head_hash verified against snapshot"
+  echo "  PASS: test_snapshot_bootstrap"
+  exit 0
+else
+  echo "  -- $T/receiver/log (last 12 lines) --"
+  tail -12 "$T/receiver/log" 2>/dev/null | sed 's/^/    | /'
+  echo "  FAIL: test_snapshot_bootstrap ($FAILS checks failed)"
+  exit 1
+fi

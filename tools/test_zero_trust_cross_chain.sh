@@ -172,12 +172,14 @@ echo "=== 6. Verify ==="
 echo "  Beacon n1: height=$BEACON_H, tracked_shard_tips=$BEACON_TIPS"
 echo "  Shard  n1: height=$SHARD_H,  beacon_headers=$SHARD_HEADERS"
 
-PASS=true
-if [ "$BEACON_H" = "-" ] || [ "$BEACON_H" = "0" ]; then
-  echo "  FAIL: beacon chain didn't advance"; PASS=false
+FAILS=0
+# Sentinel-hardened: get_status_field returns '-' on dead RPC; require a
+# real numeric height >= 1 (rejects '-', '0', and any garbage value).
+if ! [[ "$BEACON_H" =~ ^[0-9]+$ ]] || [ "$BEACON_H" -eq 0 ]; then
+  echo "  bad: beacon chain didn't advance (height='$BEACON_H')"; FAILS=$((FAILS+1))
 fi
-if [ "$SHARD_H" = "-" ] || [ "$SHARD_H" = "0" ]; then
-  echo "  FAIL: shard chain didn't advance"; PASS=false
+if ! [[ "$SHARD_H" =~ ^[0-9]+$ ]] || [ "$SHARD_H" -eq 0 ]; then
+  echo "  bad: shard chain didn't advance (height='$SHARD_H')"; FAILS=$((FAILS+1))
 fi
 
 # This test validates the cross-chain GOSSIP PLUMBING. Validated counts
@@ -197,10 +199,10 @@ echo "    Shard received $SHARD_RECEIVED BEACON_HEADER(s)  (verified: $SHARD_VER
 echo "    Beacon received $BEACON_RECEIVED SHARD_TIP(s)    (verified: $BEACON_VERIFIED)"
 
 if [ "$SHARD_RECEIVED" -gt 0 ] && [ "$BEACON_RECEIVED" -gt 0 ]; then
-  echo "  PASS: cross-chain gossip plumbing (B2c.5b filter routing) is working"
-  echo "        both BEACON_HEADER and SHARD_TIP messages cross between chains."
+  echo "  ok: cross-chain gossip plumbing (B2c.5b filter routing) is working"
+  echo "      both BEACON_HEADER and SHARD_TIP messages cross between chains."
 else
-  echo "  FAIL: cross-chain gossip didn't reach the other side"; PASS=false
+  echo "  bad: cross-chain gossip didn't reach the other side"; FAILS=$((FAILS+1))
 fi
 
 if [ "$SHARD_VERIFIED" -gt 0 ] || [ "$BEACON_VERIFIED" -gt 0 ]; then
@@ -210,14 +212,25 @@ else
   echo "         B2c.2-full / production deployments share validator pool at beacon."
 fi
 
-if $PASS; then
-  echo
-  echo "  PASS: zero-trust cross-chain coordination plumbing (B2c.1-5 structural)"
-fi
-
 echo
 echo "=== 7. Tail of beacon n1 log (showing verified shard tip + own blocks) ==="
-grep "verified shard tip\|accepted block #\|verified beacon header" $T/beacon/n1/log | head -10
+grep "verified shard tip\|accepted block #\|verified beacon header" $T/beacon/n1/log 2>/dev/null | head -10 | sed 's/^/    | /'
 echo
 echo "=== 8. Tail of shard n1 log (showing verified beacon header + own blocks) ==="
-grep "verified shard tip\|accepted block #\|verified beacon header" $T/shard/n1/log | head -10
+grep "verified shard tip\|accepted block #\|verified beacon header" $T/shard/n1/log 2>/dev/null | head -10 | sed 's/^/    | /'
+
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: zero-trust cross-chain coordination plumbing (B2c.1-5 structural)"
+  echo "  PASS: test_zero_trust_cross_chain"
+  exit 0
+else
+  echo "  --- diagnostics: node log tails ---"
+  for d in beacon/n1 beacon/n2 shard/n1 shard/n2; do
+    echo "  -- $T/$d/log (last 12 lines) --"
+    tail -12 $T/$d/log 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_zero_trust_cross_chain ($FAILS checks failed)"
+  exit 1
+fi

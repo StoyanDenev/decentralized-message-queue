@@ -23,6 +23,7 @@ source tools/common.sh
 if [ -z "${DETERM_LIGHT:-}" ] || [ ! -x "$DETERM_LIGHT" ]; then
     echo "  SKIP: determ-light binary not found; build with"
     echo "        cmake --build build --config Release --target determ-light"
+    echo "  PASS: test_light_fetch_validators (SKIP — determ-light binary not built)"
     exit 0
 fi
 
@@ -34,13 +35,24 @@ cleanup() {
   sleep 1
   for pid in "${NODE_PIDS[@]:-}"; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; done
 }
-trap cleanup EXIT INT
+# Abnormal-exit guard: `set -e` is active for parts of the body below, so a
+# failing unguarded command would otherwise exit without a final marker.
+# Stop the nodes and emit a last-line FAIL marker for run_all.sh.
+on_abort() {
+  trap - EXIT INT
+  cleanup
+  echo "  FAIL: test_light_fetch_validators (aborted before summary)"
+  exit 1
+}
+trap on_abort EXIT INT
 rm -rf $T; mkdir -p $T/n1 $T/n2 $T/n3
 
+# Per-check lines use "  ok:"/"  bad:" so a stray "PASS:" can never land in
+# run_all.sh's last-10-lines marker window; only the final verdict uses PASS:/FAIL:.
 pass_count=0; fail_count=0
 assert() {
-  if [ "$1" = "true" ]; then echo "  PASS: $2"; pass_count=$((pass_count + 1))
-  else echo "  FAIL: $2"; fail_count=$((fail_count + 1)); fi
+  if [ "$1" = "true" ]; then echo "  ok:  $2"; pass_count=$((pass_count + 1))
+  else echo "  bad: $2"; fail_count=$((fail_count + 1)); fi
 }
 
 echo "=== 1. Init + start 3-node cluster ==="
@@ -114,7 +126,9 @@ $DETERM_LIGHT fetch-headers --rpc-port 8821 --from 0 --count $((H+1)) --out $T/h
 set +e
 OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers.json --committee $T/committee.json 2>&1); RC=$?
 set -e
-echo "$OUT" | grep -E "CONTINUITY|SIGS|VERIFY-CHAIN-FILE"
+# Raw verifier output prefixed "    | " so it can't collide with run_all.sh's
+# marker grep (also keeps this diagnostic pipeline from tripping set -e).
+echo "$OUT" | grep -E "CONTINUITY|SIGS|VERIFY-CHAIN-FILE" | sed 's/^/    | /'
 echo "$OUT" | grep -Eq "VERIFY-CHAIN-FILE: PASS" && [ $RC -eq 0 ] \
   && assert true "determ-light-only workflow (fetch-headers+fetch-validators->verify-chain-file) PASS" \
   || assert false "determ-light-only workflow PASS"
@@ -130,6 +144,11 @@ assert "$([ $RC1 -eq 1 ] && echo true || echo false)" "missing --rpc-port -> exi
 assert "$([ $RC2 -eq 1 ] && echo true || echo false)" "unreachable daemon -> exit 1"
 
 echo; echo "=== Test summary ==="
-echo "  $pass_count pass / $fail_count fail"
+echo "  checks: $pass_count ok, $fail_count failed"
+set +e   # negative-test blocks left -e enabled; teardown runs in the
+         # script's true -u-only mode so a dead-PID kill can't abort before
+         # the final marker (would exit 1 with 0 failures otherwise).
+trap - EXIT INT
+cleanup
 if [ "$fail_count" = "0" ]; then echo "  PASS: test_light_fetch_validators"; exit 0
-else echo "  FAIL: test_light_fetch_validators"; exit 1; fi
+else echo "  FAIL: test_light_fetch_validators ($fail_count checks failed)"; exit 1; fi

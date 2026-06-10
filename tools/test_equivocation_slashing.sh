@@ -213,7 +213,15 @@ for attempt in $(seq 1 120); do
 done
 
 echo
-echo "=== 9. Verify ==="
+echo "=== 9. Tail of n1 log ==="
+# Diagnostics print ABOVE the verdict; raw node-log lines are prefixed
+# so they can never collide with run_all.sh's ^\s*PASS:/^\s*FAIL: grep
+# over the last 10 output lines.
+grep -E "equivocation|adopted|accepted block|epoch" $T/n1/log 2>/dev/null \
+  | tail -8 | sed 's/^/    | /'
+
+echo
+echo "=== 10. Verify ==="
 echo "  chain height post: $HEIGHT_POST"
 echo "  node1 stake post-slash: $STAKE_POST (expected 0)"
 
@@ -229,27 +237,26 @@ print('y' if b.get('equivocation_events') else 'n')" 2>/dev/null)
   if [ "$HAS_EV" = "y" ]; then EQUIV_BLOCK=$i; break; fi
 done
 
-PASS=true
+FAILS=0
 if [ -z "$EQUIV_BLOCK" ]; then
-  echo "  FAIL: no block in [$HEIGHT_PRE..$HEIGHT_POST] contains an equivocation event"
-  PASS=false
+  echo "  bad: no block in [$HEIGHT_PRE..$HEIGHT_POST] contains an equivocation event"
+  FAILS=$((FAILS+1))
 else
-  echo "  block #$EQUIV_BLOCK contains equivocation_events"
+  echo "  ok:  block #$EQUIV_BLOCK contains equivocation_events"
 fi
 
 if [ "$STAKE_POST" != "0" ]; then
-  echo "  FAIL: node1 stake didn't go to 0 (still $STAKE_POST)"
-  PASS=false
+  echo "  bad: node1 stake didn't go to 0 (still $STAKE_POST)"
+  FAILS=$((FAILS+1))
 fi
 
-if $PASS; then
-  echo
-  echo "  PASS: equivocation slashing closed-loop"
-  echo "        - submit_equivocation RPC accepted synthesized evidence"
-  echo "        - evidence baked into block #$EQUIV_BLOCK"
-  echo "        - node1's stake forfeited (0) on apply"
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok:  submit_equivocation RPC accepted synthesized evidence"
+  echo "  ok:  evidence baked into block #$EQUIV_BLOCK"
+  echo "  ok:  node1's stake forfeited (0) on apply"
+  echo "  PASS: test_equivocation_slashing"
+  exit 0
+else
+  echo "  FAIL: test_equivocation_slashing ($FAILS checks failed)"
+  exit 1
 fi
-
-echo
-echo "=== 10. Tail of n1 log ==="
-grep -E "equivocation|adopted|accepted block|epoch" $T/n1/log | tail -8

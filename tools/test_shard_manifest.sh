@@ -174,15 +174,19 @@ echo "  beacon height: $BEACON_H"
 echo "  beacon tracked_shard_tips: $BEACON_TIPS (validation needs unified pool — B2c.2-full)"
 echo "  manifest load log: ${MANIFEST_LOG:-(missing)}"
 
-PASS=true
+FAILS=0
 if [ -z "$MANIFEST_LOG" ]; then
-  echo "  FAIL: beacon did not log shard_manifest load"; PASS=false
+  echo "  bad: beacon did not log shard_manifest load"; FAILS=$((FAILS+1))
 fi
-if [ "$SHARD_H" = "-" ] || [ "$SHARD_H" -lt 5 ] 2>/dev/null; then
-  echo "  FAIL: shard chain did not advance"; PASS=false
+# Sentinel-hardened: get_status_field returns '-' on dead RPC, and any
+# other non-numeric value would make the old `-lt` tests error out
+# (status 2 -> condition false -> silent false-green). Require real
+# numeric heights.
+if ! [[ "$SHARD_H" =~ ^[0-9]+$ ]] || [ "$SHARD_H" -lt 5 ]; then
+  echo "  bad: shard chain did not advance (height='$SHARD_H', need numeric >= 5)"; FAILS=$((FAILS+1))
 fi
-if [ "$BEACON_H" = "-" ] || [ "$BEACON_H" -lt 3 ] 2>/dev/null; then
-  echo "  FAIL: beacon chain did not advance"; PASS=false
+if ! [[ "$BEACON_H" =~ ^[0-9]+$ ]] || [ "$BEACON_H" -lt 3 ]; then
+  echo "  bad: beacon chain did not advance (height='$BEACON_H', need numeric >= 3)"; FAILS=$((FAILS+1))
 fi
 
 # Now test the fail-closed path: a fresh beacon-EXTENDED node without
@@ -204,19 +208,31 @@ with open('$T/beacon_no_manifest/config.json','w') as f: json.dump(c,f,indent=2)
 # Explicitly NO manifest file in this data_dir. Start should fail.
 START_OUT=$($DETERM start --config $T/beacon_no_manifest/config.json 2>&1 || true)
 if echo "$START_OUT" | grep -q "requires shard_manifest"; then
-  echo "  fail-closed: beacon refuses to start without manifest"
+  echo "  ok: fail-closed — beacon refuses to start without manifest"
 else
-  echo "  FAIL: beacon (EXTENDED) without manifest did not error as expected"
-  echo "  Got: $START_OUT"
-  PASS=false
+  echo "  bad: beacon (EXTENDED) without manifest did not error as expected"
+  echo "  Got:"
+  echo "$START_OUT" | sed 's/^/    | /'
+  FAILS=$((FAILS+1))
 fi
 
-if $PASS; then
-  echo
-  echo "  PASS: R2 shard manifest loading + fail-closed enforcement"
-  echo "        - beacon loaded manifest at startup ($MANIFEST_LOG)"
-  echo "        - shard chain produced blocks (height $SHARD_H)"
-  echo "        - beacon chain produced blocks (height $BEACON_H)"
-  echo "        - missing-manifest under EXTENDED rejected fail-closed"
-  echo "        (end-to-end SHARD_TIP _validation_ awaits unified-pool work)"
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: R2 shard manifest loading + fail-closed enforcement"
+  echo "      - beacon loaded manifest at startup ($MANIFEST_LOG)"
+  echo "      - shard chain produced blocks (height $SHARD_H)"
+  echo "      - beacon chain produced blocks (height $BEACON_H)"
+  echo "      - missing-manifest under EXTENDED rejected fail-closed"
+  echo "      (end-to-end SHARD_TIP _validation_ awaits unified-pool work)"
+  echo "  PASS: test_shard_manifest"
+  exit 0
+else
+  echo "  --- diagnostics: node log tails ---"
+  for d in beacon shard1 shard2; do
+    echo "  -- $T/$d/log (last 12 lines) --"
+    tail -12 $T/$d/log 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_shard_manifest ($FAILS checks failed)"
+  exit 1
 fi

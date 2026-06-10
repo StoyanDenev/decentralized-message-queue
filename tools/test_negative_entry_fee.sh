@@ -142,35 +142,46 @@ POOL=$(get_balance 8771 $ZEROTH)
 echo "  height: $H"
 echo "  Zeroth pool balance: $POOL (expected 1000)"
 
-PASS=true
+FAILS=0
 if [ "$H" = "-" ] || [ "$H" -lt 5 ] 2>/dev/null; then
-  echo "  FAIL: chain didn't advance — A1 invariant violation in the pool seed path?"
-  PASS=false
+  echo "  bad: chain didn't advance — A1 invariant violation in the pool seed path?"
+  FAILS=$((FAILS+1))
+else
+  echo "  ok:  chain advanced past genesis (height $H) — A1 unitary-balance invariant"
+  echo "       held with the pool's balance counted toward genesis_total_"
 fi
 if [ "$POOL" != "1000" ]; then
-  echo "  FAIL: Zeroth pool balance $POOL != 1000 (genesis seed wiring broken)"
-  PASS=false
+  echo "  bad: Zeroth pool balance $POOL != 1000 (genesis seed wiring broken)"
+  FAILS=$((FAILS+1))
+else
+  echo "  ok:  zeroth_pool_initial = 1000 seeded an account at the Zeroth address"
 fi
 
 # Cross-check: querying show-account on the Zeroth address returns the
 # same balance the genesis declared.
 ACCT=$($DETERM show-account $ZEROTH --rpc-port 8771 2>&1)
 if echo "$ACCT" | grep -qE "balance[[:space:]]*:[[:space:]]*1000"; then
-  echo "  show-account on Zeroth address reports balance: 1000"
+  echo "  ok:  show-account on Zeroth address reports balance: 1000"
 else
-  echo "  FAIL: show-account on Zeroth address didn't return balance=1000"
-  echo "  got: $ACCT"
-  PASS=false
+  echo "  bad: show-account on Zeroth address didn't return balance=1000"
+  echo "$ACCT" | sed 's/^/    | /'
+  FAILS=$((FAILS+1))
 fi
 
-if $PASS; then
-  echo
-  echo "  PASS: E1 Zeroth pool genesis-seed end-to-end"
-  echo "        - zeroth_pool_initial = 1000 seeded an account at"
-  echo "          $ZEROTH"
-  echo "        - chain advanced past genesis (height $H) — A1 unitary-balance"
-  echo "          invariant held with the pool's balance counted toward genesis_total_"
-  echo "        - show-account on the Zeroth address reports the genesis balance"
-  echo "        (apply-path NEF distribution exercised by code review; cross-"
-  echo "         language signed-REGISTER tx submission is a follow-on)"
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok:  E1 Zeroth pool genesis-seed end-to-end at $ZEROTH"
+  echo "  note: apply-path NEF distribution exercised by code review; cross-"
+  echo "        language signed-REGISTER tx submission is a follow-on"
+  echo "  PASS: test_negative_entry_fee"
+  exit 0
+else
+  echo "  --- diagnostics: node log tails ---"
+  for n in 1 2 3; do
+    echo "  -- $T/n$n/log (last 10 lines) --"
+    tail -10 "$T/n$n/log" 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_negative_entry_fee ($FAILS checks failed)"
+  exit 1
 fi

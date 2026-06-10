@@ -42,6 +42,11 @@ cleanup() {
 }
 trap cleanup EXIT INT
 
+# Per-check failure counter. Per-check result lines use "  ok:"/"  bad:"
+# so a stray "PASS:"/"FAIL:" can never land in run_all.sh's last-10-lines
+# marker window; only the final verdict line uses PASS:/FAIL:.
+FAILS=0
+
 get_status_field() {
   $DETERM status --rpc-port "$1" 2>/dev/null | python -c "import sys,json
 try: print(json.load(sys.stdin).get('$2','-'))
@@ -159,34 +164,62 @@ print(jackpot)
 echo "  jackpot blocks in first 60: $JACKPOT_BLOCKS (expected mean 12, p=1/5)"
 
 # Computed cumulative payout: jackpot_blocks * 50.
-EXPECTED_TOTAL=$(( JACKPOT_BLOCKS * 50 ))
+# Sentinel guard: if the chain.json inspection failed, JACKPOT_BLOCKS is
+# empty and $(( "" * 50 )) would be a bash arithmetic error; the numeric
+# check below records the failure.
+if [[ "$JACKPOT_BLOCKS" =~ ^[0-9]+$ ]]; then
+  EXPECTED_TOTAL=$(( JACKPOT_BLOCKS * 50 ))
+else
+  EXPECTED_TOTAL=0
+fi
 echo "  payout from $JACKPOT_BLOCKS jackpots × 50 = $EXPECTED_TOTAL (matches sum: $TOTAL)"
 
-PASS=true
-if [ "$H" = "-" ] || [ "$H" -lt 60 ] 2>/dev/null; then
-  echo "  FAIL: chain didn't advance to height 60"; PASS=false
+# Sentinel-hardened: '-' (dead RPC) or any non-numeric height must fail,
+# not silently skip the -lt test.
+if ! [[ "$H" =~ ^[0-9]+$ ]] || [ "$H" -lt 60 ]; then
+  echo "  bad: chain didn't advance to height 60 (height='$H')"
+  FAILS=$((FAILS+1))
 fi
-# Statistical bounds: with p=0.2, n=60, mean=12 jackpots, std=~2.8.
-# 3-sigma band [3, 21] catches any honest run while rejecting a degen
-# distribution (always-zero or always-jackpot would land at 0 or 60).
-if [ "$JACKPOT_BLOCKS" -lt 3 ] || [ "$JACKPOT_BLOCKS" -gt 21 ] 2>/dev/null; then
-  echo "  FAIL: jackpot count $JACKPOT_BLOCKS outside 3-sigma band [3, 21]"
-  PASS=false
-fi
-# Cross-check: total balance must equal expected from jackpot count.
-# (No fees in this test, so all credits are subsidy. Allow off-by-few
-#  for blocks past 60 that ran before we sampled.)
-if [ "$JACKPOT_BLOCKS" -gt 0 ] && [ "$TOTAL" -lt "$EXPECTED_TOTAL" ] 2>/dev/null; then
-  echo "  FAIL: sum-of-balances $TOTAL < expected $EXPECTED_TOTAL (subsidy not paid?)"
-  PASS=false
+# Sentinel-hardened: an empty/non-numeric jackpot count (chain.json
+# unreadable) previously made BOTH numeric checks below error out
+# silently under 2>/dev/null — i.e. a vacuous pass. Require numeric.
+if ! [[ "$JACKPOT_BLOCKS" =~ ^[0-9]+$ ]]; then
+  echo "  bad: jackpot count '$JACKPOT_BLOCKS' not numeric (chain.json inspection failed?)"
+  FAILS=$((FAILS+1))
+else
+  # Statistical bounds: with p=0.2, n=60, mean=12 jackpots, std=~2.8.
+  # 3-sigma band [3, 21] catches any honest run while rejecting a degen
+  # distribution (always-zero or always-jackpot would land at 0 or 60).
+  if [ "$JACKPOT_BLOCKS" -lt 3 ] || [ "$JACKPOT_BLOCKS" -gt 21 ]; then
+    echo "  bad: jackpot count $JACKPOT_BLOCKS outside 3-sigma band [3, 21]"
+    FAILS=$((FAILS+1))
+  fi
+  # Cross-check: total balance must equal expected from jackpot count.
+  # (No fees in this test, so all credits are subsidy. Allow off-by-few
+  #  for blocks past 60 that ran before we sampled.)
+  if [ "$JACKPOT_BLOCKS" -gt 0 ] && [ "$TOTAL" -lt "$EXPECTED_TOTAL" ]; then
+    echo "  bad: sum-of-balances $TOTAL < expected $EXPECTED_TOTAL (subsidy not paid?)"
+    FAILS=$((FAILS+1))
+  fi
 fi
 
-if $PASS; then
-  echo
-  echo "  PASS: E3 subsidy-as-lottery end-to-end"
-  echo "        - LOTTERY mode wired (multiplier=5, ~20% jackpot rate)"
-  echo "        - 60+ blocks produced under deterministic lottery distribution"
-  echo "        - jackpot count ($JACKPOT_BLOCKS) within statistical band"
-  echo "        - cumulative paid (~$EXPECTED_TOTAL) matches lottery accounting"
-  echo "        - A1 unitary-balance invariant held across $H blocks"
+echo
+echo "=== Test summary ==="
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: E3 subsidy-as-lottery end-to-end"
+  echo "      - LOTTERY mode wired (multiplier=5, ~20% jackpot rate)"
+  echo "      - 60+ blocks produced under deterministic lottery distribution"
+  echo "      - jackpot count ($JACKPOT_BLOCKS) within statistical band"
+  echo "      - cumulative paid (~$EXPECTED_TOTAL) matches lottery accounting"
+  echo "      - A1 unitary-balance invariant held across $H blocks"
+  echo "  PASS: test_lottery_subsidy"
+  exit 0
+else
+  echo "  --- diagnostics: node log tails ---"
+  for n in 1 2 3; do
+    echo "  -- $T/n$n/log (last 12 lines) --"
+    tail -12 "$T/n$n/log" 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_lottery_subsidy ($FAILS checks failed)"
+  exit 1
 fi

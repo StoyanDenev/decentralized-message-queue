@@ -32,6 +32,7 @@ source tools/common.sh
 if [ -z "${DETERM_LIGHT:-}" ] || [ ! -x "$DETERM_LIGHT" ]; then
     echo "  SKIP: determ-light binary not found; build with"
     echo "        cmake --build build --config Release --target determ-light"
+    echo "  PASS: test_light_verify_chain_file (SKIP — determ-light binary not built)"
     exit 0
 fi
 
@@ -43,13 +44,24 @@ cleanup() {
   sleep 1
   for pid in "${NODE_PIDS[@]:-}"; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; done
 }
-trap cleanup EXIT INT
+# Abnormal-exit guard: `set -e` is active for parts of the body below, so a
+# failing unguarded command would otherwise exit without a final marker.
+# Stop the nodes and emit a last-line FAIL marker for run_all.sh.
+on_abort() {
+  trap - EXIT INT
+  cleanup
+  echo "  FAIL: test_light_verify_chain_file (aborted before summary)"
+  exit 1
+}
+trap on_abort EXIT INT
 rm -rf $T; mkdir -p $T/n1 $T/n2 $T/n3
 
+# Per-check lines use "  ok:"/"  bad:" so a stray "PASS:" can never land in
+# run_all.sh's last-10-lines marker window; only the final verdict uses PASS:/FAIL:.
 pass_count=0; fail_count=0
 assert() {
-  if [ "$1" = "true" ]; then echo "  PASS: $2"; pass_count=$((pass_count + 1))
-  else echo "  FAIL: $2"; fail_count=$((fail_count + 1)); fi
+  if [ "$1" = "true" ]; then echo "  ok:  $2"; pass_count=$((pass_count + 1))
+  else echo "  bad: $2"; fail_count=$((fail_count + 1)); fi
 }
 
 echo "=== 1. Init + start 3-node cluster ==="
@@ -115,7 +127,9 @@ echo; echo "=== 4. verify-chain-file PASS (CONTINUITY + SIGS) ==="
 set +e
 OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers.json --committee $T/committee.json 2>&1); RC=$?
 set -e
-echo "$OUT" | grep -E "CONTINUITY|SIGS|VERIFY-CHAIN-FILE"
+# Raw verifier output prefixed "    | " so it can't collide with run_all.sh's
+# marker grep (also keeps this diagnostic pipeline from tripping set -e).
+echo "$OUT" | grep -E "CONTINUITY|SIGS|VERIFY-CHAIN-FILE" | sed 's/^/    | /'
 assert "$([ $RC -eq 0 ] && echo true || echo false)" "verify-chain-file exit 0"
 echo "$OUT" | grep -Eq "CONTINUITY  PASS" && echo "$OUT" | grep -Eq "SIGS        PASS" \
   && assert true "CONTINUITY + SIGS both PASS" || assert false "CONTINUITY + SIGS both PASS"
@@ -184,7 +198,7 @@ EOF
 set +e
 OUT=$($DETERM_LIGHT verify-chain-file --in $T/headers.json --committee-manifest $T/manifest_ok.json 2>&1); RC=$?
 set -e
-echo "$OUT" | grep -E "SIGS|VERIFY-CHAIN-FILE"
+echo "$OUT" | grep -E "SIGS|VERIFY-CHAIN-FILE" | sed 's/^/    | /'
 echo "$OUT" | grep -Eq "SIGS        PASS" && [ $RC -eq 0 ] && assert true "manifest 2-range -> PASS exit 0" || assert false "manifest 2-range -> PASS exit 0"
 
 echo; echo "=== 12. NEGATIVE: manifest upper range -> WRONG committee -> SIGS FAIL exit 2 ==="
@@ -213,6 +227,11 @@ $DETERM_LIGHT verify-chain-file --in $T/headers.json >/dev/null 2>&1; RC_NEITHER
 [ $RC_BOTH -eq 1 ] && [ $RC_NEITHER -eq 1 ] && assert true "both/neither committee source -> exit 1" || assert false "both/neither committee source -> exit 1 (both=$RC_BOTH neither=$RC_NEITHER)"
 
 echo; echo "=== Test summary ==="
-echo "  $pass_count pass / $fail_count fail"
+echo "  checks: $pass_count ok, $fail_count failed"
+set +e   # negative-test blocks left -e enabled; teardown runs in the
+         # script's true -u-only mode so a dead-PID kill can't abort before
+         # the final marker (would exit 1 with 0 failures otherwise).
+trap - EXIT INT
+cleanup
 if [ "$fail_count" = "0" ]; then echo "  PASS: test_light_verify_chain_file"; exit 0
-else echo "  FAIL: test_light_verify_chain_file"; exit 1; fi
+else echo "  FAIL: test_light_verify_chain_file ($fail_count checks failed)"; exit 1; fi
