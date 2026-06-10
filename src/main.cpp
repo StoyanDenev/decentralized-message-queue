@@ -1403,9 +1403,24 @@ static int cmd_init(int argc, char** argv) {
 static int cmd_start(int argc, char** argv) {
     std::string data_dir = default_data_dir();
     std::string cfg_path;
-    for (int i = 0; i < argc - 1; ++i) {
-        if (std::string(argv[i]) == "--config")   cfg_path = argv[i + 1];
-        if (std::string(argv[i]) == "--data-dir") data_dir = argv[i + 1];
+    // S-046: strict argv. cmd_start historically parsed only --config /
+    // --data-dir and SILENTLY IGNORED everything else — so a caller passing
+    // e.g. --listen-port/--rpc-port/--genesis/--peer "started" a node with
+    // none of those settings applied (init-default ports, no genesis), which
+    // is exactly how a broken test recipe shipped unnoticed. A node launcher
+    // must fail closed on arguments it does not understand.
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--config" && i + 1 < argc)        { cfg_path = argv[++i]; }
+        else if (a == "--data-dir" && i + 1 < argc) { data_dir = argv[++i]; }
+        else {
+            std::cerr << "start: unknown argument '" << a << "'\n"
+                      << "  determ start accepts ONLY --config <file> and "
+                         "--data-dir <dir>.\n"
+                      << "  Per-node settings (ports, peers, genesis pin, "
+                         "timers) live in config.json.\n";
+            return 1;
+        }
     }
     if (cfg_path.empty()) cfg_path = config_path(data_dir);
 
