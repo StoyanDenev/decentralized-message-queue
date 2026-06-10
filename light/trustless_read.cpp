@@ -194,11 +194,56 @@ VerifiedChain verify_chain_walk(
                 // K - ceil(2K/3) sentinel-zero slots. Retry once with
                 // bft_mode=true and accept if it passes.
                 vbs = verify_block_sigs(h, committee_json, /*bft=*/true);
-                if (!vbs.ok) {
+            }
+            if (!vbs.ok) {
+                // F-7 FULL-BLOCK FALLBACK. A cross-shard / reconciled (F2)
+                // block's committee signature covers the node's
+                // compute_block_digest, which binds the inbound-receipt /
+                // equivocation / abort roots — collections rpc_headers STRIPS,
+                // so the stripped-header light digest can't reproduce them and
+                // the sig check above fails. Re-fetch the FULL block (heavy
+                // fields intact) and verify against the now-F2-aware light
+                // digest (light_compute_block_digest binds the same roots when
+                // the collections are present).
+                //
+                // SOUNDNESS PIN: the full body's recomputed block_hash MUST equal
+                // the stripped header's block_hash that verify_headers just
+                // chained into prev_anchor. The committee cannot be made to sign a
+                // forged body (a doctored full block changes the digest and the K
+                // sigs fail), and the block_hash pin stops a daemon from
+                // substituting a DIFFERENTLY-positioned but validly-signed block
+                // to satisfy the per-block check while continuity tracks another
+                // hash. This is the same full-block-recompute trust step
+                // committee_bound_state_root already relies on (step 2/5 there).
+                std::string chained_hash = h.value("block_hash", std::string{});
+                bool recovered = false;
+                if (!chained_hash.empty()) {
+                    json full = rpc.call("block", {{"index", idx}});
+                    if (full.is_object()
+                        && !(full.contains("error") && !full["error"].is_null())) {
+                        try {
+                            determ::chain::Block fb =
+                                determ::chain::Block::from_json(full);
+                            if (to_hex(fb.compute_hash()) == chained_hash) {
+                                auto fvbs = verify_block_sigs(
+                                    full, committee_json, /*bft=*/false);
+                                if (!fvbs.ok)
+                                    fvbs = verify_block_sigs(
+                                        full, committee_json, /*bft=*/true);
+                                if (fvbs.ok) { vbs = fvbs; recovered = true; }
+                            }
+                        } catch (const std::exception&) {
+                            // malformed full block — fall through to the throw
+                        }
+                    }
+                }
+                if (!recovered) {
                     throw std::runtime_error(
                         "verify-chain: block at index "
                         + std::to_string(idx)
-                        + ": " + vbs.detail);
+                        + ": " + vbs.detail
+                        + " (full-block F2 re-verify failed or block_hash pin "
+                          "mismatched)");
                 }
             }
             sigs_verified++;

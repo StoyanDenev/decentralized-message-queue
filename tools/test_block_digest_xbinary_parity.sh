@@ -19,33 +19,31 @@
 #           (reconciled) — bound conditionally on every block class.
 #
 #   (B) MIRROR — light/verify.cpp::light_compute_block_digest
-#       The light client re-derives the digest from an rpc_headers-STRIPPED
-#       header to verify each committee member's Ed25519 sig. It is IDENTICAL
-#       to (A) for the v1 core AND the partner_subset_hash + timestamp tail
-#       (same order, same triggers), but INTENTIONALLY OMITS the three F2 view
-#       roots — it cannot reconstruct them from a stripped header, so it
-#       fail-closes on F2 / cross-shard blocks (false-NEGATIVE, never false-
-#       positive; documented at light/verify.cpp:40-56).
+#       The light client re-derives the digest to verify each committee
+#       member's Ed25519 sig. As of F-7 it is a FULL byte-for-byte mirror of
+#       (A): it binds EVERY field (A) binds, including the three F2 view roots,
+#       on the SAME data-driven conditions. The gates are data-driven, so when
+#       (B) is fed an rpc_headers-STRIPPED header the F2 collections are empty /
+#       view roots zero and the digest collapses to the v1 core; when fed a
+#       FULL block (the walk's F-7 fallback re-fetches the body for any header
+#       whose stripped digest fails to verify) the collections are populated and
+#       (B) reproduces (A) exactly — so the light client now VERIFIES F2 /
+#       cross-shard blocks instead of fail-closing on them.
 #
-# Runtime coverage today does NOT pin (B)==(A) on the conditional tail:
-#   * tools/test_block_digest.sh -> `determ test-block-digest` is an in-process
-#     unit test of (A) ALONE (mutate-each-field inclusion/exclusion fence).
-#     It never touches (B).  [NB: that file's HEADER COMMENT is STALE — it
-#     calls partner_subset_hash(#18) + timestamp(#19) "EXCLUDED", but producer
-#     now CONDITIONALLY BINDS both (S-030-D2, shipped); the harness was
-#     extended 19->25 and the wrapper only greps the final summary so it still
-#     passes. That header misrepresents coverage — a separate fix.]
-#   * tools/test_light_verify_block_sigs.sh boots a REAL cluster and cross-
-#     checks (B) vs (A) end-to-end — but ONLY for block 1, a NON-merged block
-#     (partner_subset_hash==0, empty proposer_times). The CONDITIONAL TAIL is
-#     therefore NEVER cross-checked between the two implementations.
+#       [HISTORY: pre-F-7, (B) INTENTIONALLY OMITTED the three F2 roots and
+#       fail-closed on cross-shard blocks. F-7 completed the mirror; this guard
+#       was flipped from "(B) == (A) minus the F2 roots" to "(B) == (A)".]
 #
-# THE GAP this guard closes: nothing pins the (B)==(A) agreement on the
-# conditional merged-block tail at the SOURCE level. A one-line edit to either
-# copy's tail — swapping partner_subset_hash/timestamp, changing a trigger
-# (is_zero vs empty), or mis-ordering vs the F2 roots — would drift the
-# committee-sig digest for merged/reconciled blocks with NO red test. This is
-# the block-digest analog of tools/test_signing_bytes_source_parity.sh.
+# THE GAP this guard closes: nothing else pins the (B)==(A) agreement at the
+# SOURCE level. A one-line edit to either copy — swapping partner_subset_hash/
+# timestamp, dropping/adding a field, changing a trigger (is_zero vs empty),
+# mis-ordering the F2 roots vs the tail — would drift the committee-sig digest
+# for some block class with NO red test. This is the block-digest analog of
+# tools/test_signing_bytes_source_parity.sh. Runtime coverage
+# (tools/test_light_verify_block_sigs.sh) cross-checks (B)==(A) end-to-end ONLY
+# for block 1 (a non-merged, non-F2 block), so the conditional appendages are
+# never runtime-cross-checked between the two implementations; this guard does
+# it statically over the full append set.
 #
 # HOW IT WORKS
 # ------------
@@ -71,47 +69,50 @@
 #       h.append(b.timestamp)                          -> TIMESTAMP
 # The F2 roots are disambiguated by their keys vector (ikeys/ekeys/akeys),
 # which is the intrinsic, order-stable signal of WHICH root is being appended.
+# Both binaries spell these appends identically (light re-implements the four
+# F2 helpers — hash_*/compute_view_root — as file-local statics with the same
+# names), so the SAME extractor token-maps both.
 #
 # ASSERTIONS
 #   * producer seq EXACTLY:
 #       INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER \
 #       CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT \
 #       PARTNER_SUBSET TIMESTAMP
-#   * light seq EXACTLY producer MINUS the three F2 roots:
-#       INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER \
-#       CREATORS TX_LISTS ED_SIGS DH_INPUTS PARTNER_SUBSET TIMESTAMP
-#   * LOAD-BEARING cross-site check: delete EXACTLY the three tokens
-#     {INBOUND_ROOT, EQ_ROOT, ABORT_ROOT} from producer's seq and require
-#     byte-equality with light's seq. This proves the merged-block tail
-#     (PARTNER_SUBSET immediately before TIMESTAMP) is in the SAME relative
-#     order in BOTH, and that the ONLY divergence is the documented F2-root
-#     omission — nothing else moved.
-#   * CONDITIONAL-TRIGGER parity where both bind: both gate PARTNER_SUBSET on a
-#     non-zero partner_subset_hash test and TIMESTAMP on a non-empty
-#     creator_proposer_times test (the guard expressions are grepped + classed).
+#   * light seq EXACTLY EQUAL to the producer seq (full F-7 parity — every
+#     field, same order, including all three F2 roots).
+#   * LOAD-BEARING cross-site check: the LIVE producer seq == the LIVE light
+#     seq, token-for-token. This proves the two consensus-critical copies bind
+#     the identical field set in the identical order — any divergence (a moved
+#     tail, an added/dropped field, a reordered F2 root) is RED.
+#   * F2-presence: BOTH binaries must contain all three F2 root tokens
+#     {INBOUND_ROOT, EQ_ROOT, ABORT_ROOT} (post-F-7 light binds them too).
+#   * CONDITIONAL-TRIGGER parity: both gate PARTNER_SUBSET on a non-zero
+#     partner_subset_hash test and TIMESTAMP on a non-empty creator_proposer_
+#     times test (the guard expressions are grepped + classed).
 #
 # LIVENESS (SELFTEST=1)
 # ---------------------
 # `SELFTEST=1 bash tools/test_block_digest_xbinary_parity.sh` feeds synthetic
 # DRIFTED snippets through the SAME extractor and the SAME cross-site logic and
-# asserts each drift is flagged RED. Covers: (1) partner/timestamp tail SWAPPED;
-# (2) a missing F2 root in producer (only 2 removed -> light wouldn't match);
-# (3) light accidentally binding an F2 root (INBOUND_ROOT in light);
-# (4) a dropped core field. The self-test creates NO files and modifies NO
-# source — it runs entirely on in-memory heredoc snippets.
+# asserts each drift is flagged RED. Covers: (1) partner/timestamp tail SWAPPED
+# in light; (2) a missing F2 root in producer; (3) a missing F2 root in LIGHT
+# (the post-F-7 failure mode — light must now bind all three); (4) a dropped
+# core field. The self-test creates NO files and modifies NO source — it runs
+# entirely on in-memory heredoc snippets.
 #
 # Pure read-only SOURCE check (awk/grep/sed over the two .cpp files only). Needs
 # NO determ binary, never SKIPs, does NOT source tools/common.sh. Deterministic
 # + offline. run_all.sh auto-discovers it (tools/test_*.sh) and reads the single
 # terminal `  PASS:` / `  FAIL:` marker.
 #
-# Exit 0 = the two copies agree (sole diff = F2-root omission); exit 1 = drift.
+# Exit 0 = the two copies are byte-parity equal; exit 1 = drift.
 set -u
 cd "$(dirname "$0")/.."
 
+# Post-F-7: light binds the SAME append set as producer (full byte-parity).
 PRODUCER_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS INBOUND_ROOT EQ_ROOT ABORT_ROOT PARTNER_SUBSET TIMESTAMP"
-LIGHT_SEQ="INDEX PREV_HASH TX_ROOT DELAY_SEED CONSENSUS_MODE BFT_PROPOSER CREATORS TX_LISTS ED_SIGS DH_INPUTS PARTNER_SUBSET TIMESTAMP"
-# The three F2 view-root tokens light omits — and ONLY these three.
+LIGHT_SEQ="$PRODUCER_SEQ"
+# The three F2 view-root tokens BOTH binaries must contain.
 F2_ROOTS="INBOUND_ROOT EQ_ROOT ABORT_ROOT"
 
 VIOLATIONS=0
@@ -162,7 +163,7 @@ extract_tokens() {
       # creator_dh_inputs loop: for (auto& d : b.creator_dh_inputs) h.append(d);
       else if (line ~ /for *\( *auto& *d *: *b\.creator_dh_inputs *\).*\.append\(d\)/) print "DH_INPUTS"
 
-      # ── F2 view roots (producer ONLY) — disambiguated by the keys vector ──
+      # ── F2 view roots (BOTH binaries post-F-7) — disambiguated by keys vec ──
       # h.append(compute_view_root(ikeys / ekeys / akeys)). The keys-vector name
       # is the intrinsic, order-stable signal of WHICH root is bound.
       else if (line ~ /\.append\(compute_view_root\(ikeys\)\)/) print "INBOUND_ROOT"
@@ -219,29 +220,9 @@ extract_triggers() {
   ' "$file"
 }
 
-# ── remove_tokens <seq> <tokens-to-remove> ──────────────────────────────────────
-# Delete each whitespace-token in $2 from the sequence $1 (one occurrence each,
-# order-preserving) and print the remainder. Used to derive "producer minus the
-# three F2 roots" for the load-bearing cross-site equality.
-remove_tokens() {
-  local seq="$1" rm="$2" t
-  for t in $rm; do
-    # Remove the FIRST occurrence of token t (whole-word) from seq.
-    seq=$(printf '%s\n' "$seq" | awk -v t="$t" '{
-      out=""; done=0;
-      for (i=1;i<=NF;i++){
-        if (!done && $i==t){ done=1; continue }
-        out = (out=="" ? $i : out" "$i)
-      }
-      print out
-    }')
-  done
-  printf '%s' "$seq"
-}
-
 # ── SELFTEST mode (SELFTEST=1) ──────────────────────────────────────────────────
 if [ "${SELFTEST:-}" = "1" ]; then
-  echo "=== SELFTEST: cross-binary block-digest extractor + cross-site liveness ==="
+  echo "=== SELFTEST: cross-binary block-digest extractor + full-parity cross-site liveness ==="
   ST_FAIL=0
 
   # st_seq: feed a C++ snippet on stdin through extract_tokens in <fn> mode and
@@ -258,17 +239,14 @@ if [ "${SELFTEST:-}" = "1" ]; then
     fi
   }
 
-  # st_f2_presence: mirror the production guard's belt-and-suspenders F2 presence
-  # check — producer MUST contain all three F2 root tokens; light MUST contain
-  # none. Returns RED (violation) if either invariant breaks. This is the
-  # mechanism that catches a producer that drops an F2 root (the cross-site
-  # remove_tokens equality cannot: removing an already-absent token is a no-op,
-  # so producer-minus-F2 would collapse to the light seq and falsely agree).
+  # st_f2_presence: post-F-7 BOTH copies must contain all three F2 root tokens.
+  # Returns RED (violation) if EITHER copy is missing any F2 root. This is the
+  # mechanism that catches a copy that drops an F2 root.
   st_f2_presence() {
     local label="$1" pseq="$2" lseq="$3" red=0 t
     for t in $F2_ROOTS; do
       case " $pseq " in *" $t "*) : ;; *) red=1 ;; esac      # producer missing -> RED
-      case " $lseq " in *" $t "*) red=1 ;; *) : ;; esac      # light binds      -> RED
+      case " $lseq " in *" $t "*) : ;; *) red=1 ;; esac      # light missing    -> RED
     done
     if [ "$red" -eq 1 ]; then echo "  ok:  $label -> RED (F2 presence invariant violated, as required)"
     else
@@ -278,29 +256,27 @@ if [ "${SELFTEST:-}" = "1" ]; then
   }
 
   # st_crosssite: given a producer seq and a light seq (as strings), assert that
-  # the cross-site rule (light == producer minus the three F2 roots) DIVERGES
-  # (i.e. would be flagged RED). $3 = "RED" means we expect divergence.
+  # the full-parity rule (light == producer EXACTLY) DIVERGES (is flagged RED).
+  # $label == "crosssite-sanity" is the one pairing that must AGREE.
   st_crosssite() {
-    local label="$1" pseq="$2" lseq="$3" pminus
-    pminus=$(remove_tokens "$pseq" "$F2_ROOTS")
-    if [ "$pminus" = "$lseq" ]; then
-      # Agreement — only OK for the canonical-sanity pairing.
+    local label="$1" pseq="$2" lseq="$3"
+    if [ "$pseq" = "$lseq" ]; then
       if [ "$label" = "crosssite-sanity" ]; then
-        echo "  ok:  $label -> producer-minus-F2 == light  [$lseq]"
+        echo "  ok:  $label -> producer == light  [$lseq]"
       else
         echo "  bad: $label produced AGREEMENT — drift NOT detected!" >&2
-        echo "       producer-minus-F2: [$pminus]" >&2
-        echo "       light:             [$lseq]" >&2
+        echo "       producer: [$pseq]" >&2
+        echo "       light:    [$lseq]" >&2
         ST_FAIL=$((ST_FAIL + 1))
       fi
     else
       if [ "$label" = "crosssite-sanity" ]; then
         echo "  bad: crosssite-sanity DIVERGED — extractor or rule is wrong!" >&2
-        echo "       producer-minus-F2: [$pminus]" >&2
-        echo "       light:             [$lseq]" >&2
+        echo "       producer: [$pseq]" >&2
+        echo "       light:    [$lseq]" >&2
         ST_FAIL=$((ST_FAIL + 1))
       else
-        echo "  ok:  $label -> RED (producer-minus-F2 != light, as required)"
+        echo "  ok:  $label -> RED (producer != light, as required)"
       fi
     fi
   }
@@ -342,7 +318,8 @@ Hash compute_block_digest(const Block& b) {
 }
 EOF
 
-  # (0b) canonical light snippet reduces to the canonical light seq.
+  # (0b) canonical light snippet (post-F-7, with the F2 branch) reduces to the
+  #      canonical light seq — which is now EQUAL to the producer seq.
   st_seq "light-sanity" light "$LIGHT_SEQ" <<'EOF'
 Hash light_compute_block_digest(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
@@ -357,6 +334,22 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
+    if (!b.inbound_receipts.empty()) {
+        std::vector<Hash> ikeys;
+        for (auto& r : b.inbound_receipts) ikeys.push_back(hash_cross_shard_receipt(r));
+        h.append(compute_view_root(ikeys));
+    }
+    auto any_nonzero = [](const std::vector<Hash>& v) { return false; };
+    if (any_nonzero(b.creator_view_eq_roots)) {
+        std::vector<Hash> ekeys;
+        for (auto& e : b.equivocation_events) ekeys.push_back(hash_equivocation_event(e));
+        h.append(compute_view_root(ekeys));
+    }
+    if (any_nonzero(b.creator_view_abort_roots)) {
+        std::vector<Hash> akeys;
+        for (auto& a : b.abort_events) akeys.push_back(hash_abort_event(a));
+        h.append(compute_view_root(akeys));
+    }
     Hash zero{};
     if (b.partner_subset_hash != zero) {
         h.append(b.partner_subset_hash);
@@ -368,11 +361,11 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
 }
 EOF
 
-  # (0c) cross-site sanity: producer-minus-F2 must equal light.
+  # (0c) cross-site sanity: producer == light (full parity).
   st_crosssite "crosssite-sanity" "$PRODUCER_SEQ" "$LIGHT_SEQ"
 
   # (1) merged-block TAIL SWAPPED in light (TIMESTAMP before PARTNER_SUBSET).
-  #     The reduced light seq differs from canonical -> producer-minus-F2 != light -> RED.
+  #     The reduced light seq differs from canonical -> producer != light -> RED.
   L_SWAP=$(extract_tokens /dev/stdin light <<'EOF'
 Hash light_compute_block_digest(const determ::chain::Block& b) {
     h.append(b.index);
@@ -386,6 +379,18 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
+    if (!b.inbound_receipts.empty()) {
+        std::vector<Hash> ikeys;
+        h.append(compute_view_root(ikeys));
+    }
+    if (any_nonzero(b.creator_view_eq_roots)) {
+        std::vector<Hash> ekeys;
+        h.append(compute_view_root(ekeys));
+    }
+    if (any_nonzero(b.creator_view_abort_roots)) {
+        std::vector<Hash> akeys;
+        h.append(compute_view_root(akeys));
+    }
     if (!b.creator_proposer_times.empty()) {
         h.append(b.timestamp);
     }
@@ -398,13 +403,9 @@ EOF
 )
   st_crosssite "tail-swapped-in-light" "$PRODUCER_SEQ" "$L_SWAP"
 
-  # (2) producer MISSING an F2 root (drops ABORT_ROOT). Caught by TWO production
-  #     mechanisms: (a) producer seq != canonical PRODUCER_SEQ, and (b) the F2
-  #     presence check (producer must contain all three F2 tokens). NOTE: the
-  #     cross-site remove_tokens equality does NOT catch this — removing an
-  #     already-absent ABORT_ROOT is a no-op, so producer-minus-F2 would collapse
-  #     to the light seq and falsely AGREE. This case proves the presence check
-  #     is the load-bearing detector for a dropped producer F2 root.
+  # (2) producer MISSING an F2 root (drops ABORT_ROOT). Caught by (a) producer
+  #     seq != canonical PRODUCER_SEQ, (b) cross-site (producer != light), and
+  #     (c) the F2 presence check (producer must contain all three F2 tokens).
   P_MISS=$(extract_tokens /dev/stdin producer <<'EOF'
 Hash compute_block_digest(const Block& b) {
     h.append(b.index);
@@ -436,21 +437,19 @@ Hash compute_block_digest(const Block& b) {
 }
 EOF
 )
-  # First, the producer seq itself must NOT equal the canonical PRODUCER_SEQ.
   if [ "$P_MISS" != "$PRODUCER_SEQ" ]; then
     echo "  ok:  producer-missing-abort-root -> producer seq != canonical (drift seen) [$P_MISS]"
   else
     echo "  bad: producer-missing-abort-root produced canonical seq — drift NOT detected!" >&2
     ST_FAIL=$((ST_FAIL + 1))
   fi
-  # The detector for a dropped producer F2 root is the F2 presence check
-  # (NOT the cross-site remove_tokens equality — see the case comment above).
+  st_crosssite   "producer-missing-abort-root" "$P_MISS" "$LIGHT_SEQ"
   st_f2_presence "producer-missing-abort-root" "$P_MISS" "$LIGHT_SEQ"
 
-  # (3) light ACCIDENTALLY binds an F2 root (INBOUND_ROOT present in light).
-  #     light seq gains INBOUND_ROOT -> producer-minus-F2 (which has NO inbound)
-  #     != light -> RED. Also light seq != canonical LIGHT_SEQ.
-  L_F2=$(extract_tokens /dev/stdin light <<'EOF'
+  # (3) light MISSING an F2 root (drops INBOUND_ROOT) — the post-F-7 failure
+  #     mode. light seq != canonical AND producer != light -> RED on both, and
+  #     the F2 presence check fires (light must bind all three).
+  L_MISS=$(extract_tokens /dev/stdin light <<'EOF'
 Hash light_compute_block_digest(const determ::chain::Block& b) {
     h.append(b.index);
     h.append(b.prev_hash);
@@ -463,9 +462,13 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
-    if (!b.inbound_receipts.empty()) {
-        std::vector<Hash> ikeys;
-        h.append(compute_view_root(ikeys));
+    if (any_nonzero(b.creator_view_eq_roots)) {
+        std::vector<Hash> ekeys;
+        h.append(compute_view_root(ekeys));
+    }
+    if (any_nonzero(b.creator_view_abort_roots)) {
+        std::vector<Hash> akeys;
+        h.append(compute_view_root(akeys));
     }
     if (b.partner_subset_hash != zero) {
         h.append(b.partner_subset_hash);
@@ -477,19 +480,17 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
 }
 EOF
 )
-  if [ "$L_F2" != "$LIGHT_SEQ" ]; then
-    echo "  ok:  light-binds-inbound-root -> light seq != canonical (drift seen) [$L_F2]"
+  if [ "$L_MISS" != "$LIGHT_SEQ" ]; then
+    echo "  ok:  light-missing-inbound-root -> light seq != canonical (drift seen) [$L_MISS]"
   else
-    echo "  bad: light-binds-inbound-root produced canonical light seq — drift NOT detected!" >&2
+    echo "  bad: light-missing-inbound-root produced canonical light seq — drift NOT detected!" >&2
     ST_FAIL=$((ST_FAIL + 1))
   fi
-  # Caught by BOTH detectors: cross-site equality (light has an extra token) AND
-  # the F2 presence check (light must bind NONE of the F2 roots).
-  st_crosssite   "light-binds-inbound-root" "$PRODUCER_SEQ" "$L_F2"
-  st_f2_presence "light-binds-inbound-root" "$PRODUCER_SEQ" "$L_F2"
+  st_crosssite   "light-missing-inbound-root" "$PRODUCER_SEQ" "$L_MISS"
+  st_f2_presence "light-missing-inbound-root" "$PRODUCER_SEQ" "$L_MISS"
 
   # (4) dropped CORE field (DELAY_SEED) in producer -> producer seq != canonical
-  #     AND producer-minus-F2 != light -> RED on both checks.
+  #     AND producer != light -> RED on both checks.
   P_DROP=$(extract_tokens /dev/stdin producer <<'EOF'
 Hash compute_block_digest(const Block& b) {
     h.append(b.index);
@@ -534,7 +535,7 @@ EOF
 
   echo ""
   if [ "$ST_FAIL" -eq 0 ]; then
-    echo "  PASS: test_block_digest_xbinary_parity SELFTEST (extractor + cross-site rule flag all drift classes: tail-swap, missing-F2-root, light-binds-F2, dropped-core)"
+    echo "  PASS: test_block_digest_xbinary_parity SELFTEST (extractor + full-parity rule flag all drift classes: tail-swap, missing-F2-root in producer OR light, dropped-core)"
     exit 0
   else
     echo "  FAIL: test_block_digest_xbinary_parity SELFTEST ($ST_FAIL self-test failure(s) — the guard is NOT live)"
@@ -542,7 +543,7 @@ EOF
   fi
 fi
 
-echo "=== block-digest CROSS-BINARY parity guard (producer.cpp vs light/verify.cpp; static FA1 complement) ==="
+echo "=== block-digest CROSS-BINARY parity guard (producer.cpp vs light/verify.cpp; static FA1 complement; full F-7 parity) ==="
 
 PROD_FILE=src/node/producer.cpp
 LIGHT_FILE=light/verify.cpp
@@ -569,35 +570,30 @@ if [ ! -f "$LIGHT_FILE" ]; then
 else
   LSEQ=$(extract_tokens "$LIGHT_FILE" light)
   if [ "$LSEQ" = "$LIGHT_SEQ" ]; then
-    ok "light/verify.cpp::light_compute_block_digest -> [$LSEQ]  (3 F2 view roots intentionally omitted)"
+    ok "light/verify.cpp::light_compute_block_digest -> [$LSEQ]  (full F-7 parity; all 3 F2 view roots bound)"
   else
     bad "light/verify.cpp::light_compute_block_digest append-sequence DRIFT"
-    echo "       want: [$LIGHT_SEQ]  (producer minus inbound/eq/abort roots)" >&2
+    echo "       want: [$LIGHT_SEQ]  (byte-parity with producer)" >&2
     echo "       got:  [$LSEQ]" >&2
   fi
 fi
 
 # ── LOAD-BEARING cross-site assertion ───────────────────────────────────────────
-# light == producer with EXACTLY {INBOUND_ROOT, EQ_ROOT, ABORT_ROOT} removed and
-# NOTHING ELSE changed. We delete those three tokens from the LIVE producer seq
-# and require byte-equality with the LIVE light seq. This proves the conditional
-# merged-block tail (PARTNER_SUBSET immediately before TIMESTAMP) is in the SAME
-# relative order in BOTH and that the only divergence is the documented F2-root
-# omission.
+# The two consensus-critical copies must bind the IDENTICAL field set in the
+# IDENTICAL order — light == producer, token-for-token. Any divergence (moved
+# tail, added/dropped field, reordered F2 root) is RED.
 if [ -n "$PSEQ" ] && [ -n "$LSEQ" ]; then
-  PSEQ_NO_F2=$(remove_tokens "$PSEQ" "$F2_ROOTS")
-  if [ "$PSEQ_NO_F2" = "$LSEQ" ]; then
-    ok "cross-site: light == producer minus {INBOUND_ROOT,EQ_ROOT,ABORT_ROOT} (sole allowed diff; tail order identical)"
+  if [ "$PSEQ" = "$LSEQ" ]; then
+    ok "cross-site: light == producer (full byte-parity; identical field set + order)"
   else
-    bad "cross-site: light differs from producer by MORE than the three F2 view roots"
-    echo "       producer minus F2: [$PSEQ_NO_F2]" >&2
-    echo "       light:             [$LSEQ]" >&2
+    bad "cross-site: light differs from producer (the two block-digest copies have drifted)"
+    echo "       producer: [$PSEQ]" >&2
+    echo "       light:    [$LSEQ]" >&2
   fi
-  # Belt-and-suspenders: the three removed tokens must be EXACTLY the F2 set —
-  # i.e. producer contains all three and light contains none of them.
+  # Belt-and-suspenders: BOTH copies must contain all three F2 root tokens.
   for t in $F2_ROOTS; do
     case " $PSEQ " in *" $t "*) : ;; *) bad "cross-site: producer is MISSING F2 root token [$t]";; esac
-    case " $LSEQ " in *" $t "*) bad "cross-site: light UNEXPECTEDLY binds F2 root token [$t]";; *) : ;; esac
+    case " $LSEQ " in *" $t "*) : ;; *) bad "cross-site: light is MISSING F2 root token [$t]";; esac
   done
 fi
 
@@ -630,7 +626,7 @@ fi
 
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then
-  echo "  PASS: test_block_digest_xbinary_parity (producer.cpp + light/verify.cpp agree; sole diff = 3 omitted F2 view roots; merged-block tail order + triggers identical)"
+  echo "  PASS: test_block_digest_xbinary_parity (producer.cpp + light/verify.cpp are byte-parity equal; identical field set + order incl. all 3 F2 view roots; merged-block tail triggers identical)"
   exit 0
 else
   echo "  FAIL: test_block_digest_xbinary_parity ($VIOLATIONS parity violation(s) — a block-digest copy has drifted)"

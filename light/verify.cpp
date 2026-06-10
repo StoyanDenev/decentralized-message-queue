@@ -20,6 +20,8 @@
 #include <determ/util/json_validate.hpp>
 #include <determ/types.hpp>
 #include <determ/chain/block.hpp>
+#include <set>
+#include <vector>
 #include <stdexcept>
 
 namespace determ::light {
@@ -29,31 +31,96 @@ using determ::util::json_require;
 using determ::util::json_require_hex;
 using determ::util::json_require_array;
 
-// COPY OF producer.cpp::compute_block_digest (src/node/producer.cpp:608-693) — keep in sync.
+namespace {
+
+// ── F2 digest helpers — byte-exact re-implementations of producer.cpp's
+//    {hash_cross_shard_receipt, hash_equivocation_event, hash_abort_event,
+//    compute_view_root} (src/node/producer.cpp:322-382). The light client does
+//    NOT link producer.cpp (deliberate minimal footprint, see CMakeLists.txt's
+//    explicit reuse list), so these four are duplicated here and pinned
+//    BYTE-FOR-BYTE against the originals by tools/test_block_digest_xbinary_
+//    parity.sh. The DTM-F2-* domain tags + field order + append static-types
+//    MUST match producer.cpp exactly, or an F2 block's committee signature will
+//    not verify. Field order / casts copied verbatim from producer.cpp. ───────
+using determ::crypto::SHA256Builder;
+
+Hash hash_cross_shard_receipt(const determ::chain::CrossShardReceipt& r) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-RCPT-v1"));
+    b.append(static_cast<uint64_t>(r.src_shard));
+    b.append(static_cast<uint64_t>(r.dst_shard));
+    b.append(r.src_block_index);
+    b.append(r.src_block_hash);
+    b.append(r.tx_hash);
+    b.append(r.from);
+    b.append(r.to);
+    b.append(r.amount);
+    b.append(r.fee);
+    b.append(r.nonce);
+    return b.finalize();
+}
+
+Hash hash_equivocation_event(const determ::chain::EquivocationEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-EQ-v1"));
+    b.append(e.equivocator);
+    b.append(e.block_index);
+    b.append(e.digest_a);
+    b.append(e.sig_a.data(), e.sig_a.size());
+    b.append(e.digest_b);
+    b.append(e.sig_b.data(), e.sig_b.size());
+    b.append(static_cast<uint64_t>(e.shard_id));
+    b.append(e.beacon_anchor_height);
+    return b.finalize();
+}
+
+Hash hash_abort_event(const determ::chain::AbortEvent& e) {
+    SHA256Builder b;
+    b.append(std::string("DTM-F2-ABORT-v1"));
+    b.append(e.round);
+    b.append(e.aborting_node);
+    b.append(static_cast<uint64_t>(e.timestamp));
+    b.append(e.event_hash);
+    b.append(e.claims_json.dump());
+    return b.finalize();
+}
+
+Hash compute_view_root(const std::vector<Hash>& items) {
+    std::set<Hash> u(items.begin(), items.end());
+    SHA256Builder b;
+    for (auto& h : u) b.append(h);
+    return b.finalize();
+}
+
+}  // namespace
+
+// COPY OF producer.cpp::compute_block_digest (src/node/producer.cpp:619-704) — keep in sync.
 //
 // Computes the digest the K-of-K committee signs in Phase 2. The light
 // client must recompute this byte-for-byte to verify each committee
 // member's Ed25519 signature against compute_block_digest(block). The
-// upstream source lives at src/node/producer.cpp:608-693; if the
-// upstream byte-order or field set ever changes, mirror it here.
+// upstream source lives at src/node/producer.cpp:619-704; if the
+// upstream byte-order or field set ever changes, mirror it here. The
+// tools/test_block_digest_xbinary_parity.sh guard pins the two append
+// sequences EQUAL token-for-token.
 //
-// IMPORTANT: producer.cpp's compute_block_digest binds the per-creator
-// Phase-1 commits + index/prev_hash/tx_root/delay_seed + consensus_mode/
-// bft_proposer (the v1 core, always), PLUS two classes of conditional
-// appendage:
-//   (1) the F2 view roots over the rpc_headers-STRIPPED collections
-//       (inbound_receipts / equivocation_events / abort_events). The light
-//       client cannot reconstruct these from a stripped header, so it does
-//       NOT bind them and FAIL-CLOSES on F2 / cross-shard blocks (false-
-//       negative, never false-PASS — verify those against a full node).
-//   (2) partner_subset_hash (R4/R7 merged-signing), which SURVIVES the
-//       rpc_headers strip (node.cpp::rpc_headers keeps it alongside
-//       state_root). Because the value is present in the stripped header,
-//       the light client CAN bind it exactly — so it mirrors producer's
-//       conditional-on-non-zero append below, keeping header-only sync sound
-//       for merged-but-non-F2 blocks. (transactions / cross_shard_receipts /
-//       initial_state / state_root are not in the digest at all.)
-// If the upstream byte-order or field set ever changes, mirror it here.
+// FULL PARITY (F-7): this is now a byte-for-byte mirror of the node's
+// compute_block_digest — it binds EVERY field the node does, including the
+// three conditional F2 view roots (inbound_receipts / equivocation_events /
+// abort_events) and the merged-block tail (partner_subset_hash, timestamp).
+// All appends are gated on the SAME data-driven conditions as the node, so:
+//   * fed an rpc_headers-STRIPPED header (heavy F2 collections removed,
+//     view roots zero), every F2 gate is false → the digest collapses to the
+//     v1 core, byte-identical to a non-F2 header. Header-only sync of non-F2
+//     blocks is unchanged.
+//   * fed a FULL block (the walk re-fetches the full body for any header whose
+//     stripped digest fails to verify — trustless_read.cpp::verify_chain_walk's
+//     F2 fallback), the collections are populated → the light client binds the
+//     same inbound/eq/abort roots the committee signed and VERIFIES the
+//     cross-shard / reconciled block (previously this fail-closed: F-7).
+// (transactions / cross_shard_receipts / initial_state / state_root are not in
+// the digest at all.) If the upstream byte-order or field set ever changes,
+// mirror it here.
 Hash light_compute_block_digest(const determ::chain::Block& b) {
     determ::crypto::SHA256Builder h;
     h.append(b.index);
@@ -67,6 +134,38 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
         for (auto& tx : list) h.append(tx);
     for (auto& s : b.creator_ed_sigs) h.append(s.data(), s.size());
     for (auto& d : b.creator_dh_inputs) h.append(d);
+    // v2.7 F2 / S-016 + S-030-D2 (F-7): bind the three F2 sets EXACTLY as the
+    // node's compute_block_digest does (producer.cpp:632-672). All three gates
+    // are data-driven and identical to the node's: on a STRIPPED header these
+    // collections are empty / view roots zero, so every gate is false and the
+    // digest stays byte-identical to the v1 core; on a FULL block (re-fetched by
+    // the walk's F2 fallback) they are populated and the light client binds the
+    // same roots the committee signed — so it now verifies cross-shard /
+    // reconciled blocks rather than fail-closing on them. Field order matches
+    // the node: inbound, eq, abort, partner_subset_hash, timestamp.
+    if (!b.inbound_receipts.empty()) {
+        std::vector<Hash> ikeys;
+        ikeys.reserve(b.inbound_receipts.size());
+        for (auto& r : b.inbound_receipts) ikeys.push_back(hash_cross_shard_receipt(r));
+        h.append(compute_view_root(ikeys));
+    }
+    auto any_nonzero = [](const std::vector<Hash>& v) {
+        Hash z{};
+        for (auto& r : v) if (r != z) return true;
+        return false;
+    };
+    if (any_nonzero(b.creator_view_eq_roots)) {
+        std::vector<Hash> ekeys;
+        ekeys.reserve(b.equivocation_events.size());
+        for (auto& e : b.equivocation_events) ekeys.push_back(hash_equivocation_event(e));
+        h.append(compute_view_root(ekeys));
+    }
+    if (any_nonzero(b.creator_view_abort_roots)) {
+        std::vector<Hash> akeys;
+        akeys.reserve(b.abort_events.size());
+        for (auto& a : b.abort_events) akeys.push_back(hash_abort_event(a));
+        h.append(compute_view_root(akeys));
+    }
     // S-030-D2 (partner_subset_hash dimension): bind when non-zero, exactly
     // mirroring producer.cpp::compute_block_digest's trailing conditional
     // append. Deterministic field that survives the header strip, so this
