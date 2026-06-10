@@ -3,11 +3,10 @@
 FB57 — TLA+ specification of the determ-light PERSISTED-ANCHOR CACHE lifecycle
 (SHIPPED feature; the `verify-chain --persist` writer + `state` management
 subcommand + `light/persist.{hpp,cpp}` module). Machine-checkable companion to
-`docs/proofs/LightStatePersistenceSoundness.md` (theorems LSP-1..LSP-7; this
-model covers LSP-1..LSP-6 — LSP-7's head-monotonicity gates are arithmetic
-comparisons over the live daemon head, source-guarded offline by
-tools/test_light_resume_monotonicity_guard.sh; a model extension would add a
-RegressedDaemon action + INV_MonotoneResume).
+`docs/proofs/LightStatePersistenceSoundness.md` (theorems LSP-1..LSP-7 — LSP-7's
+head-monotonicity gates modeled via the MonotonicityGate action +
+INV_MonotoneResume / INV_LSP7_RefusalTotal; also pinned at source by
+tools/test_light_resume_monotonicity_guard.sh).
 
 This is the state-machine model of the "validated, genesis-pinned,
 schema-versioned, fail-closed cache" the medium-tier light client uses to
@@ -175,7 +174,8 @@ nondeterministic choice over the cases that matter for soundness:
     verify_chain_from_anchor function's resumed=false); since LSP-7 the CALLER
     (anchored_head) no longer accepts that fallback silently — head BELOW the
     anchor throws, head AT it triggers the full-verify + anchor-hash
-    cross-check. The caller-layer gates are outside this model (see header);
+    cross-check. The caller-layer gates are modeled by the MonotonicityGate
+    action (LSP-7, below);
   * an honest suffix that chains onto the cached head_block_hash at the correct
     next index ⇒ RESUMED (a new committee-verified head);
   * a suffix that does NOT chain onto the anchor (a fork/rollback below it) ⇒
@@ -199,7 +199,7 @@ offline gap is re-derived by the suffix verify, not cached).
 
 --------------------------------------------------------------------------
 Companion analytic source: `docs/proofs/LightStatePersistenceSoundness.md`
-(LSP-1..LSP-7; LSP-7 head-monotonicity is outside this model — see header).
+(LSP-1..LSP-7, all modeled — LSP-7 via MonotonicityGate).
 Empirical pin: `tools/test_light_state.sh` (27 offline
 assertions — `state --selftest` round-trip + 5 fail-closed reject paths;
 `--show`/`--clear`/`--show --json` graceful-absence + fail-closed-on-corrupt;
@@ -252,6 +252,12 @@ ResumeNone == "RESUME_NONE"  \* resumeResult before any ResumeVerify (LSP-6)
 \*   "not_ahead" — daemon head <= anchor height (nothing new) → FALLBACK.
 Offerings == {"none", "extends", "fork", "index0", "not_ahead"}
 
+\* The daemon-head vs cached-anchor relation the LSP-7 MonotonicityGate measures
+\* (anchored_head's own fetch_head_height, BEFORE the LSP-6 suffix walk). The
+\* == case splits on whether the full verify's tip matches the cached anchor
+\* block_hash ("at_same") or not ("at_fork" — a same-height fork at the anchor).
+HeadRelations == {"below", "at_same", "at_fork", "ahead"}
+
 \* The set of schema versions + genesis symbols + hex-shape flags.
 Schemas    == {SchemaCurrent, SchemaStale}
 Genatures  == {OwnGenesis, OtherGenesis}
@@ -302,10 +308,21 @@ VARIABLES
     loaded,         \* last Load verdict: Empty | BAD | a Records triple
     anchorVerdict,  \* last ReVerifyAnchor verdict: Unverified | "PASS" | "MISMATCH"
     resumeOffering, \* daemon's suffix offering on the last ResumeVerify (Offerings)
-    resumeResult    \* last ResumeVerify verdict: ResumeNone | RESUMED | FALLBACK | REJECTED
+    resumeResult,   \* last ResumeVerify verdict: ResumeNone | RESUMED | FALLBACK | REJECTED
+    \* History snapshots (verdict-time): a verdict judges the record it CONSUMED,
+    \* not whatever a later Tamper/Clear leaves on disk. Without these, the
+    \* INV_GenesisPinned / INV_ResumeSound implications would be falsified by a
+    \* Tamper firing AFTER a PASS / RESUMED while the stale verdict persists —
+    \* a latent instability found by manual review (TLC pending).
+    anchorPinned,   \* the disk record the last ReVerifyAnchor judged (or Empty)
+    resumeAnchor,   \* the disk record the last RESUMED consumed (or Empty)
+    \* LSP-7 (head-monotonicity gate at the anchored_head caller layer):
+    headRelation,   \* last measured daemon-head vs anchor relation ("rel_none" initial)
+    lsp7Verdict     \* last MonotonicityGate verdict (see TypeOK for the universe)
 
 vars == <<localGenesis, verifiedHead, disk, provenance, loaded, anchorVerdict,
-          resumeOffering, resumeResult>>
+          resumeOffering, resumeResult, anchorPinned, resumeAnchor,
+          headRelation, lsp7Verdict>>
 
 ----------------------------------------------------------------------------
 \* §2. Helpers.
@@ -336,6 +353,10 @@ Init ==
     /\ anchorVerdict = Unverified
     /\ resumeOffering = "none"
     /\ resumeResult   = ResumeNone
+    /\ anchorPinned   = Empty
+    /\ resumeAnchor   = Empty
+    /\ headRelation   = "rel_none"
+    /\ lsp7Verdict    = "LSP7_NONE"
 
 ----------------------------------------------------------------------------
 \* §4. Actions.
@@ -349,7 +370,8 @@ VerifyRun ==
     /\ verifiedHead = NoHead
     /\ verifiedHead' = HeadPin
     /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict,
-                   resumeOffering, resumeResult>>
+                   resumeOffering, resumeResult, anchorPinned, resumeAnchor,
+                   headRelation, lsp7Verdict>>
 
 \* WriteAnchor: cmd_verify_chain --persist calls save_light_state. ENABLED ONLY
 \* after a committee-verified head exists (verifiedHead # NoHead) — the LSP-1
@@ -362,7 +384,8 @@ WriteAnchor ==
     /\ disk'       = <<SchemaCurrent, localGenesis, Good>>
     /\ provenance' = "self"
     /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict,
-                   resumeOffering, resumeResult>>
+                   resumeOffering, resumeResult, anchorPinned, resumeAnchor,
+                   headRelation, lsp7Verdict>>
 
 \* Load: load_light_state parses + validates the on-disk record. An ABSENT file is
 \* the graceful "no anchor" (loaded = Empty, exit 0). A present record is accepted
@@ -372,7 +395,8 @@ WriteAnchor ==
 Load ==
     /\ loaded' = LoadVerdict(disk)
     /\ UNCHANGED <<localGenesis, verifiedHead, disk, provenance, anchorVerdict,
-                   resumeOffering, resumeResult>>
+                   resumeOffering, resumeResult, anchorPinned, resumeAnchor,
+                   headRelation, lsp7Verdict>>
 
 \* ReVerifyAnchor: `state --verify-anchor --genesis <file>` — the offline LSP-2
 \* genesis re-pin gate (the SHIPPED security-critical half of the LSP-6 resume).
@@ -387,8 +411,10 @@ ReVerifyAnchor ==
     /\ IF WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis
        THEN anchorVerdict' = "PASS"        \* exit 0: anchor is for THIS chain
        ELSE anchorVerdict' = "MISMATCH"    \* exit 2 (wrong chain) or fail-closed (corrupt)
+    /\ anchorPinned' = disk                \* the record THIS verdict judged (history)
     /\ UNCHANGED <<localGenesis, verifiedHead, disk, provenance, loaded,
-                   resumeOffering, resumeResult>>
+                   resumeOffering, resumeResult, resumeAnchor,
+                   headRelation, lsp7Verdict>>
 
 \* Tamper: an attacker rewrites the local state.json (the trusted-local model's
 \* in-scope adversary, present ONLY to witness that the genesis-pin / fail-closed
@@ -404,7 +430,8 @@ Tamper ==
           /\ disk'       = <<sc, g, hx>>
           /\ provenance' = "attacker"
     /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict,
-                   resumeOffering, resumeResult>>
+                   resumeOffering, resumeResult, anchorPinned, resumeAnchor,
+                   headRelation, lsp7Verdict>>
 
 \* Clear: `state --clear` deletes the cache file (a benign management action).
 \* Resets the on-disk record to Empty; the next Load is the graceful "no anchor".
@@ -412,7 +439,8 @@ Clear ==
     /\ disk'       = Empty
     /\ provenance' = "none"
     /\ UNCHANGED <<localGenesis, verifiedHead, loaded, anchorVerdict,
-                   resumeOffering, resumeResult>>
+                   resumeOffering, resumeResult, anchorPinned, resumeAnchor,
+                   headRelation, lsp7Verdict>>
 
 \* ResumeVerify: `verify-chain --resume` (verify_chain_from_anchor). Reads the
 \* cache and either RESUMES (verifies only the suffix above the anchor), FALLS
@@ -424,7 +452,7 @@ Clear ==
 \*   2. daemon not ahead ("not_ahead") ⇒ FALLBACK (nothing new to verify at the
 \*      verify_chain_from_anchor layer; since LSP-7 the anchored_head CALLER
 \*      converts this to a throw (head < anchor) or a full-verify + anchor-hash
-\*      cross-check (head == anchor) — caller gates not modeled, see header);
+\*      cross-check (head == anchor) — caller gates modeled by MonotonicityGate);
 \*   3. honest chaining suffix ("extends") ⇒ RESUMED, producing a verified head;
 \*   4. fork-below-anchor ("fork") OR the index-0 diversion ("index0") ⇒ REJECTED
 \*      (the prev_hash continuity break / the index-contiguity gate — a hard error,
@@ -438,16 +466,56 @@ ResumeVerify ==
          /\ IF ~(WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis)
             THEN /\ resumeResult' = "FALLBACK"      \* corrupt / wrong-chain anchor
                  /\ verifiedHead' = verifiedHead
+                 /\ resumeAnchor' = resumeAnchor
             ELSE IF offer = "not_ahead"
             THEN /\ resumeResult' = "FALLBACK"      \* daemon not ahead of anchor
                  /\ verifiedHead' = verifiedHead
+                 /\ resumeAnchor' = resumeAnchor
             ELSE IF offer = "extends"
             THEN /\ resumeResult' = "RESUMED"       \* honest suffix chains onto anchor
                  /\ verifiedHead' = HeadPin         \* the new committee-verified tip
+                 /\ resumeAnchor' = disk            \* the anchor THIS resume consumed
             ELSE \* offer \in {"fork", "index0"}
                  /\ resumeResult' = "REJECTED"      \* fork-below / index-0 diversion
                  /\ verifiedHead' = verifiedHead
-    /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict>>
+                 /\ resumeAnchor' = resumeAnchor
+    /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict,
+                   anchorPinned, headRelation, lsp7Verdict>>
+
+\* MonotonicityGate: the LSP-7 head-monotonicity gates anchored_head runs BEFORE
+\* the LSP-6 suffix walk, given a VALID genesis-pinned anchor (the gate's enabling
+\* condition in the code: anchor loaded + genesis pin matched + head_height > 0;
+\* with no usable anchor the gates don't run — the absent/corrupt/wrong-chain
+\* fallbacks are unchanged). The daemon's head relation is a finite
+\* nondeterministic measurement; the verdict mapping is the code's:
+\*   "below"   ⇒ REFUSED_BELOW           (G1: a fork-free chain never regresses —
+\*                                        stale/truncated daemon state; THROW)
+\*   "at_same" ⇒ CROSSCHECK_OK           (G2 pass: full verify ran AND the verified
+\*                                        tip block_hash == the cached anchor's —
+\*                                        produces a committee-verified head)
+\*   "at_fork" ⇒ REFUSED_FORK_AT_ANCHOR  (G2 fail: same-height fork at the anchor;
+\*                                        THROW — a plain full verify would have
+\*                                        accepted it, only the cache compare
+\*                                        catches it)
+\*   "ahead"   ⇒ PROCEED_RESUME          (control passes to ResumeVerify / LSP-6;
+\*                                        the G3 between-queries regression is the
+\*                                        PROCEED_RESUME state followed by a
+\*                                        "not_ahead" ResumeVerify offering, which
+\*                                        the caller converts to a THROW — see
+\*                                        INV_LSP7_RefusalTotal's companion note)
+MonotonicityGate ==
+    /\ disk /= Empty
+    /\ WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis
+    /\ \E rel \in HeadRelations :
+         /\ headRelation' = rel
+         /\ lsp7Verdict' =
+              CASE rel = "below"   -> "REFUSED_BELOW"
+                [] rel = "at_same" -> "CROSSCHECK_OK"
+                [] rel = "at_fork" -> "REFUSED_FORK_AT_ANCHOR"
+                [] rel = "ahead"   -> "PROCEED_RESUME"
+         /\ verifiedHead' = IF rel = "at_same" THEN HeadPin ELSE verifiedHead
+    /\ UNCHANGED <<localGenesis, disk, provenance, loaded, anchorVerdict,
+                   resumeOffering, resumeResult, anchorPinned, resumeAnchor>>
 
 ----------------------------------------------------------------------------
 \* §5. Next-state relation + spec. A verify run produces a verified head; the
@@ -459,6 +527,7 @@ Next ==
     \/ WriteAnchor
     \/ Load
     \/ ReVerifyAnchor
+    \/ MonotonicityGate
     \/ ResumeVerify
     \/ Tamper
     \/ Clear
@@ -474,7 +543,7 @@ Spec ==
     /\ WF_vars(ReVerifyAnchor)
 
 ----------------------------------------------------------------------------
-\* §6. Invariants — LSP-0..LSP-5.
+\* §6. Invariants — LSP-0..LSP-7.
 
 \* LSP-0 / TypeOK. Shapes + bounds; the value universes are finite for TLC.
 TypeOK ==
@@ -486,6 +555,11 @@ TypeOK ==
     /\ anchorVerdict \in {Unverified, "PASS", "MISMATCH"}
     /\ resumeOffering \in Offerings
     /\ resumeResult   \in {ResumeNone, "RESUMED", "FALLBACK", "REJECTED"}
+    /\ anchorPinned   \in (Records \cup {Empty})
+    /\ resumeAnchor   \in (Records \cup {Empty})
+    /\ headRelation   \in ({"rel_none"} \cup HeadRelations)
+    /\ lsp7Verdict    \in {"LSP7_NONE", "REFUSED_BELOW", "CROSSCHECK_OK",
+                           "REFUSED_FORK_AT_ANCHOR", "PROCEED_RESUME"}
 
 \* LSP-1 / INV_NoUnverifiedWrite. Every SELF-written on-disk record was written
 \* while a committee-verified head existed. State-form: if the cache holds a
@@ -504,9 +578,15 @@ INV_NoUnverifiedWrite ==
 \* PASS — only MISMATCH. So a resume is never told "this anchor is for your chain"
 \* when it is not; the eclipse-onto-another-chain reuse is rejected. The
 \* `state --verify-anchor` gate (main.cpp:1478 `if (s.genesis_hash == local_hex)`).
+\* STABILITY NOTE (history-variable form): the implication is over anchorPinned —
+\* the record the verdict JUDGED — not the current disk. The naive disk-form is
+\* falsified by a Tamper firing AFTER a PASS (the stale verdict persists while
+\* disk mutates); the verdict's claim is about what it consumed, which the
+\* snapshot preserves. Found by manual review; TLC pending.
 INV_GenesisPinned ==
     (anchorVerdict = "PASS") =>
-        (disk /= Empty /\ WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis)
+        (anchorPinned \in Records /\ WellFormed(anchorPinned)
+         /\ PinnedGenesis(anchorPinned) = localGenesis)
 
 \* LSP-3 / INV_SchemaGated. Load NEVER accepts a record whose schema is not
 \* current: a present on-disk record with a stale/unknown schema_version loads as
@@ -546,9 +626,13 @@ INV_ReadSound ==
 \* different chain. The resume is therefore never weaker than a full verify (the
 \* skipped prefix is exactly the one the cached, genesis-pinned, committee-verified
 \* anchor already covered).
+\* STABILITY NOTE: stated over resumeAnchor (the record the RESUMED consumed),
+\* not the current disk — same Tamper-after-verdict rationale as
+\* INV_GenesisPinned above.
 INV_ResumeSound ==
     (resumeResult = "RESUMED") =>
-        (disk /= Empty /\ WellFormed(disk) /\ PinnedGenesis(disk) = localGenesis)
+        (resumeAnchor \in Records /\ WellFormed(resumeAnchor)
+         /\ PinnedGenesis(resumeAnchor) = localGenesis)
 
 \* LSP-6 / INV_ResumeNoFalseAccept. A RESUMED verdict implies the daemon's suffix
 \* offering was a genuinely-chaining honest suffix ("extends"): the fork-below-
@@ -559,6 +643,31 @@ INV_ResumeSound ==
 \* guard, abstracted here as: only "extends" reaches RESUMED.
 INV_ResumeNoFalseAccept ==
     (resumeResult = "RESUMED") => (resumeOffering = "extends")
+
+\* LSP-7 / INV_MonotoneResume. An ACCEPTING MonotonicityGate verdict exists only
+\* under a non-regressed daemon: CROSSCHECK_OK only for "at_same" (head == anchor
+\* AND the verified tip IS the cached anchor block) and PROCEED_RESUME only for
+\* "ahead". A daemon measured below the anchor, or at it with a different block,
+\* can never reach an accepting verdict — the anchored_head gates throw
+\* (trustless_read.cpp LSP-7; the pre-LSP-7 silent full-verify fail-open is
+\* unreachable in the gated model). headRelation and lsp7Verdict change only
+\* together (atomically, in MonotonicityGate), so the implication is stable.
+INV_MonotoneResume ==
+    (lsp7Verdict \in {"CROSSCHECK_OK", "PROCEED_RESUME"}) =>
+        (headRelation \in {"at_same", "ahead"})
+
+\* LSP-7 / INV_LSP7_RefusalTotal. Every regression-shaped measurement is REFUSED —
+\* totally, with no third disposition: "below" and "at_fork" map only to the two
+\* refusal verdicts (the G1/G2 throws). Together with INV_MonotoneResume this
+\* pins the gate's verdict mapping as a bijection-on-classes: regressed ⇒ refused,
+\* non-regressed ⇒ accepted-or-deferred. The G3 between-queries regression is the
+\* PROCEED_RESUME state followed by a "not_ahead" ResumeVerify offering — at the
+\* anchored_head layer that combination is a THROW (the model keeps the layers
+\* separate; the caller mapping is pinned by the source guard
+\* tools/test_light_resume_monotonicity_guard.sh I3/I6).
+INV_LSP7_RefusalTotal ==
+    (headRelation \in {"below", "at_fork"}) =>
+        (lsp7Verdict \in {"REFUSED_BELOW", "REFUSED_FORK_AT_ANCHOR"})
 
 ----------------------------------------------------------------------------
 \* §7. Temporal property.
@@ -593,8 +702,9 @@ Prop_TamperNeverLoadsAccepted ==
 \*   action-gating discipline this spec mirrors.
 \*
 \* Companion analytic source:
-\*   docs/proofs/LightStatePersistenceSoundness.md (LSP-1..LSP-7; LSP-7
-\*     head-monotonicity is source-guarded, not modeled here). LSP-1 =
+\*   docs/proofs/LightStatePersistenceSoundness.md (LSP-1..LSP-7; LSP-7 =
+\*     MonotonicityGate + INV_MonotoneResume + INV_LSP7_RefusalTotal, also
+\*     source-guarded by tools/test_light_resume_monotonicity_guard.sh). LSP-1 =
 \*     INV_NoUnverifiedWrite; LSP-2 = INV_GenesisPinned; LSP-3 = INV_SchemaGated;
 \*     LSP-4 = INV_FailClosed; LSP-5 = INV_ReadSound; LSP-6 = INV_ResumeSound +
 \*     INV_ResumeNoFalseAccept (the resume CONSUMER is SHIPPED, commit 22c04fa, and
