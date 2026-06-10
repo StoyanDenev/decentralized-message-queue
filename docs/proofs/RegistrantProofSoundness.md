@@ -22,7 +22,7 @@ A single trust-minimized read answering one question without trusting the daemon
 
 > **(`r:` read)** Is domain `D` currently a registered validator (a member of the set the consensus committee is drawn from), and if so, with which `ed_pub` consensus key, `region` tag, and lifecycle anchors `(registered_at, active_from, inactive_from)`, at the committee-verified height — and is it currently `ACTIVE` or `INACTIVE` against that height?
 
-The read's logical pipeline mirrors `read_account_trustless` (`light/trustless_read.cpp:439-572`) with the `a:`-namespace argument replaced by `"r"` and the value-hash decode replaced by the `RegistryEntry` encoding; the shipped implementation is `cmd_verify_registrant` (`light/main.cpp:4456-4773`):
+The read's logical pipeline mirrors `read_account_trustless` (`light/trustless_read.cpp:439-599`) with the `a:`-namespace argument replaced by `"r"` and the value-hash decode replaced by the `RegistryEntry` encoding; the shipped implementation is `cmd_verify_registrant` (`light/main.cpp:4456-4773`):
 
 1. **Genesis anchor** — `anchor_genesis(rpc, genesis_O)` (`light/trustless_read.cpp:55-82`; invoked at `light/main.cpp:4499`): compute `compute_genesis_hash(genesis_O)` locally, fetch block 0, byte-compare. (T-L1.)
 2. **Header-chain walk + per-block committee-sig verify** — `verify_chain_to_head` (`light/trustless_read.cpp:234-248`; invoked at `light/main.cpp:4511`), invoking `verify_headers` + `verify_block_sigs` end-to-end from block 0, capturing `vc.head_state_root` + `vc.height`. (T-L2.) This yields a committee-anchored `state_root` (SR-1). If `vc.head_state_root` is empty the read throws (S-033 not active — `light/main.cpp:4512-4517`).
@@ -30,7 +30,7 @@ The read's logical pipeline mirrors `read_account_trustless` (`light/trustless_r
 4. **Key binding** — bind `proof.key_bytes == "r:" + domain`, recomputed locally (`light/main.cpp:4504-4507` builds `local_key`; the byte-compare is at `light/main.cpp:4561-4570`). A mismatch ⇒ `UNVERIFIABLE`.
 5. **Value-hash cleartext cross-check** — fetch the cleartext registrant via the `account` RPC (`light/main.cpp:4577`), recompute the canonical `RegistryEntry` value-hash from the daemon-asserted cleartext fields (`light/main.cpp:4614-4621`), and require equality against the proof's verified `value_hash` (`light/main.cpp:4623-4632`). (RP-3 / §4.3.)
 6. **Committee-binding of the proof root (S-042)** — a stale-reject (`proof_height < vc.height` ⇒ throw, `light/main.cpp:4644-4650`) followed by `committee_bound_state_root` (`light/trustless_read.cpp:335-437`; invoked at `light/main.cpp:4667-4670`), which binds the proof's claimed `state_root` to the committee signature on the **successor** header rather than to the daemon-reported `state_root` field (which the committee digest excludes). (T-L4 §4.4.1 / RP-1; the mechanism is `docs/SECURITY.md` §S-042. The same helper backs every trustless reader — `verify-param-change`, `read_account_trustless`, `stake-trustless`, etc.)
-7. **Merkle inclusion verify** — `verify_state_proof(proof, anchor_root)` (`light/verify.cpp:285-349`; invoked at `light/main.cpp:4690`), delegating to `crypto::merkle_verify` (`src/crypto/merkle.cpp:113-141`). (T-L3 / RP-2.)
+7. **Merkle inclusion verify** — `verify_state_proof(proof, anchor_root)` (`light/verify.cpp:330-396`; invoked at `light/main.cpp:4690`), delegating to `crypto::merkle_verify` (`src/crypto/merkle.cpp:113-141`). (T-L3 / RP-2.)
 8. **Lifecycle derivation** — on `INCLUDED`, derive `ACTIVE`/`INACTIVE` from the committee-certified `(active_from, inactive_from)` against the committee-verified anchored head height (`light/main.cpp:4705-4708`). (RP-5 / §4.5.)
 
 The verdict tri-state (mirroring `verify-dapp-registration` / `verify-param-change`):
@@ -163,7 +163,7 @@ then either (a) `key_r(D)` is a genuine leaf of the tree `R` commits to at sorte
 2. `A_daemon` returns a state-proof `P_A = (key_bytes_A, value\_hash_A, target\_index, n, proof)` claiming `D` is registered with entry `r_A` when it is not. It may (i) serve a genuine leaf for some *other* registered domain and relabel it, (ii) serve a non-`r:` leaf (e.g. an `a:` or `s:` or `d:` leaf for the **same** domain) with a forged `key_bytes`, (iii) serve a `value\_hash_A` inconsistent with the `r_A` it asserts over the `account` RPC, or (iv) alter `target_index` / a sibling.
 3. `A_daemon` wins if `verify_state_proof(P_A, R)` returns `ok = true` **and** the verdict is `INCLUDED`.
 
-**Proof.** This is the direct application of `MerkleTreeSoundness.md` **MT-4** (inclusion-proof soundness) at the `r:` leaf, plus the **MT-2** leaf-key domain separation. `verify_state_proof` delegates to `crypto::merkle_verify(R, key_bytes, value\_hash_A, target\_index, n, sibs)` (`light/verify.cpp:333-335`), which recomputes the leaf hash
+**Proof.** This is the direct application of `MerkleTreeSoundness.md` **MT-4** (inclusion-proof soundness) at the `r:` leaf, plus the **MT-2** leaf-key domain separation. `verify_state_proof` delegates to `crypto::merkle_verify(R, key_bytes, value\_hash_A, target\_index, n, sibs)` (`light/verify.cpp:378-380`), which recomputes the leaf hash
 
 $$
 c_0 = \text{merkle\_leaf\_hash}(key_bytes, value\_hash_A) = H(\texttt{0x00} \| u32\_be(|key_bytes|) \| key_bytes \| value\_hash_A)
@@ -327,7 +327,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | Theorem | Statement | Primary code citation | Composition |
 |---|---|---|---|
 | RP-1 | Committee-signed `state_root` binds the `r:` leaf | `light/main.cpp:4644-4684` (S-042 binding) → `light/trustless_read.cpp:335-437` (`committee_bound_state_root`); `src/node/producer.cpp::compute_block_digest`; `src/chain/block.cpp::signing_bytes` | `docs/SECURITY.md` §S-042; `StateRootAnchorSoundness.md` SR-1/SR-2/SR-3; `LightClientThreatModel.md` T-L2 |
-| RP-2 | Merkle state-proof for the `r:` leaf is sound | `light/verify.cpp:285-349`; `src/crypto/merkle.cpp:113-141`; leaf encoding `src/chain/chain.cpp:298-308` | `MerkleTreeSoundness.md` MT-1/MT-2/MT-4 + §6.2 (S-040); `S033StateRootNamespaceCoverage.md` T-1/T-2 |
+| RP-2 | Merkle state-proof for the `r:` leaf is sound | `light/verify.cpp:330-396`; `src/crypto/merkle.cpp:113-141`; leaf encoding `src/chain/chain.cpp:298-308` | `MerkleTreeSoundness.md` MT-1/MT-2/MT-4 + §6.2 (S-040); `S033StateRootNamespaceCoverage.md` T-1/T-2 |
 | RP-3 | Value-hash cleartext cross-check binding | recompute `light/main.cpp:4614-4621` ≡ committed `src/chain/chain.cpp:300-307`; compare `light/main.cpp:4625`; cleartext source `src/node/node.cpp:2725-2735` | `LightClientThreatModel.md` L-4; `StakeProofSoundness.md` SP-2; `DAppRegistryReadSoundness.md` DR-2(iii) |
 | RP-4 | One-sided verifier; daemon-asserted `NOT_INCLUDED` ((H-neg)) via `not_found` + cleartext corroboration | `light/main.cpp:4532-4551` (`not_found` + null-registry cross-check); `light/main.cpp:4584-4591` (present-proof + null-registry → throw); `src/chain/chain.cpp:449` (`nullopt`); `src/node/node.cpp:3428` (`not_found`) | `MerkleTreeSoundness.md` MT-5; `NegativeVerdictSoundness.md` NV-6 |
 | RP-5 | ACTIVE/INACTIVE is a sound derived predicate | `light/main.cpp:4705-4708`; struct sentinel `include/determ/chain/chain.hpp:38` | `DAppRegistryReadSoundness.md` DR-6 |
@@ -342,8 +342,8 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | `account` RPC registry block (cleartext source) | `src/node/node.cpp:2725-2735` (`region` added commit `48a6f5d`) |
 | `state_proof` RPC simple-key `r:` branch | `src/node/node.cpp:3355-3429` (`r` enumerated at `node.cpp:3382`; `not_found` at `3428`) |
 | `cmd_verify_registrant` (the reader) | `light/main.cpp:4456-4773` |
-| Genesis anchor / committee-sig verify | `light/trustless_read.cpp:43-186`; `light/verify.cpp:104-283` |
-| Merkle state-proof verify | `light/verify.cpp:285-349`; `src/crypto/merkle.cpp:113-141` |
+| Genesis anchor / committee-sig verify | `light/trustless_read.cpp:46-230`; `light/verify.cpp:135-328` |
+| Merkle state-proof verify | `light/verify.cpp:330-396`; `src/crypto/merkle.cpp:113-141` |
 | CLI dispatch | `light/main.cpp:7286` (`verify-registrant` → `cmd_verify_registrant`, defined at `:4456`) |
 | `state_proof` RPC contract | `docs/PROTOCOL.md` §10.2 |
 | `r:` canonical Merkle-leaf row | `docs/PROTOCOL.md` §4.1.1 |

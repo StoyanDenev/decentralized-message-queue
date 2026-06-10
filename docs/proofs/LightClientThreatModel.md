@@ -95,7 +95,7 @@ The light-client composes four verification primitives over the operator's per-i
 
 ### 3.1 Genesis anchor
 
-**Function.** `determ::light::anchor_genesis` at `light/trustless_read.cpp:52-79`.
+**Function.** `determ::light::anchor_genesis` at `light/trustless_read.cpp:55-82`.
 
 **Inputs.**
 
@@ -115,7 +115,7 @@ The anchor runs unconditionally at the start of every composite command that tou
 
 ### 3.2 Committee-signature verification
 
-**Function.** `determ::light::verify_block_sigs` at `light/verify.cpp:190-283`.
+**Function.** `determ::light::verify_block_sigs` at `light/verify.cpp:235-328`.
 
 **Inputs.**
 
@@ -139,7 +139,7 @@ Pre-S-038 (block.state_root absent), the `state_root_hex` field is empty and the
 
 ### 3.3 Header-chain continuity
 
-**Function.** `determ::light::verify_headers` at `light/verify.cpp:104-188`.
+**Function.** `determ::light::verify_headers` at `light/verify.cpp:135-233`.
 
 **Inputs.**
 
@@ -155,11 +155,11 @@ Pre-S-038 (block.state_root absent), the `state_root_hex` field is empty and the
 
 **Output.** A `VerifyResult` with `count` and `block_hash_hex` = the page's tail block-hash (suitable as the next page's `prev_hash` anchor).
 
-The `verify-chain` composite at `light/trustless_read.cpp:81-186` walks the chain in pages of 256 (`PAGE` constant) from block 0 to the daemon's reported tip, invoking `verify_headers` per page AND `verify_block_sigs` per block within each page.
+The `verify-chain` composite core `verify_chain_walk` at `light/trustless_read.cpp:105-230` (reached via the `verify_chain_to_head` wrapper at `:234-248`) walks the chain in pages of 256 (`PAGE` constant) from block 0 to the daemon's reported tip, invoking `verify_headers` per page AND `verify_block_sigs` per block within each page.
 
 ### 3.4 Merkle state-proof verification
 
-**Function.** `determ::light::verify_state_proof` at `light/verify.cpp:285-349`, delegating to `determ::crypto::merkle_verify` at `src/crypto/merkle.cpp`.
+**Function.** `determ::light::verify_state_proof` at `light/verify.cpp:330-396`, delegating to `determ::crypto::merkle_verify` at `src/crypto/merkle.cpp`.
 
 **Inputs.**
 
@@ -175,7 +175,7 @@ The `verify-chain` composite at `light/trustless_read.cpp:81-186` walks the chai
 
 **Output.** A `VerifyResult` with `ok=true` and `state_root_hex` = the root verified against on success; structured `detail` field describing the failure mode on rejection.
 
-The proof verification is *self-anchoring* against the supplied root. The load-bearing step in the composite trustless-read flow at `light/trustless_read.cpp:188-350` is the OUTER one: anchor the proof's `state_root` to a *committee-signed* header, then invoke `verify_state_proof` to confirm the Merkle path actually rolls up to that root.
+The proof verification is *self-anchoring* against the supplied root. The load-bearing step in the composite trustless-read flow at `light/trustless_read.cpp:439-599` is the OUTER one: anchor the proof's `state_root` to a *committee-signed* header, then invoke `verify_state_proof` to confirm the Merkle path actually rolls up to that root.
 
 ### 3.5 Pipeline composition diagram
 
@@ -256,7 +256,7 @@ The function computes `expected := compute_genesis_hash(genesis_O)` locally — 
 
 **Adversary game.**
 
-1. Setup. Operator pins `genesis_O`. The genesis-pinned committee `K_0 := {(domain_i, pk_i)}` for the initial creators is loaded into the light-client's `committee_seed` map by `build_genesis_committee` at `trustless_read.cpp:43-50`.
+1. Setup. Operator pins `genesis_O`. The genesis-pinned committee `K_0 := {(domain_i, pk_i)}` for the initial creators is loaded into the light-client's `committee_seed` map by `build_genesis_committee` at `trustless_read.cpp:46-53`.
 2. Adversary forges a block header `H_A` claiming to be at some height `h > 0` with creators `K_A ⊂ K_0` (committee subset) and signatures `{σ_i^A : i ∈ [0, |K_A|)}`.
 3. Adversary wins if `verify_block_sigs(H_A, committee_json, *)` returns `ok=true`.
 
@@ -268,7 +268,7 @@ The threshold `required = k` (MD) or `ceil(2k/3)` (BFT) means the adversary must
 
 **Composition with FA1.** This is exactly the FA1 K-of-K safety property restricted to a single block. FA1's full-chain safety (no two finalized blocks at the same height) is not needed by the light-client per se; what the light-client uses is the *per-block* signature-set primitive that FA1 already establishes.
 
-**Caveat: committee evolution.** The genesis-seeded committee map covers the initial creators. Mid-chain REGISTER / DEREGISTER events would shift the active committee. The current `verify_chain_to_head` requires every creator to be in the seed map (`light/verify.cpp:223-229`). For chains with mid-chain REGISTERs, the operator must pre-populate `committee_seed` with every domain that has been registered. This is documented in `light/trustless_read.hpp:71-75` as a scope limitation; chains with mid-chain registry changes need either (a) operator-provided extended committee map, (b) future stateful-sync extension. T-L2's claim holds conditional on the supplied committee map being a superset of every creator encountered on the chain.
+**Caveat: committee evolution.** The genesis-seeded committee map covers the initial creators. Mid-chain REGISTER / DEREGISTER events would shift the active committee. The current `verify_chain_to_head` requires every creator to be in the seed map (`light/verify.cpp:268-273`). For chains with mid-chain REGISTERs, the operator must pre-populate `committee_seed` with every domain that has been registered. This is documented in `light/trustless_read.hpp:71-75` as a scope limitation; chains with mid-chain registry changes need either (a) operator-provided extended committee map, (b) future stateful-sync extension. T-L2's claim holds conditional on the supplied committee map being a superset of every creator encountered on the chain.
 
 **Concrete-security bound.** `Pr[A_daemon wins T-L2] ≤ K · 2⁻¹²⁸` per block forge attempt. Cumulative over `Q` attempts: `Q · K · 2⁻¹²⁸`.   ∎
 
@@ -276,7 +276,7 @@ The threshold `required = k` (MD) or `ceil(2k/3)` (BFT) means the adversary must
 
 **Statement.** Under (A2) SHA-256 collision resistance + a committee-anchored state_root `R := state_root(h)`, an adversarial daemon `A_daemon` cannot present a forged state-proof for a value not actually committed under `R`.
 
-> **Precise binding of `R` to the committee (mechanism note — IMPLEMENTED).** "Committee-anchored" here is *transitive-forward*, not a direct signature: the committee directly Ed25519-signs `compute_block_digest` (which carries `index, prev_hash, tx_root, …` but **NOT** `state_root`); `state_root(h)` is bound into `Block::signing_bytes(h)` and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`. So `R = state_root(h)` is committee-certified via the *successor* block's signature — `state_root(h) ∈ signing_bytes(h) ∈ block_hash(h) = prev_hash(h+1) ∈ digest(h+1)`. This is the standalone sub-lemma `StateRootAnchorSoundness.md` (F6) SR-1 proves. **The binding is now mechanized** in `light/trustless_read.cpp::committee_bound_state_root` (`:333-411`): it fetches the FULL block at `h` via the `"block"` RPC (`node.cpp:2623-2627` — the stripped `"headers"` RPC cannot recompute `block_hash`), recomputes `block_hash(h)`, verifies the committee-signed successor's sigs, and requires `successor.prev_hash == recomputed block_hash(h)` before returning the attested `state_root`. ALL trust-minimized readers (`read_account_trustless`, `verify_state_root_at`, stake / supply / account-history / receipt-inclusion / merge-state / param-change / registrant / dapp-registration / account verifiers) route their reported `state_root` through it. **Head-block boundary:** the chain head's `state_root` has no signed successor yet, so the helper **fails closed** (`trustless_read.cpp:366-375`) — the reader reports an error rather than an unbound head root; an anchor becomes verifiable once a successor is produced (full nodes enforce the head's root meanwhile via the apply-layer S-033 gate; `StateRootAnchorSoundness.md` §6.3). Earlier the readers trusted the daemon's reported `state_root`/`block_hash` field — a confirmed HIGH-severity gap (a malicious daemon could swap `state_root` post-signing → forged committee-verified balance); now closed, see `docs/SECURITY.md §S-042`. T-L3 below proves the Merkle-path soundness *given* such an `R`; the committee-binding of `R` itself is T-L2 + SR-1.
+> **Precise binding of `R` to the committee (mechanism note — IMPLEMENTED).** "Committee-anchored" here is *transitive-forward*, not a direct signature: the committee directly Ed25519-signs `compute_block_digest` (which carries `index, prev_hash, tx_root, …` but **NOT** `state_root`); `state_root(h)` is bound into `Block::signing_bytes(h)` and hence into `block_hash(h) = SHA256(signing_bytes(h) ‖ creator_block_sigs)`, and `block_hash(h) = prev_hash(h+1)` sits inside the committee-signed `digest(h+1)`. So `R = state_root(h)` is committee-certified via the *successor* block's signature — `state_root(h) ∈ signing_bytes(h) ∈ block_hash(h) = prev_hash(h+1) ∈ digest(h+1)`. This is the standalone sub-lemma `StateRootAnchorSoundness.md` (F6) SR-1 proves. **The binding is now mechanized** in `light/trustless_read.cpp::committee_bound_state_root` (`:335-437`): it fetches the FULL block at `h` via the `"block"` RPC (`node.cpp:2623-2627` — the stripped `"headers"` RPC cannot recompute `block_hash`), recomputes `block_hash(h)`, verifies the committee-signed successor's sigs, and requires `successor.prev_hash == recomputed block_hash(h)` before returning the attested `state_root`. ALL trust-minimized readers (`read_account_trustless`, `verify_state_root_at`, stake / supply / account-history / receipt-inclusion / merge-state / param-change / registrant / dapp-registration / account verifiers) route their reported `state_root` through it. **Head-block boundary:** the chain head's `state_root` has no signed successor yet, so the helper **fails closed** (`trustless_read.cpp:388-401`) — the reader reports an error rather than an unbound head root; an anchor becomes verifiable once a successor is produced (full nodes enforce the head's root meanwhile via the apply-layer S-033 gate; `StateRootAnchorSoundness.md` §6.3). Earlier the readers trusted the daemon's reported `state_root`/`block_hash` field — a confirmed HIGH-severity gap (a malicious daemon could swap `state_root` post-signing → forged committee-verified balance); now closed, see `docs/SECURITY.md §S-042`. T-L3 below proves the Merkle-path soundness *given* such an `R`; the committee-binding of `R` itself is T-L2 + SR-1.
 
 **Adversary game.**
 
@@ -298,7 +298,7 @@ For chains with `leaf_count ≤ 2⁶⁴` (which is every practical state size), 
 
 ### 4.4 Theorem T-L4 (balance/nonce trust via state-proof composition)
 
-**Statement.** Under T-L1 + T-L2 + T-L3, the composite trustless-read flow `read_account_trustless` at `light/trustless_read.cpp:188-350` yields balance/next_nonce values that are bound, end-to-end, to a committee-signed `state_root` anchored to the operator's pinned genesis.
+**Statement.** Under T-L1 + T-L2 + T-L3, the composite trustless-read flow `read_account_trustless` at `light/trustless_read.cpp:439-599` yields balance/next_nonce values that are bound, end-to-end, to a committee-signed `state_root` anchored to the operator's pinned genesis.
 
 **Adversary game.**
 
@@ -333,17 +333,13 @@ Union bound over the steps: `≤ (1 + K · vc.height + log₂(leaf_count) + 1) �
 
 Between the light-client fetching the head (step 2, anchoring height `vc.height`) and fetching the state-proof (step 3, returning at height `proof_height`), the actual chain has advanced. The proof carries `state_root` at `proof_height`, which is generally `≥ vc.height`. Naively comparing `proof.state_root == vc.head_state_root` would fail in the common case (chain advanced); naively trusting the proof's claimed root (no anchoring) would defeat the trust model.
 
-The mitigation at `trustless_read.cpp:226-307` works in three branches:
+The mitigation (S-042) at `trustless_read.cpp:528-557` is a stale-height gate followed by a single committee-binding step — there is no longer a `proof_height < / == / >` branch split; the former `==` and `>` cases both route to the same successor-binding helper:
 
-1. **`proof_height < vc.height`.** This is a stale-state attack — the daemon returned an old proof from before the head the light-client just verified. Throw with `proof.height ... is BEFORE verified-chain head ... — daemon is serving stale state`.
+1. **Stale-height gate (`proof_height < vc.height`).** This is a stale-state attack — the daemon returned an old proof from before the head the light-client just verified. The gate at `:528-533` throws with `proof.height ... is BEFORE verified-chain head ... — daemon is serving stale state`.
 
-2. **`proof_height > vc.height`.** The chain advanced during the round-trip. The mitigation:
-   - Walk the prev_hash chain from `vc.height - 1` up to `anchor_index = proof_height - 1` via `verify_headers` to confirm the new tip extends the previously-verified head (catches a "forge a single committee-signed header detached from the chain" attack — the walk forces the new tip to extend the verified prefix).
-   - Bind `proof.state_root` to the COMMITTEE-SIGNED root committed by the block at `anchor_index` via `committee_bound_state_root(rpc, committee_json, anchor_index)` (`trustless_read.cpp:333-411`): fetch the FULL block at `anchor_index` via the `"block"` RPC, recompute its `block_hash`, verify the SUCCESSOR(`anchor_index+1`) committee sigs, and require `successor.prev_hash == recomputed block_hash`. The attested `state_root` is then required to equal `proof.state_root` byte-for-byte; mismatch throws. This is the load-bearing fix: the light client does NOT trust `header[anchor_index].state_root` as a reported field (the committee digest excludes `state_root`, so a stripped header's field is not committee-attested and can be swapped post-signing); it binds the field the sound way via the recompute + successor (`docs/SECURITY.md §S-042`).
+2. **Committee-binding (`proof_height >= vc.height`).** With `anchor_index = proof_height − 1` (`:545`), bind `proof.state_root` to the COMMITTEE-SIGNED root committed by the block at `anchor_index` via `committee_bound_state_root(rpc, committee_json, anchor_index)` (`trustless_read.cpp:335-437`, called at `:546-548`): fetch the FULL block at `anchor_index` via the `"block"` RPC, recompute its `block_hash`, verify the SUCCESSOR(`anchor_index+1`) committee sigs (`:409-415`), and require `successor.prev_hash == recomputed block_hash` (`:424-432`). The attested `state_root` is then required to equal `proof.state_root` byte-for-byte (`:549-555`); mismatch throws. This is the load-bearing fix: the light client does NOT trust `header[anchor_index].state_root` as a reported field (the committee digest excludes `state_root`, so a stripped header's field is not committee-attested and can be swapped post-signing); it binds the field the sound way via the recompute + successor (`docs/SECURITY.md §S-042`). When `anchor_index` is the current head (no signed successor yet) the helper fails closed unless `--wait` polls for the next block.
 
-3. **`proof_height == vc.height`.** The proof's claimed root must match `vc.head_state_root` byte-for-byte. Mismatch throws.
-
-The race-window narrative is the load-bearing part of T-L4: without the mitigation, the daemon could serve an honest `vc.head_state_root` for the head walk, then serve a state-proof at some forked future height with a different state_root, and the light-client would naively use the un-anchored future root. With the mitigation, every forked future root must (a) match a header field, (b) be signed by a known committee, (c) chain via prev_hash to the verified prefix. By T-L1 + T-L2, all three conditions defeat the daemon's lie.
+The race-window narrative is the load-bearing part of T-L4: without the mitigation, the daemon could serve an honest `vc.head_state_root` for the head walk, then serve a state-proof at some forked future height with a different state_root, and the light-client would naively use the un-anchored future root. With the mitigation, every accepted root must be transitively committed by a committee-signed successor's `prev_hash` over the recomputed anchor `block_hash` (which includes `state_root` via `signing_bytes`). By T-L1 + T-L2, that defeats the daemon's lie — a swapped `state_root` changes the recomputed `block_hash` and so no longer matches the `prev_hash` the committee signed.
 
 **Concrete-security bound.** `Pr[A_daemon wins T-L4] ≤ (vc.height + 2) · K · 2⁻¹²⁸ + 2⁻¹²²`. For practical chains (e.g., `vc.height ≤ 2³², K ≤ 16`), this is `≤ 2⁻⁹²`, negligible.   ∎
 
@@ -385,23 +381,21 @@ Composition with T-L4: the operator-supplied `nonce` came from a verified state-
 
 **Lemma L-3 (Merkle inclusion soundness).** `crypto::merkle_verify(R, key_bytes, value_hash, target_index, leaf_count, sibs)` returns `true` iff there exists a leaf at position `target_index` in a `leaf_count`-sized balanced binary Merkle tree whose root is `R` and whose `(key_bytes, value_hash)` pair hashes to that leaf. Proof: by induction over the path. At level 0, the leaf hash is `H(key_bytes ‖ value_hash)`. At level `i + 1`, the inner hash is computed from the level-`i` hash and the supplied sibling (left or right depending on the target_index bit). After `ceil(log₂(leaf_count))` steps, the function compares the root against `R`. If `value_hash` differs from the true leaf value at that position, the level-0 hash differs; by A2 (collision resistance) the difference cascades up the tree with probability `1 - 2⁻¹²⁸` per level. Cumulative bound across the tree: `1 - log₂(leaf_count) · 2⁻¹²⁸`. The verifier returns `false` (rejects) on a forged inclusion claim with overwhelming probability.   □
 
-**Lemma L-4 (cleartext-vs-value_hash cross-check binds the daemon's `account` reply).** The composite trustless-read flow at `trustless_read.cpp:309-343` fetches `rpc_account` for the same `domain`, extracts `(balance, next_nonce)`, computes `SHA256(balance_be ‖ next_nonce_be)`, and compares against the proof's verified `value_hash`. Proof: the chain's apply layer at `chain.cpp:285-290` emits the `a:`-namespace leaf with exactly this value-hash encoding (`value_hash = SHA256(balance_u64 ‖ next_nonce_u64)` per `S033StateRootNamespaceCoverage.md` §2.1). For the daemon to lie about `(balance, next_nonce)` while serving an honest proof for the chain's actual state, it would need `(balance_A, next_nonce_A) ≠ (balance_T, next_nonce_T)` with `SHA256(balance_A ‖ next_nonce_A) = SHA256(balance_T ‖ next_nonce_T)` — a SHA-256 collision, `≤ 2⁻¹²⁸` per attempt. Alternatively, the daemon could serve an honest cleartext and a forged proof for some other state; the proof forge is caught by L-3 + the committee-signed anchor.   □
+**Lemma L-4 (cleartext-vs-value_hash cross-check binds the daemon's `account` reply).** The composite trustless-read flow at `trustless_read.cpp:573-593` fetches `rpc_account` for the same `domain`, extracts `(balance, next_nonce)`, computes `SHA256(balance_be ‖ next_nonce_be)`, and compares against the proof's verified `value_hash`. Proof: the chain's apply layer at `chain.cpp:285-290` emits the `a:`-namespace leaf with exactly this value-hash encoding (`value_hash = SHA256(balance_u64 ‖ next_nonce_u64)` per `S033StateRootNamespaceCoverage.md` §2.1). For the daemon to lie about `(balance, next_nonce)` while serving an honest proof for the chain's actual state, it would need `(balance_A, next_nonce_A) ≠ (balance_T, next_nonce_T)` with `SHA256(balance_A ‖ next_nonce_A) = SHA256(balance_T ‖ next_nonce_T)` — a SHA-256 collision, `≤ 2⁻¹²⁸` per attempt. Alternatively, the daemon could serve an honest cleartext and a forged proof for some other state; the proof forge is caught by L-3 + the committee-signed anchor.   □
 
-**Lemma L-5 (race-window mitigation soundness).** The three-branch dispatch at `trustless_read.cpp:226-307` for `proof_height < / == / > vc.height` is sound under T-L1 + T-L2: every accepted proof is bound to a committee-signed header that extends the verified prefix.
+**Lemma L-5 (race-window mitigation soundness).** The S-042 committee-binding at `trustless_read.cpp:528-557` (a stale-height gate at `:528-533` followed by `committee_bound_state_root` at `:546-548`) is sound under T-L1 + T-L2: every accepted proof is bound to a committee-signed successor header whose `prev_hash` commits the recomputed anchor `block_hash` (and hence the anchor's `state_root`). The former `proof_height < / == / >` branch split is gone — both the `==` and `>` race cases route through the same successor binding.
 
 Proof by case:
 
-- **`proof_height < vc.height`.** Rejected unconditionally at `:237-242`. No proof is accepted with this property.
+- **`proof_height < vc.height`.** Rejected unconditionally by the stale-height gate at `:528-533`. No proof is accepted with this property.
 
-- **`proof_height == vc.height`.** The proof's `state_root` must equal `vc.head_state_root` byte-for-byte at `:302-307`. Since `vc.head_state_root` was extracted from a committee-signed header at height `vc.height - 1` (the head's index is `vc.height - 1`), any divergence is a daemon lie caught at the byte-equality check. By L-2 (digest binding) + T-L2 (committee-sig binding), the daemon cannot serve a different `state_root` claim at this height without breaking A1.
+- **`proof_height >= vc.height`.** With `anchor_index = proof_height − 1` (`:545`), `committee_bound_state_root(rpc, committee_json, anchor_index)` (`trustless_read.cpp:335-437`, called at `:546-548`):
+  1. Fetch the FULL block at `anchor_index` via the `"block"` RPC and recompute its `block_hash` (which binds `state_root` through `signing_bytes`).
+  2. Fetch the SUCCESSOR header (`anchor_index+1`) and verify its committee sigs (`:409-415`), then require `successor.prev_hash == recomputed block_hash` (`:424-432`). Then require the attested `state_root` equals `proof.state_root` (`:549-555`). Any mismatch throws.
 
-- **`proof_height > vc.height`.** The dispatch runs, with `anchor_index = proof_height - 1`:
-  1. Walk the prev_hash chain from `vc.height - 1` to `anchor_index` via `verify_headers`. Failure throws. This binds the new tip to the previously-verified chain.
-  2. Bind `proof.state_root` via `committee_bound_state_root(rpc, committee_json, anchor_index)` (`trustless_read.cpp:333-411`): fetch the FULL block at `anchor_index` via the `"block"` RPC, recompute its `block_hash` (which binds `state_root` through `signing_bytes`), verify the committee sigs on the SUCCESSOR header (`anchor_index+1`), and require `successor.prev_hash == recomputed block_hash`. Then require the attested `state_root` equals `proof.state_root`. Any mismatch throws.
+  By T-L2, the successor's committee sigs require the daemon to present a header the committee actually signed under their Ed25519 keys; without those keys, infeasible. By A2 the recomputed `block_hash` over a swapped-`state_root` body cannot match the committee-signed `prev_hash`. Combined, any accepted proof binds to a committee-attested `state_root` on the operator's pinned chain — NOT to a daemon-reported header field (the committee digest excludes `state_root`). At the head (no signed successor yet) the helper fails closed (`trustless_read.cpp:388-401`) unless `--wait` polls for the next block. See `docs/SECURITY.md §S-042`.   □
 
-  By T-L2, the successor's committee sigs require the daemon to present a header the committee actually signed under their Ed25519 keys; without those keys, infeasible. By A2 the recomputed `block_hash` over a swapped-`state_root` body cannot match the committee-signed `prev_hash`. By the prev_hash continuity in step 1 (A2 on each link), the new tip must extend the verified prefix rather than fork off. Combined, any accepted proof binds to a committee-attested `state_root` on the operator's pinned chain — NOT to a daemon-reported header field (the committee digest excludes `state_root`). At the head (no signed successor) the helper fails closed (`trustless_read.cpp:366-375`). See `docs/SECURITY.md §S-042`.   □
-
-**Lemma L-6 (fail-closed exit).** The light-client's verification surfaces never silently downgrade to "trust the daemon." Every failure path in `light/verify.cpp` and `light/trustless_read.cpp` either returns a `VerifyResult` with `ok=false` (consumed by the caller, which throws) or directly throws. The composite read flows at `light/trustless_read.cpp` re-throw any caller-level failure to the CLI dispatcher in `light/main.cpp`, which converts to a non-zero exit code with a structured stderr diagnostic. Proof: inspection of the verify functions — `verify_headers` (`:104-188`) sets `r.ok = false` and `r.detail` on every error branch and returns to the caller which throws; `verify_block_sigs` (`:190-283`) does the same; `verify_state_proof` (`:285-349`) does the same; `read_account_trustless` (`:188-350`) throws on every inconsistency it detects (lines 64, 72, 91, 132, 141, 156, 167, 202, 213, 222, 237, 263, 270, 281, 294, 303, 317, 334). No silent-accept code path exists.   □
+**Lemma L-6 (fail-closed exit).** The light-client's verification surfaces never silently downgrade to "trust the daemon." Every failure path in `light/verify.cpp` and `light/trustless_read.cpp` either returns a `VerifyResult` with `ok=false` (consumed by the caller, which throws) or directly throws. The composite read flows at `light/trustless_read.cpp` re-throw any caller-level failure to the CLI dispatcher in `light/main.cpp`, which converts to a non-zero exit code with a structured stderr diagnostic. Proof: inspection of the verify functions — `verify_headers` (`:135-233`) sets `r.ok = false` and `r.detail` on every error branch and returns to the caller which throws; `verify_block_sigs` (`:235-328`) does the same; `verify_state_proof` (`:330-396`) does the same; `read_account_trustless` (`:439-599`) throws on every inconsistency it detects (the genesis-anchor mismatch, the per-block sig failures, the state_root-not-activated gate, the key-bytes bind, the self-consistency check, the stale-height gate, the committee-bound-state_root mismatch, and the cleartext value-hash cross-check). No silent-accept code path exists.   □
 
 ---
 
@@ -451,7 +445,7 @@ For example: if the light-client retrieves `(balance, next_nonce)` for account `
 
 The light-client benefits transitively: a daemon serving chain data has gone through S-021 load validation; the daemon's served headers carry S-038-populated state_root fields; the light-client's state-proof verification anchors against an S-033-committed state_root.
 
-**Composition statement.** T-L3 + T-L4 depend on the chain having S-033 + S-038 active. The light-client's `read_account_trustless` explicitly throws with the diagnostic `chain has not activated state_root (S-033)` if the verified head's state_root is empty (`light/trustless_read.cpp:202-208`). This is a chain-level deployment prerequisite, not a light-client design choice.
+**Composition statement.** T-L3 + T-L4 depend on the chain having S-033 + S-038 active. The light-client's `read_account_trustless` explicitly throws with the diagnostic `chain has not activated state_root (S-033)` if the verified head's state_root is empty (`light/trustless_read.cpp:458-464`). This is a chain-level deployment prerequisite, not a light-client design choice.
 
 ---
 
@@ -529,11 +523,11 @@ This section records discoveries from writing the proof that the operator or fut
 
 ### F-1 Committee map seeded only from `initial_creators`
 
-**Surface.** `light/trustless_read.cpp:43-50` (`build_genesis_committee`) populates the seed map exclusively from `cfg.initial_creators`. Mid-chain registry changes (REGISTER / DEREGISTER on the chain proper) are not threaded into the seed map at runtime.
+**Surface.** `light/trustless_read.cpp:46-53` (`build_genesis_committee`) populates the seed map exclusively from `cfg.initial_creators`. Mid-chain registry changes (REGISTER / DEREGISTER on the chain proper) are not threaded into the seed map at runtime.
 
 **Soundness impact.** T-L2 holds conditional on the seed map being a superset of every encountered creator. If the operator's chain has post-genesis REGISTERs, the operator must pre-populate the committee_seed map (e.g., by hand-editing the JSON consumed by `build_genesis_committee`, or via a future operator-side helper).
 
-**Mitigation.** The existing diagnostic at `light/verify.cpp:223-229` produces `"creator '<domain>' is not in the supplied committee"` — clean fail-closed exit. Operators on chains with REGISTERs need the committee-map hand-extension pattern. A future stateful-sync extension would track committee evolution chain-side.
+**Mitigation.** The existing diagnostic at `light/verify.cpp:268-273` produces `"creator '<domain>' is not in the supplied committee"` — clean fail-closed exit. Operators on chains with REGISTERs need the committee-map hand-extension pattern. A future stateful-sync extension would track committee evolution chain-side.
 
 ### F-2 No defense against stale-state lies within the genesis-seed committee
 
@@ -575,22 +569,22 @@ Per-theorem citation table for an auditor walking from theorem to code.
 
 | Theorem | Function | File:lines | Role |
 |---|---|---|---|
-| T-L1 | `anchor_genesis` | `light/trustless_read.cpp:52-79` | Compute `compute_genesis_hash(genesis_O)` locally, fetch block 0, compare. |
+| T-L1 | `anchor_genesis` | `light/trustless_read.cpp:55-82` | Compute `compute_genesis_hash(genesis_O)` locally, fetch block 0, compare. |
 | T-L1 | `compute_genesis_hash` | `src/chain/genesis.cpp:429-432` | `make_genesis_block(cfg).compute_hash()`. |
 | T-L1 | `make_genesis_block` | `src/chain/genesis.cpp::make_genesis_block` | Canonical genesis-block encoder. |
-| T-L2 | `verify_block_sigs` | `light/verify.cpp:190-283` | Per-block Ed25519 sig set verify. |
+| T-L2 | `verify_block_sigs` | `light/verify.cpp:235-328` | Per-block Ed25519 sig set verify. |
 | T-L2 | `light_compute_block_digest` | `light/verify.cpp:57-92` | Byte-for-byte copy of `producer.cpp::compute_block_digest`. |
-| T-L2 | `verify_chain_to_head` | `light/trustless_read.cpp:81-186` | Per-page header walk + per-block sig verify, end-to-end. |
+| T-L2 | `verify_chain_to_head` | `light/trustless_read.cpp:105-230` (wrapper `:234-248`) | Per-page header walk + per-block sig verify, end-to-end (core `verify_chain_walk`). |
 | T-L2 | `pad_stripped_header` | `light/verify.cpp:63-69` | Inject empty arrays for heavy fields that don't participate in digest. |
 | T-L2 | `parse_committee` | `light/verify.cpp:71-102` | Build domain → PubKey map from genesis JSON. |
-| T-L2 | `build_genesis_committee` | `light/trustless_read.cpp:43-50` | Seed the committee map from genesis `initial_creators`. |
-| T-L3 | `verify_state_proof` | `light/verify.cpp:285-349` | Wrapper over `merkle_verify` with json parsing. |
+| T-L2 | `build_genesis_committee` | `light/trustless_read.cpp:46-53` | Seed the committee map from genesis `initial_creators`. |
+| T-L3 | `verify_state_proof` | `light/verify.cpp:330-396` | Wrapper over `merkle_verify` with json parsing. |
 | T-L3 | `merkle_verify` | `src/crypto/merkle.cpp` | Recompute path from leaf to root, compare. |
-| T-L4 | `read_account_trustless` | `light/trustless_read.cpp:188-350` | Full composite: anchor → walk → state-proof → race-window mitigation → cleartext cross-check. |
-| T-L3 / T-L4 binding | `committee_bound_state_root` | `light/trustless_read.cpp:333-411` (decl `trustless_read.hpp:174-205`) | **The implemented committee-binding of `state_root` (S-042):** full-block recompute via the `"block"` RPC + committee-signed successor `prev_hash` match; head fails closed (`:366-375`). Every trust-minimized reader routes its reported `state_root` through it. |
+| T-L4 | `read_account_trustless` | `light/trustless_read.cpp:439-599` | Full composite: anchor → walk → state-proof → race-window mitigation → cleartext cross-check. |
+| T-L3 / T-L4 binding | `committee_bound_state_root` | `light/trustless_read.cpp:335-437` (decl `trustless_read.hpp:174-205`) | **The implemented committee-binding of `state_root` (S-042):** full-block recompute via the `"block"` RPC + committee-signed successor `prev_hash` match; head fails closed (`:388-401`). Every trust-minimized reader routes its reported `state_root` through it. |
 | T-L3 / T-L4 binding | `Node::rpc_block` (full block) | `src/node/node.cpp:2623-2627` | the `"block"` RPC returning the UNSTRIPPED body so the light client can recompute `compute_hash` (the stripped `"headers"` RPC cannot — `node.cpp:2658-2661`). |
-| T-L4 race-window | `read_account_trustless` race branches | `light/trustless_read.cpp:226-307` | The three-branch handling for `proof_height < / == / > vc.height`. |
-| T-L4 cleartext cross-check | `read_account_trustless` value-hash recompute | `light/trustless_read.cpp:309-343` | `SHA256(balance_be ‖ nonce_be) == proof.value_hash` byte-equality. |
+| T-L4 race-window | `read_account_trustless` S-042 binding | `light/trustless_read.cpp:528-557` | Stale-height gate (`:528-533`) then `committee_bound_state_root` (`:546-548`); no `< / == / >` branch split — `==` and `>` both route to the successor binding. |
+| T-L4 cleartext cross-check | `read_account_trustless` value-hash recompute | `light/trustless_read.cpp:573-593` | `SHA256(balance_be ‖ nonce_be) == proof.value_hash` byte-equality. |
 | T-L5 | `sign_light_tx` | `light/sign_tx.cpp:64-124` | Build envelope, sign via OpenSSL Ed25519, emit JSON. |
 | T-L5 | `compute_signing_bytes` | `light/sign_tx.cpp:37-62` | Byte-for-byte copy of `Transaction::signing_bytes`. |
 | T-L5 | `LightKeyfile` load | `light/keyfile.cpp::load_light_keyfile` | Validate keyfile shape, derive PubKey, confirm anon_address binding. |

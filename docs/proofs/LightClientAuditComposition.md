@@ -32,7 +32,7 @@ The `determ-light audit --rpc-port <N> --genesis <file> [--json]` composite comm
 
 | Component | Implementation | Backing proof | What it establishes |
 |---|---|---|---|
-| **CHAIN** | `anchor_genesis` (`light/trustless_read.cpp:52-79`) + `verify_chain_to_head` (`:81-186`), the `verify-chain` flow | `LightClientThreatModel.md` **T-L1** (genesis anchor) + **T-L2** (per-block committee sigs) + chain-continuity walk; `Safety.md` **§7 T-1.2** (the chain-level light-client safety composition) | The served chain's block 0 byte-equals the operator's pinned genesis, AND every block from genesis to head carries a valid K-of-K (MD) / `⌈2K/3⌉`-of-`k_bft` (BFT) committee signature set over its digest, AND the prev_hash links are continuous — i.e. a genuinely-continuous, committee-signed chain anchored to the pinned genesis. |
+| **CHAIN** | `anchor_genesis` (`light/trustless_read.cpp:55-82`) + `verify_chain_to_head` (`:234-248`, delegating to the `verify_chain_walk` core `:105-230`), the `verify-chain` flow | `LightClientThreatModel.md` **T-L1** (genesis anchor) + **T-L2** (per-block committee sigs) + chain-continuity walk; `Safety.md` **§7 T-1.2** (the chain-level light-client safety composition) | The served chain's block 0 byte-equals the operator's pinned genesis, AND every block from genesis to head carries a valid K-of-K (MD) / `⌈2K/3⌉`-of-`k_bft` (BFT) committee signature set over its digest, AND the prev_hash links are continuous — i.e. a genuinely-continuous, committee-signed chain anchored to the pinned genesis. |
 | **SUPPLY** | `cmd_supply_trustless` (`light/main.cpp:4268-4633`) | `SupplyProofSoundness.md` **SU-1/SU-2/SU-3/SU-4** + Corollary **SU-E** | The five A1 supply counters (`genesis_total`, `accumulated_subsidy/inbound/slashed/outbound`) are each committee-committed under a single committee-anchored `state_root`, and their closed-form A1 identity `expected_total` is internally consistent (and matches the daemon's claimed `total_supply` when supplied) — the A1 unitary-supply conservation read. |
 
 The audit's *only* additions over these two are: the conjunction (`failed == 0`), the CHAIN→SUPPLY short-circuit (SKIP), the head-state-root capture/report, and the `--json` streambuf relocation. §3 proves each of these adds no trust surface.
@@ -219,8 +219,8 @@ Per-theorem citation table for an auditor walking from theorem to code.
 |---|---|---|---|
 | AC-1 | `cmd_audit` aggregate verdict | `light/main.cpp:5603, :5636` | `overall = (failed == 0)`; `return overall ? 0 : 1`. |
 | AC-1 (CHAIN) | CHAIN block | `light/main.cpp:5542-5569` | `anchor_genesis` (T-L1) + `verify_chain_to_head` (T-L2 + continuity); captures `vc.head_state_root`. |
-| AC-1 (CHAIN) | `verify_chain_to_head` | `light/trustless_read.cpp:81-186` | The `verify-chain` composite the audit calls directly (so it can also read the head `state_root` for the report). |
-| AC-1 (CHAIN) | `anchor_genesis` | `light/trustless_read.cpp:52-79` | T-L1 genesis pin (`compute_genesis_hash` byte-compare). |
+| AC-1 (CHAIN) | `verify_chain_to_head` | `light/trustless_read.cpp:234-248` (walk core `verify_chain_walk` `:105-230`) | The `verify-chain` composite the audit calls directly (so it can also read the head `state_root` for the report). |
+| AC-1 (CHAIN) | `anchor_genesis` | `light/trustless_read.cpp:55-82` | T-L1 genesis pin (`compute_genesis_hash` byte-compare). |
 | AC-1 (SUPPLY) | SUPPLY block | `light/main.cpp:5571-5601` | Invokes `cmd_supply_trustless`; `rc == 0` → PASS, non-zero → FAIL, CHAIN-fail → SKIP. |
 | AC-1 (SUPPLY) | `cmd_supply_trustless` | `light/main.cpp:4268-4633` | SU-E supply read; exit 0=CONSERVED, 2=VIOLATED, 3=UNVERIFIABLE, 1=fault (`:4622-4632`). |
 | AC-2(a) | exit-code path | `light/main.cpp:5603, :5636` | Exit code is a pure function of `passed`/`failed`/`skipped`. |
