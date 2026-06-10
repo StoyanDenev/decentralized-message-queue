@@ -262,7 +262,7 @@ void print_usage() {
         "      header whose sigs don't verify fails closed (non-zero exit) —\n"
         "      never a bare daemon-reported root.\n"
         "  committee-at-height --rpc-port <N> --genesis <file> --height <H>\n"
-        "                      [--member <D>] [--json]\n"
+        "                      [--member <D>] [--json] [--wait <seconds>]\n"
         "      Report the committee-verified set of creators (consensus\n"
         "      committee members) that produced block H, in selection order,\n"
         "      each paired with its genesis-committee ed_pub + whether it\n"
@@ -277,7 +277,9 @@ void print_usage() {
         "      IN-COMMITTEE / NOT-IN-COMMITTEE verdict (plus the member's slot\n"
         "      + sign status). Genesis (H=0) has no committee and is rejected\n"
         "      with a diagnostic. A header whose sigs don't verify fails closed\n"
-        "      (non-zero exit) — never a bare daemon-reported committee.\n"
+        "      (non-zero exit) — never a bare daemon-reported committee. --wait\n"
+        "      matters only when H == head (the S-042 successor binding needs\n"
+        "      block H+1); for any H < head no wait is needed.\n"
         "\n"
         "Sign + submit:\n"
         "  sign-tx --keyfile <path> --type {TRANSFER|STAKE|UNSTAKE}\n"
@@ -5911,7 +5913,7 @@ const char* committee_verdict_str(CommitteeVerdict v) {
 int cmd_committee_at_height(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, member;
-    uint64_t height = 0;
+    uint64_t height = 0, wait_seconds = 0;
     bool have_port = false, have_height = false, have_member = false,
          json_out = false;
     for (int i = 0; i < argc; ++i) {
@@ -5924,6 +5926,7 @@ int cmd_committee_at_height(int argc, char** argv) {
         } else if (a == "--member"  && i + 1 < argc) {
             member = argv[++i]; have_member = true;
         } else if (a == "--json")                    json_out = true;
+        else if   (a == "--wait" && i + 1 < argc)    wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "committee-at-height: unknown arg '" << a << "'\n";
             return 1;
@@ -5959,9 +5962,12 @@ int cmd_committee_at_height(int argc, char** argv) {
         // Trustless anchor: genesis pin + bounded prev_hash walk [0, H] +
         // committee-sig verification of header[H]. On a sig failure or a
         // height beyond head this returns ok=false (clean error), never a
-        // bare daemon-reported committee.
+        // bare daemon-reported committee. --wait (default 0) matters only
+        // when H == head: the S-042 successor binding needs block H+1, so a
+        // query at the exact head fails closed until the chain advances. For
+        // any H < head the successor already exists and no wait is needed.
         auto sr = verify_state_root_at(rpc, committee_seed,
-                                       genesis_hash_hex, height);
+                                       genesis_hash_hex, height, wait_seconds);
         if (!sr.ok) {
             std::cerr << "committee-at-height: " << sr.detail << "\n";
             return 1;
