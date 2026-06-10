@@ -125,7 +125,7 @@ The anchor runs unconditionally at the start of every composite command that tou
 
 **Procedure.**
 
-1. Strip-or-pad the header into `Block::from_json` consumable shape (`pad_stripped_header` at `light/verify.cpp:63-69` injects empty arrays for the heavy fields `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` — none of which participate in `compute_block_digest`).
+1. Strip-or-pad the header into `Block::from_json` consumable shape (`pad_stripped_header` at `light/verify.cpp:94-100` injects empty arrays for the heavy fields `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` — none of which participate in `compute_block_digest`).
 2. Parse the committee JSON into a `domain → PubKey` map.
 3. Confirm every entry in `b.creators` is present in the supplied committee.
 4. Confirm `b.creator_block_sigs.size() == b.creators.size()`.
@@ -539,7 +539,7 @@ This section records discoveries from writing the proof that the operator or fut
 
 ### F-3 Empty committee JSON is rejected by `parse_committee` but not before genesis anchor
 
-**Surface.** `parse_committee` at `light/verify.cpp:98-100` throws on empty committee. If the operator's `genesis.json` lacks `initial_creators` entirely, the seed map is empty, and `verify_block_sigs` rejects the first non-genesis block.
+**Surface.** `parse_committee` at `light/verify.cpp:129-131` throws on empty committee. If the operator's `genesis.json` lacks `initial_creators` entirely, the seed map is empty, and `verify_block_sigs` rejects the first non-genesis block.
 
 **Soundness impact.** Fail-closed; clean.
 
@@ -575,13 +575,13 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | T-L2 | `verify_block_sigs` | `light/verify.cpp:235-328` | Per-block Ed25519 sig set verify. |
 | T-L2 | `light_compute_block_digest` | `light/verify.cpp:57-92` | Byte-for-byte copy of `producer.cpp::compute_block_digest`. |
 | T-L2 | `verify_chain_to_head` | `light/trustless_read.cpp:105-230` (wrapper `:234-248`) | Per-page header walk + per-block sig verify, end-to-end (core `verify_chain_walk`). |
-| T-L2 | `pad_stripped_header` | `light/verify.cpp:63-69` | Inject empty arrays for heavy fields that don't participate in digest. |
-| T-L2 | `parse_committee` | `light/verify.cpp:71-102` | Build domain → PubKey map from genesis JSON. |
+| T-L2 | `pad_stripped_header` | `light/verify.cpp:94-100` | Inject empty arrays for heavy fields that don't participate in digest. |
+| T-L2 | `parse_committee` | `light/verify.cpp:102-133` | Build domain → PubKey map from genesis JSON. |
 | T-L2 | `build_genesis_committee` | `light/trustless_read.cpp:46-53` | Seed the committee map from genesis `initial_creators`. |
 | T-L3 | `verify_state_proof` | `light/verify.cpp:330-396` | Wrapper over `merkle_verify` with json parsing. |
 | T-L3 | `merkle_verify` | `src/crypto/merkle.cpp` | Recompute path from leaf to root, compare. |
 | T-L4 | `read_account_trustless` | `light/trustless_read.cpp:439-599` | Full composite: anchor → walk → state-proof → race-window mitigation → cleartext cross-check. |
-| T-L3 / T-L4 binding | `committee_bound_state_root` | `light/trustless_read.cpp:335-437` (decl `trustless_read.hpp:174-205`) | **The implemented committee-binding of `state_root` (S-042):** full-block recompute via the `"block"` RPC + committee-signed successor `prev_hash` match; head fails closed (`:388-401`). Every trust-minimized reader routes its reported `state_root` through it. |
+| T-L3 / T-L4 binding | `committee_bound_state_root` | `light/trustless_read.cpp:335-437` (decl `trustless_read.hpp:221-224`) | **The implemented committee-binding of `state_root` (S-042):** full-block recompute via the `"block"` RPC + committee-signed successor `prev_hash` match; head fails closed (`:388-401`). Every trust-minimized reader routes its reported `state_root` through it. |
 | T-L3 / T-L4 binding | `Node::rpc_block` (full block) | `src/node/node.cpp:2623-2627` | the `"block"` RPC returning the UNSTRIPPED body so the light client can recompute `compute_hash` (the stripped `"headers"` RPC cannot — `node.cpp:2658-2661`). |
 | T-L4 race-window | `read_account_trustless` S-042 binding | `light/trustless_read.cpp:528-557` | Stale-height gate (`:528-533`) then `committee_bound_state_root` (`:546-548`); no `< / == / >` branch split — `==` and `>` both route to the successor binding. |
 | T-L4 cleartext cross-check | `read_account_trustless` value-hash recompute | `light/trustless_read.cpp:573-593` | `SHA256(balance_be ‖ nonce_be) == proof.value_hash` byte-equality. |

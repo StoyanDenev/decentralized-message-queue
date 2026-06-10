@@ -26,7 +26,7 @@ layer (each grounded in shipped source):
 
   LSP-1 (No-unverified-write). `cmd_verify_chain` (light/main.cpp:1386-1396)
     calls `save_light_state` ONLY on the success path AFTER `anchor_genesis`
-    (genesis pin; light/trustless_read.cpp:52-79) AND `verify_chain_to_head`
+    (genesis pin; light/trustless_read.cpp:55-82) AND `verify_chain_to_head`
     (prev_hash continuity + per-block K-of-K committee Ed25519 over
     `light_compute_block_digest`; trustless_read.cpp:81+) both return. A genesis
     mismatch, chain break, bad signature, or unreachable daemon THROWS before the
@@ -621,7 +621,7 @@ Prop_TamperNeverLoadsAccepted ==
 \*   light/persist.hpp:32-38        : struct LightState {schema_version, genesis_hash,
 \*       head_height, head_block_hash, head_state_root} — the persisted record the
 \*       Records triple abstracts (head_state_root "" on a pre-S-033 chain, :37).
-\*   light/trustless_read.cpp:52-79 : anchor_genesis — recompute compute_genesis_hash
+\*   light/trustless_read.cpp:55-82 : anchor_genesis — recompute compute_genesis_hash
 \*       LOCALLY (:55) + reject a daemon whose block 0 hash differs (:72-77); the
 \*       local pin VerifyRun / WriteAnchor write into the cache (LSP-2 source of the
 \*       locally-recomputed genesis).

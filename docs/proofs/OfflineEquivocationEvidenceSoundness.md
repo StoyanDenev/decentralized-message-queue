@@ -78,7 +78,7 @@ Parse the evidence JSON into a typed `EquivocationEvent` via the same `Equivocat
 
 - Missing or mistyped required fields (`equivocator`, `block_index`, `digest_a`, `digest_b`, `sig_a`, `sig_b`).
 - Either digest not exactly 32 bytes (64 hex) or either signature not exactly 64 bytes (128 hex).
-- `equivocator` not present in the supplied committee/pubkey map (no key to verify against ⇒ unadjudicable ⇒ REJECT, mirroring `verify_block_sigs`'s "creator not in supplied committee" fail-closed branch at `light/verify.cpp:223-229`).
+- `equivocator` not present in the supplied committee/pubkey map (no key to verify against ⇒ unadjudicable ⇒ REJECT, mirroring `verify_block_sigs`'s "creator not in supplied committee" fail-closed branch at `light/verify.cpp:268-273`).
 
 ### 3.2 Step 2 — pubkey binding (two modes)
 
@@ -298,7 +298,7 @@ Per-theorem citation table for an auditor walking from theorem to the surfaces t
 | Theorem | Mirrors / depends on | File:lines | Role |
 |---|---|---|---|
 | T-OE0 | `EquivocationEvent::from_json` + S-018 `json_require<T>` | `include/determ/chain/block.hpp:277-278` | Parse + structural gate (total, deterministic). |
-| T-OE0 | `parse_committee` | `light/verify.cpp:71-102` | domain → PubKey map; absent-signer REJECT. |
+| T-OE0 | `parse_committee` | `light/verify.cpp:102-133` | domain → PubKey map; absent-signer REJECT. |
 | T-OE1 | `crypto::verify` (Ed25519) | `src/node/validator.cpp::check_equivocation_events` | Dual signature verify under the named key (the A1-binding core). |
 | T-OE1 | V11 predicate | `Preliminaries.md` §5 | The predicate the verifier evaluates offline. |
 | T-OE2 | digest/sig distinctness | `validator.cpp::check_equivocation_events` (`digest_a != digest_b`, `sig_a != sig_b`) | Non-triviality gate (replay + self-pair REJECT). |

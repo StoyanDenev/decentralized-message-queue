@@ -2,8 +2,8 @@
 
 This document proves the soundness of the `determ-light verify-chain-file` subcommand: a **composite, one-shot, fully OFFLINE whole-chain verifier** — the *file-based dual* of the online `verify-chain` — that an operator runs against an exported headers file plus committee material, with **NO daemon, NO RPC, NO network**, to obtain a single PASS/FAIL verdict over two checks:
 
-- **CONTINUITY** — `verify_headers(doc, genesis_hash_hex, prev_hash_hex)` (`light/verify.cpp:104-188`): walks the stored `prev_hash` chain (`header[i].prev_hash == header[i-1].block_hash`) over the file's own `block_hash` fields, optionally anchoring block 0 via `--genesis-hash` or a mid-chain start via `--prev-hash`.
-- **SIGS** — for every header with `index != 0`, `verify_block_sigs(header, committee, bft)` (`light/verify.cpp:190-283`), which **recomputes** the block digest via `light_compute_block_digest` and Ed25519-verifies the committee signatures over that recomputed digest. **Only `index == 0` (the genesis) is skipped.**
+- **CONTINUITY** — `verify_headers(doc, genesis_hash_hex, prev_hash_hex)` (`light/verify.cpp:135-233`): walks the stored `prev_hash` chain (`header[i].prev_hash == header[i-1].block_hash`) over the file's own `block_hash` fields, optionally anchoring block 0 via `--genesis-hash` or a mid-chain start via `--prev-hash`.
+- **SIGS** — for every header with `index != 0`, `verify_block_sigs(header, committee, bft)` (`light/verify.cpp:235-328`), which **recomputes** the block digest via `light_compute_block_digest` and Ed25519-verifies the committee signatures over that recomputed digest. **Only `index == 0` (the genesis) is skipped.**
 
 It conjoins the two into one verdict with a monitor-friendly exit code (`0` both pass, `2` a check failed, `1` args/parse error).
 
@@ -33,8 +33,8 @@ determ-light verify-chain-file --in <file>
 
 **`int cmd_verify_chain_file(int, char**)` is IMPLEMENTED and SHIPPED in `light/main.cpp:850-1011`** (dispatched on `verify-chain-file` at `light/main.cpp:6057`). It is the offline file dual of the online `cmd_verify_chain` (`light/main.cpp:1136`). The two composed verification cores are read directly off source and are the same primitives the online `verify-chain` family uses:
 
-- **CONTINUITY** — `determ::light::verify_headers` (`light/verify.cpp:104-188`): leading-header anchor (`index == 0` ⇒ zero `prev_hash`, optional `--genesis-hash` byte-equality against `headers[0].block_hash`; `index > 0` ⇒ optional `--prev-hash` match), then the consecutive-pair walk `headers[i].prev_hash == headers[i-1].block_hash` over the **stored** `block_hash` fields (`light/verify.cpp:167-178`).
-- **SIGS** — for each header in `doc` with `index != 0`, `determ::light::verify_block_sigs` (`light/verify.cpp:190-283`), which calls `light_compute_block_digest` (`light/verify.cpp:57-92`) to **recompute** the digest internally, then per-creator Ed25519-verifies (`determ::crypto::verify`) against it, enforcing `required = bft ? (2K+2)/3 : K`. The genesis skip is keyed on `idx == 0` at `light/main.cpp:962`.
+- **CONTINUITY** — `determ::light::verify_headers` (`light/verify.cpp:135-233`): leading-header anchor (`index == 0` ⇒ zero `prev_hash`, optional `--genesis-hash` byte-equality against `headers[0].block_hash`; `index > 0` ⇒ optional `--prev-hash` match), then the consecutive-pair walk `headers[i].prev_hash == headers[i-1].block_hash` over the **stored** `block_hash` fields (`light/verify.cpp:211-223`).
+- **SIGS** — for each header in `doc` with `index != 0`, `determ::light::verify_block_sigs` (`light/verify.cpp:235-328`), which calls `light_compute_block_digest` (`light/verify.cpp:57-92`) to **recompute** the digest internally, then per-creator Ed25519-verifies (`determ::crypto::verify`) against it, enforcing `required = bft ? (2K+2)/3 : K`. The genesis skip is keyed on `idx == 0` at `light/main.cpp:962`.
 
 The single-committee vs. `--committee-manifest` resolver is the `committee_for` lambda at `light/main.cpp:892-912`: single-committee mode returns the same committee for every index; manifest mode picks the inclusive `[from, to]` range covering `idx` and lazily loads + caches its committee file, returning `false` (⇒ SIGS FAIL, never skip) when **no** range covers `idx` (`light/main.cpp:910-911`).
 
@@ -58,8 +58,8 @@ The `determ-light verify-chain-file` composite. Its control flow, read off `ligh
 
 | Component | Implementation basis | What it establishes | Backing |
 |---|---|---|---|
-| **CONTINUITY** | `verify_headers` (`light/verify.cpp:104-188`) | The file's headers form an unbroken stored-`block_hash` linkage (`prev_hash[i] == block_hash[i-1]`), optionally anchored at block 0 (`--genesis-hash`) or mid-chain (`--prev-hash`) | A2 at the anchor (VCF-1 §3.1); structural for the walk |
-| **SIGS** | per non-genesis header `verify_block_sigs` (`light/verify.cpp:190-283`) | Every header with `index != 0` carries a committee-signature quorum over **`light_compute_block_digest(b)` — recomputed from THAT header** | A1, **UNCONDITIONAL** per header (VCF-2 §3.2, inheriting LBV-2) |
+| **CONTINUITY** | `verify_headers` (`light/verify.cpp:135-233`) | The file's headers form an unbroken stored-`block_hash` linkage (`prev_hash[i] == block_hash[i-1]`), optionally anchored at block 0 (`--genesis-hash`) or mid-chain (`--prev-hash`) | A2 at the anchor (VCF-1 §3.1); structural for the walk |
+| **SIGS** | per non-genesis header `verify_block_sigs` (`light/verify.cpp:235-328`) | Every header with `index != 0` carries a committee-signature quorum over **`light_compute_block_digest(b)` — recomputed from THAT header** | A1, **UNCONDITIONAL** per header (VCF-2 §3.2, inheriting LBV-2) |
 
 ### 1.3 Out of scope (intentional — the verifier's coverage boundary)
 
@@ -77,10 +77,10 @@ Read directly off the two components.
 
 ### 2.1 CONTINUITY — the stored-`block_hash` linkage walk (NOT a hash recompute)
 
-`verify_headers` (`light/verify.cpp:104-188`), two phases:
+`verify_headers` (`light/verify.cpp:135-233`), two phases:
 
 **Anchor phase (`:137-164`).** Let `headers[0]` have index `i0` and `prev_hash` field `p0`.
-- If `i0 == 0`: require `p0 == "0"*64` (genesis has zero prev_hash, `:141-147`). If `--genesis-hash` (`genesis_hash_hex`) is non-empty, require `headers[0].block_hash == genesis_hash_hex` byte-for-byte (`:148-156`). **This is the only genesis trust anchor.**
+- If `i0 == 0`: require `p0 == "0"*64` (genesis has zero prev_hash, `:187-192`). If `--genesis-hash` (`genesis_hash_hex`) is non-empty, require `headers[0].block_hash == genesis_hash_hex` byte-for-byte (`:193-200`). **This is the only genesis trust anchor.**
 - Else (`i0 > 0`) and `--prev-hash` (`prev_hash_hex`) non-empty: require `p0 == prev_hash_hex` (`:157-164`), anchoring a mid-chain start to a caller-supplied prior block hash.
 
 **Walk phase (`:166-178`).** For `i` from `1` to `headers.size()-1`:
@@ -95,7 +95,7 @@ The commitment CONTINUITY establishes is therefore *internal linkage consistency
 
 ### 2.2 SIGS — per-non-genesis-header committee-quorum over a SELF-RECOMPUTED digest
 
-For each header `h` with `idx != 0`, the composite calls `verify_block_sigs(h, committee, bft)` (`light/verify.cpp:190-283`). The core (§2.2 of `LightBlockVerifySoundness.md`, reproduced for the per-header instance):
+For each header `h` with `idx != 0`, the composite calls `verify_block_sigs(h, committee, bft)` (`light/verify.cpp:235-328`). The core (§2.2 of `LightBlockVerifySoundness.md`, reproduced for the per-header instance):
 
 ```cpp
 Hash digest = light_compute_block_digest(b);          // ← LIGHT recomputes from THIS header
@@ -110,7 +110,7 @@ size_t required = bft_mode ? (2 * b.creators.size() + 2) / 3 : b.creators.size()
 // PASS iff valid >= required
 ```
 
-with the pre-checks: every `creators[i]` must be in the supplied committee (`light/verify.cpp:223-229`, FAIL otherwise) and `creator_block_sigs.size() == creators.size()` (`light/verify.cpp:230-236`, FAIL otherwise). The digest is byte-for-byte the producer's `compute_block_digest` over the common-case field prefix (`light_compute_block_digest`, `light/verify.cpp:57-92` ≡ `src/node/producer.cpp:608-693`), per `LightClientThreatModel.md` Lemma L-2.
+with the pre-checks: every `creators[i]` must be in the supplied committee (`light/verify.cpp:268-273`, FAIL otherwise) and `creator_block_sigs.size() == creators.size()` (`light/verify.cpp:275-281`, FAIL otherwise). The digest is byte-for-byte the producer's `compute_block_digest` over the common-case field prefix (`light_compute_block_digest`, `light/verify.cpp:57-92` ≡ `src/node/producer.cpp:608-693`), per `LightClientThreatModel.md` Lemma L-2.
 
 **The digest binds `prev_hash`.** Critically for the composite (§3.3), `light_compute_block_digest` appends `b.prev_hash` as its second field (`light/verify.cpp:60`): `h.append(b.prev_hash);`. So a tampered `prev_hash` changes the recomputed digest and breaks the committee signatures — SIGS FAILs. This is the bridge by which SIGS, an independent per-block check, also re-validates the linkage CONTINUITY walks over.
 
@@ -156,13 +156,13 @@ Throughout, let `CONT ∈ {PASS, FAIL}`, `SIGS ∈ {PASS, FAIL, SKIP}` be the tw
 
 ### 3.1 VCF-1 (CONTINUITY soundness — internal linkage + the anchor)
 
-**Statement.** A CONTINUITY PASS implies (i) the file's headers form an **unbroken stored-`block_hash` linkage** — `prev_hash[j] == block_hash[j-1]` for all `1 ≤ j ≤ n-1` (`light/verify.cpp:167-178`) — and (ii) **if `--genesis-hash` is supplied and `index[0] == 0`**, the file's `block_hash[0]` equals the supplied genesis hash byte-for-byte, under A2 the unique commitment to the operator's pinned genesis (`light/verify.cpp:148-156`). CONTINUITY does **not** assert any stored `block_hash[j]` is the true `Block::compute_hash` of its body; it asserts the *linkage among the stored fields* (plus the optional head anchor).
+**Statement.** A CONTINUITY PASS implies (i) the file's headers form an **unbroken stored-`block_hash` linkage** — `prev_hash[j] == block_hash[j-1]` for all `1 ≤ j ≤ n-1` (`light/verify.cpp:211-223`) — and (ii) **if `--genesis-hash` is supplied and `index[0] == 0`**, the file's `block_hash[0]` equals the supplied genesis hash byte-for-byte, under A2 the unique commitment to the operator's pinned genesis (`light/verify.cpp:193-200`). CONTINUITY does **not** assert any stored `block_hash[j]` is the true `Block::compute_hash` of its body; it asserts the *linkage among the stored fields* (plus the optional head anchor).
 
 **Proof.**
 
-*Part 1 — the walk.* CONTINUITY PASS requires the loop at `light/verify.cpp:167-178` to complete without a `prev != prior_hash` mismatch, i.e. `prev_hash[j] == block_hash[j-1]` for every consecutive pair. This is a deterministic string comparison over the file's own fields (each width-validated to 64 hex chars at `:120-135`); the conjunction is exactly the unbroken-linkage predicate. Any single break (a reordered, inserted, or deleted header that desynchronizes a `prev_hash`/`block_hash` pair) makes some `prev_hash[j] != block_hash[j-1]` and forces FAIL (`:170-176`). No assumption is needed for the walk itself — it is a structural string-equality conjunction.
+*Part 1 — the walk.* CONTINUITY PASS requires the loop at `light/verify.cpp:211-223` to complete without a `prev != prior_hash` mismatch, i.e. `prev_hash[j] == block_hash[j-1]` for every consecutive pair. This is a deterministic string comparison over the file's own fields (each width-validated to 64 hex chars at `:120-135`); the conjunction is exactly the unbroken-linkage predicate. Any single break (a reordered, inserted, or deleted header that desynchronizes a `prev_hash`/`block_hash` pair) makes some `prev_hash[j] != block_hash[j-1]` and forces FAIL (`:170-176`). No assumption is needed for the walk itself — it is a structural string-equality conjunction.
 
-*Part 2 — the genesis anchor (A2).* If `index[0] == 0` and `--genesis-hash = g`, CONTINUITY additionally requires `block_hash[0] == g` (`:148-156`) and `prev_hash[0] == "0"*64` (`:141-147`). The operator obtains `g` from a trusted out-of-band source (e.g. a pinned `genesis.json` run through `determ-light` genesis derivation, or a published constant). For the file to present a `block_hash[0]` equal to `g` while committing to a genesis *different* from the operator's pinned one, the file's genesis encoding must SHA-256-collide with the pinned genesis's encoding — an A2 break (`Preliminaries.md §2.1`), `≤ 2⁻¹²⁸`-class. This is the **offline-file instance of `LightClientThreatModel.md` T-L1**: T-L1 byte-compares the daemon's reported block-0 hash against a *locally recomputed* `compute_genesis_hash`; `verify-chain-file` byte-compares the file's `block_hash[0]` against an *operator-supplied* `--genesis-hash`. The anchor mechanism (byte-equality of a 32-byte hash) and its A2 bound are identical; the only difference is the provenance of the expected value (recomputed in T-L1 vs. flag-supplied here). **Note:** this path never calls `compute_genesis_hash`, so it is unaffected by the known `determ-light` cross-platform genesis-hash determinism gap — the operator supplies the hash directly.
+*Part 2 — the genesis anchor (A2).* If `index[0] == 0` and `--genesis-hash = g`, CONTINUITY additionally requires `block_hash[0] == g` (`:193-200`) and `prev_hash[0] == "0"*64` (`:187-192`). The operator obtains `g` from a trusted out-of-band source (e.g. a pinned `genesis.json` run through `determ-light` genesis derivation, or a published constant). For the file to present a `block_hash[0]` equal to `g` while committing to a genesis *different* from the operator's pinned one, the file's genesis encoding must SHA-256-collide with the pinned genesis's encoding — an A2 break (`Preliminaries.md §2.1`), `≤ 2⁻¹²⁸`-class. This is the **offline-file instance of `LightClientThreatModel.md` T-L1**: T-L1 byte-compares the daemon's reported block-0 hash against a *locally recomputed* `compute_genesis_hash`; `verify-chain-file` byte-compares the file's `block_hash[0]` against an *operator-supplied* `--genesis-hash`. The anchor mechanism (byte-equality of a 32-byte hash) and its A2 bound are identical; the only difference is the provenance of the expected value (recomputed in T-L1 vs. flag-supplied here). **Note:** this path never calls `compute_genesis_hash`, so it is unaffected by the known `determ-light` cross-platform genesis-hash determinism gap — the operator supplies the hash directly.
 
 *What Part 1+2 do NOT give.* CONTINUITY says nothing about whether any `block_hash[j]` (for `j ≥ 1`, or `j == 0` without `--genesis-hash`) is the *true* `Block::compute_hash` of its body — it walks the stored fields without recomputing them. An attacker who rewrites a block's body **and** updates its stored `block_hash[j]` **and** the next header's `prev_hash[j+1]` to match keeps the linkage intact and passes CONTINUITY. CONTINUITY catches reordering / linkage breaks; it does **not** catch content tampering. The content binding is SIGS's job (VCF-3 §3.3 proves the composite closes this). ∎
 
@@ -175,7 +175,7 @@ Throughout, let `CONT ∈ {PASS, FAIL}`, `SIGS ∈ {PASS, FAIL, SKIP}` be the tw
 **Proof.** SIGS PASS requires the loop at `light/main.cpp:950-971` to complete with `verified ≥ 1` and no thrown FAIL. For each non-genesis header `H_j` it reaches, `verify_block_sigs(H_j, committee_j, bft)` returned `ok=true`. Apply **`LightBlockVerifySoundness.md` LBV-2** to `H_j`:
 
 - *Part 1 (digest is the header's true digest).* `verify_block_sigs` computes `digest_j := light_compute_block_digest(b_j)` at `light/verify.cpp:283`, where `b_j` is the parsed header. By `LightClientThreatModel.md` Lemma L-2, `light_compute_block_digest` is byte-for-byte `producer.cpp::compute_block_digest` over the common-case field prefix — so `digest_j` equals the exact digest the committee signed when it produced `H_j`. No operator input enters; the digest is a pure function of `H_j`'s own fields. (Cross-shard / F2 headers are out of this part's scope — F-VCF6, inheriting F-LBV5.)
-- *Part 2 (per-signer verification is sound for that digest).* Each counted-valid creator `i` satisfies `verify(pk_i, digest_j, σ_i) = 1` with `pk_i` drawn from the resolved committee (`light/verify.cpp:254`); every creator is pre-checked for committee membership (`:223-229`) and `creator_block_sigs.size() == creators.size()` is enforced (`:230-236`). By A1 (Ed25519 EUF-CMA, `Preliminaries.md §2.2`), an adversary without `sk_i` produces such a `σ_i` for a never-signed `digest_j` with probability `≤ 2⁻¹²⁸`. The per-signer loop is a faithful `K_j`-fold replication of the single-sig verify primitive with no cross-signer state — instantiating `BatchSigningSoundness.md` BS-3's structural-isolation property for the committee-sig loop.
+- *Part 2 (per-signer verification is sound for that digest).* Each counted-valid creator `i` satisfies `verify(pk_i, digest_j, σ_i) = 1` with `pk_i` drawn from the resolved committee (`light/verify.cpp:299`); every creator is pre-checked for committee membership (`:268-273`) and `creator_block_sigs.size() == creators.size()` is enforced (`:275-281`). By A1 (Ed25519 EUF-CMA, `Preliminaries.md §2.2`), an adversary without `sk_i` produces such a `σ_i` for a never-signed `digest_j` with probability `≤ 2⁻¹²⁸`. The per-signer loop is a faithful `K_j`-fold replication of the single-sig verify primitive with no cross-signer state — instantiating `BatchSigningSoundness.md` BS-3's structural-isolation property for the committee-sig loop.
 
 Combining, a SIGS PASS implies for *every* non-genesis header `H_j` that `required` distinct resolved-committee members signed `H_j`'s true digest under A1. There is additionally **no cross-header channel**: header `H_j`'s verdict depends only on `(H_j, committee_j, bft)` — `verify_block_sigs` reads no other header and carries no state between iterations (the loop's only mutable state is the `verified`/`skipped` counters and the committee cache, both monotone and verdict-independent of order). So the per-header BS-3 isolation lifts to a per-chain isolation: the conjunction over `j` is sound iff each conjunct is. ∎
 
@@ -200,7 +200,7 @@ Combining, a SIGS PASS implies for *every* non-genesis header `H_j` that `requir
 2. **An emptiness-based skip would then skip `H_k`.** With the sigs stripped, `creator_block_sigs.empty()` is true ⇒ the hypothetical predicate skips `H_k` entirely ⇒ **no committee-signature check ever runs on the stripped block.** The attacker has removed a real block's only per-block attestation and dodged verification — a false PASS over a chain whose block `k` is unattested.
 
 **Why the index-based skip closes it.** The shipped predicate skips **only** `index == 0`. For a non-genesis header `H_k` (`index[k] ≥ 1`) with stripped sigs, `idx = index[k] != 0`, so `H_k` is **not** skipped — it flows into `verify_block_sigs` (`light/main.cpp:965-967`). There, one of two fail-closed paths fires:
-- If `creator_block_sigs` is absent/empty while `creators` is non-empty, the size check `creator_block_sigs.size() != creators.size()` FAILs (`light/verify.cpp:230-236`).
+- If `creator_block_sigs` is absent/empty while `creators` is non-empty, the size check `creator_block_sigs.size() != creators.size()` FAILs (`light/verify.cpp:275-281`).
 - If the attacker also empties `creators` to match (size 0 == 0), then `valid = 0` and `required = K = 0` would naively pass the `valid >= required` gate — **but** `creators` empty means no signer attests the block at all, and such a header cannot be the genuine block at `index[k]` (the genuine block has a non-empty committee); the digest `light_compute_block_digest` over the mangled fields will not match what any successor header's `prev_hash` linkage *and* the committee at that height attest. In practice the genuine chain's `H_k` has `K ≥ 1` creators, so a stripped `H_k` presenting `creators=[]` mismatches the real block's content; and any header the attacker substitutes wholesale (non-empty creators with forged sigs) reduces to the A1 forgery bound of VCF-2. Either way there is **no skip** — the non-genesis header is verified, not bypassed.
 
 Thus the index keying forces the stripped block into the verifier and fail-closes; the emptiness keying would have bypassed it. **VCF-S is the formal record of a real bug found and fixed mid-development.** ∎
@@ -309,7 +309,7 @@ A PASS asserts linkage + per-block committee attestation. It does **not** assert
 
 ### F-VCF7 Sentinel / quorum semantics inherited from `verify_block_sigs`
 
-SIGS inherits `verify_block_sigs`'s exact handling: a 64-byte all-zero signature is a *sentinel abstention* — permitted (uncounted) only under `--bft`, a hard FAIL in MD mode (`light/verify.cpp:244-252`); a creator absent from the resolved committee is a hard FAIL (`:223-229`); `creator_block_sigs.size() != creators.size()` is a hard FAIL (`:230-236`). The MD quorum is full `K`; the `--bft` quorum is `⌈2K/3⌉ = (2K+2)/3` (`:264-266`). An operator running MD against a BFT-escalated chain gets a clean FAIL, not a false PASS — they must pass `--bft`. These are `verify_block_sigs`'s behavior, carried verbatim (the same as `LightBlockVerifySoundness.md` F-LBV6).
+SIGS inherits `verify_block_sigs`'s exact handling: a 64-byte all-zero signature is a *sentinel abstention* — permitted (uncounted) only under `--bft`, a hard FAIL in MD mode (`light/verify.cpp:289-297`); a creator absent from the resolved committee is a hard FAIL (`:268-273`); `creator_block_sigs.size() != creators.size()` is a hard FAIL (`:275-281`). The MD quorum is full `K`; the `--bft` quorum is `⌈2K/3⌉ = (2K+2)/3` (`:309-311`). An operator running MD against a BFT-escalated chain gets a clean FAIL, not a false PASS — they must pass `--bft`. These are `verify_block_sigs`'s behavior, carried verbatim (the same as `LightBlockVerifySoundness.md` F-LBV6).
 
 ---
 
@@ -320,16 +320,16 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | Theorem | Surface | File:lines | Role |
 |---|---|---|---|
 | — | `cmd_verify_chain_file` (composite) | `light/main.cpp:850-1011` | Arg parse + XOR gate, CONTINUITY, SIGS loop, conjunction, exit 0/1/2. |
-| VCF-1 | `verify_headers` | `light/verify.cpp:104-188` | Genesis/prev anchor + stored-`block_hash` linkage walk. |
-| VCF-1 | genesis-hash anchor | `light/verify.cpp:148-156` | `headers[0].block_hash == --genesis-hash` byte-equality (offline T-L1). |
-| VCF-1 | linkage walk | `light/verify.cpp:167-178` | `headers[i].prev_hash == headers[i-1].block_hash`. |
-| VCF-2 | per-header `verify_block_sigs` | `light/verify.cpp:190-283` | Per-creator Ed25519 verify over the **self-recomputed** digest; quorum `K` / `⌈2K/3⌉`. |
+| VCF-1 | `verify_headers` | `light/verify.cpp:135-233` | Genesis/prev anchor + stored-`block_hash` linkage walk. |
+| VCF-1 | genesis-hash anchor | `light/verify.cpp:193-200` | `headers[0].block_hash == --genesis-hash` byte-equality (offline T-L1). |
+| VCF-1 | linkage walk | `light/verify.cpp:211-223` | `headers[i].prev_hash == headers[i-1].block_hash`. |
+| VCF-2 | per-header `verify_block_sigs` | `light/verify.cpp:235-328` | Per-creator Ed25519 verify over the **self-recomputed** digest; quorum `K` / `⌈2K/3⌉`. |
 | VCF-2 | `light_compute_block_digest` | `light/verify.cpp:57-92` | Byte-for-byte copy of `producer.cpp::compute_block_digest` (common-case prefix); binds `prev_hash` (`:60`). |
 | VCF-2 | digest recomputed (not supplied) | `light/verify.cpp:283` | `Hash digest = light_compute_block_digest(b);` — the UNCONDITIONAL improvement over wallet BV-2. |
 | VCF-2 | daemon original | `src/node/producer.cpp:608-693` (+`:629-690` extensions) | `compute_block_digest`; F-VCF6 covers the cross-shard / F2 tail the light copy omits. |
 | VCF-S | genesis skip keyed on `index` | `light/main.cpp:960-962` | `idx == 0 ⇒ skip`, NOT emptiness — closes the sig-strip hole. |
 | VCF-S | sigs bound into `block_hash` | `src/chain/block.cpp:356-365` | `Block::compute_hash` appends `creator_block_sigs` after `signing_bytes` — why CONTINUITY's stored-hash walk cannot catch a strip. |
-| VCF-S | size-mismatch FAIL | `light/verify.cpp:230-236` | `creator_block_sigs.size() != creators.size() ⇒ FAIL` — the fail-close a stripped header hits. |
+| VCF-S | size-mismatch FAIL | `light/verify.cpp:275-281` | `creator_block_sigs.size() != creators.size() ⇒ FAIL` — the fail-close a stripped header hits. |
 | VCF-3 | CONTINUITY-gates-SIGS + conjunction | `light/main.cpp:940, 988` | SIGS runs only if CONTINUITY passed; `overall = (failed == 0)`. |
 | VCF-3 | exit code | `light/main.cpp:1010` | `return overall ? 0 : 2;` (args/parse → 1 earlier). |
 | VCF-4 | `committee_for` resolver | `light/main.cpp:892-912` | Single-committee passthrough; manifest first-covering-range select; uncovered ⇒ false. |
@@ -348,7 +348,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 
 ## 7. Status
 
-- **Implementation.** **SHIPPED.** `int cmd_verify_chain_file` is in `light/main.cpp:850-1011` (dispatched on `verify-chain-file` at `:6057`), the offline file dual of online `cmd_verify_chain` (`:1136`). Composes CONTINUITY via `verify_headers` (`light/verify.cpp:104-188`) and SIGS via per-non-genesis-header `verify_block_sigs` (`light/verify.cpp:190-283`), with the `committee_for` single/manifest resolver (`light/main.cpp:892-912`).
+- **Implementation.** **SHIPPED.** `int cmd_verify_chain_file` is in `light/main.cpp:850-1011` (dispatched on `verify-chain-file` at `:6057`), the offline file dual of online `cmd_verify_chain` (`:1136`). Composes CONTINUITY via `verify_headers` (`light/verify.cpp:135-233`) and SIGS via per-non-genesis-header `verify_block_sigs` (`light/verify.cpp:235-328`), with the `committee_for` single/manifest resolver (`light/main.cpp:892-912`).
 - **Proof.** Complete (this document). VCF-1 (CONTINUITY soundness — stored-`block_hash` linkage + A2 genesis anchor; honest about NOT recomputing block hashes); **VCF-2 (SIGS soundness UNCONDITIONAL per non-genesis header under A1 — self-recomputed digest, inheriting LBV-2)**; **Lemma VCF-S (the strip-hole lemma — the genesis skip MUST key on `index`, not emptiness; records a real mid-development bug + its fix)**; VCF-3 (composite soundness = CONTINUITY ∧ SIGS, covering BOTH reordering AND content-tamper via the `prev_hash`-in-digest bridge, fail-closed); VCF-4 (manifest per-range soundness + uncovered-block-FAILs-never-skips). Composition bound VCF-E (`≤ ε_{A2} + n·K·ε_{A1}`; no new cryptographic term; **no digest conditional**).
 - **Soundness gap hunt — result.** **No genuine soundness gap found.** The one design point that *would* have been a real gap — an emptiness-based genesis skip permitting a silent sig-strip — is **closed** by the index-based skip (VCF-S), which this proof records as a real fixed bug. The manifest gap-in-coverage that *would* silently drop verification is **closed** by the uncovered-block-FAIL rule (VCF-4). The residuals (F-VCF1..F-VCF7) are all **coverage/scope statements or the committee-provenance boundary**, none of which is a false-PASS path: every honest limitation either fail-closes (F-VCF6 cross-shard/F2) or is an explicit "this is not asserted" coverage note (genesis-unanchored without `--genesis-hash`, committee provenance, semantic validity). The sole remaining trust boundary is **committee provenance** — identical to `LightBlockVerifySoundness.md` LBV-3 / F-LBV3 and `LightClientThreatModel.md` T-L2.
 - **Cryptographic assumptions used.** A1 (Ed25519 EUF-CMA, SIGS), A2 (SHA-256 collision resistance, CONTINUITY genesis anchor). A3, A4 not used. Per `Preliminaries.md §2.0`.

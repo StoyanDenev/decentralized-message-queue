@@ -162,7 +162,7 @@ Hash light_compute_block_digest(const determ::chain::Block& b) {
 }
 ```
 
-`verify_block_sigs` (`light/verify.cpp:190-283`) Ed25519-verifies each committee member's signature against exactly this digest (`light/verify.cpp:254`). Therefore: **after `verify_block_sigs` passes for block `B`, the verifier holds a `tx_root` value that ≥ `required` distinct committee members signed under their registered Ed25519 keys.** This is the strong-regime precondition.
+`verify_block_sigs` (`light/verify.cpp:235-328`) Ed25519-verifies each committee member's signature against exactly this digest (`light/verify.cpp:299`). Therefore: **after `verify_block_sigs` passes for block `B`, the verifier holds a `tx_root` value that ≥ `required` distinct committee members signed under their registered Ed25519 keys.** This is the strong-regime precondition.
 
 The canonical specification agrees: `README.md §7.4` states `block_digest` is `SHA-256 of idx ‖ prev_hash ‖ tx_root ‖ delay_seed ‖ …`, and `Preliminaries.md` §1.3 names `compute_block_digest(B)` as "what each Phase-2 committee member signs over." The light-side equality is pinned by `LightClientThreatModel.md` Lemma L-2 (byte-equivalence of `light_compute_block_digest` with the producer) and exercised end-to-end by `tools/test_light_verify_block_sigs.sh`.
 
@@ -366,9 +366,9 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | Theorem / step | Function | File:lines | Role |
 |---|---|---|---|
 | Pipeline (E3) | `verify-tx-inclusion` subcommand | `light/verify_tx_inclusion.cpp` / `.hpp`; `light/main.cpp::cmd_verify_tx_inclusion` | Anchor → header trust → tx-root recompute → membership decision; emits INCLUDED / NOT-INCLUDED / UNVERIFIABLE. |
-| Step 1 (T-L1) | `anchor_genesis` | `light/trustless_read.cpp:52-79` | Genesis-hash anchor (reused; `LightClientThreatModel.md` T-L1). |
-| Step 2 (T-L2) | `verify_block_sigs` | `light/verify.cpp:190-283` | Per-block Ed25519 sig-set verify over the recomputed digest. |
-| Step 2 (T-L2) | `verify_headers` | `light/verify.cpp:104-188` | prev_hash continuity binding block `B` to the genesis-anchored prefix. |
+| Step 1 (T-L1) | `anchor_genesis` | `light/trustless_read.cpp:55-82` | Genesis-hash anchor (reused; `LightClientThreatModel.md` T-L1). |
+| Step 2 (T-L2) | `verify_block_sigs` | `light/verify.cpp:235-328` | Per-block Ed25519 sig-set verify over the recomputed digest. |
+| Step 2 (T-L2) | `verify_headers` | `light/verify.cpp:135-233` | prev_hash continuity binding block `B` to the genesis-anchored prefix. |
 | §3.1 binding (light) | `light_compute_block_digest` | `light/verify.cpp:57-92` | Recomputes the committee-signed digest; **binds `tx_root` at line 61**. |
 | §3.1 binding (chain) | `compute_block_digest` | `src/node/producer.cpp:608-693` | The producer's signed digest; **binds `tx_root` at line 612**. |
 | §3.1 binding (sign) | `make_block_sig` | `src/node/producer.cpp:662-675` | K-of-K Ed25519 signature over `block_digest` (line 673). |

@@ -228,7 +228,7 @@ Cross-references:
     + FB42 pin owner-immutability + state-progression at apply; FB50
     pins value-hash-binding at read. The committed entry FB50 reads is
     exactly the one FB9 / FB42's apply actions produced.
-  - light/trustless_read.cpp:52-79 — anchor_genesis (the AnchorOk gate);
+  - light/trustless_read.cpp:55-82 — anchor_genesis (the AnchorOk gate);
     :81+ verify_chain_to_head (the HeadOk gate).
   - src/chain/chain.cpp:309-329 — build_state_leaves d: branch; the
     canonical DAppEntry field-encoding the value_hash commits. Encode is
@@ -332,7 +332,7 @@ DaemonFlags == [anchor_honest : BOOLEAN,
                 claimed       : DAppEntry]
 
 \* AnchorOk(daemon) — the daemon ran our chain (block-0 hash matches the
-\* locally-recomputed genesis hash). trustless_read.cpp:52-79.
+\* locally-recomputed genesis hash). trustless_read.cpp:55-82.
 AnchorOk(daemon) == daemon.anchor_honest = TRUE
 
 \* HeadOk(daemon) — the daemon's header chain to the tip is committee-
@@ -691,7 +691,7 @@ PROP_Determinism ==
 \*       reads is the one FB9 / FB42's apply actions produced.
 \*
 \* C++ enforcement:
-\*   light/trustless_read.cpp:52-79 : anchor_genesis — the AnchorOk gate
+\*   light/trustless_read.cpp:55-82 : anchor_genesis — the AnchorOk gate
 \*       (the GENESIS HASH MISMATCH throw at :72-77). INV_AnchorGate
 \*       (T-DR2).
 \*   light/trustless_read.cpp:81+   : verify_chain_to_head — the HeadOk
