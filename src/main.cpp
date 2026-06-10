@@ -476,6 +476,22 @@ In-process tests (deterministic, no network):
                                               bind in F2 path + edge cases
                                               (empty tx, idx=0, idx near uint64
                                               max, zero prev/dh, cross-perturbation)
+  determ test-contrib-wire-verify             Phase-1 ContribMsg end-to-end wire +
+                                              sig-verification semantics: sign as
+                                              sender (make_contrib, non-zero
+                                              proposer_time) -> to_json/from_json
+                                              wire roundtrip -> recompute with the
+                                              RECEIVER formula (on_contrib's
+                                              make_contrib_commitment call shape)
+                                              -> Ed25519 verify. Pins the S-030-D2
+                                              DTM-TS-v1 binding across the wire:
+                                              the pre-fix 7-arg recompute MUST
+                                              reject a production contrib (the
+                                              f99eeb8 on_contrib liveness
+                                              regression class), transit-tampered
+                                              proposer_time rejects, legacy
+                                              zero-time contribs keep the v1
+                                              short-circuit, F2 views + TS compose
   determ test-frost-types                     v2.10 Phase A: pin RFC 9591
                                               type-layout assumptions for FROST
                                               primitives — Identifier (uint16_t),
@@ -36507,6 +36523,114 @@ int main(int argc, char** argv) {
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": merkle-tree-balanced "
+                  << (fail == 0 ? "all assertions" : "had failures")
+                  << "\n";
+        std::cout.flush();
+        fflush(stdout);
+        return fail == 0 ? 0 : 1;
+    }
+
+    if (cmd == "test-contrib-wire-verify") {
+        // Phase-1 ContribMsg end-to-end: sender signing -> wire roundtrip ->
+        // RECEIVER-formula recompute -> Ed25519 verify. This is exactly the
+        // path the f99eeb8 liveness regression broke: the sender bound
+        // proposer_time (DTM-TS-v1) into the signed commitment but
+        // Node::on_contrib recomputed without it, so every production
+        // contrib failed sig-verify at every peer and no cluster could mint
+        // a block. The in-process suite never noticed because nothing
+        // exercised the sign->serialize->deserialize->recompute->verify
+        // chain with a non-zero proposer_time. This test is that chain.
+        using namespace determ;
+        using namespace determ::node;
+        int fail = 0;
+        auto check = [&](bool cond, const char* msg) {
+            if (cond) fputs("  PASS: ", stdout);
+            else      { fputs("  FAIL: ", stdout); fail++; }
+            fputs(msg, stdout);
+            fputs("\n", stdout);
+            fflush(stdout);
+        };
+
+        crypto::NodeKey key = crypto::generate_node_key();
+        Hash prev{}; prev[0] = 0xAB;
+        Hash dh{};   dh[3]  = 0x77;
+        std::vector<Hash> txs(2);
+        txs[0][0] = 0x01; txs[1][0] = 0x02;
+        const uint64_t TS = 1718000000ULL;  // any non-zero committed time
+
+        // ── 1. Production shape: v1 contrib (empty F2 views) + non-zero TS ──
+        ContribMsg c = make_contrib(key, "node-test", 42, prev, 0,
+                                     txs, dh, {}, {}, {}, TS);
+        nlohmann::json j = c.to_json();
+        check(j.contains("proposer_time"),
+              "non-zero proposer_time present on the JSON wire");
+        ContribMsg r = ContribMsg::from_json(j);
+        check(r.proposer_time == TS,
+              "wire roundtrip preserves proposer_time");
+
+        // ── 2. Receiver formula (on_contrib's recompute) verifies ──────────
+        Hash commit = make_contrib_commitment(
+            r.block_index, r.prev_hash, r.tx_hashes, r.dh_input,
+            r.view_eq_root, r.view_abort_root, r.view_inbound_root,
+            r.proposer_time);
+        check(crypto::verify(key.pub, commit.data(), commit.size(), r.ed_sig),
+              "receiver-formula recompute verifies the sender's sig (TS bound)");
+
+        // ── 3. THE REGRESSION CLASS: the pre-fix 7-arg recompute (defaulted
+        //       proposer_time=0) must REJECT a production contrib. If a
+        //       future edit drops the time from on_contrib's call again,
+        //       assertion 2 above fails; this leg documents the asymmetry
+        //       that made the bug total (sender bound, receiver didn't). ──
+        Hash stale = make_contrib_commitment(
+            r.block_index, r.prev_hash, r.tx_hashes, r.dh_input,
+            r.view_eq_root, r.view_abort_root, r.view_inbound_root);
+        check(!crypto::verify(key.pub, stale.data(), stale.size(), r.ed_sig),
+              "pre-fix 7-arg recompute REJECTED (f99eeb8 on_contrib regression class)");
+
+        // ── 4. Transit tamper of proposer_time fails (T-3 authentication) ──
+        ContribMsg t = r;
+        t.proposer_time += 1;
+        Hash tc = make_contrib_commitment(
+            t.block_index, t.prev_hash, t.tx_hashes, t.dh_input,
+            t.view_eq_root, t.view_abort_root, t.view_inbound_root,
+            t.proposer_time);
+        check(!crypto::verify(key.pub, tc.data(), tc.size(), t.ed_sig),
+              "transit-tampered proposer_time rejected");
+
+        // ── 5. Legacy zero-time contrib: omitted from the wire, verifies
+        //       via the byte-identical v1 short-circuit (7-arg == 8-arg(0)) ─
+        ContribMsg z = make_contrib(key, "node-test", 42, prev, 0,
+                                     txs, dh, {}, {}, {}, 0);
+        nlohmann::json zj = z.to_json();
+        check(!zj.contains("proposer_time"),
+              "zero proposer_time omitted from the JSON wire (v1 shape)");
+        ContribMsg zr = ContribMsg::from_json(zj);
+        Hash zc = make_contrib_commitment(
+            zr.block_index, zr.prev_hash, zr.tx_hashes, zr.dh_input,
+            zr.view_eq_root, zr.view_abort_root, zr.view_inbound_root);
+        check(crypto::verify(key.pub, zc.data(), zc.size(), zr.ed_sig),
+              "legacy zero-time contrib verifies via the v1 short-circuit");
+
+        // ── 6. F2 views + TS compose: DTM-F2-v1 then DTM-TS-v1 ─────────────
+        std::vector<Hash> ev(1); ev[0][0] = 0x0E;
+        ContribMsg f = make_contrib(key, "node-test", 43, prev, 0,
+                                     txs, dh, ev, {}, {}, TS + 1);
+        nlohmann::json fj = f.to_json();
+        ContribMsg fr = ContribMsg::from_json(fj);
+        Hash fc = make_contrib_commitment(
+            fr.block_index, fr.prev_hash, fr.tx_hashes, fr.dh_input,
+            fr.view_eq_root, fr.view_abort_root, fr.view_inbound_root,
+            fr.proposer_time);
+        check(crypto::verify(key.pub, fc.data(), fc.size(), fr.ed_sig),
+              "F2-view + TS contrib verifies via the receiver formula");
+        Hash fNoTs = make_contrib_commitment(
+            fr.block_index, fr.prev_hash, fr.tx_hashes, fr.dh_input,
+            fr.view_eq_root, fr.view_abort_root, fr.view_inbound_root);
+        check(!crypto::verify(key.pub, fNoTs.data(), fNoTs.size(), fr.ed_sig),
+              "F2-view contrib WITHOUT the TS re-bind rejected");
+
+        std::cout << (fail == 0 ? "PASS" : "FAIL")
+                  << ": contrib-wire-verify "
                   << (fail == 0 ? "all assertions" : "had failures")
                   << "\n";
         std::cout.flush();
