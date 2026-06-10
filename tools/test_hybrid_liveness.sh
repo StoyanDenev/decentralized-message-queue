@@ -18,6 +18,8 @@ cd "$(dirname "$0")/.."
 source tools/common.sh
 T=test_hyb_live
 
+pass_count=0; fail_count=0
+
 declare -a NODE_PIDS
 
 cleanup() {
@@ -46,8 +48,12 @@ rm -rf $T
 mkdir -p $T/n1 $T/n2 $T/n3 $T/n4
 
 echo "=== 1. Init 4 nodes ==="
+# regional_test: the only K<M profile that boots a 1-shard genesis
+# (SHARD/CURRENT/MODERN). The genesis below overrides M/K to 4/3; the profile
+# only pins sharding_mode/chain_role/crypto/timing. Do NOT use 'web' — it is
+# EXTENDED sharding mode and the A6 boot guard rejects a 1-shard genesis.
 for n in 1 2 3 4; do
-  $DETERM init --data-dir $T/n$n --profile web 2>&1 | tail -1
+  $DETERM init --data-dir $T/n$n --profile regional_test 2>&1 | tail -1
   $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
@@ -114,6 +120,30 @@ sleep 30
 H_PRE=$(get_height 8771)
 echo "  pre-kill height: $H_PRE"
 echo "  heights: n1=$(get_height 8771) n2=$(get_height 8772) n3=$(get_height 8773) n4=$(get_height 8774)"
+# Fail-closed guard: H_PRE must be numeric (not the '-' dead-RPC sentinel)
+# and > 0 (warm-up actually produced blocks) before any arithmetic on it.
+case "$H_PRE" in
+  ''|*[!0-9]*)
+    echo "  bad: warm-up height is non-numeric ('$H_PRE') — RPC dead or nodes failed to boot"
+    echo
+    echo "  Diagnostics: tail of n1 log:"
+    tail -20 $T/n1/log 2>/dev/null | sed 's/^/    | /'
+    echo "  FAIL: test_hybrid_liveness (warm-up RPC dead / nodes failed to boot)"
+    exit 1
+    ;;
+  0)
+    echo "  bad: warm-up produced no blocks (height 0)"
+    echo
+    echo "  Diagnostics: tail of n1 log:"
+    tail -20 $T/n1/log 2>/dev/null | sed 's/^/    | /'
+    echo "  FAIL: test_hybrid_liveness (warm-up produced no blocks)"
+    exit 1
+    ;;
+  *)
+    echo "  ok: warm-up height $H_PRE > 0"
+    pass_count=$((pass_count + 1))
+    ;;
+esac
 
 echo
 echo "=== 6. KILL node4 (simulate creator going down) ==="
@@ -124,26 +154,49 @@ NODE_PIDS[3]=""
 echo "  node4 killed; surviving 3 must form K=3 committees after suspension"
 
 echo
-echo "=== 7. Wait 60s for chain to recover (suspension mechanism kicks in after some aborts) ==="
-for i in 1 2 3 4 5 6; do
-  sleep 10
-  H_POST=$(get_height 8771)
-  echo "  [t=$((30 + i*10))s] heights: n1=$H_POST n2=$(get_height 8772) n3=$(get_height 8773)"
+echo "=== 7. Poll up to 150s for chain to recover (break early once height advances; suspension kicks in after some aborts) ==="
+for i in $(seq 1 30); do
+  sleep 5
+  H_NOW=$(get_height 8771)
+  case "$H_NOW" in
+    ''|*[!0-9]*)
+      echo "  [t=+$((i*5))s] n1 RPC not answering"
+      continue
+      ;;
+  esac
+  echo "  [t=+$((i*5))s] heights: n1=$H_NOW n2=$(get_height 8772) n3=$(get_height 8773)"
+  if [ "$H_NOW" -gt "$H_PRE" ]; then
+    echo "  chain advanced after ~$((i*5))s post-kill"
+    break
+  fi
 done
 
 H_FINAL=$(get_height 8771)
 
 echo
 echo "=== 8. Verify chain advanced after creator drop ==="
-DELTA=$((H_FINAL - H_PRE))
+# Fail-closed guard: never feed the '-' dead-RPC sentinel into arithmetic.
+case "$H_FINAL" in
+  ''|*[!0-9]*)
+    echo "  bad: final height is non-numeric ('$H_FINAL') — n1 RPC dead after kill"
+    fail_count=$((fail_count + 1))
+    DELTA=0
+    ;;
+  *)
+    DELTA=$((H_FINAL - H_PRE))
+    ;;
+esac
 echo "  pre-kill height:  $H_PRE"
 echo "  final height:     $H_FINAL"
-echo "  delta:            $DELTA blocks during the 60s after kill"
+echo "  delta:            $DELTA blocks after kill"
 
 if [ "$DELTA" -gt 0 ]; then
-  echo "  PASS: chain advanced after losing 1 of 4 creators (K-committee rotation works)"
+  echo "  ok: chain advanced after losing 1 of 4 creators (K-committee rotation works)"
+  pass_count=$((pass_count + 1))
 else
-  echo "  FAIL: chain stalled. K-committee rotation may need more aborts to suspend node4."
+  echo "  bad: chain stalled within the 150s window. K-committee rotation /"
+  echo "       abort-driven suspension failed to exclude the dead creator."
+  fail_count=$((fail_count + 1))
 fi
 
 echo
@@ -154,12 +207,33 @@ HEAD3=$(get_head 8773)
 echo "  n1: $HEAD1"
 echo "  n2: $HEAD2"
 echo "  n3: $HEAD3"
-if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ]; then
-  echo "  PASS: surviving nodes agree on head_hash"
+# Fail-closed: '?' is the dead-RPC sentinel from get_head — three identical
+# sentinels must never count as agreement.
+BAD_HEAD=0
+for H in "$HEAD1" "$HEAD2" "$HEAD3"; do
+  case "$H" in ''|'?') BAD_HEAD=1 ;; esac
+done
+if [ "$BAD_HEAD" -ne 0 ]; then
+  echo "  bad: one or more surviving nodes returned no head_hash (dead RPC)"
+  fail_count=$((fail_count + 1))
+elif [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ]; then
+  echo "  ok: surviving nodes agree on head_hash"
+  pass_count=$((pass_count + 1))
 else
   echo "  WARN: head_hash divergence (in-flight block possible)"
 fi
 
 echo
 echo "=== 10. Tail of n1 log to show abort+recovery pattern ==="
-tail -20 $T/n1/log
+tail -20 $T/n1/log 2>/dev/null | sed 's/^/    | /'
+
+echo
+echo "=== 11. Summary ==="
+echo "  $pass_count pass / $fail_count fail"
+if [ "$fail_count" -eq 0 ]; then
+  echo "  PASS: test_hybrid_liveness"
+  exit 0
+else
+  echo "  FAIL: test_hybrid_liveness ($fail_count checks failed)"
+  exit 1
+fi

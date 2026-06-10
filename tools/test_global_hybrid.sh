@@ -53,12 +53,12 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 2. Build BEACON genesis (M=K=2 for cold-start reliability; EXTENDED needs initial_shard_count=3) ==="
+echo "=== 2. Build BEACON genesis (M=K=3 strong; EXTENDED needs initial_shard_count=3) ==="
 cat > $T/gen.json <<EOF
 {
   "chain_id": "test-global-hybrid",
-  "m_creators": 2,
-  "k_block_sigs": 2,
+  "m_creators": 3,
+  "k_block_sigs": 3,
   "block_subsidy": 10,
   "chain_role": 1,
   "initial_shard_count": 3,
@@ -71,6 +71,10 @@ $(cat $T/p3.json | tr -d '\n')
 }
 EOF
 $DETERM genesis-tool build $T/gen.json | tail -1
+if [ ! -s $T/gen.json.hash ]; then
+  echo "  FAIL: test_global_hybrid (genesis build failed — no $T/gen.json.hash)"
+  exit 1
+fi
 GHASH=$(cat $T/gen.json.hash)
 GPATH="$PROJECT_ROOT/$T/gen.json"
 
@@ -120,24 +124,34 @@ for _ in $(seq 1 80); do
   sleep 0.2
 done
 
-H1=$(get_status_field 8771 height)
 ROLE=$(get_status_field 8771 chain_role)
-
-echo "  height: $H1"
 echo "  n1 role: $ROLE (expected beacon)"
 
 PASS=true
-if [ "$H1" = "-" ] || [ "$H1" -lt 5 ] 2>/dev/null; then
-  echo "  FAIL: chain didn't advance"; PASS=false
-fi
+FAILED=0
+for n in 1 2 3; do
+  H=$(get_status_field 877$n height)
+  echo "  n$n height: $H"
+  if ! [[ "$H" =~ ^[0-9]+$ ]] || [ "$H" -lt 5 ]; then
+    echo "  bad: n$n chain didn't advance (height=$H, want >= 5)"
+    PASS=false; FAILED=$((FAILED+1))
+  fi
+done
 if [ "$ROLE" != "beacon" ]; then
-  echo "  FAIL: role mismatch — expected beacon, got $ROLE"; PASS=false
+  echo "  bad: role mismatch — expected beacon, got $ROLE"
+  PASS=false; FAILED=$((FAILED+1))
 fi
 
 if $PASS; then
   echo
-  echo "  PASS: global_test profile (BEACON + EXTENDED) end-to-end"
-  echo "        - 3 beacon nodes finalized blocks under sub-30 ms timers"
-  echo "        - initial_shard_count=3 satisfied EXTENDED's S>=3 gate"
-  echo "        - profile loads, BEACON role active, chain advances"
+  echo "  global_test profile (BEACON + EXTENDED) end-to-end:"
+  echo "    - 3 beacon nodes finalized blocks under sub-30 ms timers"
+  echo "    - initial_shard_count=3 satisfied EXTENDED's S>=3 gate"
+  echo "    - profile loads, BEACON role active, chain advances"
+  echo "  PASS: test_global_hybrid"
+  exit 0
+else
+  echo
+  echo "  FAIL: test_global_hybrid ($FAILED checks failed)"
+  exit 1
 fi

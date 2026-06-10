@@ -16,6 +16,12 @@
 #      exhaustion transition (a violation would throw at apply time and
 #      kill the node).
 #
+# Node configs override the single_test profile's 5/5/3 ms round timers with
+# tx_commit_ms=2000 / block_sig_ms=2000 / abort_claim_ms=1000 (the proven
+# test_multinode.sh posture): sub-RTT timeout fallbacks desync a 3-process
+# Windows cluster into perpetual cross-phase aborts. Phase transitions are
+# event-driven, so the happy path stays fast; the timers only bound timeouts.
+#
 # Run from repo root: bash tools/test_finite_subsidy.sh
 set -u
 cd "$(dirname "$0")/.."
@@ -88,6 +94,12 @@ c['genesis_hash'] = '$GHASH'
 c['chain_path'] = '$PROJECT_ROOT/$T/n$n/chain.json'
 c['key_path'] = '$PROJECT_ROOT/$T/n$n/node_key.json'
 c['data_dir'] = '$PROJECT_ROOT/$T/n$n'
+# Extra-generous timeouts for the test environment (Windows multi-process,
+# loopback gossip) — mirrors test_multinode.sh. Node Config fields, not
+# genesis fields: the genesis hash and the E4 economics are untouched.
+c['tx_commit_ms'] = 2000
+c['block_sig_ms'] = 2000
+c['abort_claim_ms'] = 1000
 with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)
 "
 }
@@ -105,15 +117,21 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 5. Poll until chain advances past expected exhaustion (height >= 10) ==="
-for _ in $(seq 1 80); do
-  H=$(get_status_field 8771 height)
-  if [ "$H" != "-" ] && [ "$H" -ge 10 ] 2>/dev/null; then break; fi
+echo "=== 5. Poll until all 3 chains advance past expected exhaustion (height >= 10) ==="
+for _ in $(seq 1 150); do
+  ALL_OK=true
+  for p in 8771 8772 8773; do
+    h=$(get_status_field $p height)
+    if ! [[ "$h" =~ ^[0-9]+$ ]] || [ "$h" -lt 10 ]; then ALL_OK=false; break; fi
+  done
+  $ALL_OK && break
   sleep 0.2
 done
 
 H=$(get_status_field 8771 height)
-echo "  height: $H"
+H2=$(get_status_field 8772 height)
+H3=$(get_status_field 8773 height)
+echo "  heights: node1=$H node2=$H2 node3=$H3"
 
 # Inspect creators' balances. After pool exhaustion, blocks pay only
 # fees (0 in this test — no user txs). Total subsidy ever paid =
@@ -122,24 +140,46 @@ echo "  height: $H"
 # total across all 3 = subsidy_pool_initial = 100. Per-creator may
 # vary by ±1 from the dust rule (creator[0] gets remainders).
 B1=$($DETERM balance node1 --rpc-port 8771 2>/dev/null | python -c "import sys,json
-try: print(json.load(sys.stdin).get('balance',0))
-except: print(0)")
+try: print(json.load(sys.stdin).get('balance','-'))
+except: print('-')")
 B2=$($DETERM balance node2 --rpc-port 8771 2>/dev/null | python -c "import sys,json
-try: print(json.load(sys.stdin).get('balance',0))
-except: print(0)")
+try: print(json.load(sys.stdin).get('balance','-'))
+except: print('-')")
 B3=$($DETERM balance node3 --rpc-port 8771 2>/dev/null | python -c "import sys,json
-try: print(json.load(sys.stdin).get('balance',0))
-except: print(0)")
-TOTAL=$(( B1 + B2 + B3 ))
+try: print(json.load(sys.stdin).get('balance','-'))
+except: print('-')")
+if [[ "$B1" =~ ^[0-9]+$ ]] && [[ "$B2" =~ ^[0-9]+$ ]] && [[ "$B3" =~ ^[0-9]+$ ]]; then
+  TOTAL=$(( B1 + B2 + B3 ))
+else
+  TOTAL='-'
+fi
 echo "  creator balances: node1=$B1 node2=$B2 node3=$B3 sum=$TOTAL"
 
 PASS=true
-if [ "$H" = "-" ] || [ "$H" -lt 10 ] 2>/dev/null; then
-  echo "  FAIL: chain didn't advance past exhaustion height"; PASS=false
+FAILS=0
+check_fail() { echo "  bad: $1"; PASS=false; FAILS=$((FAILS+1)); }
+
+# Height: explicit numeric guard — '-', empty, or error strings must FAIL,
+# never be silently skipped by a suppressed [ ] error.
+if ! [[ "$H" =~ ^[0-9]+$ ]]; then
+  check_fail "node1 height read is non-numeric ('$H') — RPC dead or node down"
+elif [ "$H" -lt 10 ]; then
+  check_fail "chain didn't advance past exhaustion height (height=$H, need >= 10)"
 fi
-if [ "$TOTAL" -ne 100 ]; then
-  echo "  FAIL: cumulative subsidy = $TOTAL, expected 100 (== subsidy_pool_initial)"
-  PASS=false
+# 3-node agreement: every node must report a numeric height past exhaustion
+# (rejects '-'/empty before comparing).
+for pair in "node2:$H2" "node3:$H3"; do
+  name=${pair%%:*}; hv=${pair#*:}
+  if ! [[ "$hv" =~ ^[0-9]+$ ]]; then
+    check_fail "$name height read is non-numeric ('$hv') — RPC dead or node down"
+  elif [ "$hv" -lt 10 ]; then
+    check_fail "$name didn't advance past exhaustion height (height=$hv, need >= 10)"
+  fi
+done
+if ! [[ "$TOTAL" =~ ^[0-9]+$ ]]; then
+  check_fail "balance reads failed (non-numeric: node1=$B1 node2=$B2 node3=$B3)"
+elif [ "$TOTAL" -ne 100 ]; then
+  check_fail "cumulative subsidy = $TOTAL, expected 100 (== subsidy_pool_initial)"
 fi
 
 # A1 invariant: if any block had violated it, a node would have thrown
@@ -148,9 +188,20 @@ fi
 
 if $PASS; then
   echo
-  echo "  PASS: E4 finite subsidy fund end-to-end"
-  echo "        - subsidy_pool_initial = 100 hard-cap honored"
-  echo "        - cumulative paid = 100 (chain stopped minting after exhaustion)"
-  echo "        - chain continued past exhaustion (height $H)"
-  echo "        - A1 unitary-balance invariant held across the transition"
+  echo "  ok: E4 finite subsidy fund end-to-end"
+  echo "      - subsidy_pool_initial = 100 hard-cap honored"
+  echo "      - cumulative paid = 100 (chain stopped minting after exhaustion)"
+  echo "      - chain continued past exhaustion on all 3 nodes (heights $H/$H2/$H3)"
+  echo "      - A1 unitary-balance invariant held across the transition"
+  echo "  PASS: test_finite_subsidy"
+  exit 0
+else
+  echo
+  echo "=== node log tails (diagnostics) ==="
+  for n in 1 2 3; do
+    echo "--- n$n log tail ---"
+    tail -10 $T/n$n/log 2>/dev/null | sed 's/^/    | /'
+  done
+  echo "  FAIL: test_finite_subsidy ($FAILS checks failed)"
+  exit 1
 fi
