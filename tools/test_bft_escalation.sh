@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # rev.8 per-height BFT escalation test. M=K=3 strong, bft_enabled=true,
-# bft_escalation_threshold=2. Kill 1 of 3 mid-test; expect chain to:
+# bft_escalation_threshold=1 (genesis-pinned below; NOT the default 5 —
+# at M=K=3 the abort-event counter ceiling per stuck height is K-1=2, so
+# the default threshold is unreachable: AbortCascadeLiveness.md T-4 /
+# SECURITY.md S-045). Kill 1 of 3 mid-test; expect chain to:
 #   1. Try MD K-of-K, abort 2x against the dead node.
 #   2. Escalate to BFT 2-of-3 with designated proposer.
 #   3. Finalize a BFT-mode block (consensus_mode=1, bft_proposer=<live node>).
@@ -146,7 +149,7 @@ kill "${NODE_PIDS[2]}" 2>/dev/null
 sleep 1
 kill -9 "${NODE_PIDS[2]}" 2>/dev/null
 NODE_PIDS[2]=""
-echo "  node3 killed; with threshold=2 the chain should produce BFT blocks"
+echo "  node3 killed; with threshold=1 the chain should produce BFT blocks"
 echo "  after 2 round-1 aborts at the same height."
 
 echo
