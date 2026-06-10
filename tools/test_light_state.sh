@@ -73,6 +73,35 @@ echo "{ not json" > "$SP"
 $DETERM_LIGHT state --show --state "$SP" >/dev/null 2>&1
 ck $? 1 "--show on corrupt cache fails closed"
 
+# 5a. --show --json on a valid anchor: machine-readable, carries the fields +
+#     an age_seconds. (jq-free assertions: grep the dumped JSON.)
+printf '{"schema_version":1,"genesis_hash":"%s","head_height":42,"head_block_hash":"%s","head_state_root":"%s"}\n' \
+    "$H64a" "$H64b" "$H64c" > "$SP"
+OUT=$($DETERM_LIGHT state --show --json --state "$SP" 2>&1); rc=$?
+if [ "$rc" = "0" ] && echo "$OUT" | grep -q '"present": true' \
+   && echo "$OUT" | grep -q '"head_height": 42' \
+   && echo "$OUT" | grep -q '"age_seconds"'; then
+    echo "  PASS: --show --json emits present/head_height/age_seconds"; pass=$((pass+1))
+else echo "  FAIL: --show --json on valid anchor (exit $rc)"; echo "$OUT" | sed 's/^/      /'; fail=$((fail+1)); fi
+
+# 5b. --show --json on an ABSENT cache: present=false, exit 0 (absence is data,
+#     not an error — operator tooling branches on the field).
+rm -f "$SP"
+OUT=$($DETERM_LIGHT state --show --json --state "$SP" 2>&1); rc=$?
+if [ "$rc" = "0" ] && echo "$OUT" | grep -q '"present": false'; then
+    echo "  PASS: --show --json on absent cache reports present=false"; pass=$((pass+1))
+else echo "  FAIL: --show --json on absent cache (exit $rc)"; echo "$OUT" | sed 's/^/      /'; fail=$((fail+1)); fi
+
+# 5c. --show --json on a corrupt cache STILL fails closed (exit 1 — the JSON
+#     mode must not soften the corrupt-cache discipline).
+echo "{ not json" > "$SP"
+$DETERM_LIGHT state --show --json --state "$SP" >/dev/null 2>&1
+ck $? 1 "--show --json on corrupt cache fails closed"
+
+# 5d. --json is --show-only: rejected with any other mode (usage error).
+$DETERM_LIGHT state --clear --json --state "$SP" >/dev/null 2>&1
+ck $? 1 "--json rejected outside --show"
+
 # 6. no mode flag → usage error (exit 1).
 $DETERM_LIGHT state --state "$SP" >/dev/null 2>&1
 ck $? 1 "missing --show/--clear/--selftest rejected"

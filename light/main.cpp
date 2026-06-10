@@ -155,11 +155,14 @@ void print_usage() {
         "      else ~/.determ-light/state.json) — written only AFTER full verify.\n"
         "      --resume re-pins the genesis against a cached anchor and verifies\n"
         "      ONLY the suffix the daemon added above it (skips re-walking the\n"
-        "      committee-signed prefix); always falls back to a full verify when\n"
-        "      the anchor is absent/corrupt/wrong-chain or the daemon hasn't\n"
-        "      advanced — never weaker than a full verify. Pair with --persist for\n"
-        "      the steady-state resume-then-advance loop.\n"
-        "  state (--show | --clear | --selftest | --verify-anchor --genesis <file>) [--state <path>]\n"
+        "      committee-signed prefix); falls back to a full verify when the\n"
+        "      anchor is absent/corrupt/wrong-chain — never weaker than a full\n"
+        "      verify. LSP-7: a daemon BELOW the cached anchor height is REFUSED\n"
+        "      (a fork-free chain never regresses — stale/truncated state; clear\n"
+        "      with `state --clear` if the reset was intentional), and a daemon\n"
+        "      exactly AT it must present the cached anchor block itself. Pair\n"
+        "      with --persist for the steady-state resume-then-advance loop.\n"
+        "  state (--show [--json] | --clear | --selftest | --verify-anchor --genesis <file>) [--state <path>]\n"
         "      Manage the persisted anchor cache (offline; no daemon). --show\n"
         "      prints + validates it; --clear deletes it; --selftest runs the\n"
         "      offline round-trip + fail-closed reject-path checks of the module;\n"
@@ -1538,18 +1541,24 @@ int cmd_state(int argc, char** argv) {
     enum { SHOW, CLEAR, SELFTEST, VERIFY, NONE } mode = NONE;
     std::string state_path;    // empty → default_state_path()
     std::string genesis_path;  // for --verify-anchor
+    bool json_out = false;     // --show machine-readable output
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--show")          mode = SHOW;
         else if (a == "--clear")         mode = CLEAR;
         else if (a == "--selftest")      mode = SELFTEST;
         else if (a == "--verify-anchor") mode = VERIFY;
+        else if (a == "--json")          json_out = true;
         else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if (a == "--state" && i + 1 < argc) state_path = argv[++i];
         else {
             std::cerr << "state: unknown arg '" << a << "'\n";
             return 1;
         }
+    }
+    if (json_out && mode != SHOW) {
+        std::cerr << "state: --json is only valid with --show\n";
+        return 1;
     }
     if (mode == NONE) {
         std::cerr << "state: one of --show / --clear / --selftest / --verify-anchor is required\n";
@@ -1564,11 +1573,45 @@ int cmd_state(int argc, char** argv) {
     try {
         if (mode == SHOW) {
             if (!light_state_exists(path)) {
-                std::cout << "no persisted anchor at " << path << "\n"
-                          << "  (run `verify-chain --persist` to create one)\n";
+                if (json_out) {
+                    std::cout << nlohmann::json{{"present", false},
+                                                {"path", path}}.dump(2) << "\n";
+                } else {
+                    std::cout << "no persisted anchor at " << path << "\n"
+                              << "  (run `verify-chain --persist` to create one)\n";
+                }
                 return 0;  // absence is not an error
             }
             LightState s = load_light_state(path);  // throws if corrupt → fail-closed
+            // Cache age from the file's mtime, measured on the file clock so no
+            // epoch conversion is needed. 0 on any stat error (age is advisory —
+            // staleness POLICY lives in the operator tooling, not here).
+            uint64_t age_seconds = 0;
+            {
+                std::error_code ec;
+                auto ft = std::filesystem::last_write_time(
+                    std::filesystem::path(path), ec);
+                if (!ec) {
+                    auto d = decltype(ft)::clock::now() - ft;
+                    if (d.count() > 0) {
+                        age_seconds = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::seconds>(d)
+                                .count());
+                    }
+                }
+            }
+            if (json_out) {
+                std::cout << nlohmann::json{
+                    {"present",         true},
+                    {"path",            path},
+                    {"schema_version",  s.schema_version},
+                    {"genesis_hash",    s.genesis_hash},
+                    {"head_height",     s.head_height},
+                    {"head_block_hash", s.head_block_hash},
+                    {"head_state_root", s.head_state_root},
+                    {"age_seconds",     age_seconds}}.dump(2) << "\n";
+                return 0;
+            }
             std::cout << "persisted anchor (" << path << ")\n"
                       << "  schema_version:     " << s.schema_version << "\n"
                       << "  genesis_hash:       " << s.genesis_hash << "\n"
@@ -1576,7 +1619,8 @@ int cmd_state(int argc, char** argv) {
                       << "  head_block_hash:    " << s.head_block_hash << "\n"
                       << "  head_state_root:    "
                       << (s.head_state_root.empty() ? "(pre-S-033 chain)" : s.head_state_root)
-                      << "\n";
+                      << "\n"
+                      << "  age:                " << age_seconds << "s\n";
             return 0;
         }
         if (mode == VERIFY) {
