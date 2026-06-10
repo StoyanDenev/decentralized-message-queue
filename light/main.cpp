@@ -2906,7 +2906,11 @@ int cmd_verify_tx_inclusion(int argc, char** argv) {
 // or daemon refusal to serve the `i:` proof yields UNVERIFIABLE (exit 3),
 // never a false INCLUDED. A clean Merkle-verified inclusion → INCLUDED
 // (exit 0); a daemon `not_found` for the canonical key → NOT-INCLUDED
-// (exit 0, a sound verified negative).
+// (exit 0, a DAEMON-ASSERTED negative — sound only under the single-daemon
+// negative-honesty premise (H-neg), NOT a cryptographic absence proof: the
+// sorted-leaves tree has no non-membership witness, MerkleTreeSoundness.md
+// MT-5 / NegativeVerdictSoundness.md NV-2/NV-3. The --json carries
+// negative_footing=daemon_asserted so a consumer applies NV-6 clause 3).
 
 int cmd_verify_receipt_inclusion(int argc, char** argv) {
     uint16_t port = 0;
@@ -3199,8 +3203,10 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
 // or daemon refusal to serve the `m:` proof yields UNVERIFIABLE (exit 3),
 // never a false INCLUDED. A clean Merkle-verified inclusion → INCLUDED
 // (exit 0); a daemon `not_found` for the canonical key → NOT-INCLUDED
-// (exit 0, a sound verified negative — shard S is not currently merged
-// into THAT partner with THAT region).
+// (exit 0, a DAEMON-ASSERTED negative — sound only under (H-neg), NOT a
+// cryptographic absence proof, MT-5 / NV-2/NV-3; --json negative_footing=
+// daemon_asserted. It says "shard S not merged into THAT partner with THAT
+// region" only insofar as the single daemon answers absences honestly).
 
 int cmd_verify_merge_state(int argc, char** argv) {
     uint16_t port = 0;
@@ -3531,8 +3537,11 @@ int cmd_verify_merge_state(int argc, char** argv) {
 // Fail-closed contract: any tamper, malformed proof, key/value mismatch, or
 // daemon refusal to serve the `p:` proof yields UNVERIFIABLE (exit 3), never
 // a false INCLUDED. A clean Merkle-verified inclusion → INCLUDED (exit 0); a
-// daemon `not_found` for the canonical key → NOT-INCLUDED (exit 0, a sound
-// verified negative — no such change is staged at that slot).
+// daemon `not_found` for the canonical key → NOT-INCLUDED (exit 0, a DAEMON-
+// ASSERTED negative — sound only under (H-neg), NOT a cryptographic absence
+// proof, MT-5 / NV-2/NV-3; --json negative_footing=daemon_asserted. "No such
+// change is staged at that slot" holds only insofar as the daemon answers
+// absences honestly).
 
 int cmd_verify_param_change(int argc, char** argv) {
     uint16_t port = 0;
