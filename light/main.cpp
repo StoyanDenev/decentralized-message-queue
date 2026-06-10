@@ -2825,6 +2825,12 @@ int cmd_verify_tx_inclusion(int argc, char** argv) {
                 {"committee_size",     r.committee_size},
                 {"tx_count",           r.tx_count},
             };
+            // F-2 (NegativeVerdictSoundness.md): tag a NOT-INCLUDED with its
+            // trust footing so a machine consumer can apply NV-6 clause (2) vs
+            // (3). The block-body negative is CRYPTOGRAPHIC (NV-1: sound under
+            // A2 via the full-set tx_root recompute + bijection gate).
+            if (r.verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "cryptographic";
             if (!r.detail.empty()) out["detail"] = r.detail;
             std::cout << out.dump() << "\n";
         } else {
@@ -3115,6 +3121,11 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
                 {"tx_hash",     canon_tx_hash},
                 {"namespace",   "i"},
             };
+            // F-2 (NegativeVerdictSoundness.md): the i: state-proof negative is
+            // DAEMON_ASSERTED — sound only under the non-cryptographic (H-neg)
+            // premise (NV-2/NV-3); a consumer MUST apply NV-6 clause (3).
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
             if (!state_root_used.empty()) {
                 out["state_root"] = state_root_used;
                 out["height"]     = anchored_height;
@@ -3431,6 +3442,11 @@ int cmd_verify_merge_state(int argc, char** argv) {
                 {"refugee_region", refugee_region},
                 {"namespace",      "m"},
             };
+            // F-2 (NegativeVerdictSoundness.md): the m: state-proof negative is
+            // DAEMON_ASSERTED — sound only under the non-cryptographic (H-neg)
+            // premise (NV-2/NV-3); a consumer MUST apply NV-6 clause (3).
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
             if (!state_root_used.empty()) {
                 out["state_root"] = state_root_used;
                 out["height"]     = anchored_height;
@@ -3764,6 +3780,11 @@ int cmd_verify_param_change(int argc, char** argv) {
                 {"value_hex",        value_hex},
                 {"namespace",        "p"},
             };
+            // F-2 (NegativeVerdictSoundness.md): the p: state-proof negative is
+            // DAEMON_ASSERTED — sound only under the non-cryptographic (H-neg)
+            // premise (NV-2/NV-3); a consumer MUST apply NV-6 clause (3).
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
             if (!state_root_used.empty()) {
                 out["state_root"] = state_root_used;
                 out["height"]     = anchored_height;
