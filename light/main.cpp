@@ -205,6 +205,17 @@ void print_usage() {
         "      to the signed state_root; NOT-RECORDED (a daemon-asserted negative,\n"
         "      negative_footing=daemon_asserted) means no committed b: leaf. The\n"
         "      trust-minimized complement to operator_slashing_ledger.sh.\n"
+        "  verify-constant --rpc-port <N> --genesis <file> --name <NAME>\n"
+        "                  {--value <U64> | --value-hex <64-hex>} [--json]\n"
+        "                  [--resume [--state <path>]] [--wait <seconds>]\n"
+        "      CONFIRM an asserted chain constant against the committee-attested\n"
+        "      k: leaf (key-bound + Merkle-bound to the signed state_root). BOTH\n"
+        "      verdicts are cryptographic: CONFIRMED (exit 0) = the committee\n"
+        "      attests exactly the asserted value; MISMATCH (exit 2) = it attests\n"
+        "      a DIFFERENT one. not_found -> UNVERIFIABLE (exit 3; constants are\n"
+        "      always committed). 12 u64 constants (min_stake, unstake_delay,\n"
+        "      block_subsidy, shard_count, ...) take --value; shard_salt takes\n"
+        "      --value-hex. Audits a daemon's governance parameters trustlessly.\n"
         "  verify-unstake-eligibility --rpc-port <N> --genesis <file>\n"
         "                             --domain <D> [--json] [--wait <seconds>]\n"
         "      Prove whether <D>'s locked stake is CURRENTLY eligible to be\n"
@@ -2240,6 +2251,31 @@ int cmd_verify_abort_record(int argc, char** argv) {
             return 0;
         }
 
+        // 3a. Bind the proof to THIS domain's key. verify_state_proof (step 4)
+        //     Merkle-verifies whatever key_bytes the daemon SUPPLIES — without
+        //     this check a Byzantine daemon could serve a valid proof for SOME
+        //     OTHER `b:` leaf and lie consistently in the abort_records
+        //     cleartext (step 6 binds the cleartext to the SERVED leaf, not to
+        //     this domain's), attributing an arbitrary committed
+        //     (count, last_block) to `domain` — e.g. laundering a heavily-
+        //     aborted node behind a clean node's record (the F-6 forge class,
+        //     NegativeVerdictSoundness.md). proof.key_bytes MUST equal the
+        //     locally-computed canonical key ("b:" || domain), byte-for-byte.
+        {
+            std::vector<uint8_t> local_key;
+            local_key.reserve(2 + domain.size());
+            local_key.push_back('b'); local_key.push_back(':');
+            local_key.insert(local_key.end(), domain.begin(), domain.end());
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                throw std::runtime_error(
+                    "proof.key_bytes=" + proof_key_hex
+                    + " does not match the canonical b: key " + local_key_hex
+                    + " — daemon served a proof for a different leaf");
+            }
+        }
+
         // 4. Verify the proof self-consistently (siblings roll up to its root).
         auto vsp = verify_state_proof(proof, {});
         if (!vsp.ok) {
@@ -2339,6 +2375,237 @@ int cmd_verify_abort_record(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "verify-abort-record: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ──────────────────────── verify-constant ──────────────────────────────
+//
+// Trust-minimized read of the `k:` (genesis-pinned constants) namespace —
+// the LAST of the 10 committed state namespaces to gain a light reader.
+// Unlike the DISCOVER+verify readers (stake/abort: a daemon RPC supplies the
+// cleartext), `k:` has NO cleartext RPC — so this is CONFIRM-shaped, like
+// verify-merge-state: the OPERATOR asserts (name, value) and the reader
+// proves the assertion against the committee-attested `k:` leaf.
+//
+// Both verdicts are CRYPTOGRAPHIC (not daemon-asserted): every `k:` leaf is
+// unconditionally emitted by chain.cpp::build_state_leaves on an S-033 chain,
+// the proof is key-bound to "k:"+name and Merkle-bound to the committee-
+// attested state_root (committee_bound_state_root, S-042), and value_hash =
+// SHA256(u64_be(value)) is injective over u64 in practice — so CONFIRMED
+// means the committee attests exactly the asserted value, and MISMATCH means
+// it attests a DIFFERENT one (modulo an A2 collision). A `not_found` is
+// UNVERIFIABLE (exit 3), never a negative: constants always exist, so absence
+// = a legacy (pre-S-033) or lying daemon. The 12 u64 constants take
+// --value <u64>; shard_salt (a 32-byte leaf, value_hash = SHA256(salt)) takes
+// --value-hex <64-hex>. Unknown names are rejected with the canonical list
+// (the NV-5a canonical-key discipline: the daemon never picks the key).
+// Use cases: audit that a daemon's chain runs the governance parameters the
+// operator expects (min_stake, unstake_delay, subsidy schedule, shard
+// topology) without trusting its config or logs.
+static const char* kKnownU64Constants[] = {
+    "block_subsidy", "subsidy_pool_initial", "subsidy_mode",
+    "lottery_jackpot_multiplier", "min_stake", "suspension_slash",
+    "unstake_delay", "merge_threshold_blocks", "revert_threshold_blocks",
+    "merge_grace_blocks", "shard_count", "my_shard_id",
+};
+
+int cmd_verify_constant(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, name, value_hex, state_path;
+    bool have_port = false, have_value = false, json_out = false,
+         resume = false;
+    uint64_t value = 0, wait_seconds = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--name"    && i + 1 < argc) name         = argv[++i];
+        else if   (a == "--value"   && i + 1 < argc) {
+            value = parse_u64("--value", argv[++i]); have_value = true;
+        } else if (a == "--value-hex" && i + 1 < argc) value_hex  = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--resume")                  resume       = true;
+        else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
+        else {
+            std::cerr << "verify-constant: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || name.empty()) {
+        std::cerr << "verify-constant: "
+                     "--rpc-port, --genesis, --name are required\n";
+        return 1;
+    }
+    // Canonical-name gate (NV-5a discipline): only the known k: leaves are
+    // queryable, and the value-form must match the leaf's encoding.
+    bool is_salt = (name == "shard_salt");
+    bool is_u64 = false;
+    for (auto* n : kKnownU64Constants) if (name == n) { is_u64 = true; break; }
+    if (!is_salt && !is_u64) {
+        std::cerr << "verify-constant: unknown constant '" << name
+                  << "'. Known u64 constants:";
+        for (auto* n : kKnownU64Constants) std::cerr << " " << n;
+        std::cerr << "; plus shard_salt (use --value-hex <64-hex>)\n";
+        return 1;
+    }
+    if (is_u64 && !have_value) {
+        std::cerr << "verify-constant: '" << name
+                  << "' is a u64 constant — pass --value <u64>\n";
+        return 1;
+    }
+    if (is_salt && value_hex.empty()) {
+        std::cerr << "verify-constant: shard_salt is a 32-byte leaf — pass "
+                     "--value-hex <64-hex>\n";
+        return 1;
+    }
+
+    try {
+        // The asserted value's expected leaf hash, per build_state_leaves:
+        // u64 constants: SHA256(u64_be(value)); shard_salt: SHA256(salt_32).
+        Hash expected_value_hash;
+        if (is_u64) {
+            determ::crypto::SHA256Builder b;
+            b.append(value);
+            expected_value_hash = b.finalize();
+        } else {
+            Hash salt = from_hex_arr<32>(value_hex);  // throws on bad hex/len
+            determ::crypto::SHA256Builder b;
+            b.append(salt);
+            expected_value_hash = b.finalize();
+        }
+
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-constant: " << rpc.last_error() << "\n";
+            return 1;
+        }
+
+        // 1+2. Anchor genesis + committee-verify the header chain to head.
+        auto ah = anchored_head(rpc, committee_seed, genesis, resume, state_path);
+        VerifiedChain vc = ah.vc;
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so state-proofs can't be anchored.");
+        }
+
+        // 3. Fetch the k: state-proof. Constants are UNCONDITIONALLY committed
+        //    by build_state_leaves, so not_found is never a sound negative —
+        //    it is a legacy daemon or a refusal → UNVERIFIABLE (exit 3).
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "k"}, {"key", name}});
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].dump();
+            if (json_out) {
+                json out = {
+                    {"name",     name},
+                    {"verdict",  "UNVERIFIABLE"},
+                    {"verified", false},
+                    {"detail",   "daemon refused the k: state-proof (" + err
+                                 + ") — constants are always committed, so "
+                                   "this is a legacy or lying daemon"},
+                };
+                std::cout << out.dump() << "\n";
+            } else {
+                std::cerr << "verify-constant: UNVERIFIABLE — daemon refused "
+                             "the k: proof (" << err << "); constants are "
+                             "always committed on an S-033 chain\n";
+            }
+            return 3;
+        }
+
+        // 3a. Key-bind: proof.key_bytes MUST equal "k:" || name (the F-6
+        //     forge-class closure — without it the daemon could prove a
+        //     DIFFERENT constant's leaf whose value happens to match).
+        {
+            std::vector<uint8_t> local_key;
+            local_key.reserve(2 + name.size());
+            local_key.push_back('k'); local_key.push_back(':');
+            local_key.insert(local_key.end(), name.begin(), name.end());
+            std::string proof_key_hex = proof.value("key_bytes", std::string{});
+            std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+            if (proof_key_hex != local_key_hex) {
+                throw std::runtime_error(
+                    "proof.key_bytes=" + proof_key_hex
+                    + " does not match the canonical k: key " + local_key_hex
+                    + " — daemon served a proof for a different leaf");
+            }
+        }
+
+        // 4. Verify the proof self-consistently.
+        auto vsp = verify_state_proof(proof, {});
+        if (!vsp.ok) {
+            throw std::runtime_error(vsp.detail);
+        }
+
+        // 5. Bind the proof's claimed state_root to a COMMITTEE-SIGNED root
+        //    (committee_bound_state_root, S-042; --wait forwarded).
+        uint64_t proof_height = proof.value("height", uint64_t{0});
+        std::string proof_root = proof.value("state_root", std::string{});
+        if (proof_height < vc.height) {
+            throw std::runtime_error(
+                "proof.height=" + std::to_string(proof_height)
+                + " is BEFORE verified-chain head=" + std::to_string(vc.height)
+                + " — daemon is serving stale state");
+        }
+        json committee_json;
+        {
+            json arr = json::array();
+            for (auto& [domain_, pk] : committee_seed)
+                arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
+            committee_json = json{{"members", arr}};
+        }
+        uint64_t anchor_index = proof_height - 1;
+        std::string attested = determ::light::committee_bound_state_root(
+            rpc, committee_json, anchor_index, wait_seconds);
+        if (attested != proof_root) {
+            throw std::runtime_error("SECURITY — committee-attested state_root at "
+                "index " + std::to_string(anchor_index) + " = " + attested
+                + " does NOT match proof.state_root = " + proof_root
+                + " — daemon served a proof against an unattested root");
+        }
+
+        // 6. The verdict: the committee-bound leaf's value_hash either equals
+        //    the asserted value's hash (CONFIRMED) or it does not (MISMATCH —
+        //    the committee attests a DIFFERENT value than asserted). Both are
+        //    sound under A2; no cleartext RPC is consulted.
+        Hash proof_value_hash = from_hex_arr<32>(
+            proof["value_hash"].get<std::string>());
+        bool confirmed = (proof_value_hash == expected_value_hash);
+
+        if (json_out) {
+            json out = {
+                {"name",       name},
+                {"verdict",    confirmed ? "CONFIRMED" : "MISMATCH"},
+                {"height",     proof_height},
+                {"state_root", attested},
+                {"verified",   true},
+            };
+            if (is_u64) out["asserted_value"] = value;
+            else        out["asserted_value_hex"] = value_hex;
+            std::cout << out.dump() << "\n";
+        } else if (confirmed) {
+            std::cout << name << ": CONFIRMED — the committee attests exactly "
+                      << (is_u64 ? std::to_string(value) : value_hex)
+                      << " (verified via k: state-proof at height "
+                      << proof_height << ", state_root "
+                      << attested.substr(0, 16) << "...)\n";
+        } else {
+            std::cout << name << ": MISMATCH — the committee-attested k: leaf "
+                         "commits a DIFFERENT value than the asserted "
+                      << (is_u64 ? std::to_string(value) : value_hex)
+                      << " (sound under A2; the chain does not run this "
+                         "parameter value)\n";
+        }
+        return confirmed ? 0 : 2;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-constant: " << e.what() << "\n";
         return 1;
     }
 }
@@ -7265,6 +7532,7 @@ int main(int argc, char** argv) {
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
         if (cmd == "verify-abort-record")   return cmd_verify_abort_record(sub_argc, sub_argv);
+        if (cmd == "verify-constant")       return cmd_verify_constant(sub_argc, sub_argv);
         if (cmd == "verify-unstake-eligibility") return cmd_verify_unstake_eligibility(sub_argc, sub_argv);
         if (cmd == "supply-trustless")      return cmd_supply_trustless(sub_argc, sub_argv);
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
