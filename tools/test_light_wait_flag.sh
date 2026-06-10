@@ -10,7 +10,9 @@
 # yet — so the trustless readers fail closed on every current-head read. The fix:
 # `committee_bound_state_root(..., max_wait_seconds)` polls for the next block, then
 # binds the ALREADY-HELD proof (never re-fetching, which would race a state change).
-# Exposed as an OPT-IN `--wait <seconds>` flag on the 12 readers; default 0 = behaviour
+# Exposed as an OPT-IN `--wait <seconds>` flag on EVERY head-anchored composite —
+# the trustless readers PLUS verify-and-submit (embedded nonce read) and
+# verify-unstake-eligibility (embedded stake read); default 0 = behaviour
 # unchanged (head case fails closed immediately, exactly as before S-042's caveat).
 #
 # WHAT RUNS HERE (offline, no cluster) vs CI

@@ -198,7 +198,7 @@ void print_usage() {
         "      bonded). A domain with no stake leaf fails closed (the daemon's\n"
         "      state_proof returns not_found) — never a bare zero.\n"
         "  verify-unstake-eligibility --rpc-port <N> --genesis <file>\n"
-        "                             --domain <D> [--json]\n"
+        "                             --domain <D> [--json] [--wait <seconds>]\n"
         "      Prove whether <D>'s locked stake is CURRENTLY eligible to be\n"
         "      unstaked — i.e. whether an UNSTAKE tx mined at the committee-\n"
         "      verified head height H would pass the S-017 chain/producer/\n"
@@ -220,7 +220,9 @@ void print_usage() {
         "      mismatch, or daemon refusal → UNVERIFIABLE (exit 3), never a\n"
         "      false ELIGIBLE. Distinct from stake-trustless, which reports the\n"
         "      raw (locked, unlock_height) pair but does NOT compute the\n"
-        "      height-relative eligibility verdict.\n"
+        "      height-relative eligibility verdict. --wait blocks up to s seconds\n"
+        "      for the head's successor block so the embedded stake read's S-042\n"
+        "      successor binding can complete (default 0 fails closed at the head).\n"
         "  supply-trustless --rpc-port <N> --genesis <file> [--json] [--resume [--state <path>]]\n"
         "                   [--wait <seconds>]\n"
         "      Verified chain + the five A1 supply counters from the `c:`\n"
@@ -2151,6 +2153,7 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
     uint16_t port = 0;
     std::string genesis_path, domain;
     bool have_port = false, json_out = false;
+    uint64_t wait_seconds = 0;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--rpc-port" && i + 1 < argc) {
@@ -2158,6 +2161,7 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
         } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
         else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
         else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--wait" && i + 1 < argc)    wait_seconds = parse_u64("--wait", argv[++i]);
         else {
             std::cerr << "verify-unstake-eligibility: unknown arg '"
                       << a << "'\n";
@@ -2196,8 +2200,12 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
         // ELIGIBLE.
         bool have_stake = true;
         try {
+            // --wait (default 0) forwards to the embedded stake read, which
+            // anchors at the head: without it the S-042 successor binding
+            // fails closed there (UNVERIFIABLE), same as the other readers.
             auto sv = read_stake_trustless(rpc, committee_seed, genesis,
-                                           canon_domain);
+                                           canon_domain, /*resume=*/false,
+                                           /*state_path=*/"", wait_seconds);
             locked        = sv.locked;
             unlock_height = sv.unlock_height;
             head_height   = sv.height;
