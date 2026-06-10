@@ -197,6 +197,14 @@ void print_usage() {
         "      locked stake + unlock_height (UINT64_MAX = no active unlock /\n"
         "      bonded). A domain with no stake leaf fails closed (the daemon's\n"
         "      state_proof returns not_found) — never a bare zero.\n"
+        "  verify-abort-record --rpc-port <N> --genesis <file> --domain <D> [--json]\n"
+        "                      [--resume [--state <path>]] [--wait <seconds>]\n"
+        "      Verified chain + state-proof (b: namespace) + cross-check the\n"
+        "      daemon's `abort_records` cleartext. RECORDED prints the committee-\n"
+        "      verified Phase-1 abort (count, last_block) for node <D> hash-bound\n"
+        "      to the signed state_root; NOT-RECORDED (a daemon-asserted negative,\n"
+        "      negative_footing=daemon_asserted) means no committed b: leaf. The\n"
+        "      trust-minimized complement to operator_slashing_ledger.sh.\n"
         "  verify-unstake-eligibility --rpc-port <N> --genesis <file>\n"
         "                             --domain <D> [--json] [--wait <seconds>]\n"
         "      Prove whether <D>'s locked stake is CURRENTLY eligible to be\n"
@@ -2084,6 +2092,206 @@ int cmd_stake_trustless(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "stake-trustless: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// ──────────────────────── verify-abort-record ──────────────────────────
+//
+// Trust-minimized read of the `b:` (abort_records) namespace — the S-032
+// cache of FA5 Phase-1 block-production aborts per node. Proves the
+// committee-attested (count, last_block) for a node's abort record at the
+// verified head, or a NOT-RECORDED verdict when the node has no record.
+//
+// Like stake-trustless (`s:`) this DISCOVERS + verifies: it Merkle-verifies
+// the `b:` leaf against the COMMITTEE-BOUND state_root (committee_bound_state_root,
+// the S-042 successor binding) AND hash-binds the daemon's `abort_records` RPC
+// cleartext to the proven value_hash (= SHA256(u64_be(count) ‖ u64_be(last_block)),
+// matching chain.cpp::build_state_leaves), so a lying daemon can neither inflate
+// nor hide a node's abort count without detection. A `not_found` for the
+// canonical key is reported NOT-RECORDED — a DAEMON-ASSERTED negative, sound only
+// under the single-daemon (H-neg) honesty premise (NegativeVerdictSoundness.md
+// NV-2/NV-3; tagged `negative_footing=daemon_asserted` in --json). The
+// trust-minimized complement to operator_slashing_ledger.sh for auditing
+// committee-instability / suspension slashing. `--wait` (default 0) forwards to
+// the head-anchored binding exactly as on the other readers.
+int cmd_verify_abort_record(int argc, char** argv) {
+    uint16_t port = 0;
+    std::string genesis_path, domain, state_path;
+    bool have_port = false, json_out = false, resume = false;
+    uint64_t wait_seconds = 0;
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--rpc-port" && i + 1 < argc) {
+            port = parse_u16("--rpc-port", argv[++i]); have_port = true;
+        } else if (a == "--genesis" && i + 1 < argc) genesis_path = argv[++i];
+        else if   (a == "--domain"  && i + 1 < argc) domain       = argv[++i];
+        else if   (a == "--json")                    json_out     = true;
+        else if   (a == "--resume")                  resume       = true;
+        else if   (a == "--state" && i + 1 < argc)   state_path   = argv[++i];
+        else if   (a == "--wait" && i + 1 < argc)
+            wait_seconds = parse_u64("--wait", argv[++i]);
+        else {
+            std::cerr << "verify-abort-record: unknown arg '" << a << "'\n";
+            return 1;
+        }
+    }
+    if (!have_port || genesis_path.empty() || domain.empty()) {
+        std::cerr << "verify-abort-record: "
+                     "--rpc-port, --genesis, --domain are required\n";
+        return 1;
+    }
+    try {
+        auto genesis = load_genesis(genesis_path);
+        auto committee_seed = build_genesis_committee(genesis);
+        RpcClient rpc(port);
+        if (!rpc.open()) {
+            std::cerr << "verify-abort-record: " << rpc.last_error() << "\n";
+            return 1;
+        }
+
+        // 1+2. Anchor genesis + committee-verify the header chain to head
+        //      (full, or --resume only the suffix above a cached anchor).
+        auto ah = anchored_head(rpc, committee_seed, genesis, resume, state_path);
+        VerifiedChain vc = ah.vc;
+        if (vc.head_state_root.empty()) {
+            throw std::runtime_error(
+                "chain has not activated state_root (S-033) — head header "
+                "carries no state_root, so state-proofs can't be anchored.");
+        }
+
+        // 3. Fetch the `b:` state-proof. A `not_found` for the canonical key
+        //    means the node has NO abort record — a clean NOT-RECORDED, not an
+        //    error.
+        auto proof = rpc.call("state_proof",
+            {{"namespace", "b"}, {"key", domain}});
+        bool recorded = true;
+        if (proof.contains("error") && !proof["error"].is_null()) {
+            std::string err = proof["error"].dump();
+            if (err.find("not_found") != std::string::npos) recorded = false;
+            else throw std::runtime_error(
+                "state_proof RPC error: " + err);
+        }
+
+        if (!recorded) {
+            // NOT-RECORDED — a daemon-asserted negative (NV-2/NV-3): sound only
+            // under the single-daemon (H-neg) negative-honesty premise.
+            if (json_out) {
+                json out = {
+                    {"domain",           domain},
+                    {"verdict",          "NOT-RECORDED"},
+                    {"count",            0},
+                    {"verified",         true},
+                    {"negative_footing", "daemon_asserted"},
+                };
+                std::cout << out.dump() << "\n";
+            } else {
+                std::cout << domain << ": NOT-RECORDED (no committee-verified "
+                             "b: leaf — node has no Phase-1 abort record; "
+                             "daemon-asserted absence)\n";
+            }
+            return 0;
+        }
+
+        // 4. Verify the proof self-consistently (siblings roll up to its root).
+        auto vsp = verify_state_proof(proof, {});
+        if (!vsp.ok) {
+            throw std::runtime_error(vsp.detail);
+        }
+
+        // 5. Bind the proof's claimed state_root to a COMMITTEE-SIGNED root via
+        //    the block at proof_height-1 (committee_bound_state_root, S-042).
+        uint64_t proof_height = proof.value("height", uint64_t{0});
+        std::string proof_root = proof.value("state_root", std::string{});
+        if (proof_height < vc.height) {
+            throw std::runtime_error(
+                "proof.height=" + std::to_string(proof_height)
+                + " is BEFORE verified-chain head=" + std::to_string(vc.height)
+                + " — daemon is serving stale state");
+        }
+        json committee_json;
+        {
+            json arr = json::array();
+            for (auto& [domain_, pk] : committee_seed)
+                arr.push_back({{"domain", domain_}, {"ed_pub", to_hex(pk)}});
+            committee_json = json{{"members", arr}};
+        }
+        uint64_t anchor_index = proof_height - 1;
+        std::string attested = determ::light::committee_bound_state_root(
+            rpc, committee_json, anchor_index, wait_seconds);
+        if (attested != proof_root) {
+            throw std::runtime_error("SECURITY — committee-attested state_root at "
+                "index " + std::to_string(anchor_index) + " = " + attested
+                + " does NOT match proof.state_root = " + proof_root
+                + " — daemon served a proof against an unattested root");
+        }
+
+        // 6. Fetch the cleartext (count, last_block) via `abort_records`,
+        //    recompute the committed leaf hash, and confirm it matches the
+        //    proven value_hash. A daemon could serve an honest proof for THIS
+        //    domain while lying in the cleartext; the hash recomputation forces
+        //    consistency. Encoding matches build_state_leaves exactly:
+        //    value_hash = SHA256(u64_be(count) || u64_be(last_block)).
+        auto records = rpc.call("abort_records", json::object());
+        if (!records.is_array()) {
+            throw std::runtime_error(
+                "abort_records RPC did not return a JSON array");
+        }
+        bool found = false;
+        uint64_t count = 0, last_block = 0;
+        for (auto& r : records) {
+            if (r.value("domain", std::string{}) == domain) {
+                count      = r.value("count",      uint64_t{0});
+                last_block = r.value("last_block", uint64_t{0});
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error(
+                "INCONSISTENT — the b: state-proof proves a committed abort leaf "
+                "for '" + domain + "' but the daemon's abort_records cleartext "
+                "omits it (daemon lying about either the proof or the cleartext)");
+        }
+
+        determ::crypto::SHA256Builder b;
+        b.append(count);
+        b.append(last_block);
+        Hash computed_value_hash = b.finalize();
+        Hash proof_value_hash = from_hex_arr<32>(
+            proof["value_hash"].get<std::string>());
+        if (computed_value_hash != proof_value_hash) {
+            throw std::runtime_error(
+                "TAMPERED — daemon's abort_records reply (count="
+                + std::to_string(count) + ", last_block="
+                + std::to_string(last_block) + ") hashes to "
+                + to_hex(computed_value_hash)
+                + " but the state-proof's value_hash is "
+                + to_hex(proof_value_hash)
+                + " — daemon is lying about either the cleartext OR the proof");
+        }
+
+        if (json_out) {
+            json out = {
+                {"domain",     domain},
+                {"verdict",    "RECORDED"},
+                {"count",      count},
+                {"last_block", last_block},
+                {"height",     proof_height},
+                {"state_root", attested},
+                {"verified",   true},
+            };
+            std::cout << out.dump() << "\n";
+        } else {
+            std::cout << domain << ": RECORDED count=" << count
+                      << " last_block=" << last_block
+                      << " (verified via b: state-proof at height "
+                      << proof_height << ", state_root "
+                      << attested.substr(0, 16) << "...)\n";
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "verify-abort-record: " << e.what() << "\n";
         return 1;
     }
 }
@@ -6946,6 +7154,7 @@ int main(int argc, char** argv) {
         if (cmd == "balance-trustless")     return cmd_account_trustless(sub_argc, sub_argv, true,  "balance-trustless");
         if (cmd == "nonce-trustless")       return cmd_account_trustless(sub_argc, sub_argv, false, "nonce-trustless");
         if (cmd == "stake-trustless")       return cmd_stake_trustless(sub_argc, sub_argv);
+        if (cmd == "verify-abort-record")   return cmd_verify_abort_record(sub_argc, sub_argv);
         if (cmd == "verify-unstake-eligibility") return cmd_verify_unstake_eligibility(sub_argc, sub_argv);
         if (cmd == "supply-trustless")      return cmd_supply_trustless(sub_argc, sub_argv);
         if (cmd == "account-history")       return cmd_account_history(sub_argc, sub_argv);
