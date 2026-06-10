@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # test_light_verify_constant.sh — the determ-light `verify-constant` trust-
-# minimized reader for the `k:` (genesis-pinned constants) namespace — the
-# LAST of the 10 committed state namespaces to gain a light reader.
+# minimized reader for the `k:` (genesis-pinned constants) namespace.
+# (verify-param-value already reads the 12 u64 k: constants; this command's
+# delta is shard_salt coverage, the closed name whitelist, --resume, and the
+# MISMATCH-exit-2 contract — see ConstantProofSoundness.md §1.)
 #
 # WHAT IT VERIFIES
 # ----------------

@@ -2381,12 +2381,12 @@ int cmd_verify_abort_record(int argc, char** argv) {
 
 // ──────────────────────── verify-constant ──────────────────────────────
 //
-// Trust-minimized read of the `k:` (genesis-pinned constants) namespace —
-// the LAST of the 10 committed state namespaces to gain a light reader.
-// Unlike the DISCOVER+verify readers (stake/abort: a daemon RPC supplies the
-// cleartext), `k:` has NO cleartext RPC — so this is CONFIRM-shaped, like
-// verify-merge-state: the OPERATOR asserts (name, value) and the reader
-// proves the assertion against the committee-attested `k:` leaf.
+// Trust-minimized read of the `k:` (genesis-pinned constants) namespace.
+// verify-param-value already reads the 12 u64 k: constants; the deltas here:
+// shard_salt coverage (32-byte leaf), a CLOSED compiled-in name whitelist
+// (unknown names rejected before any RPC), --resume, and a MISMATCH-exit-2
+// contract (verify-param-value exits 0 on MISMATCH). k: has NO cleartext RPC,
+// so CONFIRM-shaped: the OPERATOR asserts (name, value), the reader proves it.
 //
 // Both verdicts are CRYPTOGRAPHIC (not daemon-asserted): every `k:` leaf is
 // unconditionally emitted by chain.cpp::build_state_leaves on an S-033 chain,
