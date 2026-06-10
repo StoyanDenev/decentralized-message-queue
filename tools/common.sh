@@ -105,4 +105,32 @@ else
     DETERM_LIGHT=""
 fi
 
+# ── Absolutize binary paths (Windows Python-subprocess portability) ────────────
+# The detection above yields paths RELATIVE to the repo root (e.g.
+# build/Release/determ.exe). Bash resolves a relative-with-slash path against
+# the cwd fine, so direct `$DETERM ...` invocations work everywhere. But a
+# Python `subprocess.run([$DETERM, ...])` on native Windows goes through
+# CreateProcess, which does NOT search the cwd for the executable — a relative
+# path raises FileNotFoundError [WinError 2]. That silently broke every test
+# whose wallet-grinder/helper spawns the binary from Python (test_cross_shard_
+# transfer's grinder produced 0 wallets → empty privkey → "hex length mismatch"
+# → the cross-shard flow never ran; test_light_verify_receipt_inclusion too).
+# These tests pass on Linux/CI (POSIX execvp resolves relative-with-slash) and
+# only fail on native Git-Bash + Windows-Python. Prefixing $PROJECT_ROOT (already
+# an absolute, Windows-native path via `pwd -W`) makes every invocation portable.
+# Bash exec of an absolute path is identical to the relative one, and the
+# operator_*.sh scripts' own `case "$DETERM"` absolutizers take their
+# already-absolute branch (drive-letter / leading-slash), so nothing double-
+# prefixes. An operator-supplied DETERM_BIN that is already absolute is left
+# untouched.
+_dt_abs() {  # echo $1 made absolute under PROJECT_ROOT unless empty/already-absolute
+    case "$1" in
+        ""|/*|[A-Za-z]:[/\\]*) printf '%s' "$1" ;;
+        *)                     printf '%s/%s' "$PROJECT_ROOT" "$1" ;;
+    esac
+}
+DETERM="$(_dt_abs "$DETERM")"
+DETERM_WALLET="$(_dt_abs "$DETERM_WALLET")"
+DETERM_LIGHT="$(_dt_abs "$DETERM_LIGHT")"
+
 export PROJECT_ROOT DETERM DETERM_WALLET DETERM_LIGHT
