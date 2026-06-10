@@ -23,7 +23,7 @@
 # Assertions (all run once the node + registration are live):
 #   1. (headline) The registered domain → INCLUDED, exit 0, ACTIVE, with a
 #      committee-anchored state_root and the recomputed value_hash matching.
-#   2. An unregistered domain → NOT-INCLUDED (sound verified negative:
+#   2. An unregistered domain → NOT-INCLUDED (a daemon-asserted negative, (H-neg):
 #      daemon returns not_found), exit 0, NEVER a false INCLUDED.
 #   3. Wrong --genesis → fail-closed, non-zero exit (genesis-hash mismatch
 #      detected before any verdict); never INCLUDED.
@@ -252,7 +252,7 @@ RC=$?
 set -e
 echo "$OUT"
 if [ "$RC" = "0" ] && echo "$OUT" | grep -qE "^NOT-INCLUDED"; then
-  assert "true" "unregistered domain → NOT-INCLUDED, exit 0 (sound verified negative)"
+  assert "true" "unregistered domain → NOT-INCLUDED, exit 0 (daemon-asserted negative, (H-neg))"
 else
   assert "false" "unregistered domain → NOT-INCLUDED/exit0 (got rc=$RC)"
 fi

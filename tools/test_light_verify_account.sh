@@ -12,14 +12,16 @@
 # lowercase-hex(pubkey)); with --address it re-derives the pubkey and
 # round-trips to canonical form, catching a case-mixed input. It then (2)
 # anchors genesis, committee-verifies the header chain to head, and (3)
-# makes a sound verdict against the `a:` namespace: a committee-anchored
+# renders a verdict against the `a:` namespace: a committee-anchored
 # Merkle proof → EXISTS (verified balance + next_nonce, hash-bound to the
-# daemon's `account` cleartext); a sound state_proof not_found at the
-# verified head → NOT-CREATED (the account has never been credited — a TRUE
-# zero, not the daemon-fabricated zero the bare `account` RPC returns for any
-# unknown address). Unlike balance-trustless, which THROWS on a not_found
-# leaf, verify-account distinguishes "never created" from "created then
-# drained".
+# daemon's `account` cleartext); a state_proof not_found at the verified
+# head → NOT-CREATED, a DAEMON-ASSERTED negative — sound only under the
+# single-daemon (H-neg) honesty premise (NegativeVerdictSoundness.md
+# NV-2/NV-3), stronger than the fabricated zero the bare `account` RPC
+# returns for any unknown address but NOT a cryptographic absence proof;
+# --json tags it negative_footing=daemon_asserted. Unlike balance-trustless,
+# which THROWS on a not_found leaf, verify-account distinguishes "never
+# created" from "created then drained".
 #
 # Assertions (all run once the node + funded anon account are live):
 #   1. (headline) The genesis-funded anon address → EXISTS, exit 0, with the
@@ -29,8 +31,9 @@
 #      local make_anon_address derivation, no daemon trust).
 #   3. The SAME account queried by an UPPERCASE --address → EXISTS with the
 #      identical canonical address (S-028 normalization to one leaf).
-#   4. An uncredited derived anon address → NOT-CREATED (sound verified
-#      negative: state_proof not_found), exit 0, never a false EXISTS.
+#   4. An uncredited derived anon address → NOT-CREATED (a daemon-asserted
+#      negative: state_proof not_found, (H-neg)), exit 0, never a false
+#      EXISTS.
 #   5. Wrong --genesis → fail-closed, non-zero exit; never EXISTS.
 #   6. Missing / conflicting flags → usage error (exit 1).
 #   7. (anti-false-positive) The NOT-CREATED / error variants never print a
@@ -289,7 +292,7 @@ RC=$?
 set -e
 echo "$OUT"
 if [ "$RC" = "0" ] && echo "$OUT" | grep -qE "^NOT-CREATED"; then
-  assert "true" "uncredited address → NOT-CREATED, exit 0 (sound verified negative)"
+  assert "true" "uncredited address → NOT-CREATED, exit 0 (daemon-asserted negative, (H-neg))"
 else
   assert "false" "uncredited address → NOT-CREATED/exit0 (got rc=$RC)"
 fi

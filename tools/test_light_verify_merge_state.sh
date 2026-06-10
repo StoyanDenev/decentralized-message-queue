@@ -321,7 +321,7 @@ RC=$?
 set -e
 echo "$OUT"
 if [ "$RC" = "0" ] && echo "$OUT" | grep -qE "^NOT-INCLUDED"; then
-  assert "true" "random shard_id → NOT-INCLUDED, exit 0 (sound verified negative)"
+  assert "true" "random shard_id → NOT-INCLUDED, exit 0 (daemon-asserted negative, (H-neg))"
 else
   assert "false" "random shard_id → NOT-INCLUDED/exit0 (got rc=$RC)"
 fi

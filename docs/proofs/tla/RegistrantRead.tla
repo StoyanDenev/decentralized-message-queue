@@ -500,8 +500,10 @@ StatusActive(entry, H) ==
 \* there is no leaf to prove — path/bind are vacuously FALSE), and the daemon
 \* does NOT forge a phantom path (path_honest = FALSE is the honest report of
 \* "no such leaf"). This matches main.cpp:4235-4251: a not_found with a
-\* corroborating null `account` registry is a sound NOT_INCLUDED, whereas a
-\* not_found contradicted by a non-null registry is UNVERIFIABLE.
+\* corroborating null `account` registry is a daemon-asserted NOT_INCLUDED
+\* (sound only under (H-neg), NegativeVerdictSoundness.md NV-2/NV-3 — the
+\* cross-check catches a self-contradicting daemon, not a consistent liar),
+\* whereas a not_found contradicted by a non-null registry is UNVERIFIABLE.
 Classify(domain, daemon, H) ==
     IF AllGatesOk(domain, daemon)
         THEN "INCLUDED"

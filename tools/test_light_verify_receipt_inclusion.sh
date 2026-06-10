@@ -28,7 +28,7 @@
 #   1. (headline) The genuinely-applied receipt → INCLUDED, exit 0, with
 #      a committee-anchored state_root.
 #   2. A random (never-applied) tx_hash for the same shard → NOT-INCLUDED
-#      (a sound verified negative: daemon returns not_found), exit 0,
+#      (a daemon-asserted negative, (H-neg): daemon returns not_found), exit 0,
 #      NEVER a false INCLUDED.
 #   3. Wrong --genesis → fail-closed, non-zero exit (genesis-hash mismatch
 #      detected before any verdict); never INCLUDED.
@@ -366,7 +366,7 @@ RC=$?
 set -e
 echo "$OUT"
 if [ "$RC" = "0" ] && echo "$OUT" | grep -qE "^NOT-INCLUDED"; then
-  assert "true" "random tx_hash → NOT-INCLUDED, exit 0 (sound verified negative)"
+  assert "true" "random tx_hash → NOT-INCLUDED, exit 0 (daemon-asserted negative, (H-neg))"
 else
   assert "false" "random tx_hash → NOT-INCLUDED/exit0 (got rc=$RC)"
 fi

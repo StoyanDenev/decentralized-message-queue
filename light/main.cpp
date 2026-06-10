@@ -218,13 +218,17 @@ void print_usage() {
         "      where b.index is the next-block height H+1 at the verified head\n"
         "      H) over the committee-attested unlock_height — never the\n"
         "      daemon's raw claim. Both inputs (the head height AND the\n"
-        "      unlock_height) are committee-anchored, so the verdict cannot be\n"
-        "      faked by a lying daemon. Four sound verdicts (exit 0): ELIGIBLE\n"
-        "      (locked>0 and an unlock_height <= H+1 has matured), LOCKED\n"
-        "      (locked>0 but H+1 < unlock_height — blocks_remaining reported),\n"
-        "      BONDED (locked>0 but unlock_height==UINT64_MAX — no unlock has\n"
-        "      been scheduled; DEREGISTER first), and NO-STAKE (locked==0 or no\n"
-        "      s: leaf — nothing to unstake). Any tamper, cleartext/leaf\n"
+        "      unlock_height) are committee-anchored, so an ELIGIBLE / LOCKED /\n"
+        "      BONDED verdict cannot be faked by a lying daemon. Four verdicts\n"
+        "      (exit 0): ELIGIBLE (locked>0 and an unlock_height <= H+1 has\n"
+        "      matured), LOCKED (locked>0 but H+1 < unlock_height —\n"
+        "      blocks_remaining reported), BONDED (locked>0 but\n"
+        "      unlock_height==UINT64_MAX — no unlock scheduled; DEREGISTER\n"
+        "      first), and NO-STAKE — which has TWO footings: a present s: leaf\n"
+        "      with locked==0 is a committee-anchored proof of a zero stake\n"
+        "      (negative_footing=cryptographic), while an absent leaf\n"
+        "      (state_proof not_found) is a daemon-asserted negative ((H-neg),\n"
+        "      negative_footing=daemon_asserted). Any tamper, cleartext/leaf\n"
         "      mismatch, or daemon refusal → UNVERIFIABLE (exit 3), never a\n"
         "      false ELIGIBLE. Distinct from stake-trustless, which reports the\n"
         "      raw (locked, unlock_height) pair but does NOT compute the\n"
@@ -366,7 +370,10 @@ void print_usage() {
         "      equal SHA256(0x01) (the presence marker) — binding the proof\n"
         "      to THIS receipt, not some other leaf. Receipts are\n"
         "      append-only once applied, so there is no per-block race.\n"
-        "      INCLUDED / NOT-INCLUDED are sound verified verdicts. Current\n"
+        "      INCLUDED is a sound committee-anchored verdict; NOT-INCLUDED is a\n"
+        "      daemon-asserted negative (sound only under the single-daemon\n"
+        "      (H-neg) honesty premise, NOT a cryptographic absence proof; --json\n"
+        "      tags negative_footing=daemon_asserted). Current\n"
         "      daemons serve the composite-key `i:` namespace (hex-encoded\n"
         "      key body); against a legacy daemon that cannot, the verdict\n"
         "      is UNVERIFIABLE and the command fails closed — never a false\n"
@@ -386,9 +393,12 @@ void print_usage() {
         "      value_hash must equal SHA256(u64_be(partner_id) ||\n"
         "      u64_be(region_len) || region) — binding the proof to THIS\n"
         "      merge record, so a daemon lie about the partner or region is\n"
-        "      detected, not propagated. INCLUDED / NOT-INCLUDED are sound\n"
-        "      verdicts anchored to the head height (merge_state is mutable:\n"
-        "      a later revert flips INCLUDED back to NOT-INCLUDED). Any\n"
+        "      detected, not propagated. INCLUDED is a sound committee-anchored\n"
+        "      verdict anchored to the head height; NOT-INCLUDED is a daemon-\n"
+        "      asserted negative ((H-neg), negative_footing=daemon_asserted) —\n"
+        "      sound only if the daemon answers absences honestly (merge_state\n"
+        "      is mutable: a later revert flips INCLUDED back to NOT-INCLUDED).\n"
+        "      Any\n"
         "      tamper, mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
         "      never a false INCLUDED.\n"
         "  verify-param-change --rpc-port <N> --genesis <file>\n"
@@ -410,10 +420,12 @@ void print_usage() {
         "      detected, not propagated. Use the daemon's `pending_params` RPC\n"
         "      to discover the (effective_height, name, value_hex) to assert;\n"
         "      --idx is the entry's 0-based position within its bucket.\n"
-        "      INCLUDED / NOT-INCLUDED are sound verdicts anchored to the head\n"
-        "      height (pending_param_changes is consumed at activation: once\n"
-        "      the chain advances past <H> the same query flips INCLUDED back\n"
-        "      to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
+        "      INCLUDED is a sound committee-anchored verdict anchored to the\n"
+        "      head height; NOT-INCLUDED is a daemon-asserted negative ((H-neg),\n"
+        "      negative_footing=daemon_asserted) — sound only if the daemon\n"
+        "      answers absences honestly (pending_param_changes is consumed at\n"
+        "      activation: once the chain advances past <H> the same query flips\n"
+        "      INCLUDED back to NOT-INCLUDED). Any tamper, mismatch, or daemon refusal →\n"
         "      UNVERIFIABLE (exit 3), never a false INCLUDED.\n"
         "  verify-param-value --rpc-port <N> --genesis <file>\n"
         "                     --name <NAME> --value <U64> [--json] [--wait <seconds>]\n"
@@ -460,8 +472,10 @@ void print_usage() {
         "      On INCLUDED the verdict also reports ACTIVE vs INACTIVE derived\n"
         "      from the committee-attested inactive_from vs the anchored head\n"
         "      height (a deactivated DApp keeps its `d:` leaf, so INACTIVE is a\n"
-        "      verified verdict, not a daemon claim). INCLUDED / NOT-INCLUDED\n"
-        "      are sound verdicts anchored to the head height; any tamper,\n"
+        "      verified verdict, not a daemon claim). INCLUDED is a sound\n"
+        "      committee-anchored verdict anchored to the head height;\n"
+        "      NOT-INCLUDED is a daemon-asserted negative ((H-neg),\n"
+        "      negative_footing=daemon_asserted); any tamper,\n"
         "      cleartext/leaf mismatch, or daemon refusal → UNVERIFIABLE\n"
         "      (exit 3), never a false INCLUDED.\n"
         "  verify-registrant --rpc-port <N> --genesis <file>\n"
@@ -483,10 +497,12 @@ void print_usage() {
         "      active_from / inactive_from vs the anchored head height. A null\n"
         "      `account` registry is consistent ONLY with a state_proof\n"
         "      not_found (else the daemon contradicts itself → UNVERIFIABLE).\n"
-        "      INCLUDED / NOT-INCLUDED → exit 0 (both sound verified answers,\n"
-        "      matching the InclusionVerdict reader family); any tamper,\n"
+        "      INCLUDED → exit 0 (sound, committee-anchored); NOT-INCLUDED →\n"
+        "      exit 0 (a daemon-asserted negative, (H-neg) — the null-registry\n"
+        "      cross-check catches a self-contradicting daemon, not a consistent\n"
+        "      liar; negative_footing=daemon_asserted in --json); any tamper,\n"
         "      value_hash mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
-        "      never a false INCLUDED/NOT-INCLUDED.\n"
+        "      never a false INCLUDED.\n"
         "  verify-account --rpc-port <N> --genesis <file>\n"
         "                 {--pubkey <64-hex> | --address <0x...>} [--json] [--wait <seconds>]\n"
         "      Derive an anon-account's canonical address LOCALLY and prove\n"
@@ -501,13 +517,15 @@ void print_usage() {
         "      auto-creation lifecycle against the `a:` namespace: a committee-\n"
         "      anchored `a:` Merkle proof → EXISTS (the verified balance +\n"
         "      next_nonce are printed, hash-bound to the daemon's `account`\n"
-        "      cleartext); a sound state_proof not_found at the verified head →\n"
-        "      NOT-CREATED (the account has never been credited — its balance is\n"
-        "      a TRUE zero, not the daemon-fabricated zero the bare `account`\n"
-        "      RPC returns for any unknown address). Distinct from\n"
+        "      cleartext); a state_proof not_found at the verified head →\n"
+        "      NOT-CREATED (a daemon-asserted negative, sound only under the\n"
+        "      single-daemon (H-neg) honesty premise — stronger than the bare\n"
+        "      `account` RPC's fabricated zero for unknown addresses, but NOT a\n"
+        "      cryptographic absence proof; --json tags\n"
+        "      negative_footing=daemon_asserted). Distinct from\n"
         "      balance-trustless, which THROWS on a not_found leaf and cannot\n"
         "      tell \"never created\" from \"created then drained\". EXISTS /\n"
-        "      NOT-CREATED → exit 0 (sound verified answer); any tamper,\n"
+        "      NOT-CREATED → exit 0 (a definite answer); any tamper,\n"
         "      key/leaf mismatch, or daemon refusal → UNVERIFIABLE (exit 3),\n"
         "      never a false EXISTS.\n"
         "\n"
@@ -1941,6 +1959,33 @@ StakeView read_stake_trustless(
             "stake leaf?): " + proof["error"].dump());
     }
 
+    // 3a. Bind the proof to THIS domain's key. verify_state_proof (step 4)
+    //     Merkle-verifies whatever key_bytes the daemon SUPPLIES — it does
+    //     not know which key we asked for — so without this check a Byzantine
+    //     daemon could serve a valid proof for SOME OTHER `s:` leaf (any
+    //     validator's) and the step-6 cleartext hash-bind would still pass
+    //     (the daemon also controls the `stake_info` reply, so it makes the
+    //     two consistent). That would let it attribute an arbitrary committed
+    //     (locked, unlock_height) to `domain` — forging not just NO-STAKE but
+    //     ELIGIBLE/LOCKED/BONDED (NegativeVerdictSoundness.md F-6). The key
+    //     bind closes it, mirroring verify-account/-registrant/-receipt:
+    //     proof.key_bytes MUST equal the locally-computed canonical key
+    //     ("s:" || domain), byte-for-byte.
+    {
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + domain.size());
+        local_key.push_back('s'); local_key.push_back(':');
+        local_key.insert(local_key.end(), domain.begin(), domain.end());
+        std::string proof_key_hex = proof.value("key_bytes", std::string{});
+        std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+        if (proof_key_hex != local_key_hex) {
+            throw std::runtime_error(
+                "stake-trustless: proof.key_bytes=" + proof_key_hex
+                + " does not match the canonical s: key " + local_key_hex
+                + " — daemon served a proof for a different leaf");
+        }
+    }
+
     // 4. Verify the proof self-consistently (Merkle siblings roll up to
     //    the proof's claimed state_root).
     auto vsp = verify_state_proof(proof, {});
@@ -1995,10 +2040,12 @@ StakeView read_stake_trustless(
 
     // 6. Fetch the cleartext (locked, unlock_height) via `stake_info`,
     //    recompute the committed leaf hash, and confirm it matches the
-    //    verified value_hash. This is the load-bearing cross-check: a
-    //    daemon could serve an honest proof for some OTHER stake pair
-    //    while lying in the cleartext; the hash recomputation forces
-    //    consistency. Encoding matches build_state_leaves exactly:
+    //    verified value_hash. With step 3a binding the proof to THIS
+    //    domain's key, the two binds together are load-bearing: the key
+    //    bind fixes WHICH leaf, and this value-hash bind fixes the leaf's
+    //    contents — a daemon lying in the `stake_info` cleartext is caught
+    //    because the recomputed hash no longer matches the (key-bound)
+    //    leaf's value_hash. Encoding matches build_state_leaves exactly:
     //    SHA256(u64_be(locked) || u64_be(unlock_height)).
     auto si = rpc.call("stake_info", {{"domain", domain}});
     if (si.contains("error") && !si["error"].is_null()) {
@@ -2342,9 +2389,12 @@ int cmd_verify_abort_record(int argc, char** argv) {
 //                   operator must DEREGISTER first to start the timer)
 //   NO-STAKE     locked==0 (or no s: leaf)                 → exit 0
 //   UNVERIFIABLE any tamper / mismatch / daemon refusal    → exit 3
-// All four positive verdicts are SOUND committee-anchored answers (exit 0);
-// only a refusal-to-assert is non-zero (exit 3). A transport / parse / usage
-// fault exits 1, matching the rest of the binary.
+// All four definite verdicts exit 0; ELIGIBLE / LOCKED / BONDED and the
+// proven-zero NO-STAKE arm (present s: leaf, locked==0) are SOUND committee-
+// anchored answers, while the not_found NO-STAKE arm is a daemon-asserted
+// negative ((H-neg), NegativeVerdictSoundness.md NV-2/NV-3). Only a refusal-
+// to-assert is non-zero (exit 3). A transport / parse / usage fault exits 1,
+// matching the rest of the binary.
 
 enum class UnstakeVerdict { ELIGIBLE, LOCKED, BONDED, NO_STAKE, UNVERIFIABLE };
 
@@ -2404,10 +2454,11 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
         // The committee-anchored (locked, unlock_height, head height) read.
         // A domain with no s: leaf throws inside read_stake_trustless (the
         // daemon's state_proof returns not_found); we treat that ONE case as
-        // a sound NO-STAKE — there is nothing to unstake — and let every
-        // other failure (sig break, root mismatch, cleartext/leaf tamper)
-        // surface as UNVERIFIABLE so a lying daemon can never coerce a false
-        // ELIGIBLE.
+        // NO-STAKE — a DAEMON-ASSERTED negative, sound only under the
+        // single-daemon (H-neg) honesty premise (NegativeVerdictSoundness.md
+        // NV-2/NV-3) — and let every other failure (sig break, root mismatch,
+        // cleartext/leaf tamper, any non-not_found refusal) surface as
+        // UNVERIFIABLE so a lying daemon can never coerce a false ELIGIBLE.
         bool have_stake = true;
         try {
             // --wait (default 0) forwards to the embedded stake read, which
@@ -2422,11 +2473,18 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
             state_root_hex = sv.state_root_hex;
         } catch (const std::exception& e) {
             std::string msg = e.what();
-            if (msg.find("not_found") != std::string::npos
-                || msg.find("no verified") != std::string::npos) {
-                have_stake = false;          // sound NO-STAKE
+            // Match ONLY the absence marker. read_stake_trustless's step-3
+            // throw prefixes EVERY state_proof RPC error with "domain has
+            // no verified stake leaf?", so the former second find-disjunct
+            // on that prefix classified ANY daemon refusal (malformed key,
+            // rate limit, RPC-layer error) as NO-STAKE instead of
+            // UNVERIFIABLE — the opposite of the fail-closed intent
+            // (NegativeVerdictSoundness.md F-5; fixed alongside the
+            // F-1/F-2 a: closure; ratcheted by test_light_negative_footing).
+            if (msg.find("not_found") != std::string::npos) {
+                have_stake = false;   // daemon-asserted NO-STAKE ((H-neg))
             } else {
-                throw;                       // sig/root/tamper → UNVERIFIABLE
+                throw;                // any other refusal → UNVERIFIABLE
             }
         }
 
@@ -2472,6 +2530,16 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
             };
             if (verdict == UnstakeVerdict::LOCKED)
                 out["blocks_remaining"] = blocks_remaining;
+            // F-2 (NegativeVerdictSoundness.md): NO-STAKE has TWO sources with
+            // DIFFERENT footings — leaf-present-with-locked==0 is a committee-
+            // anchored POSITIVE proof of a zero stake (a cryptographically
+            // sound negative, A1+A2), while leaf-absent is a daemon-asserted
+            // not_found ((H-neg), NV-2/NV-3). Tag which one this verdict is so
+            // a consumer applies NV-6 clause (2) vs (3) by machine.
+            if (verdict == UnstakeVerdict::NO_STAKE && have_stake)
+                out["negative_footing"] = "cryptographic";
+            if (verdict == UnstakeVerdict::NO_STAKE && !have_stake)
+                out["negative_footing"] = "daemon_asserted";
             if (!state_root_hex.empty())
                 out["state_root"] = state_root_hex;
             if (!detail.empty()) out["detail"] = detail;
@@ -2497,7 +2565,7 @@ int cmd_verify_unstake_eligibility(int argc, char** argv) {
                 std::cout << "  detail:         " << detail << "\n";
         }
 
-        // Exit codes match verify-account: every sound verdict (ELIGIBLE /
+        // Exit codes match verify-account: every definite verdict (ELIGIBLE /
         // LOCKED / BONDED / NO-STAKE) → 0; UNVERIFIABLE → 3 (refused to
         // assert). Note UNVERIFIABLE only reaches here via --json's catch;
         // the non-json path below maps a thrown exception to exit 1.
@@ -3213,8 +3281,9 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
 
         // A daemon that cannot serve the `i:` namespace (e.g. the RPC does
         // not expose composite-key namespaces) returns an `error`. We
-        // distinguish a genuine absence (`not_found` for our exact key →
-        // a sound NOT-INCLUDED) from any other refusal (→ UNVERIFIABLE,
+        // distinguish a daemon-reported absence (`not_found` for our exact
+        // key → NOT-INCLUDED, a daemon-asserted negative per (H-neg) —
+        // NV-2/NV-3) from any other refusal (→ UNVERIFIABLE,
         // fail closed — we will not assert membership either way).
         if (proof.contains("error") && !proof["error"].is_null()) {
             std::string err = proof["error"].is_string()
@@ -3359,7 +3428,8 @@ int cmd_verify_receipt_inclusion(int argc, char** argv) {
         }
 
         // Exit codes match verify-tx-inclusion: INCLUDED / NOT-INCLUDED →
-        // 0 (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        // 0 (a definite answer; NOT-INCLUDED is daemon-asserted, (H-neg));
+        // UNVERIFIABLE → 3 (refused to assert).
         if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
         return 0;
     } catch (const std::exception& e) {
@@ -3528,8 +3598,9 @@ int cmd_verify_merge_state(int argc, char** argv) {
             {{"namespace", "m"}, {"key", key_body_hex}});
 
         // A daemon that cannot serve the `m:` namespace returns an `error`.
-        // We distinguish a genuine absence (`not_found` for our exact key →
-        // a sound NOT-INCLUDED) from any other refusal (→ UNVERIFIABLE,
+        // We distinguish a daemon-reported absence (`not_found` for our exact
+        // key → NOT-INCLUDED, a daemon-asserted negative per (H-neg) —
+        // NV-2/NV-3) from any other refusal (→ UNVERIFIABLE,
         // fail closed — we will not assert membership either way).
         if (proof.contains("error") && !proof["error"].is_null()) {
             std::string err = proof["error"].is_string()
@@ -3683,7 +3754,8 @@ int cmd_verify_merge_state(int argc, char** argv) {
         }
 
         // Exit codes match verify-receipt-inclusion: INCLUDED / NOT-INCLUDED
-        // → 0 (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        // → 0 (a definite answer; NOT-INCLUDED is daemon-asserted, (H-neg));
+        // UNVERIFIABLE → 3 (refused to assert).
         if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
         return 0;
     } catch (const std::exception& e) {
@@ -3868,8 +3940,9 @@ int cmd_verify_param_change(int argc, char** argv) {
             {{"namespace", "p"}, {"key", key_body_hex}});
 
         // A daemon that cannot serve the `p:` namespace returns an `error`.
-        // We distinguish a genuine absence (`not_found` for our exact key →
-        // a sound NOT-INCLUDED) from any other refusal (→ UNVERIFIABLE,
+        // We distinguish a daemon-reported absence (`not_found` for our exact
+        // key → NOT-INCLUDED, a daemon-asserted negative per (H-neg) —
+        // NV-2/NV-3) from any other refusal (→ UNVERIFIABLE,
         // fail closed — we will not assert membership either way).
         if (proof.contains("error") && !proof["error"].is_null()) {
             std::string err = proof["error"].is_string()
@@ -4026,7 +4099,8 @@ int cmd_verify_param_change(int argc, char** argv) {
         }
 
         // Exit codes match verify-merge-state: INCLUDED / NOT-INCLUDED → 0
-        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        // (a definite answer; NOT-INCLUDED is daemon-asserted, (H-neg));
+        // UNVERIFIABLE → 3 (refused to assert).
         if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
         return 0;
     } catch (const std::exception& e) {
@@ -4186,8 +4260,9 @@ int cmd_verify_param_value(int argc, char** argv) {
             {{"namespace", "k"}, {"key", name}});
 
         // A `not_found` for a `k:` name is treated as UNVERIFIABLE, NOT a
-        // sound negative: unlike a:/d: (where an absent leaf is a genuine
-        // "never created" verdict), every WELL-KNOWN consensus scalar always
+        // negative verdict: unlike a:/d: (where an absent leaf yields a
+        // daemon-asserted "never created/registered" verdict, (H-neg) —
+        // NV-2/NV-3), every WELL-KNOWN consensus scalar always
         // has a `k:` leaf, so a not_found means the caller named an unknown /
         // non-`k:` constant — we cannot anchor a value for a leaf that is not
         // in the committed tree, and refuse to assert either way.
@@ -4445,9 +4520,11 @@ int cmd_verify_registrant(int argc, char** argv) {
         auto proof = rpc.call("state_proof",
             {{"namespace", "r"}, {"key", domain}});
 
-        // not_found for our exact key → a sound NOT-INCLUDED (no such
-        // validator registered at the verified head). Any other refusal →
-        // fail-closed UNVERIFIABLE (we will not assert membership either way).
+        // not_found for our exact key → NOT-INCLUDED, a daemon-asserted
+        // negative per (H-neg) — NV-2/NV-3 (no such validator registered at
+        // the verified head, if the daemon answers absences honestly). Any
+        // other refusal → fail-closed UNVERIFIABLE (we will not assert
+        // membership either way).
         if (proof.contains("error") && !proof["error"].is_null()) {
             std::string err = proof["error"].is_string()
                 ? proof["error"].get<std::string>()
@@ -4459,6 +4536,9 @@ int cmd_verify_registrant(int argc, char** argv) {
                           "head (state_proof not_found)";
                 // Cross-check the cleartext: the `account` RPC's registry must
                 // ALSO be null/absent, else the daemon contradicts itself.
+                // This catches a SELF-CONTRADICTING daemon only; a consistent
+                // liar (not_found + null registry for a real registrant) still
+                // forges the negative — the (H-neg) footing is unchanged.
                 auto acc = rpc.call("account", {{"address", domain}});
                 bool reg_null = !acc.contains("registry")
                               || acc["registry"].is_null();
@@ -4639,6 +4719,12 @@ int cmd_verify_registrant(int argc, char** argv) {
                 {"domain",    domain},
                 {"namespace", "r"},
             };
+            // F-2 (NegativeVerdictSoundness.md): the r: state-proof negative is
+            // DAEMON_ASSERTED — sound only under the non-cryptographic (H-neg)
+            // premise (NV-2/NV-3); a consumer MUST apply NV-6 clause (3). The
+            // account-RPC cross-check above does not upgrade the footing.
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
             if (included) {
                 out["active"]        = active;
                 out["ed_pub"]        = ed_pub_hex;
@@ -4675,7 +4761,8 @@ int cmd_verify_registrant(int argc, char** argv) {
 
         // Exit codes match verify-dapp-registration and the whole InclusionVerdict
         // reader family (verify-tx-inclusion / -receipt-inclusion / -merge-state /
-        // -param-change): INCLUDED / NOT-INCLUDED → 0 (both sound verified answers);
+        // -param-change): INCLUDED → 0 (sound, committee-anchored), NOT-INCLUDED
+        // → 0 (a daemon-asserted negative, (H-neg) — NV-2/NV-3);
         // UNVERIFIABLE → 3 (refused to assert); args/transport → 1.
         if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
         return 0;
@@ -4796,9 +4883,11 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
         auto proof = rpc.call("state_proof",
             {{"namespace", "d"}, {"key", domain}});
 
-        // not_found for our exact key → a sound NOT-INCLUDED (no such DApp
-        // registered at the verified head). Any other refusal → fail-closed
-        // UNVERIFIABLE (we will not assert membership either way).
+        // not_found for our exact key → NOT-INCLUDED, a daemon-asserted
+        // negative per (H-neg) — NV-2/NV-3 (no such DApp registered at the
+        // verified head, if the daemon answers absences honestly). Any other
+        // refusal → fail-closed UNVERIFIABLE (we will not assert membership
+        // either way).
         if (proof.contains("error") && !proof["error"].is_null()) {
             std::string err = proof["error"].is_string()
                 ? proof["error"].get<std::string>()
@@ -4977,6 +5066,11 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
                 {"domain",    domain},
                 {"namespace", "d"},
             };
+            // F-2 (NegativeVerdictSoundness.md): the d: state-proof negative is
+            // DAEMON_ASSERTED — sound only under the non-cryptographic (H-neg)
+            // premise (NV-2/NV-3); a consumer MUST apply NV-6 clause (3).
+            if (verdict == InclusionVerdict::NOT_INCLUDED)
+                out["negative_footing"] = "daemon_asserted";
             if (included) {
                 out["active"]         = active;
                 out["service_pubkey"] = service_pubkey_hex;
@@ -5017,7 +5111,8 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
         }
 
         // Exit codes match verify-param-change: INCLUDED / NOT-INCLUDED → 0
-        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        // (a definite answer; NOT-INCLUDED is daemon-asserted, (H-neg));
+        // UNVERIFIABLE → 3 (refused to assert).
         if (verdict == InclusionVerdict::UNVERIFIABLE) return 3;
         return 0;
     } catch (const std::exception& e) {
@@ -5028,8 +5123,10 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
 
 // ──────────────────────────── verify-account ───────────────────────────
 
-// Tri-state for the anon-account existence check. EXISTS / NOT-CREATED are
-// sound committee-anchored verdicts (exit 0); UNVERIFIABLE is a refusal to
+// Tri-state for the anon-account existence check. EXISTS is a sound committee-
+// anchored verdict; NOT-CREATED is a daemon-asserted negative (sound only under
+// the single-daemon (H-neg) honesty premise, NV-2/NV-3 — not a cryptographic
+// absence proof). Both exit 0; UNVERIFIABLE is a refusal to
 // assert (exit 3); a transport / parse / usage fault exits 1. Named
 // distinctly from InclusionVerdict so the lifecycle semantics are explicit:
 // the question is whether the chain has ever MATERIALIZED an `a:` leaf for
@@ -5069,9 +5166,14 @@ const char* account_exist_verdict_str(AccountExistVerdict v) {
 //      non-registrant) materializes one. So:
 //        • a committee-anchored `a:` Merkle proof  → EXISTS, and the
 //          verified (balance, next_nonce) are reported;
-//        • a sound state_proof `not_found` at the verified head → NOT-CREATED
-//          (the account has never been credited — its balance is a TRUE zero,
-//          not a daemon-fabricated one).
+//        • a state_proof `not_found` at the verified head → NOT-CREATED
+//          (never credited — auto-creation has not fired). This is a
+//          DAEMON-ASSERTED negative: sound only under the single-daemon
+//          negative-honesty premise (H-neg), NOT a cryptographic absence
+//          proof (the sorted-leaves tree has no non-membership witness,
+//          MerkleTreeSoundness.md MT-5 / NegativeVerdictSoundness.md
+//          NV-2/NV-3). The --json carries negative_footing=daemon_asserted
+//          so a consumer applies NV-6 clause 3.
 //
 // ─── Why this is NOT balance-trustless ──────────────────────────────────
 //
@@ -5083,10 +5185,12 @@ const char* account_exist_verdict_str(AccountExistVerdict v) {
 // node.cpp rpc_account — it defaults the fields when the address is absent
 // from the committed view). A naive client reading `account` alone cannot
 // tell "never created" from "created then drained", and would render a
-// fabricated zero as though it were chain-attested. verify-account closes
-// that gap: NOT-CREATED is a VERIFIED negative anchored to the committee-
-// signed state_root via the `a:` state_proof's not_found, never the daemon's
-// unverified cleartext zero. On EXISTS it additionally hash-binds the
+// fabricated zero as though it were chain-attested. verify-account narrows
+// that gap: NOT-CREATED is asserted only after the genesis pin + the
+// committee-verified header chain + an explicit `a:` state_proof not_found —
+// a daemon-asserted absence ((H-neg) footing, NV-2/NV-3), strictly stronger
+// than the bare `account` cleartext zero but NOT a cryptographic absence
+// proof. On EXISTS it additionally hash-binds the
 // daemon's `account` cleartext (SHA256(u64_be(balance) || u64_be(next_nonce))
 // per build_state_leaves' "a:" branch) to the proof's value_hash, so a
 // daemon lie about the balance of a real account is detected too.
@@ -5189,20 +5293,20 @@ int cmd_verify_account(int argc, char** argv) {
         auto proof = rpc.call("state_proof",
             {{"namespace", "a"}, {"key", canon_address}});
 
-        // not_found for our exact address → a sound NOT-CREATED (the chain
-        // has never materialized an account leaf for it). Any OTHER refusal →
-        // fail-closed UNVERIFIABLE (we will not assert either way).
+        // not_found for our exact address → NOT-CREATED, a DAEMON-ASSERTED
+        // negative: sound only under (H-neg), NOT a cryptographic absence
+        // proof (MT-5 / NV-2/NV-3). Any OTHER refusal → fail-closed
+        // UNVERIFIABLE (we will not assert either way).
         if (proof.contains("error") && !proof["error"].is_null()) {
             std::string err = proof["error"].is_string()
                 ? proof["error"].get<std::string>()
                 : proof["error"].dump();
             if (err == "not_found") {
                 verdict = AccountExistVerdict::NOT_CREATED;
-                detail  = "no `a:` leaf for '" + canon_address
-                        + "' at the committee-verified head — the account has "
-                          "never been credited (auto-creation has not fired); "
-                          "its balance is a TRUE zero, not a daemon-fabricated "
-                          "one";
+                detail  = "daemon reports no `a:` leaf for '" + canon_address
+                        + "' at the committee-verified head — never credited "
+                          "(auto-creation has not fired); a daemon-asserted "
+                          "negative (H-neg), not a cryptographic absence proof";
             } else {
                 verdict = AccountExistVerdict::UNVERIFIABLE;
                 detail  = "daemon refused the `a:` state-proof: " + err
@@ -5342,6 +5446,11 @@ int cmd_verify_account(int argc, char** argv) {
                 {"pubkey",    to_hex(pk)},
                 {"namespace", "a"},
             };
+            // F-2 (NegativeVerdictSoundness.md): the a: state-proof negative is
+            // DAEMON_ASSERTED — sound only under the non-cryptographic (H-neg)
+            // premise (NV-2/NV-3); a consumer MUST apply NV-6 clause (3).
+            if (verdict == AccountExistVerdict::NOT_CREATED)
+                out["negative_footing"] = "daemon_asserted";
             if (exists) {
                 out["balance"]    = balance;
                 out["next_nonce"] = next_nonce;
@@ -5369,7 +5478,8 @@ int cmd_verify_account(int argc, char** argv) {
         }
 
         // Exit codes mirror verify-dapp-registration: EXISTS / NOT-CREATED → 0
-        // (sound verified answer); UNVERIFIABLE → 3 (refused to assert).
+        // (a definite answer; NOT-CREATED is daemon-asserted per (H-neg));
+        // UNVERIFIABLE → 3 (refused to assert).
         if (verdict == AccountExistVerdict::UNVERIFIABLE) return 3;
         return 0;
     } catch (const std::exception& e) {
