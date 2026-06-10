@@ -472,6 +472,34 @@ AccountView read_account_trustless(
             + proof["error"].dump());
     }
 
+    // 3a. Bind the proof to THIS domain's key. verify_state_proof (step 4)
+    //     Merkle-verifies whatever key_bytes the daemon SUPPLIES — it does
+    //     not know which key we asked for — so without this check a
+    //     Byzantine daemon could serve a valid proof for SOME OTHER `a:`
+    //     leaf and lie consistently in the `account` cleartext (step 5's
+    //     hash-bind compares the cleartext against the SERVED leaf, not
+    //     this domain's), attributing an arbitrary committed
+    //     (balance, next_nonce) to `domain` — e.g. forging a whale's
+    //     balance onto an empty account (the F-6 forge class,
+    //     NegativeVerdictSoundness.md; the same gap was fixed in
+    //     read_stake_trustless and verify-abort-record).
+    //     proof.key_bytes MUST equal the locally-computed canonical key
+    //     ("a:" || domain), byte-for-byte.
+    {
+        std::vector<uint8_t> local_key;
+        local_key.reserve(2 + domain.size());
+        local_key.push_back('a'); local_key.push_back(':');
+        local_key.insert(local_key.end(), domain.begin(), domain.end());
+        std::string proof_key_hex = proof.value("key_bytes", std::string{});
+        std::string local_key_hex = to_hex(local_key.data(), local_key.size());
+        if (proof_key_hex != local_key_hex) {
+            throw std::runtime_error(
+                "trustless-read: proof.key_bytes=" + proof_key_hex
+                + " does not match the canonical a: key " + local_key_hex
+                + " — daemon served a proof for a different leaf");
+        }
+    }
+
     // 4. Verify the proof self-consistently (the proof's Merkle
     //    siblings must roll up to the claimed state_root).
     auto vsp = verify_state_proof(proof, {});
