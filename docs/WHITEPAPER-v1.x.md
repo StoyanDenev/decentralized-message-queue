@@ -135,6 +135,8 @@ When all four hold, the round runs in BFT mode with two-level shrinkage:
 - A designated proposer is deterministically chosen from the committee via `proposer_idx(seed, abort_events, k_bft)` where `seed = epoch_committee_seed(epoch_rand, shard_id)` and the inputs are domain-separated by the ASCII tag `"bft-proposer"` (full algorithm in PROTOCOL.md §5.3.1). The proposer must sign; up to `k_bft − Q` other slots may carry sentinel-zero signatures.
 - The block tags `consensus_mode = BFT` and `bft_proposer = <domain>`.
 
+A known open limitation (S-044/S-045, SECURITY.md §3): the trigger's threshold condition is reachable only while rounds can still run, so at the default threshold the escalation never engages on the nominal pool of any shipped profile, and at K=2 the trigger conditions are mutually unsatisfiable. Operators relying on escalation should genesis-pin `bft_escalation_threshold ≤ K−1`; the formal reachability derivation is `docs/proofs/AbortCascadeLiveness.md` (FB67).
+
 BFT-mode safety is conditional on `f_h < k_bft/3` (the standard BFT bound applied to the smaller BFT committee), plus economic slashing recovery for any equivocator. See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
 
 ### 3.4 Equivocation slashing

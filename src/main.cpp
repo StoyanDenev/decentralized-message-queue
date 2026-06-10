@@ -4620,6 +4620,45 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
             std::cout << "Initial balances:   " << cfg.initial_balances.size() << "\n";
             std::cout << "Genesis hash:       " << hex << "\n";
             std::cout << "Wrote " << path << ".hash\n";
+            // S-044/S-045 liveness-posture advisories (SECURITY.md;
+            // derivations in docs/proofs/AbortCascadeLiveness.md FB67).
+            // Advisory prints only — the genesis still builds. Arithmetic
+            // mirrors node.cpp::check_if_selected: q = K-1 claim quorum,
+            // k_bft = ceil(2K/3), escalation headroom = M - k_bft, and the
+            // per-stuck-height abort-event ceiling K-1 (T-4).
+            {
+                uint32_t K = cfg.k_block_sigs, M = cfg.m_creators;
+                uint32_t k_bft = (2 * K + 2) / 3;
+                if (K == 2) {
+                    std::cout << "WARNING (S-044):    K=2 single-claim abort quorum — one phase\n"
+                                 "                    straggle excludes a member; cascades wedge the\n"
+                                 "                    chain permanently (BFT escalation unsatisfiable\n"
+                                 "                    at K=2). Deploy k_block_sigs >= 3.\n";
+                } else if (K >= 3) {
+                    if (M < k_bft + 2) {
+                        std::cout << "WARNING (S-045):    escalation headroom M-k_bft = "
+                                  << (M - k_bft) << " < 2 — two distinct\n"
+                                     "                    straggles at one height halt the chain permanently.\n";
+                    }
+                    if (cfg.bft_enabled
+                        && cfg.bft_escalation_threshold > K - 1
+                        && M < cfg.bft_escalation_threshold + k_bft) {
+                        std::cout << "WARNING (S-045):    bft_escalation_threshold="
+                                  << cfg.bft_escalation_threshold
+                                  << " exceeds the per-stuck-height abort-event\n"
+                                     "                    ceiling (K-1=" << (K - 1)
+                                  << ") and the pool is below threshold+k_bft="
+                                  << (cfg.bft_escalation_threshold + k_bft)
+                                  << " —\n"
+                                     "                    escalation is likely unreachable. Pin the threshold\n"
+                                     "                    <= K-1 or grow the pool.\n";
+                    }
+                }
+                if (!cfg.bft_enabled && K >= 2 && M > K) {
+                    std::cout << "NOTE:               bft_enabled=false — no escalation path exists; a\n"
+                                 "                    persistent straggle wedge requires operator restart.\n";
+                }
+            }
         }
     } catch (std::exception& e) {
         emit_error(e.what());
