@@ -21,6 +21,11 @@
 //       is caught (see verify-chain --resume / MultiPeer... follow-up).
 //   (3) schema version — a state written by an incompatible build is rejected,
 //       not misread.
+//   (4) head monotonicity (LSP-7) — on reuse, a daemon whose head is BELOW the
+//       cached committee-verified height is rejected (a fork-free chain never
+//       regresses; stale/truncated state), and a daemon EXACTLY AT the cached
+//       height must present the cached anchor block itself (anchored_head's
+//       gates; the cache is load-bearing evidence, not just an optimization).
 
 #pragma once
 #include <cstdint>

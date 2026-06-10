@@ -301,9 +301,84 @@ AnchoredHead anchored_head(
             }
             if (anchor_loaded) {
                 if (st.genesis_hash == out.genesis_hash_hex && st.head_height > 0) {
-                    // NOT guarded: a suffix that does not chain onto the anchor
-                    // (a fork/rollback below it) THROWS — a hard error, never a
-                    // silent from-genesis re-verify that would mask the fork.
+                    // LSP-7 head-monotonicity gates. The cached anchor is a
+                    // previously committee-verified head on THIS chain (genesis
+                    // pin just matched), and a fork-free chain never regresses —
+                    // so a daemon whose head is BELOW the anchor is serving
+                    // stale or truncated state (e.g. restored from an old
+                    // snapshot), and a daemon EXACTLY AT the anchor height must
+                    // present the very block we verified. Both are hard
+                    // fail-closed errors. Pre-LSP-7, both cases silently fell
+                    // back to a full from-genesis verify that ACCEPTED the
+                    // shorter/stale chain at face value — the cache held the
+                    // proof of regression and the code ignored it.
+                    uint64_t daemon_head = fetch_head_height(rpc);
+                    if (daemon_head < st.head_height) {
+                        throw std::runtime_error(
+                            "--resume: SECURITY/STALE — daemon head height "
+                            + std::to_string(daemon_head)
+                            + " is BELOW the previously committee-verified anchor"
+                              " at height " + std::to_string(st.head_height)
+                            + " — a fork-free chain never regresses; the daemon"
+                              " is serving stale or truncated state. Refusing."
+                              " If the chain was intentionally reset, clear the"
+                              " cache with `determ-light state --clear` and"
+                              " re-verify from genesis.");
+                    }
+                    if (daemon_head == st.head_height) {
+                        // No suffix exists to confirm the anchor from above;
+                        // full verify, then require the verified tip to BE the
+                        // cached anchor block (same chain, no same-height fork).
+                        out.vc = verify_chain_to_head(rpc, committee_seed,
+                                                      out.genesis_hash_hex);
+                        if (out.vc.height == st.head_height) {
+                            if (out.vc.head_block_hash != st.head_block_hash) {
+                                throw std::runtime_error(
+                                    "--resume: SECURITY — daemon's verified head"
+                                    " at the cached anchor height "
+                                    + std::to_string(st.head_height) + " is "
+                                    + out.vc.head_block_hash
+                                    + " but the previously verified anchor"
+                                      " block_hash is " + st.head_block_hash
+                                    + " — same-height fork at the anchor;"
+                                      " refusing");
+                            }
+                            out.note = "(--resume: daemon exactly at cached"
+                                       " anchor height "
+                                     + std::to_string(st.head_height)
+                                     + "; full verify cross-checked against the"
+                                       " cached anchor)";
+                            return out;
+                        }
+                        // The chain advanced between our head fetch and the
+                        // full verify's own fetch, so the verified tip is past
+                        // the anchor and the tip compare above no longer binds
+                        // the cached anchor block. Bind it explicitly: the
+                        // suffix walk chains [anchor, new head) onto the cached
+                        // anchor block_hash and throws on a fork at/below it.
+                        // Skipping this would silently drop the anchor binding
+                        // exactly when a block lands mid-check.
+                        auto bind = verify_chain_from_anchor(
+                            rpc, committee_seed, st.head_height,
+                            st.head_block_hash);
+                        if (!bind.resumed) {
+                            throw std::runtime_error(
+                                "--resume: SECURITY/STALE — daemon head"
+                                " regressed to at-or-below the cached anchor ("
+                                + std::to_string(st.head_height)
+                                + ") between queries — inconsistent daemon;"
+                                  " refusing");
+                        }
+                        out.note = "(--resume: chain advanced during the anchor"
+                                   " cross-check; cached anchor at height "
+                                 + std::to_string(st.head_height)
+                                 + " bound via suffix walk)";
+                        return out;
+                    }
+                    // daemon_head > anchor. NOT guarded: a suffix that does not
+                    // chain onto the anchor (a fork/rollback below it) THROWS —
+                    // a hard error, never a silent from-genesis re-verify that
+                    // would mask the fork.
                     auto rr = verify_chain_from_anchor(
                         rpc, committee_seed, st.head_height, st.head_block_hash);
                     if (rr.resumed) {
@@ -315,8 +390,18 @@ AnchoredHead anchored_head(
                                  + " suffix headers)";
                         return out;
                     }
-                    out.note = "(--resume: daemon not ahead of cached anchor at height "
-                             + std::to_string(st.head_height) + " — full verify)";
+                    // We measured daemon_head strictly ABOVE the anchor moments
+                    // ago, yet the resume's own head fetch found it at-or-below
+                    // the anchor. Heads only advance on an honest daemon — a
+                    // head that moved DOWN between two queries is a regression
+                    // mid-session. Fail closed (pre-LSP-7 this fell through to
+                    // a full verify that would accept the regressed chain).
+                    throw std::runtime_error(
+                        "--resume: SECURITY/STALE — daemon head regressed from "
+                        + std::to_string(daemon_head)
+                        + " to at-or-below the cached anchor ("
+                        + std::to_string(st.head_height)
+                        + ") between queries — inconsistent daemon; refusing");
                 } else {
                     out.note = "(--resume: cached anchor is for a different chain or empty "
                                "— genesis re-pin failed; full verify)";

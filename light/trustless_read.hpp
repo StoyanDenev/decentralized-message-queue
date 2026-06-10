@@ -132,11 +132,23 @@ struct AnchoredHead {
 // Always anchors genesis first (anchor_genesis). If `resume` and a valid
 // genesis-pinned anchor is cached at `state_path` (empty → default_state_path())
 // and the daemon's head is strictly above it, verifies ONLY the suffix above the
-// anchor (verify_chain_from_anchor); otherwise — absent / corrupt / wrong-chain /
-// not-ahead anchor — falls back to a full verify_chain_to_head (NEVER weaker). A
-// fork below the anchor THROWS (verify_chain_from_anchor's hard error). With
-// resume=false this is exactly anchor_genesis + verify_chain_to_head, so existing
-// callers are byte-for-byte unaffected.
+// anchor (verify_chain_from_anchor); an absent / corrupt / wrong-chain anchor
+// falls back to a full verify_chain_to_head (NEVER weaker). A fork below the
+// anchor THROWS (verify_chain_from_anchor's hard error).
+//
+// LSP-7 head-monotonicity (a valid genesis-pinned anchor is LOAD-BEARING, not
+// just an optimization): a fork-free chain never regresses, so with such an
+// anchor at height H —
+//   * daemon head < H  → THROW (stale/truncated state; e.g. an old-snapshot
+//     restore). Clear the cache with `state --clear` if the reset was intended.
+//   * daemon head == H → full verify, then the verified tip's block_hash MUST
+//     equal the cached anchor's (same-height fork at the anchor → THROW).
+//   * daemon head > H  → the LSP-6 suffix walk; if the daemon's head then
+//     regresses to ≤ H between queries → THROW (inconsistent daemon).
+// Pre-LSP-7 the first two cases silently fell back to a full verify that
+// accepted the shorter/stale chain. With resume=false this is exactly
+// anchor_genesis + verify_chain_to_head, so existing callers are byte-for-byte
+// unaffected.
 AnchoredHead anchored_head(
     RpcClient& rpc,
     const std::map<std::string, PubKey>& committee_seed,
