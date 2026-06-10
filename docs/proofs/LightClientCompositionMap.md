@@ -94,7 +94,7 @@ This section is the lattice's **node list**: each family theorem, a one-line sta
 | **T-L4** | Balance/nonce trust via composition: `read_account_trustless` binds `(balance, next_nonce)` end-to-end to a committee-signed `state_root` anchored to the pinned genesis (incl. the race-window mitigation). Bound `≤ 2⁻⁹²`. | T-L1 + T-L2 + T-L3 + L-4 |
 | **T-L5** | Sign-and-submit correctness: a tx signed by the light-client and submitted via `verify-and-submit` cannot be mutated by the daemon without breaking the signature; nonce comes from a T-L4-verified read. | T-L4 + A1 |
 
-Supporting lemmas: **L-1** (genesis-encoding determinism), **L-2** (`light_compute_block_digest` ≡ producer digest, byte-for-byte), **L-3** (Merkle inclusion soundness — the seed of MT-4), **L-4** (cleartext-vs-`value_hash` cross-check binds the daemon's `account` reply), **L-5** (race-window mitigation soundness), **L-6** (fail-closed exit).
+Supporting lemmas: **L-1** (genesis-encoding determinism), **L-2** (`light_compute_block_digest` ≡ producer digest, byte-for-byte — a FULL mirror as of F-7, binding the three F2 view roots so the light client verifies F2 / cross-shard blocks too, no longer fail-closing on them; see `LightClientThreatModel.md §7 F-7`), **L-3** (Merkle inclusion soundness — the seed of MT-4), **L-4** (cleartext-vs-`value_hash` cross-check binds the daemon's `account` reply), **L-5** (race-window mitigation soundness), **L-6** (fail-closed exit).
 
 ### 3.2 MerkleTreeSoundness.md — MT-1..MT-5 (the inclusion substrate)
 
@@ -326,8 +326,8 @@ Inherited uniformly from `LightClientThreatModel.md` §6: **no persistence** (ev
 | File | Surface |
 |---|---|
 | `light/main.cpp` (dispatch lines 933–948) | The subcommand dispatcher (§5). |
-| `light/trustless_read.cpp` / `.hpp` | `anchor_genesis` (T-L1), `verify_chain_to_head`, `read_account_trustless` (T-L4 + race-window), `build_genesis_committee` (the `K_0` seed, §6.2). |
-| `light/verify.cpp` / `.hpp` | `verify_headers` (continuity), `verify_block_sigs` (T-L2), `light_compute_block_digest` (L-2; binds `tx_root` at `:61`), `verify_state_proof` → `merkle_verify` (T-L3/MT-4). |
+| `light/trustless_read.cpp` / `.hpp` | `anchor_genesis` (T-L1), `verify_chain_to_head` / `verify_chain_walk` (the latter with the F-7 F2 full-block fallback at `:198-248` — re-fetch + re-verify any header whose stripped-header digest fails, soundness-pinned on `compute_hash() == chained block_hash`), `read_account_trustless` (T-L4 + race-window), `build_genesis_committee` (the `K_0` seed, §6.2). |
+| `light/verify.cpp` / `.hpp` | `verify_headers` (continuity), `verify_block_sigs` (T-L2), `light_compute_block_digest` (L-2; `:124-191` — FULL producer-digest mirror, binds `tx_root` at `:128` and the three F2 view roots at `:146-168`, the F-7 fix), `verify_state_proof` → `merkle_verify` (T-L3/MT-4). |
 | `light/account_history.cpp` / `.hpp` | `run_account_history` (AH-1/AH-2), `verify_header_state_root_at` (SR-1 per height), `IncrementalChainWalker::advance_to` (genesis-linkage single pass). |
 | `light/verify_tx_inclusion.cpp` / `.hpp` | `verify-tx-inclusion` (TI-1/TI-2/TI-3). |
 | `light/verify_archive.cpp` / `.hpp` | `verify-archive` (AR-1 offline / AR-2). |

@@ -125,11 +125,11 @@ The anchor runs unconditionally at the start of every composite command that tou
 
 **Procedure.**
 
-1. Strip-or-pad the header into `Block::from_json` consumable shape (`pad_stripped_header` at `light/verify.cpp:94-100` injects empty arrays for the heavy fields `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` — none of which participate in `compute_block_digest`).
+1. Strip-or-pad the header into `Block::from_json` consumable shape (`pad_stripped_header` at `light/verify.cpp:193-199` injects empty arrays for the heavy fields `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state`). On a non-F2 header none of these participate in `compute_block_digest`, so the padded header reproduces the v1-core digest exactly. On an F2 / cross-shard block `inbound_receipts` (and, on reconciled blocks, the equivocation / abort views) DO contribute to the digest via the three F2 view roots — a stripped header therefore cannot reproduce an F2 block's digest, which is why the composite walk re-fetches the FULL block for any header whose stripped-header digest fails to verify (§3.3, the F-7 full-block fallback).
 2. Parse the committee JSON into a `domain → PubKey` map.
 3. Confirm every entry in `b.creators` is present in the supplied committee.
 4. Confirm `b.creator_block_sigs.size() == b.creators.size()`.
-5. Compute the per-block digest via `light_compute_block_digest` at `light/verify.cpp:57-92` — a byte-for-byte copy of `src/node/producer.cpp::compute_block_digest` (lines 608-693) with a "keep in sync" comment header.
+5. Compute the per-block digest via `light_compute_block_digest` at `light/verify.cpp:124-191` — a FULL byte-for-byte mirror of `src/node/producer.cpp::compute_block_digest` (lines 619-704) with a "keep in sync" comment header. As of F-7 (§7) it binds EVERY field the node binds, including the three conditional F2 view roots (inbound-receipt / equivocation / abort, `light/verify.cpp:146-168`), on the SAME data-driven gates as the node: on a stripped header the F2 collections are empty / view roots zero and the digest collapses to the v1 core; on a full block they are populated and the light digest reproduces the node digest exactly. Pre-F-7 the mirror was partial (the F2 roots were omitted), so F2 blocks fail-closed — see §7 F-7.
 6. For each `i ∈ [0, k)`: if the signature is the 64-byte zero sentinel, require `bft_mode == true` (else throw `sentinel-zero signature in MD mode`); else Ed25519-verify the signature against the digest under `pubkey_of[b.creators[i]]`. Any verify failure throws.
 7. Enforce the threshold: `valid >= required` where `required = bft_mode ? (2k + 2) / 3 : k`.
 
@@ -561,6 +561,19 @@ This section records discoveries from writing the proof that the operator or fut
 
 **Mitigation.** None needed; the cross-check is the defense.
 
+### F-7 Light-client fail-closed on F2 / cross-shard blocks (capability gap — FIXED this session)
+
+**Surface.** `light_compute_block_digest` (`light/verify.cpp:124-191`) was originally a *partial* mirror of `producer.cpp::compute_block_digest`: it bound the v1 core + `partner_subset_hash` + `timestamp` tail but OMITTED the three F2 view roots (`inbound_receipts` / `equivocation_events` / `abort_events` roots), because those collections are stripped out of the `rpc_headers` reply and could not be reconstructed from a stripped header. Every committee sig over an F2 / cross-shard block therefore failed to verify, and because the receiver shard applies an inbound cross-shard receipt IN an F2 block, `verify_chain_to_head` threw on it — making `verify-receipt-inclusion` and every trustless read (balance / stake / supply) structurally unusable on any shard chain that had applied a cross-shard transfer.
+
+**Soundness impact (false-negative-safe — a CAPABILITY GAP, not a vulnerability).** The verifier threw *before reaching any verdict*, so the only possible outcomes were error / UNVERIFIABLE — **never a false `INCLUDED`** and never a forged balance reported as verified. T-L1..T-L5 were unaffected on non-F2 chains; on F2 chains the client refused to act rather than acting wrongly. So this was a missing capability, not a soundness break — not deployment-blocking.
+
+**Fix (shipped, commit `dc7bb3e`; user-chosen Path 3 — "complete the light digest").** Two parts, both light-client-side (`src/node/producer.cpp` UNCHANGED):
+
+1. `light_compute_block_digest` (`light/verify.cpp:124-191`) is now a FULL byte-for-byte mirror that binds the three F2 view roots (`:146-168`) on the SAME data-driven gates as the node, with the four F2 helpers re-implemented as file-local statics (`light/verify.cpp:47-93`) because the light client deliberately does not link `producer.cpp`. A stripped header → empty collections → digest collapses to the v1 core (non-F2 unchanged); a full block → F2 roots bound → reproduces the node digest exactly.
+2. `verify_chain_walk` (`light/trustless_read.cpp:198-248`) gained an F2 full-block fallback: when a stripped header's committee-sig check fails (after the MD→BFT retry), it re-fetches the FULL block via the `"block"` RPC and re-verifies against the now-F2-aware digest. **Soundness pin (`:227`):** the full body's recomputed `compute_hash()` MUST equal the stripped header's chained `block_hash` (the value `verify_headers` chained into `prev_anchor`); combined with unforgeable committee sigs, a doctored or mis-positioned body is rejected. This is the same full-block-recompute trust step `committee_bound_state_root` (S-042) relies on. The fallback fires only on F2 blocks.
+
+**Guard.** `tools/test_block_digest_xbinary_parity.sh` was tightened from "light == producer MINUS the 3 F2 roots" to "light == producer EXACTLY" (full byte-parity — strictly STRONGER), passing live + `SELFTEST=1`. See `docs/SECURITY.md §3 F-7`.
+
 ---
 
 ## 8. Implementation cross-references
@@ -573,7 +586,8 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | T-L1 | `compute_genesis_hash` | `src/chain/genesis.cpp:429-432` | `make_genesis_block(cfg).compute_hash()`. |
 | T-L1 | `make_genesis_block` | `src/chain/genesis.cpp::make_genesis_block` | Canonical genesis-block encoder. |
 | T-L2 | `verify_block_sigs` | `light/verify.cpp:235-328` | Per-block Ed25519 sig set verify. |
-| T-L2 | `light_compute_block_digest` | `light/verify.cpp:57-92` | Byte-for-byte copy of `producer.cpp::compute_block_digest`. |
+| T-L2 | `light_compute_block_digest` | `light/verify.cpp:124-191` | FULL byte-for-byte mirror of `producer.cpp::compute_block_digest`, incl. the three F2 view roots (`:146-168`) gated identically to the node (F-7). |
+| T-L2 (F2) | `verify_chain_walk` F2 full-block fallback | `light/trustless_read.cpp:198-248` | When a stripped header's sig check fails, re-fetch the FULL block and re-verify against the F2-aware digest; SOUNDNESS PIN `fb.compute_hash() == chained block_hash` (`:227`). Fires only on F2 blocks (F-7). |
 | T-L2 | `verify_chain_to_head` | `light/trustless_read.cpp:105-230` (wrapper `:234-248`) | Per-page header walk + per-block sig verify, end-to-end (core `verify_chain_walk`). |
 | T-L2 | `pad_stripped_header` | `light/verify.cpp:94-100` | Inject empty arrays for heavy fields that don't participate in digest. |
 | T-L2 | `parse_committee` | `light/verify.cpp:102-133` | Build domain → PubKey map from genesis JSON. |
