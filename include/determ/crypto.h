@@ -1,0 +1,48 @@
+/* Determ unified C99 crypto API — CRYPTO-C99-SPEC.md §3.11 / §2 Q5.
+ *
+ * One include for the SHIPPED libsodium-free C99 primitive layer. This is an
+ * UMBRELLA: it aggregates the per-module headers verbatim rather than
+ * introducing the struct-typedef wrapper signatures sketched in §2 Q5 — the
+ * sketch predates the shipped raw-buffer APIs, and a second C-level signature
+ * set over the same primitives would be churn without safety gain (the
+ * type-safety layer lives in the C++ wrapper, crypto.hpp). Recorded as a Q5
+ * deviation in the spec's §3.11 status, same convention as the X25519 / FROST
+ * shipped-name annotations inside Q5 itself.
+ *
+ * What you get (all C99, all validated byte-equal vs OpenSSL / libsodium /
+ * published KATs — see src/crypto/<module>/README.md per module):
+ *   - SHA-256/512, HMAC, HKDF, PBKDF2            (sha2/sha2.h,     §3.1+§3.8b)
+ *   - BLAKE2b                                    (blake2/blake2b.h, §3.6 dep)
+ *   - Argon2id                                   (argon2/argon2id.h, §3.6)
+ *   - ChaCha20, Poly1305, ChaCha20-Poly1305,
+ *     HChaCha20 + XChaCha20-Poly1305             (chacha20/*,       §3.4)
+ *   - AES-256 block + AES-256-GCM                (aes/aes.h,        §3.5)
+ *   - Ed25519 sign/verify                        (ed25519/ed25519.h, §3.2)
+ *   - X25519                                     (x25519/x25519.h,  §3.3)
+ *   - determ_ct_memcmp + determ_secure_zero      (ct.h, secure_zero.h, §3.10)
+ *
+ * Deliberately NOT included:
+ *   - FROST-Ed25519 (crypto/frost/frost.h) — retained as a LIBRARY but not a
+ *     Determ chain primitive (docs/proofs/FROST_DEVIATION_NOTICE.md); callers
+ *     opt in with an explicit include so library presence is never mistaken
+ *     for protocol adoption.
+ *   - The Ed25519 scalar/group primitives (ed25519/ed25519_group.h) — the
+ *     FROST building blocks; explicit include for the same reason.
+ *   - Future §3.7/§3.8c/§3.9 primitives (secp256k1, P-256, OPRF) — added here
+ *     when they ship.
+ */
+#ifndef DETERM_CRYPTO_H
+#define DETERM_CRYPTO_H
+
+#include "determ/crypto/secure_zero.h"
+#include "determ/crypto/ct.h"
+#include "determ/crypto/sha2/sha2.h"
+#include "determ/crypto/blake2/blake2b.h"
+#include "determ/crypto/argon2/argon2id.h"
+#include "determ/crypto/chacha20/chacha20.h"
+#include "determ/crypto/chacha20/xchacha20_poly1305.h"
+#include "determ/crypto/aes/aes.h"
+#include "determ/crypto/ed25519/ed25519.h"
+#include "determ/crypto/x25519/x25519.h"
+
+#endif /* DETERM_CRYPTO_H */

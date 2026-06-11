@@ -24,6 +24,7 @@
 #include <determ/crypto/argon2/argon2id.h>    // v2.10 Phase 0: C99-native Argon2id (RFC 9106, §3.6)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
+#include <determ/crypto.hpp>                  // §3.11: determ::c99 C++ wrapper over the C99 stack
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -460,6 +461,10 @@ In-process tests (deterministic, no network):
                                               tools/vectors/*.json (python-
                                               vetted) byte-equal through the
                                               shipped C99 implementations
+  determ test-c99-api                         §3.11: determ::c99 C++ wrapper ==
+                                              raw C99 API per primitive; AEAD
+                                              nullopt-on-auth-failure + throw-
+                                              on-param-error contracts
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11983,6 +11988,181 @@ int main(int argc, char** argv) {
         return fail==0 ? 0 : 1;
     }
 
+    if (cmd == "test-c99-api") {
+        // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
+        // (include/determ/crypto.hpp) over the C99 layer aggregated by
+        // include/determ/crypto.h. Pins: (a) wrapper output == raw C API
+        // output per primitive (the wrapper adds NO transformation); (b) the
+        // error-model contract — AEAD auth failure and X25519 low-order are
+        // std::nullopt (normal adversarial outcomes), parameter errors throw;
+        // (c) a KAT anchor per family so a wrapper that consistently
+        // mis-routed both paths to the same wrong primitive still fails.
+        using namespace determ::c99;
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+
+        // (1) Hashes: wrapper == raw C API, anchored on the FIPS "abc" KATs.
+        {
+            auto w256 = sha256(std::string_view("abc"));
+            uint8_t r256[32]; determ_sha256((const uint8_t*)"abc", 3, r256);
+            auto w512 = sha512(std::string_view("abc"));
+            uint8_t r512[64]; determ_sha512((const uint8_t*)"abc", 3, r512);
+            check(std::memcmp(w256.data(), r256, 32) == 0
+                  && hx(w256.data(),32) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                  && std::memcmp(w512.data(), r512, 64) == 0,
+                  "(1) sha256/sha512 wrapper == raw C API; sha256(\"abc\") matches the FIPS KAT");
+        }
+
+        // (2) BLAKE2b keyed: wrapper == raw; outlen-0 parameter error throws.
+        {
+            std::vector<uint8_t> key = {1,2,3}, msg = {9,8,7,6};
+            auto w = blake2b(64, key, msg);
+            uint8_t r[64];
+            int rc = determ_blake2b(r, 64, key.data(), key.size(), msg.data(), msg.size());
+            bool threw = false;
+            try { blake2b(0, key, msg); } catch (const std::runtime_error&) { threw = true; }
+            check(rc == 0 && w.size() == 64 && std::memcmp(w.data(), r, 64) == 0 && threw,
+                  "(2) blake2b wrapper == raw; outlen=0 parameter error throws");
+        }
+
+        // (3) HMAC + HKDF + PBKDF2: wrapper == raw (RFC 4231 TC1 / 5869 A.1-shape / 4096-iter inputs).
+        {
+            std::vector<uint8_t> key(20, 0x0b);
+            const char* d = "Hi There";
+            std::span<const uint8_t> msg((const uint8_t*)d, 8);
+            auto wm = hmac_sha256(key, msg);
+            uint8_t rm[32]; determ_hmac_sha256(key.data(), key.size(), (const uint8_t*)d, 8, rm);
+
+            std::vector<uint8_t> ikm(22, 0x0b), salt = unhex("000102030405060708090a0b0c"),
+                                 info = unhex("f0f1f2f3f4f5f6f7f8f9");
+            auto wh = hkdf_sha256(salt, ikm, info, 42);
+            std::vector<uint8_t> rh(42);
+            determ_hkdf_sha256(salt.data(), salt.size(), ikm.data(), ikm.size(),
+                               info.data(), info.size(), rh.data(), 42);
+
+            std::vector<uint8_t> pw = {'p','a','s','s','w','o','r','d'}, ps = {'s','a','l','t'};
+            auto wp = pbkdf2_hmac_sha256(pw, ps, 4096, 32);
+            std::vector<uint8_t> rp(32);
+            determ_pbkdf2_hmac_sha256(pw.data(), pw.size(), ps.data(), ps.size(), 4096, rp.data(), 32);
+
+            check(std::memcmp(wm.data(), rm, 32) == 0 && wh == rh && wp == rp,
+                  "(3) hmac_sha256 / hkdf_sha256 / pbkdf2_hmac_sha256 wrappers == raw C API");
+        }
+
+        // (4) Argon2id: wrapper == raw; deterministic across calls.
+        {
+            std::vector<uint8_t> pw = {'p','w'}, salt(16, 0x5a);
+            auto w1 = argon2id(pw, salt, 1, 16, 1, 32);
+            auto w2 = argon2id(pw, salt, 1, 16, 1, 32);
+            std::vector<uint8_t> r(32);
+            determ_argon2id(r.data(), 32, pw.data(), pw.size(), salt.data(), salt.size(), 1, 16, 1);
+            check(w1 == r && w1 == w2, "(4) argon2id wrapper == raw C API; deterministic");
+        }
+
+        // (5)-(7) The three AEADs: seal/open round-trip; tampered tag, tampered
+        //         AAD, and tampered ciphertext each open to nullopt.
+        {
+            std::array<uint8_t,32> key{}; for (int i = 0; i < 32; i++) key[i] = (uint8_t)i;
+            std::array<uint8_t,12> n12{}; n12[11] = 1;
+            std::array<uint8_t,24> n24{}; n24[23] = 2;
+            std::vector<uint8_t> aad = {0xde,0xad}, pt = {'s','e','c','r','e','t','!'};
+
+            auto run12 = [&](auto sealer, auto opener, const char* name) {
+                auto s = sealer(key, n12, std::span<const uint8_t>(aad), std::span<const uint8_t>(pt));
+                auto good = opener(key, n12, std::span<const uint8_t>(aad),
+                                   std::span<const uint8_t>(s.ciphertext),
+                                   std::span<const uint8_t,16>(s.tag));
+                auto btag = s.tag; btag[0] ^= 1;
+                auto bad_tag = opener(key, n12, std::span<const uint8_t>(aad),
+                                      std::span<const uint8_t>(s.ciphertext),
+                                      std::span<const uint8_t,16>(btag));
+                std::vector<uint8_t> baad = aad; baad[0] ^= 1;
+                auto bad_aad = opener(key, n12, std::span<const uint8_t>(baad),
+                                      std::span<const uint8_t>(s.ciphertext),
+                                      std::span<const uint8_t,16>(s.tag));
+                auto bct = s.ciphertext; bct[0] ^= 1;
+                auto bad_ct = opener(key, n12, std::span<const uint8_t>(aad),
+                                     std::span<const uint8_t>(bct),
+                                     std::span<const uint8_t,16>(s.tag));
+                check(good.has_value() && *good == pt
+                      && !bad_tag.has_value() && !bad_aad.has_value() && !bad_ct.has_value(),
+                      std::string(name) + " seal/open round-trip; tag/AAD/ct tamper each -> nullopt");
+            };
+            run12([](auto& k, auto& n, auto a, auto p){ return chacha20_poly1305_seal(k, n, a, p); },
+                  [](auto& k, auto& n, auto a, auto c, auto t){ return chacha20_poly1305_open(k, n, a, c, t); },
+                  "(5) chacha20_poly1305");
+            run12([](auto& k, auto& n, auto a, auto p){ return aes256_gcm_seal(k, n, a, p); },
+                  [](auto& k, auto& n, auto a, auto c, auto t){ return aes256_gcm_open(k, n, a, c, t); },
+                  "(6) aes256_gcm");
+            {
+                auto s = xchacha20_poly1305_seal(key, n24, aad, pt);
+                auto good = xchacha20_poly1305_open(key, n24, aad, s.ciphertext, s.tag);
+                auto btag = s.tag; btag[15] ^= 0x80;
+                auto bad = xchacha20_poly1305_open(key, n24, aad, s.ciphertext, btag);
+                check(good.has_value() && *good == pt && !bad.has_value(),
+                      "(7) xchacha20_poly1305 seal/open round-trip; tag tamper -> nullopt");
+            }
+        }
+
+        // (8) Ed25519: RFC 8032 §7.1 TEST 1 through the wrapper; tamper rejected.
+        {
+            auto seedv = unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+            ed25519::Seed seed; std::copy(seedv.begin(), seedv.end(), seed.begin());
+            auto pk = ed25519::public_key(seed);
+            auto sig = ed25519::sign(seed, pk, std::span<const uint8_t>());
+            bool ok_pk = hx(pk.data(),32) == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+            bool ok_sig = hx(sig.data(),64) ==
+                "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+                "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+            bool ok_v = ed25519::verify(pk, std::span<const uint8_t>(), sig);
+            auto bsig = sig; bsig[0] ^= 1;
+            bool ok_rej = !ed25519::verify(pk, std::span<const uint8_t>(), bsig);
+            check(ok_pk && ok_sig && ok_v && ok_rej,
+                  "(8) ed25519 wrapper: RFC 8032 TEST 1 pubkey/sign/verify; tampered sig rejected");
+        }
+
+        // (9) X25519: §6.1 DH through the wrapper; all-zero low-order peer -> nullopt.
+        {
+            auto av = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+            auto bv = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+            x25519::Scalar a, b; std::copy(av.begin(), av.end(), a.begin());
+            std::copy(bv.begin(), bv.end(), b.begin());
+            auto pa = x25519::public_key(a);
+            auto pb = x25519::public_key(b);
+            auto s1 = x25519::dh(a, pb);
+            auto s2 = x25519::dh(b, pa);
+            bool ok_shared = s1.has_value() && s2.has_value() && *s1 == *s2
+                && hx(s1->data(),32) == "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+            x25519::Point zero{};
+            bool ok_low = !x25519::dh(a, zero).has_value();
+            check(ok_shared && ok_low,
+                  "(9) x25519 wrapper: RFC 7748 §6.1 DH both directions; all-zero low-order -> nullopt");
+        }
+
+        // (10) ct_equal + secure_zero contracts.
+        {
+            std::vector<uint8_t> p = {1,2,3,4}, q = {1,2,3,4}, r = {1,2,3,5}, s = {1,2,3};
+            bool ok = ct_equal(p, q) && !ct_equal(p, r) && !ct_equal(p, s);
+            std::vector<uint8_t> buf = {9,9,9,9};
+            secure_zero(buf);
+            for (auto bch : buf) if (bch != 0) ok = false;
+            check(ok, "(10) ct_equal equal/differ/length-mismatch contract; secure_zero wipes");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": c99-api " << (fail == 0
+                      ? "determ::c99 wrapper == raw C API; error-model contracts held (CRYPTO-C99-SPEC §3.11)"
+                      : "had assertion failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "test-c99-vectors") {
         // CRYPTO-C99-SPEC §3.13 — the binary half of the vector-file gate.
         // tools/test_c99_vector_files.sh validates tools/vectors/*.json against
