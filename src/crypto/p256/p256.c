@@ -14,7 +14,9 @@
  */
 #include "determ/crypto/p256/p256.h"
 #include "determ/crypto/secure_zero.h"
+#include "determ/crypto/sha2/sha2.h"   /* expand_message_xmd (RFC 9380 §5.3.1) */
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef uint32_t fe[8];   /* little-endian limbs */
@@ -373,4 +375,362 @@ void determ_p256_params(uint8_t p_be[32], uint8_t n_be[32], uint8_t b_be[32],
     memcpy(b_be, B_BE, 32);
     memcpy(gx_be, GX_BE, 32);
     memcpy(gy_be, GY_BE, 32);
+}
+
+/* ═══ §3.9b OPRF groundwork: mod-n scalar field + RFC 9380 hash-to-curve ═══ */
+
+/* ── generic Montgomery mod n (the group order) ──────────────────────────
+ * Unlike p, n mod 2^32 is not -1, so n0' = -n^{-1} mod 2^32 is derived at
+ * runtime by Newton iteration (x_{k+1} = x_k(2 - n·x_k) doubles correct
+ * bits; 5 steps from x=1 give all 32). R mod n = 2^256 - n (valid since
+ * n < 2^256 < 2n) and R² mod n by 256 modular doublings — same
+ * no-transcribed-wide-constants policy as the field layer. */
+static uint32_t Nl[8];          /* n as limbs */
+static uint32_t N0I;            /* -n^{-1} mod 2^32 */
+static fe R2N, ONE_N;           /* R² mod n; R mod n (= 1 in Montgomery) */
+static int sc_ready = 0;
+
+static void sc_add_raw(fe r, const fe a, const fe b) {   /* mod n */
+    uint32_t t[8], s[8];
+    uint64_t c = 0, brw = 0;
+    int i;
+    for (i = 0; i < 8; i++) { c += (uint64_t)a[i] + b[i]; t[i] = (uint32_t)c; c >>= 32; }
+    for (i = 0; i < 8; i++) {
+        uint64_t d = (uint64_t)t[i] - Nl[i] - brw;
+        s[i] = (uint32_t)d; brw = (d >> 63) & 1;
+    }
+    {
+        uint32_t use_s = (uint32_t)0 - (uint32_t)((c | (1 - brw)) & 1);
+        for (i = 0; i < 8; i++) r[i] = (s[i] & use_s) | (t[i] & ~use_s);
+    }
+}
+
+static void sc_mont_mul(fe r, const fe a, const fe b) {  /* CIOS mod n */
+    uint32_t t[10];
+    int i, j;
+    memset(t, 0, sizeof t);
+    for (i = 0; i < 8; i++) {
+        uint64_t c = 0;
+        uint32_t m;
+        for (j = 0; j < 8; j++) {
+            c += (uint64_t)t[j] + (uint64_t)a[j] * b[i];
+            t[j] = (uint32_t)c; c >>= 32;
+        }
+        c += t[8]; t[8] = (uint32_t)c; t[9] = (uint32_t)(c >> 32);
+        m = t[0] * N0I;
+        c = (uint64_t)t[0] + (uint64_t)m * Nl[0];
+        c >>= 32;
+        for (j = 1; j < 8; j++) {
+            c += (uint64_t)t[j] + (uint64_t)m * Nl[j];
+            t[j-1] = (uint32_t)c; c >>= 32;
+        }
+        c += t[8]; t[7] = (uint32_t)c; c >>= 32;
+        t[8] = t[9] + (uint32_t)c;
+        t[9] = 0;
+    }
+    {
+        uint32_t s[8], use_s;
+        uint64_t brw = 0;
+        for (i = 0; i < 8; i++) {
+            uint64_t d = (uint64_t)t[i] - Nl[i] - brw;
+            s[i] = (uint32_t)d; brw = (d >> 63) & 1;
+        }
+        use_s = (uint32_t)0 - (uint32_t)((t[8] | (1 - (uint32_t)brw)) & 1);
+        for (i = 0; i < 8; i++) r[i] = (s[i] & use_s) | (t[i] & ~use_s);
+    }
+}
+
+static void sc_init(void) {
+    int i;
+    uint32_t x;
+    if (sc_ready) return;
+    be_to_fe(Nl, N_BE);
+    x = 1;                                   /* Newton: invert n mod 2^32 */
+    for (i = 0; i < 5; i++) x *= 2u - Nl[0] * x;
+    N0I = (uint32_t)0 - x;                   /* -n^{-1} mod 2^32 */
+    {
+        uint64_t c = 1;                      /* R mod n = ~n + 1 */
+        for (i = 0; i < 8; i++) { c += (uint64_t)(~Nl[i]); ONE_N[i] = (uint32_t)c; c >>= 32; }
+    }
+    memcpy(R2N, ONE_N, sizeof(fe));
+    for (i = 0; i < 256; i++) sc_add_raw(R2N, R2N, R2N);
+    sc_ready = 1;
+}
+
+int determ_p256_scalar_mul_mod_n(uint8_t r[32], const uint8_t a[32],
+                                 const uint8_t b[32]) {
+    fe am, bm, rm, t;
+    fe one = {1,0,0,0,0,0,0,0};
+    sc_init();
+    if (!be_lt(a, N_BE) || !be_lt(b, N_BE)) return -1;
+    be_to_fe(t, a); sc_mont_mul(am, t, R2N);
+    be_to_fe(t, b); sc_mont_mul(bm, t, R2N);
+    sc_mont_mul(rm, am, bm);
+    sc_mont_mul(t, rm, one);
+    fe_to_be(r, t);
+    return 0;
+}
+
+int determ_p256_scalar_inv_mod_n(uint8_t r[32], const uint8_t a[32]) {
+    fe am, acc, t;
+    fe one = {1,0,0,0,0,0,0,0};
+    uint8_t e[32];
+    int i, bit;
+    sc_init();
+    if (be_is_zero(a) || !be_lt(a, N_BE)) return -1;
+    be_to_fe(t, a); sc_mont_mul(am, t, R2N);
+    /* exponent n - 2 (n ends 0x51 — no borrow); n prime => Fermat. */
+    memcpy(e, N_BE, 32); e[31] -= 2;
+    memcpy(acc, ONE_N, sizeof(fe));
+    for (i = 0; i < 32; i++)
+        for (bit = 7; bit >= 0; bit--) {
+            sc_mont_mul(acc, acc, acc);
+            if ((e[i] >> bit) & 1) sc_mont_mul(acc, acc, am);  /* public bit */
+        }
+    sc_mont_mul(t, acc, one);
+    fe_to_be(r, t);
+    determ_secure_zero(am, sizeof am); determ_secure_zero(acc, sizeof acc);
+    return 0;
+}
+
+/* ── field helpers for SSWU (public fixed exponents, derived at runtime) ── */
+
+/* big-endian helpers over 32-byte exponents */
+static void be_shr1(uint8_t a[32]) {
+    int i;
+    uint8_t carry = 0;
+    for (i = 0; i < 32; i++) {
+        uint8_t nc = a[i] & 1;
+        a[i] = (uint8_t)((a[i] >> 1) | (carry << 7));
+        carry = nc;
+    }
+}
+
+static void fe_pow_pub(fe r, const fe a, const uint8_t e_be[32]) {
+    fe acc;
+    int i, bit;
+    memcpy(acc, ONE_M, sizeof(fe));
+    for (i = 0; i < 32; i++)
+        for (bit = 7; bit >= 0; bit--) {
+            fe_mont_sqr(acc, acc);
+            if ((e_be[i] >> bit) & 1) fe_mont_mul(acc, acc, a);  /* public bit */
+        }
+    memcpy(r, acc, sizeof(fe));
+}
+
+/* sqrt(a) = a^((p+1)/4) — valid since p ≡ 3 (mod 4). Caller guarantees a is
+ * square (SSWU selects the square branch first). */
+static void fe_sqrt(fe r, const fe a) {
+    uint8_t e[32];
+    int i;
+    memcpy(e, P_BE, 32);
+    for (i = 31; i >= 0; i--) { if (++e[i] != 0) break; }   /* p + 1 */
+    be_shr1(e); be_shr1(e);                                  /* / 4 */
+    fe_pow_pub(r, a, e);
+}
+
+/* Legendre: returns all-ones mask iff a is a nonzero square (a^((p-1)/2) == 1);
+ * zero treated by the caller. Branchless aggregate compare. */
+static uint32_t fe_is_square_mask(const fe a) {
+    uint8_t e[32];
+    fe t;
+    uint32_t diff = 0;
+    int i;
+    memcpy(e, P_BE, 32); e[31] -= 1;   /* p ends 0xff — no borrow */
+    be_shr1(e);                         /* (p-1)/2 */
+    fe_pow_pub(t, a, e);
+    for (i = 0; i < 8; i++) diff |= t[i] ^ ONE_M[i];
+    /* diff == 0 -> square. Collapse branchlessly. */
+    return (uint32_t)0 - (uint32_t)(1u & (((uint64_t)diff - 1u) >> 63));
+}
+
+static void fe_cmov(fe r, const fe a, uint32_t mask) {  /* r = mask ? a : r */
+    int i;
+    for (i = 0; i < 8; i++) r[i] = (a[i] & mask) | (r[i] & ~mask);
+}
+
+static uint32_t fe_is_zero_mask(const fe a) {
+    uint32_t d = 0; int i;
+    for (i = 0; i < 8; i++) d |= a[i];
+    return (uint32_t)0 - (uint32_t)(1u & (((uint64_t)d - 1u) >> 63));
+}
+
+/* sgn0(a) (m = 1): the parity of the canonical representative. */
+static uint32_t fe_sgn0(const fe a_m) {
+    fe t;
+    from_mont(t, a_m);
+    return t[0] & 1u;
+}
+
+/* ── expand_message_xmd with SHA-256 (RFC 9380 §5.3.1) ─────────────────── */
+
+int determ_p256_expand_message_xmd(uint8_t* out, size_t outlen,
+                                   const uint8_t* msg, size_t msglen,
+                                   const uint8_t* dst, size_t dstlen) {
+    /* b_in_bytes = 32, s_in_bytes (r_in_bytes) = 64 for SHA-256. */
+    size_t ell = (outlen + 31) / 32;
+    uint8_t b0[32], bi[32];
+    size_t off, i, done;
+    if (outlen == 0 || ell > 255 || outlen > 65535 || dstlen > 255) return -1;
+
+    /* b0 = H(Z_pad(64) || msg || I2OSP(outlen,2) || 0x00 || DST || len(DST)).
+     * msg can be arbitrarily long — hash incrementally? determ_sha256 is
+     * one-shot, so assemble in two passes: hash Z_pad+msg prefix via a
+     * stack buffer only when small... msg length is unbounded; allocate. */
+    {
+        size_t pre_len = 64 + msglen + 2 + 1 + dstlen + 1;
+        uint8_t small[512];
+        uint8_t* buf = pre_len <= sizeof small ? small : (uint8_t*)0;
+        uint8_t* heap = 0;
+        if (!buf) {
+            heap = (uint8_t*)malloc(pre_len);
+            if (!heap) return -1;
+            buf = heap;
+        }
+        memset(buf, 0, 64);
+        if (msglen) memcpy(buf + 64, msg, msglen);
+        off = 64 + msglen;
+        buf[off++] = (uint8_t)(outlen >> 8);
+        buf[off++] = (uint8_t)(outlen);
+        buf[off++] = 0x00;
+        if (dstlen) memcpy(buf + off, dst, dstlen);
+        off += dstlen;
+        buf[off++] = (uint8_t)dstlen;
+        determ_sha256(buf, off, b0);
+        if (heap) { determ_secure_zero(heap, pre_len); free(heap); }
+        else determ_secure_zero(small, sizeof small);
+    }
+
+    /* b1 = H(b0 || 0x01 || DST_prime); bi = H((b0 ^ b_{i-1}) || i || DST_prime) */
+    done = 0;
+    memcpy(bi, b0, 32);                 /* seed for the xor chain */
+    for (i = 1; i <= ell; i++) {
+        uint8_t in[32 + 1 + 255 + 1];
+        size_t inlen = 0, k;
+        if (i == 1) memcpy(in, b0, 32);
+        else for (k = 0; k < 32; k++) in[k] = (uint8_t)(b0[k] ^ bi[k]);
+        inlen = 32;
+        in[inlen++] = (uint8_t)i;
+        if (dstlen) memcpy(in + inlen, dst, dstlen);
+        inlen += dstlen;
+        in[inlen++] = (uint8_t)dstlen;
+        determ_sha256(in, inlen, bi);
+        {
+            size_t take = outlen - done < 32 ? outlen - done : 32;
+            memcpy(out + done, bi, take);
+            done += take;
+        }
+    }
+    determ_secure_zero(b0, sizeof b0);
+    determ_secure_zero(bi, sizeof bi);
+    return 0;
+}
+
+/* ── hash_to_field (m = 1, L = 48, count = 2) + simplified SSWU ─────────── */
+
+/* 48 big-endian bytes -> field element mod p: val = hi(16B)·2^256 + lo(32B);
+ * hi·2^256 mod p == to_mont(hi)'s VALUE (mont_mul(hi, R²) = hi·R); add the
+ * conditionally-reduced lo. Output in the PLAIN domain. */
+static void fe_from_be48(fe r, const uint8_t in[48]) {
+    uint8_t hi_be[32], lo_be[32];
+    fe hi, lo, hiR;
+    memset(hi_be, 0, 16); memcpy(hi_be + 16, in, 16);
+    memcpy(lo_be, in + 16, 32);
+    be_to_fe(hi, hi_be);
+    fe_mont_mul(hiR, hi, R2);            /* = hi·R mod p (plain value) */
+    be_to_fe(lo, lo_be);
+    /* reduce lo < 2^256 < 2p with one branchless conditional subtract */
+    {
+        uint32_t s[8], use_s; uint64_t brw = 0; int i;
+        for (i = 0; i < 8; i++) {
+            uint64_t d = (uint64_t)lo[i] - P[i] - brw;
+            s[i] = (uint32_t)d; brw = (d >> 63) & 1;
+        }
+        use_s = (uint32_t)0 - (uint32_t)(1 - (uint32_t)brw);
+        for (i = 0; i < 8; i++) lo[i] = (s[i] & use_s) | (lo[i] & ~use_s);
+    }
+    fe_add(r, hiR, lo);
+}
+
+/* Simplified SSWU (RFC 9380 §6.6.2) for y² = x³ + A x + B, A = -3, Z = -10.
+ * Input/output in the Montgomery domain; constant-time (mask selects — the
+ * OPRF input behind u may be a user secret). */
+static void sswu_map(fe x_out, fe y_out, const fe u) {
+    static fe Z_M, C1_M, C2_M, A_M;          /* derived once (public) */
+    static int sswu_ready = 0;
+    fe tv1, tv2, x1, gx1, x2, gx2, y1, y2, u2, t;
+    uint32_t e1, e2, sgn_mask;
+    if (!sswu_ready) {
+        fe zero, ten, a_plain, za, inv_t;
+        memset(zero, 0, sizeof(fe));
+        memset(ten, 0, sizeof(fe)); ten[0] = 10;
+        be_to_fe(a_plain, P_BE);             /* p ≡ 0; A = p - 3 below */
+        memset(a_plain, 0, sizeof(fe)); a_plain[0] = 3;
+        fe_sub(t, zero, a_plain); to_mont(A_M, t);          /* A = -3 */
+        fe_sub(t, zero, ten);     to_mont(Z_M, t);          /* Z = -10 */
+        /* C1 = -B/A ; C2 = B/(Z·A) (Montgomery domain throughout) */
+        fe_inv(inv_t, A_M);
+        fe_mont_mul(t, B_M, inv_t);
+        memset(zero, 0, sizeof(fe));         /* 0 is the same in any domain */
+        fe_sub(C1_M, zero, t);                              /* -B/A */
+        fe_mont_mul(za, Z_M, A_M);
+        fe_inv(inv_t, za);
+        fe_mont_mul(C2_M, B_M, inv_t);                      /* B/(Z·A) */
+        sswu_ready = 1;
+    }
+    /* tv1 = inv0(Z²u⁴ + Zu²) */
+    fe_mont_sqr(u2, u);
+    fe_mont_mul(tv1, Z_M, u2);               /* Z u² */
+    fe_mont_sqr(tv2, tv1);                   /* Z² u⁴ */
+    fe_add(tv2, tv2, tv1);
+    fe_inv(t, tv2);                          /* inv0: 0 -> 0 */
+    /* x1 = C1 · (1 + tv1');  tv1' == 0  =>  x1 = C2 */
+    fe_add(x1, ONE_M, t);
+    fe_mont_mul(x1, C1_M, x1);
+    e1 = fe_is_zero_mask(tv2);
+    fe_cmov(x1, C2_M, e1);
+    /* gx1 = x1³ + A x1 + B */
+    fe_mont_sqr(gx1, x1); fe_mont_mul(gx1, gx1, x1);
+    fe_mont_mul(t, A_M, x1); fe_add(gx1, gx1, t); fe_add(gx1, gx1, B_M);
+    /* x2 = Z u² x1 ; gx2 = x2³ + A x2 + B */
+    fe_mont_mul(x2, tv1, x1);
+    fe_mont_sqr(gx2, x2); fe_mont_mul(gx2, gx2, x2);
+    fe_mont_mul(t, A_M, x2); fe_add(gx2, gx2, t); fe_add(gx2, gx2, B_M);
+    /* select the square branch */
+    e2 = fe_is_square_mask(gx1);
+    memcpy(x_out, x2, sizeof(fe));  fe_cmov(x_out, x1, e2);
+    memcpy(t, gx2, sizeof(fe));     fe_cmov(t, gx1, e2);
+    fe_sqrt(y1, t);
+    /* fix sign: sgn0(y) must equal sgn0(u) */
+    {
+        fe zero;
+        memset(zero, 0, sizeof(fe));
+        fe_sub(y2, zero, y1);
+        sgn_mask = (uint32_t)0 - (fe_sgn0(y1) ^ fe_sgn0(u));
+        memcpy(y_out, y1, sizeof(fe));
+        fe_cmov(y_out, y2, sgn_mask);
+    }
+}
+
+int determ_p256_hash_to_curve(uint8_t out[65],
+                              const uint8_t* msg, size_t msglen,
+                              const uint8_t* dst, size_t dstlen) {
+    uint8_t uniform[96];
+    fe u0p, u1p, u0, u1;
+    pt q0, q1, r;
+    int rc;
+    p256_init();
+    if (determ_p256_expand_message_xmd(uniform, 96, msg, msglen, dst, dstlen) != 0)
+        return -1;
+    fe_from_be48(u0p, uniform);          /* plain domain */
+    fe_from_be48(u1p, uniform + 48);
+    to_mont(u0, u0p); to_mont(u1, u1p);
+    sswu_map(q0.X, q0.Y, u0); memcpy(q0.Z, ONE_M, sizeof(fe));
+    sswu_map(q1.X, q1.Y, u1); memcpy(q1.Z, ONE_M, sizeof(fe));
+    pt_add(&r, &q0, &q1);                /* complete add; clear_cofactor = id (h=1) */
+    rc = encode_point(out, &r);          /* infinity (prob ~2^-256) -> -1 */
+    determ_secure_zero(uniform, sizeof uniform);
+    determ_secure_zero(&q0, sizeof q0); determ_secure_zero(&q1, sizeof q1);
+    determ_secure_zero(&r, sizeof r);
+    return rc;
 }

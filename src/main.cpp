@@ -468,6 +468,10 @@ In-process tests (deterministic, no network):
                                               profile curve) — constants +
                                               [k]G + ECDH byte-equal vs the
                                               OpenSSL EC oracle; reject gates
+  determ test-p256-h2c-c99                    §3.9b groundwork: mod-n scalar
+                                              ops vs OpenSSL BIGNUM; RFC 9380
+                                              SSWU hash-to-curve structural
+                                              contract (vectors via §3.13)
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -12164,6 +12168,136 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": p256-c99 " << (fail == 0
                       ? "constants + scalar-mult byte-equal vs OpenSSL; reject gates held (CRYPTO-C99-SPEC §3.8c)"
+                      : "had assertion failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+    if (cmd == "test-p256-h2c-c99") {
+        // CRYPTO-C99-SPEC §3.9b groundwork — mod-n scalar arithmetic vs the
+        // OpenSSL BIGNUM oracle, and the RFC 9380 P256_XMD:SHA-256_SSWU_RO_
+        // hash-to-curve's structural contract (on-curve always, deterministic,
+        // msg- and DST-sensitive, bounds rejected). The RFC appendix
+        // byte-vectors live in tools/vectors/p256_h2c.json and are consumed by
+        // `determ test-c99-vectors` (binary half) + the file-side runner —
+        // this subcommand is the oracle/structural leg.
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto mk_scalar = [](uint8_t s[32], uint32_t seed) {
+            for (int i = 0; i < 32; i++) s[i] = (uint8_t)((seed * 2654435761u + i * 40503u) >> ((i % 3) * 8));
+            s[0] &= 0x0f; s[31] |= 1;
+        };
+
+        EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+        BN_CTX* bnctx = BN_CTX_new();
+        BIGNUM* order = BN_new();
+        if (!grp || !bnctx || !order || EC_GROUP_get_order(grp, order, bnctx) != 1) {
+            std::cout << "  FAIL: OpenSSL group/order init\n"; return 1;
+        }
+
+        // (1) scalar_mul_mod_n == BN_mod_mul over a grid.
+        {
+            bool ok = true; uint32_t at = 0;
+            for (uint32_t it = 0; it < 10 && ok; it++) {
+                uint8_t a[32], b[32], mine[32], theirs[32];
+                mk_scalar(a, it * 3 + 1); mk_scalar(b, it * 7 + 2);
+                BIGNUM *ba = BN_bin2bn(a, 32, nullptr), *bb = BN_bin2bn(b, 32, nullptr),
+                       *br = BN_new();
+                bool step = determ_p256_scalar_mul_mod_n(mine, a, b) == 0
+                         && BN_mod_mul(br, ba, bb, order, bnctx) == 1
+                         && BN_bn2binpad(br, theirs, 32) == 32
+                         && std::memcmp(mine, theirs, 32) == 0;
+                BN_free(ba); BN_free(bb); BN_free(br);
+                if (!step) { ok = false; at = it; }
+            }
+            check(ok, ok ? "(1) scalar_mul_mod_n == OpenSSL BN_mod_mul over a 10-pair grid"
+                         : "(1) mod-n mul diverged at grid index " + std::to_string(at));
+        }
+
+        // (2) scalar_inv_mod_n == BN_mod_inverse; a * a^{-1} == 1 through OUR mul.
+        {
+            bool ok = true;
+            for (uint32_t it = 0; it < 6 && ok; it++) {
+                uint8_t a[32], inv[32], theirs[32], prod[32], one[32] = {0};
+                one[31] = 1;
+                mk_scalar(a, it * 11 + 5);
+                BIGNUM *ba = BN_bin2bn(a, 32, nullptr), *br = BN_new();
+                ok = determ_p256_scalar_inv_mod_n(inv, a) == 0
+                  && BN_mod_inverse(br, ba, order, bnctx) != nullptr
+                  && BN_bn2binpad(br, theirs, 32) == 32
+                  && std::memcmp(inv, theirs, 32) == 0
+                  && determ_p256_scalar_mul_mod_n(prod, a, inv) == 0
+                  && std::memcmp(prod, one, 32) == 0;
+                BN_free(ba); BN_free(br);
+            }
+            check(ok, "(2) scalar_inv_mod_n == BN_mod_inverse; a * a^-1 == 1 through our own mul");
+        }
+
+        // (3) mod-n validity gates: zero / >= n rejected on both entry points.
+        {
+            uint8_t zero[32] = {0}, big[32], a[32], out[32];
+            std::memset(big, 0xff, 32);
+            mk_scalar(a, 99);
+            bool ok = determ_p256_scalar_inv_mod_n(out, zero) == -1
+                   && determ_p256_scalar_inv_mod_n(out, big) == -1
+                   && determ_p256_scalar_mul_mod_n(out, big, a) == -1
+                   && determ_p256_scalar_mul_mod_n(out, a, big) == -1;
+            check(ok, "(3) mod-n gates: zero and >= n rejected by mul (both operands) and inv");
+        }
+
+        // (4) expand_message_xmd: deterministic; outlen-exact; bounds rejected.
+        {
+            const uint8_t* m = (const uint8_t*)"determ h2c";
+            const uint8_t* d = (const uint8_t*)"DETERM-TEST-DST";
+            uint8_t o1[96], o2[96], o3[32];
+            bool ok = determ_p256_expand_message_xmd(o1, 96, m, 10, d, 15) == 0
+                   && determ_p256_expand_message_xmd(o2, 96, m, 10, d, 15) == 0
+                   && std::memcmp(o1, o2, 96) == 0
+                   && determ_p256_expand_message_xmd(o3, 32, m, 10, d, 15) == 0
+                   /* len_in_bytes is bound into b0 (I2OSP(outlen,2)) — outputs
+                    * for DIFFERENT lengths are domain-separated, so the 32B
+                    * output must NOT be the 96B prefix (RFC 9380 §5.3.1). */
+                   && std::memcmp(o1, o3, 32) != 0
+                   && determ_p256_expand_message_xmd(o1, 0, m, 10, d, 15) == -1;
+            std::vector<uint8_t> longdst(256, 0x41);
+            ok = ok && determ_p256_expand_message_xmd(o1, 96, m, 10, longdst.data(), 256) == -1;
+            check(ok, "(4) expand_message_xmd: deterministic; outlen domain-separated (32B != 96B prefix); outlen=0 / dstlen>255 rejected");
+        }
+
+        // (5) hash_to_curve structural: ALWAYS on-curve over a message grid;
+        //     deterministic; msg-sensitive; DST-sensitive.
+        {
+            const uint8_t* dst = (const uint8_t*)"DETERM-V01-CS01-with-P256_XMD:SHA-256_SSWU_RO_";
+            size_t dstlen = 46;
+            bool ok = true; uint32_t at = 0;
+            uint8_t prev[65] = {0};
+            for (uint32_t it = 0; it < 16 && ok; it++) {
+                uint8_t msg[40], pt_[65], pt2[65];
+                for (int i = 0; i < 40; i++) msg[i] = (uint8_t)(it * 17 + i * 3);
+                size_t mlen = (it % 5) * 9;          /* lengths 0,9,18,27,36 */
+                if (determ_p256_hash_to_curve(pt_, msg, mlen, dst, dstlen) != 0
+                    || determ_p256_point_check(pt_) != 0) { ok = false; at = it; break; }
+                if (determ_p256_hash_to_curve(pt2, msg, mlen, dst, dstlen) != 0
+                    || std::memcmp(pt_, pt2, 65) != 0) { ok = false; at = it; break; }
+                if (it > 0 && (it % 5) != 0 && std::memcmp(pt_, prev, 65) == 0) { ok = false; at = it; break; }
+                std::memcpy(prev, pt_, 65);
+            }
+            check(ok, ok ? "(5) hash_to_curve: on-curve + deterministic over a 16-msg grid (lengths 0..36)"
+                         : "(5) h2c structural failure at grid index " + std::to_string(at));
+            uint8_t a1[65], a2[65];
+            const uint8_t* m2 = (const uint8_t*)"same-msg";
+            bool ok2 = determ_p256_hash_to_curve(a1, m2, 8, dst, dstlen) == 0
+                    && determ_p256_hash_to_curve(a2, m2, 8, (const uint8_t*)"OTHER-DST", 9) == 0
+                    && std::memcmp(a1, a2, 65) != 0;
+            check(ok2, "(6) hash_to_curve: DST-sensitivity (same msg, different DST -> different point)");
+        }
+
+        BN_free(order); EC_GROUP_free(grp); BN_CTX_free(bnctx);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": p256-h2c-c99 " << (fail == 0
+                      ? "mod-n ops == OpenSSL BIGNUM; hash-to-curve structural contract held (§3.9b groundwork)"
                       : "had assertion failures")
                   << "\n";
         return fail == 0 ? 0 : 1;

@@ -64,6 +64,38 @@ int determ_p256_point_check(const uint8_t point[65]);
 void determ_p256_params(uint8_t p_be[32], uint8_t n_be[32], uint8_t b_be[32],
                         uint8_t gx_be[32], uint8_t gy_be[32]);
 
+/* ── §3.9b OPRF groundwork ──────────────────────────────────────────────────
+ * Scalar-field (mod n) arithmetic — the OPRF blind/unblind core — and the
+ * RFC 9380 hash-to-curve suite P256_XMD:SHA-256_SSWU_RO_ (simplified SSWU,
+ * Z = -10, no isogeny — P-256 has A·B ≠ 0). Validated by `determ
+ * test-p256-h2c-c99` (mod-n ops vs the OpenSSL BIGNUM oracle; h2c vs the
+ * RFC 9380 appendix vectors in tools/vectors/p256_h2c.json + structural
+ * on-curve/determinism/DST-sensitivity gates). */
+
+/* r = a*b mod n (inputs big-endian, both must be < n; -1 otherwise).
+ * Constant-time Montgomery arithmetic; the validity outcome is public. */
+int determ_p256_scalar_mul_mod_n(uint8_t r[32], const uint8_t a[32],
+                                 const uint8_t b[32]);
+
+/* r = a^{-1} mod n via Fermat (n is prime). -1 if a == 0 or a >= n.
+ * Constant-time in `a` (the exponent n-2 is a public constant). */
+int determ_p256_scalar_inv_mod_n(uint8_t r[32], const uint8_t a[32]);
+
+/* expand_message_xmd with SHA-256 (RFC 9380 §5.3.1). -1 on the RFC's
+ * length/DST bounds (outlen > 8160 i.e. ell > 255, or > 65535; dstlen >
+ * 255; zero outlen). Exposed for the appendix-K.1 vector gate. */
+int determ_p256_expand_message_xmd(uint8_t* out, size_t outlen,
+                                   const uint8_t* msg, size_t msglen,
+                                   const uint8_t* dst, size_t dstlen);
+
+/* hash_to_curve P256_XMD:SHA-256_SSWU_RO_ (RFC 9380 §3, random-oracle
+ * variant): out = SEC1 uncompressed point, never the identity. The map is
+ * constant-time in `msg` (an OPRF input may be a user secret); DST is
+ * public. -1 only on expand_message bounds violations. */
+int determ_p256_hash_to_curve(uint8_t out[65],
+                              const uint8_t* msg, size_t msglen,
+                              const uint8_t* dst, size_t dstlen);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
