@@ -654,12 +654,25 @@ Original plan (retained for the deviation record):
 - Per-primitive constant-time test
 - Reports + documentation
 
-### 3.13 Test-vector validation (~3-5 days)
+### 3.13 Test-vector validation — **SEEDED** (both halves live for the shipped primitives)
 
-- All vectors collected into `tools/vectors/<primitive>.json`
-- Test runner verifies byte-equal output
-- Cross-validation against libsodium during migration (verify equivalent behavior)
-- CI gate: vectors must pass
+- `tools/vectors/<primitive>.json` — 10 files / 40 vectors for the shipped
+  families (SHA-256/512 incl. the million-'a' `repeat` form, HMAC, HKDF,
+  PBKDF2, BLAKE2b, ChaCha20-Poly1305, AES-256-GCM, Ed25519, X25519 incl. the
+  full §6.1 DH exchange). No-fabrication rule: every vector was mechanically
+  recomputed before inclusion; argon2id omitted (no local oracle) — its KATs
+  stay pinned in `test-argon2id-c99`.
+- File half: `tools/test_c99_vector_files.sh` validates every JSON against
+  INDEPENDENT python implementations (hashlib / cryptography.hazmat) — a bad
+  vector file goes RED without the determ binary.
+- Binary half: `determ test-c99-vectors` (+ `tools/test_c99_vectors.sh`, in
+  FAST=1) runs the same vetted vectors through the shipped C99
+  implementations — a divergence with the file half green means OUR code is
+  wrong. AEAD entries also assert the decrypt round-trip; Ed25519 asserts
+  pubkey + sign + verify; missing file / unknown discriminator is a hard FAIL.
+- Remaining for full §3.13: vectors for future primitives as they ship
+  (secp256k1, P-256, OPRF), libsodium cross-validation during §3.15 migration,
+  CI wiring.
 
 ### 3.14 Build system + module structure (~3 days)
 

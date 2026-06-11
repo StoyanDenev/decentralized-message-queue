@@ -456,6 +456,10 @@ In-process tests (deterministic, no network):
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
                                               memcmp; determ_secure_zero wipe
+  determ test-c99-vectors [dir]               §3.13 binary half: every KAT in
+                                              tools/vectors/*.json (python-
+                                              vetted) byte-equal through the
+                                              shipped C99 implementations
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11979,6 +11983,188 @@ int main(int argc, char** argv) {
         return fail==0 ? 0 : 1;
     }
 
+    if (cmd == "test-c99-vectors") {
+        // CRYPTO-C99-SPEC §3.13 — the binary half of the vector-file gate.
+        // tools/test_c99_vector_files.sh validates tools/vectors/*.json against
+        // INDEPENDENT python implementations (hashlib / cryptography.hazmat);
+        // this subcommand closes the loop by running the SAME vetted vectors
+        // through the shipped C99 implementations (src/crypto/*). A divergence
+        // here with the file-side runner green means OUR code is wrong, not the
+        // vectors. Per-file dispatch on the "primitive" discriminator; an
+        // unknown primitive or unreadable file is a hard FAIL (fail-closed —
+        // silently skipping a vector class would read as coverage).
+        // Optional arg: vectors directory (default tools/vectors, repo-root
+        // relative — wrappers run from repo root per house convention).
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        auto unhex = [](const std::string& s){ std::vector<uint8_t> v;
+            for(size_t i=0;i+1<s.size();i+=2) v.push_back((uint8_t)std::stoi(s.substr(i,2),nullptr,16)); return v; };
+        auto hx = [](const uint8_t* p, size_t n){ static const char* H="0123456789abcdef";
+            std::string s; for(size_t i=0;i<n;i++){s.push_back(H[p[i]>>4]);s.push_back(H[p[i]&0xf]);} return s; };
+        auto dptr = [](std::vector<uint8_t>& v) -> const uint8_t* {
+            return v.empty() ? nullptr : v.data(); };
+
+        std::string vdir = (argc > 2) ? argv[2] : "tools/vectors";
+        const char* files[] = { "sha256.json", "sha512.json", "hmac_sha256.json",
+                                "hkdf_sha256.json", "pbkdf2_sha256.json",
+                                "blake2b.json", "chacha20_poly1305.json",
+                                "aes256_gcm.json", "ed25519.json", "x25519.json" };
+
+        for (const char* fn : files) {
+            std::string path = vdir + "/" + fn;
+            std::ifstream f(path);
+            if (!f) { check(false, std::string("vector file present: ") + path); continue; }
+            json doc;
+            try { f >> doc; } catch (const std::exception& e) {
+                check(false, path + std::string(" parses as JSON (") + e.what() + ")"); continue;
+            }
+            std::string prim = doc.value("primitive", "");
+            size_t n = doc["vectors"].size();
+            bool ok = true; std::string bad;
+
+            for (auto& v : doc["vectors"]) {
+                std::string name = v.value("name", "?");
+                try {
+                if (prim == "sha256") {
+                    auto msg = unhex(v["msg_hex"]);
+                    // Optional "repeat": the message is msg_hex repeated N times
+                    // (the FIPS 180-2 B.3 million-'a' case without a 2 MB hex blob).
+                    size_t rep = v.value("repeat", 1);
+                    if (rep > 1) { std::vector<uint8_t> e; e.reserve(msg.size()*rep);
+                        for (size_t r = 0; r < rep; r++) e.insert(e.end(), msg.begin(), msg.end());
+                        msg.swap(e); }
+                    uint8_t out[32];
+                    determ_sha256(dptr(msg), msg.size(), out);
+                    if (hx(out,32) != v["digest_hex"]) { ok=false; bad=name; break; }
+                } else if (prim == "sha512") {
+                    auto msg = unhex(v["msg_hex"]);
+                    size_t rep = v.value("repeat", 1);
+                    if (rep > 1) { std::vector<uint8_t> e; e.reserve(msg.size()*rep);
+                        for (size_t r = 0; r < rep; r++) e.insert(e.end(), msg.begin(), msg.end());
+                        msg.swap(e); }
+                    uint8_t out[64];
+                    determ_sha512(dptr(msg), msg.size(), out);
+                    if (hx(out,64) != v["digest_hex"]) { ok=false; bad=name; break; }
+                } else if (prim == "hmac_sha256") {
+                    auto key = unhex(v["key_hex"]); auto msg = unhex(v["msg_hex"]);
+                    size_t maclen = v.value("mac_len", 32);
+                    uint8_t out[32];
+                    if (determ_hmac_sha256(dptr(key), key.size(), dptr(msg), msg.size(), out) != 0
+                        || hx(out, maclen) != v["mac_hex"]) { ok=false; bad=name; break; }
+                } else if (prim == "hkdf_sha256") {
+                    auto ikm = unhex(v["ikm_hex"]); auto salt = unhex(v["salt_hex"]);
+                    auto info = unhex(v["info_hex"]); size_t L = v["length"];
+                    std::vector<uint8_t> out(L);
+                    if (determ_hkdf_sha256(dptr(salt), salt.size(), dptr(ikm), ikm.size(),
+                                           dptr(info), info.size(), out.data(), L) != 0
+                        || hx(out.data(), L) != v["okm_hex"]) { ok=false; bad=name; break; }
+                } else if (prim == "pbkdf2_hmac_sha256") {
+                    auto pw = unhex(v["password_hex"]); auto salt = unhex(v["salt_hex"]);
+                    uint32_t iters = v["iterations"]; size_t dklen = v["dklen"];
+                    std::vector<uint8_t> out(dklen);
+                    if (determ_pbkdf2_hmac_sha256(dptr(pw), pw.size(), dptr(salt), salt.size(),
+                                                  iters, out.data(), dklen) != 0
+                        || hx(out.data(), dklen) != v["dk_hex"]) { ok=false; bad=name; break; }
+                } else if (prim == "blake2b") {
+                    auto key = unhex(v["key_hex"]); auto msg = unhex(v["msg_hex"]);
+                    size_t outlen = v["outlen"];
+                    std::vector<uint8_t> out(outlen);
+                    if (determ_blake2b(out.data(), outlen, dptr(key), key.size(),
+                                       dptr(msg), msg.size()) != 0
+                        || hx(out.data(), outlen) != v["digest_hex"]) { ok=false; bad=name; break; }
+                } else if (prim == "chacha20_poly1305") {
+                    auto key = unhex(v["key_hex"]); auto nonce = unhex(v["nonce_hex"]);
+                    auto aad = unhex(v["aad_hex"]); auto pt = unhex(v["plaintext_hex"]);
+                    if (key.size() != 32 || nonce.size() != 12) { ok=false; bad=name + " (bad key/nonce len)"; break; }
+                    std::vector<uint8_t> ct(pt.size()); uint8_t tag[16];
+                    if (determ_chacha20_poly1305_encrypt(key.data(), nonce.data(),
+                            dptr(aad), aad.size(), dptr(pt), pt.size(),
+                            ct.empty()?nullptr:ct.data(), tag) != 0
+                        || hx(dptr(ct), ct.size()) != v["ciphertext_hex"]
+                        || hx(tag,16) != v["tag_hex"]) { ok=false; bad=name; break; }
+                    std::vector<uint8_t> rt(ct.size());
+                    auto exp_tag = unhex(v["tag_hex"]);
+                    if (determ_chacha20_poly1305_decrypt(key.data(), nonce.data(),
+                            dptr(aad), aad.size(), dptr(ct), ct.size(),
+                            exp_tag.data(), rt.empty()?nullptr:rt.data()) != 0
+                        || rt != pt) { ok=false; bad=name + " (decrypt round-trip)"; break; }
+                } else if (prim == "aes256_gcm") {
+                    auto key = unhex(v["key_hex"]); auto iv = unhex(v["iv_hex"]);
+                    auto aad = unhex(v["aad_hex"]); auto pt = unhex(v["plaintext_hex"]);
+                    if (key.size() != 32 || iv.size() != 12) { ok=false; bad=name + " (bad key/iv len)"; break; }
+                    std::vector<uint8_t> ct(pt.size()); uint8_t tag[16];
+                    determ_aes256_gcm_encrypt(key.data(), iv.data(), dptr(aad), aad.size(),
+                                              dptr(pt), pt.size(),
+                                              ct.empty()?nullptr:ct.data(), tag);
+                    if (hx(dptr(ct), ct.size()) != v["ciphertext_hex"]
+                        || hx(tag,16) != v["tag_hex"]) { ok=false; bad=name; break; }
+                    std::vector<uint8_t> rt(ct.size());
+                    auto exp_tag = unhex(v["tag_hex"]);
+                    if (determ_aes256_gcm_decrypt(key.data(), iv.data(), dptr(aad), aad.size(),
+                            dptr(ct), ct.size(), exp_tag.data(),
+                            rt.empty()?nullptr:rt.data()) != 0
+                        || rt != pt) { ok=false; bad=name + " (decrypt round-trip)"; break; }
+                } else if (prim == "ed25519") {
+                    auto seed = unhex(v["seed_hex"]); auto msg = unhex(v["msg_hex"]);
+                    if (seed.size() != 32) { ok=false; bad=name + " (bad seed len)"; break; }
+                    uint8_t pk[32], sig[64];
+                    determ_ed25519_pubkey_from_seed(seed.data(), pk);
+                    if (hx(pk,32) != v["public_key_hex"]) { ok=false; bad=name + " (pubkey)"; break; }
+                    if (determ_ed25519_sign(seed.data(), pk, dptr(msg), msg.size(), sig) != 0
+                        || hx(sig,64) != v["signature_hex"]) { ok=false; bad=name + " (sign)"; break; }
+                    if (determ_ed25519_verify(pk, dptr(msg), msg.size(), sig) != 0) {
+                        ok=false; bad=name + " (verify)"; break; }
+                } else if (prim == "x25519") {
+                    // Two shapes per the file's "type" discriminator:
+                    //   "scalarmult": out = X25519(scalar, u)        (RFC 7748 §5.2)
+                    //   "dh": full §6.1 exchange — base-derive both publics,
+                    //         then shared secret equal from BOTH directions.
+                    std::string ty = v.value("type", "scalarmult");
+                    if (ty == "dh") {
+                        auto a = unhex(v["private_a_hex"]); auto b = unhex(v["private_b_hex"]);
+                        if (a.size() != 32 || b.size() != 32) { ok=false; bad=name + " (bad len)"; break; }
+                        uint8_t pa[32], pb[32], s1[32], s2[32];
+                        if (determ_x25519_base(pa, a.data()) != 0
+                            || hx(pa,32) != v["public_a_hex"]) { ok=false; bad=name + " (public_a)"; break; }
+                        if (determ_x25519_base(pb, b.data()) != 0
+                            || hx(pb,32) != v["public_b_hex"]) { ok=false; bad=name + " (public_b)"; break; }
+                        if (determ_x25519(s1, a.data(), pb) != 0
+                            || determ_x25519(s2, b.data(), pa) != 0
+                            || hx(s1,32) != v["shared_hex"]
+                            || hx(s2,32) != v["shared_hex"]) { ok=false; bad=name + " (shared)"; break; }
+                    } else {
+                        auto scalar = unhex(v["scalar_hex"]); auto u = unhex(v["u_hex"]);
+                        if (scalar.size() != 32 || u.size() != 32) { ok=false; bad=name + " (bad len)"; break; }
+                        uint8_t out[32];
+                        if (determ_x25519(out, scalar.data(), u.data()) != 0
+                            || hx(out,32) != v["output_hex"]) { ok=false; bad=name; break; }
+                    }
+                } else {
+                    ok = false; bad = "unknown primitive discriminator '" + prim + "'";
+                    break;
+                }
+                } catch (const std::exception& e) {
+                    // A schema surprise (missing/odd-typed field) must FAIL with
+                    // a diagnostic, not crash with a lost stdout buffer.
+                    ok = false; bad = name + std::string(" (schema: ") + e.what() + ")";
+                    break;
+                }
+            }
+            check(ok, ok ? std::string(fn) + ": " + std::to_string(n) +
+                           " vector(s) byte-equal through the C99 " + prim + " implementation"
+                         : std::string(fn) + " diverged at vector: " + bad);
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": c99-vectors " << (fail == 0
+                      ? "all vector files byte-equal through the shipped C99 implementations (CRYPTO-C99-SPEC §3.13)"
+                      : "had divergences")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "test-ct-c99") {
         // CRYPTO-C99-SPEC §3.10 — the two constant-time/hygiene primitives the
         // rest of the C99 stack builds on: determ_ct_memcmp (no-short-circuit
