@@ -10,15 +10,24 @@ with lfence serialization + steady_clock fallback, the pinned
 thresholds, Welford cells, max-|t|-over-pairs-and-crops reporting with the
 §3.4 banding) plus six §4 targets: ct-memcmp (4 mismatch-position classes),
 chacha-tag-verify, gcm-tag-verify, ed25519-sign, x25519, and the
-sha256-content negative control. `--selftest` (the §5.5 bit-exact statistics
-fixture) is in the regular suite as `tools/test_ct_timing_selftest.sh`;
-measurement mode stays out of run_all.sh per §3.1. First measured run on the
-dev host (MSVC -O2, rdtsc): all six targets max |t| in 1.3–3.0, no evidence
-of leakage at the smoke sample sizes — consistent with ConstantTimeInventory's
-mechanism claims, with §5.4's negative-claim caveats in force. Remaining: the
-other §4 targets register in the same table as they are added; §1's
-dudect/ctgrind VENDORING question (the third-party-code path) still awaits
-Stoyan's authorization and is unaffected by the in-house implementation.
+sha256-content negative control; tranche 2 (same session) added aes-core,
+chacha20-core, poly1305-key, ed25519-pubkey, sc-canonical (the five
+boundary-scalar classes {0, L−1, L, 2L−1, random} of §4 target 7), and
+hmac-key — 12 targets total — plus the rest of the §3.2 CLI surface
+(`--seconds`, `--batch`, `--csv`, `--json`). `--selftest` (the §5.5 bit-exact
+statistics fixture) is in the regular suite as
+`tools/test_ct_timing_selftest.sh`; measurement mode stays out of run_all.sh
+per §3.1. First measured runs on the dev host (MSVC -O2, rdtsc): max |t|
+1.3–4.2 across all targets, no evidence of leakage at the smoke sample sizes —
+with one live demonstration of the §3.4 banding procedure: sc-canonical's
+first run hit max |t| = 4.96 (evidence band) on a single (pair, crop) cell,
+and the prescribed double-the-samples re-run collapsed it to 0.43 (an
+environmental fluke, not a leak — a true leak grows like √n; with 10 pairs ×
+7 crops this is §5.2's multiple-testing caveat materializing on schedule).
+§5.4's negative-claim caveats remain in force. Remaining: the other §4
+targets register in the same table as they are added; §1's dudect/ctgrind
+VENDORING question (the third-party-code path) still awaits Stoyan's
+authorization and is unaffected by the in-house implementation.
 
 **Subject:** the design of Determ's constant-time (CT) verification framework —
 CRYPTO-C99-SPEC.md §3.12, which today reads in full:

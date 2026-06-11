@@ -708,13 +708,18 @@ Original plan (retained for the deviation record):
   (secp256k1, P-256, OPRF), libsodium cross-validation during §3.15 migration,
   CI wiring.
 
-### 3.14 Build system + module structure (~3 days)
+### 3.14 Build system + module structure — **SEEDED** (aggregate static lib)
 
-- CMake targets per `src/crypto/<module>/`
-- Each module compiles as static lib
-- Top-level `libdeterm-crypto` aggregates all modules
-- Cross-compilation verified (x86-64, ARM64, Linux/Windows/MINIX)
-- libsodium dropped from CMakeLists
+- SHIPPED: `determ-crypto-c99` STATIC library target (CMakeLists.txt) — all 18
+  C99 sources moved out of the `determ` SOURCES list; PUBLIC include dir, so
+  any consumer gets the umbrella `determ/crypto.h` + header-only
+  `determ/crypto.hpp` by linking. `determ` links it; the full c99 battery is
+  validated against the lib-linked binary.
+- Remaining: the per-module sub-library split (one aggregate target today —
+  splitting buys nothing until a second consumer with a partial-module need
+  exists); the cross-compilation matrix (x86-64 / ARM64, Linux/Windows/MINIX
+  — only MSVC x64 exercised so far); the libsodium drop (gated on §3.15: the
+  wallet OPAQUE stub still links sodium).
 
 ### 3.15 Migration of existing callers (~5 days)
 
