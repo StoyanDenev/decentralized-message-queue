@@ -129,6 +129,9 @@ add_library(determ-crypto-c99 STATIC
   # + `determ test-argon2id-c99`.
   "${CMAKE_SOURCE_DIR}/src/crypto/blake2/blake2b.c"
   "${CMAKE_SOURCE_DIR}/src/crypto/argon2/argon2id.c"
+  # §3.8c NIST P-256 (FIPS-profile curve; Montgomery field + RCB complete
+  # addition + CT ladder) — `determ test-p256-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/p256/p256.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 

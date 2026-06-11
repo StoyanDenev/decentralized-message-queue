@@ -22,6 +22,7 @@
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
 #include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
 #include <determ/crypto/argon2/argon2id.h>    // v2.10 Phase 0: C99-native Argon2id (RFC 9106, §3.6)
+#include <determ/crypto/p256/p256.h>          // §3.8c: C99 NIST P-256 (FIPS-profile curve)
 #include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
 #include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
 #include <determ/crypto.hpp>                  // §3.11: determ::c99 C++ wrapper over the C99 stack
@@ -37,6 +38,9 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <openssl/ec.h>       // test-p256-c99: EC_GROUP/EC_POINT cross-validation oracle
+#include <openssl/obj_mac.h>  // test-p256-c99: NID_X9_62_prime256v1
+#include <openssl/bn.h>       // test-p256-c99: BIGNUM scalar/coordinate plumbing
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -460,6 +464,10 @@ In-process tests (deterministic, no network):
                                               Argon2id (RFC 9106) vs libsodium
                                               crypto_pwhash_argon2id KATs
                                               (§3.6; BLAKE2b-based, memory-hard)
+  determ test-p256-c99                        §3.8c: C99 NIST P-256 (FIPS-
+                                              profile curve) — constants +
+                                              [k]G + ECDH byte-equal vs the
+                                              OpenSSL EC oracle; reject gates
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
@@ -12000,6 +12008,166 @@ int main(int argc, char** argv) {
         return fail==0 ? 0 : 1;
     }
 
+    if (cmd == "test-p256-c99") {
+        // CRYPTO-C99-SPEC §3.8c — the from-scratch C99 NIST P-256 vs the
+        // OpenSSL EC oracle. ORDERING MATTERS: assertion (1) proves our
+        // in-source curve constants byte-equal OpenSSL's EC_GROUP — that is
+        // what converts the hand-transcribed p/n/b/Gx/Gy from "trusted from
+        // memory" into "mechanically verified" before any arithmetic is
+        // trusted. Then base-mult byte-equality over a scalar grid (the §Q9
+        // gate), ECDH parity + symmetry, commutativity, and the reject paths.
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+
+        EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+        BN_CTX* bnctx = BN_CTX_new();
+        if (!grp || !bnctx) { std::cout << "  FAIL: OpenSSL P-256 group init\n"; return 1; }
+
+        // (1) Curve-constant parity: our p/n/b/Gx/Gy == OpenSSL EC_GROUP.
+        {
+            uint8_t p_be[32], n_be[32], b_be[32], gx_be[32], gy_be[32];
+            determ_p256_params(p_be, n_be, b_be, gx_be, gy_be);
+            BIGNUM *bp = BN_new(), *ba = BN_new(), *bb = BN_new(), *bn = BN_new(),
+                   *bx = BN_new(), *by = BN_new();
+            uint8_t o[32];
+            bool ok = EC_GROUP_get_curve_GFp(grp, bp, ba, bb, bnctx) == 1;
+            ok = ok && EC_GROUP_get_order(grp, bn, bnctx) == 1;
+            const EC_POINT* g = EC_GROUP_get0_generator(grp);
+            ok = ok && EC_POINT_get_affine_coordinates_GFp(grp, g, bx, by, bnctx) == 1;
+            ok = ok && BN_bn2binpad(bp, o, 32) == 32 && std::memcmp(o, p_be, 32) == 0;
+            ok = ok && BN_bn2binpad(bn, o, 32) == 32 && std::memcmp(o, n_be, 32) == 0;
+            ok = ok && BN_bn2binpad(bb, o, 32) == 32 && std::memcmp(o, b_be, 32) == 0;
+            ok = ok && BN_bn2binpad(bx, o, 32) == 32 && std::memcmp(o, gx_be, 32) == 0;
+            ok = ok && BN_bn2binpad(by, o, 32) == 32 && std::memcmp(o, gy_be, 32) == 0;
+            // a = -3 mod p: a + 3 == p
+            ok = ok && BN_add_word(ba, 3) == 1 && BN_cmp(ba, bp) == 0;
+            BN_free(bp); BN_free(ba); BN_free(bb); BN_free(bn); BN_free(bx); BN_free(by);
+            check(ok, "(1) curve constants p/n/b/Gx/Gy byte-equal OpenSSL EC_GROUP; a == -3 mod p "
+                      "(the gate that makes the in-source constants trustworthy)");
+        }
+
+        // OpenSSL-side scalar mult helper: out65 = [k] (Q or G).
+        auto ossl_mul = [&](uint8_t out65[65], const uint8_t k_be[32],
+                            const uint8_t* q65 /* nullptr = base */) -> bool {
+            BIGNUM* k = BN_bin2bn(k_be, 32, nullptr);
+            EC_POINT* r = EC_POINT_new(grp);
+            EC_POINT* q = nullptr;
+            bool ok = k && r;
+            if (ok && q65) {
+                q = EC_POINT_new(grp);
+                ok = q && EC_POINT_oct2point(grp, q, q65, 65, bnctx) == 1;
+            }
+            if (ok) ok = EC_POINT_mul(grp, r, q65 ? nullptr : k, q, q65 ? k : nullptr, bnctx) == 1;
+            if (ok) ok = EC_POINT_point2oct(grp, r, POINT_CONVERSION_UNCOMPRESSED,
+                                            out65, 65, bnctx) == 65;
+            if (q) EC_POINT_free(q);
+            if (r) EC_POINT_free(r);
+            if (k) BN_free(k);
+            return ok;
+        };
+        // Deterministic in-range scalars (top byte forced low => < n).
+        auto mk_scalar = [](uint8_t s[32], uint32_t seed) {
+            for (int i = 0; i < 32; i++) s[i] = (uint8_t)((seed * 2654435761u + i * 40503u) >> ((i % 3) * 8));
+            s[0] &= 0x0f;
+            s[31] |= 1;          /* never zero */
+        };
+
+        // (2) base_mul byte-equal vs OpenSSL over a scalar grid (incl. k=1, k=2).
+        {
+            bool ok = true; uint32_t at = 0;
+            for (uint32_t it = 0; it < 12 && ok; it++) {
+                uint8_t k[32] = {0}, mine[65], theirs[65];
+                if (it == 0) k[31] = 1;
+                else if (it == 1) k[31] = 2;
+                else mk_scalar(k, it * 0x9e37u + 7);
+                if (determ_p256_base_mul(mine, k) != 0
+                    || !ossl_mul(theirs, k, nullptr)
+                    || std::memcmp(mine, theirs, 65) != 0) { ok = false; at = it; }
+            }
+            check(ok, ok ? "(2) [k]G byte-equal vs OpenSSL over 12-scalar grid incl. k=1,2 — the §Q9 gate"
+                         : "(2) base_mul diverged from OpenSSL at grid index " + std::to_string(at));
+        }
+
+        // (3) point_mul parity + ECDH symmetry: [a]([b]G) == [b]([a]G) == OpenSSL.
+        {
+            uint8_t a[32], b[32], pa[65], pb[65], s1[65], s2[65], theirs[65];
+            mk_scalar(a, 101); mk_scalar(b, 202);
+            bool ok = determ_p256_base_mul(pa, a) == 0 && determ_p256_base_mul(pb, b) == 0
+                   && determ_p256_point_mul(s1, a, pb) == 0
+                   && determ_p256_point_mul(s2, b, pa) == 0
+                   && std::memcmp(s1, s2, 65) == 0
+                   && ossl_mul(theirs, a, pb)
+                   && std::memcmp(s1, theirs, 65) == 0;
+            check(ok, "(3) ECDH: [a]([b]G) == [b]([a]G) and byte-equal vs OpenSSL point-mult");
+        }
+
+        // (4) commutativity chain on a non-generator base: [k1]([k2]P) == [k2]([k1]P).
+        {
+            uint8_t k1[32], k2[32], k3[32], p0[65], t1[65], t2[65], r1[65], r2[65];
+            mk_scalar(k1, 11); mk_scalar(k2, 22); mk_scalar(k3, 33);
+            bool ok = determ_p256_base_mul(p0, k3) == 0
+                   && determ_p256_point_mul(t1, k2, p0) == 0
+                   && determ_p256_point_mul(r1, k1, t1) == 0
+                   && determ_p256_point_mul(t2, k1, p0) == 0
+                   && determ_p256_point_mul(r2, k2, t2) == 0
+                   && std::memcmp(r1, r2, 65) == 0;
+            check(ok, "(4) scalar-mult commutativity on a non-generator base point");
+        }
+
+        // (5) on-curve checks: valid point accepted; tampered coordinate,
+        //     bad prefix, and coordinate >= p each rejected.
+        {
+            uint8_t k[32], p0[65], bad[65];
+            mk_scalar(k, 55);
+            bool ok = determ_p256_base_mul(p0, k) == 0
+                   && determ_p256_point_check(p0) == 0;
+            std::memcpy(bad, p0, 65); bad[40] ^= 1;          /* off-curve Y */
+            ok = ok && determ_p256_point_check(bad) == -1;
+            std::memcpy(bad, p0, 65); bad[0] = 0x02;         /* compressed prefix */
+            ok = ok && determ_p256_point_check(bad) == -1;
+            std::memcpy(bad, p0, 65);
+            std::memset(bad + 1, 0xff, 32);                  /* X >= p */
+            ok = ok && determ_p256_point_check(bad) == -1;
+            ok = ok && determ_p256_point_mul(p0, k, bad) == -1;  /* mul refuses bad point */
+            check(ok, "(5) point checks: valid accepted; off-curve / bad-prefix / X>=p rejected (mul refuses too)");
+        }
+
+        // (6) scalar validity gates: 0 and n rejected; n-1 accepted and
+        //     [n-1]G == -G (same X as G, Y = p - Gy).
+        {
+            uint8_t zero[32] = {0}, nval[32], nm1[32], out[65];
+            uint8_t p_be[32], n_be[32], b_be[32], gx_be[32], gy_be[32];
+            determ_p256_params(p_be, n_be, b_be, gx_be, gy_be);
+            std::memcpy(nval, n_be, 32);
+            std::memcpy(nm1, n_be, 32); nm1[31] -= 1;        /* n ends 0x51 — no borrow */
+            bool ok = determ_p256_base_mul(out, zero) == -1
+                   && determ_p256_base_mul(out, nval) == -1
+                   && determ_p256_base_mul(out, nm1) == 0
+                   && std::memcmp(out + 1, gx_be, 32) == 0
+                   && std::memcmp(out + 33, gy_be, 32) != 0;
+            // Y((n-1)G) == p - Gy: verify by big-endian byte addition Y + Gy == p.
+            if (ok) {
+                uint32_t carry = 0; uint8_t sum[32];
+                for (int i = 31; i >= 0; i--) {
+                    uint32_t v = (uint32_t)out[33 + i] + gy_be[i] + carry;
+                    sum[i] = (uint8_t)v; carry = v >> 8;
+                }
+                ok = (carry == 0) && std::memcmp(sum, p_be, 32) == 0;
+            }
+            check(ok, "(6) scalar gates: 0 and n rejected; [n-1]G == -G (X matches G, Y + Gy == p)");
+        }
+
+        EC_GROUP_free(grp); BN_CTX_free(bnctx);
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": p256-c99 " << (fail == 0
+                      ? "constants + scalar-mult byte-equal vs OpenSSL; reject gates held (CRYPTO-C99-SPEC §3.8c)"
+                      : "had assertion failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "ct-timing-probe") {
         // CRYPTO-C99-SPEC §3.12 / docs/proofs/TimingProbeDesign.md — the
         // in-house fix-vs-random timing-leakage probe (dudect method:
