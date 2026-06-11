@@ -165,5 +165,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: S-014 RPC rate limiting"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_rpc_rate_limit"; exit 1
 fi

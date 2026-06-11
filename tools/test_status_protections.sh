@@ -174,5 +174,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: rpc_status protections readback"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_status_protections"; exit 1
 fi

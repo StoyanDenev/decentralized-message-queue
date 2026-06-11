@@ -390,5 +390,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet sign-arbitrary + verify-arbitrary"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_message_sign_verify"; exit 1
 fi

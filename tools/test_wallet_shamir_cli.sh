@@ -257,6 +257,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet shamir-split + shamir-combine raw CLIs"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_shamir_cli"
   exit 1
 fi

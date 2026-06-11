@@ -165,6 +165,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet shamir-verify --threshold non-integer edge"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_shamir_verify_threshold_noninteger_edge"
     exit 1
 fi

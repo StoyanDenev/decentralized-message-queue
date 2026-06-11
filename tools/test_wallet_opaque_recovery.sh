@@ -91,5 +91,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: OPAQUE-scheme recovery end-to-end"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_wallet_opaque_recovery"; exit 1
 fi

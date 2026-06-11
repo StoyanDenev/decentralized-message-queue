@@ -190,5 +190,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: S-021 chain.json head_hash tampering detection"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_chain_integrity"; exit 1
 fi

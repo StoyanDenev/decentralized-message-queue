@@ -421,6 +421,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet keyfile-loader fail-closed robustness"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_keyfile_robustness"
     exit 1
 fi

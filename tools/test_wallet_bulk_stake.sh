@@ -602,6 +602,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet bulk-stake"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_bulk_stake"
   exit 1
 fi

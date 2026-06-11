@@ -296,6 +296,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet derive-shared-secret"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_derive_shared_secret"
     exit 1
 fi

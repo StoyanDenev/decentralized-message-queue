@@ -330,6 +330,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet anon-batch-balance"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_anon_batch_balance"
   exit 1
 fi

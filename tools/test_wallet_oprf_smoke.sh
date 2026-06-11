@@ -78,5 +78,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: libsodium primitives wired"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_wallet_oprf_smoke"; exit 1
 fi

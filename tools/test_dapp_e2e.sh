@@ -246,5 +246,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: v2.18/v2.19 DApp end-to-end"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_dapp_e2e"; exit 1
 fi

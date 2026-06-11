@@ -106,7 +106,7 @@ else
     echo "  FAIL: could not mint third keypair"
     fail_count=$((fail_count + 1))
     echo; echo "=== Test summary ==="; echo "  $pass_count pass / $fail_count fail"
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_message_aead_fuzz"; exit 1
 fi
 
 echo
@@ -253,6 +253,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet encrypt-message/decrypt-message round-trip + tamper fuzz ($NUM_CASES cases)"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_message_aead_fuzz"
     exit 1
 fi

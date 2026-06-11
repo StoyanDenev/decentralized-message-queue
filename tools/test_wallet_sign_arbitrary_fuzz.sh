@@ -293,6 +293,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet sign-arbitrary/verify-arbitrary fixed-seed fuzz"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_sign_arbitrary_fuzz"
   exit 1
 fi

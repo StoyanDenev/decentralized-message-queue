@@ -139,5 +139,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: S-027 log_quiet flag"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_log_quiet"; exit 1
 fi

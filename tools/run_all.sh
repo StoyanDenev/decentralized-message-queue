@@ -132,12 +132,21 @@ for t in tools/test_*.sh; do
     #   "  PASS: <description>"  on success
     #   "  FAIL: <description>"  on failure
     # Both with a leading space (the existing test convention).
+    #
+    # FAIL is checked FIRST (fail-closed): many tests print per-check
+    # "PASS: <desc>" lines via assert helpers, and a late passing check can
+    # land inside a FAILING run's tail window alongside the terminal
+    # "FAIL: <name>" marker. With PASS checked first, that combination
+    # counted GREEN (a real observed false-green class — see
+    # tools/test_cluster_output_discipline.sh). A FAIL marker in the tail
+    # always wins; a passing run prints no FAIL: line, so this cannot
+    # false-RED a healthy test.
     LAST=$(echo "$OUT" | tail -10)
-    if echo "$LAST" | grep -qE "^\s*PASS:"; then
-        PASS_COUNT=$((PASS_COUNT + 1))
-    elif echo "$LAST" | grep -qE "^\s*FAIL:"; then
+    if echo "$LAST" | grep -qE "^\s*FAIL:"; then
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_TESTS+=("$t")
+    elif echo "$LAST" | grep -qE "^\s*PASS:"; then
+        PASS_COUNT=$((PASS_COUNT + 1))
     else
         # Ambiguous outcome — count as failure for safety.
         echo "  (no PASS:/FAIL: marker in final 10 lines — counted as failure)"

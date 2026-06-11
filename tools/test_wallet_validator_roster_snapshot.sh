@@ -412,7 +412,10 @@ if [ -f "${SNAP_PATH}.tmp" ]; then
   echo "  FAIL: stray .tmp file exists at ${SNAP_PATH}.tmp"
   fail_count=$((fail_count + 1))
 else
-  echo "  PASS: no .tmp left behind"
+  # ok: (not PASS:) — a per-check line this close to the end of the output
+  # could land in run_all.sh's last-10-lines window of a FAILING run and
+  # false-green the suite (PASS: is grepped before FAIL:).
+  echo "  ok: no .tmp left behind"
   pass_count=$((pass_count + 1))
 fi
 
@@ -434,6 +437,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet validator-roster-snapshot"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_validator_roster_snapshot"
   exit 1
 fi

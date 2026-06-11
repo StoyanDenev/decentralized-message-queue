@@ -265,5 +265,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: operator_stake_distribution.sh (Nakamoto + Gini)"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_operator_stake_distribution"; exit 1
 fi

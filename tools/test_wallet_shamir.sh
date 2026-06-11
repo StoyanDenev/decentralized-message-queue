@@ -105,6 +105,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet shamir end-to-end"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_shamir"
   exit 1
 fi

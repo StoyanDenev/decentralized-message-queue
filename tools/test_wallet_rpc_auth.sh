@@ -302,5 +302,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet rpc-auth"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_rpc_auth"; exit 1
 fi

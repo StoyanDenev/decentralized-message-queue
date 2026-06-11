@@ -159,5 +159,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: S-001 RPC localhost-only default"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_rpc_localhost_only"; exit 1
 fi

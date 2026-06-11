@@ -234,5 +234,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet keyfile-rotate AAD pubkey-substitution edge"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_keyfile_rotate_aad_pubkey_substitution_edge"; exit 1
 fi

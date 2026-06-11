@@ -400,5 +400,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet verify-batch"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_verify_batch"; exit 1
 fi

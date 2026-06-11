@@ -257,6 +257,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet shamir-split/shamir-combine property fuzz"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_shamir_property_fuzz"
   exit 1
 fi

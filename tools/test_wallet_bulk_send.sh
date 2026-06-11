@@ -416,6 +416,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet bulk-send"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_bulk_send"
   exit 1
 fi

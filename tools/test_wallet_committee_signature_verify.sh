@@ -449,6 +449,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet committee-signature-verify (offline K-of-K Ed25519 verifier)"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_committee_signature_verify"
   exit 1
 fi

@@ -216,5 +216,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: --json flag on info CLIs"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_json_cli"; exit 1
 fi

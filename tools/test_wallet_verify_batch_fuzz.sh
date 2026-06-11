@@ -99,7 +99,7 @@ json.dump(recs, open('$T/in.json','w'))
   --out "$T/signed.json" >/dev/null 2>&1
 if [ ! -f "$T/signed.json" ]; then
   echo "  SETUP-FAIL: tx-batch-sign did not produce signed batch"
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_wallet_verify_batch_fuzz"; exit 1
 fi
 
 count_valid()   { $PY -c "import json,sys; print(sum(1 for v in json.load(open(sys.argv[1])) if v['valid']))" "$1"; }
@@ -224,5 +224,5 @@ echo "  $pass_count pass / $fail_count fail  ($CASES fuzz cases, seed=$SEED)"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet verify-batch fuzz"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_verify_batch_fuzz"; exit 1
 fi

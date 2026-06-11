@@ -448,6 +448,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet stake-bulk-query"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_stake_bulk_query"
   exit 1
 fi

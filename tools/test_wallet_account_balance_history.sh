@@ -552,6 +552,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet account-balance-history"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_account_balance_history"
   exit 1
 fi

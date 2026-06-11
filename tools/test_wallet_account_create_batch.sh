@@ -296,5 +296,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet account-create-batch"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_account_create_batch"; exit 1
 fi

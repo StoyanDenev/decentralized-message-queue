@@ -285,5 +285,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: v2.2 headers RPC + CLI"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_headers_rpc"; exit 1
 fi

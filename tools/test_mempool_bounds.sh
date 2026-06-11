@@ -157,5 +157,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: S-008 mempool bounds"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_mempool_bounds"; exit 1
 fi

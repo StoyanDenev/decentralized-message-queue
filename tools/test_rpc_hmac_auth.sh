@@ -178,5 +178,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: v2.16 / S-001 HMAC RPC auth"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_rpc_hmac_auth"; exit 1
 fi

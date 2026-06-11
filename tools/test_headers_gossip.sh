@@ -203,5 +203,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
   echo "  PASS: v2.2 gossip-layer headers RPC (HEADERS_REQUEST/HEADERS_RESPONSE)"; exit 0
 else
-  echo "  FAIL"; exit 1
+  echo "  FAIL: test_headers_gossip"; exit 1
 fi

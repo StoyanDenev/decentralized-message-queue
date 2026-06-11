@@ -343,6 +343,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet keyfile lifecycle property/fuzz"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_keyfile_lifecycle_fuzz"
     exit 1
 fi

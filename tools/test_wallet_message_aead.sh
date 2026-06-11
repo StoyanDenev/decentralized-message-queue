@@ -340,6 +340,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet encrypt-message + decrypt-message"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_message_aead"
     exit 1
 fi

@@ -6593,13 +6593,28 @@ int main(int argc, char** argv) {
             check(r == Hash{}, "empty leaf set yields all-zero root");
         }
 
-        // 2. Single-leaf tree → root == leaf_hash (degenerate case;
-        //    proof is empty array).
+        // 2. Single-leaf tree → root == S-040 wrap of the leaf hash
+        //    (0x02 ‖ be_u32(leaf_count=1) ‖ leaf_hash). Pre-S-040 the
+        //    root WAS the bare leaf_hash; the leaf_count-binding wrap
+        //    changed every non-empty root. (This assertion was stale
+        //    against the shipped wrap and masked by the old PASS-first
+        //    run_all detection — fixed when detection went FAIL-first.)
         {
+            auto wrap_root = [](const Hash& inner, uint32_t n) {
+                crypto::SHA256Builder b;
+                uint8_t p = 0x02; b.append(&p, 1);
+                uint8_t be[4] = { static_cast<uint8_t>((n >> 24) & 0xff),
+                                  static_cast<uint8_t>((n >> 16) & 0xff),
+                                  static_cast<uint8_t>((n >> 8)  & 0xff),
+                                  static_cast<uint8_t>( n        & 0xff) };
+                b.append(be, 4); b.append(inner);
+                return b.finalize();
+            };
             auto leaves = make_leaves(1);
             Hash r = merkle_root(leaves);
             Hash lh = merkle_leaf_hash(leaves[0].key, leaves[0].value_hash);
-            check(r == lh, "single-leaf root equals leaf_hash");
+            check(r == wrap_root(lh, 1),
+                  "single-leaf root equals S-040 wrap(leaf_hash, count=1)");
             auto p = merkle_proof(leaves, 0);
             check(p.empty(), "single-leaf proof is empty");
             bool ok = merkle_verify(r, leaves[0].key, leaves[0].value_hash,
@@ -14249,62 +14264,71 @@ int main(int argc, char** argv) {
                   "compute_genesis_hash: chain_id sensitivity");
         }
 
-        // === Documented GAP: operational params NOT in genesis hash ===
+        // === S-039 (CLOSED): operational params ARE in the genesis hash ===
         //
-        // Discovered during this test's authoring: the following config
-        // fields contribute NOTHING to compute_genesis_hash, by current
-        // design (make_genesis_block only mixes chain_id + chain_role +
-        // shard_id + committee_region + genesis_message + creators'
-        // ed_pubs + governance fields + suspension_slash/unstake_delay +
-        // merge thresholds):
+        // History: this block originally locked in the OPPOSITE behavior
+        // — these fields contributed nothing to compute_genesis_hash, so
+        // two operators whose configs differed in (say) m_creators
+        // computed the SAME genesis_hash and then silently failed to
+        // converge (different K-committees → sig gathering never
+        // gathers), with no diagnostic. That was registered as S-039
+        // (diagnostic-UX gap) and CLOSED by the "DTM-genesis-ops-v1"
+        // domain-separated mix in make_genesis_block
+        // (src/chain/genesis.cpp), which binds UNCONDITIONALLY:
         //
-        //   * m_creators            — committee size K
-        //   * k_block_sigs          — Phase-2 quorum within committee
-        //   * block_subsidy         — E1 economics
-        //   * subsidy_pool_initial  — E1 economics
-        //   * subsidy_mode          — E1 economics
-        //   * min_stake             — economics + Sybil-cost
-        //   * initial_shard_count   — sharding topology
-        //   * bft_enabled           — BFT escalation gate
-        //   * bft_escalation_threshold
-        //   * epoch_blocks          — committee-selection epoch length
-        //   * shard_address_salt    — sharding routing salt
+        //   m_creators, k_block_sigs, block_subsidy,
+        //   subsidy_pool_initial, subsidy_mode,
+        //   lottery_jackpot_multiplier, min_stake,
+        //   initial_shard_count, bft_enabled,
+        //   bft_escalation_threshold, epoch_blocks, shard_address_salt
         //
-        // Diagnostic-UX impact: if two operators run the same chain_id
-        // with different m_creators, the chain fails to advance
-        // (different K-committees per node → signature gathering
-        // never converges), but they don't see "your config doesn't
-        // match the chain's m_creators" — only cryptic consensus
-        // failures.
+        // A mismatch in ANY of these now yields a different genesis_hash,
+        // rejected at the HELLO genesis-hash handshake with a clear
+        // diagnostic instead of a silent stall.
         //
-        // Wire-compat impact: making any of these consensus-critical,
-        // and binding them into compute_genesis_hash, would change
-        // every existing chain's genesis hash → wire-compat break.
-        // Not in this commit's scope; tracked as a forward-dev item.
-        //
-        // Test lock-in: assert the CURRENT no-effect behavior so we
-        // notice if it changes accidentally (e.g., someone adds one
-        // of these to the hash without a coordinated migration).
+        // (The pre-S-039 "NOT in hash" lock-ins below fired exactly as
+        // designed when the binding shipped — but were masked by the old
+        // PASS-first run_all.sh outcome detection until it was flipped
+        // to FAIL-first. Flipped to sensitivity assertions covering the
+        // full DTM-genesis-ops-v1 field list.)
         {
             GenesisConfig c = make_base_cfg();
             c.m_creators = 5;
-            check(compute_genesis_hash(c) == base_hash,
-                  "compute_genesis_hash: m_creators NOT in hash (current — diagnostic-UX gap)");
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: m_creators sensitivity (S-039 ops binding)");
             c = make_base_cfg(); c.k_block_sigs = 2;
-            check(compute_genesis_hash(c) == base_hash,
-                  "compute_genesis_hash: k_block_sigs NOT in hash (current — diagnostic-UX gap)");
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: k_block_sigs sensitivity (S-039 ops binding)");
             c = make_base_cfg(); c.block_subsidy = 200;
-            check(compute_genesis_hash(c) == base_hash,
-                  "compute_genesis_hash: block_subsidy NOT in hash (current — diagnostic-UX gap)");
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: block_subsidy sensitivity (S-039 ops binding)");
             c = make_base_cfg(); c.min_stake = 2000;
-            check(compute_genesis_hash(c) == base_hash,
-                  "compute_genesis_hash: min_stake NOT in hash (current — diagnostic-UX gap)");
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: min_stake sensitivity (S-039 ops binding)");
             c = make_base_cfg(); c.initial_shard_count = 4;
-            check(compute_genesis_hash(c) == base_hash,
-                  "compute_genesis_hash: initial_shard_count NOT in hash (current — diagnostic-UX gap)");
-            c = make_base_cfg(); c.bft_enabled = false;
-            check(compute_genesis_hash(c) == base_hash,
-                  "compute_genesis_hash: bft_enabled NOT in hash (current — diagnostic-UX gap)");
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: initial_shard_count sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.bft_enabled = !c.bft_enabled;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: bft_enabled sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.subsidy_pool_initial += 12345;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: subsidy_pool_initial sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.subsidy_mode = 1;  // FLAT -> LOTTERY
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: subsidy_mode sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.lottery_jackpot_multiplier = 7;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: lottery_jackpot_multiplier sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.bft_escalation_threshold += 1;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: bft_escalation_threshold sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.epoch_blocks += 1;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: epoch_blocks sensitivity (S-039 ops binding)");
+            c = make_base_cfg(); c.shard_address_salt[0] ^= 0x01;
+            check(compute_genesis_hash(c) != base_hash,
+                  "compute_genesis_hash: shard_address_salt sensitivity (S-039 ops binding)");
         }
 
         // === Fields that ARE bound into the genesis hash ===
@@ -36417,18 +36441,35 @@ int main(int argc, char** argv) {
                   "Hash{} sentinel (the 'no committed state' convention)");
         }
 
+        // S-040: every non-empty root is WRAPPED — root = SHA256(0x02 ‖
+        // be_u32(leaf_count) ‖ inner_root) — binding the leaf count into
+        // the committed root (merkle.cpp::merkle_root_wrap). The shape
+        // assertions below recompute the wrap inline. (They originally
+        // asserted the bare pre-S-040 shapes and were masked by the old
+        // PASS-first run_all detection until it went FAIL-first.)
+        auto wrap_root = [](const Hash& inner, uint32_t n) {
+            crypto::SHA256Builder b;
+            uint8_t p = 0x02; b.append(&p, 1);
+            uint8_t be[4] = { static_cast<uint8_t>((n >> 24) & 0xff),
+                              static_cast<uint8_t>((n >> 16) & 0xff),
+                              static_cast<uint8_t>((n >> 8)  & 0xff),
+                              static_cast<uint8_t>( n        & 0xff) };
+            b.append(be, 4); b.append(inner);
+            return b.finalize();
+        };
+
         // ── (2) Single-leaf degenerate case ──
         // The while-loop in merkle.cpp doesn't iterate (row.size() == 1),
-        // so the root is exactly the leaf hash. Locks that no padding /
-        // no inner-hash wrap is applied for the single-leaf case.
+        // so the inner root is exactly the leaf hash; the committed root
+        // is its S-040 wrap with leaf_count=1.
         {
             auto leaves = make_leaves(1);
             Hash root = merkle_root(leaves);
-            Hash expected = merkle_leaf_hash(leaves[0].key,
-                                                  leaves[0].value_hash);
+            Hash expected = wrap_root(
+                merkle_leaf_hash(leaves[0].key, leaves[0].value_hash), 1);
             check(root == expected,
-                  "(2) Single-leaf tree: merkle_root == merkle_leaf_hash(L0) "
-                  "(degenerate case; no padding / no inner-hash wrap)");
+                  "(2) Single-leaf tree: merkle_root == S-040 wrap("
+                  "merkle_leaf_hash(L0), 1) (degenerate case; no padding)");
         }
 
         // ── (3) Two-leaf canonical inner-hash ──
@@ -36440,10 +36481,10 @@ int main(int argc, char** argv) {
             Hash root = merkle_root(leaves);
             Hash lh0 = merkle_leaf_hash(leaves[0].key, leaves[0].value_hash);
             Hash lh1 = merkle_leaf_hash(leaves[1].key, leaves[1].value_hash);
-            Hash expected = merkle_inner_hash(lh0, lh1);
+            Hash expected = wrap_root(merkle_inner_hash(lh0, lh1), 2);
             check(root == expected,
-                  "(3) Two-leaf tree: merkle_root == merkle_inner_hash("
-                  "leaf_hash(L0), leaf_hash(L1)) — the canonical sorted-"
+                  "(3) Two-leaf tree: merkle_root == S-040 wrap(inner_hash("
+                  "leaf_hash(L0), leaf_hash(L1)), 2) — the canonical sorted-"
                   "leaves balanced-tree shape at the smallest non-trivial "
                   "size");
         }
@@ -36471,11 +36512,11 @@ int main(int argc, char** argv) {
             Hash lh2 = merkle_leaf_hash(leaves[2].key, leaves[2].value_hash);
             Hash left  = merkle_inner_hash(lh0, lh1);
             Hash right = merkle_inner_hash(lh2, lh2);  // last-leaf dup
-            Hash expected = merkle_inner_hash(left, right);
+            Hash expected = wrap_root(merkle_inner_hash(left, right), 3);
             check(root == expected,
                   "(4) Three-leaf odd-count tree: last-leaf duplication at "
-                  "the bottom row — root == inner(inner(LH0,LH1), "
-                  "inner(LH2,LH2)). Locks the Bitcoin-style padding "
+                  "the bottom row — root == wrap(inner(inner(LH0,LH1), "
+                  "inner(LH2,LH2)), 3). Locks the Bitcoin-style padding "
                   "documented in merkle.hpp (NOT a sparse Merkle tree)");
         }
 
@@ -36492,12 +36533,12 @@ int main(int argc, char** argv) {
             Hash lh3 = merkle_leaf_hash(leaves[3].key, leaves[3].value_hash);
             Hash left  = merkle_inner_hash(lh0, lh1);
             Hash right = merkle_inner_hash(lh2, lh3);
-            Hash expected = merkle_inner_hash(left, right);
+            Hash expected = wrap_root(merkle_inner_hash(left, right), 4);
             check(root == expected,
                   "(5) Four-leaf balanced tree: depth-2, no padding — "
-                  "root == inner(inner(LH0,LH1), inner(LH2,LH3)). Locks "
-                  "the canonical power-of-2 shape (left-right structural "
-                  "binding)");
+                  "root == wrap(inner(inner(LH0,LH1), inner(LH2,LH3)), 4). "
+                  "Locks the canonical power-of-2 shape (left-right "
+                  "structural binding)");
         }
 
         // ── (6) Determinism: same content → same root across instances ──
@@ -36544,35 +36585,33 @@ int main(int argc, char** argv) {
                   "pre-sort)");
         }
 
-        // ── (8) Domain separation tip: leaf prefix 0x00 vs inner prefix
-        //     0x01 — pin that a single-leaf tree (root == leaf_hash with
-        //     0x00 prefix) is NEVER byte-identical to ANY same-content
-        //     two-leaf inner-hash root (which would have 0x01 prefix at
-        //     the topmost combiner). The leaf/inner prefix split is the
-        //     classical second-preimage defense (merkle.hpp lines 95-97).
-        //     This isn't a structural shape assertion — it's the
-        //     irreducible-cousin invariant that makes the shape uniquely
-        //     decodable. Single leaf [L0] vs two-leaf [L0, L0]
-        //     (duplicated key) WOULD have collided if not for the
-        //     prefix domain-separation.
+        // ── (8) Domain separation tip: a single-leaf tree's root is
+        //     NEVER byte-identical to ANY same-content two-leaf root.
+        //     TWO independent defenses enforce this: (a) the classical
+        //     0x00-leaf / 0x01-inner prefix split (merkle.hpp), which
+        //     keeps the INNER roots distinct, and (b) the S-040 wrap,
+        //     which binds leaf_count (1 vs 2) into the committed root.
+        //     Either alone suffices; this pins the composition. Single
+        //     leaf [L0] vs two-leaf [L0, L0] (duplicated key) WOULD
+        //     have collided absent both.
         {
             // Construct a 2-leaf vector where both leaves are identical
             // by content (same key + same value_hash). After sort the
-            // bottom row is [LH0, LH0]; root = inner(LH0, LH0).
-            // Meanwhile single-leaf root = LH0 directly.
-            // The two MUST differ (inner-hash with 0x01 prefix vs.
-            // leaf-hash with 0x00 prefix).
+            // bottom row is [LH0, LH0]; inner root = inner(LH0, LH0)
+            // (0x01 prefix) vs the single-leaf inner root LH0 (0x00
+            // prefix); the S-040 wrap then additionally binds count
+            // 2 vs 1. The committed roots MUST differ.
             auto one = make_leaves(1);
             std::vector<MerkleLeaf> two = one;
             two.push_back(one[0]);  // duplicate; same key + same value_hash
             Hash root_one = merkle_root(one);
             Hash root_two = merkle_root(two);
             check(root_one != root_two,
-                  "(8) Domain separation: single-leaf root (0x00-prefix "
-                  "leaf_hash) is byte-distinct from same-content two-leaf "
-                  "root (0x01-prefix inner_hash over duplicated leaf) — "
-                  "defeats second-preimage shape conflation between depth-"
-                  "0 and depth-1 trees");
+                  "(8) Domain separation: single-leaf root is byte-"
+                  "distinct from same-content two-leaf root (0x00/0x01 "
+                  "prefix split + S-040 leaf_count wrap) — defeats "
+                  "second-preimage shape conflation between depth-0 and "
+                  "depth-1 trees");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

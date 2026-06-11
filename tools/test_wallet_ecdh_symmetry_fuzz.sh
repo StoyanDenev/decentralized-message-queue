@@ -84,7 +84,7 @@ assert_eq "$RC" "0" "account-derive-batch (count=$N) succeeded"
 if [ "$RC" != "0" ] || [ ! -f "$T/batch.json" ]; then
     echo "  FAIL: setup did not produce batch.json — aborting"
     echo "  $pass_count pass / $fail_count fail"
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_ecdh_symmetry_fuzz"
     exit 1
 fi
 
@@ -258,6 +258,6 @@ if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet derive-shared-secret ECDH symmetry fuzz"
     exit 0
 else
-    echo "  FAIL"
+    echo "  FAIL: test_wallet_ecdh_symmetry_fuzz"
     exit 1
 fi

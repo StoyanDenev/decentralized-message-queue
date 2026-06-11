@@ -281,5 +281,5 @@ echo "  $pass_count pass / $fail_count fail"
 if [ "$fail_count" = "0" ]; then
     echo "  PASS: determ-wallet envelope decrypt malformed-blob edge"; exit 0
 else
-    echo "  FAIL"; exit 1
+    echo "  FAIL: test_wallet_envelope_decrypt_malformed_edge"; exit 1
 fi

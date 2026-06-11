@@ -188,11 +188,14 @@ fi
 
 echo
 if $PASS; then
-  echo "  PASS: F2 eq/abort reconciliation closed-loop"
-  echo "        - plain F2 blocks (zero-root views) accepted (no stall)"
-  echo "        - equivocation reconciled into block #$EQUIV_BLOCK + slashed"
-  echo "        - zero 'invalid block: F2:' rejections across the committee"
+  # Detail lines ABOVE the terminal marker; explicit exit 0 so the marker is
+  # the final output line (run_all.sh greps the last 10 lines for ^\s*PASS:).
+  echo "  ok: plain F2 blocks (zero-root views) accepted (no stall)"
+  echo "  ok: equivocation reconciled into block #$EQUIV_BLOCK + slashed"
+  echo "  ok: zero 'invalid block: F2:' rejections across the committee"
+  echo "  PASS: test_f2_eqabort_reconciliation"
+  exit 0
 else
-  echo "  FAIL: F2 eq/abort reconciliation test"
+  echo "  FAIL: test_f2_eqabort_reconciliation"
   exit 1
 fi

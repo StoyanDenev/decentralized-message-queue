@@ -644,6 +644,6 @@ if [ "$fail_count" = "0" ]; then
   echo "  PASS: determ-wallet tx-history-export"
   exit 0
 else
-  echo "  FAIL"
+  echo "  FAIL: test_wallet_tx_history_export"
   exit 1
 fi
