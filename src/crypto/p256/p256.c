@@ -712,6 +712,52 @@ static void sswu_map(fe x_out, fe y_out, const fe u) {
     }
 }
 
+/* 48 big-endian bytes -> scalar mod n (the order-field analogue of
+ * fe_from_be48: hi·2^256 mod n == sc_mont_mul(hi, R²(n))'s value). */
+static void sc_from_be48(fe r, const uint8_t in[48]) {
+    uint8_t hi_be[32], lo_be[32];
+    fe hi, lo, hiR;
+    memset(hi_be, 0, 16); memcpy(hi_be + 16, in, 16);
+    memcpy(lo_be, in + 16, 32);
+    be_to_fe(hi, hi_be);
+    sc_mont_mul(hiR, hi, R2N);
+    be_to_fe(lo, lo_be);
+    {
+        uint32_t s[8], use_s; uint64_t brw = 0; int i;
+        for (i = 0; i < 8; i++) {
+            uint64_t d = (uint64_t)lo[i] - Nl[i] - brw;
+            s[i] = (uint32_t)d; brw = (d >> 63) & 1;
+        }
+        use_s = (uint32_t)0 - (uint32_t)(1 - (uint32_t)brw);
+        for (i = 0; i < 8; i++) lo[i] = (s[i] & use_s) | (lo[i] & ~use_s);
+    }
+    sc_add_raw(r, hiR, lo);
+}
+
+int determ_p256_hash_to_scalar(uint8_t out[32],
+                               const uint8_t* msg, size_t msglen,
+                               const uint8_t* dst, size_t dstlen) {
+    uint8_t uniform[48];
+    fe s;
+    sc_init();
+    if (determ_p256_expand_message_xmd(uniform, 48, msg, msglen, dst, dstlen) != 0)
+        return -1;
+    sc_from_be48(s, uniform);
+    fe_to_be(out, s);
+    determ_secure_zero(uniform, sizeof uniform);
+    determ_secure_zero(s, sizeof s);
+    return 0;
+}
+
+int determ_p256_point_add(uint8_t out[65], const uint8_t p[65],
+                          const uint8_t q[65]) {
+    pt a, b, r;
+    p256_init();
+    if (decode_point(&a, p) != 0 || decode_point(&b, q) != 0) return -1;
+    pt_add(&r, &a, &b);
+    return encode_point(out, &r);     /* infinity (P + -P) -> -1 */
+}
+
 int determ_p256_hash_to_curve(uint8_t out[65],
                               const uint8_t* msg, size_t msglen,
                               const uint8_t* dst, size_t dstlen) {

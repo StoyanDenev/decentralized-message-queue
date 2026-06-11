@@ -3,13 +3,15 @@
 # and the RFC 9380 hash-to-curve suite P256_XMD:SHA-256_SSWU_RO_ (simplified
 # SSWU, Z = -10, no isogeny) in src/crypto/p256/p256.c.
 #
-# 7 assertions: (1) scalar_mul_mod_n == OpenSSL BN_mod_mul over a 10-pair
+# 9 assertions: (1) scalar_mul_mod_n == OpenSSL BN_mod_mul over a 10-pair
 # grid; (2) scalar_inv_mod_n == BN_mod_inverse AND a*a^-1 == 1 through our own
 # mul; (3) zero / >= n rejected on both entry points; (4) expand_message_xmd
 # deterministic + outlen domain-separation (len_in_bytes is bound into b0, so
 # a 32B output must NOT be the 96B output's prefix) + bounds rejects;
 # (5) hash_to_curve always on-curve + deterministic over a 16-msg grid;
-# (6) DST-sensitivity. NOTE: structural gates only here — the RFC 9380
+# (6) DST-sensitivity; (7) point_add == OpenSSL EC_POINT_add +
+# the [a]G+[b]G == [(a+b) mod n]G identity + P+(-P) -> -1; (8) hash_to_scalar
+# < n / deterministic / DST-sensitive (the RFC 9497 HashToScalar shape). NOTE: structural gates only here — the RFC 9380
 # appendix BYTE vectors live in tools/vectors/p256_h2c.json and are enforced
 # by both §3.13 gate halves (test_c99_vector_files.sh + determ
 # test-c99-vectors); a wrong SSWU constant passes structure but fails there.

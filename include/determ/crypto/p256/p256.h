@@ -96,6 +96,20 @@ int determ_p256_hash_to_curve(uint8_t out[65],
                               const uint8_t* msg, size_t msglen,
                               const uint8_t* dst, size_t dstlen);
 
+/* hash_to_scalar (RFC 9380 hash_to_field with the ORDER n as the modulus;
+ * m = 1, L = 48, count = 1 — the RFC 9497 HashToScalar shape). Output is a
+ * canonical big-endian scalar < n. -1 only on expand_message bounds. */
+int determ_p256_hash_to_scalar(uint8_t out[32],
+                               const uint8_t* msg, size_t msglen,
+                               const uint8_t* dst, size_t dstlen);
+
+/* out = P + Q (SEC1 uncompressed in/out; the RCB complete formulas, so
+ * P == Q and P == -Q are handled uniformly). -1 if either input fails
+ * decode or the result is the point at infinity (P + (-P)). Public-data
+ * operation (DLEQ verification shapes s·A + c·B operate on public values). */
+int determ_p256_point_add(uint8_t out[65], const uint8_t p[65],
+                          const uint8_t q[65]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

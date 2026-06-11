@@ -12294,6 +12294,82 @@ int main(int argc, char** argv) {
             check(ok2, "(6) hash_to_curve: DST-sensitivity (same msg, different DST -> different point)");
         }
 
+        // (7) point_add == OpenSSL EC_POINT_add over a grid; [a]G + [b]G ==
+        //     [a+b mod n]G through our own mod-n add path; P + (-P) -> -1.
+        {
+            bool ok = true;
+            for (uint32_t it = 0; it < 6 && ok; it++) {
+                uint8_t a[32], b[32], pa[65], pb[65], mine[65], theirs[65], sum[32], ps[65];
+                mk_scalar(a, it * 13 + 3); mk_scalar(b, it * 29 + 8);
+                ok = determ_p256_base_mul(pa, a) == 0 && determ_p256_base_mul(pb, b) == 0
+                  && determ_p256_point_add(mine, pa, pb) == 0;
+                // OpenSSL side
+                if (ok) {
+                    EC_POINT *qa = EC_POINT_new(grp), *qb = EC_POINT_new(grp), *qr = EC_POINT_new(grp);
+                    ok = qa && qb && qr
+                      && EC_POINT_oct2point(grp, qa, pa, 65, bnctx) == 1
+                      && EC_POINT_oct2point(grp, qb, pb, 65, bnctx) == 1
+                      && EC_POINT_add(grp, qr, qa, qb, bnctx) == 1
+                      && EC_POINT_point2oct(grp, qr, POINT_CONVERSION_UNCOMPRESSED, theirs, 65, bnctx) == 65
+                      && std::memcmp(mine, theirs, 65) == 0;
+                    if (qa) EC_POINT_free(qa); if (qb) EC_POINT_free(qb); if (qr) EC_POINT_free(qr);
+                }
+                // [a]G + [b]G == [(a+b) mod n]G via our mod-n machinery:
+                // sum = (a*1 + b*1)... no add API exported; use mul trick:
+                // (a + b) mod n == (a*inv(x) ... ) — simplest: BN computes sum.
+                if (ok) {
+                    BIGNUM *ba = BN_bin2bn(a, 32, nullptr), *bb = BN_bin2bn(b, 32, nullptr), *bs = BN_new();
+                    ok = BN_mod_add(bs, ba, bb, order, bnctx) == 1
+                      && BN_bn2binpad(bs, sum, 32) == 32
+                      && determ_p256_base_mul(ps, sum) == 0
+                      && std::memcmp(mine, ps, 65) == 0;
+                    BN_free(ba); BN_free(bb); BN_free(bs);
+                }
+            }
+            // P + (-P) = infinity -> -1 (negate by flipping Y: y' = p - y).
+            if (ok) {
+                uint8_t k[32], p0[65], pn[65], o[65];
+                uint8_t p_be[32], n_be[32], b_be[32], gx_be[32], gy_be[32];
+                determ_p256_params(p_be, n_be, b_be, gx_be, gy_be);
+                mk_scalar(k, 77);
+                ok = determ_p256_base_mul(p0, k) == 0;
+                if (ok) {
+                    std::memcpy(pn, p0, 65);
+                    uint32_t borrow = 0;                  /* y' = p - y, big-endian */
+                    for (int i = 31; i >= 0; i--) {
+                        int32_t d = (int32_t)p_be[i] - pn[33 + i] - (int32_t)borrow;
+                        borrow = d < 0; if (d < 0) d += 256;
+                        pn[33 + i] = (uint8_t)d;
+                    }
+                    ok = determ_p256_point_check(pn) == 0
+                      && determ_p256_point_add(o, p0, pn) == -1;
+                }
+            }
+            check(ok, "(7) point_add == OpenSSL EC_POINT_add; [a]G+[b]G == [(a+b) mod n]G; P + (-P) -> -1");
+        }
+
+        // (8) hash_to_scalar: output < n always; deterministic; DST-sensitive.
+        {
+            uint8_t n_be[32], p_be[32], b_be[32], gx_be[32], gy_be[32];
+            determ_p256_params(p_be, n_be, b_be, gx_be, gy_be);
+            const uint8_t* dst = (const uint8_t*)"DETERM-HashToScalar-TEST";
+            bool ok = true;
+            uint8_t s1[32], s2[32], s3[32];
+            for (uint32_t it = 0; it < 12 && ok; it++) {
+                uint8_t msg[24];
+                for (int i = 0; i < 24; i++) msg[i] = (uint8_t)(it * 31 + i);
+                ok = determ_p256_hash_to_scalar(s1, msg, 24, dst, 24) == 0
+                  && determ_p256_hash_to_scalar(s2, msg, 24, dst, 24) == 0
+                  && std::memcmp(s1, s2, 32) == 0;
+                // < n: byte compare
+                if (ok) { int lt = 0; for (int i = 0; i < 32; i++) { if (s1[i] < n_be[i]) { lt = 1; break; } if (s1[i] > n_be[i]) { lt = 0; break; } } ok = lt == 1; }
+            }
+            ok = ok && determ_p256_hash_to_scalar(s3, (const uint8_t*)"m", 1, (const uint8_t*)"OTHER", 5) == 0
+                    && determ_p256_hash_to_scalar(s1, (const uint8_t*)"m", 1, dst, 24) == 0
+                    && std::memcmp(s1, s3, 32) != 0;
+            check(ok, "(8) hash_to_scalar: < n over a 12-msg grid; deterministic; DST-sensitive");
+        }
+
         BN_free(order); EC_GROUP_free(grp); BN_CTX_free(bnctx);
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": p256-h2c-c99 " << (fail == 0
