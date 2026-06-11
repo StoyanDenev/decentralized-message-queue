@@ -63,10 +63,17 @@ except: print('-')"
 rm -rf $T
 mkdir -p $T/n1 $T/n2 $T/n3
 
-echo "=== 1. Init 3 nodes (web profile, will override to weak K=2) ==="
-$DETERM init --data-dir $T/n1 --profile web 2>&1 | tail -1
-$DETERM init --data-dir $T/n2 --profile web 2>&1 | tail -1
-$DETERM init --data-dir $T/n3 --profile web 2>&1 | tail -1
+echo "=== 1. Init 3 nodes (regional_test profile: SHARD+CURRENT, M=K=3 strong) ==="
+# regional_test boots a 1-shard genesis. The old `web` profile pinned
+# sharding_mode=EXTENDED into config.json, and the A6 boot guard rejects
+# EXTENDED without initial_shard_count >= 3 — every node FATALed at boot
+# (this test was false-greening: no terminal marker + sentinel head-agree).
+# Genesis m_creators=3 / k_block_sigs=3 (below) override the profile's 5/4,
+# preserving the strong-BFT posture the rest of the test exercises. (The old
+# "weak K=2" echo was stale — the genesis has always been M=K=3 strong.)
+$DETERM init --data-dir $T/n1 --profile regional_test 2>&1 | tail -1
+$DETERM init --data-dir $T/n2 --profile regional_test 2>&1 | tail -1
+$DETERM init --data-dir $T/n3 --profile regional_test 2>&1 | tail -1
 
 echo
 echo "=== 2. Generate peer-info entries ==="
@@ -154,10 +161,12 @@ H2=$(get_height 8772)
 H3=$(get_height 8773)
 echo "  heights:  n1=$H1  n2=$H2  n3=$H3"
 
+FAILS=0
 if [ "$H1" = "-" ] || [ "$H1" = "1" ]; then
-  echo "  FAIL: n1 not producing blocks"; exit 1
+  echo "  bad: n1 not producing blocks (height=$H1)"; FAILS=$((FAILS+1))
+else
+  echo "  ok: blocks producing under strong BFT (M=3, K=3)"
 fi
-echo "  PASS: blocks producing under strong BFT (M=3, K=3)"
 
 echo
 echo "=== 8. Check creator balances (should have block subsidy accumulated) ==="
@@ -184,9 +193,9 @@ for n in 1 2 3; do
   if [ "$bal" != "1" ]; then ALL_AGREE=false; fi
 done
 if $ALL_AGREE; then
-  echo "  PASS: tx round-trip confirmed across all nodes"
+  echo "  ok: tx round-trip confirmed across all nodes"
 else
-  echo "  FAIL: balance disagreement (expected 1)"
+  echo "  bad: balance disagreement (expected recipient=1)"; FAILS=$((FAILS+1))
 fi
 
 echo
@@ -202,10 +211,10 @@ HEAD3=$(get_head 8773)
 echo "  n1 head_hash: $HEAD1"
 echo "  n2 head_hash: $HEAD2"
 echo "  n3 head_hash: $HEAD3"
-if [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ]; then
-  echo "  PASS: all nodes agree on head_hash"
+if [[ "$HEAD1" =~ ^[0-9a-fA-F]{64}$ ]] && [ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ]; then
+  echo "  ok: all nodes agree on head_hash"
 else
-  echo "  NOTE: hash divergence possible during in-flight block; check heights too"
+  echo "  note: heads not identical (in-flight block skew or dead RPC; not counted — height + tx round-trip are the asserted signals)"
 fi
 
 echo
@@ -217,6 +226,16 @@ done
 
 echo
 echo "=== Test summary ==="
-echo "  Strong BFT mode (K=M=3): blocks producing ✓"
-echo "  Tx round-trip via RPC submit + gossip + apply: $($ALL_AGREE && echo "✓" || echo "✗")"
-echo "  Cross-node consistency: $([ "$HEAD1" = "$HEAD2" ] && [ "$HEAD2" = "$HEAD3" ] && echo "✓" || echo "✗")"
+echo "  Strong BFT mode (K=M=3): blocks producing + tx round-trip asserted"
+# Terminal marker MUST be the final line (run_all.sh greps the last 10 lines
+# for ^\s*PASS:/^\s*FAIL:, PASS first). Run cleanup BEFORE the marker so its
+# echoes can't push the marker out of the tail window.
+trap - EXIT INT
+cleanup || true
+if [ "$FAILS" -eq 0 ]; then
+  echo "  PASS: test_adversarial"
+  exit 0
+else
+  echo "  FAIL: test_adversarial ($FAILS checks failed)"
+  exit 1
+fi

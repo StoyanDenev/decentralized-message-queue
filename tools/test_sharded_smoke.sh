@@ -117,10 +117,11 @@ echo "  Beacon genesis hash: $BEACON_HASH"
 echo "  Shard0 genesis hash: $SHARD_HASH"
 
 if [ "$BEACON_HASH" = "$SHARD_HASH" ]; then
-  echo "  FAIL: beacon and shard hashes are identical (role+shard_id should differ)"
+  trap - EXIT INT; cleanup || true
+  echo "  FAIL: test_sharded_smoke (beacon and shard genesis hashes identical; role+shard_id should differ)"
   exit 1
 else
-  echo "  PASS: beacon and shard genesis hashes are distinct"
+  echo "  ok: beacon and shard genesis hashes are distinct"
 fi
 
 echo
@@ -186,38 +187,43 @@ echo "=== 7. Verify ==="
 echo "  Beacon n1 status: role=$BEACON_ROLE, shard_id=$BEACON_SHARDID, height=$BEACON_HEIGHT"
 echo "  Shard0 n1 status: role=$SHARD_ROLE,  shard_id=$SHARD_SHARDID, height=$SHARD_HEIGHT"
 
-PASS=true
+FAILS=0
 if [ "$BEACON_ROLE" != "beacon" ]; then
-  echo "  FAIL: beacon node reports role=$BEACON_ROLE (expected beacon)"
-  PASS=false
+  echo "  bad: beacon node reports role=$BEACON_ROLE (expected beacon)"; FAILS=$((FAILS+1))
 fi
 if [ "$SHARD_ROLE" != "shard" ]; then
-  echo "  FAIL: shard node reports role=$SHARD_ROLE (expected shard)"
-  PASS=false
+  echo "  bad: shard node reports role=$SHARD_ROLE (expected shard)"; FAILS=$((FAILS+1))
 fi
 if [ "$BEACON_HEIGHT" = "-" ] || [ "$BEACON_HEIGHT" = "0" ]; then
-  echo "  FAIL: beacon chain didn't advance (height=$BEACON_HEIGHT)"
-  PASS=false
+  echo "  bad: beacon chain didn't advance (height=$BEACON_HEIGHT)"; FAILS=$((FAILS+1))
 fi
 if [ "$SHARD_HEIGHT" = "-" ] || [ "$SHARD_HEIGHT" = "0" ]; then
-  echo "  FAIL: shard chain didn't advance (height=$SHARD_HEIGHT)"
-  PASS=false
+  echo "  bad: shard chain didn't advance (height=$SHARD_HEIGHT)"; FAILS=$((FAILS+1))
 fi
-
-if $PASS; then
-  echo "  PASS: beacon and shard chains both produced blocks independently"
-  echo "  PASS: rpc_status correctly reports chain_role + shard_id"
+if [ "$FAILS" -eq 0 ]; then
+  echo "  ok: beacon and shard chains both produced blocks independently"
+  echo "  ok: rpc_status correctly reports chain_role + shard_id"
 fi
 
 echo
-echo "=== 8. Tail of beacon n1 log (showing role tag) ==="
-grep "role=" $T/beacon/n1/log | head -2
-echo
-echo "=== 9. Tail of shard0 n1 log (showing role tag) ==="
-grep "role=" $T/shard/n1/log | head -2
-
+echo "=== 8. Role tags from logs (beacon n1 / shard0 n1) ==="
+grep "role=" $T/beacon/n1/log 2>/dev/null | head -2 | sed 's/^/    | /'
+grep "role=" $T/shard/n1/log 2>/dev/null | head -2 | sed 's/^/    | /'
 echo
 echo "Note: Stage B2b/B2c will add cross-chain coordination — shards reading"
 echo "the beacon's epoch boundary, beacon tracking shard tips, cross-shard"
 echo "receipts. For this smoke test, beacon and shard chains are independent;"
 echo "each runs the rev.8 protocol on its own genesis."
+
+# Terminal marker MUST be the final output line (run_all.sh greps the last 10
+# lines for ^\s*PASS:/^\s*FAIL:). cleanup runs first so its echoes stay above it.
+echo
+trap - EXIT INT
+cleanup || true
+if [ "$FAILS" -eq 0 ]; then
+  echo "  PASS: test_sharded_smoke"
+  exit 0
+else
+  echo "  FAIL: test_sharded_smoke ($FAILS checks failed)"
+  exit 1
+fi

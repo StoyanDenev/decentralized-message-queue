@@ -98,8 +98,9 @@ for _ in $(seq 1 120); do
 done
 echo "  n1 height: $H"
 if [ "$H" -lt 3 ]; then
-  echo "FAIL: chain didn't mine enough blocks"
-  tail -20 $T/n1/log
+  tail -20 $T/n1/log 2>/dev/null | sed 's/^/    | /'
+  trap - EXIT INT; cleanup || true
+  echo "  FAIL: test_orphan_check_cluster (chain didn't mine >= 3 blocks; height=$H)"
   exit 1
 fi
 
@@ -117,5 +118,14 @@ bash tools/operator_chain_orphan_check.sh --rpc-port 8841 --anomalies-only
 
 echo
 echo "=== 7. Done ==="
-[ "$RC" = "0" ] && echo "  PASS" || echo "  FAIL (rc=$RC)"
-exit $RC
+# Marker needs the colon run_all.sh greps for (^\s*PASS:) — a bare "  PASS"
+# never matched, so this test counted as a no-marker failure even at rc=0.
+trap - EXIT INT
+cleanup || true
+if [ "$RC" = "0" ]; then
+  echo "  PASS: test_orphan_check_cluster"
+  exit 0
+else
+  echo "  FAIL: test_orphan_check_cluster (orphan-check rc=$RC)"
+  exit 1
+fi
