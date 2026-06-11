@@ -12086,6 +12086,19 @@ int main(int argc, char** argv) {
               { "fix-scalar", "rnd-scalar" }, 1 },
             { "sha256-content", "determ_sha256 fixed-length msg (negative control: ARX is data-independent)",
               { "fix-msg", "rnd-msg" }, 16 },
+            // ── tranche 2 (inventory §5 targets 2, 5, 6, 7, 12) ──
+            { "aes-core",       "determ_aes256_init + encrypt_block (secret = key; inventory target 2)",
+              { "fix-key", "rnd-key" }, 8 },
+            { "chacha20-core",  "determ_chacha20 64B keystream (secret = key; inventory target 5)",
+              { "fix-key", "rnd-key" }, 16 },
+            { "poly1305-key",   "determ_poly1305 over fixed 64B msg (secret = key; inventory target 5)",
+              { "fix-key", "rnd-key" }, 16 },
+            { "ed25519-pubkey", "determ_ed25519_pubkey_from_seed (secret = seed; inventory target 6)",
+              { "fix-seed", "rnd-seed" }, 1 },
+            { "sc-canonical",   "determ_ed25519_sc_is_canonical boundary scalars (inventory target 7)",
+              { "zero", "L-1", "L", "2L-1", "random" }, 64 },
+            { "hmac-key",       "determ_hmac_sha256 fixed msg (secret = 32B key; inventory target 12)",
+              { "fix-key", "rnd-key" }, 8 },
         };
 
         if (sub == "--list") {
@@ -12103,11 +12116,20 @@ int main(int argc, char** argv) {
         if (!tgt) { std::cerr << "unknown target '" << sub << "' (see --list)\n"; return 1; }
 
         uint64_t samples = 200000;              // default; §5.3 floor is operator-tunable
-        std::string timer = "auto";
-        for (int i = 3; i + 1 < argc; i += 2) {
+        double seconds = 0;                     // 0 = no time bound (design §3.2: whichever hits first)
+        size_t batch_override = 0;
+        std::string timer = "auto", csv_path;
+        bool json_out = false;
+        for (int i = 3; i < argc; i++) {
             std::string k = argv[i];
-            if (k == "--samples") samples = std::stoull(argv[i+1]);
-            else if (k == "--timer") timer = argv[i+1];
+            if (k == "--json") { json_out = true; continue; }
+            if (i + 1 >= argc) { std::cerr << "missing value for " << k << "\n"; return 1; }
+            if (k == "--samples") samples = std::stoull(argv[++i]);
+            else if (k == "--seconds") seconds = std::stod(argv[++i]);
+            else if (k == "--batch") batch_override = std::stoull(argv[++i]);
+            else if (k == "--timer") timer = argv[++i];
+            else if (k == "--csv") csv_path = argv[++i];
+            else { std::cerr << "unknown flag " << k << "\n"; return 1; }
         }
 #ifdef DETERM_HAVE_RDTSC
         bool use_rdtsc = (timer != "monotonic");
@@ -12150,14 +12172,25 @@ int main(int argc, char** argv) {
         uint8_t gcm_fixtag_wrong[16]; std::memcpy(gcm_fixtag_wrong, gcm_tag_good, 16); gcm_fixtag_wrong[0] ^= 1;
         uint8_t bufA[32], bufB[32];
         for (int i = 0; i < 32; i++) bufA[i] = (uint8_t)(i + 1);
+        // Ed25519 group order L (little-endian) + the §5 target-7 boundary
+        // scalars: L-1 (canonical max), L and 2L-1 (non-canonical).
+        uint8_t Lle[32] = {0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
+                           0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,
+                           0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x10};
+        uint8_t Lm1[32], L2m1[32];
+        std::memcpy(Lm1, Lle, 32); Lm1[0] -= 1;            // no borrow: L[0]=0xed
+        { unsigned carry = 0;                              // 2L, then -1
+          for (int i = 0; i < 32; i++) { unsigned v = 2u*Lle[i] + carry; L2m1[i] = (uint8_t)v; carry = v >> 8; }
+          L2m1[0] -= 1; }                                  // 2L[0]=0xda, no borrow
 
+        size_t batch = batch_override ? batch_override : tgt->batch;
         volatile int sink = 0;                  // results consumed — no dead-code elision
         std::string id = tgt->id;
 
         // One timed sample for class c: per-iteration setup OUTSIDE the timed
         // region (design §3.3), then `batch` back-to-back target calls inside.
         auto run_one = [&](size_t c) -> double {
-            uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64];
+            uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64], key[32];
             // ---- setup (untimed) ----
             if (id == "ct-memcmp") {
                 std::memcpy(bufB, bufA, 32);
@@ -12167,26 +12200,42 @@ int main(int argc, char** argv) {
             } else if (id == "chacha-tag-verify" || id == "gcm-tag-verify") {
                 if (c == 0) std::memcpy(tag, id[0]=='c' ? fixtag_wrong : gcm_fixtag_wrong, 16);
                 else rnd_fill(tag, 16);
-            } else if (id == "ed25519-sign") {
+            } else if (id == "ed25519-sign" || id == "ed25519-pubkey") {
                 if (c == 0) std::memcpy(seed, fixseed, 32); else rnd_fill(seed, 32);
             } else if (id == "x25519") {
                 if (c == 0) std::memcpy(scalar, fixscalar, 32); else rnd_fill(scalar, 32);
             } else if (id == "sha256-content") {
                 if (c == 0) std::memcpy(msg, fixmsg, 64); else rnd_fill(msg, 64);
+            } else if (id == "aes-core" || id == "chacha20-core" || id == "poly1305-key"
+                       || id == "hmac-key") {
+                if (c == 0) std::memcpy(key, key32, 32); else rnd_fill(key, 32);
+            } else if (id == "sc-canonical") {
+                if (c == 0)      std::memset(scalar, 0, 32);
+                else if (c == 1) std::memcpy(scalar, Lm1, 32);
+                else if (c == 2) std::memcpy(scalar, Lle, 32);
+                else if (c == 3) std::memcpy(scalar, L2m1, 32);
+                else             rnd_fill(scalar, 32);
             }
             // ---- timed region ----
             uint64_t t0 = now_ticks();
-            for (size_t b = 0; b < tgt->batch; b++) {
+            for (size_t b = 0; b < batch; b++) {
                 if (id == "ct-memcmp")              sink += determ_ct_memcmp(bufA, bufB, 32);
                 else if (id == "chacha-tag-verify") sink += determ_chacha20_poly1305_decrypt(key32, n12, aad, sizeof aad, ct64, 64, tag, out64);
                 else if (id == "gcm-tag-verify")    sink += determ_aes256_gcm_decrypt(key32, n12, aad, sizeof aad, gcm_ct64, 64, tag, out64);
                 else if (id == "ed25519-sign")    { uint8_t pk[32]; determ_ed25519_pubkey_from_seed(seed, pk);
                                                     sink += determ_ed25519_sign(seed, pk, fixmsg, 64, sig); }
+                else if (id == "ed25519-pubkey")  { uint8_t pk[32]; determ_ed25519_pubkey_from_seed(seed, pk); sink += pk[0]; }
                 else if (id == "x25519")            sink += determ_x25519(o32, scalar, basepoint);
                 else if (id == "sha256-content")  { determ_sha256(msg, 64, o32); sink += o32[0]; }
+                else if (id == "aes-core")        { determ_aes256_ctx actx; determ_aes256_init(&actx, key);
+                                                    uint8_t blk[16]; determ_aes256_encrypt_block(&actx, pt64, blk); sink += blk[0]; }
+                else if (id == "chacha20-core")   { determ_chacha20(key, 1u, n12, pt64, 64, out64); sink += out64[0]; }
+                else if (id == "poly1305-key")    { determ_poly1305(key, pt64, 64, tag); sink += tag[0]; }
+                else if (id == "sc-canonical")      sink += determ_ed25519_sc_is_canonical(scalar);
+                else if (id == "hmac-key")        { determ_hmac_sha256(key, 32, pt64, 64, o32); sink += o32[0]; }
             }
             uint64_t t1 = now_ticks();
-            return (double)(t1 - t0) / (double)tgt->batch;
+            return (double)(t1 - t0) / (double)batch;
         };
 
         const size_t NC = tgt->classes.size();
@@ -12209,8 +12258,16 @@ int main(int argc, char** argv) {
         }
 
         // Phase 2 — interleaved measurement into (class x crop) Welford cells.
+        // Budget: --samples AND --seconds, whichever bound hits first (§3.2).
         std::vector<std::vector<Welford>> cells(NC, std::vector<Welford>(NCROP));
-        for (uint64_t i = 0; i < samples; i++) {
+        auto wall0 = std::chrono::steady_clock::now();
+        uint64_t done = 0;
+        for (; done < samples; done++) {
+            if (seconds > 0 && (done & 0x3ff) == 0) {
+                double el = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - wall0).count();
+                if (el >= seconds) break;
+            }
             size_t c = pick(rng);
             double x = run_one(c);
             for (size_t k = 0; k < NCROP; k++)
@@ -12220,7 +12277,8 @@ int main(int argc, char** argv) {
         // Report: per class pair x crop, |t|; overall max (design §3.4).
         std::cout << "ct-timing-probe " << id << " — " << tgt->what << "\n"
                   << "  timer=" << (use_rdtsc ? "rdtsc" : "steady_clock")
-                  << " batch=" << tgt->batch << " samples=" << samples
+                  << " batch=" << batch << " samples=" << done
+                  << (done < samples ? " (--seconds bound hit)" : "")
                   << " (interleaved over " << NC << " classes; calibration "
                   << CAL << " discarded)\n";
         double tmax = 0;
@@ -12239,6 +12297,40 @@ int main(int argc, char** argv) {
                       : tmax <= 10.0 ? "evidence; quiet the host, double --samples, re-run — persistent/growing => leak"
                                      : "STRONG evidence of secret-dependent timing — file a finding (TimingProbeDesign.md §3.4)")
                   << "\n  (|t|<=4.5 is NOT a constant-time proof — see TimingProbeDesign.md §5.4; sink=" << sink << ")\n";
+
+        // Machine-readable dumps (design §3.2) — per (class pair x crop) cell,
+        // for archiving alongside the build recipe (design §6).
+        if (!csv_path.empty() || json_out) {
+            json jdoc;
+            jdoc["target"] = id;
+            jdoc["timer"] = use_rdtsc ? "rdtsc" : "steady_clock";
+            jdoc["batch"] = batch;
+            jdoc["samples"] = done;
+            jdoc["max_abs_t"] = tmax;
+            jdoc["cells"] = json::array();
+            std::ofstream csv;
+            if (!csv_path.empty()) {
+                csv.open(csv_path);
+                csv << "class_a,class_b,crop_pct,n_a,n_b,mean_a,mean_b,abs_t\n";
+            }
+            for (size_t a = 0; a < NC; a++) for (size_t b2 = a + 1; b2 < NC; b2++)
+                for (size_t k = 0; k < NCROP; k++) {
+                    double t = std::fabs(welch_t(cells[a][k], cells[b2][k]));
+                    if (csv.is_open())
+                        csv << tgt->classes[a] << "," << tgt->classes[b2] << ","
+                            << crops[k] << "," << (uint64_t)cells[a][k].n << ","
+                            << (uint64_t)cells[b2][k].n << "," << cells[a][k].m << ","
+                            << cells[b2][k].m << "," << t << "\n";
+                    if (json_out)
+                        jdoc["cells"].push_back({ {"class_a", tgt->classes[a]},
+                            {"class_b", tgt->classes[b2]}, {"crop_pct", crops[k]},
+                            {"n_a", (uint64_t)cells[a][k].n}, {"n_b", (uint64_t)cells[b2][k].n},
+                            {"mean_a", cells[a][k].m}, {"mean_b", cells[b2][k].m},
+                            {"abs_t", t} });
+                }
+            if (csv.is_open()) { csv.close(); std::cout << "  csv written: " << csv_path << "\n"; }
+            if (json_out) std::cout << jdoc.dump(2) << "\n";
+        }
         return 0;
     }
     if (cmd == "test-c99-api") {

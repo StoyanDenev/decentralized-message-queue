@@ -85,56 +85,52 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
 # the A2 Phase 1 secret-sharing primitive). Link it into the main
 # binary so the test command can call shamir::split / ::combine.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.1: the first vendored primitive of the
-# libsodium-free C99 crypto stack — SHA-256 / SHA-512 (FIPS 180-4) in portable
-# C99. The src/*.cpp glob above does not pick up .c files; list them explicitly.
-# Exercised by `determ test-sha2-c99` (byte-equal cross-validation vs OpenSSL +
-# NIST KATs). Not yet wired into any call site — additive, validated module.
-# Shared memory-hygiene primitive (determ_secure_zero) used by every module below.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/secure_zero.c")
-# Shared constant-time equality compare (determ_ct_memcmp, §3.10) — consolidates
-# the per-module ct_eq16 / ct_verify_32 helpers; exercised by `determ test-ct-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/ct.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hkdf.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: ChaCha20 (RFC 8439), the cipher half of
-# the ChaCha20-Poly1305 AEAD family. Exercised by `determ test-chacha20-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/poly1305.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.4: XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha) —
-# extended-nonce AEAD = HChaCha20 subkey + the ChaCha20-Poly1305 above. Validated by
-# `determ test-xchacha-c99` (HChaCha20 KAT + AEAD byte-equal vs OpenSSL's inner AEAD).
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/xchacha20_poly1305.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.5: AES-256-GCM (FIPS-197 + SP 800-38D),
-# constant-time end to end (arithmetic S-box + branchless GHASH — see aes.h).
-# Exercised by `determ test-aes-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c")
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.2: Ed25519 (RFC 8032), the EC prerequisite
-# for FROST-Ed25519. Constant-time gf[16] field + cswap-ladder scalarmult; built
-# on the C99 SHA-512. Exercised by `determ test-ed25519-c99` (byte-equal vs
-# OpenSSL EVP_PKEY_ED25519 + RFC 8032 KATs).
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c")
-# v2.10 Phase A / CRYPTO-C99-SPEC §3.2 + RFC 9591: FROST-Ed25519 threshold
-# signatures on the C99 Ed25519 group ops. Keygen (Shamir over the scalar field +
-# Lagrange) + threshold sign. Exercised by `determ test-frost-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/frost/frost.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.3: X25519 (RFC 7748), the Curve25519 DH
-# companion to the C99 Ed25519. Constant-time Montgomery ladder; validated
-# byte-equal vs OpenSSL EVP_PKEY_X25519 + RFC 7748 §6.1 KAT by `determ test-x25519-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6 prerequisite: BLAKE2b (RFC 7693), the hash
-# Argon2id is built on. Validated vs OpenSSL EVP_blake2b512 (unkeyed-64 core) +
-# python hashlib.blake2b reference vectors (keyed/var-len) by `determ test-blake2b-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/blake2/blake2b.c")
-# v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6: Argon2id (RFC 9106) on the BLAKE2b above —
-# the memory-hard password hash (libsodium-free keyfile-KDF replacement). Validated
-# byte-equal vs libsodium crypto_pwhash_argon2id by `determ test-argon2id-c99`.
-list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/argon2/argon2id.c")
+# ── determ-crypto-c99: the libsodium-free C99 primitive layer as a STATIC
+# library (CRYPTO-C99-SPEC §3.14 seed — "each module compiles as a static
+# lib; top-level libdeterm-crypto aggregates"). One aggregate target today
+# (per-module split is the §3.14 follow-up once a second consumer exists);
+# consumed by `determ` and linkable by any future target without re-listing
+# sources. Umbrella header: include/determ/crypto.h; C++ wrapper:
+# include/determ/crypto.hpp (header-only, rides the PUBLIC include dir).
+# Per-module provenance + validation evidence: src/crypto/<module>/README.md.
+# The src/*.cpp glob above does not pick up .c files; list them explicitly.
+# §3.14 remaining: per-module sub-libraries, the cross-compilation matrix,
+# and the libsodium drop (gated on §3.15 — the wallet OPAQUE stub still
+# links sodium).
+add_library(determ-crypto-c99 STATIC
+  # §3.10 shared primitives — secure_zero (hygiene) + ct_memcmp (CT compare),
+  # consumed by every module below.
+  "${CMAKE_SOURCE_DIR}/src/crypto/secure_zero.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/ct.c"
+  # §3.1 SHA-2 family + §3.8b PBKDF2 — `determ test-sha2-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hkdf.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c"
+  # §3.4 ChaCha20 / Poly1305 / ChaCha20-Poly1305 + XChaCha20-Poly1305 —
+  # `determ test-chacha20-c99` + `determ test-xchacha-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/poly1305.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/xchacha20_poly1305.c"
+  # §3.5 AES-256 + GCM (arithmetic S-box + branchless GHASH) — `determ test-aes-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c"
+  # §3.2 Ed25519 (gf[16] cswap-ladder, RFC 8032; includes the exposed
+  # scalar/group ops FROST builds on) — `determ test-ed25519-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c"
+  # §3.8 FROST-Ed25519 — LIBRARY-ONLY, not a chain primitive
+  # (docs/proofs/FROST_DEVIATION_NOTICE.md) — `determ test-frost-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/frost/frost.c"
+  # §3.3 X25519 (Montgomery cswap-ladder, RFC 7748) — `determ test-x25519-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c"
+  # §3.6 BLAKE2b (RFC 7693) + Argon2id (RFC 9106) — `determ test-blake2b-c99`
+  # + `determ test-argon2id-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/blake2/blake2b.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/argon2/argon2id.c"
+)
+target_include_directories(determ-crypto-c99 PUBLIC include)
 
 add_executable(determ ${SOURCES})
 
@@ -146,6 +142,7 @@ target_include_directories(determ PRIVATE
 )
 
 target_link_libraries(determ PRIVATE
+  determ-crypto-c99
   ssl
   crypto
   nlohmann_json::nlohmann_json
