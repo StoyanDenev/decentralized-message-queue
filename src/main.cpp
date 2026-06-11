@@ -12477,6 +12477,13 @@ int main(int argc, char** argv) {
               { "zero", "L-1", "L", "2L-1", "random" }, 64 },
             { "hmac-key",       "determ_hmac_sha256 fixed msg (secret = 32B key; inventory target 12)",
               { "fix-key", "rnd-key" }, 8 },
+            // ── tranche 3 (the §3.8c/§3.9b P-256 module) ──
+            { "p256-base-mul",  "determ_p256_base_mul (secret = scalar; uniform RCB ladder)",
+              { "fix-scalar", "rnd-scalar" }, 1 },
+            { "p256-h2c",       "determ_p256_hash_to_curve fixed-length msg (secret = msg; branchless SSWU)",
+              { "fix-msg", "rnd-msg" }, 1 },
+            { "p256-sc-mul",    "determ_p256_scalar_mul_mod_n (secret = both operands)",
+              { "fix-ops", "rnd-ops" }, 16 },
         };
 
         if (sub == "--list") {
@@ -12593,6 +12600,17 @@ int main(int argc, char** argv) {
                 else if (c == 2) std::memcpy(scalar, Lle, 32);
                 else if (c == 3) std::memcpy(scalar, L2m1, 32);
                 else             rnd_fill(scalar, 32);
+            } else if (id == "p256-base-mul") {
+                // P-256 scalars are BE; keep < n by zeroing the top byte.
+                if (c == 0) { std::memcpy(scalar, fixscalar, 32); scalar[0] = 0x0f; }
+                else { rnd_fill(scalar, 32); scalar[0] &= 0x0f; scalar[31] |= 1; }
+            } else if (id == "p256-h2c") {
+                if (c == 0) std::memcpy(msg, fixmsg, 64); else rnd_fill(msg, 64);
+            } else if (id == "p256-sc-mul") {
+                if (c == 0) { std::memcpy(scalar, fixscalar, 32); scalar[0] = 0x0f;
+                              std::memcpy(seed, fixseed, 32); seed[0] = 0x0f; }
+                else { rnd_fill(scalar, 32); scalar[0] &= 0x0f;
+                       rnd_fill(seed, 32);   seed[0] &= 0x0f; }
             }
             // ---- timed region ----
             uint64_t t0 = now_ticks();
@@ -12611,6 +12629,11 @@ int main(int argc, char** argv) {
                 else if (id == "poly1305-key")    { determ_poly1305(key, pt64, 64, tag); sink += tag[0]; }
                 else if (id == "sc-canonical")      sink += determ_ed25519_sc_is_canonical(scalar);
                 else if (id == "hmac-key")        { determ_hmac_sha256(key, 32, pt64, 64, o32); sink += o32[0]; }
+                else if (id == "p256-base-mul")   { uint8_t p65[65]; sink += determ_p256_base_mul(p65, scalar); }
+                else if (id == "p256-h2c")        { uint8_t p65[65];
+                                                    sink += determ_p256_hash_to_curve(p65, msg, 64,
+                                                        (const uint8_t*)"DETERM-PROBE-DST", 16); }
+                else if (id == "p256-sc-mul")     { sink += determ_p256_scalar_mul_mod_n(o32, scalar, seed); }
             }
             uint64_t t1 = now_ticks();
             return (double)(t1 - t0) / (double)batch;

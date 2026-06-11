@@ -77,9 +77,11 @@ double-and-add-always with mask-select cswap; field add/sub/mul use
 branchless carry/borrow masks; inversion iterates the PUBLIC constant
 exponent `p − 2`. Branches exist only on public data (encoding validity,
 scalar-range outcomes, the one-time init flag). Ladder temporaries are
-scrubbed via `determ_secure_zero`. Timing-probe targets for this module
-register with `determ ct-timing-probe` as a follow-up tranche
-(ConstantTimeInventory.md gains its rows when the §3.12 sweep next runs).
+scrubbed via `determ_secure_zero`. Timing-probe coverage: tranche 3 registers
+`p256-base-mul` (secret = scalar), `p256-h2c` (secret = msg) and `p256-sc-mul`
+(secret = both operands) with `determ ct-timing-probe` — first measured runs
+clean (max |t| < 1.5 at smoke sample sizes). ConstantTimeInventory.md gains
+its per-mechanism rows when the §3.12 sweep next runs.
 
 ## §3.9b groundwork (same module)
 
@@ -104,5 +106,6 @@ and re-verified by two independent python implementations before import.
 - Performance: the portable 32-bit-limb Montgomery field favors auditability
   over throughput (same trade as the gf[16] Ed25519); a 64-bit-limb variant
   is a future perf option.
-- ConstantTimeInventory.md + the timing-probe target table do not cover this
-  module yet (post-§3.8c sweep work).
+- ConstantTimeInventory.md does not carry this module's per-mechanism rows
+  yet (probe targets registered in tranche 3; the inventory sweep is the
+  remaining §3.12 follow-up).
