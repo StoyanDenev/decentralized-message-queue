@@ -5,7 +5,9 @@
 # branchless mod-L reduction; composes the C99 SHA-512. No key-dependent branch,
 # index, or precomputed-table lookup -> no cache-timing channel.
 #
-# 9 assertions: (1) pubkey + (2) signature match the RFC 8032 §7.1 TEST 1 vector
+# 12 assertions (the original 9 below + the 3a6370f anti-malleability
+# additions: S>=L reject, non-canonical-y pubkey reject, large-message
+# splice): (1) pubkey + (2) signature match the RFC 8032 §7.1 TEST 1 vector
 # (empty message) -- an OpenSSL-independent anchor; (3) pubkey + (4) signature
 # byte-equal vs OpenSSL EVP_PKEY_ED25519 over a fuzzed (seed,message-length) grid
 # -- the §Q9 gate; (5)-(8) verify accepts a valid signature and rejects a tampered

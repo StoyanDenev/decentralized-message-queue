@@ -9,7 +9,11 @@
  * are constant-time w.r.t. their inputs EXCEPT determ_ed25519_sc_invert, which
  * branches only on the PUBLIC constant exponent L-2 (not on the base) — the base
  * is never leaked. Point ops decode their compressed inputs and re-encode the
- * result; a decode of an off-curve / non-canonical encoding returns -1.
+ * result; a decode of an off-curve encoding returns -1. Decode does NOT check
+ * canonicality (a y >= q encoding is accepted leniently) — callers that need
+ * the y < q / s < L gates use the explicit determ_ed25519_point_is_canonical /
+ * determ_ed25519_sc_is_canonical witnesses below (as the FROST PoP verifier
+ * does).
  */
 #ifndef DETERM_CRYPTO_ED25519_GROUP_H
 #define DETERM_CRYPTO_ED25519_GROUP_H

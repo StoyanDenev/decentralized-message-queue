@@ -4,7 +4,7 @@
 
 > **NOTICE 2026-06-07 — FROST removed from v1.1 chain consensus path.** Per `FROST_DEVIATION_NOTICE.md`, FROST was identified as a Claude-introduced design deviation, not part of Stoyan Denev's original Determ design. The §3.8 FROST-Ed25519 implementation under `src/crypto/frost/` is retained as a library (DApp-layer use post-launch is allowed) but is NOT part of the v1.1 consensus path, NOT part of the v1.1-locked formal-verification surface, and any re-introduction into chain consensus requires Stoyan's explicit sign-off per `FROST_DEVIATION_NOTICE.md §3`. All §3.1–§3.7 primitives (SHA-2, HMAC, HKDF, PBKDF2, ChaCha20-Poly1305, AES-256-GCM, Ed25519, X25519, BLAKE2b) remain in v1.1 scope; only §3.8 FROST is excluded from the consensus-path commitment.
 
-**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; binding-factor RFC-9591-byte-exact interop vectors are a documented follow-up). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
+**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.10 constant-time primitives (`determ_ct_memcmp` + `determ_secure_zero` — the one §3.10 piece every other module consumes), §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; binding-factor RFC-9591-byte-exact interop vectors are a documented follow-up). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 
 **Companion documents:**
 - `v2.10-DKG-SPEC.md` — FROST-Ed25519 threshold-randomness spec (consumer of this stack)
@@ -473,7 +473,17 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Test vectors from NIST CAVP + RFC 4231 + RFC 5869
 - Constant-time verification (trivial — hashing is inherently CT)
 
-### 3.2 Ed25519 (~6 days)
+### 3.2 Ed25519 — **SHIPPED** (as TweetNaCl-derived `gf[16]`, NOT the ref10 plan below)
+
+Shipped: `src/crypto/ed25519/ed25519.c` — constant-time table-free `gf[16]`
+(radix-2^16) field + cswap ladder, RFC 8032 sign/verify with the §5.1.3/§5.1.7
+canonicality gates, plus the exposed scalar/group primitives in
+`ed25519_group.h` that FROST builds on. Validated by `determ test-ed25519-c99`
+(byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1) and
+`determ test-ed25519-vectors`. See the status-header note for why the original
+plan below was deviated from (the ~30 KB ref10 base table is infeasible to
+vendor by hand; ref10/radix-2^51 remains a future throughput variant).
+Original plan (retained for the deviation record):
 
 - Vendor Bernstein's `ref10` from supercop, pinned version
 - Adapter layer to Determ's API
@@ -551,7 +561,12 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - **Memory-hard, NOT constant-time in the data-dependent passes** by design (Argon2d
   GPU-resistance); the Argon2id hybrid keeps the secret-derived addressing of pass-0
   first-half data-independent (RFC 9106 §3.4). The intended consumer is the
-  passphrase keyfile KDF (libsodium `crypto_pwhash` today) — this is the drop-in.
+  passphrase keyfile KDF. (Call-site reality: the v2.17/S-004 envelope today
+  derives via OpenSSL `PKCS5_PBKDF2_HMAC` (`wallet/envelope.cpp::derive_key`);
+  the tree's only libsodium `crypto_pwhash` caller is the wallet OPAQUE stub
+  (`wallet/opaque_primitives.cpp::argon2id`) — `determ_argon2id` is the
+  byte-equal drop-in THERE, while an envelope PBKDF2→Argon2id switch is an
+  on-disk format change. See `src/crypto/argon2/README.md` §5.)
 
 ### 3.7 secp256k1 + libsecp256k1-zkp (~10 days)
 
@@ -608,11 +623,23 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - Test vectors from voprf draft + RFC 9380 P-256 mode
 - Smaller than 3.9a because P-256 primitives already in `src/crypto/p256/` from §3.8c
 
-### 3.10 Constant-time primitives (~1 day)
+### 3.10 Constant-time primitives — **SHIPPED**
 
-- `determ_ct_memcmp` (memcmp without short-circuit)
-- `determ_ct_zero` (memory wipe that compiler can't optimize away)
-- Documented usage notes
+- `determ_ct_memcmp` (`include/determ/crypto/ct.h` + `src/crypto/ct.c`) —
+  equality-only compare, no short-circuit, OR-accumulated XOR over the full
+  length, 0/-1 collapse via the unsigned-borrow idiom (libsodium
+  `crypto_verify` shape). Consolidates the per-module local helpers the stack
+  had accumulated: `ct_eq16` (aes_gcm.c, chacha20_poly1305.c), `ct_verify_32`
+  (ed25519.c), and frost.c's two PoP/VSS point-compare `memcmp`s (public
+  operands — uniform discipline there, not a leak fix).
+- The "ct_zero" half shipped earlier as `determ_secure_zero`
+  (`include/determ/crypto/secure_zero.h`, volatile-indirection memset).
+- Documented usage notes live in `ct.h` (equality-only — no lexicographic
+  order; use on every secret-adjacent compare; `len` is public).
+- Validated by `determ test-ct-c99` (6 assertions: boundary lengths,
+  first/middle/last mismatch positions, 500-case verdict-equality fuzz vs
+  memcmp, strict 0/-1 contract, wipe + no-op pins). The TIMING property
+  itself is §3.12's dudect/ctgrind follow-up.
 
 ### 3.11 Unified API + C++ wrapper (~3 days)
 

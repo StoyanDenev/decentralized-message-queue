@@ -6,7 +6,7 @@
 # the v2.10 work.
 #
 # Covers the C99 SHA-2 hash/MAC/KDF family (SHA-256/512 + HMAC + HKDF [§3.1] +
-# PBKDF2 [§3.8b]), 14 assertions: (1) byte-equal cross-validation of C99 SHA-256 +
+# PBKDF2 [§3.8b]), 18 assertions: (1) byte-equal cross-validation of C99 SHA-256 +
 # SHA-512 against the OpenSSL backend over EVERY message length 0..300 (single-
 # block, multi-block, both padding edges — the §Q9 gate, no transcribed digest),
 # (2) NIST FIPS 180-4 KATs for SHA-256/512 of "abc" and "", (3) a 1 MiB message,

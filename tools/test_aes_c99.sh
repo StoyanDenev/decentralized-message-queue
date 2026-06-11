@@ -9,7 +9,7 @@
 # complete (byte-correctness + CT); this remains an additive validated module not
 # yet wired into the S-004 call site.
 #
-# 7 assertions: (0) the constant-time S-box exhaustively equals the canonical
+# 9 assertions: (0) the constant-time S-box exhaustively equals the canonical
 # FIPS-197 table over all 256 inputs; (1) AES-256 encrypt vs the FIPS-197 Appendix
 # C.3 KAT; (2) AES-256 block byte-equal vs OpenSSL EVP_aes_256_ecb over 256 fuzzed
 # pairs; (3) the full AES-256-GCM (ciphertext AND tag) byte-equal vs OpenSSL

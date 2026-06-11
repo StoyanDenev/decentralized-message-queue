@@ -381,6 +381,8 @@ int determ_frost_pss_verify_commit(const u8 commitment0[32]) {
     u8 zero[32], id[32]; int k;
     for (k = 0; k < 32; k++) zero[k] = 0;
     determ_ed25519_point_basemul(id, zero);                       /* identity = [0]B */
-    for (k = 0; k < 32; k++) if (commitment0[k] != id[k]) return -1;
-    return 0;
+    /* C_0 is a public commitment; CT compare is uniform house discipline
+     * (ConstantTimeInventory.md CTI-1 — this was the one per-byte early-
+     * return compare left after the §3.10 consolidation). */
+    return determ_ct_memcmp(commitment0, id, 32);
 }

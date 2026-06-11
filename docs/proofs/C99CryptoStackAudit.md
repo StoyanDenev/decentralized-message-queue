@@ -50,7 +50,7 @@ byte-identical, plus published KATs (NIST/RFC). Coverage by primitive:
 - HMAC / HKDF / PBKDF2: RFC 2104 / RFC 5869 / RFC 8018-style KATs; HKDF exercises
   the `outlen=42` two-block expand for RFC 5869 TC1/TC3; PBKDF2 exercises
   `outlen ∈ {33,48,100}` multi-block + the 4096-iteration KAT.
-- ChaCha20 / Poly1305 / AEAD: RFC 8439 §2.8.2 KAT + OpenSSL `EVP_chacha20`/
+- ChaCha20 / Poly1305 / AEAD: RFC 8439 §2.5.2 Poly1305 KAT + OpenSSL `EVP_chacha20`/
   `EVP_chacha20_poly1305`; counters deliberately bounded well below 2³²; `out==in`
   aliasing only.
 - AES-256 / GCM: OpenSSL over plaintext `∈ {0,1,16,63,64,65,128,200}`,
@@ -542,9 +542,11 @@ verify, and it is the dimension this stack handles cleanly. Per-file findings:
   **unsigned-shift mask** (`(g4 >> 31) - 1`) — no secret-dependent branch, no
   timing leak, no signed-shift UB. Branchless. Clean.
 
-- **ChaCha20-Poly1305 AEAD (`chacha20_poly1305.c`):** `ct_eq16` accumulates all
-  16 byte-differences into a single byte and branches only on the **aggregate**
-  pass/fail bit — it leaks neither byte position nor per-byte timing (the textbook
+- **ChaCha20-Poly1305 AEAD (`chacha20_poly1305.c`):** the tag compare (as audited,
+  a local `ct_eq16`; since consolidated into the shared `determ_ct_memcmp` per
+  CRYPTO-C99-SPEC §3.10 — same aggregate-OR form) accumulates all 16
+  byte-differences and branches only on the **aggregate** pass/fail bit — it
+  leaks neither byte position nor per-byte timing (the textbook
   constant-time-compare idiom). `decrypt` verifies the tag before writing any
   plaintext, so it writes nothing on auth failure. Clean.
 
@@ -557,8 +559,9 @@ verify, and it is the dimension this stack handles cleanly. Per-file findings:
   in the build-time selftest, never indexed by the cipher. All encrypt/shift/mix
   loops have fixed bounds and constant indices. Clean.
 
-- **AES-256-GCM (`aes_gcm.c`):** `ct_eq16` (lines 103–108) is the same aggregate-OR
-  constant-time tag compare; `gcm_crypt` loop bounds and `take` depend only on
+- **AES-256-GCM (`aes_gcm.c`):** the tag compare (as audited, a local `ct_eq16`;
+  since consolidated into the shared `determ_ct_memcmp` per CRYPTO-C99-SPEC
+  §3.10) is the same aggregate-OR constant-time form; `gcm_crypt` loop bounds and `take` depend only on
   public length; `ghash_mul` is branchless with secret-independent masks. No
   secret-dependent index, branch, or table lookup. Clean.
 
@@ -912,5 +915,10 @@ external oracle:
 
 The adversarial audit is now complete (6 hardening findings remediated, 0
 correctness defects). The intended consumer — a libsodium-free passphrase keyfile
-KDF — is the natural next integration step (the determ-wallet envelope's
-`crypto_pwhash` call site).
+KDF — is the natural next integration step. (Call-site reality check: the v2.17/
+S-004 keyfile envelope today derives via OpenSSL `PKCS5_PBKDF2_HMAC`
+(`wallet/envelope.cpp::derive_key`), NOT libsodium `crypto_pwhash`; the tree's
+only `crypto_pwhash` caller is the wallet OPAQUE stub
+(`wallet/opaque_primitives.cpp::argon2id`). A PBKDF2→Argon2id switch in the
+envelope is an on-disk format change, not a byte-equal drop-in — see
+`src/crypto/argon2/README.md` §5 for the split.)

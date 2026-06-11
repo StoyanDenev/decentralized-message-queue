@@ -1,0 +1,48 @@
+{
+  "primitive": "blake2b",
+  "source": "RFC 7693 Appendix A ('abc' BLAKE2b-512) + python hashlib.blake2b reference cases (unkeyed/keyed, 64/32-byte outputs); recomputed via python hashlib.blake2b; four cases byte-equal to the pins in src/main.cpp test-blake2b-c99",
+  "vectors": [
+    {
+      "name": "unkeyed BLAKE2b-512 of 'abc' (RFC 7693 Appendix A)",
+      "msg_hex": "616263",
+      "key_hex": "",
+      "outlen": 64,
+      "digest_hex": "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+    },
+    {
+      "name": "unkeyed BLAKE2b-512 of empty message",
+      "msg_hex": "",
+      "key_hex": "",
+      "outlen": 64,
+      "digest_hex": "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+    },
+    {
+      "name": "unkeyed BLAKE2b-256 of empty message - pinned in src/main.cpp test-blake2b-c99",
+      "msg_hex": "",
+      "key_hex": "",
+      "outlen": 32,
+      "digest_hex": "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8"
+    },
+    {
+      "name": "unkeyed BLAKE2b-256 of 'abc' - pinned in src/main.cpp test-blake2b-c99",
+      "msg_hex": "616263",
+      "key_hex": "",
+      "outlen": 32,
+      "digest_hex": "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
+    },
+    {
+      "name": "keyed BLAKE2b-512 (key='determ-blake2b-key', msg='the quick brown fox') - pinned in src/main.cpp test-blake2b-c99",
+      "msg_hex": "74686520717569636b2062726f776e20666f78",
+      "key_hex": "64657465726d2d626c616b6532622d6b6579",
+      "outlen": 64,
+      "digest_hex": "467b88348d04e56da92f5a3e1104c105f52d2ab78d7ca7a3254960a421f1c52a8179527f3078f36f6b580fa780006accb53de5c4542682a5f2e028931513bd31"
+    },
+    {
+      "name": "keyed BLAKE2b-256 (same key/msg) - pinned in src/main.cpp test-blake2b-c99",
+      "msg_hex": "74686520717569636b2062726f776e20666f78",
+      "key_hex": "64657465726d2d626c616b6532622d6b6579",
+      "outlen": 32,
+      "digest_hex": "445f0e39ac1104d8617762a91cef6cfb95b0426f15d5ede9087cf4b7d07a1106"
+    }
+  ]
+}

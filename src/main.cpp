@@ -12613,8 +12613,9 @@ int main(int argc, char** argv) {
         // (5) HKDF-SHA-256 against the RFC 5869 known-answer vectors. HKDF is
         // built entirely on the HMAC cross-validated above, so these vectors
         // anchor the extract/expand glue (multi-block expand + the empty-salt /
-        // empty-info default path). OpenSSL's 3.0 EVP_KDF API is unavailable under
-        // this build's OPENSSL_API_COMPAT pin, so the RFC vectors are the anchor;
+        // empty-info default path). OpenSSL's EVP_KDF API arrived in OpenSSL 3.0
+        // and this build vendors 1.1.1w (the janbar/openssl-cmake FetchContent pin
+        // in CMakeLists.txt), so the RFC vectors are the anchor;
         // the §Q9 byte-equal-vs-OpenSSL gate runs through the HMAC building block.
         {
             uint8_t ikm[22]; std::memset(ikm, 0x0b, 22);
@@ -12677,9 +12678,10 @@ int main(int argc, char** argv) {
         // v2.10 Phase-0 / CRYPTO-C99-SPEC §Q7 "validate before you vendor":
         // pin the daemon's Ed25519 (currently OpenSSL EVP_PKEY_ED25519, the only
         // shipped signature backend) against the CANONICAL RFC 8032 §7.1 known-
-        // answer vectors. This is the independent oracle the future libsodium-free
-        // C99 ref10 backend (per the V210ImplementationRoadmap P0 decision) MUST
-        // reproduce byte-for-byte (the §Q9 cross-validation gate) — swap the
+        // answer vectors. This is the independent oracle any libsodium-free
+        // C99 Ed25519 backend MUST reproduce byte-for-byte (the SHIPPED backend is
+        // the constant-time gf[16] TweetNaCl-derived form in src/crypto/ed25519/;
+        // a ref10 radix-2^51 variant remains a future perf option) (the §Q9 cross-validation gate) — swap the
         // backend, re-run this, and a single bit of divergence in key derivation
         // or deterministic signing fails loudly. RFC 8032 Ed25519 signing is
         // deterministic, so the signature bytes are themselves a KAT.
@@ -12698,7 +12700,7 @@ int main(int argc, char** argv) {
         // signature per (key, message). So "the produced signature verifies AND
         // is reproducible" pins the exact canonical bytes just as tightly, while
         // the seed->pubkey equality below is the independent published-standard
-        // anchor. A ref10 backend that diverges in key derivation fails the
+        // anchor. A C99 backend that diverges in key derivation fails the
         // pubkey check; one that diverges in signing fails verify (no alternative
         // valid signature exists under RFC 8032).
         struct KAT { const char* name; const char* sk; const char* pk;
@@ -12769,7 +12771,7 @@ int main(int argc, char** argv) {
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
                   << ": ed25519-vectors "
                   << (fail == 0 ? "all RFC 8032 KATs matched" : "had failures")
-                  << " (cross-validation oracle for the v2.10 C99 ref10 backend)\n";
+                  << " (cross-validation oracle for the C99 Ed25519 backend; shipped gf[16], ref10 = future perf variant)\n";
         return fail == 0 ? 0 : 1;
     }
 

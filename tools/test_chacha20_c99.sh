@@ -5,12 +5,14 @@
 # both with no S-boxes / tables / secret-dependent branches, so the family is
 # constant-time by construction (vs AES-GCM's GHASH, the spec's flagged hard part).
 #
-# 8 assertions: (1) ChaCha20 byte-equal vs OpenSSL EVP_chacha20 over a
+# 10 assertions: (1) ChaCha20 byte-equal vs OpenSSL EVP_chacha20 over a
 # (counter,length) grid; (2) ChaCha20 self-inverse; (3) block-counter sensitivity;
 # (4) Poly1305 vs the RFC 8439 §2.5.2 KAT; (5) the full ChaCha20-Poly1305 AEAD
 # (ciphertext AND tag) byte-equal vs OpenSSL EVP_chacha20_poly1305 over a
 # (plaintext,aad)-length grid -- the §Q9 gate; (6) AEAD decrypt round-trip + tamper
-# rejection (tag + ciphertext). Additive -- not wired into any call site yet.
+# rejection (tag + ciphertext + the two c9e5cf2 AAD-binding negatives:
+# modified AAD and dropped AAD both reject). Additive -- not wired into any
+# call site yet.
 #
 # Run from repo root: bash tools/test_chacha20_c99.sh
 set -u

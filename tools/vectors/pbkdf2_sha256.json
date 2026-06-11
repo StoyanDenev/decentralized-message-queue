@@ -1,0 +1,46 @@
+{
+  "primitive": "pbkdf2_hmac_sha256",
+  "source": "RFC 7914 section 11 (the two PBKDF2-HMAC-SHA-256 vectors) + well-known (password,salt,c,32) cases; recomputed via python hashlib.pbkdf2_hmac; the c=4096 case is byte-equal to the pin in src/main.cpp test-sha2-c99",
+  "vectors": [
+    {
+      "name": "RFC 7914 section 11 vector 1",
+      "password_hex": "706173737764",
+      "salt_hex": "73616c74",
+      "iterations": 1,
+      "dklen": 64,
+      "dk_hex": "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
+    },
+    {
+      "name": "RFC 7914 section 11 vector 2",
+      "password_hex": "50617373776f7264",
+      "salt_hex": "4e61436c",
+      "iterations": 80000,
+      "dklen": 64,
+      "dk_hex": "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"
+    },
+    {
+      "name": "(password,salt,c=1,dkLen=32)",
+      "password_hex": "70617373776f7264",
+      "salt_hex": "73616c74",
+      "iterations": 1,
+      "dklen": 32,
+      "dk_hex": "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+    },
+    {
+      "name": "(password,salt,c=2,dkLen=32)",
+      "password_hex": "70617373776f7264",
+      "salt_hex": "73616c74",
+      "iterations": 2,
+      "dklen": 32,
+      "dk_hex": "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+    },
+    {
+      "name": "(password,salt,c=4096,dkLen=32) - pinned in src/main.cpp test-sha2-c99",
+      "password_hex": "70617373776f7264",
+      "salt_hex": "73616c74",
+      "iterations": 4096,
+      "dklen": 32,
+      "dk_hex": "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+    }
+  ]
+}

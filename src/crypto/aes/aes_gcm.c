@@ -140,10 +140,12 @@ int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
     if (determ_ct_memcmp(expect, tag, 16) != 0) {                   /* authentication failure */
         determ_secure_zero(&ctx, sizeof ctx);
         determ_secure_zero(H, sizeof H);
+        determ_secure_zero(expect, sizeof expect);  /* recomputed tag is key-derived (CTI-2) */
         return -1;
     }
     gcm_crypt(&ctx, J0, ct, ctlen, pt);
     determ_secure_zero(&ctx, sizeof ctx);
     determ_secure_zero(H, sizeof H);
+    determ_secure_zero(expect, sizeof expect);      /* recomputed tag is key-derived (CTI-2) */
     return 0;
 }

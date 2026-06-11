@@ -1,7 +1,7 @@
 /* Determ C99-native ChaCha20-Poly1305 AEAD (RFC 8439 Section 2.8).
  * Part of the libsodium-free crypto stack (CRYPTO-C99-SPEC.md Section 3.4).
  * Composes the C99 ChaCha20 + Poly1305 in this directory. Validated byte-equal
- * against OpenSSL EVP_chacha20_poly1305 + the RFC 8439 2.8.2 KAT by
+ * against OpenSSL EVP_chacha20_poly1305 + the RFC 8439 2.5.2 Poly1305 KAT by
  * `determ test-chacha20-c99`. */
 #include "determ/crypto/chacha20/chacha20.h"
 #include "determ/crypto/secure_zero.h"
