@@ -10,6 +10,7 @@
  * remaining cache-timing channel gating use at a secret-key call site. */
 #include "determ/crypto/aes/aes.h"
 #include "determ/crypto/secure_zero.h"
+#include "determ/crypto/ct.h"
 #include <string.h>
 
 /* X = X * H over GF(2^128) (NIST SP 800-38D, MSB-first bit order, R=0xe1...). */
@@ -104,13 +105,6 @@ static void gcm_crypt(const determ_aes256_ctx *ctx, const uint8_t J0[16],
     determ_secure_zero(ks, sizeof ks);     /* last AES keystream block */
 }
 
-static int ct_eq16(const uint8_t *a, const uint8_t *b) {
-    uint8_t r = 0;
-    int i;
-    for (i = 0; i < 16; i++) r |= (uint8_t)(a[i] ^ b[i]);
-    return r == 0 ? 0 : -1;
-}
-
 void determ_aes256_gcm_encrypt(const uint8_t key[32], const uint8_t iv[12],
                                const uint8_t *aad, size_t aadlen,
                                const uint8_t *pt, size_t ptlen,
@@ -143,7 +137,7 @@ int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
     memcpy(J0, iv, 12);
     J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
     gcm_tag(&ctx, H, J0, aad, aadlen, ct, ctlen, expect);
-    if (ct_eq16(expect, tag) != 0) {                   /* authentication failure */
+    if (determ_ct_memcmp(expect, tag, 16) != 0) {                   /* authentication failure */
         determ_secure_zero(&ctx, sizeof ctx);
         determ_secure_zero(H, sizeof H);
         return -1;

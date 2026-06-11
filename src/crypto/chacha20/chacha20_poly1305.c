@@ -5,6 +5,7 @@
  * `determ test-chacha20-c99`. */
 #include "determ/crypto/chacha20/chacha20.h"
 #include "determ/crypto/secure_zero.h"
+#include "determ/crypto/ct.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,14 +21,6 @@ static void poly1305_keygen(const uint8_t key[32], const uint8_t nonce[12], uint
 static void put_u64_le(uint8_t *p, uint64_t v) {
     int i;
     for (i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
-}
-
-/* Constant-time 16-byte compare: returns 0 iff equal (no secret-dependent branch). */
-static int ct_eq16(const uint8_t *a, const uint8_t *b) {
-    uint8_t r = 0;
-    int i;
-    for (i = 0; i < 16; i++) r |= (uint8_t)(a[i] ^ b[i]);
-    return r == 0 ? 0 : -1;
 }
 
 /* tag = Poly1305(otk, aad || pad16(aad) || ct || pad16(ct) || len(aad)_le64 || len(ct)_le64)
@@ -87,7 +80,7 @@ int determ_chacha20_poly1305_decrypt(const uint8_t key[32], const uint8_t nonce[
         determ_secure_zero(expect, sizeof expect);
         return -1;
     }
-    if (ct_eq16(expect, tag) != 0) {              /* authentication failure */
+    if (determ_ct_memcmp(expect, tag, 16) != 0) {              /* authentication failure */
         determ_secure_zero(otk, sizeof otk);
         determ_secure_zero(expect, sizeof expect);
         return -1;

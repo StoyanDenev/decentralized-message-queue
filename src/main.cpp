@@ -22,6 +22,8 @@
 #include <determ/crypto/blake2/blake2b.h>     // v2.10 Phase 0: C99-native BLAKE2b (RFC 7693, §3.6 prereq)
 #include <determ/crypto/chacha20/xchacha20_poly1305.h> // v2.10 Phase 0: C99 XChaCha20-Poly1305 (§3.4)
 #include <determ/crypto/argon2/argon2id.h>    // v2.10 Phase 0: C99-native Argon2id (RFC 9106, §3.6)
+#include <determ/crypto/ct.h>                 // v2.10 Phase 0: C99 constant-time compare (§3.10)
+#include <determ/crypto/secure_zero.h>        // v2.10 Phase 0: C99 secure zeroization (§3.10)
 #include <determ/chain/genesis.hpp>
 #include <determ/net/messages.hpp>
 #include <determ/util/json_validate.hpp>
@@ -450,6 +452,10 @@ In-process tests (deterministic, no network):
                                               Argon2id (RFC 9106) vs libsodium
                                               crypto_pwhash_argon2id KATs
                                               (§3.6; BLAKE2b-based, memory-hard)
+  determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
+                                              primitives — determ_ct_memcmp
+                                              equality/contract pins + fuzz vs
+                                              memcmp; determ_secure_zero wipe
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11973,6 +11979,127 @@ int main(int argc, char** argv) {
         return fail==0 ? 0 : 1;
     }
 
+    if (cmd == "test-ct-c99") {
+        // CRYPTO-C99-SPEC §3.10 — the two constant-time/hygiene primitives the
+        // rest of the C99 stack builds on: determ_ct_memcmp (no-short-circuit
+        // equality compare; consolidates the former per-module ct_eq16 /
+        // ct_verify_32 local helpers and frost.c's point-compare memcmps) and
+        // determ_secure_zero (dead-store-elimination-proof wipe). These pins
+        // are FUNCTIONAL (equality semantics, return-value contract, wipe
+        // effect); the timing property itself is §3.12's dudect/ctgrind
+        // follow-up — a functional test cannot measure it.
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+
+        // (1) Equal buffers -> 0 across boundary lengths (incl. 0).
+        {
+            bool ok = true; long at = -1;
+            const size_t lens[] = {0, 1, 15, 16, 17, 31, 32, 33, 64, 255};
+            for (size_t li = 0; li < sizeof(lens)/sizeof(lens[0]) && ok; ++li) {
+                size_t L = lens[li];
+                std::vector<uint8_t> a(L), b(L);
+                for (size_t i = 0; i < L; i++) { a[i] = (uint8_t)((i*37u + L) & 0xff); b[i] = a[i]; }
+                if (determ_ct_memcmp(L ? a.data() : nullptr, L ? b.data() : nullptr, L) != 0) { ok = false; at = (long)L; }
+            }
+            check(ok, ok ? "(1) equal buffers return 0 at lengths {0,1,15,16,17,31,32,33,64,255}"
+                         : "(1) equal-buffer compare nonzero at len=" + std::to_string(at));
+        }
+
+        // (2) Single-byte mismatch at FIRST / MIDDLE / LAST position -> -1.
+        //     (Positions chosen to catch a short-circuit or an off-by-one in
+        //     the accumulation loop at either end.)
+        {
+            bool ok = true; std::string what;
+            const size_t lens[] = {1, 16, 32, 64};
+            for (size_t li = 0; li < sizeof(lens)/sizeof(lens[0]) && ok; ++li) {
+                size_t L = lens[li];
+                const size_t pos[] = {0, L/2, L-1};
+                for (size_t pi = 0; pi < 3 && ok; ++pi) {
+                    std::vector<uint8_t> a(L), b(L);
+                    for (size_t i = 0; i < L; i++) { a[i] = (uint8_t)(i & 0xff); b[i] = a[i]; }
+                    b[pos[pi]] ^= 0x01;
+                    if (determ_ct_memcmp(a.data(), b.data(), L) != -1) {
+                        ok = false; what = "len=" + std::to_string(L) + " pos=" + std::to_string(pos[pi]);
+                    }
+                }
+            }
+            check(ok, ok ? "(2) single-byte mismatch at first/middle/last returns -1 (lens 1/16/32/64)"
+                         : "(2) mismatch not flagged as -1 at " + what);
+        }
+
+        // (3) Boolean-equality cross-check vs memcmp over a deterministic fuzz
+        //     grid: ct semantics must agree with memcmp's ==0 verdict on every
+        //     input (the ONLY permitted difference is timing + order info).
+        {
+            bool ok = true; long bad_it = -1;
+            uint32_t s = 0x9e3779b9u;
+            auto nxt = [&s]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; };
+            for (int it = 0; it < 500 && ok; ++it) {
+                size_t L = 1 + (nxt() % 96);
+                std::vector<uint8_t> a(L), b(L);
+                for (size_t i = 0; i < L; i++) a[i] = (uint8_t)(nxt() & 0xff);
+                b = a;
+                if (it % 3 != 0) b[nxt() % L] ^= (uint8_t)(1u + (nxt() % 255u));  // 2/3 differ
+                bool ct_eq = (determ_ct_memcmp(a.data(), b.data(), L) == 0);
+                bool mc_eq = (std::memcmp(a.data(), b.data(), L) == 0);
+                if (ct_eq != mc_eq) { ok = false; bad_it = it; }
+            }
+            check(ok, ok ? "(3) 500-case fuzz: ct verdict == memcmp equality verdict on every input"
+                         : "(3) fuzz divergence vs memcmp at iteration " + std::to_string(bad_it));
+        }
+
+        // (4) Return-value contract: exactly 0 or -1, never any other value
+        //     (callers pattern-match on != 0; -1 mirrors libsodium
+        //     crypto_verify and the prior local helpers).
+        {
+            bool ok = true;
+            uint8_t a[64], b[64];
+            for (int i = 0; i < 64; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(63 - i); }
+            int r1 = determ_ct_memcmp(a, b, 64);   // wildly different
+            int r2 = determ_ct_memcmp(a, a, 64);   // identical
+            uint8_t c[64]; std::memcpy(c, a, 64); c[63] ^= 0x80;
+            int r3 = determ_ct_memcmp(a, c, 64);   // single high-bit diff
+            ok = (r1 == -1) && (r2 == 0) && (r3 == -1);
+            check(ok, ok ? "(4) return contract: 0 on equal, -1 on any difference (all-differ + 1-bit-differ)"
+                         : "(4) return contract violated (r1=" + std::to_string(r1) +
+                           " r2=" + std::to_string(r2) + " r3=" + std::to_string(r3) + ")");
+        }
+
+        // (5) determ_secure_zero wipes a patterned buffer in full.
+        {
+            uint8_t buf[64];
+            for (int i = 0; i < 64; i++) buf[i] = (uint8_t)(0xA5 ^ i);
+            determ_secure_zero(buf, sizeof buf);
+            bool ok = true;
+            for (int i = 0; i < 64; i++) if (buf[i] != 0) ok = false;
+            check(ok, "(5) determ_secure_zero zeroes all 64 patterned bytes");
+        }
+
+        // (6) determ_secure_zero NULL / zero-length are documented no-ops
+        //     (must not crash; partial wipe must not touch beyond len).
+        {
+            determ_secure_zero(nullptr, 0);
+            determ_secure_zero(nullptr, 16);   // NULL guard short-circuits even with len > 0
+            uint8_t buf[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+            determ_secure_zero(buf, 0);        // zero-len leaves bytes intact
+            bool intact = true;
+            for (int i = 0; i < 8; i++) if (buf[i] != (uint8_t)(i + 1)) intact = false;
+            determ_secure_zero(buf, 4);        // partial wipe stops at len
+            bool half = buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 0 &&
+                        buf[4] == 5 && buf[5] == 6 && buf[6] == 7 && buf[7] == 8;
+            check(intact && half, "(6) secure_zero NULL/0-len no-ops; partial wipe stops exactly at len");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": ct-c99 " << (fail == 0
+                      ? "constant-time compare + secure-zero functional contracts held (CRYPTO-C99-SPEC §3.10)"
+                      : "had assertion failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "test-blake2b-c99") {
         // v2.10 Phase 0 / CRYPTO-C99-SPEC §3.6 prerequisite: validate the
         // libsodium-free C99 BLAKE2b (RFC 7693) — (1) the unkeyed 64-byte digest

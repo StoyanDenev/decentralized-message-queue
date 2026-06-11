@@ -92,6 +92,9 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
 # NIST KATs). Not yet wired into any call site — additive, validated module.
 # Shared memory-hygiene primitive (determ_secure_zero) used by every module below.
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/secure_zero.c")
+# Shared constant-time equality compare (determ_ct_memcmp, §3.10) — consolidates
+# the per-module ct_eq16 / ct_verify_32 helpers; exercised by `determ test-ct-c99`.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/ct.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c")
 list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c")

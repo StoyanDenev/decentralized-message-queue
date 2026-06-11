@@ -10,6 +10,7 @@
 #include "determ/crypto/ed25519/ed25519_group.h"
 #include "determ/crypto/sha2/sha2.h"
 #include "determ/crypto/secure_zero.h"
+#include "determ/crypto/ct.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -318,7 +319,9 @@ int determ_frost_dkg_verify_pop(const u8 commitment0[32], int idx, const u8 pop[
     determ_ed25519_point_basemul(lhs, pop + 32);                 /* [z] B */
     if (determ_ed25519_point_mul(tmp, c, commitment0)) return -1;/* [c] A_0 */
     if (determ_ed25519_point_add(rhs, pop, tmp)) return -1;      /* R + [c] A_0 */
-    return (memcmp(lhs, rhs, 32) == 0) ? 0 : -1;
+    /* Both operands are publicly recomputable group elements; the constant-
+     * time compare is uniform house discipline (ct.h), not a leak fix. */
+    return determ_ct_memcmp(lhs, rhs, 32);
 }
 
 int determ_frost_dkg_verify_share(const u8 share[32], int j, const u8 *commitments, int t) {
@@ -333,7 +336,8 @@ int determ_frost_dkg_verify_share(const u8 share[32], int j, const u8 *commitmen
         if (determ_ed25519_point_add(acc, acc, term)) return -1; /* acc += j^k · C_k */
     }
     determ_ed25519_point_basemul(lhs, share);                    /* [share] B */
-    return (memcmp(lhs, acc, 32) == 0) ? 0 : -1;
+    /* Same as verify_pop: public group elements; CT compare for uniformity. */
+    return determ_ct_memcmp(lhs, acc, 32);
 }
 
 /* ── Proactive Secret Sharing refresh (Herzberg et al. 1995) ──────────────────

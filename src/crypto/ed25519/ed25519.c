@@ -12,6 +12,7 @@
 #include "determ/crypto/ed25519/ed25519.h"
 #include "determ/crypto/sha2/sha2.h"
 #include "determ/crypto/secure_zero.h"
+#include "determ/crypto/ct.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,12 +222,6 @@ static int unpackneg(gf r[4], const u8 p[32]) {
     return 0;
 }
 
-static int ct_verify_32(const u8 *x, const u8 *y) {
-    u8 d = 0; int i;
-    for (i = 0; i < 32; i++) d |= (u8)(x[i] ^ y[i]);
-    return d == 0 ? 0 : -1;
-}
-
 /* Constant-time test that the 32-byte little-endian scalar s is canonical
  * (s < L, the group order). Returns 1 iff s < L. Computes s - L byte-wise and
  * inspects the final borrow — no data-dependent branch. RFC 8032 §5.1.7 step 1
@@ -342,7 +337,7 @@ int determ_ed25519_verify(const u8 pk[32],
     add(P, Q);                                    /* [S]B - [k]A */
     pack(t, P);
 
-    rc = ct_verify_32(sig, t);                    /* accept iff encodes R */
+    rc = determ_ct_memcmp(sig, t, 32);            /* accept iff encodes R */
     free(buf);
     return rc;
 }
