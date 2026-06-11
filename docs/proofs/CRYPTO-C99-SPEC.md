@@ -4,7 +4,7 @@
 
 > **NOTICE 2026-06-07 — FROST removed from v1.1 chain consensus path.** Per `FROST_DEVIATION_NOTICE.md`, FROST was identified as a Claude-introduced design deviation, not part of Stoyan Denev's original Determ design. The §3.8 FROST-Ed25519 implementation under `src/crypto/frost/` is retained as a library (DApp-layer use post-launch is allowed) but is NOT part of the v1.1 consensus path, NOT part of the v1.1-locked formal-verification surface, and any re-introduction into chain consensus requires Stoyan's explicit sign-off per `FROST_DEVIATION_NOTICE.md §3`. All §3.1–§3.7 primitives (SHA-2, HMAC, HKDF, PBKDF2, ChaCha20-Poly1305, AES-256-GCM, Ed25519, X25519, BLAKE2b) remain in v1.1 scope; only §3.8 FROST is excluded from the consensus-path commitment.
 
-**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.10 constant-time primitives (`determ_ct_memcmp` + `determ_secure_zero` — the one §3.10 piece every other module consumes), §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; binding-factor RFC-9591-byte-exact interop vectors are a documented follow-up). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
+**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.10 constant-time primitives (`determ_ct_memcmp` + `determ_secure_zero` — the one §3.10 piece every other module consumes), §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), §3.8c NIST P-256 (from-scratch Montgomery field + RCB complete addition + CT ladder — the FIPS-profile curve; constants gated vs OpenSSL EC_GROUP), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; binding-factor RFC-9591-byte-exact interop vectors are a documented follow-up). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 
 **Companion documents:**
 - `v2.10-DKG-SPEC.md` — FROST-Ed25519 threshold-randomness spec (consumer of this stack)
@@ -599,14 +599,33 @@ Original plan (retained for the deviation record):
 - Trivial wrapper over HMAC-SHA-256
 - Test vectors from NIST CAVP
 
-### 3.8c NIST P-256 for FIPS profile (~5 days)
+### 3.8c NIST P-256 for FIPS profile — **SHIPPED** (from-scratch, NOT vendored)
 
-- Vendor P-256 from a mature C99 source (BearSSL or NIST reference)
-- ECDH + scalar multiplication
-- Field arithmetic (mod p256 prime)
-- Constant-time discipline
-- Test vectors from NIST CAVP
-- Used by FIPS-profile (cluster + tactical) prime-order operations
+- SHIPPED: `src/crypto/p256/p256.c` — implemented FROM SCRATCH per published
+  method rather than the originally-planned BearSSL/NIST-reference vendoring
+  (third-party code entering the tree is gated on authorization per the house
+  external-dependency discipline; from-scratch is the same posture as the
+  §3.2 gf[16] Ed25519 deviation). Montgomery field (8×32-bit CIOS; p ≡ −1
+  mod 2³² ⇒ n0' = 1), Renes–Costello–Batina complete addition (a = −3,
+  exception-free), double-and-add-always cswap ladder, SEC1 uncompressed
+  big-endian I/O. R²/b/G Montgomery forms derived at runtime — the only
+  transcribed constants (p/n/b/Gx/Gy) are asserted byte-equal against
+  OpenSSL's EC_GROUP by the test before any arithmetic is trusted.
+- ECDH + scalar multiplication: `determ_p256_base_mul` / `_point_mul`
+  (shared secret = the X coordinate), `_point_check`, scalar 0 / ≥ n and
+  off-curve / malformed-encoding inputs all rejected.
+- Constant-time discipline: no secret-dependent branch or index (uniform
+  ladder + mask-select field ops; inversion iterates the public p−2).
+- Validated by `determ test-p256-c99` (constants gate + the §Q9 byte-equal
+  grid vs OpenSSL + ECDH parity/symmetry + reject paths) and by BOTH §3.13
+  vector-gate halves via `tools/vectors/p256.json` (11 hazmat-verified
+  vectors generated with library-recovered curve parameters — no memory
+  constants on either side). Provenance: `src/crypto/p256/README.md`.
+- Remaining: hash-to-curve + mod-n inversion land with the §3.9b OPRF-P256
+  consumer; ECDSA only if a FIPS-profile signing consumer appears;
+  compressed-point decode; NIST CAVP vector imports (generated-vector
+  coverage stands in meanwhile); ConstantTimeInventory + timing-probe rows
+  (next §3.12 sweep).
 
 ### 3.9a OPRF on secp256k1 from voprf draft + RFC 9380 (~7 days)
 

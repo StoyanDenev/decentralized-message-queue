@@ -3,8 +3,8 @@
 # OFFLINE half: every vector file in tools/vectors/<primitive>.json is (1)
 # schema-validated and (2) recomputed end-to-end with an INDEPENDENT
 # implementation (python hashlib / hmac / pbkdf2_hmac for the hash/MAC/KDF
-# families; cryptography.hazmat ChaCha20Poly1305 / AESGCM / Ed25519 / X25519
-# for the AEAD + curve families). Any byte that drifts from the recomputation
+# families; cryptography.hazmat ChaCha20Poly1305 / AESGCM / Ed25519 / X25519 /
+# ec.SECP256R1 for the AEAD + curve families). Any byte that drifts from the recomputation
 # turns this RED, so a corrupted / hand-edited / fabricated vector can never
 # sit silently in the corpus that the binary-side test-*-c99 subcommands and
 # future CI gates consume.
@@ -13,8 +13,11 @@
 # examples (FIPS 180-2 Appendix B/C numbering — FIPS 180-4 dropped the worked
 # examples and points to the NIST CSRC examples page; the empty-message case
 # is NIST CAVP ShortMsg Len=0), RFC 4231, RFC 7914 §11, RFC 5869 A.1-A.3, RFC 7693, RFC 8439
-# §2.8.2, the McGrew-Viega GCM AES-256 KATs, RFC 8032 §7.1 TEST 1-3, and
-# RFC 7748 §5.2 + §6.1. Where the same vector is hardcoded in a src/main.cpp
+# §2.8.2, the McGrew-Viega GCM AES-256 KATs, RFC 8032 §7.1 TEST 1-3,
+# RFC 7748 §5.2 + §6.1, and the generated §3.8c P-256 corpus (p256.json — every
+# value recomputed here from cryptography.hazmat ec.SECP256R1; curve p/a/b and
+# the group order are recovered from the library itself, never hardcoded).
+# Where the same vector is hardcoded in a src/main.cpp
 # test-*-c99 dispatch block (SHA-2 empty/"abc", HMAC RFC 4231 cases 1-2, HKDF
 # A.1/A.3, PBKDF2 c=4096, four BLAKE2b cases, Ed25519 TEST 1, the full X25519
 # §6.1 example), the JSON bytes are the SAME bytes, so the file corpus and the
@@ -37,13 +40,14 @@ def bad(m): print("  bad: " + m)
 EXPECTED = {
     "sha256.json", "sha512.json", "hmac_sha256.json", "pbkdf2_sha256.json",
     "hkdf_sha256.json", "blake2b.json", "chacha20_poly1305.json",
-    "aes256_gcm.json", "ed25519.json", "x25519.json",
+    "aes256_gcm.json", "ed25519.json", "x25519.json", "p256.json",
 }
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+    from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives import hashes, serialization
 except Exception as e:
@@ -186,6 +190,90 @@ def chk_x25519(vec, label):
     else:
         return "unknown x25519 vector type %r" % t
 
+_P256_PARAMS = []
+def p256_params():
+    """Recover (p, a, b) of SECP256R1 mechanically from library-generated points
+    (gcd of point-relation eliminants), so the invalid_point curve-equation check
+    uses NO hardcoded curve constants. Cached after first call."""
+    if _P256_PARAMS:
+        return _P256_PARAMS[0]
+    import itertools, math
+    pts = []
+    for s in range(1, 7):
+        nums = ec.derive_private_key(s, ec.SECP256R1()).public_key().public_numbers()
+        pts.append((nums.x, nums.y))
+    f = [y * y - x * x * x for (x, y) in pts]
+    g = 0
+    for (i, j, k) in itertools.combinations(range(6), 3):
+        g = math.gcd(g, abs((f[i] - f[j]) * (pts[j][0] - pts[k][0])
+                            - (f[j] - f[k]) * (pts[i][0] - pts[j][0])))
+    q = 2
+    while q < 100000 and g.bit_length() > 256:
+        while g % q == 0 and g.bit_length() > 256:
+            g //= q
+        q += 1
+    p = g
+    if p.bit_length() != 256:
+        raise ValueError("p256 prime recovery failed (%d-bit candidate)" % p.bit_length())
+    a = ((f[0] - f[1]) * pow(pts[0][0] - pts[1][0], -1, p)) % p
+    b = (f[0] - a * pts[0][0]) % p
+    if a != p - 3 or any((y * y - x * x * x - a * x - b) % p for (x, y) in pts):
+        raise ValueError("p256 curve-parameter recovery inconsistent")
+    _P256_PARAMS.append((p, a, b))
+    return _P256_PARAMS[0]
+
+def chk_p256(vec, label):
+    t = vec.get("type")
+    if t == "keygen":
+        need(vec, ["scalar_hex", "public_uncompressed_hex"], label)
+        scalar = unhex(vec["scalar_hex"], label + " scalar_hex")
+        if len(scalar) != 32: return "scalar_hex is not 32 bytes"
+        want = unhex(vec["public_uncompressed_hex"], label + " public_uncompressed_hex")
+        if len(want) != 65 or want[0] != 0x04:
+            return "public_uncompressed_hex is not 65 bytes 0x04||X||Y"
+        got = ec.derive_private_key(int.from_bytes(scalar, "big"),
+                                    ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        if got != want:
+            return "derived pubkey %s != public_uncompressed_hex %s" % (got.hex(), want.hex())
+    elif t == "ecdh":
+        need(vec, ["private_a_hex", "private_b_hex", "public_a_uncompressed_hex",
+                   "public_b_uncompressed_hex", "shared_x_hex"], label)
+        ska = ec.derive_private_key(
+            int.from_bytes(unhex(vec["private_a_hex"], label + " private_a_hex"), "big"),
+            ec.SECP256R1())
+        skb = ec.derive_private_key(
+            int.from_bytes(unhex(vec["private_b_hex"], label + " private_b_hex"), "big"),
+            ec.SECP256R1())
+        unc = lambda k: k.public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        if unc(ska).hex() != unhex(vec["public_a_uncompressed_hex"],
+                                   label + " public_a_uncompressed_hex").hex():
+            return "derived public_a %s != public_a_uncompressed_hex" % unc(ska).hex()
+        if unc(skb).hex() != unhex(vec["public_b_uncompressed_hex"],
+                                   label + " public_b_uncompressed_hex").hex():
+            return "derived public_b %s != public_b_uncompressed_hex" % unc(skb).hex()
+        want = unhex(vec["shared_x_hex"], label + " shared_x_hex")
+        if len(want) != 32: return "shared_x_hex is not 32 bytes"
+        sab = ska.exchange(ec.ECDH(), skb.public_key())
+        sba = skb.exchange(ec.ECDH(), ska.public_key())
+        if sab != want or sba != want:
+            return "recomputed shared %s/%s != shared_x_hex %s" % (sab.hex(), sba.hex(), want.hex())
+    elif t == "invalid_point":
+        need(vec, ["point_uncompressed_hex"], label)
+        pt = unhex(vec["point_uncompressed_hex"], label + " point_uncompressed_hex")
+        if len(pt) != 65 or pt[0] != 0x04:
+            return "point_uncompressed_hex is not 65 bytes 0x04||X||Y"
+        # checked via the curve equation directly (from_encoded_point may or may
+        # not validate depending on the cryptography/OpenSSL version)
+        p, a, b = p256_params()
+        x = int.from_bytes(pt[1:33], "big")
+        y = int.from_bytes(pt[33:65], "big")
+        if (y * y - x * x * x - a * x - b) % p == 0:
+            return "point satisfies the curve equation — it is NOT an invalid point"
+    else:
+        return "unknown p256 vector type %r" % t
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -197,6 +285,7 @@ CHECKERS = {
     "aes256_gcm":         lambda v, l: chk_aead(v, l, AESGCM, "iv_hex"),
     "ed25519":            chk_ed25519,
     "x25519":             chk_x25519,
+    "p256":               chk_p256,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

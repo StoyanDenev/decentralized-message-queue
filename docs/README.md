@@ -145,13 +145,13 @@ Run the full suite with:
 
 ```bash
 bash tools/run_all.sh                          # all tests + PASS/FAIL summary
-FAST=1 bash tools/run_all.sh                   # in-process subset only (164 tests, ~2-3 min, no flakes)
+FAST=1 bash tools/run_all.sh                   # in-process subset only (165 tests, ~2-3 min, no flakes)
 QUIET=1 bash tools/run_all.sh                  # summary only (no per-test stdout)
 ONLY_PATTERN='test_dapp' bash tools/run_all.sh # subset by regex
 SKIP_PATTERN='test_equiv' bash tools/run_all.sh # skip known-flaky on a platform
 ```
 
-`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention (each test ends with a terminal `  PASS: <name>` / `  FAIL: <name>` line; the runner greps the tail window for `FAIL:` FIRST, then `PASS:` — fail-closed, so a stray per-check PASS line can never green a failing run), and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. The marker/exit discipline is itself pinned by a static ratchet, `tools/test_cluster_output_discipline.sh` (run with `SELFTEST=1` to verify its checks are live). **`FAST=1`** short-circuits to the deterministic in-process subset (`determ test-*` subcommand wrappers — 164 tests, ~2-3 minutes, no clusters, no network, no flakes; the canonical list is the `ONLY_PATTERN` regex inside `run_all.sh`) — useful for dev iteration. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
+`tools/run_all.sh` iterates every `tools/test_*.sh`, captures per-test outcome via the suite's PASS/FAIL marker convention (each test ends with a terminal `  PASS: <name>` / `  FAIL: <name>` line; the runner greps the tail window for `FAIL:` FIRST, then `PASS:` — fail-closed, so a stray per-check PASS line can never green a failing run), and exits non-zero if anything failed. Per-test failures don't stop the suite — an operator gets the full failure picture in one run. The marker/exit discipline is itself pinned by a static ratchet, `tools/test_cluster_output_discipline.sh` (run with `SELFTEST=1` to verify its checks are live). **`FAST=1`** short-circuits to the deterministic in-process subset (`determ test-*` subcommand wrappers — 165 tests, ~2-3 minutes, no clusters, no network, no flakes; the canonical list is the `ONLY_PATTERN` regex inside `run_all.sh`) — useful for dev iteration. The portable `DETERM_BIN` / `DETERM_WALLET_BIN` override hooks (see `tools/common.sh`) flow through automatically. Plain bash loop also still works:
 
 ```bash
 for t in tools/test_*.sh; do bash "$t"; done

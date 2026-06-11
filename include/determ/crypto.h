@@ -19,6 +19,7 @@
  *   - AES-256 block + AES-256-GCM                (aes/aes.h,        §3.5)
  *   - Ed25519 sign/verify                        (ed25519/ed25519.h, §3.2)
  *   - X25519                                     (x25519/x25519.h,  §3.3)
+ *   - NIST P-256 (FIPS-profile curve)            (p256/p256.h,      §3.8c)
  *   - determ_ct_memcmp + determ_secure_zero      (ct.h, secure_zero.h, §3.10)
  *
  * Deliberately NOT included:
@@ -44,5 +45,6 @@
 #include "determ/crypto/aes/aes.h"
 #include "determ/crypto/ed25519/ed25519.h"
 #include "determ/crypto/x25519/x25519.h"
+#include "determ/crypto/p256/p256.h"
 
 #endif /* DETERM_CRYPTO_H */

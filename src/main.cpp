@@ -12704,7 +12704,8 @@ int main(int argc, char** argv) {
         const char* files[] = { "sha256.json", "sha512.json", "hmac_sha256.json",
                                 "hkdf_sha256.json", "pbkdf2_sha256.json",
                                 "blake2b.json", "chacha20_poly1305.json",
-                                "aes256_gcm.json", "ed25519.json", "x25519.json" };
+                                "aes256_gcm.json", "ed25519.json", "x25519.json",
+                                "p256.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -12835,6 +12836,40 @@ int main(int argc, char** argv) {
                         if (determ_x25519(out, scalar.data(), u.data()) != 0
                             || hx(out,32) != v["output_hex"]) { ok=false; bad=name; break; }
                     }
+                } else if (prim == "p256") {
+                    // Three shapes per the "type" discriminator (big-endian /
+                    // SEC1 — unlike the LE curve25519 files):
+                    //   "keygen": pub == [scalar]G
+                    //   "ecdh": both publics re-derived; shared X equal BOTH ways
+                    //   "invalid_point": point_check must REJECT
+                    std::string ty = v.value("type", "");
+                    if (ty == "keygen") {
+                        auto k = unhex(v["scalar_hex"]);
+                        if (k.size() != 32) { ok=false; bad=name + " (bad scalar len)"; break; }
+                        uint8_t out[65];
+                        if (determ_p256_base_mul(out, k.data()) != 0
+                            || hx(out,65) != v["public_uncompressed_hex"]) { ok=false; bad=name; break; }
+                    } else if (ty == "ecdh") {
+                        auto a = unhex(v["private_a_hex"]); auto b = unhex(v["private_b_hex"]);
+                        auto pa = unhex(v["public_a_uncompressed_hex"]);
+                        auto pb = unhex(v["public_b_uncompressed_hex"]);
+                        if (a.size()!=32 || b.size()!=32 || pa.size()!=65 || pb.size()!=65) {
+                            ok=false; bad=name + " (bad len)"; break; }
+                        uint8_t ga[65], gb[65], s1[65], s2[65];
+                        if (determ_p256_base_mul(ga, a.data()) != 0 || hx(ga,65) != v["public_a_uncompressed_hex"]) {
+                            ok=false; bad=name + " (public_a)"; break; }
+                        if (determ_p256_base_mul(gb, b.data()) != 0 || hx(gb,65) != v["public_b_uncompressed_hex"]) {
+                            ok=false; bad=name + " (public_b)"; break; }
+                        if (determ_p256_point_mul(s1, a.data(), pb.data()) != 0
+                            || determ_p256_point_mul(s2, b.data(), pa.data()) != 0
+                            || hx(s1+1,32) != v["shared_x_hex"]
+                            || hx(s2+1,32) != v["shared_x_hex"]) { ok=false; bad=name + " (shared)"; break; }
+                    } else if (ty == "invalid_point") {
+                        auto pt = unhex(v["point_uncompressed_hex"]);
+                        if (pt.size() != 65) { ok=false; bad=name + " (bad len)"; break; }
+                        if (determ_p256_point_check(pt.data()) != -1) {
+                            ok=false; bad=name + " (off-curve point ACCEPTED)"; break; }
+                    } else { ok=false; bad=name + " (unknown p256 type '" + ty + "')"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;

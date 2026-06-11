@@ -1,0 +1,79 @@
+{
+  "primitive": "p256",
+  "source": "Generated for CRYPTO-C99-SPEC 3.8c via python cryptography.hazmat ec.SECP256R1 (ec.derive_private_key for keygen, ec.ECDH for exchanges); ALL hex is lowercase BIG-endian per the P-256 wire convention (unlike the little-endian curve25519 files); group order n recovered from the library itself by derive_private_key range binary search, curve p/b recovered from library-generated points for the invalid_point construction; every ECDH shared_x verified identical from both exchange directions and against x((a*b mod n)G)",
+  "vectors": [
+    {
+      "type": "keygen",
+      "name": "scalar = 1 (generator point G)",
+      "scalar_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "public_uncompressed_hex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+    },
+    {
+      "type": "keygen",
+      "name": "scalar = 2 (point doubling 2G)",
+      "scalar_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "public_uncompressed_hex": "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1"
+    },
+    {
+      "type": "keygen",
+      "name": "scalar = 0x55 repeated 32 times (fixed mid-range constant)",
+      "scalar_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "public_uncompressed_hex": "0457e977f6db7e33c3fe7acf2842ed987009caf56d458682fca447b7d3d762ab34c5ab3770ba573bdff5414065640ffb5b346dfa84dec4db4d68e5f59cc471c2ec"
+    },
+    {
+      "type": "keygen",
+      "name": "scalar = n-1 where n is the SECP256R1 group order recovered from the library via derive_private_key range binary search; pubkey = -G (same X as G, negated Y)",
+      "scalar_hex": "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+      "public_uncompressed_hex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a"
+    },
+    {
+      "type": "keygen",
+      "name": "scalar = SHA-256(\"determ p256 fixture A\") (fixed pseudo-random value)",
+      "scalar_hex": "7dc66eecf228c3cd69df8b2277805b6fae79bcaf68422c3cce1476af91857c83",
+      "public_uncompressed_hex": "044fc7c0b6d8a67c5648589dba7d327b011485233700db28fef6bdaebe32c1d8437bd84bc24ba35c711f0c715d5d8be57960abc0d2a1d29d63bbe57579e1c32902"
+    },
+    {
+      "type": "keygen",
+      "name": "scalar = SHA-256(\"determ p256 fixture B\") (fixed pseudo-random value)",
+      "scalar_hex": "5b5377e61fe5c15df73ead0ca87538d8c70a73c1ea13d8697c3691e149cb5322",
+      "public_uncompressed_hex": "04ab9100f8f3efd59d9d4cb797d75f29d095cdb1d96fd71e013be864d5389922f8827e6a9488f49a7776a0bb14792147cf72055783873a90e0a1d2e6c16047d624"
+    },
+    {
+      "type": "ecdh",
+      "name": "ECDH fixture A x fixture B (both scalars are stated SHA-256 values)",
+      "private_a_hex": "7dc66eecf228c3cd69df8b2277805b6fae79bcaf68422c3cce1476af91857c83",
+      "private_b_hex": "5b5377e61fe5c15df73ead0ca87538d8c70a73c1ea13d8697c3691e149cb5322",
+      "public_a_uncompressed_hex": "044fc7c0b6d8a67c5648589dba7d327b011485233700db28fef6bdaebe32c1d8437bd84bc24ba35c711f0c715d5d8be57960abc0d2a1d29d63bbe57579e1c32902",
+      "public_b_uncompressed_hex": "04ab9100f8f3efd59d9d4cb797d75f29d095cdb1d96fd71e013be864d5389922f8827e6a9488f49a7776a0bb14792147cf72055783873a90e0a1d2e6c16047d624",
+      "shared_x_hex": "8e57ce1ab85bcf575dd48e2255ac9996423e3d970269db2512b9dddc85309ff4"
+    },
+    {
+      "type": "ecdh",
+      "name": "ECDH scalar-2 x mid-range 0x55..55",
+      "private_a_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "private_b_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "public_a_uncompressed_hex": "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1",
+      "public_b_uncompressed_hex": "0457e977f6db7e33c3fe7acf2842ed987009caf56d458682fca447b7d3d762ab34c5ab3770ba573bdff5414065640ffb5b346dfa84dec4db4d68e5f59cc471c2ec",
+      "shared_x_hex": "38014c603c89da9712426320ee53a94c795dda3b90bb5b0791ae8f5db486b7db"
+    },
+    {
+      "type": "ecdh",
+      "name": "ECDH (n-1) x fixture A (order-edge scalar)",
+      "private_a_hex": "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+      "private_b_hex": "7dc66eecf228c3cd69df8b2277805b6fae79bcaf68422c3cce1476af91857c83",
+      "public_a_uncompressed_hex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a",
+      "public_b_uncompressed_hex": "044fc7c0b6d8a67c5648589dba7d327b011485233700db28fef6bdaebe32c1d8437bd84bc24ba35c711f0c715d5d8be57960abc0d2a1d29d63bbe57579e1c32902",
+      "shared_x_hex": "4fc7c0b6d8a67c5648589dba7d327b011485233700db28fef6bdaebe32c1d843"
+    },
+    {
+      "type": "invalid_point",
+      "name": "pubkey of scalar 1 with the least-significant bit of Y flipped (off-curve: y^2 != x^3 + a*x + b mod p)",
+      "point_uncompressed_hex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f4"
+    },
+    {
+      "type": "invalid_point",
+      "name": "pubkey of scalar 2 with the most-significant bit of Y flipped (off-curve: y^2 != x^3 + a*x + b mod p)",
+      "point_uncompressed_hex": "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997887775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1"
+    }
+  ]
+}
