@@ -641,11 +641,28 @@ Original plan (retained for the deviation record):
   memcmp, strict 0/-1 contract, wipe + no-op pins). The TIMING property
   itself is §3.12's dudect/ctgrind follow-up.
 
-### 3.11 Unified API + C++ wrapper (~3 days)
+### 3.11 Unified API + C++ wrapper — **SEEDED** (two Q5 deviations recorded)
 
-- `include/determ/crypto.h` — C99 API per Q5
-- `include/determ/crypto.hpp` — C++ ergonomic wrappers
-- Test that existing callers can refactor with mechanical edits
+- `include/determ/crypto.h` — SHIPPED as an UMBRELLA over the per-module
+  headers (one include for the whole shipped C99 layer) rather than the Q5
+  struct-typedef signature set — that sketch predates the shipped raw-buffer
+  APIs, and a second C-level signature set over the same primitives is churn
+  without safety gain (type safety lives in the C++ wrapper). FROST + the
+  ed25519 group primitives deliberately excluded (library-only per
+  FROST_DEVIATION_NOTICE.md; explicit include opt-in).
+- `include/determ/crypto.hpp` — SHIPPED header-only in namespace
+  **`determ::c99`**, NOT Q5's `determ::crypto`: that namespace is the
+  production OpenSSL-backed layer (sha256.hpp / merkle.hpp / keys.hpp) with an
+  overlapping `sha256` name and different return types. The wrapper folds into
+  `determ::crypto` at the §3.15 migration when the OpenSSL layer retires.
+  Conventions: `std::span` in, `std::array`/`std::vector` out; parameter
+  errors throw `std::runtime_error`; AEAD auth failure + X25519 low-order
+  return `std::nullopt` (normal adversarial outcomes, not exceptions).
+- Validated by `determ test-c99-api` (wrapper output == raw C API output per
+  primitive, with KAT anchors; the full AEAD tamper -> nullopt contract).
+- Remaining for full §3.11: RAII incremental/streaming state (BLAKE2b first —
+  the only shipped streaming C API), the caller-refactor mechanical-edit test
+  (lands with §3.15), and umbrella rows for §3.7/§3.8c/§3.9 as they ship.
 
 ### 3.12 Constant-time verification framework (~3-5 days)
 
@@ -656,12 +673,20 @@ Original plan (retained for the deviation record):
 
 ### 3.13 Test-vector validation — **SEEDED** (both halves live for the shipped primitives)
 
-- `tools/vectors/<primitive>.json` — 10 files / 40 vectors for the shipped
-  families (SHA-256/512 incl. the million-'a' `repeat` form, HMAC, HKDF,
-  PBKDF2, BLAKE2b, ChaCha20-Poly1305, AES-256-GCM, Ed25519, X25519 incl. the
-  full §6.1 DH exchange). No-fabrication rule: every vector was mechanically
-  recomputed before inclusion; argon2id omitted (no local oracle) — its KATs
-  stay pinned in `test-argon2id-c99`.
+- `tools/vectors/<primitive>.json` — 10 files / 52 vectors for the shipped
+  families (SHA-256/512 incl. the million-'a' `repeat` form, HMAC RFC 4231
+  TC1-7, HKDF A.1-A.3 + TC2-long + L∈{0,32,8160} edges, PBKDF2, BLAKE2b incl.
+  two-block keyed + 64-byte-key edges, ChaCha20-Poly1305 + AES-256-GCM incl.
+  generated block-boundary cases, Ed25519 incl. §7.1 TEST SHA(abc), X25519
+  incl. the full §6.1 DH exchange + the §5.2 iterated vector at 1 and 1,000
+  iterations). Mixed provenance is declared per-file in each `source` field
+  (published RFC/NIST KATs + cryptography.hazmat-generated boundary cases).
+  No-fabrication rule: every vector was mechanically recomputed before
+  inclusion; argon2id omitted (no local oracle) — its KATs stay pinned in
+  `test-argon2id-c99`. The trust analysis of the two-half gate is proof FB68
+  (`VectorGateComposition.md`); the corpus count is deliberately NOT pinned
+  in the proof (it pins the file set + mechanics, so the corpus can grow
+  without re-staling it).
 - File half: `tools/test_c99_vector_files.sh` validates every JSON against
   INDEPENDENT python implementations (hashlib / cryptography.hazmat) — a bad
   vector file goes RED without the determ binary.

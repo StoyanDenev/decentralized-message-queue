@@ -1,6 +1,6 @@
 {
   "primitive": "x25519",
-  "source": "RFC 7748 section 5.2 scalar-mult vectors + section 6.1 Diffie-Hellman example; recomputed via cryptography.hazmat X25519; the 6.1 keys/shared-secret are byte-equal to the pins in src/main.cpp test-x25519-c99",
+  "source": "RFC 7748 section 5.2 scalar-mult vectors + the section 5.2 iteration test at 1 and 1,000 iterations (the 1,000,000-iteration case is omitted) + section 6.1 Diffie-Hellman example; recomputed via cryptography.hazmat X25519; the 6.1 keys/shared-secret are byte-equal to the pins in src/main.cpp test-x25519-c99",
   "vectors": [
     {
       "type": "scalarmult",
@@ -24,6 +24,20 @@
       "public_a_hex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
       "public_b_hex": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
       "shared_hex": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "type": "scalarmult",
+      "name": "RFC 7748 5.2 iteration test, 1 iteration (k=u=09||00*31; output is the RFC's published 422c8e7a... value)",
+      "scalar_hex": "0900000000000000000000000000000000000000000000000000000000000000",
+      "u_hex": "0900000000000000000000000000000000000000000000000000000000000000",
+      "output_hex": "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"
+    },
+    {
+      "type": "scalarmult",
+      "name": "RFC 7748 5.2 iteration test, 1000 iterations (scalar/u = loop state after 999 iterations from k=u=09||00*31; output is the RFC's published 684cf59b... value)",
+      "scalar_hex": "e4ba7df230e7574d397d88e1e18069d405dd71c6a286086dda6cc54d04f69a18",
+      "u_hex": "0a5beb6060b6a9e264f6776681c7ee69891e5e7ef6a31c15857339fec94a003b",
+      "output_hex": "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51"
     }
   ]
 }

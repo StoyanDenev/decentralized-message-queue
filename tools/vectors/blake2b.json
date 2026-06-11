@@ -1,6 +1,6 @@
 {
   "primitive": "blake2b",
-  "source": "RFC 7693 Appendix A ('abc' BLAKE2b-512) + python hashlib.blake2b reference cases (unkeyed/keyed, 64/32-byte outputs); recomputed via python hashlib.blake2b; four cases byte-equal to the pins in src/main.cpp test-blake2b-c99",
+  "source": "RFC 7693 Appendix A ('abc' BLAKE2b-512) + python hashlib.blake2b reference cases (unkeyed/keyed, 64/32-byte outputs, a two-block keyed message, and a 64-byte max-length key — extending the hashlib.blake2b oracle of C99CryptoStackAudit.md section 8d); recomputed via python hashlib.blake2b; four cases byte-equal to the pins in src/main.cpp test-blake2b-c99",
   "vectors": [
     {
       "name": "unkeyed BLAKE2b-512 of 'abc' (RFC 7693 Appendix A)",
@@ -43,6 +43,20 @@
       "key_hex": "64657465726d2d626c616b6532622d6b6579",
       "outlen": 32,
       "digest_hex": "445f0e39ac1104d8617762a91cef6cfb95b0426f15d5ede9087cf4b7d07a1106"
+    },
+    {
+      "name": "generated: keyed BLAKE2b-512, two-block message (msg=bytes i mod 256 for i=0..199, key=00..1f)",
+      "msg_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "outlen": 64,
+      "digest_hex": "9093518bf78f2721ca56ba259b17cae6a3c1851e8d09f996d5897febc9188502fb1f1382fe6acc16cf593e744db24b6c51b09978a7b458341f2a1043823244b6"
+    },
+    {
+      "name": "generated: keyed BLAKE2b-512, 64-byte max-length key (msg='abc', key=00..3f)",
+      "msg_hex": "616263",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "outlen": 64,
+      "digest_hex": "06bbc3dedf13a31139498655251b7588ccd3bb5aaa071b2d44d8e0a04095579ed590fbfdcf941f4370ce5ce623624e7a76d33e7a8109dcda9b57d72f8f8efa51"
     }
   ]
 }

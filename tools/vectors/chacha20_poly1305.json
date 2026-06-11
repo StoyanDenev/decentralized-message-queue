@@ -1,6 +1,6 @@
 {
   "primitive": "chacha20_poly1305",
-  "source": "RFC 8439 section 2.8.2 AEAD example; recomputed via cryptography.hazmat ChaCha20Poly1305; tag verified against the published 1ae10b59... value",
+  "source": "RFC 8439 section 2.8.2 AEAD example + generated block-boundary cases (pt=64B/65B, fixed key/nonce/aad stated in the vector names); recomputed via cryptography.hazmat ChaCha20Poly1305; the RFC tag verified against the published 1ae10b59... value",
   "vectors": [
     {
       "name": "RFC 8439 section 2.8.2 AEAD example",
@@ -10,6 +10,24 @@
       "plaintext_hex": "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
       "ciphertext_hex": "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116",
       "tag_hex": "1ae10b594f09e26a7e902ecbd0600691"
+    },
+    {
+      "name": "generated: pt=64B block boundary (key=00..1f, nonce=00..0b, aad='determ-c99-aead-boundary'; cryptography.hazmat)",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce_hex": "000102030405060708090a0b",
+      "aad_hex": "64657465726d2d6339392d616561642d626f756e64617279",
+      "plaintext_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "ciphertext_hex": "89fa0a032d12a347bf8a35f89410006cd961a0f44561bbaefe8e35de69ddb823cca10ed0c23b97bf1f1b5cf349b9a10c4eb59b47c91d8eac2a81e33cac72a0e9",
+      "tag_hex": "9aed0db60e92c1b9c45c5d1458756e51"
+    },
+    {
+      "name": "generated: pt=65B block+1 (key=00..1f, nonce=01..0c, aad='determ-c99-aead-boundary'; cryptography.hazmat)",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce_hex": "0102030405060708090a0b0c",
+      "aad_hex": "64657465726d2d6339392d616561642d626f756e64617279",
+      "plaintext_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+      "ciphertext_hex": "648946690d57a2b440e04f4cd8ac8201aeed818d529ca95c63c4b6d25af2f12a389aab8bbc1707dd6f9f60f34a97bb1ff776d1d94f040acc894d0d232c013becaf",
+      "tag_hex": "a28813fda02683c03f80aa8a70b09199"
     }
   ]
 }
