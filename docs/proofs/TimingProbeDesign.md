@@ -2,9 +2,23 @@
 
 # §3.12 Timing-Probe Design — constant-time verification framework
 
-**Status:** DESIGN — not yet implemented. No code, no CLI subcommand, no
-wrapper script exists for this yet; this document is the §3.12 design that
-implementation will follow once §1's authorization question is resolved.
+**Status:** IMPLEMENTED (first tranche, same session as the design). The
+IN-HOUSE path of §1 shipped — `determ ct-timing-probe` (src/main.cpp
+dispatch): the §2 engine in full (interleaved fix-vs-random classes, rdtsc
+with lfence serialization + steady_clock fallback, the pinned
+{no-crop, 99.9, 99, 95, 90, 75, 50} crop ladder with calibration-pass
+thresholds, Welford cells, max-|t|-over-pairs-and-crops reporting with the
+§3.4 banding) plus six §4 targets: ct-memcmp (4 mismatch-position classes),
+chacha-tag-verify, gcm-tag-verify, ed25519-sign, x25519, and the
+sha256-content negative control. `--selftest` (the §5.5 bit-exact statistics
+fixture) is in the regular suite as `tools/test_ct_timing_selftest.sh`;
+measurement mode stays out of run_all.sh per §3.1. First measured run on the
+dev host (MSVC -O2, rdtsc): all six targets max |t| in 1.3–3.0, no evidence
+of leakage at the smoke sample sizes — consistent with ConstantTimeInventory's
+mechanism claims, with §5.4's negative-claim caveats in force. Remaining: the
+other §4 targets register in the same table as they are added; §1's
+dudect/ctgrind VENDORING question (the third-party-code path) still awaits
+Stoyan's authorization and is unaffected by the in-house implementation.
 
 **Subject:** the design of Determ's constant-time (CT) verification framework —
 CRYPTO-C99-SPEC.md §3.12, which today reads in full:

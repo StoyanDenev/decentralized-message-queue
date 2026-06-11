@@ -664,12 +664,21 @@ Original plan (retained for the deviation record):
   the only shipped streaming C API), the caller-refactor mechanical-edit test
   (lands with §3.15), and umbrella rows for §3.7/§3.8c/§3.9 as they ship.
 
-### 3.12 Constant-time verification framework (~3-5 days)
+### 3.12 Constant-time verification framework — **SEEDED** (in-house probe shipped; vendoring still gated)
 
-- Vendor dudect or ctgrind
-- Integrate into CI
-- Per-primitive constant-time test
-- Reports + documentation
+- `determ ct-timing-probe` — IN-HOUSE fix-vs-random Welch-t leakage probe
+  implemented from the published dudect method (design + statistical
+  soundness analysis: `TimingProbeDesign.md`; targets: ConstantTimeInventory
+  §5). First tranche: ct-memcmp (4 mismatch-position classes),
+  chacha/gcm-tag-verify, ed25519-sign, x25519, sha256-content negative
+  control. REPORTING tool by design — measurement mode stays out of
+  run_all.sh/FAST (environmentally flaky); only the deterministic `--selftest`
+  statistics fixture is suite-eligible (`tools/test_ct_timing_selftest.sh`).
+- Vendoring dudect or ctgrind (third-party code into the tree) remains
+  FLAGGED awaiting authorization per TimingProbeDesign.md §1; the ctgrind
+  taint-analysis leg needs the Linux/WSL2 valgrind environment either way.
+- Remaining: the rest of the §4 target list; per-build report archiving
+  (CSV + build recipe per TimingProbeDesign.md §6); CI wiring decision.
 
 ### 3.13 Test-vector validation — **SEEDED** (both halves live for the shipped primitives)
 

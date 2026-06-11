@@ -46,6 +46,13 @@
 #include <cstring>
 #include <thread>
 #include <chrono>
+#include <random>      // ct-timing-probe: interleaved class assignment + RND-class secrets
+#include <cmath>       // ct-timing-probe: Welch t / sqrt
+#include <algorithm>   // ct-timing-probe: percentile crop thresholds (nth_element)
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>    // ct-timing-probe: __rdtsc + _mm_lfence (TimingProbeDesign.md §2.3)
+#define DETERM_HAVE_RDTSC 1
+#endif
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -465,6 +472,11 @@ In-process tests (deterministic, no network):
                                               raw C99 API per primitive; AEAD
                                               nullopt-on-auth-failure + throw-
                                               on-param-error contracts
+  determ ct-timing-probe <target|--list|      §3.12: fix-vs-random Welch-t
+                          --selftest>         timing-leakage probe (dudect
+                                              method, in-house — REPORTING
+                                              tool, not pass/fail; --selftest
+                                              is the suite-eligible piece)
 )" << R"(  determ test-view-root                       v2.7 F2 + v2.10 Phase A: view-
                                               reconciliation primitives + FROST
                                               verify. compute_view_root +
@@ -11988,6 +12000,247 @@ int main(int argc, char** argv) {
         return fail==0 ? 0 : 1;
     }
 
+    if (cmd == "ct-timing-probe") {
+        // CRYPTO-C99-SPEC §3.12 / docs/proofs/TimingProbeDesign.md — the
+        // in-house fix-vs-random timing-leakage probe (dudect method:
+        // Reparaz-Balasch-Verbauwhede 2017, implemented from the published
+        // method — NO vendored third-party harness code, per the design
+        // doc's §1 deviation flag).
+        //
+        // REPORTING TOOL, deliberately NOT a pass/fail regression test
+        // (design §3.1): timing is environmental; only `--selftest` (the
+        // §5.5 deterministic statistics fixture) belongs in the suite.
+        // First tranche of targets — engine is general; remaining §4 targets
+        // register here as they are added. Interpretation bands per §3.4:
+        // |t| <= 4.5 no evidence at this n; 4.5-10 re-run bigger and watch
+        // the trend; > 10 or growing with n = treat as a leak.
+
+        // ── Statistics engine ──────────────────────────────────────────────
+        struct Welford {                     // design §2.5: O(1) per sample
+            double n = 0, m = 0, M2 = 0;
+            void add(double x) { n += 1; double d = x - m; m += d / n; M2 += d * (x - m); }
+            double var() const { return n > 1 ? M2 / (n - 1) : 0.0; }
+        };
+        auto welch_t = [](const Welford& a, const Welford& b) -> double {
+            if (a.n < 2 || b.n < 2) return 0.0;
+            double se2 = a.var()/a.n + b.var()/b.n;
+            return se2 > 0 ? (a.m - b.m) / std::sqrt(se2) : 0.0;
+        };
+        auto welch_df = [](const Welford& a, const Welford& b) -> double {
+            double va = a.var()/a.n, vb = b.var()/b.n, s = va + vb;
+            double den = va*va/(a.n - 1) + vb*vb/(b.n - 1);
+            return den > 0 ? s*s/den : 0.0;
+        };
+
+        std::string sub = (argc > 2) ? argv[2] : "--list";
+
+        // ── --selftest: §5.5 pinned fixture, bit-exact, suite-eligible ─────
+        if (sub == "--selftest") {
+            // Batch-formula path.
+            const double A[5] = {10,11,12,13,14}, B[5] = {12,13,14,15,16};
+            double ma=0, mb=0; for (int i=0;i<5;i++){ ma+=A[i]; mb+=B[i]; } ma/=5; mb/=5;
+            double va=0, vb=0; for (int i=0;i<5;i++){ va+=(A[i]-ma)*(A[i]-ma); vb+=(B[i]-mb)*(B[i]-mb); }
+            va/=4; vb/=4;
+            double t_batch  = (ma-mb)/std::sqrt(va/5+vb/5);
+            double s = va/5+vb/5;
+            double df_batch = s*s/((va/5)*(va/5)/4 + (vb/5)*(vb/5)/4);
+            // Welford-incremental path.
+            Welford wa, wb; for (int i=0;i<5;i++){ wa.add(A[i]); wb.add(B[i]); }
+            double t_inc  = welch_t(wa, wb);
+            double df_inc = welch_df(wa, wb);
+            int fail = 0;
+            auto check = [&](bool c, const char* m) {
+                if (c) std::cout << "  PASS: " << m << "\n";
+                else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+            };
+            check(t_batch == -2.0,  "batch Welch t == -2.0 exactly (TimingProbeDesign §5.5)");
+            check(df_batch == 8.0,  "batch Welch-Satterthwaite df == 8.0 exactly");
+            check(t_inc == -2.0,    "Welford-incremental t == -2.0 exactly (bit-equal to batch)");
+            check(df_inc == 8.0,    "Welford-incremental df == 8.0 exactly");
+            check(welch_t(wb, wa) == 2.0, "antisymmetry: t(B,A) == +2.0 exactly");
+            std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                      << ": ct-timing-probe selftest "
+                      << (fail == 0 ? "statistics engine matches the pinned §5.5 fixture"
+                                    : "statistics engine diverges from the pinned fixture") << "\n";
+            return fail == 0 ? 0 : 1;
+        }
+
+        // ── Target registry (design §3.3): name, classes, secret setup,
+        //    timed call. Class 0 is always FIX. ──────────────────────────────
+        struct Target {
+            const char* id;
+            const char* what;
+            std::vector<std::string> classes;
+            size_t batch;                       // invocations per timed sample
+        };
+        const std::vector<Target> targets = {
+            { "ct-memcmp",      "determ_ct_memcmp over 32 bytes (inventory target 1)",
+              { "equal", "diff@first", "diff@mid", "diff@last" }, 64 },
+            { "chacha-tag-verify", "determ_chacha20_poly1305_decrypt reject path (tag compare)",
+              { "fix-tag", "rnd-tag" }, 8 },
+            { "gcm-tag-verify", "determ_aes256_gcm_decrypt reject path (tag compare)",
+              { "fix-tag", "rnd-tag" }, 8 },
+            { "ed25519-sign",   "determ_ed25519_sign, fixed msg (secret = seed)",
+              { "fix-seed", "rnd-seed" }, 1 },
+            { "x25519",         "determ_x25519, fixed point (secret = scalar)",
+              { "fix-scalar", "rnd-scalar" }, 1 },
+            { "sha256-content", "determ_sha256 fixed-length msg (negative control: ARX is data-independent)",
+              { "fix-msg", "rnd-msg" }, 16 },
+        };
+
+        if (sub == "--list") {
+            std::cout << "ct-timing-probe targets (first tranche; full list: TimingProbeDesign.md §4):\n";
+            for (auto& t : targets)
+                std::cout << "  " << t.id << "  — " << t.what
+                          << "  [" << t.classes.size() << " classes, batch " << t.batch << "]\n";
+            std::cout << "usage: determ ct-timing-probe <target> [--samples N] [--timer rdtsc|monotonic]\n"
+                      << "       determ ct-timing-probe --selftest\n";
+            return 0;
+        }
+
+        const Target* tgt = nullptr;
+        for (auto& t : targets) if (sub == t.id) tgt = &t;
+        if (!tgt) { std::cerr << "unknown target '" << sub << "' (see --list)\n"; return 1; }
+
+        uint64_t samples = 200000;              // default; §5.3 floor is operator-tunable
+        std::string timer = "auto";
+        for (int i = 3; i + 1 < argc; i += 2) {
+            std::string k = argv[i];
+            if (k == "--samples") samples = std::stoull(argv[i+1]);
+            else if (k == "--timer") timer = argv[i+1];
+        }
+#ifdef DETERM_HAVE_RDTSC
+        bool use_rdtsc = (timer != "monotonic");
+#else
+        bool use_rdtsc = false;
+        if (timer == "rdtsc") { std::cerr << "rdtsc unavailable on this build; using monotonic\n"; }
+#endif
+        auto now_ticks = [&]() -> uint64_t {
+#ifdef DETERM_HAVE_RDTSC
+            if (use_rdtsc) { _mm_lfence(); uint64_t v = __rdtsc(); _mm_lfence(); return v; }
+#endif
+            return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+
+        // CSPRNG-seeded generator for class assignment + RND-class secrets
+        // (design §2.1-2.2; mt19937_64 seeded from random_device — adequate
+        // for a measurement tool; secrets here protect nothing).
+        std::random_device rd;
+        std::mt19937_64 rng(((uint64_t)rd() << 32) ^ rd());
+        auto rnd_fill = [&](uint8_t* p, size_t n) {
+            for (size_t i = 0; i < n; i++) p[i] = (uint8_t)(rng() & 0xff);
+        };
+
+        // Fixed (public) inputs shared by all classes of a target.
+        uint8_t key32[32], n12[12], pt64[64], ct64[64], tag_good[16], aad[8];
+        for (int i = 0; i < 32; i++) key32[i] = (uint8_t)(i * 7 + 1);
+        for (int i = 0; i < 12; i++) n12[i] = (uint8_t)(i + 3);
+        for (int i = 0; i < 64; i++) pt64[i] = (uint8_t)(i * 13 + 5);
+        for (int i = 0; i <  8; i++) aad[i] = (uint8_t)(0xA0 + i);
+        uint8_t fixseed[32], fixscalar[32], fixmsg[64], fixpk[32];
+        for (int i = 0; i < 32; i++) { fixseed[i] = (uint8_t)(0x42 + i); fixscalar[i] = (uint8_t)(0x24 + i); }
+        for (int i = 0; i < 64; i++) fixmsg[i] = (uint8_t)(0x11 * (i % 13));
+        determ_ed25519_pubkey_from_seed(fixseed, fixpk);
+        uint8_t basepoint[32] = {9};
+        determ_chacha20_poly1305_encrypt(key32, n12, aad, sizeof aad, pt64, 64, ct64, tag_good);
+        uint8_t gcm_ct64[64], gcm_tag_good[16];
+        determ_aes256_gcm_encrypt(key32, n12, aad, sizeof aad, pt64, 64, gcm_ct64, gcm_tag_good);
+        uint8_t fixtag_wrong[16]; std::memcpy(fixtag_wrong, tag_good, 16); fixtag_wrong[0] ^= 1;
+        uint8_t gcm_fixtag_wrong[16]; std::memcpy(gcm_fixtag_wrong, gcm_tag_good, 16); gcm_fixtag_wrong[0] ^= 1;
+        uint8_t bufA[32], bufB[32];
+        for (int i = 0; i < 32; i++) bufA[i] = (uint8_t)(i + 1);
+
+        volatile int sink = 0;                  // results consumed — no dead-code elision
+        std::string id = tgt->id;
+
+        // One timed sample for class c: per-iteration setup OUTSIDE the timed
+        // region (design §3.3), then `batch` back-to-back target calls inside.
+        auto run_one = [&](size_t c) -> double {
+            uint8_t seed[32], scalar[32], msg[64], tag[16], out64[64], o32[32], sig[64];
+            // ---- setup (untimed) ----
+            if (id == "ct-memcmp") {
+                std::memcpy(bufB, bufA, 32);
+                if (c == 1) bufB[0] ^= 1;
+                else if (c == 2) bufB[16] ^= 1;
+                else if (c == 3) bufB[31] ^= 1;
+            } else if (id == "chacha-tag-verify" || id == "gcm-tag-verify") {
+                if (c == 0) std::memcpy(tag, id[0]=='c' ? fixtag_wrong : gcm_fixtag_wrong, 16);
+                else rnd_fill(tag, 16);
+            } else if (id == "ed25519-sign") {
+                if (c == 0) std::memcpy(seed, fixseed, 32); else rnd_fill(seed, 32);
+            } else if (id == "x25519") {
+                if (c == 0) std::memcpy(scalar, fixscalar, 32); else rnd_fill(scalar, 32);
+            } else if (id == "sha256-content") {
+                if (c == 0) std::memcpy(msg, fixmsg, 64); else rnd_fill(msg, 64);
+            }
+            // ---- timed region ----
+            uint64_t t0 = now_ticks();
+            for (size_t b = 0; b < tgt->batch; b++) {
+                if (id == "ct-memcmp")              sink += determ_ct_memcmp(bufA, bufB, 32);
+                else if (id == "chacha-tag-verify") sink += determ_chacha20_poly1305_decrypt(key32, n12, aad, sizeof aad, ct64, 64, tag, out64);
+                else if (id == "gcm-tag-verify")    sink += determ_aes256_gcm_decrypt(key32, n12, aad, sizeof aad, gcm_ct64, 64, tag, out64);
+                else if (id == "ed25519-sign")    { uint8_t pk[32]; determ_ed25519_pubkey_from_seed(seed, pk);
+                                                    sink += determ_ed25519_sign(seed, pk, fixmsg, 64, sig); }
+                else if (id == "x25519")            sink += determ_x25519(o32, scalar, basepoint);
+                else if (id == "sha256-content")  { determ_sha256(msg, 64, o32); sink += o32[0]; }
+            }
+            uint64_t t1 = now_ticks();
+            return (double)(t1 - t0) / (double)tgt->batch;
+        };
+
+        const size_t NC = tgt->classes.size();
+        std::uniform_int_distribution<size_t> pick(0, NC - 1);
+
+        // Phase 1 — calibration (design §2.4): pooled distribution -> crop
+        // thresholds at the pinned percentile ladder. Calibration samples are
+        // discarded from the statistics.
+        const double crops[] = { 100.0, 99.9, 99.0, 95.0, 90.0, 75.0, 50.0 };
+        const size_t NCROP = sizeof crops / sizeof crops[0];
+        const uint64_t CAL = 20000;
+        std::vector<double> cal; cal.reserve(CAL);
+        for (uint64_t i = 0; i < CAL; i++) cal.push_back(run_one(pick(rng)));
+        double thresh[NCROP];
+        for (size_t k = 0; k < NCROP; k++) {
+            if (crops[k] >= 100.0) { thresh[k] = 1e300; continue; }
+            size_t idx = (size_t)((crops[k] / 100.0) * (double)(cal.size() - 1));
+            std::nth_element(cal.begin(), cal.begin() + idx, cal.end());
+            thresh[k] = cal[idx];
+        }
+
+        // Phase 2 — interleaved measurement into (class x crop) Welford cells.
+        std::vector<std::vector<Welford>> cells(NC, std::vector<Welford>(NCROP));
+        for (uint64_t i = 0; i < samples; i++) {
+            size_t c = pick(rng);
+            double x = run_one(c);
+            for (size_t k = 0; k < NCROP; k++)
+                if (x <= thresh[k]) cells[c][k].add(x);
+        }
+
+        // Report: per class pair x crop, |t|; overall max (design §3.4).
+        std::cout << "ct-timing-probe " << id << " — " << tgt->what << "\n"
+                  << "  timer=" << (use_rdtsc ? "rdtsc" : "steady_clock")
+                  << " batch=" << tgt->batch << " samples=" << samples
+                  << " (interleaved over " << NC << " classes; calibration "
+                  << CAL << " discarded)\n";
+        double tmax = 0;
+        for (size_t a = 0; a < NC; a++) for (size_t b2 = a + 1; b2 < NC; b2++) {
+            std::cout << "  " << tgt->classes[a] << " vs " << tgt->classes[b2] << ":";
+            for (size_t k = 0; k < NCROP; k++) {
+                double t = std::fabs(welch_t(cells[a][k], cells[b2][k]));
+                if (t > tmax) tmax = t;
+                char buf[48]; std::snprintf(buf, sizeof buf, "  p%.4g=%.2f", crops[k], t);
+                std::cout << buf;
+            }
+            std::cout << "  (n=" << (uint64_t)cells[a][0].n << "/" << (uint64_t)cells[b2][0].n << ")\n";
+        }
+        std::cout << "  max |t| = " << tmax << "  -> "
+                  << (tmax <= 4.5 ? "no evidence of leakage at this sample size on this machine"
+                      : tmax <= 10.0 ? "evidence; quiet the host, double --samples, re-run — persistent/growing => leak"
+                                     : "STRONG evidence of secret-dependent timing — file a finding (TimingProbeDesign.md §3.4)")
+                  << "\n  (|t|<=4.5 is NOT a constant-time proof — see TimingProbeDesign.md §5.4; sink=" << sink << ")\n";
+        return 0;
+    }
     if (cmd == "test-c99-api") {
         // CRYPTO-C99-SPEC §3.11 — the determ::c99 C++ ergonomic wrapper
         // (include/determ/crypto.hpp) over the C99 layer aggregated by
