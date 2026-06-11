@@ -634,7 +634,24 @@ Original plan (retained for the deviation record):
 - DLEQ proof generation + verification (for verifiable OPRF)
 - Test vectors from voprf draft + RFC 9380
 
-### 3.9b OPRF on NIST P-256 from voprf draft + RFC 9380 (~4 days)
+### 3.9b OPRF on NIST P-256 — **GROUNDWORK SHIPPED** (h2c + mod-n; protocol layer remains)
+
+SHIPPED (src/crypto/p256/p256.c): the two cryptographic prerequisites —
+RFC 9380 hash-to-curve suite P256_XMD:SHA-256_SSWU_RO_ (expand_message_xmd,
+hash_to_field m=1/L=48/count=2, simplified SSWU Z=−10 direct/no-isogeny with
+branchless mask-selects, RO composition over the RCB complete addition) and
+mod-n scalar arithmetic (Montgomery with runtime-derived n0'/R²;
+determ_p256_scalar_mul_mod_n / _inv_mod_n — the blind/unblind core).
+Validated three ways: `determ test-p256-h2c-c99` (mod-n vs the OpenSSL BIGNUM
+oracle + structural h2c gates) and BOTH §3.13 gate halves over
+tools/vectors/p256_h2c.json — 15 GENUINE RFC 9380 appendix vectors (K.1 ×10 +
+J.1.1 ×5), fetched from rfc-editor.org and re-verified by two independent
+pure-python implementations (297/297 checks) before import; the C99 output is
+byte-exact against all 15. Remaining for full §3.9b (the voprf PROTOCOL
+layer): blind/evaluate/unblind message flow, DLEQ proof generation +
+verification on P-256, and the voprf-draft test vectors.
+
+Original plan (retained):
 
 - Implement OPRF-P256 cipher suite from voprf draft (used by FIPS profile / cluster + tactical)
 - Hash-to-curve for P-256 per RFC 9380 (SSWU map for P-256)

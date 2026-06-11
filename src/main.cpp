@@ -12839,7 +12839,7 @@ int main(int argc, char** argv) {
                                 "hkdf_sha256.json", "pbkdf2_sha256.json",
                                 "blake2b.json", "chacha20_poly1305.json",
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
-                                "p256.json" };
+                                "p256.json", "p256_h2c.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13004,6 +13004,29 @@ int main(int argc, char** argv) {
                         if (determ_p256_point_check(pt.data()) != -1) {
                             ok=false; bad=name + " (off-curve point ACCEPTED)"; break; }
                     } else { ok=false; bad=name + " (unknown p256 type '" + ty + "')"; break; }
+                } else if (prim == "p256_h2c") {
+                    // RFC 9380 appendix vectors (K.1 expand_message_xmd +
+                    // J.1.1 P256_XMD:SHA-256_SSWU_RO_). The u0/u1
+                    // intermediates are file-side-only (our API exposes the
+                    // composed point); px/py here is the byte-exactness gate
+                    // the structural tests in test-p256-h2c-c99 cannot give.
+                    std::string ty = v.value("type", "");
+                    auto msgv = unhex(v["msg_hex"]); auto dstv = unhex(v["dst_hex"]);
+                    if (ty == "expand_message_xmd") {
+                        size_t L = v["len_in_bytes"];
+                        std::vector<uint8_t> out(L);
+                        if (determ_p256_expand_message_xmd(out.data(), L,
+                                msgv.empty()?nullptr:msgv.data(), msgv.size(),
+                                dstv.data(), dstv.size()) != 0
+                            || hx(out.data(), L) != v["uniform_bytes_hex"]) { ok=false; bad=name; break; }
+                    } else if (ty == "hash_to_curve") {
+                        uint8_t out[65];
+                        if (determ_p256_hash_to_curve(out,
+                                msgv.empty()?nullptr:msgv.data(), msgv.size(),
+                                dstv.data(), dstv.size()) != 0
+                            || hx(out+1, 32) != v["px_hex"]
+                            || hx(out+33, 32) != v["py_hex"]) { ok=false; bad=name; break; }
+                    } else { ok=false; bad=name + " (unknown p256_h2c type '" + ty + "')"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;

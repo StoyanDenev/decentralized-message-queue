@@ -14,9 +14,13 @@
 # examples and points to the NIST CSRC examples page; the empty-message case
 # is NIST CAVP ShortMsg Len=0), RFC 4231, RFC 7914 §11, RFC 5869 A.1-A.3, RFC 7693, RFC 8439
 # §2.8.2, the McGrew-Viega GCM AES-256 KATs, RFC 8032 §7.1 TEST 1-3,
-# RFC 7748 §5.2 + §6.1, and the generated §3.8c P-256 corpus (p256.json — every
+# RFC 7748 §5.2 + §6.1, the generated §3.8c P-256 corpus (p256.json — every
 # value recomputed here from cryptography.hazmat ec.SECP256R1; curve p/a/b and
-# the group order are recovered from the library itself, never hardcoded).
+# the group order are recovered from the library itself, never hardcoded), and
+# RFC 9380 Appendix J.1.1 + K.1 (p256_h2c.json — suite
+# P256_XMD:SHA-256_SSWU_RO_ hash_to_curve + expand_message_xmd SHA-256;
+# re-derived here end-to-end by a from-scratch §5.3.1/§5.2/§6.6.2/§3 pipeline
+# on hashlib.sha256 with curve p/a/b from the same p256_params() recovery).
 # Where the same vector is hardcoded in a src/main.cpp
 # test-*-c99 dispatch block (SHA-2 empty/"abc", HMAC RFC 4231 cases 1-2, HKDF
 # A.1/A.3, PBKDF2 c=4096, four BLAKE2b cases, Ed25519 TEST 1, the full X25519
@@ -41,6 +45,7 @@ EXPECTED = {
     "sha256.json", "sha512.json", "hmac_sha256.json", "pbkdf2_sha256.json",
     "hkdf_sha256.json", "blake2b.json", "chacha20_poly1305.json",
     "aes256_gcm.json", "ed25519.json", "x25519.json", "p256.json",
+    "p256_h2c.json",
 }
 
 try:
@@ -274,6 +279,99 @@ def chk_p256(vec, label):
     else:
         return "unknown p256 vector type %r" % t
 
+# ---- RFC 9380 P-256 hash-to-curve (suite P256_XMD:SHA-256_SSWU_RO_) ----
+# From-scratch re-derivation on hashlib.sha256 + integer arithmetic only:
+# expand_message_xmd per §5.3.1, hash_to_field per §5.2 (m=1, L=48),
+# simplified SSWU per §6.6.2 (Z=-10 per §8.2), sgn0 per §4.1 (m=1, x mod 2),
+# hash_to_curve per §3 (h_eff=1 so clear_cofactor is the identity). Curve
+# p/a/b come from p256_params() — recovered from the cryptography library,
+# never hardcoded.
+def h2c_expand_xmd(msg, dst, len_in_bytes):
+    ell = -(-len_in_bytes // 32)
+    if ell > 255 or len_in_bytes > 65535 or len(dst) > 255:
+        raise ValueError("expand_message_xmd bounds exceeded")
+    dst_prime = dst + bytes([len(dst)])
+    b0 = hashlib.sha256(b"\x00" * 64 + msg + len_in_bytes.to_bytes(2, "big")
+                        + b"\x00" + dst_prime).digest()
+    bi = hashlib.sha256(b0 + b"\x01" + dst_prime).digest()
+    out = bi
+    for i in range(2, ell + 1):
+        bi = hashlib.sha256(bytes(x ^ y for x, y in zip(b0, bi))
+                            + bytes([i]) + dst_prime).digest()
+        out += bi
+    return out[:len_in_bytes]
+
+def h2c_map_sswu(u, p, a, b):
+    z = (-10) % p                              # RFC 9380 §8.2: Z = -10
+    inv0 = lambda x: pow(x, p - 2, p)          # inv0(0) == 0
+    tv1 = inv0((z * z * pow(u, 4, p) + z * u * u) % p)
+    x1 = (-b * inv0(a)) % p * (1 + tv1) % p
+    if tv1 == 0:
+        x1 = b * inv0(z * a % p) % p
+    gx1 = (pow(x1, 3, p) + a * x1 + b) % p
+    x2 = (z * u * u % p) * x1 % p
+    gx2 = (pow(x2, 3, p) + a * x2 + b) % p
+    if pow(gx1, (p - 1) // 2, p) in (0, 1):
+        x, g = x1, gx1
+    else:
+        x, g = x2, gx2
+    y = pow(g, (p + 1) // 4, p)                # p == 3 mod 4
+    if (y * y - g) % p:
+        raise ValueError("sswu: g(x) unexpectedly non-square")
+    if (u % 2) != (y % 2):                     # sgn0 m=1
+        y = p - y
+    return (x, y)
+
+def h2c_point_add(p1, p2, p, a):
+    (x1, y1), (x2, y2) = p1, p2
+    if x1 == x2 and (y1 + y2) % p == 0:
+        raise ValueError("Q0 + Q1 is the point at infinity")
+    if p1 == p2:
+        lam = (3 * x1 * x1 + a) * pow(2 * y1, p - 2, p) % p
+    else:
+        lam = (y2 - y1) * pow(x2 - x1, p - 2, p) % p
+    x3 = (lam * lam - x1 - x2) % p
+    return (x3, (lam * (x1 - x3) - y1) % p)
+
+def chk_p256_h2c(vec, label):
+    t = vec.get("type")
+    if t == "expand_message_xmd":
+        need(vec, ["msg_hex", "dst_hex", "len_in_bytes", "uniform_bytes_hex"], label)
+        msg = unhex(vec["msg_hex"], label + " msg_hex")
+        dst = unhex(vec["dst_hex"], label + " dst_hex")
+        L = int(vec["len_in_bytes"])
+        want = unhex(vec["uniform_bytes_hex"], label + " uniform_bytes_hex")
+        if len(want) != L: return "uniform_bytes_hex length != len_in_bytes"
+        got = h2c_expand_xmd(msg, dst, L)
+        if got != want:
+            return "recomputed %s != uniform_bytes_hex %s" % (got.hex(), want.hex())
+    elif t == "hash_to_curve":
+        need(vec, ["msg_hex", "dst_hex", "u0_hex", "u1_hex", "px_hex", "py_hex"], label)
+        msg = unhex(vec["msg_hex"], label + " msg_hex")
+        dst = unhex(vec["dst_hex"], label + " dst_hex")
+        p, a, b = p256_params()
+        ub = h2c_expand_xmd(msg, dst, 96)      # count=2 * m=1 * L=48 (§8.2)
+        u0 = int.from_bytes(ub[:48], "big") % p
+        u1 = int.from_bytes(ub[48:], "big") % p
+        for got_u, fld in ((u0, "u0_hex"), (u1, "u1_hex")):
+            want_u = unhex(vec[fld], label + " " + fld)
+            if len(want_u) != 32: return "%s is not 32 bytes" % fld
+            if got_u != int.from_bytes(want_u, "big"):
+                return "recomputed %s %064x != vector %s" % (fld, got_u, want_u.hex())
+        px, py = h2c_point_add(h2c_map_sswu(u0, p, a, b),
+                               h2c_map_sswu(u1, p, a, b), p, a)
+        want_x = unhex(vec["px_hex"], label + " px_hex")
+        want_y = unhex(vec["py_hex"], label + " py_hex")
+        if len(want_x) != 32 or len(want_y) != 32:
+            return "px_hex/py_hex is not 32 bytes"
+        if (py * py - px * px * px - a * px - b) % p:
+            return "recomputed P is not on the curve (runner bug)"
+        if px != int.from_bytes(want_x, "big") or py != int.from_bytes(want_y, "big"):
+            return "recomputed P (%064x, %064x) != vector (%s, %s)" % (
+                px, py, want_x.hex(), want_y.hex())
+    else:
+        return "unknown p256_h2c vector type %r" % t
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -286,6 +384,7 @@ CHECKERS = {
     "ed25519":            chk_ed25519,
     "x25519":             chk_x25519,
     "p256":               chk_p256,
+    "p256_h2c":           chk_p256_h2c,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

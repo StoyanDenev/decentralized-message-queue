@@ -81,11 +81,25 @@ scrubbed via `determ_secure_zero`. Timing-probe targets for this module
 register with `determ ct-timing-probe` as a follow-up tranche
 (ConstantTimeInventory.md gains its rows when the §3.12 sweep next runs).
 
+## §3.9b groundwork (same module)
+
+Shipped on top of the base: mod-n scalar arithmetic (Montgomery with
+runtime-derived `n0'` via Newton iteration + `R²` via modular doublings;
+`determ_p256_scalar_mul_mod_n` / `_inv_mod_n`) and the RFC 9380 hash-to-curve
+suite `P256_XMD:SHA-256_SSWU_RO_` (`determ_p256_expand_message_xmd` +
+`determ_p256_hash_to_curve`; simplified SSWU, Z = −10, branchless throughout —
+an OPRF input behind `u` may be a user secret). Validated by `determ
+test-p256-h2c-c99` (OpenSSL BIGNUM oracle for mod-n; structural h2c gates) and
+byte-exactly by both §3.13 gate halves against `tools/vectors/p256_h2c.json` —
+15 genuine RFC 9380 appendix vectors (K.1 + J.1.1) fetched from rfc-editor.org
+and re-verified by two independent python implementations before import.
+
 ## Known limitations / future work
 
+- The voprf PROTOCOL layer (blind/evaluate/unblind flow, DLEQ proofs) is the
+  remaining §3.9b work; the cryptographic groundwork above is complete.
 - ECDSA-P256 sign/verify is NOT implemented — out of the §3.8c seed's scope
-  (the §3.9b OPRF consumer needs hash-to-curve + scalar mult + mod-n
-  inversion; ECDSA lands only if a FIPS-profile signing consumer appears).
+  (ECDSA lands only if a FIPS-profile signing consumer appears).
 - No compressed-point (0x02/0x03) decode — SEC1 uncompressed only.
 - Performance: the portable 32-bit-limb Montgomery field favors auditability
   over throughput (same trade as the gf[16] Ed25519); a 64-bit-limb variant
