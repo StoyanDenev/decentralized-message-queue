@@ -203,7 +203,7 @@ backward-compat shim, the same v1-byte-identity discipline PSB-3 encodes here.
 FB26 (BlockchainStateIntegrity.tla) — the apply/load tamper-detection sibling;
 PSB-2 is its digest-layer analog for the partner field specifically.
 
-NOTE: spec-only, model-check pending TLC install (matching every sibling in this
+NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md for the checked set; matching every no-cfg sibling in this
 directory).
 *)
 

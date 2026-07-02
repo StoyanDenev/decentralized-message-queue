@@ -190,12 +190,14 @@ binds leaf_count into the committed root (S-040 closed); the 5-leaf vs
 To check (assuming TLC installed):
   $ tlc MerklePathVerify.tla -config MerklePathVerify.cfg
 
-Recommended config (state space ~10^4, < 30s):
-  Leaves = a 3-element leaf universe, target indices 0..2, an
+Recommended config (the shipped .cfg; 519,121 distinct states, ~50s):
+  Leaves = a 2-element leaf universe, target indices 0..1, an
   adversarial Proofs universe of honest + tampered sibling lists,
-  LeafCounts = {2,3,4} (+ {5,8} to confirm the S-040 fix — the two no
+  LeafCounts = {1,2,3} (+ {5,8} to confirm the S-040 fix — the two no
   longer alias because the root-wrapper binds the distinct counts),
-  MaxVerifies = 5.
+  MaxVerifies = 2 — the pairwise-invariant depth: records are
+  independent and every invariant reads single records or pairs, so
+  deeper logs multiply states without adding checking power.
 
 Cross-references:
   - tools/test_merkle_proof_tampering.sh — the exhaustive negative-
@@ -290,6 +292,33 @@ InnerTerm(left, right) == <<InnerTag, left, right>>
 RootTerm(n, inner) == <<RootTag, n, inner>>
 
 \* -----------------------------------------------------------------
+\* Concrete proof sibling-sequences (the Proofs universe).
+\* -----------------------------------------------------------------
+\* These MUST be real TLA+ sequences, not bare model values: the
+\* recompute walk applies `sibs[pi]` (function application), which is
+\* only defined on a sequence. Declaring them in the .cfg as opaque
+\* model values (Proofs = {p_empty, p_one, p_two}) makes `sibs[pi]`
+\* raise "a non-function was applied as a function". They are wired in
+\* via `Proofs <- ProofsUniverse` CONSTANT substitution in the .cfg so
+\* the Proofs universe carries genuine sequences of sibling TERMS.
+\*   ProofEmpty : << >>                        — height-0 / truncated
+\*   ProofOne   : << LeafTerm(LeafA) >>          — honest 1-sibling (2-leaf)
+\*   ProofTwo   : << LeafTerm(LeafA), LeafTerm(LeafB) >> — over-long (2-sib)
+\* LeafA/LeafB are two distinct leaf model values drawn from Leaves via
+\* CHOOSE, so the honest recompute is well-defined against the same
+\* universe without the .tla needing to name the .cfg's model values.
+LeafA == CHOOSE x \in Leaves : TRUE
+LeafB == CHOOSE x \in Leaves : x /= LeafA
+
+ProofEmpty == << >>
+ProofOne   == << LeafTerm(LeafA) >>
+ProofTwo   == << LeafTerm(LeafA), LeafTerm(LeafB) >>
+
+\* The Proofs universe as genuine sequences. Substituted for the CONSTANT
+\* `Proofs` via `Proofs <- ProofsUniverse` in the .cfg.
+ProofsUniverse == { ProofEmpty, ProofOne, ProofTwo }
+
+\* -----------------------------------------------------------------
 \* §2. The recompute walk (merkle_verify lifted to a pure function).
 \* -----------------------------------------------------------------
 \*
@@ -318,9 +347,24 @@ WalkHeight(n) == WalkHeightAux(n)
 \* terms; the walk consumes them in order. This is the pure-function
 \* projection of merkle.cpp:122-138 — the inner root BEFORE the S-040
 \* root-wrapper is applied.
+\* ExhaustedTerm is the sentinel the walk folds to when it needs a
+\* sibling the proof does not carry — the pure-function image of
+\* merkle.cpp:147 `if (proof_idx >= proof.size()) return false`. It is
+\* headed by a tag distinct from LeafTag/InnerTag/RootTag, so a wrapped
+\* ExhaustedTerm can never structurally equal any honest committed root
+\* (which is always RootTag-headed over Inner/Leaf terms). A too-short
+\* proof therefore recomputes to a non-matching term and REJECTS, exactly
+\* as the shipped mid-walk bounds guard does. Without this guard TLC would
+\* index past the end of the sequence (`sibs[pi]` out of bounds) — a spec
+\* modeling artifact, NOT a defect the shipped verifier can reach, because
+\* merkle_verify checks proof_idx against proof.size() before every access.
+ExhaustedTag  == "X"
+ExhaustedTerm == <<ExhaustedTag>>
+
 RECURSIVE RecomputeInnerAux(_, _, _, _, _)
 RecomputeInnerAux(current, idx, level, sibs, pi) ==
     IF level <= 1 THEN current
+    ELSE IF pi > Len(sibs) THEN ExhaustedTerm  \* merkle.cpp:147 short-proof reject
     ELSE LET even == IF level % 2 = 1 THEN level + 1 ELSE level
              sib  == sibs[pi]
              nxt  == IF idx % 2 = 0 THEN InnerTerm(current, sib)
@@ -448,10 +492,13 @@ Init ==
 
 \* Verify(in): the headline action — admit one input, run the recompute
 \* walk via MakeRecord, append one VerifyRecord to verify_log, increment
-\* verify_count. Models one merkle_verify invocation.
+\* verify_count. Models one merkle_verify invocation. (The cheap
+\* saturation guard is FIRST: TLC evaluates conjuncts in order, and at
+\* every saturated state it re-tests all candidates, so leading with the
+\* InputShape membership test made saturated-state expansion quadratic.)
 Verify(in) ==
-    /\ in \in InputShape
     /\ verify_count < MaxVerifies
+    /\ in \in InputShape
     /\ verify_log'   = Append(verify_log, MakeRecord(in))
     /\ verify_count' = verify_count + 1
 
@@ -581,6 +628,10 @@ PROP_Determinism ==
 \* always eventually grows until saturation. merkle_verify always
 \* terminates with a decision — the walk is bounded by WalkHeight(n)
 \* and never hangs. The no-stuck-verify liveness contract.
+\* NOT checked by the shipped .cfg: temporal checking is intractable at
+\* the exhaustive-input state count (see the .cfg PROPERTIES note); the
+\* load-bearing surface is the seven SAFETY theorems, all checked as
+\* invariants. Same posture as BFTAcceptGate's unchecked liveness pair.
 PROP_EventualAnswer ==
     (verify_count < MaxVerifies)
     ~> (verify_count > 0 /\ Len(verify_log) = verify_count)

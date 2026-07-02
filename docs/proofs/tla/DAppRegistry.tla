@@ -79,7 +79,7 @@ CONSTANTS
     MaxHeight,          \* upper bound on chain height for TLC
     DappGrace,          \* grace-period blocks for Deactivate (e.g., 3)
     Sentinel,           \* "still-active" marker; > MaxHeight + DappGrace
-    InitialNefPool      \* starting NEF pool balance (e.g., 100)
+    InitialNefPool      \* starting NEF pool balance (e.g., 2)
 
 ASSUME ConfigOK ==
     /\ Cardinality(Domains) >= 2

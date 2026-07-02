@@ -12,7 +12,12 @@ This spec is intentionally a simplified projection of the real protocol:
     commit-reveal binding are abstracted as boolean predicates.
   * Aborts are modeled by an adversary action that drops messages or
     delays validators.
-  * BFT escalation is captured as a mode-switch after N round-1 aborts.
+  * BFT escalation is captured as a mode-switch after N aborts, WITH the
+    committee shrink the code performs: node.cpp start_new_round sets
+    k_use = k_bft = ceil(2K/3) and only those members contribute/sign
+    (V3 pins B.creators to that committee; V8 counts only their sigs).
+    The model picks the shrunk committee nondeterministically per abort,
+    over-approximating the code's deterministic seed-based selection.
 
 What the model verifies (under TLC):
 
@@ -61,6 +66,10 @@ Modes == {"MD", "BFT"}
 \* TLC will explore a small set.
 Digests == 0..2
 
+\* BFT-shrunk committee size k_bft = ceil(2K/3)
+\* (include/determ/chain/params.hpp bft_committee_size).
+KBft == (2*K + 2) \div 3
+
 VARIABLES
     v_state,            \* function Validators → States
     contribs,           \* set of (validator, digest) phase-1 commits seen
@@ -68,11 +77,12 @@ VARIABLES
     sigs,               \* function digest → set of validators signing it
     round,              \* current round (1..MaxRounds)
     mode,               \* current consensus mode
+    committee,          \* active committee (Validators in MD; k_bft subset in BFT)
     finalized,          \* set of finalized digests at this height
     aborted_rounds      \* count of rounds that aborted
 
 vars == <<v_state, contribs, secrets_revealed, sigs, round, mode,
-          finalized, aborted_rounds>>
+          committee, finalized, aborted_rounds>>
 
 ----------------------------------------------------------------------------
 \* Initial state: all validators IDLE, round 1, MD mode.
@@ -84,58 +94,78 @@ Init ==
     /\ sigs = [d \in Digests |-> {}]
     /\ round = 1
     /\ mode = "MD"
+    /\ committee = Validators
     /\ finalized = {}
     /\ aborted_rounds = 0
 
 ----------------------------------------------------------------------------
 \* Actions.
 
-\* Honest validator v submits phase-1 commit for digest d.
+\* Honest validator v submits phase-1 commit for digest d. Only committee
+\* members contribute (in BFT mode V3 pins B.creators to the shrunk
+\* committee; non-members have no slot in the block).
 \* Honest constraint: each honest v submits at most one (v, *) pair per round.
 ContribHonest(v, d) ==
     /\ v \in Honest
+    /\ v \in committee
     /\ v_state[v] = "IDLE"
     /\ ~ \E d2 \in Digests : <<v, d2>> \in contribs    \* H2: one commit
     /\ contribs' = contribs \cup {<<v, d>>}
     /\ v_state' = [v_state EXCEPT ![v] = "CONTRIB"]
-    /\ UNCHANGED <<secrets_revealed, sigs, round, mode,
+    /\ UNCHANGED <<secrets_revealed, sigs, round, mode, committee,
                    finalized, aborted_rounds>>
 
 \* Byzantine validator may equivocate: submit two distinct commits.
 \* This action models the worst-case adversary in FA1's analytic proof.
 \* Slashing (FA6) detects this, but the spec doesn't model slashing here —
 \* the goal is to show that even with equivocation, the safety invariant
-\* still holds because the K-of-K block-sig phase has an honest member.
+\* still holds because the quorum always contains an honest member.
 ContribByzantine(v, d) ==
     /\ v \in Byzantine
+    /\ v \in committee
     /\ v_state[v] \in {"IDLE", "CONTRIB"}
     /\ contribs' = contribs \cup {<<v, d>>}
     /\ v_state' = [v_state EXCEPT ![v] = "CONTRIB"]
-    /\ UNCHANGED <<secrets_revealed, sigs, round, mode,
+    /\ UNCHANGED <<secrets_revealed, sigs, round, mode, committee,
                    finalized, aborted_rounds>>
 
-\* Transition phase 1 → phase 2: a validator that has seen K phase-1
-\* commits proceeds to BLOCK_SIG (reveals secret, signs digest).
-\* The "K commits seen" condition is the selective-abort defense.
+\* Transition phase 1 → phase 2: a validator that has seen all committee
+\* phase-1 commits proceeds to BLOCK_SIG (reveals secret, signs digest).
+\* The "all commits seen" condition is the selective-abort defense (H3).
+\* Threshold is the round's committee size: K in MD, k_bft in BFT (block
+\* assembly needs every creator slot filled; only phase-2 sigs may be
+\* sentinel-zero in BFT — validator.cpp check_block_sigs).
 SeenKCommits ==
-    Cardinality({v \in Validators : \E d \in Digests : <<v, d>> \in contribs}) >= K
+    Cardinality({v \in committee : \E d \in Digests : <<v, d>> \in contribs})
+        >= Cardinality(committee)
 
 EnterBlockSig(v) ==
     /\ v_state[v] = "CONTRIB"
     /\ SeenKCommits
     /\ v_state' = [v_state EXCEPT ![v] = "BLOCK_SIG"]
     /\ secrets_revealed' = secrets_revealed \cup {v}
-    /\ UNCHANGED <<contribs, sigs, round, mode, finalized, aborted_rounds>>
+    /\ UNCHANGED <<contribs, sigs, round, mode, committee,
+                   finalized, aborted_rounds>>
 
-\* Validator v signs digest d (phase 2). Honest v signs the digest it
-\* committed to in phase 1.
+\* The digest honest validators sign. In the code the block digest is
+\* compute_block_digest (producer.cpp ~L619) over the ASSEMBLED block —
+\* a deterministic function of the round's contrib set — not a per-
+\* validator vote. CHOOSE models that: an arbitrary-but-fixed function
+\* of the current contrib set.
+ContribDigests == {d \in Digests : \E v \in Validators : <<v, d>> \in contribs}
+AssembledDigest == CHOOSE d \in ContribDigests : TRUE
+
+\* Validator v signs digest d (phase 2). Honest v signs the assembled
+\* digest, and at most one digest per (height, round) — H2(a),
+\* Preliminaries.md §4.
 SignHonest(v, d) ==
     /\ v \in Honest
     /\ v_state[v] = "BLOCK_SIG"
-    /\ <<v, d>> \in contribs
+    /\ d = AssembledDigest
+    /\ ~ \E d2 \in Digests : v \in sigs[d2]            \* H2: one digest
     /\ sigs' = [sigs EXCEPT ![d] = sigs[d] \cup {v}]
     /\ UNCHANGED <<v_state, contribs, secrets_revealed, round, mode,
-                   finalized, aborted_rounds>>
+                   committee, finalized, aborted_rounds>>
 
 \* Byzantine v may sign any digest in phase 2.
 SignByzantine(v, d) ==
@@ -143,37 +173,47 @@ SignByzantine(v, d) ==
     /\ v_state[v] = "BLOCK_SIG"
     /\ sigs' = [sigs EXCEPT ![d] = sigs[d] \cup {v}]
     /\ UNCHANGED <<v_state, contribs, secrets_revealed, round, mode,
-                   finalized, aborted_rounds>>
+                   committee, finalized, aborted_rounds>>
 
 \* Finalize: digest d has K signatures (MD) or Q signatures (BFT mode).
 \*
-\* In BFT mode the actual protocol applies TWO levels of shrinkage:
-\*   (1) committee size shrinks K -> k_bft = ceil(2K/3) members
-\*   (2) within-committee 2/3 quorum Q = ceil(2*k_bft/3) sigs are required
+\* In BFT mode the protocol applies TWO levels of shrinkage, and BOTH are
+\* load-bearing for safety (FA5 / BFTSafety.md L-5.1):
+\*   (1) the COMMITTEE shrinks to k_bft = ceil(2K/3) members — modeled by
+\*       the `committee` variable (node.cpp start_new_round ~L778 sets
+\*       k_use = k_bft; V3 pins B.creators to it);
+\*   (2) Q = ceil(2*k_bft/3) sigs are required WITHIN that committee
+\*       (producer.cpp required_block_sigs ~L583 — its committee_size
+\*       argument is already the shrunk k_bft; validator.cpp
+\*       check_block_sigs ~L432 counts only creators' sigs).
+\* Quorums drawn from the SAME k_bft committee intersect in >= 2Q - k_bft
+\* >= k_bft/3 members, so under FA5's B1 hypothesis (f_h < k_bft/3) an
+\* honest member is in every two quorums and H2 forbids double-finalize.
+\* Shrinking only the threshold over the full K validators (an earlier
+\* revision of this spec) breaks exactly that intersection — at K=3 it
+\* admits 2-of-3 quorums meeting only at a Byzantine node.
 \*
-\* The model below only applies the first shrinkage (Keff = ceil(2K/3))
-\* because the recommended TLC configuration is K=3 where the two levels
-\* coincide degenerately (k_bft = Q = 2). For K=6 (k_bft=4, Q=3) and
-\* K=9 (k_bft=6, Q=4) the formula would over-approximate the sig
-\* threshold. The Inv_OneDigest safety invariant being model-checked is
-\* preserved under either choice (over-approximating sig requirements
-\* makes the BFT branch HARDER to finalize, which keeps safety
-\* properties at least as strong). For full-fidelity TLC checks at K>=6
-\* the formula should be tightened to `(2 * ((2*K + 2) \div 3) + 2) \div 3`.
+\* Only committee members can reach BLOCK_SIG, so sigs[d] \subseteq
+\* committee and a plain cardinality test matches the code's V8 count.
 \*
 \* The spec's BFTThreshold parameter is the abort count that triggers
 \* escalation, not the post-escalation sig quorum.
-Keff == IF mode = "BFT" THEN (2*K + 2) \div 3 ELSE K
+Keff == IF mode = "BFT" THEN (2*Cardinality(committee) + 2) \div 3
+                        ELSE Cardinality(committee)
 
 Finalize(d) ==
     /\ Cardinality(sigs[d]) >= Keff
     /\ finalized' = finalized \cup {d}
     /\ v_state' = [v \in Validators |-> "FINAL"]
     /\ UNCHANGED <<contribs, secrets_revealed, sigs, round, mode,
-                   aborted_rounds>>
+                   committee, aborted_rounds>>
 
 \* Abort: round times out without reaching SeenKCommits or quorum sigs.
-\* Increments aborted_rounds and may escalate mode to BFT.
+\* Increments aborted_rounds and may escalate mode to BFT. On escalation
+\* the committee shrinks to k_bft members; the code re-derives it
+\* deterministically from the abort-adjusted seed each round
+\* (node.cpp ~L791-808) — the model over-approximates with a
+\* nondeterministic choice over all k_bft-subsets.
 AbortRound ==
     /\ round < MaxRounds
     /\ finalized = {}
@@ -182,6 +222,11 @@ AbortRound ==
     /\ round' = round + 1
     /\ aborted_rounds' = aborted_rounds + 1
     /\ mode' = IF aborted_rounds + 1 >= BFTThreshold THEN "BFT" ELSE mode
+    /\ IF aborted_rounds + 1 >= BFTThreshold
+       THEN \E C \in SUBSET Validators :
+                /\ Cardinality(C) = KBft
+                /\ committee' = C
+       ELSE committee' = Validators
     /\ v_state' = [v \in Validators |-> "IDLE"]
     /\ contribs' = {}
     /\ secrets_revealed' = {}
@@ -225,6 +270,8 @@ TypeOK ==
     /\ sigs \in [Digests -> SUBSET Validators]
     /\ round \in 1..MaxRounds
     /\ mode \in Modes
+    /\ committee \subseteq Validators
+    /\ Cardinality(committee) = IF mode = "BFT" THEN KBft ELSE K
     /\ finalized \subseteq Digests
     /\ aborted_rounds \in Nat
 

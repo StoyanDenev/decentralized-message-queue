@@ -184,7 +184,7 @@ survival), FB18 (CrossShardOutboundApply — src-side debit), FB32
 CreditInbound shapes this spec reuses), FB10 (FeeAccounting — fee-is-
 intra-supply), FB11 (SubsidyDistribution — subsidy mint).
 
-NOTE: spec-only, model-check pending TLC install (matching every sibling
+NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md for the checked set; matching every no-cfg sibling
 in this directory).
 
 To check (assuming TLC installed):

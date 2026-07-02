@@ -47,10 +47,10 @@ Properties captured:
          balances[d] = InitialNefPool at every reachable state.
          The pool drain is an internal redistribution; no NEF
          action mints or destroys.
-  (T-N6) Eventual exhaustion (temporal): under fairness on
-         ApplyFirstRegister, the pool eventually reaches 0 OR
-         the model bound is reached (no more domains available
-         to register).
+  (T-N6) Eventual exhaustion (temporal): under fairness on the
+         Submit/Apply actions, eventually the pool reaches 0, OR
+         every domain has registered, OR the apply-action budget
+         (height = MaxHeight) is exhausted.
   (T-N7) Registration is terminal (temporal): once a domain enters
          the `registrants` set it stays — no Deregister action is
          modeled in this scope (Deregister is FB8 / StakeLifecycle
@@ -107,7 +107,8 @@ VARIABLES
     registrants,        \* SUBSET Domain — domains that have first-registered
     balances,           \* AllAddresses -> Nat — includes ZerothAddress as pool
     pending_register,   \* Seq(Domain) — submitted-but-not-applied register txs
-    height              \* Nat — apply-action counter, bounds TLC
+    height              \* 0..MaxHeight — apply-action counter; both Apply
+                        \* actions are guarded by height < MaxHeight (TLC bound)
 
 vars == <<registrants, balances, pending_register, height>>
 
@@ -120,8 +121,8 @@ nef_pool == balances[ZerothAddress]
 \* Sum of balances over non-pool addresses. The A1 conservation
 \* identity (T-N5) is: nef_pool + SumDomainBalances = InitialNefPool.
 SumDomainBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              balances[d] + sum_bal(S \ {d})
@@ -153,8 +154,9 @@ Init ==
 \* side enforces first-time-vs-re-register via the `registrants` set
 \* membership check at apply time.
 \*
-\* Pre-condition: pending queue depth < MaxHeight (TLC bound; equivalent
-\* to "the model has not exhausted its action budget"). The C++ has no
+\* Pre-condition: pending queue depth < MaxHeight (TLC bound on queue
+\* depth only; the apply-action budget is the separate height <
+\* MaxHeight guard on the Apply actions). The C++ has no
 \* such bound — mempool capacity is bounded by S-008 quotas, which are
 \* validator-side and orthogonal to the apply-layer drain semantics
 \* modeled here.
@@ -167,30 +169,32 @@ SubmitRegister(d) ==
 \* ApplyFirstRegister(d): apply branch for d \notin registrants.
 \* Drains nef_pool by floor-half and credits the drained amount to d's
 \* balance. Adds d to registrants. Consumes d from the head of
-\* pending_register.
+\* pending_register. Guarded by height < MaxHeight — the TLC
+\* apply-action budget (a model bound, not a code behavior).
 \*
 \* Models `src/chain/chain.cpp:813-833` — the E1 NEF transfer that
 \* fires inside the `first_time_register == true` branch (the
 \* `registrants_.find(tx.from) == registrants_.end()` predicate at
 \* chain.cpp:795-796).
 \*
-\* The drain is floor-half: balances[zeroth]' = balances[zeroth] \div 2
-\* (rounded down). The credit is exactly the drained amount:
-\*   drain = balances[zeroth] - (balances[zeroth] \div 2)
-\*         = ceil(balances[zeroth] / 2)
-\* The post-state pool is balances[zeroth] \div 2 = floor(P / 2).
+\* The drain is floor-half: drain = balances[zeroth] \div 2 (rounded
+\* down), matching the C++ `nef = pool / 2`. The credit is exactly the
+\* drained amount. The post-state pool is
+\*   balances[zeroth] - drain = ceil(P / 2),
+\* so the pool absorbs at 1 (drain of 1 is 0), matching the C++
+\* `if (nef > 0)` gate at chain.cpp:828.
 \*
 \* T-N4 (zero-pool noop): if balances[zeroth] = 0, then drain = 0 and
 \* the credit is a no-op on balance. registrants STILL gains d (the
 \* register tx succeeds even with an empty pool; the drain is a
 \* silent zero). The A1 conservation identity holds: 0 = 0 + 0.
 ApplyFirstRegister(d) ==
+    /\ height < MaxHeight
     /\ Len(pending_register) > 0
     /\ Head(pending_register) = d
     /\ d \in Domains
     /\ d \notin registrants
     /\ LET drain == balances[ZerothAddress] \div 2 IN
-       LET keep  == balances[ZerothAddress] - drain IN
        /\ balances' = [balances EXCEPT
                          ![ZerothAddress] = balances[ZerothAddress] - drain,
                          ![d]            = balances[d] + drain]
@@ -207,8 +211,10 @@ ApplyFirstRegister(d) ==
 \* apply-progress matches the C++ for-loop iteration order. No other
 \* state mutation occurs — balance, pool, registrants all preserved.
 \* T-N3 structural witness: re-register is a stutter on the drain
-\* state.
+\* state. Same height < MaxHeight apply-action budget as
+\* ApplyFirstRegister.
 ApplyReRegister(d) ==
+    /\ height < MaxHeight
     /\ Len(pending_register) > 0
     /\ Head(pending_register) = d
     /\ d \in Domains
@@ -232,12 +238,16 @@ Next ==
 \* unregistered domain) it eventually fires.
 \*
 \* Fairness on SubmitRegister keeps the pending queue fed; without it
-\* a trace could indefinitely stutter at an empty queue.
+\* a trace could indefinitely stutter at an empty queue. Fairness on
+\* ApplyReRegister keeps the queue draining; without it an already-
+\* registered domain sitting at the head could block the queue (and
+\* the height budget) forever.
 Spec ==
     /\ Init
     /\ [][Next]_vars
     /\ \A d \in Domains : WF_vars(SubmitRegister(d))
     /\ \A d \in Domains : WF_vars(ApplyFirstRegister(d))
+    /\ \A d \in Domains : WF_vars(ApplyReRegister(d))
 
 ----------------------------------------------------------------------------
 \* Invariants.
@@ -247,7 +257,7 @@ Inv_TypeOK ==
     /\ registrants \subseteq Domains
     /\ balances \in [AllAddresses -> 0..InitialNefPool]
     /\ pending_register \in Seq(Domains)
-    /\ height \in 0..(MaxHeight * 3)
+    /\ height \in 0..MaxHeight
 
 \* PoolNonNegative: the pool balance never goes negative. The
 \* floor-half drain is closed on Nat (P - (P \div 2) <= P for all
@@ -295,24 +305,24 @@ Inv_A1Conservation ==
 ----------------------------------------------------------------------------
 \* Temporal properties.
 
-\* EventualExhaustion (T-N6): under fairness on ApplyFirstRegister,
-\* the pool eventually hits zero (or the model bound is reached).
+\* EventualExhaustion (T-N6): under the fairness conditions in Spec,
+\* the pool eventually hits zero, OR every domain has registered, OR
+\* the apply-action budget is exhausted (height = MaxHeight).
 \*
 \* With |Domains| distinct first-registers and InitialNefPool fixed,
 \* the pool drains geometrically. For Domains = {a, b, c} and
 \* InitialNefPool = 8, the trace
 \*   pool=8 -> register(a) -> pool=4 -> register(b) -> pool=2
 \*           -> register(c) -> pool=1
-\* leaves the pool at 1 (floor(8/2^3) = 1). Further registrations
-\* would drive it to 0 but |Domains| = 3 caps the number of first-
-\* registers. Hence the escape clause "eventual zero OR model bound
-\* reached" — for the 3-domain InitialNefPool=8 cfg, the model bound
-\* is the binding constraint.
-\*
-\* TLC verifies this temporal property under the fairness conditions
-\* in Spec.
+\* leaves the pool at 1 (floor(8/2^3) = 1); the pool absorbs at 1
+\* (drain of 1 is 0 — the C++ `if (nef > 0)` gate), so "eventual
+\* zero" is unreachable from a positive pool. The height = MaxHeight
+\* disjunct is the model-bound escape: re-register churn may consume
+\* the apply budget before every domain first-registers.
 Prop_EventualExhaustion ==
-    <>(balances[ZerothAddress] = 0 \/ Cardinality(registrants) = Cardinality(Domains))
+    <>(\/ balances[ZerothAddress] = 0
+       \/ Cardinality(registrants) = Cardinality(Domains)
+       \/ height = MaxHeight)
 
 \* RegistrationIsTerminal (T-N7): action-level invariant — once a
 \* domain enters registrants, it stays. No Deregister action is

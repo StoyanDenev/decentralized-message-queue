@@ -334,22 +334,24 @@ HmacOutputs == { Hmac(s, b) : s \in RpcSecrets, b \in Messages }
 
 \* ForgedHeaders: the universe of adversary-chosen headers that are
 \* NOT canonical Hmac outputs. The adversary picks from this set in
-\* IssueForgedRequest. Modeled as a single sentinel value "FORGED"
-\* distinct from every canonical Hmac output by construction (the
-\* tagged-tuple <<"HMAC", _, _>> is never equal to the string
-\* "FORGED").
+\* IssueForgedRequest. Modeled as a single sentinel tuple
+\* <<"FORGED", "-", "-">> distinct from every canonical Hmac output
+\* by construction (the leading tag "FORGED" /= "HMAC", so the
+\* sentinel tuple is never equal to any <<"HMAC", _, _>> output);
+\* the tuple shape keeps ForgedHeaders type-compatible with
+\* HmacOutputs for TLC.
 \*
 \* This abstraction is sound because: under A_outside (the adversary
 \* has no access to the secret), the probability that a randomly-
 \* chosen forged_header collides with the canonical Hmac output is
 \* bounded by 2^-256 per attempt (L-5 of `RpcAuthHmacSoundness.md`);
 \* the spec layer collapses the entire "random forge attempt" event
-\* into the single "FORGED" sentinel, which by construction does
-\* not collide with any canonical Hmac. The analytic side bounds
-\* the collision probability; the spec layer enforces non-collision
-\* structurally.
+\* into the single <<"FORGED", "-", "-">> sentinel, which by
+\* construction does not collide with any canonical Hmac. The
+\* analytic side bounds the collision probability; the spec layer
+\* enforces non-collision structurally.
 
-ForgedHeaders == {"FORGED"}
+ForgedHeaders == {<<"FORGED", "-", "-">>}
 
 \* -----------------------------------------------------------------
 \* §2. Variables.
@@ -466,7 +468,10 @@ ConfigureSecret(s) ==
 \* HMAC output (which is one-way per A_HMAC).
 \*
 \* Pre-condition: server_secret ∈ RpcSecrets (configured); body
-\* ∈ Messages; Len(pending_requests) < MaxRequests (bound).
+\* ∈ Messages; Len(auth_log) + Len(pending_requests) < MaxRequests
+\* (the combined total-work bound — MaxRequests caps the number of
+\* requests ever issued, matching the "bounds the auth_log +
+\* pending_requests growth" contract in the header).
 \*
 \* Post-condition: pending_requests grows by one entry with the
 \* canonical Hmac output; server_secret + auth_log unchanged.
@@ -474,7 +479,7 @@ ConfigureSecret(s) ==
 IssueAuthorizedRequest(body) ==
     /\ server_secret \in RpcSecrets
     /\ body \in Messages
-    /\ Len(pending_requests) < MaxRequests
+    /\ Len(auth_log) + Len(pending_requests) < MaxRequests
     /\ LET entry == [body |-> body,
                      auth_header |-> Hmac(server_secret, body)] IN
        pending_requests' = Append(pending_requests, entry)
@@ -499,7 +504,8 @@ IssueAuthorizedRequest(body) ==
 \* = {} disjointness.
 \*
 \* Pre-condition: body ∈ Messages; forged_header ∈ ForgedHeaders;
-\* Len(pending_requests) < MaxRequests.
+\* Len(auth_log) + Len(pending_requests) < MaxRequests (combined
+\* total-work bound, same as IssueAuthorizedRequest).
 \*
 \* Post-condition: pending_requests grows by one entry with the
 \* forged header; server_secret + auth_log unchanged.
@@ -507,7 +513,7 @@ IssueAuthorizedRequest(body) ==
 IssueForgedRequest(body, forged_header) ==
     /\ body \in Messages
     /\ forged_header \in ForgedHeaders
-    /\ Len(pending_requests) < MaxRequests
+    /\ Len(auth_log) + Len(pending_requests) < MaxRequests
     /\ LET entry == [body |-> body, auth_header |-> forged_header] IN
        pending_requests' = Append(pending_requests, entry)
     /\ UNCHANGED <<server_secret, auth_log>>

@@ -105,7 +105,11 @@ rejections. Variables:
                 carries (tx, reason) so a regression that admits
                 a tx that should have been rejected (or vice
                 versa) surfaces as a length / content mismatch
-                between the admission trace and the log.
+                between the admission trace and the log. Length is
+                bounded by MaxRejections for TLC tractability (see
+                the MaxRejections comment in §5) — the C++ side
+                returns admission errors per-call, it does not
+                accumulate them.
 
 Six actions cover the admission / apply / sweep / RBF surfaces:
 
@@ -197,12 +201,17 @@ Modeling scope (kept tractable for TLC):
     eviction tie-break + the RBF tie-break).
   * `Hashes` is a finite set of opaque tx-hash identifiers; the
     SHA-256 abstraction is FA-track A3 territory. The hash is
-    used here only as the tx-identity marker (the C++ side keys
-    `tx_store_` by hash; our Seq projection collapses this into
-    the position-in-sequence ordering but preserves uniqueness
-    via the Hashes set).
-  * `Cap` is a small Nat (recommended 3-4) so the cap-eviction
-    branch is reachable under MaxNonce=4 + Domains=3.
+    used here only as an inert tx-identity marker (the C++ side
+    keys `tx_store_` by hash; our Seq projection collapses this
+    into the position-in-sequence ordering — no guard or
+    invariant compares hashes, so a singleton set suffices).
+  * `Cap` is a small Nat (recommended 2) so the cap-eviction
+    branch is reachable: MaxPerSender senders'-worth of admits
+    saturate the cap while the other sender stays under quota,
+    keeping the cap_full / evict branches (5a)/(5b) enabled.
+  * `rejection_log` is bounded by MaxRejections (TLC tractability;
+    see §5) — without the bound the audit trail grows without
+    bound and the state space is infinite.
   * Signature validity is modeled as a Boolean field `sig_valid`
     on each Tx — the FB23 FrostVerify-style abstract precondition.
     A regression that admits a tx with `sig_valid = FALSE` would
@@ -243,9 +252,16 @@ Companion analytic proofs:
 To check (assuming TLC installed):
   $ tlc MempoolAdmission.tla -config MempoolAdmission.cfg
 
-Recommended config (state space ~10^4-10^5, < 60s):
-  Domains = {d1, d2}, Hashes = {h1, h2, h3, h4}, MaxNonce = 3,
-  MaxFee = 3, Cap = 3.
+Recommended config (measured sizing in MempoolAdmission.cfg):
+  Domains = {d1, d2}, Hashes = {h1}, MaxNonce = 2,
+  MaxFee = 1, Cap = 2.
+Larger sizings blow up combinatorially: the liveness property
+PROP_MempoolEventuallyDrains branches once per element of Tx
+(|Tx| = |Hashes| * |Domains| * (MaxNonce+1) * (MaxFee+1) * 2), and
+the mempool-sequence orderings grow factorially in the cap — the
+historical {h1..h4}/MaxNonce=3/MaxFee=3/Cap=3 sizing exceeds 10^7
+behavior-graph states (256 liveness branches) and cannot finish
+inside the harness timeout.
 
 Cross-references:
   * FB7 Nonce.tla — the per-account nonce gate state machine in
@@ -451,24 +467,41 @@ Init ==
 \*      new tx (the fee-priority eviction at node.cpp:2001-2017).
 \*
 \* On accept (any of the success paths above), append tx to mempool.
-\* On reject, append a Rejection record to rejection_log.
+\* On reject, append a Rejection record to rejection_log. Every
+\* reject branch carries the Len(rejection_log) < MaxRejections
+\* guard — the TLC tractability bound on the audit trail (see the
+\* MaxRejections comment below); accept branches are never gated
+\* on the rejection budget.
 
 \* Modeled MEMPOOL_MAX_PER_SENDER bound at the spec level. Production
 \* is 100; the spec uses a small constant to keep TLC tractable. The
 \* per-sender quota's role here is to make the "future_nonce"
-\* rejection branch reachable in the bounded universe.
-MaxPerSender == Cardinality(Hashes) \div 2 + 1
+\* rejection branch reachable in the bounded universe: a sender at
+\* quota (2 slots) submitting a third fresh slot fires branch (4).
+MaxPerSender == 2
+
+\* rejection_log length is bounded for TLC tractability — without it
+\* the audit trail grows without bound (every re-submission of a
+\* rejected tx appends another entry) and the state space is
+\* infinite. The C++ side has no such accumulation (admission errors
+\* are returned per-call, not stored); the bound only truncates
+\* TLC's exploration of longer audit trails — every rejection reason
+\* stays reachable, and INV_RejectionLogCorrectness is checked over
+\* every log the bounded exploration produces.
+MaxRejections == 1
 
 AdmitTransaction(tx) ==
     /\ tx \in Tx
     /\ \/ \* (1) Stale nonce → reject.
           /\ tx.nonce < applied_nonces[tx.from]
+          /\ Len(rejection_log) < MaxRejections
           /\ rejection_log' = Append(rejection_log,
                                      [tx |-> tx, reason |-> "stale_nonce"])
           /\ UNCHANGED <<mempool, mempool_cap, applied_nonces>>
        \/ \* (2) Bad signature → reject.
           /\ tx.nonce >= applied_nonces[tx.from]
           /\ ~tx.sig_valid
+          /\ Len(rejection_log) < MaxRejections
           /\ rejection_log' = Append(rejection_log,
                                      [tx |-> tx, reason |-> "bad_sig"])
           /\ UNCHANGED <<mempool, mempool_cap, applied_nonces>>
@@ -479,6 +512,7 @@ AdmitTransaction(tx) ==
           /\ LET idx == find_same_slot(tx.from, tx.nonce) IN
              /\ idx /= 0
              /\ mempool[idx].fee >= tx.fee
+             /\ Len(rejection_log) < MaxRejections
              /\ rejection_log' = Append(rejection_log,
                                         [tx |-> tx, reason |-> "duplicate"])
              /\ UNCHANGED <<mempool, mempool_cap, applied_nonces>>
@@ -502,6 +536,7 @@ AdmitTransaction(tx) ==
           /\ tx.sig_valid
           /\ find_same_slot(tx.from, tx.nonce) = 0
           /\ per_sender_count(tx.from) >= MaxPerSender
+          /\ Len(rejection_log) < MaxRejections
           /\ rejection_log' = Append(rejection_log,
                                      [tx |-> tx, reason |-> "future_nonce"])
           /\ UNCHANGED <<mempool, mempool_cap, applied_nonces>>
@@ -513,6 +548,7 @@ AdmitTransaction(tx) ==
           /\ per_sender_count(tx.from) < MaxPerSender
           /\ Len(mempool) >= mempool_cap
           /\ tx.fee <= min_fee(mempool)
+          /\ Len(rejection_log) < MaxRejections
           /\ rejection_log' = Append(rejection_log,
                                      [tx |-> tx, reason |-> "cap_full"])
           /\ UNCHANGED <<mempool, mempool_cap, applied_nonces>>
@@ -639,7 +675,12 @@ Next ==
     \/ ApplyBlock
     \/ EvictStale
     \/ \E tx \in Tx : OverwriteSameAccountSameNonce(tx)
-    \/ \E c \in 1..(Cap + 2) : AdjustCap(c)
+    \/ \E c \in 1..Cap : AdjustCap(c)
+       \* Range 1..Cap: the documented AdjustCap scenario is the
+       \* operator's smaller-cap redeploy (see the action comment);
+       \* growing past the initial Cap is undocumented surface and
+       \* would only lengthen mempool sequences, whose orderings
+       \* grow factorially (TLC tractability).
     \/ Stutter
 
 Spec == Init /\ [][Next]_vars
@@ -765,15 +806,15 @@ PROP_EventualAdmissionOrRejection ==
     \A tx \in Tx :
        (\E i \in 1..Len(mempool) : mempool[i] = tx)
        \/ (\E i \in 1..Len(rejection_log) : rejection_log[i].tx = tx)
-       \/ \* Tx hasn't been observed in either collection — which
-          \* under the bounded model means AdmitTransaction has
-          \* not yet fired on this tx. The structural disjunct
-          \* covering the "not-yet-submitted" state space; under
-          \* fairness on AdmitTransaction (modeled implicitly via
-          \* Next), the tx eventually fires AdmitTransaction and
-          \* routes to one of the two collections above.
-          (\A i \in 1..Len(mempool) : mempool[i] /= tx)
-          /\ (\A j \in 1..Len(rejection_log) : rejection_log[j].tx /= tx)
+       \/ (\* Tx hasn't been observed in either collection — which
+             \* under the bounded model means AdmitTransaction has
+             \* not yet fired on this tx. The structural disjunct
+             \* covering the "not-yet-submitted" state space; under
+             \* fairness on AdmitTransaction (modeled implicitly via
+             \* Next), the tx eventually fires AdmitTransaction and
+             \* routes to one of the two collections above.
+             (\A i \in 1..Len(mempool) : mempool[i] /= tx)
+             /\ (\A j \in 1..Len(rejection_log) : rejection_log[j].tx /= tx))
 
 \* PROP_MempoolEventuallyDrains — under fairness on ApplyBlock,
 \* a non-empty mempool eventually shrinks. The structural argument:
@@ -785,8 +826,15 @@ PROP_EventualAdmissionOrRejection ==
 \* tx (nonce matches the per-sender frontier), then eventually the
 \* mempool is either empty OR no longer has that exact tx (it has
 \* been drained / replaced / swept).
+\* The quantifier ranges over sig-valid txs only: by
+\* INV_SigValidityNecessary an invalid-sig tx never appears in
+\* mempool, so its antecedent is unsatisfiable and its leads-to
+\* branch is trivially true — ranging over the full Tx universe
+\* would only double TLC's implied-temporal branch count (each
+\* quantified tx is one satisfiability branch) without checking
+\* anything extra.
 PROP_MempoolEventuallyDrains ==
-    \A tx \in Tx :
+    \A tx \in {t \in Tx : t.sig_valid} :
        ((\E i \in 1..Len(mempool) :
             mempool[i] = tx
             /\ tx.nonce = applied_nonces[tx.from]))

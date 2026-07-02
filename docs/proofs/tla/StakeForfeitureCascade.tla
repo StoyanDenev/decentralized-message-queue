@@ -153,16 +153,16 @@ Init ==
 \* Helpers.
 
 SumBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              accounts[d].balance + sum_bal(S \ {d})
     IN sum_bal(Domains)
 
 SumStakes ==
-    LET RECURSIVE sum_stk(_) IN
-    LET sum_stk(S) ==
+    LET RECURSIVE sum_stk(_)
+        sum_stk(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              accounts[d].stake_locked + sum_stk(S \ {d})
@@ -173,7 +173,16 @@ SumStakes ==
 \* Apply* actions later drain head-first. Queue is bounded for TLC
 \* tractability.
 
-QueueCap == MaxHeight * Cardinality(Domains) + Cardinality(Domains)
+\* QueueCap = 2: at most two events in flight. Sufficient for every
+\* coverage class in the cfg matrix (each is an alternating submit /
+\* apply chain; the T-C5 order pair differs only in submission order,
+\* which two slots preserve) and required for tractability: submission
+\* is unconditioned, so a cap-k queue contributes O(E^k) reachable
+\* contents for E distinct event values (10 under the shipped cfg:
+\* MaxStake*|Domains| STAKE variants + 3*|Domains| others) — the
+\* former MaxHeight*|Domains|+|Domains| = 10 cap made the queue
+\* contents alone unexplorable.
+QueueCap == 2
 
 \* SubmitStake(d, amount): admit a STAKE event for d. The apply-layer
 \* guard is balance >= amount; admission is adversarial (the validator
@@ -495,10 +504,21 @@ Inv_A1Conservation ==
 Inv_SlashedMonotonic ==
     [][accumulated_slashed' >= accumulated_slashed]_vars
 
-\* Unlock monotonicity — same as FB8, preserved under cascade.
+\* Unlock monotonicity — per-lock-cycle, same weakening as FB8. The
+\* ARMING step legitimately moves unlock_heights[d] DOWN from Sentinel
+\* (the C++ UINT64_MAX, set at REGISTER — src/chain/chain.cpp:811) to
+\* the finite inactive_from + unstake_delay_ (DEREGISTER arm —
+\* src/chain/chain.cpp:844-851), so global non-decrease over-promises.
+\* The code's actual promise is per lock cycle: once armed
+\* (non-Sentinel), the value never decreases. In-model the only
+\* armed-state mutation is UnstakePost's clear-to-Sentinel
+\* (non-decreasing by ConfigOK); re-arming cannot fire because
+\* ApplyDeregister is gated on registrants[d].active — the one-shot
+\* stricter model inherited from FB8.
 Inv_UnlockMonotonic ==
     [][\A d \in Domains :
-         unlock_heights'[d] >= unlock_heights[d]
+         unlock_heights[d] /= Sentinel
+           => unlock_heights'[d] >= unlock_heights[d]
       ]_vars
 
 ----------------------------------------------------------------------------

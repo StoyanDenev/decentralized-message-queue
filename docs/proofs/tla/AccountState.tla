@@ -219,19 +219,19 @@ Inv_NonceMonotonic ==
 \* We compute the sums via explicit set-comprehension folds since
 \* Domains is small.
 SumBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
-        IF S = {} THEN 0
-        ELSE LET d == CHOOSE x \in S : TRUE IN
-             accounts[d].balance + sum_bal(S \ {d})
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
+            IF S = {} THEN 0
+            ELSE LET d == CHOOSE x \in S : TRUE IN
+                 accounts[d].balance + sum_bal(S \ {d})
     IN sum_bal(Domains)
 
 SumStakes ==
-    LET RECURSIVE sum_stk(_) IN
-    LET sum_stk(S) ==
-        IF S = {} THEN 0
-        ELSE LET d == CHOOSE x \in S : TRUE IN
-             stakes[d].locked + sum_stk(S \ {d})
+    LET RECURSIVE sum_stk(_)
+        sum_stk(S) ==
+            IF S = {} THEN 0
+            ELSE LET d == CHOOSE x \in S : TRUE IN
+                 stakes[d].locked + sum_stk(S \ {d})
     IN sum_stk(Domains)
 
 Inv_SupplyConservation == SumBalances + SumStakes + slashed = INITIAL_TOTAL

@@ -180,16 +180,19 @@ Five paired theorems are pinned (per the contract above):
           committee comes from `EligibleInRegion(R) ∪ refugees`
           where refugees are filtered by `merge_state[R]`.
   (T-RC5) EventualCommitteeRotation + UnderQuorumMerge.
-          (a) PROP_EventualCommitteeRotation: under fairness on
-              AdvanceBlock + a region change or active-set
-              mutation, the committee changes infinitely often
-              (analog of FB34 T-ER5 lifted to the per-block
-              regional surface).
+          (a) PROP_EventualCommitteeRotation: IF the chain ever
+              produces a post-genesis block, some pair of
+              consecutive blocks has distinct committees (analog
+              of FB34 T-ER5 lifted to the per-block regional
+              surface, conditioned on block production — the
+              environment's validator churn can legitimately
+              starve AdvanceBlock forever).
           (b) PROP_UnderQuorumMerge: if `|EligibleInRegion(R)| <
-              K` for the current region R, eventually a merge to
-              a sibling region fires — the R7 forward-progress
-              contract that prevents the chain from stalling on
-              an under-quorum region.
+              K` for the current region R PERSISTS (with a
+              sibling region holding an active validator),
+              eventually a merge to a sibling region fires — the
+              R7 forward-progress contract that prevents the
+              chain from stalling on an under-quorum region.
 
 Five invariants codify T-RC1..T-RC5 + a type predicate:
 
@@ -210,13 +213,14 @@ Five invariants codify T-RC1..T-RC5 + a type predicate:
 
 Two temporal properties pin the headline composition claims:
 
-  PROP_EventualCommitteeRotation (T-RC5a) — under fairness on
-    AdvanceBlock + a region change OR a non-trivial pool mutation
-    between consecutive blocks, the committee changes infinitely
-    often when `|EligibleInRegion(R)| > K` (so multiple distinct
-    K-committees exist within the region's pool).
+  PROP_EventualCommitteeRotation (T-RC5a) — conditional on block
+    production: if a post-genesis block ever forms, some pair of
+    consecutive blocks has distinct committees (the first rotation
+    targets a sibling region whose pool is disjoint from
+    genesis's).
   PROP_UnderQuorumMerge (T-RC5b) — if `|EligibleInRegion(R)| < K`
-    for the current region R, eventually a merge to a sibling
+    for the current region R persists (with a sibling region
+    holding an active validator), eventually a merge to a sibling
     region fires (ForceMerge enables) — composes with R7
     UnderQuorumMerge to prevent the chain from stalling on an
     under-quorum region.
@@ -225,10 +229,10 @@ To check (assuming TLC installed):
   $ tlc RegionalShardingCommittee.tla -config RegionalShardingCommittee.cfg
 
 Recommended config (state space ~10^4, < 30s):
-  Validators = (v1 :> [domain |-> "v1", region |-> "r1"]) @@
-               (v2 :> [domain |-> "v2", region |-> "r1"]) @@
-               (v3 :> [domain |-> "v3", region |-> "r2"]) @@
-               (v4 :> [domain |-> "v4", region |-> "r2"]),
+  Validators <- ModelValidators (defined below; TLC's .cfg grammar
+               cannot parse function-valued expressions, so the
+               4-validator × 2-region map v1,v2:r1 / v3,v4:r2 is
+               bound by substitution),
   Regions = {"r1", "r2"}, K = 2, MaxBlock = 4.
 
 Cross-references:
@@ -288,6 +292,16 @@ Cross-references:
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
+
+\* ModelValidators — the 4-validator × 2-region model instance from the
+\* recommended config above. Lives here (not in the .cfg) because TLC's
+\* config grammar cannot parse function-valued expressions; the .cfg
+\* binds it via `CONSTANT Validators <- ModelValidators` (same pattern
+\* as MerklePathVerify.cfg's ProofsUniverse).
+ModelValidators ==
+    [v \in {"v1", "v2", "v3", "v4"} |->
+        [domain |-> v,
+         region |-> IF v \in {"v1", "v2"} THEN "r1" ELSE "r2"]]
 
 CONSTANTS
     Validators,         \* function from validator domain ID (string) to
@@ -765,49 +779,57 @@ INV_NoCrossRegionLeak ==
 
 \* PROP_EventualCommitteeRotation (T-RC5a).
 \*
-\* Under fairness on AdvanceBlock + a region change OR an active-set
-\* mutation, the committee changes infinitely often (or, in the
-\* bounded-MaxBlock form TLC validates: some pair of consecutive
-\* blocks has distinct committees, witnessing rotation).
+\* CONDITIONAL on block production: if the chain ever produces a
+\* post-genesis block, some pair of consecutive blocks has distinct
+\* committees, witnessing rotation (the first AdvanceBlock rotates
+\* to a sibling region whose merge_state is still empty, so the
+\* fresh committee is drawn from a pool disjoint from genesis's).
 \*
-\* The forward-progress contract: the per-block region rotation
-\* paired with the per-block beacon advance ensures the committee
-\* rotates non-trivially across blocks; under fairness on the
-\* AdvanceBlock action, the committee at some block differs from
-\* the committee at the prior block.
-\*
-\* TLA+ liveness body: eventually some pair of consecutive blocks
-\* has different committees.
+\* The unconditional form (<>rotation-witness) is NOT a promise of
+\* the code and fails in this model: Register/Shrink churn can keep
+\* the rotation-target region's pool empty forever, so AdvanceBlock
+\* is only intermittently enabled and WF imposes no obligation — no
+\* block ever forms. Block production liveness depends on the
+\* environment supplying an eligible pool; the code only promises
+\* rotation ACROSS blocks that actually form.
 
 PROP_EventualCommitteeRotation ==
-    <>(\E h \in DOMAIN committee_history :
-          /\ (h + 1) \in DOMAIN committee_history
-          /\ committee_history[h] # committee_history[h + 1])
+    <>(block_height >= 1)
+    => <>(\E h \in DOMAIN committee_history :
+             /\ (h + 1) \in DOMAIN committee_history
+             /\ committee_history[h] # committee_history[h + 1])
 
 \* PROP_UnderQuorumMerge (T-RC5b).
 \*
-\* If `|EligibleInRegion(R)| < K` for the current region R, eventually
-\* a merge to a sibling region fires (ForceMerge enables) — the R7
-\* forward-progress contract that prevents the chain from stalling
-\* on an under-quorum region.
+\* If the under-quorum condition PERSISTS (`|EligibleInRegion(R)| <
+\* K` for the current region R, with a sibling region holding at
+\* least one active validator, forever from some point), eventually
+\* a merge to a sibling region fires — the R7 forward-progress
+\* contract that prevents the chain from stalling on an under-quorum
+\* region.
 \*
-\* Structural witness: ForceMerge's pre-condition is
-\* `Cardinality(EligibleInRegion(current_region, active_validators))
-\* < K`; under weak fairness on the ForceMerge action, the merge
-\* fires when enabled. Composes with R7 UnderQuorumMerge.md's
-\* analytic narrative on the merge mechanism.
+\* Structural witness: block_height is monotone and bounded by
+\* MaxBlock, so current_region is eventually constant in every
+\* behavior; once the antecedent holds forever, ForceMerge is
+\* continuously enabled (or the merge already fired), and weak
+\* fairness on ForceMerge fires it. Composes with R7
+\* UnderQuorumMerge.md's analytic narrative on the merge mechanism.
 \*
-\* The TLA+ liveness body: if at some state the under-quorum
-\* condition holds, eventually merge_state[current_region] becomes
-\* non-empty (the merge has fired).
+\* The one-shot form ([](P => <>merge-fired)) is NOT a promise of
+\* the code and fails in this model: a TRANSIENT under-quorum can
+\* recover via RegisterValidator (pool back to >= K, no merge
+\* needed), and Register/Shrink churn can keep ForceMerge only
+\* intermittently enabled, which WF does not obligate. The code's
+\* promise is merge-on-persistent-under-quorum, not
+\* merge-on-any-dip.
 
 PROP_UnderQuorumMerge ==
-    [](Cardinality(EligibleInRegion(current_region,
-                                     active_validators)) < K
-       /\ (\E r \in Regions :
-              /\ r # current_region
-              /\ \E v \in active_validators : Validators[v].region = r)
-       => <>(merge_state[current_region] # {}))
+    <>[](/\ Cardinality(EligibleInRegion(current_region,
+                                          active_validators)) < K
+         /\ \E r \in Regions :
+               /\ r # current_region
+               /\ \E v \in active_validators : Validators[v].region = r)
+    => <>(merge_state[current_region] # {})
 
 \* -----------------------------------------------------------------
 \* §7. Soundness commentary — what TLC checks vs. what is abstracted.
@@ -865,9 +887,10 @@ PROP_UnderQuorumMerge ==
 \*     "validator's region is in the EFFECTIVE region set" contract.
 \*
 \*   * The R7 under-quorum-merge forward-progress witness
-\*     (PROP_UnderQuorumMerge): under fairness, an under-quorum
-\*     region eventually receives a sibling merge — the chain does
-\*     not stall on a single region's pool collapse.
+\*     (PROP_UnderQuorumMerge): under fairness, a PERSISTENTLY
+\*     under-quorum region (with a sibling holding an active
+\*     validator) eventually receives a sibling merge — the chain
+\*     does not stall on a single region's pool collapse.
 \*
 \*   * The composition with FB34 EpochCommitteeRotation: SelectMCreators
 \*     is the same shape as FB34's EpochCommitteeSelect; FB35

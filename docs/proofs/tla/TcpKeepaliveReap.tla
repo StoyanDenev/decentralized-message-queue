@@ -92,18 +92,18 @@ Five invariants codify the structural contracts:
 
   TypeOK — shape predicate for all variables.
   INV_BoundedDeadPeerLifetime (T-1) — every dead peer (peer_alive[p]
-        = FALSE) currently in peer_present has been unreachable for
-        at most KeepaliveInterval × KeepaliveProbes time units.
-        Captures the bounded-lifetime contract: a dead peer survives
-        for at most one full keepalive cycle past the last
-        successful response.
-  INV_NoFalseReap (T-3) — every peer removed from peer_present
-        without a corresponding fresh reconnect is structurally a
-        dead peer. The structural witness: ReapDeadPeer's
-        precondition gates on `now - last_keepalive_response[p] >
-        KeepaliveInterval × KeepaliveProbes`, which can only hold
-        for peer_alive[p] = FALSE (a live peer's keepalive responses
-        keep last_keepalive_response within the cycle bound).
+        = FALSE) currently in peer_present whose staleness gap has
+        exceeded KeepaliveInterval × KeepaliveProbes is immediately
+        reapable (ReapDeadPeer is ENABLED on it). Captures the
+        bounded-lifetime contract: a dead peer past the kernel-
+        timeout window cannot linger un-reapably; fairness on
+        ReapDeadPeer (PROP_EventualReap) discharges the reap.
+  INV_NoFalseReap (T-3) — for every live peer (peer_alive[p] =
+        TRUE) in peer_present, ReapDeadPeer is NOT ENABLED. The
+        structural witness: ReapDeadPeer's precondition gates on
+        peer_alive[p] = FALSE — the kernel only errors a socket
+        after UNANSWERED probes, so a live peer (whose kernel ACKs
+        every probe) is never reapable.
   INV_MonotoneTime — `now` is monotone non-decreasing across every
         step (matches steady_clock monotonicity).
   INV_ReapMonotone — once a peer is reaped (removed from
@@ -188,7 +188,9 @@ The state machine. Four actions cover the dead-peer reap pipeline
     no response). UNCHANGED peer_present, peer_alive, now.
     Pre-condition: p \in peer_present.
   * ReapDeadPeer(p) — removes p from peer_present. Pre-condition:
-    p \in peer_present AND `now - last_keepalive_response[p] >
+    p \in peer_present AND peer_alive[p] = FALSE (the kernel only
+    errors after unanswered probes; a live peer is never reapable)
+    AND `now - last_keepalive_response[p] >
     KeepaliveInterval × KeepaliveProbes` (the kernel-timeout
     predicate). UNCHANGED peer_alive[p], last_keepalive_response[p],
     now.
@@ -459,16 +461,20 @@ KeepaliveProbe(p) ==
 \* pipeline into a single atomic action.
 \*
 \* Pre-condition: p \in peer_present (the peer is attached);
-\* `now - last_keepalive_response[p] > KeepaliveCycle` (the
-\* kernel-timeout predicate has fired — KeepaliveCycle elapsed
-\* without a probe response). The strict-greater bound matches
-\* the prose proof's `T_keepalive` definition (the kernel marks
-\* the socket failed AFTER the cycle elapses, not AT the cycle
-\* boundary).
+\* peer_alive[p] = FALSE (the kernel only errors the socket after
+\* UNANSWERED probes — a live peer's kernel ACKs every probe, so
+\* `gossip.cpp` handle_peer_closed fires only on a truthy asio
+\* error_code, never for a reachable host; L-7 of the prose
+\* proof); `now - last_keepalive_response[p] > KeepaliveCycle`
+\* (the kernel-timeout predicate has fired — KeepaliveCycle
+\* elapsed without a probe response). The strict-greater bound
+\* matches the prose proof's `T_keepalive` definition (the kernel
+\* marks the socket failed AFTER the cycle elapses, not AT the
+\* cycle boundary).
 \*
 \* Post-condition: p is removed from peer_present. peer_alive[p]
-\* is left in its current state (FALSE — the precondition implies
-\* the peer didn't respond, so it must be dead; L-7 of the prose
+\* is left in its current state (FALSE by the precondition;
+\* L-7 of the prose
 \* proof — false-positive impossibility). last_keepalive_response
 \* [p] is left as-is (the spec keeps the stale value as a record
 \* of when the peer was last seen alive; cleared on next
@@ -476,6 +482,7 @@ KeepaliveProbe(p) ==
 
 ReapDeadPeer(p) ==
     /\ p \in peer_present
+    /\ peer_alive[p] = FALSE
     /\ now - last_keepalive_response[p] > KeepaliveCycle
     /\ peer_present' = peer_present \ {p}
     /\ UNCHANGED peer_alive
@@ -542,12 +549,13 @@ TypeOK ==
 \* INV_BoundedDeadPeerLifetime (T-1).
 \*
 \* Every dead peer (peer_alive[p] = FALSE) currently in
-\* peer_present has been unreachable for at most KeepaliveCycle
-\* time units. The structural argument: ReapDeadPeer's pre-
-\* condition is `now - last_keepalive_response[p] > KeepaliveCycle`;
-\* under fairness, any dead peer reaching this bound is reaped.
-\* So an unreaped dead peer must have
-\* `now - last_keepalive_response[p] <= KeepaliveCycle`.
+\* peer_present whose staleness gap has exceeded KeepaliveCycle
+\* is immediately reapable: ReapDeadPeer(p) is ENABLED. This is
+\* the state-form of the T-1 lifetime bound — a dead peer past
+\* the kernel-timeout window cannot linger un-reapably; the reap
+\* action is available, and under the WF_vars fairness on
+\* ReapDeadPeer it fires (PROP_EventualReap carries the temporal
+\* half of the claim).
 \*
 \* Worst-case timing: a peer goes dead at time t1 = now (PeerDie
 \* fires). KeepaliveProbe actions after t1 do NOT refresh
@@ -555,34 +563,20 @@ TypeOK ==
 \* IF-branches on peer_alive[p]). The dead peer's
 \* `last_keepalive_response[p]` thus stays at its pre-death value
 \* (set by the last successful KeepaliveProbe or PeerConnect
-\* before t1).
+\* before t1). At time t2 = t1 + KeepaliveCycle + 1 the predicate
+\* `now - last_keepalive_response[p] > KeepaliveCycle` fires and
+\* ReapDeadPeer(p) is enabled — the invariant asserts exactly
+\* this enabledness at every reachable state where the gap has
+\* been exceeded.
 \*
-\* At time t2 = t1 + KeepaliveCycle + 1, the predicate
-\* `now - last_keepalive_response[p] > KeepaliveCycle` is FALSE
-\* (the spec evaluates `now - last_keepalive_response[p]` as
-\* arithmetic on Nat, with `t2 - t1 = KeepaliveCycle + 1`, so
-\* the strict-greater bound fires). ReapDeadPeer becomes
-\* enabled; under fairness it fires; p is removed from
-\* peer_present.
-\*
-\* Therefore the invariant: any dead peer in peer_present has
-\* its `now - last_keepalive_response[p] <= KeepaliveCycle`.
-\* The strict-equality boundary `= KeepaliveCycle` is the last
-\* moment before reap; at `> KeepaliveCycle` ReapDeadPeer is
-\* enabled and would have fired.
-\*
-\* The actual ReapDeadPeer.precondition is strict-greater
-\* (`> KeepaliveCycle`), so the invariant `<=` is the tightest
-\* state-form witness for the lifetime bound. The invariant
-\* covers the dead-peer survival window between PeerDie and the
-\* keepalive-machinery-driven reap; the prose proof's T-1
-\* bound is `T_keepalive`, which at the spec layer collapses to
-\* KeepaliveCycle.
+\* The prose proof's T-1 bound is `T_keepalive`, which at the
+\* spec layer collapses to KeepaliveCycle.
 
 INV_BoundedDeadPeerLifetime ==
     \A p \in peer_present :
-       (peer_alive[p] = FALSE) =>
-          (now - last_keepalive_response[p] <= KeepaliveCycle)
+       ((peer_alive[p] = FALSE)
+          /\ (now - last_keepalive_response[p] > KeepaliveCycle)) =>
+             ENABLED ReapDeadPeer(p)
 
 \* INV_NoFalseReap (T-3).
 \*
@@ -590,63 +584,29 @@ INV_BoundedDeadPeerLifetime ==
 \* keepalive — the structural witness for L-7 of the prose
 \* proof (false-positive impossibility on live connections).
 \*
-\* The structural argument: KeepaliveProbe(p) refreshes
-\* last_keepalive_response[p] to `now` whenever peer_alive[p] =
-\* TRUE. Under fairness on KeepaliveProbe, a live peer's
-\* `last_keepalive_response[p]` is refreshed periodically; the
-\* staleness gap `now - last_keepalive_response[p]` cannot
-\* exceed the inter-probe interval (KeepaliveInterval at the
-\* spec layer). Therefore the ReapDeadPeer precondition
-\* `> KeepaliveCycle = KeepaliveInterval * KeepaliveProbes`
-\* (with KeepaliveProbes >= 1) is never enabled for a live peer.
+\* The structural argument: ReapDeadPeer(p) carries the
+\* precondition peer_alive[p] = FALSE — the kernel only errors
+\* the socket after UNANSWERED probes, and a live peer's kernel
+\* ACKs every probe, so `gossip.cpp` handle_peer_closed fires
+\* only on a truthy asio error_code. A live peer therefore never
+\* satisfies ReapDeadPeer's enabling condition, regardless of
+\* how stale its last_keepalive_response is (a live-but-unprobed
+\* peer's staleness gap can transiently exceed KeepaliveCycle at
+\* the spec layer; the kernel would simply probe it and get an
+\* ACK, never an error).
 \*
-\* The state-form invariant: for any peer in peer_present that
-\* is alive AND has been live since the last KeepaliveProbe,
-\* the staleness gap is bounded by the inter-probe interval.
+\* The state-form invariant is exactly the T-3 claim: for every
+\* live peer p in peer_present, ReapDeadPeer(p) is not ENABLED.
 \* TLC verifies by enumerating every reachable state and
-\* asserting that no live peer satisfies the kernel-timeout
-\* predicate.
-\*
-\* Equivalent form: for any p in peer_present with peer_alive[p]
-\* = TRUE, the kernel-timeout predicate `now -
-\* last_keepalive_response[p] > KeepaliveCycle` is FALSE — so
-\* ReapDeadPeer cannot fire on p. This is the structural
-\* "no false reap" guarantee.
-\*
-\* Note: the spec models KeepaliveProbe as a discrete action,
-\* not a continuous timer. Under fairness on KeepaliveProbe,
-\* live peers are probed at every reachable interleaving point;
-\* the lifetime gap between probes is bounded by the
-\* interleaving granularity of the spec, which equals the
-\* AdvanceTime step granularity (1). So a live peer's gap is
-\* bounded by 1 + the number of AdvanceTime steps since the
-\* last probe — which TLC enumerates and bounds.
-\*
-\* For the spec to make this concrete, we capture the structural
-\* witness as: a live peer in peer_present cannot be such that
-\* ReapDeadPeer is enabled on it. Equivalently: for any reachable
-\* state, no live peer satisfies the kernel-timeout predicate
-\* OR if it does (because the test enumeration includes such
-\* states), the fairness on KeepaliveProbe will immediately
-\* re-establish the gap-bounded property in the next step.
+\* asserting the ENABLED predicate is FALSE for live peers.
 
 INV_NoFalseReap ==
     \A p \in peer_present :
        (peer_alive[p] = TRUE) =>
-          \* A live peer's staleness gap is bounded by the
-          \* kernel-timeout cycle. The structural witness: under
-          \* fairness, KeepaliveProbe refreshes the gap to 0;
-          \* AdvanceTime then widens it by at most 1 per step;
-          \* so the gap is bounded by the number of consecutive
-          \* AdvanceTime steps without a KeepaliveProbe, which
-          \* under WF_vars on KeepaliveProbe is bounded by 1.
-          \*
-          \* The invariant body is the boundary condition: the
-          \* gap is at most KeepaliveCycle (the kernel-timeout
-          \* bound), so ReapDeadPeer is never enabled for live
-          \* peers. The structural witness fires at every
-          \* reachable state.
-          (now - last_keepalive_response[p] <= KeepaliveCycle)
+          \* The true T-3 claim: the reap action is never
+          \* enabled on a live peer. Holds structurally via
+          \* ReapDeadPeer's peer_alive[p] = FALSE precondition.
+          ~ ENABLED ReapDeadPeer(p)
 
 \* INV_MonotoneTime.
 \*
@@ -782,7 +742,9 @@ PROP_NoLeak ==
 \*     atomic peer-removal. The spec does not model the asio
 \*     completion lambda layer; the structural witness is that
 \*     ReapDeadPeer is the only action that removes from
-\*     peer_present, and its precondition is the kernel-timeout
+\*     peer_present, and its precondition is the dead-peer flag
+\*     `peer_alive[p] = FALSE` (the kernel only errors after
+\*     unanswered probes) conjoined with the kernel-timeout
 \*     predicate `now - last_keepalive_response[p] >
 \*     KeepaliveCycle`.
 \*

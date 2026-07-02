@@ -132,8 +132,8 @@ Init ==
 
 \* Sum of all balances across Domains. Used by Inv_SubsidyConservation.
 SumBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              accounts[d].balance + sum_bal(S \ {d})

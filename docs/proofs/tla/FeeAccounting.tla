@@ -5,7 +5,8 @@ state machine. Models the apply-layer lifecycle of a transfer's fee
 from sender-debit (on success) or silent-skip (on insufficient balance),
 through accumulation into the block's running `block_total_fees`
 counter, through finalization that distributes the accumulated fees
-equally across the block's creator set with dust to creators[0].
+equally across the block's creator list (per entry) with dust to
+creators[0].
 
 This spec captures the invariants of Determ's fee accounting at the
 state-machine layer, independent of consensus, signature verification,
@@ -21,9 +22,11 @@ overflow-checking, and subsidy/lottery distribution semantics:
     Inv_NoFeeOnSkip invariant is the headline structural claim that
     silently-skipped txs cannot leak balance.
   * FinalizeBlock (creators non-empty): distributes `block_total_fees`
-    equally across `block_creators`; each creator gains
-    `block_total_fees / |block_creators|` and creator[0] additionally
-    gains the dust `block_total_fees mod |block_creators|`. After
+    equally across `block_creators`; each creator ENTRY gains
+    `block_total_fees / |block_creators|` (a domain listed twice is
+    credited twice, matching the C++ range-for) and creator[0]
+    additionally gains the dust `block_total_fees mod |block_creators|`.
+    After
     distribution, `block_total_fees` is reset to 0 and `height` is
     advanced. Models the T-F1 distribution branch at
     src/chain/chain.cpp:1286-1305.
@@ -146,8 +149,8 @@ vars == <<accounts, pending_txs, block_creators, block_total_fees, height>>
 \* Balances are pre-allocated so their sum equals TotalSupplyInitial.
 \* For TLC tractability we hard-code a small initial allocation in the
 \* .cfg via INIT (the Init operator below picks one canonical
-\* allocation; the .cfg's CONSTANT TotalSupplyInitial = 20 with
-\* 4 domains a/b/c/d allocates 5 to each).
+\* allocation; the .cfg's CONSTANT TotalSupplyInitial = 2 with
+\* 2 domains a/b allocates 1 to each).
 \*
 \* pending_txs starts empty (no txs submitted yet); block_creators
 \* starts empty (StartNextBlock must fire to assign the first
@@ -170,17 +173,19 @@ Init ==
 \* arity. Pattern matches StakeLifecycle.tla::SumBalances /
 \* SumStakes.
 SumBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              accounts[d].balance + sum_bal(S \ {d})
     IN sum_bal(Domains)
 
-\* Set-of-elements of a sequence. TLC has Seq builtins but expressing
-\* "the set of creators in the current block" is cleaner as a set.
-\* Used by FinalizeBlock + Inv_FeeDistributionDeterministic.
-SeqToSet(s) == {s[i] : i \in 1..Len(s)}
+\* Finite set of creator sequences of length 0..|Domains|. TLC cannot
+\* enumerate the infinite set Seq(Domains); this is exactly the subset
+\* that StartNextBlock's `Len(creators) <= Cardinality(Domains)` guard
+\* admits, so quantifying over it instead of Seq(Domains) is
+\* meaning-preserving. Used by Next + the Spec fairness conjunct.
+CreatorSeqs == UNION {[1..n -> Domains] : n \in 0..Cardinality(Domains)}
 
 ----------------------------------------------------------------------------
 \* Actions. Each action models the corresponding apply-layer branch in
@@ -200,7 +205,11 @@ SeqToSet(s) == {s[i] : i \in 1..Len(s)}
 \* head of an empty queue has no domain).
 SubmitTx(t) ==
     /\ t \in Tx
-    /\ Len(pending_txs) <= MaxHeight  \* bound queue length for TLC
+    /\ Len(pending_txs) < 2  \* bound queue depth (2 slots) for TLC: two
+                             \* pending txs suffice to interleave the
+                             \* success + insufficient-balance branches
+                             \* within one block; deeper queues only
+                             \* multiply the state space (|Tx|^depth)
     /\ pending_txs' = Append(pending_txs, t)
     /\ UNCHANGED <<accounts, block_creators, block_total_fees, height>>
 
@@ -254,8 +263,15 @@ ApplyTxInsufficientBalance ==
 \* Distribution policy (mirrors the C++):
 \*   per_creator = block_total_fees \div |block_creators|
 \*   dust        = block_total_fees mod  |block_creators|
-\*   each c \in block_creators : balance += per_creator
+\*   each ENTRY of block_creators : balance += per_creator
 \*   block_creators[0] additionally: balance += dust
+\*
+\* The credit is per-ENTRY, not per-distinct-domain: the C++ range-for
+\* over b.creators at line 1291 credits every entry, so a domain that
+\* appears k times in the creator sequence gains k * per_creator. The
+\* model counts occurrences accordingly — this is what keeps the
+\* distribution lossless (per_creator * Len + dust = block_total_fees)
+\* even for duplicate-bearing creator sequences.
 \*
 \* The dust-to-creators[0] rule is the canonical tie-breaker that
 \* keeps the distribution lossless (every unit of fee ends up on some
@@ -301,13 +317,13 @@ FinalizeBlockWithCreators ==
     /\ height < MaxHeight
     /\ LET m   == Len(block_creators) IN
        LET per == block_total_fees \div m IN
-       LET dst == block_total_fees \div m * m + (block_total_fees % m) IN  \* sanity
+       LET dst == ((block_total_fees \div m) * m) + (block_total_fees % m) IN  \* sanity
        LET dust == block_total_fees % m IN
        /\ accounts' = [d \in Domains |->
                          [balance |->
                             accounts[d].balance
-                            + (IF d \in SeqToSet(block_creators)
-                               THEN per ELSE 0)
+                            + per * Cardinality({i \in 1..m :
+                                                   block_creators[i] = d})
                             + (IF d = block_creators[1]
                                THEN dust ELSE 0)]]
        /\ block_total_fees' = 0
@@ -350,7 +366,7 @@ Next ==
     \/ ApplyTx
     \/ ApplyTxInsufficientBalance
     \/ FinalizeBlock
-    \/ \E creators \in Seq(Domains) : StartNextBlock(creators)
+    \/ \E creators \in CreatorSeqs : StartNextBlock(creators)
 
 \* Fairness on FinalizeBlock + StartNextBlock so that the fee pool
 \* eventually drains and the block-by-block cycle progresses.
@@ -358,11 +374,20 @@ Next ==
 \* perpetually accumulating new tx fees; without WF on
 \* StartNextBlock, the first FinalizeBlock would clear creators and
 \* no subsequent block could ever finalize.
+\*
+\* TLC form: a per-sequence quantified fairness family
+\* (\A creators : WF_vars(StartNextBlock(creators))) is not a
+\* TLC-checkable temporal formula shape; the single WF on the
+\* existentially quantified action below is equivalent here because
+\* ENABLED StartNextBlock(c) is the same condition
+\* (block_creators = <<>>) for every c \in CreatorSeqs — both forms
+\* exclude exactly the behaviors that stutter at block_creators =
+\* <<>> forever.
 Spec ==
     /\ Init
     /\ [][Next]_vars
     /\ WF_vars(FinalizeBlock)
-    /\ \A creators \in Seq(Domains) : WF_vars(StartNextBlock(creators))
+    /\ WF_vars(\E creators \in CreatorSeqs : StartNextBlock(creators))
 
 ----------------------------------------------------------------------------
 \* Invariants.

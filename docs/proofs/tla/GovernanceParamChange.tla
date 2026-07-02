@@ -48,12 +48,13 @@ Modeling scope (kept tractable for TLC):
     + activation + forwarding are uniform across whitelist names;
     modeling one is sufficient. A multi-parameter model would be a
     straight Cartesian-product lift of this one.
-  * Pending entries are modeled as a sequence (TLA+ Seq) rather than
-    a std::map<eff_height, vector<...>> — preserving insertion-order
-    semantics within and across effective_height buckets. The TLC
-    enumeration walks the same insertion-order drain that the C++
-    `Chain::activate_pending_params` does (std::map iterates in
-    ascending key order + std::vector preserves push_back order).
+  * Pending entries are modeled as a sequence (TLA+ Seq) kept sorted
+    by ascending effective_height via a sorted insert (ties broken by
+    insertion order) — mirroring the std::map<eff_height, vector<...>>
+    ordering exactly: std::map iterates in ascending key order and
+    std::vector preserves push_back order within a bucket. The TLC
+    enumeration therefore walks the same drain order that the C++
+    `Chain::activate_pending_params` does.
   * Signature verification is abstracted: the model stores the
     submitted signer set as a SUBSET of keyholders and checks the
     cardinality against the threshold. The actual chain runs full
@@ -164,18 +165,32 @@ Init ==
 \*       >= param_threshold
 \* This action models (3) and (4) as guards; (1) and (2) are abstracted.
 \*
-\* On success: append a new PendingEntry to the pending sequence,
-\* preserving FIFO order across submissions. The C++ uses a
-\* std::map<eff_height, vector<...>> which gives ascending-eff-height
-\* iteration; within the same eff_height, vector push_back preserves
-\* submission order. The TLA model collapses this into a single Seq
-\* and lets the Activate action's insertion-order drain replicate the
-\* C++ traversal — see Activate below for why this is faithful.
+\* On success: insert a new PendingEntry into the pending sequence at
+\* its sorted position keyed on `effective` (ties broken by insertion
+\* order: the new entry goes AFTER existing entries with the same
+\* effective_height). This mirrors the C++
+\* std::map<eff_height, vector<...>> at `stage_param_change`:
+\* ascending-eff-height iteration across buckets, vector push_back
+\* order within a bucket. The sorted insert keeps `pending` ordered
+\* by ascending `effective` by construction, so eligible entries are
+\* always a head-contiguous prefix — the property Inv_NoEarlyActivation
+\* asserts and which holds by construction in the C++ map.
 \*
 \* Pre-condition: `name \in Whitelist` (T-G2 / T-11) AND
 \* `sigs \subseteq Keyholders` AND `Cardinality(sigs) >= Threshold`
 \* (T-G3 / T-10). The two guards together encode the structural
 \* defense against unauthorized mutations.
+
+\* InsertSorted(seq, e): insert e after all entries whose effective
+\* is <= e.effective. On a seq already sorted by ascending effective
+\* (an inductive property of `pending`: Init is empty; every insert
+\* preserves it; removals preserve it), this is the std::map bucket
+\* position with push_back tie-breaking.
+InsertSorted(seq, e) ==
+    LET pos == Cardinality({j \in 1..Len(seq) :
+                              seq[j].effective <= e.effective}) + 1
+    IN  SubSeq(seq, 1, pos - 1) \o <<e>> \o SubSeq(seq, pos, Len(seq))
+
 SubmitParamChange(name, value, eff, sigs) ==
     /\ name \in Whitelist
     /\ value \in 0..MaxValue
@@ -183,10 +198,10 @@ SubmitParamChange(name, value, eff, sigs) ==
     /\ sigs \subseteq Keyholders
     /\ Cardinality(sigs) >= Threshold
     /\ Len(pending) < MaxHeight + 1                    \* bound queue length for TLC
-    /\ pending' = Append(pending, [name      |-> name,
-                                    value     |-> value,
-                                    effective |-> eff,
-                                    sigs      |-> sigs])
+    /\ pending' = InsertSorted(pending, [name      |-> name,
+                                         value     |-> value,
+                                         effective |-> eff,
+                                         sigs      |-> sigs])
     /\ UNCHANGED <<chain_param, validator_param, height>>
 
 \* RejectSubmitOffWhitelist(name, value, eff, sigs): a tx carrying an
@@ -252,11 +267,10 @@ RejectSubmitNonKeyholder(name, value, eff, sigs) ==
 \* This matches the C++ `while (it != pending_param_changes_.end() &&
 \* it->first <= current_height)` loop at `src/chain/chain.cpp:472`.
 \* The std::map's ascending-key iteration is replicated here by the
-\* invariant that submissions with smaller eff arrive before larger
-\* eff in the sequence — TLC explores all reachable orderings, and
-\* the drain semantics hold under any of them because the head-first
-\* eligible check is order-independent in its action effect (the
-\* eligible-set drains regardless of which entry is first).
+\* InsertSorted staging in SubmitParamChange: `pending` is sorted by
+\* ascending effective at every reachable state, so eligible entries
+\* (effective <= height) are always a head-contiguous prefix and the
+\* head-first drain below is exactly the C++ traversal.
 \*
 \* For tractability, we use a simpler "find first eligible entry,
 \* drain it, repeat" formulation in the Activate action below rather
@@ -417,12 +431,13 @@ Inv_ThresholdRespected ==
 \* cannot increase the count of eligible entries by more than one
 \* per step. The combination gives the eventual-drain conclusion.
 \*
-\* Encoded here as: the index of the first eligible entry, if any,
-\* equals 1 OR there exists no eligible entry — i.e., eligibles
-\* are always at the head. This is automatically true because
-\* (a) Activate removes from the head, (b) AdvanceHeight does not
-\* reorder, (c) SubmitParamChange appends to the tail. So any
-\* eligible entry that exists is the first non-drained one.
+\* Encoded here as: eligible entries are always a head-contiguous
+\* prefix of `pending`. This holds by construction because
+\* (a) Activate removes from the (eligible) head, (b) AdvanceHeight
+\* does not reorder, (c) SubmitParamChange inserts at the sorted
+\* position keyed on `effective` — so `pending` is sorted by
+\* ascending effective and any eligible entry sits before every
+\* not-yet-eligible one, exactly as in the C++ std::map.
 Inv_NoEarlyActivation ==
     \A i \in 1..Len(pending) :
        (pending[i].effective <= height)
@@ -464,14 +479,15 @@ Inv_ValidatorChainSync == validator_param = chain_param
 \*
 \* Encoded here as: the post-state `pending'` is either equal to
 \* `pending`, or is a one-element-shorter sequence obtained by
-\* removing some index i from `pending`, or is `Append(pending, e)`
-\* for some new entry e. No other delta on `pending` is permitted.
+\* removing some index i from `pending`, or is `InsertSorted(pending, e)`
+\* for some new entry e (the sorted insert used by SubmitParamChange).
+\* No other delta on `pending` is permitted.
 Inv_NoDoubleApply ==
     [][\/ pending' = pending
        \/ \E i \in 1..Len(pending) :
             pending' = [j \in 1..(Len(pending) - 1) |->
                           IF j < i THEN pending[j] ELSE pending[j+1]]
-       \/ \E e \in PendingEntry : pending' = Append(pending, e)
+       \/ \E e \in PendingEntry : pending' = InsertSorted(pending, e)
       ]_vars
 
 ----------------------------------------------------------------------------

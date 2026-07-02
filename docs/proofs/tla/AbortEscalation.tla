@@ -26,7 +26,7 @@ fix:
     (include/determ/chain/genesis.hpp) — reached by the first abort event,
     so the counter never freezes below it (modeled by BftThreshold=1).
 
-STATUS: written, model-check pending (TLC unavailable in this
+STATUS: TLC-checked GREEN 2026-07-02 (19 distinct states; see CHECK-RESULTS.md. Originally authored blind — TLC unavailable in this
 environment). The spec is ready-to-check:
   $ java -jar tla2tools.jar -config AbortEscalation.cfg AbortEscalation.tla
 The shipped AbortEscalation.cfg is now the PRIMARY SHIPPED-FIX exhibit

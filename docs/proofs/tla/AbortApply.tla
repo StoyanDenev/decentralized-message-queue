@@ -53,8 +53,8 @@ Properties captured:
     distinction is degenerate — record only, no slash. Models the
     DOMAIN_INCLUSION-mode (no-stake) chains.
   * Inv_NoFullForfeitureOnAbort: an abort cannot reduce stake to 0
-    in a single apply UNLESS the pre-apply stake was already below
-    SUSPENSION_SLASH. The headline distinction from equivocation
+    in a single apply UNLESS the pre-apply stake was already at or
+    below SUSPENSION_SLASH. The headline distinction from equivocation
     (T-E1), which fully forfeits regardless of pre-apply stake.
   * Inv_AbortRecordsMonotonic: abort_records[d].count only grows
     (no apply branch decrements; AdvanceRound preserves).
@@ -157,14 +157,23 @@ Init ==
 \* RecordAbort(d, phase): adversarial action — appends an
 \* AbortEvent for d with the given phase to pending. Abstracts
 \* V8 abort-claim verification + signature aggregation (FA-Apply-
-\* AbortEvent covers the soundness via EUF-CMA). Queue length is
-\* bounded for TLC tractability; the actual chain has no queue
-\* cap on AbortEvents per block (the validator's per-block-size
-\* cap S-022 provides the implicit bound).
+\* AbortEvent covers the soundness via EUF-CMA). The recorded-
+\* events budget (applied abort_records[d].count + queued events)
+\* is bounded for TLC tractability — without it the count grows
+\* without bound and the state space is infinite; the actual
+\* chain has no queue cap on AbortEvents per block (the
+\* validator's per-block-size cap S-022 provides the implicit
+\* bound). Budget = MaxRound keeps every scenario in the .cfg
+\* header reachable (3 drains to 0 + 1 DomainInclusion apply);
+\* the queue-length cap of Cardinality(Domains) keeps the
+\* deepest documented interleaving (3 queued aborts drained in
+\* FIFO order) reachable while holding TLC inside the suite's
+\* per-config time budget.
 RecordAbort(d, phase) ==
     /\ d     \in Domains
     /\ phase \in 1..2
-    /\ Len(pending) < MaxRound + Cardinality(Domains)
+    /\ abort_records[d].count + Len(pending) < MaxRound
+    /\ Len(pending) < Cardinality(Domains)
     /\ pending' = Append(pending, [aborting_node |-> d, phase |-> phase])
     /\ UNCHANGED <<stakes, abort_records, accumulated_slashed, round,
                    registry_untouched>>
@@ -176,7 +185,7 @@ RecordAbort(d, phase) ==
 \* head of pending. Registry UNTOUCHED (T-A4). The min() floor
 \* (chain.cpp:1324) ensures Inv_NoFullForfeitureOnAbort holds:
 \* a full drain to 0 only fires when the pre-apply stake was
-\* already below SUSPENSION_SLASH.
+\* already at or below SUSPENSION_SLASH.
 \*
 \* Guard: head must be a Phase-1 AbortEvent for d AND stakes[d] > 0
 \* (the chain.cpp:1322-1323 `stakes_.find(ae.aborting_node) ==
@@ -322,18 +331,19 @@ Inv_SlashedMonotonic ==
 
 \* NoFullForfeitureOnAbort: an AbortEvent apply step cannot
 \* reduce stakes[d] to 0 in a single step UNLESS the pre-apply
-\* stakes[d] was already < SUSPENSION_SLASH. The headline
+\* stakes[d] was already <= SUSPENSION_SLASH. The headline
 \* distinction from equivocation (T-E1), which fully forfeits
 \* regardless of pre-apply stake.
 \*
 \* Action form: if a step reduces stakes[d] to 0 (post is 0,
-\* pre is > 0), then pre must have been below SUSPENSION_SLASH.
-\* Equivalent contrapositive: if pre >= SUSPENSION_SLASH AND
-\* stakes is touched, then post >= pre - SUSPENSION_SLASH > 0.
+\* pre is > 0), then pre must have been at or below
+\* SUSPENSION_SLASH. Equivalent contrapositive: if
+\* pre >= SUSPENSION_SLASH AND stakes is touched, then
+\* post >= pre - SUSPENSION_SLASH >= 0.
 Inv_NoFullForfeitureOnAbort ==
     [][\A d \in Domains :
          (stakes'[d] = 0 /\ stakes[d] > 0)
-         => stakes[d] < SUSPENSION_SLASH
+         => stakes[d] <= SUSPENSION_SLASH
       ]_vars
 
 \* AbortRecordsMonotonic: abort_records[d].count never decreases

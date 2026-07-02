@@ -1,32 +1,32 @@
 ----------------------------- MODULE WireFrameCap -----------------------------
 (*
 FB47 — TLA+ specification of the S-022 two-stage wire-frame admission
-gate: the framing-layer ceiling (`kMaxFrameBytes = 16 MB`) in
-`Peer::read_header` followed by the per-message-type body-size cap
-(`max_message_bytes(MsgType)`) in `Peer::read_body`.
+gate: the framing-layer ceiling (kMaxFrameBytes = 16 MB) in
+Peer::read_header followed by the per-message-type body-size cap
+(max_message_bytes(MsgType)) in Peer::read_body.
 
 NOTE: no model-check this session — caller will TLC-validate. This
-module is syntactically self-contained and ready for `tlc -config
-WireFrameCap.cfg WireFrameCap.tla` once the TLC toolchain is available
+module is syntactically self-contained and ready for tlc -config
+WireFrameCap.cfg WireFrameCap.tla once the TLC toolchain is available
 in CI.
 
 Scope. Formalizes the just-audited S-022 closure at
-`src/net/peer.cpp:50-105` (the two-stage read pipeline) backed by the
-cap table at `include/determ/net/messages.hpp:94-152`. Every inbound
+src/net/peer.cpp:50-105 (the two-stage read pipeline) backed by the
+cap table at include/determ/net/messages.hpp:94-152. Every inbound
 gossip frame transits TWO independent length gates before the message
-reaches the `on_msg_` dispatch:
+reaches the on_msg_ dispatch:
 
-  * Stage 1 — framing gate (`Peer::read_header` at peer.cpp:50-69).
+  * Stage 1 — framing gate (Peer::read_header at peer.cpp:50-69).
     A 4-byte big-endian length prefix is read first. The receiver
-    rejects the frame (closes the connection via `on_close_`) when
-    `len == 0 || len > kMaxFrameBytes`, where `kMaxFrameBytes =
-    16 * 1024 * 1024` (16 MB) per messages.hpp:101. This gate fires
+    rejects the frame (closes the connection via on_close_) when
+    len == 0 || len > kMaxFrameBytes, where kMaxFrameBytes =
+    16 * 1024 * 1024 (16 MB) per messages.hpp:101. This gate fires
     BEFORE any body bytes are read or any deserialization runs — so a
     flooder cannot force the node to buffer more than 16 MB per frame.
-  * Stage 2 — per-type gate (`Peer::read_body` at peer.cpp:72-105).
-    After the body is read and `Message::deserialize` recovers the
+  * Stage 2 — per-type gate (Peer::read_body at peer.cpp:72-105).
+    After the body is read and Message::deserialize recovers the
     MsgType, the receiver rejects the message (closes the connection)
-    when `body_buf_.size() > max_message_bytes(msg.type)`. The cap is
+    when body_buf_.size() > max_message_bytes(msg.type). The cap is
     type-aware (messages.hpp:124-152):
       - 16 MB for SNAPSHOT_RESPONSE / CHAIN_RESPONSE (the only
         legitimate large-payload channels; bootstrap state can be MBs).
@@ -35,14 +35,14 @@ reaches the `on_msg_` dispatch:
         tx-set × tx-size or 256-header page).
       - 1 MB for everything else — the DEFAULT branch, covering
         consensus chatter (CONTRIB / BLOCK_SIG / ABORT_CLAIM /
-        ABORT_EVENT / EQUIVOCATION_EVIDENCE / HELLO / STATUS_*),
+        ABORT_EVENT / EQUIVOCATION_EVIDENCE / HELLO / STATUS_star),
         request envelopes (GET_CHAIN / SNAPSHOT_REQUEST /
         HEADERS_REQUEST), and tx. The default keeps the cap tight so
         a new MsgType variant added without explicit categorisation
         cannot slip through unbounded.
 
 The headline robustness property: the only types that can reach
-`on_msg_` carrying more than 1 MB are the five explicitly-large types
+on_msg_ carrying more than 1 MB are the five explicitly-large types
 (the 16 MB pair + the 4 MB block-class quintet). Every other type —
 in particular all consensus chatter — is bounded at 1 MB at the type
 gate even though the framing gate admitted up to 16 MB. A flooder
@@ -71,7 +71,7 @@ SECURITY.md §S-022 + the cap table at messages.hpp:103-152):
         connection is closed and NO body bytes are buffered. State-
         form witness: INV_FramingCeilingEnforced.
   (T-2) Per-Type Cap. Every message that reaches the dispatch
-        (`on_msg_`) has body size <= max_message_bytes(msg.type). A
+        (on_msg_) has body size <= max_message_bytes(msg.type). A
         message over its type cap is dropped at Stage 2. State-form
         witness: INV_DispatchedWithinTypeCap.
   (T-3) Tight Default. Every dispatched message whose type is NOT one
@@ -84,7 +84,7 @@ SECURITY.md §S-022 + the cap table at messages.hpp:103-152):
         connection closed (same disposition as a Stage-1 failure).
         State-form witness: INV_OversizeNeverDispatched +
         PROP_NoSilentOversizeDispatch.
-  (T-5) Bounded Buffering. The node never resizes `body_buf_` beyond
+  (T-5) Bounded Buffering. The node never resizes body_buf_ beyond
         kMaxFrameBytes (Stage 1 gates the resize). State-form
         witness: INV_BufferBounded — the per-frame memory the
         receiver commits is at most the framing ceiling.
@@ -95,8 +95,8 @@ SECURITY.md §S-022 + the cap table at messages.hpp:103-152):
 
 The state machine. Five actions cover the two-stage read pipeline:
 
-  * ArriveFrame(t, sz) — a frame of MsgType `t` and declared body
-    length `sz` arrives on the wire. Appends a new frame record with
+  * ArriveFrame(t, sz) — a frame of MsgType t and declared body
+    length sz arrives on the wire. Appends a new frame record with
     stage = "ARRIVED" to frames. Mirrors the async_read completion on
     the 4-byte header at peer.cpp:52 (the length prefix has been read;
     the body has NOT yet been buffered). The (type, size) pair is a
@@ -104,25 +104,25 @@ The state machine. Five actions cover the two-stage read pipeline:
     every reachable combination, including the over-framing-ceiling
     and over-type-cap cases that trigger the drop branches.
   * RejectAtFraming(idx) — Stage-1 rejection. Pre-condition: the frame
-    at idx is ARRIVED and `sz = 0 OR sz > kMaxFrameBytes`. Sets stage
+    at idx is ARRIVED and sz = 0 OR sz > kMaxFrameBytes. Sets stage
     to "DROPPED". No body is buffered (buffered[idx] stays FALSE).
-    Mirrors the `if (len == 0 || len > kMaxFrameBytes)` branch at
+    Mirrors the if (len == 0 || len > kMaxFrameBytes) branch at
     peer.cpp:64-67 (close before read_body).
   * BufferBody(idx) — the body passes the framing gate and is read off
     the wire. Pre-condition: the frame at idx is ARRIVED and
-    `1 <= sz <= kMaxFrameBytes`. Sets stage to "BUFFERED" and marks
-    buffered[idx] = TRUE. Mirrors `read_body(len)` at peer.cpp:68 +
-    the `Message::deserialize` recovery at peer.cpp:82 — at this point
+    1 <= sz <= kMaxFrameBytes. Sets stage to "BUFFERED" and marks
+    buffered[idx] = TRUE. Mirrors read_body(len) at peer.cpp:68 +
+    the Message::deserialize recovery at peer.cpp:82 — at this point
     the MsgType is known and the per-type cap can be applied.
   * RejectAtTypeCap(idx) — Stage-2 rejection. Pre-condition: the frame
-    at idx is BUFFERED and `sz > max_message_bytes(type)`. Sets stage
-    to "DROPPED". Mirrors the `if (body_buf_.size() >
-    max_message_bytes(msg.type))` branch at peer.cpp:90-97 (drop +
+    at idx is BUFFERED and sz > max_message_bytes(type). Sets stage
+    to "DROPPED". Mirrors the if (body_buf_.size() >
+    max_message_bytes(msg.type)) branch at peer.cpp:90-97 (drop +
     close after deserialize).
   * Dispatch(idx) — the message passes both gates and reaches
-    `on_msg_`. Pre-condition: the frame at idx is BUFFERED and
-    `sz <= max_message_bytes(type)`. Sets stage to "DISPATCHED".
-    Mirrors `if (self->on_msg_) self->on_msg_(self, msg)` at
+    on_msg_. Pre-condition: the frame at idx is BUFFERED and
+    sz <= max_message_bytes(type). Sets stage to "DISPATCHED".
+    Mirrors if (self->on_msg_) self->on_msg_(self, msg) at
     peer.cpp:98.
 
 Six invariants codify the structural contracts:
@@ -158,8 +158,8 @@ Two temporal properties pin the headline composition claims:
 
 Modeling scope (kept tractable for TLC):
 
-  * `MsgTypes` is a SUBSET of strings — the universe of message-type
-    discriminators. Production uses the `enum class MsgType` at
+  * MsgTypes is a SUBSET of strings — the universe of message-type
+    discriminators. Production uses the enum class MsgType at
     messages.hpp:60-82 (HELLO / CONTRIB / BLOCK_SIG / BLOCK /
     SNAPSHOT_RESPONSE / CHAIN_RESPONSE / ...). The cfg uses a
     representative subset that spans all three cap tiers:
@@ -167,7 +167,7 @@ Modeling scope (kept tractable for TLC):
       - "block"         — the 4 MB tier (BLOCK).
       - "contrib"       — the 1 MB default tier (consensus chatter).
     so all three branches of max_message_bytes are exercised.
-  * `FrameSizes` is a SUBSET of Nat — the universe of declared body
+  * FrameSizes is a SUBSET of Nat — the universe of declared body
     lengths in spec-time size units (NOT raw bytes — see UnitScale
     below). The cfg picks sizes straddling each cap boundary so the
     pass / drop branches at each gate are reachable.
@@ -178,24 +178,27 @@ Modeling scope (kept tractable for TLC):
     above a cap drops; sz at-or-below passes), which is all the
     structural invariants depend on. The literal byte values are
     documentary; the spec checks the gate ARITHMETIC.
-  * `MaxFrames` bounds the frames log growth so TLC exhausts in
-    seconds. Production runs unbounded; the model bounds at 4 to
-    exercise: 0->1 (first ARRIVED), 1->2 (first DROP-at-framing),
-    2->3 (DROP-at-type-cap), 3->4 (happy-path DISPATCH).
+  * MaxFrames bounds the frames log growth so TLC exhausts within
+    the CI budget. Production runs unbounded; the model bounds at 3 —
+    one frame per disposition class (DROP-at-framing, DROP-at-type-
+    cap, happy-path DISPATCH) co-resident in a single trace. A bound
+    of 4 gives ~5.4M distinct states (48 reachable frame-record
+    valuations, sum 48^k) and blows the 120s CI budget; see the .cfg
+    sizing note.
   * The 4-byte big-endian length-prefix decode at peer.cpp:58-61 is
     NOT modeled at the byte level — the spec carries the decoded
-    `sz` directly as a Nat. The decode correctness is the C++ side's
+    sz directly as a Nat. The decode correctness is the C++ side's
     domain; the spec models the gate decisions on the decoded value.
-  * The `Message::deserialize` format-detecting dispatch (JSON vs
+  * The Message::deserialize format-detecting dispatch (JSON vs
     binary, messages.hpp:166-171) is NOT modeled — the spec carries
-    the recovered MsgType directly as the frame's `type` field. The
+    the recovered MsgType directly as the frame's type field. The
     binary-codec round-trip is FB-track-adjacent (binary_codec.cpp);
     this spec models the SIZE-admission gate, not the codec.
   * The async-read completion-handler chain (asio buffers + the
-    `self` shared_ptr lifetime) is collapsed into the atomic actions.
+    self shared_ptr lifetime) is collapsed into the atomic actions.
     The spec does not model the asio layer; each action is the
     atomic effect of one completion handler.
-  * `buffered` is a per-frame BOOLEAN flag (TRUE iff the body bytes
+  * buffered is a per-frame BOOLEAN flag (TRUE iff the body bytes
     were read off the wire — i.e. the frame passed Stage 1). It is
     the structural witness for INV_BufferBounded: a frame is buffered
     ONLY if it passed the framing gate, so its sz <= kMaxFrameBytes.
@@ -222,9 +225,10 @@ The state machine. Five actions cover the two-stage read pipeline
 To check (assuming TLC installed):
   $ tlc WireFrameCap.tla -config WireFrameCap.cfg
 
-Recommended config (state space ~10^4, < 30s):
+Recommended config (state space ~1.1x10^5 distinct, ~30s with
+liveness):
   MsgTypes = {"snapshot_resp", "block", "contrib"},
-  FrameSizes = {0, 1, 2, 5, 16, 20}, MaxFrames = 4.
+  FrameSizes = {0, 1, 2, 5, 16, 20}, MaxFrames = 3.
   (0 = empty-frame Stage-1 reject; 2 = over-1MB / under-4MB so a
    contrib drops at Stage 2 but a block passes; 5 = over-4MB / under-
    16MB so a block drops but a snapshot_resp passes; 20 = over-16MB
@@ -232,11 +236,11 @@ Recommended config (state space ~10^4, < 30s):
 
 Cross-references:
   - src/net/peer.cpp:50-69 : Peer::read_header — the Stage-1 framing
-      gate (`if (len == 0 || len > kMaxFrameBytes)` at :64-67). The
+      gate (if (len == 0 || len > kMaxFrameBytes) at :64-67). The
       spec's RejectAtFraming + the BufferBody pre-condition mirror
       this branch.
   - src/net/peer.cpp:72-105 : Peer::read_body — the Stage-2 per-type
-      gate (`if (body_buf_.size() > max_message_bytes(msg.type))` at
+      gate (if (body_buf_.size() > max_message_bytes(msg.type)) at
       :90-97) + the dispatch at :98. The spec's RejectAtTypeCap +
       Dispatch mirror these branches.
   - include/determ/net/messages.hpp:94-101 : kMaxFrameBytes = 16 MB
@@ -281,7 +285,7 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 CONSTANTS
     MsgTypes,        \* SUBSET of strings — the universe of message-
                       \*  type discriminators. Production uses the
-                      \*  `enum class MsgType` at messages.hpp:60-82;
+                      \*  enum class MsgType at messages.hpp:60-82;
                       \*  the cfg uses a subset spanning all three cap
                       \*  tiers (16 MB / 4 MB / 1 MB default).
     FrameSizes,      \* SUBSET of Nat — declared body lengths in
@@ -311,7 +315,7 @@ ASSUME ConfigOK ==
 \* documentary (the spec checks the gate arithmetic, not the byte
 \* count).
 
-\* OneMB: the default per-type cap (messages.hpp:149-150, `default`
+\* OneMB: the default per-type cap (messages.hpp:149-150, default
 \* branch). Covers consensus chatter (CONTRIB / BLOCK_SIG /
 \* ABORT_CLAIM / ABORT_EVENT / EQUIVOCATION_EVIDENCE / HELLO /
 \* STATUS_*), request envelopes (GET_CHAIN / SNAPSHOT_REQUEST /
@@ -349,7 +353,7 @@ LargeTypes == { t \in MsgTypes : t = "block" \/ t = "snapshot_resp" }
 \* The cfg uses "snapshot_resp" (16 MB tier), "block" (4 MB tier),
 \* and "contrib" (1 MB default tier) as representatives. Any type not
 \* matching the first two falls through to the default OneMB, exactly
-\* mirroring the C++ `default:` branch that keeps a newly-added
+\* mirroring the C++ default: branch that keeps a newly-added
 \* uncategorised MsgType bounded at 1 MB.
 Cap(t) ==
     IF      t = "snapshot_resp" THEN SixteenMB
@@ -381,8 +385,8 @@ vars == <<frames, buffered>>
 FrameStage == {"ARRIVED", "BUFFERED", "DROPPED", "DISPATCHED"}
 
 \* FrameRecord: shape of a frames element. Carries the recovered
-\* MsgType (`type`), the declared body length (`sz`), and the
-\* pipeline stage (`stage`).
+\* MsgType (type), the declared body length (sz), and the
+\* pipeline stage (stage).
 FrameRecord == [
     type  : MsgTypes,
     sz    : FrameSizes,
@@ -405,13 +409,13 @@ Init ==
 \* §4. Actions.
 \* -----------------------------------------------------------------
 
-\* ArriveFrame(t, sz): a frame of MsgType `t` and declared body
-\* length `sz` arrives on the wire (the 4-byte header has been read;
+\* ArriveFrame(t, sz): a frame of MsgType t and declared body
+\* length sz arrives on the wire (the 4-byte header has been read;
 \* the body has NOT yet been buffered).
 \*
 \* Mirrors the async_read completion on the 4-byte header at
-\* peer.cpp:52 — the length prefix `len` has been decoded (peer.cpp:
-\* 58-61) but `read_body(len)` has not yet run. The (type, sz) pair
+\* peer.cpp:52 — the length prefix len has been decoded (peer.cpp:
+\* 58-61) but read_body(len) has not yet run. The (type, sz) pair
 \* is a non-deterministic choice over MsgTypes × FrameSizes; TLC
 \* explores every reachable combination, including the over-framing-
 \* ceiling (sz > SixteenMB) and over-type-cap (sz > Cap(t)) cases
@@ -438,8 +442,8 @@ ArriveFrame(t, sz) ==
 \* kMaxFrameBytes (SixteenMB at the spec layer). The connection is
 \* closed BEFORE any body bytes are read.
 \*
-\* Mirrors the `if (len == 0 || len > kMaxFrameBytes) { on_close_;
-\* return; }` branch at peer.cpp:64-67. CRITICAL: no body is read
+\* Mirrors the if (len == 0 || len > kMaxFrameBytes) { on_close_;
+\* return; } branch at peer.cpp:64-67. CRITICAL: no body is read
 \* (buffered[idx] stays FALSE) — the framing gate bounds the per-
 \* frame memory commitment to the 4-byte header BEFORE the gate
 \* decision.
@@ -461,11 +465,11 @@ RejectAtFraming(idx) ==
 
 \* BufferBody(idx): the body passes the framing gate and is read off
 \* the wire. The declared length is in range [1, SixteenMB]; the body
-\* is buffered and `Message::deserialize` recovers the MsgType (so
+\* is buffered and Message::deserialize recovers the MsgType (so
 \* the per-type cap can now be applied at Stage 2).
 \*
-\* Mirrors `read_body(len)` at peer.cpp:68 followed by the
-\* `Message::deserialize(...)` recovery at peer.cpp:82 — at this
+\* Mirrors read_body(len) at peer.cpp:68 followed by the
+\* Message::deserialize(...) recovery at peer.cpp:82 — at this
 \* point the MsgType is known. The spec collapses the body-read +
 \* deserialize into the BUFFERED transition; the per-type gate
 \* decision is the subsequent RejectAtTypeCap / Dispatch.
@@ -491,8 +495,8 @@ BufferBody(idx) ==
 \* dropped and the connection closed — the same disposition as a
 \* Stage-1 failure.
 \*
-\* Mirrors the `if (body_buf_.size() > max_message_bytes(msg.type))
-\* { on_close_; return; }` branch at peer.cpp:90-97. This is the gate
+\* Mirrors the if (body_buf_.size() > max_message_bytes(msg.type))
+\* { on_close_; return; } branch at peer.cpp:90-97. This is the gate
 \* that defeats the framing-ceiling-as-amplification attack: an
 \* oversize CONTRIB (under the 16 MB framing ceiling but over its
 \* 1 MB type cap) is read off the wire at Stage 1 but dropped here at
@@ -514,13 +518,13 @@ RejectAtTypeCap(idx) ==
     /\ UNCHANGED buffered
 
 \* Dispatch(idx): the message passes BOTH gates and reaches the
-\* `on_msg_` dispatch.
+\* on_msg_ dispatch.
 \*
-\* Mirrors `if (self->on_msg_) self->on_msg_(self, msg)` at
+\* Mirrors if (self->on_msg_) self->on_msg_(self, msg) at
 \* peer.cpp:98. The frame's declared length is within both the
 \* framing ceiling (witnessed by the BUFFERED stage — only reachable
 \* via BufferBody, whose pre-condition gated sz <= SixteenMB) AND the
-\* per-type cap (the Dispatch pre-condition `sz <= Cap(type)`).
+\* per-type cap (the Dispatch pre-condition sz <= Cap(type)).
 \*
 \* Pre-condition: idx ∈ 1..Len(frames); frames[idx].stage =
 \* "BUFFERED"; frames[idx].sz <= Cap(frames[idx].type).
@@ -578,7 +582,7 @@ TypeOK ==
 \* DROPPED (via RejectAtFraming) or still ARRIVED.
 \*
 \* Structural witness: BufferBody's pre-condition is
-\* `1 <= sz <= SixteenMB`, so a frame with sz = 0 or sz > SixteenMB
+\* 1 <= sz <= SixteenMB, so a frame with sz = 0 or sz > SixteenMB
 \* can never transition to BUFFERED; and DISPATCHED is reachable only
 \* from BUFFERED. RejectAtFraming is the only resolution path for
 \* over-ceiling / empty frames. The invariant body asserts the
@@ -597,7 +601,7 @@ INV_FramingCeilingEnforced ==
 \* Stage 2 (RejectAtTypeCap) and never dispatched.
 \*
 \* Structural witness: Dispatch's pre-condition is
-\* `sz <= Cap(frames[idx].type)`; no path sets stage = "DISPATCHED"
+\* sz <= Cap(frames[idx].type); no path sets stage = "DISPATCHED"
 \* when the per-type cap is exceeded. The invariant body asserts this
 \* per-entry over the frames log.
 
@@ -616,7 +620,7 @@ INV_DispatchedWithinTypeCap ==
 \* 16 MB.
 \*
 \* Structural witness: for a default-tier type, Cap(type) = OneMB
-\* (the `default:` branch at messages.hpp:149-150); composed with
+\* (the default: branch at messages.hpp:149-150); composed with
 \* INV_DispatchedWithinTypeCap, a dispatched default-tier frame has
 \* sz <= OneMB. This is the headline robustness claim: the 16 MB
 \* framing ceiling is NOT an amplification vector for the 1 MB-capped
@@ -648,12 +652,12 @@ INV_OversizeNeverDispatched ==
 \*
 \* Every frame whose body was read off the wire (buffered[i] = TRUE)
 \* has declared length <= kMaxFrameBytes (SixteenMB). The framing
-\* gate bounds the body-buffer resize: `body_buf_.resize(len)` at
+\* gate bounds the body-buffer resize: body_buf_.resize(len) at
 \* peer.cpp:73 runs only after the framing gate accepted
-\* `len <= kMaxFrameBytes`.
+\* len <= kMaxFrameBytes.
 \*
 \* Structural witness: buffered[i] = TRUE only via BufferBody, whose
-\* pre-condition gated `sz <= SixteenMB`. So the receiver never
+\* pre-condition gated sz <= SixteenMB. So the receiver never
 \* commits more than the framing ceiling of body memory per frame.
 \* The invariant body asserts the bound over the buffered flags.
 
@@ -745,14 +749,14 @@ PROP_NoSilentOversizeDispatch ==
 \*
 \*   * The 4-byte big-endian length-prefix decode at peer.cpp:58-61
 \*     is NOT modeled at the byte level. The spec carries the decoded
-\*     `sz` directly as a Nat; the decode correctness (shift-and-or
+\*     sz directly as a Nat; the decode correctness (shift-and-or
 \*     reassembly of the four header bytes) is the C++ side's domain.
 \*     The spec models the gate DECISIONS on the decoded value.
 \*
-\*   * The `Message::deserialize` format-detecting dispatch (JSON vs
+\*   * The Message::deserialize format-detecting dispatch (JSON vs
 \*     binary, messages.hpp:166-171; binary_codec.cpp) is NOT
 \*     modeled. The spec carries the recovered MsgType directly as
-\*     the frame's `type` field; the BUFFERED stage collapses the
+\*     the frame's type field; the BUFFERED stage collapses the
 \*     body-read + deserialize step. The binary-codec round-trip +
 \*     version negotiation are adjacent surfaces (the codec layer);
 \*     this spec models the SIZE-admission gate, not the codec.
@@ -760,13 +764,13 @@ PROP_NoSilentOversizeDispatch ==
 \*     FB37 HelloHandshake.tla territory.
 \*
 \*   * The async-read completion-handler chain (asio buffers + the
-\*     `self` shared_ptr lifetime extension + the re-arm
-\*     `read_header()` at peer.cpp:103) is collapsed into the atomic
+\*     self shared_ptr lifetime extension + the re-arm
+\*     read_header() at peer.cpp:103) is collapsed into the atomic
 \*     actions. Each action is the atomic effect of one completion
 \*     handler. The spec does not model the asio scheduling layer;
 \*     TLA+'s atomic-action model is the structural equivalent.
 \*
-\*   * The connection-close side effect (`on_close_(self)` at
+\*   * The connection-close side effect (on_close_(self) at
 \*     peer.cpp:65 / :95) is collapsed into the DROPPED stage. The
 \*     spec models the message-level disposition (the oversize frame
 \*     is not dispatched); the peer-table removal that follows the
@@ -784,7 +788,7 @@ PROP_NoSilentOversizeDispatch ==
 \*     tiers. Adding more types in the same tier does not change any
 \*     invariant — Cap(t) partitions MsgTypes into three equivalence
 \*     classes, and the spec checks one representative per class. The
-\*     `default:` branch's tightness (a newly-added uncategorised
+\*     default: branch's tightness (a newly-added uncategorised
 \*     type lands at OneMB) is witnessed by Cap's final ELSE arm.
 \*
 \*   * The framing ceiling and the SNAPSHOT_RESPONSE / CHAIN_RESPONSE
@@ -836,16 +840,16 @@ PROP_NoSilentOversizeDispatch ==
 \*
 \* C++ enforcement: src/net/peer.cpp
 \*   Peer::read_header            @ lines 50-69
-\*     framing gate `if (len == 0 || len > kMaxFrameBytes)` @ :64-67
+\*     framing gate if (len == 0 || len > kMaxFrameBytes) @ :64-67
 \*     (the spec's RejectAtFraming + BufferBody pre-condition)
 \*   Peer::read_body              @ lines 72-105
-\*     body resize `body_buf_.resize(len)`             @ :73
-\*     deserialize recovery `Message::deserialize`     @ :82
-\*     per-type gate `if (... > max_message_bytes(...))` @ :90-97
+\*     body resize body_buf_.resize(len)             @ :73
+\*     deserialize recovery Message::deserialize     @ :82
+\*     per-type gate if (... > max_message_bytes(...)) @ :90-97
 \*     (the spec's RejectAtTypeCap)
-\*     dispatch `if (on_msg_) on_msg_(self, msg)`      @ :98
+\*     dispatch if (on_msg_) on_msg_(self, msg)      @ :98
 \*     (the spec's Dispatch)
-\*     re-arm `read_header()`                          @ :103
+\*     re-arm read_header()                          @ :103
 \*
 \* C++ enforcement: include/determ/net/messages.hpp
 \*   kMaxFrameBytes = 16 MB framing ceiling           @ :94-101

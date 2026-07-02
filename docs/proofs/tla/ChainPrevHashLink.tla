@@ -215,8 +215,10 @@ The state machine. Four actions cover the four operational surfaces:
 To check (assuming TLC installed):
   $ tlc ChainPrevHashLink.tla -config ChainPrevHashLink.cfg
 
-Recommended config (state space ~10^4, < 30s):
-  Nodes = {n1, n2}, MaxChainLength = 3, BodyHashes = {bh1, bh2, bh3}.
+Recommended config (36,469 distinct states, ~26s):
+  Nodes = {n1, n2}, MaxChainLength = 2, BodyHashes = {bh1, bh2, bh3}.
+  (MaxChainLength = 3 exceeds the CI 120s TLC budget: >91k distinct
+  states at BFS depth 8 with the queue still growing.)
 
 Cross-references:
   - src/main.cpp::test-chain-prev-hash-link — the R25 in-process
@@ -302,6 +304,17 @@ HashUniverse ==
 \* The all-zero sentinel that genesis's prev_hash points to (no
 \* predecessor; chain-anchor convention).
 ZeroHash == <<"ZERO">>
+
+\* The "no interior tamper yet" sentinel for tampered_at. Modeled as an
+\* out-of-band integer (MaxChainLength + 2, never a valid tamper index
+\* which ranges over 2..MaxChainLength+1) rather than a string so that
+\* tampered_at's domain stays type-homogeneous. TLC throws on any
+\* equality comparison between a string and an integer (e.g. the
+\* tampered_at[n] = k tests in INV_HistoricalTamperCascades /
+\* PROP_TamperEventuallyDetected, and the mixed-set membership test in
+\* TypeOK); an all-integer domain avoids those cross-type comparisons
+\* entirely while preserving the "unset" semantics.
+NoTamper == MaxChainLength + 2
 
 \* compute_hash: binds (index, body_hash) — the chain-identity
 \* surface. The "BLOCK" discriminator tag prevents accidental
@@ -424,7 +437,7 @@ prev_hash_ok(b, c) ==
 Init ==
     /\ chains              = [n \in Nodes |-> <<GenesisBlock>>]
     /\ pending_inbox       = [n \in Nodes |-> <<>>]
-    /\ tampered_at         = [n \in Nodes |-> "none"]
+    /\ tampered_at         = [n \in Nodes |-> NoTamper]
     /\ load_throws         = [n \in Nodes |-> FALSE]
     /\ rejected_by         = [n \in Nodes |-> "none"]
     /\ ghost_chain_history = [n \in Nodes |-> <<GenesisBlock>>]
@@ -445,6 +458,16 @@ Init ==
 ProduceBlock(n) ==
     /\ n \in Nodes
     /\ Len(chains[n]) <= MaxChainLength
+    /\ tampered_at[n] = NoTamper
+       \* An honest node never extends an already-tampered chain: in the
+       \* real system tampering is an offline mutation of a COMPLETE
+       \* serialized chain (Chain::load walks it as a unit), never
+       \* interleaved with fresh honest production. Without this guard the
+       \* state machine would let a post-tamper ProduceBlock re-link the
+       \* new head to the tampered block's hash, spuriously repairing the
+       \* cascade that INV_HistoricalTamperCascades pins (the R25 test's
+       \* Scenario 5 tampers a block whose successor already exists, so its
+       \* prev_hash was bound PRE-tamper; this guard makes the model match).
     /\ \E bh \in BodyHashes :
           LET head_h == head_hash(chains[n]) IN
           LET body == MakeBlock(Len(chains[n]), head_h, bh) IN
@@ -473,6 +496,11 @@ ApplyBlock(n) ==
     /\ n \in Nodes
     /\ Len(pending_inbox[n]) > 0
     /\ Len(chains[n]) <= MaxChainLength
+    /\ tampered_at[n] = NoTamper
+       \* Same rationale as ProduceBlock: an honest node does not keep
+       \* extending a chain it has locally tampered. The cascade
+       \* invariant assumes every successor of the tamper site predates
+       \* the tamper (its prev_hash captured the PRE-tamper head hash).
     /\ LET b         == Head(pending_inbox[n]) IN
        LET remaining == Tail(pending_inbox[n]) IN
        IF prev_hash_ok(b, chains[n])
@@ -510,6 +538,15 @@ TamperHistorical(n) ==
        \* (Tampering the genesis block at i=1 is captured by the
        \* INV_GenesisPrevHashZero invariant — the genesis prev_hash
        \* ZeroHash anchor is itself sacrosanct.)
+    /\ tampered_at[n] = NoTamper
+       \* Tamper at most ONCE per node, matching the R25 test's Scenario
+       \* 5 (a single mutation to a strictly-different value, cascade
+       \* observed). Without this guard a second TamperHistorical could
+       \* swap body_hash BACK to its original value (the guard below only
+       \* requires difference from the CURRENT, already-tampered value),
+       \* healing the cascade while tampered_at stays latched at i — a
+       \* self-inconsistent ghost state that has no real-attack analogue
+       \* (reverting a tamper reproduces the honest chain).
     /\ \E i \in 2..Len(chains[n]) :
        \E new_bh \in BodyHashes :
           /\ new_bh /= chains[n][i].body_hash
@@ -588,7 +625,7 @@ INV_PrevHashLinkValid ==
           \* field is unchanged — only body_hash mutates), but breaks
           \* at i = tampered_at[n] + 1 (the next-block prev_hash
           \* mismatch is the cascade INV_5 captures).
-          (tampered_at[n] = "none" \/ i <= tampered_at[n])
+          (tampered_at[n] = NoTamper \/ i <= tampered_at[n])
           => chains[n][i].prev_hash = chains[n][i - 1].compute_hash
 
 \* INV_2 GenesisPrevHashZero (T-2).
@@ -626,7 +663,7 @@ INV_WrongPrevHashRejected ==
           \* on the surviving (appended) blocks is still tight — i.e.,
           \* the reject did NOT corrupt chains[n].
           \A i \in 2..Len(chains[n]) :
-             (tampered_at[n] = "none" \/ i <= tampered_at[n])
+             (tampered_at[n] = NoTamper \/ i <= tampered_at[n])
              => chains[n][i].prev_hash = chains[n][i - 1].compute_hash
 
 \* INV_4 ReloadPreservesLinks (T-4).
@@ -639,7 +676,7 @@ INV_WrongPrevHashRejected ==
 \* have byte-identical prev_hash linkage.
 INV_ReloadPreservesLinks ==
     \A n \in Nodes :
-       (tampered_at[n] = "none") =>
+       (tampered_at[n] = NoTamper) =>
           /\ ~load_throws[n]
           /\ \A i \in 2..Len(chains[n]) :
                 chains[n][i].prev_hash = chains[n][i - 1].compute_hash
@@ -674,7 +711,7 @@ INV_HistoricalTamperCascades ==
 \* legitimate chain extension never rewrites earlier blocks.
 INV_AppendOnly ==
     \A n \in Nodes :
-       (tampered_at[n] = "none") =>
+       (tampered_at[n] = NoTamper) =>
           /\ Len(chains[n]) = Len(ghost_chain_history[n])
           /\ \A i \in 1..Len(chains[n]) :
                 chains[n][i] = ghost_chain_history[n][i]
@@ -687,7 +724,7 @@ TypeOK ==
     /\ chains              \in [Nodes -> Seq(Block)]
     /\ pending_inbox       \in [Nodes -> Seq(Block)]
     /\ tampered_at         \in [Nodes -> (0..(MaxChainLength + 1))
-                                          \cup {"none"}]
+                                          \cup {NoTamper}]
     /\ load_throws         \in [Nodes -> BOOLEAN]
     /\ rejected_by         \in [Nodes -> {"none", "chain",
                                           "validator", "both"}]
@@ -708,8 +745,20 @@ TypeOK ==
 \*
 \* The dual of FB29's PROP_EventualBlockProduction; same shape, same
 \* witness, lifted to the prev_hash-link state machine.
+\*
+\* Scoped to HONEST behaviors (no node ever tampered). The adversarial
+\* TamperHistorical action carries no fairness constraint, so a behavior
+\* that tampers every node early permanently disables ProduceBlock
+\* (honest nodes never extend a tampered chain — see the ProduceBlock /
+\* ApplyBlock guards) and no chain ever overshoots MaxChainLength. That
+\* is not a liveness defect: "chain length grows" is an HONEST-operation
+\* claim, so the antecedent restricts it to tamper-free runs, matching
+\* the real system's liveness guarantee (Liveness.md is about honest
+\* committees producing blocks, not progress under an unbounded adversary
+\* who can freeze every node).
 PROP_EventualBlockProduction ==
-    <>(\E n \in Nodes : Len(chains[n]) > MaxChainLength)
+    (\A n \in Nodes : [](tampered_at[n] = NoTamper))
+      => <>(\E n \in Nodes : Len(chains[n]) > MaxChainLength)
 
 \* PROP_TamperEventuallyDetected.
 \*

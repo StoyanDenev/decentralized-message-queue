@@ -121,10 +121,15 @@ Init ==
 \* soundness). Queue length is bounded for TLC tractability; the
 \* actual chain has no queue cap on EquivocationEvents per block
 \* (the validator's per-block-size cap S-022 provides the implicit
-\* bound).
+\* bound). Bound = Cardinality(Domains): one simultaneously queued
+\* event per domain is enough for every documented interleaving
+\* (the deepest, Equivocate(a)+Equivocate(b)+Equivocate(c) then
+\* drain in any order, queues exactly |Domains| events); a looser
+\* bound only multiplies queue permutations that drain through the
+\* same three mutually-exclusive Apply* guards.
 Equivocate(d) ==
     /\ d \in Domains
-    /\ Len(pending_events) < MaxHeight + Cardinality(Domains)
+    /\ Len(pending_events) < Cardinality(Domains)
     /\ pending_events' = Append(pending_events, [offender |-> d])
     /\ UNCHANGED <<registrants, stakes, accumulated_slashed, height>>
 
@@ -269,8 +274,8 @@ Inv_SlashedMonotonic ==
 \* ApplyEquivocationGhost is a no-op (the offender's stake was
 \* already 0, so no contribution).
 SumStakes ==
-    LET RECURSIVE sum_stk(_) IN
-    LET sum_stk(S) ==
+    LET RECURSIVE sum_stk(_)
+        sum_stk(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              stakes[d] + sum_stk(S \ {d})

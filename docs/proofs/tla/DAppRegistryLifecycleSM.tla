@@ -107,8 +107,15 @@ Modeling scope (kept tractable for TLC):
     DAPP_REGISTER / DAPP_CALL. Failure refunds the fee. Fee
     accounting is FB10 (FeeAccounting) territory.
   * Payload is opaque — the model uses a small finite Payloads set
-    (default {p1, p2}) as a stand-in for the DAPP_CALL ciphertext.
-    The lifecycle invariants are payload-independent.
+    (a singleton {p1} in the shipped config) as a stand-in for the
+    DAPP_CALL ciphertext. The payload never enters the registry
+    state; the lifecycle invariants are payload-independent.
+  * total_calls is bounded by MaxCalls (TLC tractability). The C++
+    counter is unbounded; in the model Call stays enabled at the
+    MaxHeight ceiling, so without the cap the state space is
+    infinite. The lifecycle invariants are insensitive to the cap
+    (same bounded-counter device as MaxReads / MaxVerifies in the
+    sibling read-path specs).
   * service_pubkey + endpoint_url + topics + metadata are absorbed
     into the abstract PubKeys set — the lifecycle invariants don't
     depend on the cryptographic shape of those fields, only on
@@ -157,6 +164,7 @@ CONSTANTS
     PubKeys,            \* set of service public keys (opaque 32-byte stand-ins)
     Payloads,           \* set of DAPP_CALL payload bytes (opaque)
     MaxHeight,          \* upper bound on chain height for TLC
+    MaxCalls,           \* bound on per-domain successful calls (TLC tractability)
     DAPP_GRACE_BLOCKS,  \* grace-period blocks for Deactivate (e.g., 2)
     NONE                \* "no deactivation armed" sentinel; > MaxHeight + DAPP_GRACE_BLOCKS
 
@@ -166,6 +174,7 @@ ASSUME ConfigOK ==
     /\ Cardinality(PubKeys)  >= 1
     /\ Cardinality(Payloads) >= 1
     /\ MaxHeight         \in Nat /\ MaxHeight         >= 1
+    /\ MaxCalls          \in Nat /\ MaxCalls          >= 1
     /\ DAPP_GRACE_BLOCKS \in Nat /\ DAPP_GRACE_BLOCKS >= 1
     /\ NONE              \in Nat /\ NONE              > MaxHeight + DAPP_GRACE_BLOCKS + 1
 
@@ -197,13 +206,15 @@ EntryState == {"NONE", "ACTIVE", "DEREGISTERED", "DEACTIVATED"}
 \*                       current_height + DAPP_GRACE_BLOCKS by Deregister.
 \* state               — EntryState; one of NONE / ACTIVE / DEREGISTERED /
 \*                       DEACTIVATED. Drives the state-progression invariant.
-\* total_calls         — Nat. Incremented by Call(d) when state = ACTIVE.
+\* total_calls         — 0..MaxCalls. Incremented by Call(d) when state =
+\*                       ACTIVE; capped at MaxCalls (TLC tractability — the
+\*                       C++ counter is unbounded).
 RegEntry == [owner_anon:           Owners,
              service_pubkey:       PubKeys,
              registered_at:        0..MaxHeight,
              deactivation_height:  0..NONE,
              state:                EntryState,
-             total_calls:          Nat]
+             total_calls:          0..MaxCalls]
 
 ----------------------------------------------------------------------------
 \* State.
@@ -391,12 +402,18 @@ RejectDeregisterByNonOwner(d, attempted_owner) ==
 \* action because the spec aims to keep the action surface tight).
 \* Coverage is achieved by TLC's exhaustive enumeration: in every
 \* state where state /= ACTIVE, Call is structurally disabled.
+\*
+\* The total_calls < MaxCalls guard is the TLC tractability bound —
+\* Call stays enabled at the MaxHeight ceiling, so an uncapped
+\* counter would make the state space infinite. Not a protocol
+\* limit; the C++ counter is unbounded.
 Call(d, caller, payload) ==
     /\ d \in Domains
     /\ caller \in Owners
     /\ payload \in Payloads
     /\ registry[d].state = "ACTIVE"
     /\ current_height <= MaxHeight
+    /\ registry[d].total_calls < MaxCalls
     /\ registry' = [registry EXCEPT
                       ![d] = [owner_anon          |-> @.owner_anon,
                               service_pubkey      |-> @.service_pubkey,
@@ -482,14 +499,14 @@ Spec ==
 INV_TypeOK ==
     /\ registry \in [Domains -> RegEntry]
     /\ current_height \in 0..MaxHeight
-    /\ pending_call_count \in [Domains -> Nat]
+    /\ pending_call_count \in [Domains -> 0..MaxCalls]
     /\ \A d \in Domains :
          /\ registry[d].owner_anon          \in Owners
          /\ registry[d].service_pubkey      \in PubKeys
          /\ registry[d].registered_at       \in 0..MaxHeight
          /\ registry[d].deactivation_height \in 0..NONE
          /\ registry[d].state               \in EntryState
-         /\ registry[d].total_calls         \in Nat
+         /\ registry[d].total_calls         \in 0..MaxCalls
 
 ----------------------------------------------------------------------------
 \* The six invariants of the lifecycle-transition contract.

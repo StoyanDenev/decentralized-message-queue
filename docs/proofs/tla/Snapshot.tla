@@ -105,9 +105,6 @@ VARIABLES
     last_snapshot,      \* most recently taken snapshot (or NoSnapshot)
     snapshot_count      \* number of TakeSnapshot actions executed
 
-\* Sentinel: no snapshot has been taken yet.
-NoSnapshot == <<"no-snapshot">>
-
 vars == <<chain, last_snapshot, snapshot_count>>
 
 ----------------------------------------------------------------------------
@@ -121,6 +118,21 @@ EmptyCounters == [subsidy  |-> 0,
 EmptyBalances == [d \in Domains |-> 0]
 EmptyNonces   == [d \in Domains |-> 0]
 EmptyRoot     == StateRoot(EmptyBalances, EmptyCounters)
+
+\* Sentinel: no snapshot has been taken yet. A record with the same
+\* field set as a real snapshot (TLC cannot compare a record against
+\* a tuple), carrying the impossible version 0 — SnapshotVersion >= 1
+\* by ConfigOK, so the DoRestoreSnapshot version gate rejects it and
+\* it can never equal a snapshot produced by DoTakeSnapshot.
+NoSnapshot == [version    |-> 0,
+               head_index |-> 0,
+               head_hash  |-> EmptyHash,
+               payload    |-> [height     |-> 0,
+                               head_hash  |-> EmptyHash,
+                               balances   |-> EmptyBalances,
+                               nonces     |-> EmptyNonces,
+                               state_root |-> EmptyRoot,
+                               counters   |-> EmptyCounters]]
 
 Init ==
     /\ chain = [height     |-> 0,
@@ -188,10 +200,14 @@ AppendBlock(d, amount) ==
 
 \* TakeSnapshot: serializes the current chain into a snapshot.
 \* Pure: snapshot' = DoTakeSnapshot(chain). Increments snapshot_count
-\* as a witness of liveness (every TakeSnapshot is observable).
+\* as a witness of liveness, saturating at MaxHeight so TLC's state
+\* space stays finite (the liveness property only needs count > 0,
+\* and saturation keeps TakeSnapshot always enabled for WF).
 TakeSnapshot ==
     /\ last_snapshot' = DoTakeSnapshot(chain)
-    /\ snapshot_count' = snapshot_count + 1
+    /\ snapshot_count' = IF snapshot_count < MaxHeight
+                         THEN snapshot_count + 1
+                         ELSE snapshot_count
     /\ UNCHANGED chain
 
 \* RestoreSnapshot: replaces the current chain with the snapshot's
@@ -244,7 +260,7 @@ Inv_TypeOK ==
     /\ chain.counters.slashed  \in 0..MaxHeight
     /\ chain.counters.inbound  \in 0..MaxHeight
     /\ chain.counters.outbound \in 0..MaxHeight
-    /\ snapshot_count \in Nat
+    /\ snapshot_count \in 0..MaxHeight
 
 \* SerializeRestoreIdentity: RestoreSnapshot(TakeSnapshot(c)) = c
 \* for every reachable c. (TLA+ form: state predicate over the
@@ -302,12 +318,14 @@ Inv_StateRootBindsApply ==
 \* indefinitely starved relative to chain growth.
 Prop_EventualSnapshotConsistency == <>(snapshot_count > 0)
 
-\* RestoreIsCorrect: after every successful RestoreSnapshot (the
-\* well-formed branch that mutates chain), chain' = last_snapshot.payload.
+\* RestoreIsCorrect: every RestoreSnapshot step whose snapshot passes
+\* the version gate yields chain' = last_snapshot.payload. Gated on
+\* the RestoreSnapshot action itself (its UNCHANGED <<last_snapshot,
+\* snapshot_count>> postcondition included) so unrelated chain
+\* mutations (AppendBlock) are not checked against a stale snapshot
+\* payload.
 Prop_RestoreIsCorrect ==
-    [][(last_snapshot /= NoSnapshot
-        /\ last_snapshot.version = SnapshotVersion
-        /\ chain' /= chain)
+    [][(RestoreSnapshot /\ last_snapshot.version = SnapshotVersion)
        => (chain' = last_snapshot.payload)]_vars
 
 ============================================================================

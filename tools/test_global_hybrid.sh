@@ -7,7 +7,7 @@
 # because v1 hybrid finalization with K<M is structurally racy on
 # large pools (test_global_hybrid v1 with M=7 K=5 stalled at height=2,
 # surfacing the documented hybrid-mode v1 limitation). The profile's
-# M=7 K=5 default is what `dhcoin init` writes into a fresh config;
+# M=7 K=5 default is what `determ init` writes into a fresh config;
 # operators tune the genesis they actually deploy. This regression test
 # exercises the posture (role + mode + EXTENDED's S>=3 invariant) and
 # leaves K<M hybrid coverage to web_hybrid (which has the smaller

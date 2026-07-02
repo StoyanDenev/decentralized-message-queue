@@ -38,3 +38,6 @@ WHITEPAPER.pdf
 Thumbs.db
 *.swp
 *~
+tools/tlc/
+docs/proofs/tla/*_TTrace_*
+docs/proofs/tla/states/

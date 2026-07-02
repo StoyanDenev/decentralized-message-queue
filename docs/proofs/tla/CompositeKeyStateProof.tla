@@ -9,10 +9,10 @@ receipt-membership slice); FB43 lifts the FULL ten-namespace key-encoding
 contract to the state-machine layer, with the composite namespaces
 (i|m|p) as the load-bearing case.
 
-NOTE: no model-check this session — caller will TLC-validate. This
-module is syntactically self-contained and ready for `tlc -config
-CompositeKeyStateProof.cfg CompositeKeyStateProof.tla` once a companion
-`.cfg` is supplied (one is shipped alongside).
+NOTE: TLC-validated via `tlc -config CompositeKeyStateProof.cfg
+CompositeKeyStateProof.tla`. The shipped cfg binds the function/tuple
+constants with `<-` to the MC_* operators in section 0b (TLC cfg
+files cannot express function or tuple literals).
 
 Scope. The state_proof RPC serves a Merkle-inclusion proof for one
 leaf of the sorted-leaves balanced binary Merkle tree over the ten
@@ -216,7 +216,10 @@ To check (assuming TLC installed):
 Recommended config (state space ~10^4, < 30s):
   Namespaces = {a, i, m, p, x}, RawKeys as a small mixed set of
   simple + valid-composite + bad-hex + bad-width keys,
-  MaxRequests = 5, committed_keys = a 2-3 element subset.
+  MaxRequests = 3, committed_keys = a 2-3 element subset.
+  (Each Request step branches over all |Namespaces| x |RawKeys|
+  requests, so the state space is ~branching^MaxRequests — a bound
+  of 5 already explodes to ~10^6.5.)
 
 Cross-references:
   - docs/proofs/ReceiptInclusionProofSoundness.md — the i: namespace
@@ -276,6 +279,30 @@ ASSUME ConfigOK ==
     /\ HexLenOf   \in [RawKeys -> Nat]
     /\ \A ns \in CompositeNamespaces : WidthOf[ns] >= 1
     /\ MaxRequests \in Nat /\ MaxRequests >= 1
+
+\* -----------------------------------------------------------------
+\* §0b. Shipped-model bindings (CompositeKeyStateProof.cfg).
+\* -----------------------------------------------------------------
+\*
+\* TLC's .cfg parser accepts only scalar / set literals on the right
+\* of `=`; function values (:> / @@) and tuples must be bound with
+\* `<-` to operators defined in the module. The shipped cfg binds the
+\* four non-scalar constants to these MC_* operators. Namespaces and
+\* raw keys are string literals (not model values) for the same
+\* reason: a module-level operator cannot reference cfg-declared
+\* model values.
+MC_WidthOf    == ("i" :> 40 @@ "m" :> 4)
+MC_ValidHexOf == ( "simple_a"   :> FALSE
+                @@ "hex_i_ok"   :> TRUE
+                @@ "hex_badlen" :> TRUE
+                @@ "not_hex"    :> FALSE )
+MC_HexLenOf   == ( "simple_a"   :> 0
+                @@ "hex_i_ok"   :> 80
+                @@ "hex_badlen" :> 8
+                @@ "not_hex"    :> 0 )
+MC_CommittedKeys == { <<"a", "simple_a">>,
+                      <<"i", "hex_i_ok">>,
+                      <<"m", "hex_badlen">> }
 
 \* -----------------------------------------------------------------
 \* §1. Outcome / key-tag shapes.

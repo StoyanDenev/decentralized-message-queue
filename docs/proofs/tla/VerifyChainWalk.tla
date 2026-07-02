@@ -18,7 +18,7 @@ must equal Head - StartFrom, so a short final page cannot silently truncate the
 walk while still reporting Head as the verified tip). The walk ends in ACCEPT
 (the full range committee-verified onto the start anchor) or REJECT.
 
-NOTE: spec-only, model-check pending TLC install (matching every sibling in this
+NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md for the checked set; matching every no-cfg sibling in this
 directory).
 
 --------------------------------------------------------------------------
@@ -567,5 +567,5 @@ Prop_EventuallyDecided ==
 \*
 \* Doc updates (done by the orchestrator, NOT this file):
 \*   docs/proofs/README.md FB59 row — index entry (house format).
-\*   CHECK-RESULTS.md FB59 row — pending TLC install.
+\*   CHECK-RESULTS.md — spec-only (no .cfg), not in the checked set.
 ============================================================================

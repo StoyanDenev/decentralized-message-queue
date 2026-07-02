@@ -199,12 +199,15 @@ registry.
 To check (assuming TLC installed):
   $ tlc DAppRegistrationRead.tla -config DAppRegistrationRead.cfg
 
-Recommended config (state space ~10^4, < 30s):
+Recommended config (state space ~1.0x10^5):
   Domains = {d1, d2}, Owners = {o1, o2}, PubKeys = {k1, k2},
-  Heights = {0, 1}, Extras = {x1, x2}, MaxReads = 5, committed = a
-  1-2 element subset (so an absent-domain read is reachable), and a
-  daemon-flag universe spanning honest + each single-gate-forged
-  variant (anchor-forged, head-forged, path-forged, bind-forged).
+  Heights = {0}, Extras = {x1}, MaxReads = 2. Init enumerates all
+  committed mappings (so absent-domain reads are reachable), and the
+  daemon-flag universe spans honest + each single-gate-forged variant
+  (anchor-forged, head-forged, path-forged, bind-forged). The read_log
+  records order, so states grow as 64^MaxReads — keep MaxReads at 2
+  (depth 1 reaches every outcome class; depth 2 supplies the identical-
+  read pair PROP_Determinism needs). See the .cfg preamble.
 
 Cross-references:
   - docs/proofs/tla/CompositeKeyStateProof.tla (FB43) — the SERVER-side
@@ -309,7 +312,21 @@ CommittedShape == DAppEntry \cup {ABSENT}
 Encode(e) == <<"dapp_leaf", e>>
 
 \* -----------------------------------------------------------------
-\* §3. The four trust-reduction gates as pure-function predicates.
+\* §3. Variables.
+\* -----------------------------------------------------------------
+\*
+\* Declared BEFORE the gate predicates (§4): PathOk / BindOk read the
+\* `committed` state variable, and TLA+ requires declaration before use.
+
+VARIABLES
+    committed,    \* function Domains -> CommittedShape (the d: leaf domain)
+    read_log,     \* Seq(ReadRecord)
+    read_count    \* Nat (bounds read_log for TLC)
+
+vars == <<committed, read_log, read_count>>
+
+\* -----------------------------------------------------------------
+\* §4. The four trust-reduction gates as pure-function predicates.
 \* -----------------------------------------------------------------
 \*
 \* A daemon is modeled by four honest/forged Booleans plus the claimed
@@ -366,7 +383,7 @@ BindOk(domain, daemon) ==
     /\ Encode(daemon.claimed) = Encode(committed[domain])
 
 \* -----------------------------------------------------------------
-\* §4. ReadRecord shape + the MakeRecord pipeline.
+\* §5. ReadRecord shape + the MakeRecord pipeline.
 \* -----------------------------------------------------------------
 \*
 \* Each Read appends one ReadRecord: the request (domain + daemon flags
@@ -402,17 +419,6 @@ MakeRecord(domain, daemon) ==
          path     |-> p,
          bind     |-> b,
          accepted |-> a /\ h /\ p /\ b ]
-
-\* -----------------------------------------------------------------
-\* §5. Variables.
-\* -----------------------------------------------------------------
-
-VARIABLES
-    committed,    \* function Domains -> CommittedShape (the d: leaf domain)
-    read_log,     \* Seq(ReadRecord)
-    read_count    \* Nat (bounds read_log for TLC)
-
-vars == <<committed, read_log, read_count>>
 
 \* -----------------------------------------------------------------
 \* §6. Initial state.

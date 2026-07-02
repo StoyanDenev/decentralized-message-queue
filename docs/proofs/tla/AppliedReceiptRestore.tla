@@ -48,7 +48,7 @@ To check (assuming TLC installed):
   $ tlc AppliedReceiptRestore.tla -config AppliedReceiptRestore.cfg
 *)
 
-EXTENDS Naturals, FiniteSets, Sequences, TLC
+EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS
     Shards,             \* set of source-shard identifiers (T-R3 pair key)
@@ -75,15 +75,22 @@ DedupKey == [src_shard: Shards, tx_hash: Hashes]
 
 KeyOf(r) == [src_shard |-> r.src_shard, tx_hash |-> r.tx_hash]
 
-\* Sentinel — distinguished from a snapshot whose saved set is empty.
-NoSnapshot == <<"no_snapshot">>
-
 \* SnapshotState: the (applied_receipts, balances, accumulated_inbound)
 \* triple saved at TakeSnapshot. The pending queue lives in gossip,
 \* not apply state — matches the C++ snapshot scope at chain.cpp:1586.
 SnapshotState == [applied_receipts:    SUBSET DedupKey,
                   balances:            [Domains -> Nat],
                   accumulated_inbound: Nat]
+
+\* Sentinel — a record of the same field set as a real snapshot (TLC
+\* cannot compare a record against a tuple), carrying the impossible
+\* accumulated_inbound -1: real snapshots save a Nat, so no
+\* TakeSnapshot step can ever produce it. Distinguished from a
+\* snapshot whose saved set is empty (that one has accumulated_inbound
+\* >= 0). Same typed-sentinel pattern as FB14 (CrossShardReceiptDedup).
+NoSnapshot == [applied_receipts    |-> {},
+               balances            |-> [d \in Domains |-> 0],
+               accumulated_inbound |-> -1]
 
 ----------------------------------------------------------------------------
 \* State.

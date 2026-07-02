@@ -160,7 +160,12 @@ Next ==
 \* tx that matches the current next_nonce eventually applies.
 \* Existential fairness over the pending set is required so that
 \* the matching tx is not starved by infinite SubmitTx scheduling.
-Spec == Init /\ [][Next]_vars /\ \A t \in Tx : WF_vars(ApplyTx(t))
+\* WF on RemoveFromPending models node.cpp's M11 per-block
+\* stale-nonce sweep, which evicts unconditionally every block.
+Spec == /\ Init
+        /\ [][Next]_vars
+        /\ \A t \in Tx : WF_vars(ApplyTx(t))
+        /\ \A u \in Tx : WF_vars(RemoveFromPending(u))
 
 ----------------------------------------------------------------------------
 \* Invariants.
@@ -292,10 +297,12 @@ Inv_ApplyAdvancesNonce ==
 \* submitted at the current next_nonce eventually applies. The
 \* "honest" qualifier here means: well-formed (nonce matches the
 \* current next_nonce at the time of SubmitTx, balance sufficient,
-\* MaxNonce not yet reached). The combination of weak fairness on
-\* ApplyTx and the fact that ApplyTx's guard is stable (it stays
-\* enabled until the matching tx applies or is gc'd) gives the
-\* eventual-progress guarantee.
+\* MaxNonce not yet reached). ApplyTx's guard is NOT stable: a
+\* competing tx with the same {from, nonce} can apply first and
+\* strand t as permanently stale in pending. WF on ApplyTx covers
+\* the apply branch; WF on RemoveFromPending (the M11 per-block
+\* stale-nonce sweep) covers the stranded-stale branch — together
+\* they give the eventual-progress guarantee.
 \*
 \* Formally: in every fair run, if some t \in pending satisfies
 \* t.nonce = accounts[t.from].next_nonce and balance is sufficient,

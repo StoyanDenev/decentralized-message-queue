@@ -176,10 +176,13 @@ Modeling scope (kept tractable for TLC):
     distinct opaque strings {"n1", "n2", "n3"} to exercise
     multi-peer interleavings.
   * `MaxHandshakes` bounds the peer_handshakes log growth so TLC
-    exhausts in seconds. Production runs unbounded; the model
-    bounds at 4 to exercise: 0→1 (first PENDING), 1→2 (first
-    REJECT), 2→3 (mixed interleaving), 3→4 (saturation, Stutter
-    pins the bound).
+    exhausts within the CI budget. Production runs unbounded; the
+    model bounds at 3 to exercise: 0→1 (first PENDING), 1→2 (first
+    REJECT), 2→3 (mixed interleaving + triangle completion;
+    saturation, Stutter pins the bound). 3 is the minimum bound
+    that fits the full three-way handshake triangle in one
+    behavior; a bound of 4 is ~2.7×10⁷ reachable states, past the
+    CI budget.
   * The `committee_region` field of the HELLO payload is NOT
     modeled at this layer. R4 region-aware committee selection is
     FB35 `RegionalShardingCommittee.tla` territory; this spec
@@ -238,9 +241,10 @@ surface (plus a Stutter to bound TLC):
 To check (assuming TLC installed):
   $ tlc HelloHandshake.tla -config HelloHandshake.cfg
 
-Recommended config (state space ~10^4, < 30s):
+Recommended config (378,505 distinct states, depth 7, ~70s on one
+TLC worker):
   WireVersions = {0, 1}, ChainIds = {"chain_a", "chain_b"},
-  NodeIds = {"n1", "n2", "n3"}, MaxHandshakes = 4.
+  NodeIds = {"n1", "n2", "n3"}, MaxHandshakes = 3.
 
 Cross-references:
   - src/main.cpp:32411-32711 : test-hello-handshake-determinism

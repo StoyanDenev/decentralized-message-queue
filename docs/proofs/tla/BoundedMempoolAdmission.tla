@@ -130,13 +130,14 @@ plus type sanity:
 Two temporal properties pin the eventual-progress claims:
 
   PROP_EventualApplyOrEvict — under fairness on Apply + EvictLowest,
-        every submitted tx is eventually either applied (removed by
-        Apply, advancing next_nonce) OR evicted (removed by Evict
-        Lowest, appended to eviction_log). The no-stuck-in-mempool
-        liveness contract: a tx admitted to mempool does not
-        languish indefinitely; under fairness on the progress
-        actions, it eventually leaves the mempool through one of
-        the two terminal paths.
+        every FRONTIER tx (nonce = next_nonce[sender]) in mempool
+        eventually leaves it (applied, evicted, or RBF-replaced).
+        The no-stuck-in-mempool liveness contract for the txs the
+        fair Apply action can actually drain. Forward-gap-nonce
+        txs are deliberately parked (node.cpp admits nonce >=
+        next_nonce; chain.cpp apply skips nonce != next_nonce);
+        their eventual exit is cap-pressure-conditional by design,
+        so the leads-to quantifies over frontier txs only.
   PROP_NoStaleNonceEverAdmitted — invariantly across all reachable
         states, no entry in mempool has nonce < next_nonce. The
         state-form complement to INV_NonceGated lifted as a
@@ -156,8 +157,12 @@ Modeling scope (kept tractable for TLC):
     fee-priority eviction tie-break can both surface non-trivially).
   * `Cap` — small Nat (recommended 3, so cap-pressure is reachable
     after 3 submissions).
-  * `MaxOps` — bound on the total number of Submit + RBF + Apply +
-    EvictLowest actions, so TLC exhausts in seconds.
+  * `MaxOps` — bound on the total number of Submit + RBF +
+    EvictLowest actions, so TLC exhausts in seconds. Apply is
+    EXEMPT from the bound (it only drains, and gating it would
+    disable the WF_vars(Apply) fairness PROP_EventualApplyOrEvict
+    relies on); Apply stays finite because next_nonce advances
+    monotonically over the finite Nonces universe.
 
 This spec EXCLUDES (delegated to FB33):
 
@@ -247,8 +252,9 @@ CONSTANTS
     Fees,              \* SUBSET of Nat — finite universe of per-tx
                        \*   fee values.
     Cap,               \* Nat — mempool capacity.
-    MaxOps             \* Nat — bound on total Submit + RBF + Apply
-                       \*   + EvictLowest actions (TLC tractability).
+    MaxOps             \* Nat — bound on total Submit + RBF +
+                       \*   EvictLowest actions (TLC tractability).
+                       \*   Apply is exempt (drain-only; see §5).
 
 ASSUME ConfigOK ==
     /\ Cardinality(Senders) >= 1
@@ -310,9 +316,11 @@ VARIABLES
                     \*   `src/chain/chain.cpp::next_nonce`. Strictly
                     \*   monotone non-decreasing across Apply (the
                     \*   FA-Apply-3 advance).
-    ops_count       \* Nat — total Submit + RBF + Apply +
-                    \*   EvictLowest actions fired so far (TLC bound
-                    \*   via MaxOps).
+    ops_count       \* Nat — total Submit + RBF + EvictLowest
+                    \*   actions fired so far (TLC bound via
+                    \*   MaxOps). Apply does not consume the budget
+                    \*   — it is the drain action whose fairness
+                    \*   PROP_EventualApplyOrEvict relies on.
 
 vars == <<mempool, eviction_log, next_nonce, ops_count>>
 
@@ -501,18 +509,25 @@ RBF(s, n, new_f, new_h) ==
 \* per-tx-type body (TRANSFER / REGISTER / STAKE / etc.) into a
 \* single abstract Apply — the per-type body is FB5 AccountState.
 \* tla + FB8 StakeLifecycle.tla territory.
+\*
+\* Apply is EXEMPT from the MaxOps budget (no `ops_count <
+\* MaxOps` guard; ops_count UNCHANGED): production has no ops
+\* bound, and gating the drain action would disable the
+\* WF_vars(Apply) fairness that PROP_EventualApplyOrEvict relies
+\* on once the TLC budget is exhausted. Termination stays finite
+\* because each Apply strictly advances next_nonce[s] over the
+\* finite Nonces universe and only removes mempool entries.
 
 Apply(s, n) ==
     /\ s \in Senders
     /\ n \in Nonces
     /\ slot_occupied(s, n)
     /\ n = next_nonce[s]
-    /\ ops_count < MaxOps
     /\ LET applied == slot_entry(s, n) IN
        /\ mempool'    = mempool \ {applied}
        /\ next_nonce' = [next_nonce EXCEPT ![s] = @ + 1]
        /\ UNCHANGED eviction_log
-    /\ ops_count' = ops_count + 1
+    /\ UNCHANGED ops_count
 
 \* EvictLowest — standalone cap-pressure eviction action. Models
 \* the "what gets evicted under cap pressure" surface in isolation,
@@ -667,14 +682,15 @@ INV_EvictionAlwaysLowest ==
 \* -----------------------------------------------------------------
 
 \* PROP_EventualApplyOrEvict (S008BoundedMempool.md liveness).
-\* Under fairness on Apply + EvictLowest, every entry submitted
-\* to mempool is eventually removed via one of the two paths.
+\* Under fairness on Apply + EvictLowest, every FRONTIER entry
+\* (nonce = next_nonce[sender]) in mempool is eventually removed.
 \*
 \* The leads-to form: if a tx with (sender, nonce, fee, hash) is
-\* currently in mempool, then eventually that exact entry is no
-\* longer in mempool (it has been applied OR evicted OR
-\* RBF-replaced by a higher-fee submission, in which case the
-\* original entry is gone).
+\* currently in mempool AND its nonce matches the sender's applied
+\* frontier, then eventually that exact entry is no longer in
+\* mempool (it has been applied OR evicted OR RBF-replaced by a
+\* higher-fee submission, in which case the original entry is
+\* gone).
 \*
 \* The structural argument: Apply removes entries with nonce =
 \* next_nonce[sender]; under fairness on Apply, every entry that
@@ -685,15 +701,23 @@ INV_EvictionAlwaysLowest ==
 \* entry with a higher-fee version; the spec's set-semantics
 \* models this as remove-then-add.
 \*
-\* TLA+ leads-to body: a tx in mempool eventually leaves mempool
-\* (via apply, evict, or RBF-replace).
+\* Scope note: forward-gap-nonce txs (nonce > next_nonce[sender])
+\* are deliberately parked by production (`Node::on_tx` admits
+\* nonce >= next_nonce at src/node/node.cpp; `Chain::apply_
+\* transactions` skips nonce != next_nonce at src/chain/chain.cpp)
+\* with NO unconditional eviction promise — their eventual exit is
+\* cap-pressure-conditional by design, so the property does not
+\* quantify over them.
+\*
+\* TLA+ leads-to body: a frontier tx in mempool eventually leaves
+\* mempool (via apply, evict, or RBF-replace).
 PROP_EventualApplyOrEvict ==
     \A s \in Senders, n \in Nonces, f \in Fees :
        LET e == [sender   |-> s,
                  nonce    |-> n,
                  fee      |-> f,
                  tx_hash  |-> tx_hash_for(s, n, f)] IN
-       (e \in mempool) ~> (e \notin mempool)
+       (e \in mempool /\ e.nonce = next_nonce[e.sender]) ~> (e \notin mempool)
 
 \* PROP_NoStaleNonceEverAdmitted (S008BoundedMempool.md T-2
 \* state-form). Invariantly across all reachable states, no entry

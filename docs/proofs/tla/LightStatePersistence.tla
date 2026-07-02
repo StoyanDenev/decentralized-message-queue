@@ -20,7 +20,7 @@ over them. The LSP-6 fast-resume CONSUMER is documented below as the explicit
 NOT-yet-modeled boundary (it is the marked daemon-bound follow-up; this increment
 ships the validated substrate, not the trust-reducing resume).
 
-NOTE: spec-only, model-check pending TLC install (matching every sibling in this
+NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md for the checked set; matching every no-cfg sibling in this
 directory).
 
 --------------------------------------------------------------------------
@@ -780,5 +780,5 @@ Prop_TamperNeverLoadsAccepted ==
 \*
 \* Doc updates (done by the orchestrator, NOT this file):
 \*   docs/proofs/README.md FB57 row — index entry (house format).
-\*   CHECK-RESULTS.md FB57 row — pending TLC install.
+\*   CHECK-RESULTS.md — spec-only (no .cfg), not in the checked set.
 ============================================================================

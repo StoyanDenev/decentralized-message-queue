@@ -290,16 +290,16 @@ Inv_BalanceNonNegative ==
 \* is the headline A1 supply-conservation claim for the stake
 \* lifecycle.
 SumBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              accounts[d].balance + sum_bal(S \ {d})
     IN sum_bal(Domains)
 
 SumStakes ==
-    LET RECURSIVE sum_stk(_) IN
-    LET sum_stk(S) ==
+    LET RECURSIVE sum_stk(_)
+        sum_stk(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              accounts[d].stake_locked + sum_stk(S \ {d})
@@ -309,6 +309,10 @@ Inv_A1Conservation == SumBalances + SumStakes = INITIAL_TOTAL
 
 \* UnlockMonotonic: once unlock_heights[d] is set away from the
 \* Sentinel by a Deregister, it never DECREASES across any step.
+\* The ARMING step itself (Sentinel -> height+1+UnstakeDelay) is a
+\* decrease under the Sentinel-is-largest encoding, so the property
+\* guards on the pre-state being armed (/= Sentinel) — the formula
+\* for the prose contract "once armed, the value never decreases".
 \*
 \* The C++ apply path arms unlock_height in DEREGISTER and clears
 \* it to UINT64_MAX (the Sentinel equivalent) in UNSTAKE. The TLA
@@ -321,7 +325,8 @@ Inv_A1Conservation == SumBalances + SumStakes = INITIAL_TOTAL
 \* checks against the [Next]_vars transition relation.
 Inv_UnlockMonotonic ==
     [][\A d \in Domains :
-         unlock_heights'[d] >= unlock_heights[d]]_vars
+         (unlock_heights[d] /= Sentinel)
+         => unlock_heights'[d] >= unlock_heights[d]]_vars
 
 \* DeregisterImpliesActiveOff: any domain whose active bit is FALSE
 \* has a non-Sentinel inactive_from. The Deregister action sets both

@@ -122,8 +122,11 @@ Modeling scope (TLC tractability):
 To check (assuming TLC installed):
   $ tlc EquivocationEvidenceVerify.tla -config EquivocationEvidenceVerify.cfg
 
-Recommended config (state space ~10^4, < 30s):
-  Signers = {a, b}, Registered = {a}, Digests = {d1, d2}.
+Recommended config (state space ~2*10^3, < 10s):
+  Signers = {a, b}, Registered = {a}, Digests = {d1, d2}, MaxVerifies = 1
+  (each verdict-log slot multiplies the state space by the 128-record
+  Evidence universe — MaxVerifies = 4 is ~10^9 states, a TLC timeout;
+  every checked invariant is per-log-record, so one slot suffices).
 *)
 
 EXTENDS Naturals, FiniteSets, Sequences, TLC

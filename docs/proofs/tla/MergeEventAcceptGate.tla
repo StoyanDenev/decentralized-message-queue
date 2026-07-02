@@ -119,11 +119,14 @@ Modeling scope (kept tractable for TLC):
     spec abstracts MergePartnerInfo to <<partner, region_ok>>.
   * `Grace` = merge_grace_blocks, `Threshold` = merge_threshold_blocks
     are constants (genesis-bound per S-039). The cfg uses Grace = 2,
-    Threshold = 3, ShardCount = 3, MaxBlock = 5 — small enough that
-    TLC exhausts in seconds while still exercising: a too-soon
-    effective_height (< b.index + Grace), a future evidence window
-    (> b.index), a window-extends-past rejection
-    (ev_start + Threshold > b.index), and a valid admit.
+    Threshold = 3, ShardCount = 3, MaxBlock = 3 — small enough that
+    TLC exhausts in seconds (the ghost admit-history sets form a
+    subset lattice over admissible records, so MaxBlock is the bound
+    that keeps it tractable; see the .cfg preamble for the measured
+    sizing) while still exercising: a too-soon effective_height
+    (< b.index + Grace), a future evidence window (> b.index), a
+    window-extends-past rejection (ev_start + Threshold > b.index),
+    and a valid admit.
   * `ExtendedMode` is a boolean constant. When FALSE every event is
     rejected by V1 (the WrongMode action is the reachable witness).
     The cfg sets it TRUE so the rest of the gate is exercised; the
@@ -161,9 +164,9 @@ state invariant.
 To check (assuming TLC installed):
   $ tlc MergeEventAcceptGate.tla -config MergeEventAcceptGate.cfg
 
-Recommended config (state space ~10^4, < 30s):
+Recommended config (67 distinct states, < 5s):
   ShardCount = 3, Grace = 2, Threshold = 3, ExtendedMode = TRUE,
-  MaxBlock = 5.
+  MaxBlock = 3.
 
 Cross-references:
   - src/node/validator.cpp:713-787 (the MERGE_EVENT receiver bounds

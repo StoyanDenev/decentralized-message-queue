@@ -88,7 +88,11 @@ PendingBlock == [
     receipts:   SUBSET ReceiptEvent
 ]
 
-NoPendingBlock == "no_pending_block"
+\* Sentinel for "no pending block". A record (not a string) so TLC can
+\* compare it against PendingBlock records — TLC rejects equality checks
+\* between values of different kinds (record vs string), but records
+\* with disjoint field sets compare plain-unequal.
+NoPendingBlock == [none |-> TRUE]
 
 ----------------------------------------------------------------------------
 \* State.
@@ -109,16 +113,16 @@ vars == <<balances, stakes, applied_receipts, accumulated_outbound,
 \* Helpers.
 
 SumBalances ==
-    LET RECURSIVE sum_bal(_) IN
-    LET sum_bal(S) ==
+    LET RECURSIVE sum_bal(_)
+        sum_bal(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              balances[d] + sum_bal(S \ {d})
     IN sum_bal(Domains)
 
 SumStakes ==
-    LET RECURSIVE sum_st(_) IN
-    LET sum_st(S) ==
+    LET RECURSIVE sum_st(_)
+        sum_st(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              stakes[d] + sum_st(S \ {d})
@@ -144,11 +148,15 @@ Init ==
 
 \* ConstructBlock(ts, abs, eqs, rs): admit a block with the four
 \* sub-event sets. Bounded set sizes keep the model tractable. Only
-\* fires when no pending block. T-MC3 witness: ConstructBlock is the
-\* ONLY non-determinism point; apply order is fixed.
+\* fires when no pending block AND below the MaxHeight action bound
+\* (bounded for TLC tractability — without the height guard the
+\* Construct/Apply cycle repeats unboundedly and height grows without
+\* bound). T-MC3 witness: ConstructBlock is the ONLY non-determinism
+\* point; apply order is fixed.
 ConstructBlock(ts, abs, eqs, rs) ==
     /\ pending_block = NoPendingBlock
-    /\ ts \subseteq TransferEvent /\ Cardinality(ts) <= 2
+    /\ height < MaxHeight
+    /\ ts \subseteq TransferEvent /\ Cardinality(ts) <= 1
     /\ abs \subseteq AbortEvent /\ Cardinality(abs) <= 1
     /\ eqs \subseteq EquivEvent /\ Cardinality(eqs) <= 1
     /\ rs \subseteq ReceiptEvent /\ Cardinality(rs) <= 1
@@ -198,8 +206,8 @@ ApplyBlock ==
             ELSE 0 IN
        LET total_slash(d) == abort_slash(d) + equiv_slash(d) IN
        LET block_slashed_sum ==
-            LET RECURSIVE add_(_) IN
-            LET add_(S) ==
+            LET RECURSIVE add_(_)
+                add_(S) ==
                 IF S = {} THEN 0
                 ELSE LET d == CHOOSE x \in S : TRUE IN
                      total_slash(d) + add_(S \ {d})
@@ -215,9 +223,12 @@ ApplyBlock ==
        /\ height' = height + 1
 
 \* AdvanceHeight: stutter step. Lets TLC observe time pass without
-\* mutating apply state. Bounded by MaxHeight.
+\* mutating apply state. Bounded by MaxHeight; fires only while no
+\* block is pending (TLC tractability — otherwise every pending-block
+\* state is duplicated at each height).
 AdvanceHeight ==
     /\ height < MaxHeight
+    /\ pending_block = NoPendingBlock
     /\ height' = height + 1
     /\ UNCHANGED <<balances, stakes, applied_receipts, accumulated_outbound,
                    accumulated_slashed, pending_block>>
@@ -225,11 +236,19 @@ AdvanceHeight ==
 ----------------------------------------------------------------------------
 \* Next-state relation.
 
+\* TLC tractability: enumerate ConstructBlock arguments over the
+\* cardinality-<=-1 families directly, built element-wise. Equivalent
+\* to quantifying over the raw SUBSETs (ConstructBlock's own
+\* cardinality guards discard everything larger) but avoids TLC
+\* walking the full 2^|TransferEvent| x 2^|ReceiptEvent| cross
+\* product per successor computation.
+OptionSets(S) == {{}} \cup {{x} : x \in S}
+
 Next ==
-    \/ \E ts \in SUBSET TransferEvent,
-          abs \in SUBSET AbortEvent,
-          eqs \in SUBSET EquivEvent,
-          rs \in SUBSET ReceiptEvent :
+    \/ \E ts \in OptionSets(TransferEvent),
+          abs \in OptionSets(AbortEvent),
+          eqs \in OptionSets(EquivEvent),
+          rs \in OptionSets(ReceiptEvent) :
         ConstructBlock(ts, abs, eqs, rs)
     \/ ApplyBlock
     \/ AdvanceHeight

@@ -26,13 +26,13 @@ Invariants checked under TLC:
   * Inv_NoDoubleCredit — per-recipient balance is bounded by the
         sum of UNIQUE receipt amounts targeting them (T-R1 + T-R2)
   * Inv_AppliedImpliesCredited — every entry in applied_receipts
-        was installed by exactly one ApplyFirst step
+        was installed by an ApplyFirst step
 
 Temporal properties:
   * Prop_DedupAlwaysHolds — every transition preserves the
         dedup-key shape (action-form of Inv_DedupKeyIsPair)
-  * Prop_EventualApply — under fairness on ApplyFirst, any pending
-        fresh-key receipt eventually applies
+  * Prop_EventualApply — under fairness on the two apply steps,
+        any pending fresh-key receipt eventually applies
 
 Modeling scope:
   * The C++ `applied_inbound_receipts_` is `std::set<std::pair<
@@ -60,7 +60,7 @@ To check (assuming TLC installed):
   $ tlc CrossShardReceiptDedup.tla -config CrossShardReceiptDedup.cfg
 *)
 
-EXTENDS Naturals, FiniteSets, Sequences, TLC
+EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS
     Shards,             \* set of shard identifiers
@@ -99,8 +99,13 @@ SnapshotState == [accounts:            [Domains -> [balance: Nat]],
                   applied_receipts:    SUBSET DedupKey,
                   accumulated_inbound: Nat]
 
-\* Sentinel for "no snapshot taken yet".
-NoSnapshot == <<"no_snapshot">>
+\* Sentinel for "no snapshot taken yet" — a record with the same
+\* field set as a real snapshot (TLC cannot compare a record against
+\* a tuple), carrying the impossible accumulated_inbound -1: real
+\* snapshots save a Nat, so no Snapshot step can ever produce it.
+NoSnapshot == [accounts            |-> [d \in Domains |-> [balance |-> 0]],
+               applied_receipts    |-> {},
+               accumulated_inbound |-> -1]
 
 ----------------------------------------------------------------------------
 \* State.
@@ -111,7 +116,10 @@ VARIABLES
     accumulated_inbound, \* Nat
     pending_receipts,    \* Seq(Receipt)
     snapshot_state,      \* SnapshotState or NoSnapshot
-    history              \* Seq(DedupKey) — audit log of ApplyFirst credits
+    history              \* SUBSET DedupKey — audit set of ApplyFirst credits
+                         \* (a Seq audit log grows without bound under
+                         \* Snapshot -> Restore -> re-apply cycles; the set
+                         \* form keeps the TLC state space finite)
 
 vars == <<accounts, applied_receipts, accumulated_inbound,
           pending_receipts, snapshot_state, history>>
@@ -125,7 +133,7 @@ Init ==
     /\ accumulated_inbound = 0
     /\ pending_receipts    = <<>>
     /\ snapshot_state      = NoSnapshot
-    /\ history             = <<>>
+    /\ history             = {}
 
 ----------------------------------------------------------------------------
 \* Actions. Mirror the apply-layer branches in chain.cpp.
@@ -161,7 +169,7 @@ ApplyFirst(r) ==
     /\ applied_receipts'    = applied_receipts \cup {KeyOf(r)}
     /\ accumulated_inbound' = accumulated_inbound + r.amount
     /\ pending_receipts'    = Tail(pending_receipts)
-    /\ history'             = Append(history, KeyOf(r))
+    /\ history'             = history \cup {KeyOf(r)}
     /\ UNCHANGED snapshot_state
 
 \* ApplyDuplicate(r): silent no-op on duplicate. Models chain.cpp:1365
@@ -234,12 +242,15 @@ Next ==
     \/ Snapshot
     \/ Restore
 
-\* Fairness on ApplyFirst drives Prop_EventualApply: a pending
-\* fresh-key receipt cannot indefinitely stutter once enabled.
+\* Fairness on both apply steps drives Prop_EventualApply: the C++
+\* for-loop at chain.cpp:1363 advances unconditionally (a duplicate at
+\* the head is skipped, not parked), so a duplicate must not starve
+\* fresh receipts queued behind it.
 Spec ==
     /\ Init
     /\ [][Next]_vars
     /\ WF_vars(\E r \in Receipt : ApplyFirst(r))
+    /\ WF_vars(\E r \in Receipt : ApplyDuplicate(r))
 
 ----------------------------------------------------------------------------
 \* Invariants.
@@ -253,7 +264,7 @@ Inv_TypeOK ==
     /\ Len(pending_receipts) <= MaxHeight + 1
     /\ \/ snapshot_state = NoSnapshot
        \/ snapshot_state \in SnapshotState
-    /\ history \in Seq(DedupKey)
+    /\ history \subseteq DedupKey
 
 \* BalanceNonNegative: per-recipient balance >= 0. Nat-typed.
 \* ApplyFirst only credits (never debits); Restore preserves
@@ -297,18 +308,18 @@ Inv_NoDoubleCredit ==
        accounts[d].balance <= MaxAmount * Cardinality(applied_receipts)
 
 \* AppliedImpliesCredited: every entry in applied_receipts was
-\* installed by exactly one ApplyFirst step. The history sequence
-\* witnesses one entry per applied key.
+\* installed by an ApplyFirst step. The history set witnesses that
+\* every applied key was credited.
 \*
-\* The "exactly one" claim is structurally enforced: ApplyFirst's
-\* pre-condition `KeyOf(r) \notin applied_receipts` blocks re-firing
-\* on the same key. Combined with the existence claim, this gives
-\* exactly-one. The invariant catches hypothetical bugs where
-\* ApplyDuplicate accidentally inserts a key (it does not), or
-\* where some other action sneaks a phantom entry in.
+\* While applied_receipts is unchanged, re-firing on the same key is
+\* structurally blocked by ApplyFirst's pre-condition `KeyOf(r)
+\* \notin applied_receipts` (re-credit after restoring an OLDER
+\* snapshot is legitimate — see the cfg preamble). The invariant
+\* catches hypothetical bugs where ApplyDuplicate accidentally
+\* inserts a key (it does not), or where some other action sneaks
+\* a phantom entry in.
 Inv_AppliedImpliesCredited ==
-    \A k \in applied_receipts :
-       \E i \in 1..Len(history) : history[i] = k
+    applied_receipts \subseteq history
 
 ----------------------------------------------------------------------------
 \* Temporal properties.
@@ -336,9 +347,10 @@ Prop_DedupAlwaysHolds ==
 \* (not in applied_receipts), then eventually either k is in
 \* applied_receipts OR the queue drains entirely.
 \*
-\* Combined with WF_vars(ApplyFirst), this gives the eventual-
-\* progress conclusion. Without fairness, a trace could indefinitely
-\* stutter while a fresh receipt sits at the head of pending_receipts.
+\* Combined with WF_vars on ApplyFirst AND ApplyDuplicate, this gives
+\* the eventual-progress conclusion. Without fairness, a trace could
+\* indefinitely stutter while a fresh receipt sits in pending_receipts
+\* (or starves behind a duplicate parked at the head).
 Prop_EventualApply ==
     \A k \in DedupKey :
        ((\E i \in 1..Len(pending_receipts) :

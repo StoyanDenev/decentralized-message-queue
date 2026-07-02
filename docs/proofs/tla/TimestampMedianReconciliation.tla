@@ -7,7 +7,7 @@ the deterministic lower-median that lets `Block.timestamp` be bound into the
 K-of-K committee digest WITHOUT the gossip-async divergence that killed a RAW
 timestamp append.
 
-NOTE: spec-only, model-check pending TLC install (matching every sibling in this
+NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md for the checked set; matching every no-cfg sibling in this
 directory).
 
 --------------------------------------------------------------------------
@@ -575,5 +575,5 @@ Prop_EventuallyChecked ==
 \*
 \* Doc updates:
 \*   docs/proofs/README.md FB-NEXT row — index entry (house format).
-\*   CHECK-RESULTS.md FB-NEXT row — pending TLC install.
+\*   CHECK-RESULTS.md — spec-only (no .cfg), not in the checked set.
 ============================================================================

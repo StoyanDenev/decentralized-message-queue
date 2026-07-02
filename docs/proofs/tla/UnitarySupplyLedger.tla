@@ -186,8 +186,8 @@ vars == <<balance, locked, acc_subsidy, acc_inbound,
 \* handles natively at this arity. Pattern matches FeeAccounting.tla::
 \* SumBalances / StakeLifecycle.tla::SumStakes.
 SumOver(f) ==
-    LET RECURSIVE sum_f(_) IN
-    LET sum_f(S) ==
+    LET RECURSIVE sum_f(_)
+        sum_f(S) ==
         IF S = {} THEN 0
         ELSE LET d == CHOOSE x \in S : TRUE IN
              f[d] + sum_f(S \ {d})

@@ -159,8 +159,8 @@ ReconcileUnion(memberLists) ==
 ReconcileIntersection(memberLists) ==
     IF DOMAIN memberLists = {} THEN {}
     ELSE LET ms == [i \in DOMAIN memberLists |-> SetOf(memberLists[i])] IN
-         LET RECURSIVE isect_(_) IN
-         LET isect_(S) ==
+         LET RECURSIVE isect_(_)
+             isect_(S) ==
              IF Cardinality(S) = 1
              THEN LET k == CHOOSE k \in S : TRUE IN ms[k]
              ELSE LET k == CHOOSE k \in S : TRUE IN

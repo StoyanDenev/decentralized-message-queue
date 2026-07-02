@@ -142,14 +142,17 @@ The four gates as pure-function predicates:
                            signed (FB23 + verify_chain_to_head). Per-daemon
                            BOOLEAN flag. When TRUE, the head height H AND the
                            state_root the path gate trusts are both genuine.
-  PathOk(domain, daemon) : the served s:<domain> Merkle path recomputes to
-                           the trusted state_root (FB44 merkle_verify). TRUE
-                           iff the domain has a committed s: leaf AND the
-                           daemon serves the honest path.
+  PathOk(domain, daemon) : the daemon's s:<domain> state_proof answer is
+                           honest — a Merkle path that recomputes to the
+                           trusted state_root when a committed leaf exists
+                           (FB44 merkle_verify), an honest not_found when
+                           none does. A forged answer fails the gate.
   BindOk(domain, daemon) : SHA256(canonical_encoding(claimed)) =
                            committed_value_hash. Via the injective Encode
                            abstraction, BindOk holds iff the claimed
-                           (locked, unlock_height) equals the committed pair.
+                           (locked, unlock_height) equals the committed pair;
+                           vacuously TRUE for an absent domain (no leaf, so
+                           the code never runs the bind on the not_found arm).
 
 Variables:
 
@@ -192,13 +195,16 @@ Modeling scope (kept tractable for TLC):
     single anchored head `head` for the verdict's height input. A forged
     head is rejected (UNVERIFIABLE) before the verdict is computed, so a
     lying daemon cannot manufacture a false ELIGIBLE by inflating H.
-  * The path gate is TRUE iff the domain has a committed s: leaf AND the
-    daemon serves the honest path; a forged path is path_ok = FALSE. The
-    cryptographic path soundness is FB44 (MerklePathVerify.tla). A domain
-    with no committed s: leaf has no value_hash to prove or bind, so the
-    pipeline reports NO-STAKE (the documented "sound state_proof not_found
-    at the verified head" -> NO-STAKE branch, light/main.cpp), NOT a forged
-    membership — the no-fabricated-stake analog of FB43's INV_AbsenceSound.
+  * The path gate is TRUE iff the daemon answers the s:<domain> state_proof
+    honestly: a path that recomputes to the state_root when a committed leaf
+    exists, an honest not_found when none does; a forged answer is path_ok =
+    FALSE. The cryptographic path soundness is FB44 (MerklePathVerify.tla).
+    A domain with no committed s: leaf has no value_hash to prove or bind
+    (the bind gate is vacuous there), so the pipeline reports NO-STAKE (the
+    documented "sound state_proof not_found at the verified head" ->
+    NO-STAKE branch, light/main.cpp — the daemon-asserted arm of the
+    two-arm NO-STAKE split), NOT a forged membership — the
+    no-fabricated-stake analog of FB43's INV_AbsenceSound.
 
 The verdict classifier (the novel fifth step):
 
@@ -227,10 +233,15 @@ and head height.
 To check (assuming TLC installed):
   $ tlc UnstakeEligibilityRead.tla -config UnstakeEligibilityRead.cfg
 
-Recommended config (state space ~10^4, < 30s):
-  Domains = {d1, d2}, Lockeds = {0, 1}, Unlocks = {0, 1, 2} (with NONE a
-  separate sentinel > MaxHead + 1), MaxHead = 1, MaxReads = 5, committed = a
-  1-2 element subset (so an absent-domain NO-STAKE read is reachable), and a
+Recommended config (state space ~3x10^5, minutes — the order-recording
+read_log grows as (|Domains| x |DaemonFlags|)^MaxReads, so MaxReads and the
+StakeEntry universe stay small):
+  Domains = {d1, d2}, Lockeds = {0, 1}, Unlocks = {2} (with NONE a separate
+  sentinel > MaxHead + 1), MaxHead = 2 (so H+1 lands below, exactly at, and
+  above the unlock height — all three relations of the S-017 boundary),
+  MaxReads = 2 (every outcome class is reachable at depth 1; depth 2 gives
+  PROP_Determinism its repeated-read pairs), committed quantified over all
+  mappings (so an absent-domain NO-STAKE read is reachable), and a
   daemon-flag universe spanning honest + each single-gate-forged variant
   (anchor-forged, head-forged, path-forged, bind-forged).
 
@@ -341,7 +352,23 @@ Verdicts == {"ELIGIBLE", "LOCKED", "BONDED", "NO-STAKE", "UNVERIFIABLE"}
 Encode(e) == <<"stake_leaf", e>>
 
 \* -----------------------------------------------------------------
-\* §3. The four trust-reduction gates as pure-function predicates.
+\* §3. Variables.
+\* -----------------------------------------------------------------
+\*
+\* Declared BEFORE the gate predicates (§4): PathOk / BindOk / Classify
+\* read the `committed` state variable, and TLA+ requires declaration
+\* before use.
+
+VARIABLES
+    committed,    \* function Domains -> CommittedShape (the s: leaf domain)
+    head,         \* Nat: the committee-attested head height H
+    read_log,     \* Seq(ReadRecord)
+    read_count    \* Nat (bounds read_log for TLC)
+
+vars == <<committed, head, read_log, read_count>>
+
+\* -----------------------------------------------------------------
+\* §4. The four trust-reduction gates as pure-function predicates.
 \* -----------------------------------------------------------------
 \*
 \* A daemon is modeled by three honest/forged Booleans plus the claimed
@@ -354,8 +381,10 @@ Encode(e) == <<"stake_leaf", e>>
 \*   head_honest   : the daemon's header chain to the tip is committee-signed
 \*                   (FB23 / verify_chain_to_head); BOTH the state_root AND
 \*                   the head height H are genuine when TRUE.
-\*   path_honest   : the daemon serves the honest s:<domain> Merkle path
-\*                   (recomputes to the committed state_root; FB44).
+\*   path_honest   : the daemon answers the s:<domain> state_proof honestly —
+\*                   a Merkle path that recomputes to the committed state_root
+\*                   when a leaf exists (FB44), an honest not_found when none
+\*                   does.
 \*   claimed       : the StakeEntry the daemon claims is the committed leaf
 \*                   (the (locked, unlock_height) the client BIND-checks
 \*                   against the served value_hash). A forged claim differs
@@ -374,16 +403,17 @@ AnchorOk(daemon) == daemon.anchor_honest = TRUE
 \* + verify_chain_to_head (trustless_read.cpp).
 HeadOk(daemon) == daemon.head_honest = TRUE
 
-\* PathOk(domain, daemon) — the served s:<domain> Merkle path recomputes to
-\* the trusted state_root (FB44 merkle_verify). TRUE iff the domain has a
-\* committed s: leaf AND the daemon serves the honest path. An absent domain
-\* has no committed leaf -> PathOk FALSE (no membership proof exists; the
-\* daemon would have to forge one, which FB44 rejects). The absent-domain
-\* path routes to NO-STAKE in the classifier, not to a forged-membership
-\* accept.
-PathOk(domain, daemon) ==
-    /\ committed[domain] /= ABSENT
-    /\ daemon.path_honest = TRUE
+\* PathOk(domain, daemon) — the daemon's s:<domain> state_proof answer is
+\* honest: a Merkle path that recomputes to the trusted state_root when the
+\* domain HAS a committed leaf (FB44 merkle_verify), or an honest not_found
+\* when it has NONE. A forged answer (a path that does not recompute, or any
+\* non-not_found refusal) is PathOk FALSE -> UNVERIFIABLE
+\* (read_stake_trustless rethrows every non-not_found failure). The honest
+\* not_found routes the absent domain to NO-STAKE in the classifier — the
+\* daemon-asserted arm of the code's two-arm NO-STAKE split
+\* (light/main.cpp have_stake = false; NegativeVerdictSoundness.md
+\* NV-2/NV-3), not a forged-membership accept.
+PathOk(domain, daemon) == daemon.path_honest = TRUE
 
 \* BindOk(domain, daemon) — the s:-NAMESPACE anti-substitution gate. The
 \* served value_hash equals SHA256(canonical_encoding(claimed)). Under the
@@ -391,15 +421,17 @@ PathOk(domain, daemon) ==
 \* unlock_height) equals the committed pair: a daemon that serves a forged
 \* claim (e.g. a matured unlock_height to fake ELIGIBLE) produces a
 \* recomputed hash Encode(claimed) /= Encode(committed) = committed
-\* value_hash, so the bind fails. An absent domain has no committed entry to
-\* bind against, so BindOk is FALSE.
+\* value_hash, so the bind fails. An absent domain has no leaf, value_hash,
+\* or stake_info cleartext — the code never runs the bind on the not_found
+\* arm — so BindOk is vacuously TRUE there (the path gate already decided
+\* honest-not_found vs forged).
 \*
 \* src/chain/chain.cpp:292-296 commits value_hash = Encode(committed); the
 \* client recomputes Encode(claimed) and compares. THE crux of T-UE5 closing
 \* the unlock_height-substitution attack.
 BindOk(domain, daemon) ==
-    /\ committed[domain] /= ABSENT
-    /\ Encode(daemon.claimed) = Encode(committed[domain])
+    \/ committed[domain] = ABSENT
+    \/ Encode(daemon.claimed) = Encode(committed[domain])
 
 \* AllGatesOk(domain, daemon) — the conjunction of the four trust
 \* reductions. A read produces a sound (non-UNVERIFIABLE) verdict iff this
@@ -411,7 +443,7 @@ AllGatesOk(domain, daemon) ==
     /\ BindOk(domain, daemon)
 
 \* -----------------------------------------------------------------
-\* §4. The verdict classifier — the NOVEL fifth step.
+\* §5. The verdict classifier — the NOVEL fifth step.
 \* -----------------------------------------------------------------
 \*
 \* Once the four reductions expose the committed (locked, unlock_height) and
@@ -423,8 +455,11 @@ AllGatesOk(domain, daemon) ==
 \* is a pure function of committed facts, never the daemon's raw claim.
 \*
 \* When the gates do NOT all pass, the read fails closed to UNVERIFIABLE —
-\* NEVER an optimistic verdict. The absent-domain / zero-locked cases route
-\* to NO-STAKE; an unscheduled unlock (NONE) routes to BONDED.
+\* NEVER an optimistic verdict. The NO-STAKE branch is the code's TWO-ARM
+\* split (light/main.cpp): leaf-absent (an honest not_found — the
+\* daemon-asserted arm) and leaf-present-with-locked = 0 (the committee-
+\* anchored cryptographic arm) both route to NO-STAKE; an unscheduled unlock
+\* (NONE) routes to BONDED.
 Classify(domain, daemon, H) ==
     IF ~AllGatesOk(domain, daemon)
         THEN "UNVERIFIABLE"
@@ -437,7 +472,7 @@ Classify(domain, daemon, H) ==
     ELSE "LOCKED"
 
 \* -----------------------------------------------------------------
-\* §5. ReadRecord shape + the MakeRecord pipeline.
+\* §6. ReadRecord shape + the MakeRecord pipeline.
 \* -----------------------------------------------------------------
 \*
 \* Each Read appends one ReadRecord: the request (domain + daemon flags +
@@ -458,10 +493,12 @@ ReadRecord == [
 \* classifier. The verdict is UNVERIFIABLE unless ALL FOUR gates pass — the
 \* trustless-read fail-closed contract: a sound verdict is reported iff the
 \* daemon ran our chain (anchor) AND served a committee-signed head (head)
-\* AND the s:<domain> path recomputes to the trusted state_root (path) AND
-\* the served value_hash binds to the claimed pair's canonical encoding
-\* (bind). The ELIGIBLE / LOCKED / BONDED / NO-STAKE split is then the
-\* height-relative classifier over the committed leaf.
+\* AND answered the s:<domain> state_proof honestly (path — a recomputing
+\* Merkle path for a present leaf, an honest not_found for an absent one)
+\* AND the served value_hash binds to the claimed pair's canonical encoding
+\* (bind — vacuous on the absent/not_found arm). The ELIGIBLE / LOCKED /
+\* BONDED / NO-STAKE split is then the height-relative classifier over the
+\* committed leaf.
 MakeRecord(domain, daemon, H) ==
     LET a == AnchorOk(daemon)
         h == HeadOk(daemon)
@@ -474,18 +511,6 @@ MakeRecord(domain, daemon, H) ==
          path    |-> p,
          bind    |-> b,
          verdict |-> Classify(domain, daemon, H) ]
-
-\* -----------------------------------------------------------------
-\* §6. Variables.
-\* -----------------------------------------------------------------
-
-VARIABLES
-    committed,    \* function Domains -> CommittedShape (the s: leaf domain)
-    head,         \* Nat: the committee-attested head height H
-    read_log,     \* Seq(ReadRecord)
-    read_count    \* Nat (bounds read_log for TLC)
-
-vars == <<committed, head, read_log, read_count>>
 
 \* -----------------------------------------------------------------
 \* §7. Initial state.
@@ -595,9 +620,9 @@ INV_HeadGate ==
 \* recompute to the trusted state_root fails closed. No sound verdict has
 \* path = FALSE.
 \*
-\* Structural witness: PathOk requires committed[domain] /= ABSENT AND the
-\* honest path; a forged path makes path = FALSE -> UNVERIFIABLE. FB44
-\* merkle_verify.
+\* Structural witness: PathOk is the honest state_proof answer (a recomputing
+\* path for a present leaf, an honest not_found for an absent one); a forged
+\* answer makes path = FALSE -> UNVERIFIABLE. FB44 merkle_verify.
 INV_PathGate ==
     \A i \in 1..Len(read_log) :
        LET e == read_log[i] IN
@@ -608,9 +633,10 @@ INV_PathGate ==
 \* hash to the served value_hash fails closed. No sound verdict has bind =
 \* FALSE.
 \*
-\* Structural witness: BindOk requires committed[domain] /= ABSENT AND
-\* Encode(claimed) = Encode(committed[domain]); a forged claim (e.g. a
-\* matured unlock_height to fake ELIGIBLE) makes bind = FALSE -> UNVERIFIABLE.
+\* Structural witness: for a present leaf, BindOk requires Encode(claimed) =
+\* Encode(committed[domain]); a forged claim (e.g. a matured unlock_height to
+\* fake ELIGIBLE) makes bind = FALSE -> UNVERIFIABLE. For an absent domain
+\* the bind is vacuous (no value_hash exists; the code never runs it).
 \* src/chain/chain.cpp:292-296 (the canonical encoding the value_hash
 \* commits).
 INV_BindGate ==
@@ -650,7 +676,8 @@ INV_NoFalseEligible ==
 \* attested head H — never the daemon's raw claim.
 \*
 \* Derivation: a sound verdict has all four gates TRUE (INV_FourGateSound),
-\* so BindOk holds -> daemon.claimed = committed[domain] (injective Encode).
+\* so for a present leaf BindOk holds -> daemon.claimed = committed[domain]
+\* (injective Encode), and the absent arm's NO-STAKE reads no claim at all.
 \* Classify reads committed[domain] (NOT daemon.claimed) for the locked /
 \* unlock_height tests, so the reported verdict is exactly the committed-
 \* state verdict. We assert the standing equality: the recorded verdict
@@ -664,11 +691,12 @@ INV_VerdictFaithful ==
 
 \* INV_NoEligibleOnAbsent (T-UE4 + T-UE6, absence corollary) — a read for an
 \* absent domain (no committed s:<domain> leaf) is never ELIGIBLE (nor any
-\* stake-bearing verdict). Both PathOk and BindOk require committed[domain]
-\* /= ABSENT, so an absent domain fails the gates -> UNVERIFIABLE; and even
-\* the classifier's absent branch maps to NO-STAKE, never ELIGIBLE. The
-\* no-fabricated-stake invariant at the application layer (the analog of
-\* FB43 INV_AbsenceSound / FB50 INV_NoAbsentAccept).
+\* stake-bearing verdict). An honest not_found routes the absent domain to
+\* the classifier's NO-STAKE branch (the daemon-asserted arm of the two-arm
+\* split); a forged state_proof answer fails the path gate -> UNVERIFIABLE.
+\* Neither is ever ELIGIBLE. The no-fabricated-stake invariant at the
+\* application layer (the analog of FB43 INV_AbsenceSound / FB50
+\* INV_NoAbsentAccept).
 INV_NoEligibleOnAbsent ==
     \A i \in 1..Len(read_log) :
        LET e == read_log[i] IN
@@ -768,9 +796,12 @@ PROP_Determinism ==
 \*     state_root AND the head height; the Ed25519/FROST verify soundness is
 \*     FB23, the prev_hash walk is verify_chain_to_head.
 \*   * Non-membership. An absent domain returns NO-STAKE (or UNVERIFIABLE if
-\*     the daemon forges a path it cannot bind); trustless non-membership
-\*     requires the documented SMT migration and is out of scope (same
-\*     boundary as FB43 T-CK5 / FB50 INV_NoAbsentAccept).
+\*     the daemon forges a path it cannot bind). The not_found arm is modeled
+\*     HONEST (path_honest = TRUE) — a lying not_found for a COMMITTED domain
+\*     (a false NO-STAKE) is the documented daemon-asserted-negative gap
+\*     ((H-neg), NegativeVerdictSoundness.md NV-2/NV-3) and is NOT modeled;
+\*     trustless non-membership requires the documented SMT migration and is
+\*     out of scope (same boundary as FB43 T-CK5 / FB50 INV_NoAbsentAccept).
 \*   * The apply-side stake mutation. How committed[domain] came to hold its
 \*     (locked, unlock_height) is FB8 / FB21 / FB41 territory; FB53 reads a
 \*     fixed committed table at a single state-root + head.

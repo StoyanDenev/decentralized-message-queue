@@ -52,8 +52,10 @@ Inv_NoLocalCreditOnCrossShard. Temporal properties (under
 fairness): Prop_EventualApply, Prop_SourceA1Conservation.
 
 Modeling scope (TLC tractability): the routing oracle
-`shard_id_for_address` is lifted to a constant function literal
-ROUTE: Domains → Shards in the .cfg. Transactions carry (from, to,
+`shard_id_for_address` is lifted to a constant function
+ROUTE: Domains → Shards, wired at cfg time by CONSTANT substitution
+(ROUTE <- RouteOracle; TLC's cfg grammar accepts only literal
+constant values, not function expressions). Transactions carry (from, to,
 amount, fee) — the nonce gate is FB7 territory. Receipts collapse
 the 11-field CrossShardReceipt to (to, amount) since FB18 only
 models apply-side emission count + amount accumulation; the
@@ -90,12 +92,28 @@ ASSUME ConfigOK ==
 
 \* Routing oracle (Domains -> Shards). The C++ CHASH primitive at
 \* `src/crypto/shard.cpp::shard_id_for_address` is lifted to a
-\* constant function literal at cfg time; chain.cpp:198-202's
+\* constant function substituted at cfg time (ROUTE <- RouteOracle
+\* below); chain.cpp:198-202's
 \* `shard_count_ <= 1 ⇒ FALSE` short-circuit is mirrored by the
 \* `Cardinality(Shards) > 1` clause in IsCrossShard (T-O7 case).
 CONSTANT ROUTE      \* a function Domains -> Shards (see .cfg)
 
 ASSUME RouteOK == ROUTE \in [Domains -> Shards]
+
+\* RouteOracle: the concrete routing function the .cfg substitutes
+\* for ROUTE (TLC's cfg grammar cannot express function values).
+\* One CHOOSE-picked domain routes to MyShard (local); every other
+\* domain routes to a CHOOSE-picked remote shard. With
+\* Domains = {a, b}, Shards = {s1, s2}, MyShard = s1 this is the
+\* a -> s1, b -> s2 oracle described in the .cfg header (up to the
+\* symmetric renaming of {a, b}). With Shards = {MyShard} (the
+\* T-O7 single-shard variant) every domain routes to MyShard.
+RouteOracle ==
+    LET local  == CHOOSE d \in Domains : TRUE
+        remote == IF Cardinality(Shards) > 1
+                  THEN CHOOSE s \in Shards : s /= MyShard
+                  ELSE MyShard
+    IN  [d \in Domains |-> IF d = local THEN MyShard ELSE remote]
 
 IsCrossShard(d) == Cardinality(Shards) > 1 /\ ROUTE[d] /= MyShard
 
@@ -141,12 +159,15 @@ Init ==
 \* at chain.cpp:1393-1394.
 
 \* SubmitTransfer: adversarial/user surface. Appends a Transfer to
-\* pending_txs; bounded by MaxHeight for TLC tractability.
+\* pending_txs; bounded by MaxHeight for TLC tractability (height
+\* is the action counter — without the height < MaxHeight guard the
+\* reachable state space is infinite in the height dimension).
 SubmitTransfer(from, to, amount, fee) ==
     /\ from \in Domains
     /\ to   \in Domains
     /\ amount \in 1..MaxAmount
     /\ fee    \in 0..MaxFee
+    /\ height < MaxHeight
     /\ Len(pending_txs) < MaxHeight + 1
     /\ pending_txs' = Append(pending_txs,
                               [from |-> from, to |-> to,
@@ -212,8 +233,10 @@ ApplyInsufficientBalance(t) ==
 \* block boundaries.
 FinalizeBlock ==
     /\ Len(pending_txs) = 0
+    /\ height < MaxHeight
     /\ height' = height + 1
-    /\ UNCHANGED <<accounts, accumulated_outbound, pending_receipts>>
+    /\ UNCHANGED <<accounts, accumulated_outbound, pending_receipts,
+                   pending_txs>>
 
 ----------------------------------------------------------------------------
 \* Next-state relation.
@@ -264,10 +287,13 @@ Inv_OutboundMonotonic ==
 
 \* NoLocalCreditOnCrossShard (T-O3, action-level): a step matching
 \* the ApplyCrossShardTransfer signature (pending head t, cross-shard,
-\* head popped, accumulated_outbound bumped by t.amount) MUST leave
-\* accounts[t.to] UNCHANGED. The C++ witness is the structural absence
-\* of the recipient credit in chain.cpp:762-766 (vs the credit at
-\* chain.cpp:756-761 for same-shard).
+\* head popped, accumulated_outbound bumped by t.amount) leaves
+\* accounts[t.to] UNCHANGED — except the self-transfer t.to = t.from,
+\* where t.to's balance still receives NO credit but does take the
+\* sender-side debit of exactly (amount + fee). The C++ witness is
+\* the structural absence of the recipient credit in
+\* chain.cpp:762-766 (the sender debit at chain.cpp:743-745 applies
+\* regardless), vs the credit at chain.cpp:756-761 for same-shard.
 Inv_NoLocalCreditOnCrossShard ==
     [][\A t \in Transfer :
          ( /\ Len(pending_txs) > 0
@@ -275,7 +301,10 @@ Inv_NoLocalCreditOnCrossShard ==
            /\ IsCrossShard(t.to)
            /\ pending_txs' = Tail(pending_txs)
            /\ accumulated_outbound' = accumulated_outbound + t.amount )
-         => accounts'[t.to].balance = accounts[t.to].balance
+         => accounts'[t.to].balance =
+              IF t.to = t.from
+              THEN accounts[t.to].balance - (t.amount + t.fee)
+              ELSE accounts[t.to].balance
       ]_vars
 
 \* SumOfReceipts: sum of amounts in pending_receipts. Recursive

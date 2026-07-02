@@ -28,9 +28,9 @@ CONSTANTS
     Shards,             \* set of shard IDs
     Accounts,           \* set of account names
     InitialBalance,     \* int starting balance per account
-    MaxTransfers,       \* bound on cross-shard transfers for TLC
+    MaxTransfers        \* bound on cross-shard transfers for TLC
 
-ASSUME ConfigOK ==
+ASSUME
     /\ Cardinality(Shards) >= 2
     /\ Cardinality(Accounts) >= 2
     /\ InitialBalance \in Nat /\ InitialBalance >= 1
@@ -151,52 +151,28 @@ Inv_AppliedHasOrigin ==
           LET src == pair[1] IN LET id == pair[2] IN
           \E r \in emitted_receipts[src] : r[1] = src /\ r[6] = id /\ r[2] = dst
 
-\* FA7 Corollary T-7.1: global supply invariant.
-\* LiveGlobal + Pending = GenesisGlobal (no subsidy/slash in this spec).
-LiveGlobal == LET S == { balances[s, a] : s \in Shards, a \in Accounts } IN
-              SumSet(S)
-
-\* SumSet helper — sum over a set of nat-valued mappings.
-\* For TLC compactness, we sum explicitly over a fixed enumeration.
-SumOverShardsAccounts(f(_, _)) ==
-    LET sa == { <<s, a>> : s \in Shards, a \in Accounts } IN
-    LET RECURSIVE sum_seq(_) IN
-    LET sum_seq(seq) ==
-        IF seq = <<>> THEN 0
-        ELSE LET h == Head(seq) IN f(h[1], h[2]) + sum_seq(Tail(seq))
-    IN sum_seq(SetToSeq(sa))
-
-\* Helper: SetToSeq exists in TLC's Sequences module as CHOOSE-based.
+\* Helper: enumerate a finite set as a duplicate-free sequence (CHOOSE-based;
+\* community SequencesExt is not vendored).
 SetToSeq(S) == CHOOSE seq \in [1..Cardinality(S) -> S] :
                   \A i, j \in 1..Cardinality(S) : i /= j => seq[i] /= seq[j]
 
 GenesisTotal == InitialBalance * Cardinality(Accounts) * Cardinality(Shards)
 
-PendingTotal ==
-    LET pending_amts ==
-        { r[5] : r \in UNION { pending_inbound[s] : s \in Shards } }
-    IN
-    \* TLC-friendly: sum over the pending set
-    IF pending_amts = {} THEN 0
-    ELSE CHOOSE total \in Nat :
-         total = SumOverShardsAccounts(LAMBDA s, a : 0) + 0
-         \* Simplification: actual sum below
-
-\* For TLC tractability with small models, we check:
-\* sum(balances) + sum(pending amounts) = GenesisTotal
-\* Implemented via explicit enumeration when Shards x Accounts is small.
+\* FA7 Corollary T-7.1: global supply invariant.
+\* live balances + pending amounts = GenesisTotal (no subsidy/slash in this
+\* spec). Summed by explicit enumeration — Shards x Accounts is small.
 
 Inv_SupplyInvariant ==
     LET bal_sum ==
-        LET RECURSIVE pair_sum(_) IN
-        LET pair_sum(seq) ==
+        LET RECURSIVE pair_sum(_)
+            pair_sum(seq) ==
             IF seq = <<>> THEN 0
             ELSE LET h == Head(seq) IN
                  balances[h[1], h[2]] + pair_sum(Tail(seq))
         IN pair_sum(SetToSeq({ <<s, a>> : s \in Shards, a \in Accounts })) IN
     LET pending_sum ==
-        LET RECURSIVE rsum(_) IN
-        LET rsum(seq) ==
+        LET RECURSIVE rsum(_)
+            rsum(seq) ==
             IF seq = <<>> THEN 0
             ELSE Head(seq)[5] + rsum(Tail(seq))
         IN rsum(SetToSeq(UNION { pending_inbound[s] : s \in Shards })) IN

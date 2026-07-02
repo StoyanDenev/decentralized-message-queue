@@ -14,7 +14,7 @@ heads by reported height and requires every height shared by >= 2 peers to agree
 on (block_hash, state_root). The spec lifts that pipeline to a finite state
 machine so the four verdicts and the soundness theorems can be model-checked.
 
-NOTE: spec-only, model-check pending TLC install (matching every sibling in this
+NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md for the checked set; matching every no-cfg sibling in this
 directory).
 
 --------------------------------------------------------------------------
@@ -524,5 +524,5 @@ Prop_EventuallyDecided ==
 \*     where the local cluster cannot mint). DIVERGENCE needs a forked/Byzantine
 \*     daemon (test-only), exercised on WSL2/CI (MultiPeerCrossCheckSoundness.md §5).
 \*
-\* NOTE: spec-only, model-check pending TLC install (matching every sibling here).
+\* NOTE: spec-only — no .cfg yet, so NOT model-checked (see tla/CHECK-RESULTS.md).
 ============================================================================

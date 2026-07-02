@@ -293,7 +293,15 @@ VARIABLES
 
 vars == <<pending, verdicts, n_processed>>
 
-MaxCandidates == 6   \* bound on adjudicated candidates (TLC exhaustion)
+MaxCandidates == 1   \* bound on adjudicated candidates (TLC tractability).
+                     \* 1 is COMPLETE for T-AG1..T-AG6: Accept is a pure
+                     \* predicate of the single candidate (no verdict depends
+                     \* on prior verdicts) and every invariant quantifies
+                     \* per-block over Accepted, so any violation at log
+                     \* length n projects onto a length-1 log. The verdict
+                     \* log stores full candidate records, so the space grows
+                     \* as ~|Candidates|^MaxCandidates (~8.4e3^n at the
+                     \* shipped cfg) — 6 was intractable (TLC disk overflow).
 
 Init ==
     /\ pending = NONE
@@ -331,10 +339,13 @@ Stutter ==
     /\ UNCHANGED vars
 
 Next ==
-    \/ \E m \in CandidateSizes, prop \in 0..Cardinality(Members),
-          ab \in 0..MaxAborts, md \in {"MD", "BFT"} :
-          \E sigset \in SUBSET (1..m) :
-             SubmitCandidate(m, sigset, prop, ab, md)
+    \/ /\ pending = NONE            \* guards hoisted out of the \E so TLC
+       /\ n_processed < MaxCandidates  \* short-circuits the ~14k-binding
+                                       \* enumeration on non-idle states
+       /\ \E m \in CandidateSizes, prop \in 0..Cardinality(Members),
+             ab \in 0..MaxAborts, md \in {"MD", "BFT"} :
+             \E sigset \in SUBSET (1..m) :
+                SubmitCandidate(m, sigset, prop, ab, md)
     \/ Adjudicate
     \/ Stutter
 

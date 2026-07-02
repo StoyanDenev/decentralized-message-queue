@@ -88,7 +88,7 @@ Modeling scope (kept tractable for TLC):
   * `Timestamps` is a finite universe of integer-valued seconds (the
     int64_t spec-layer projection; the universe is bounded by
     MaxTimestamp to keep TLC tractable). The model uses a small
-    monotone sequence {0, 1, 2, 3} for the recommended cfg.
+    monotone sequence {0, 1, 2} for the recommended cfg.
   * `MaxChainLength` bounds chain growth so TLC exhausts in seconds.
   * `MaxTimestampSkew` bounds how much a producer's sampled
     timestamp can diverge from head().timestamp at ProduceBlock
@@ -216,8 +216,9 @@ The state machine. Four actions cover the four operational surfaces:
 To check (assuming TLC installed):
   $ tlc BlockTimestampMonotonic.tla -config BlockTimestampMonotonic.cfg
 
-Recommended config (state space ~10^4, < 30s):
-  Nodes = {n1, n2}, MaxChainLength = 3, MaxTimestamp = 3,
+Recommended config (measured: 49,753 distinct states, depth 12,
+~30s single worker incl. liveness):
+  Nodes = {n1, n2}, MaxChainLength = 2, MaxTimestamp = 2,
   MaxTimestampSkew = 1, TxUniverse = {t1}, monotonic_gate = FALSE.
 
 To exercise the forward-looking strict-monotonic discipline (with
@@ -351,6 +352,17 @@ compute_signing_bytes(b) ==
 \* The genesis hash sentinel.
 GenesisHash == <<"GENESIS">>
 
+\* The "no tamper logged" sentinel for tampered_at. Modeled as the
+\* integer 0 (NOT a string) so tampered_at stays in a single
+\* homogeneous integer domain — TLC throws on any string-vs-integer
+\* comparison (e = between "none" and an int index), which would
+\* fire the moment a TamperHistoricalTimestamp action sets
+\* tampered_at[n] to an integer index and an invariant then compares
+\* it against the sentinel. Tamper indices always range over
+\* 2..Len(chains[n]) (see TamperHistoricalTimestamp), so 0 can never
+\* collide with a real tamper site.
+NoTamper == 0
+
 \* The genesis block. Pinned at index = 0, timestamp = 0, prev_hash =
 \* GenesisHash (matching the C++ make_genesis_block at
 \* src/chain/genesis.cpp:301 with the hard-coded timestamp = 0
@@ -369,7 +381,7 @@ GenesisBlock == [
 VARIABLES
     chains,             \* function NodeId -> Seq(Block)
     pending_inbox,      \* function NodeId -> Seq(Block) — gossip queue
-    tampered_at,        \* function NodeId -> Nat or "none" — interior
+    tampered_at,        \* function NodeId -> Nat (NoTamper = 0 sentinel) — interior
                          \* tamper site, latches across actions
     load_throws         \* function NodeId -> BOOLEAN — reload reject
 
@@ -425,7 +437,7 @@ validate_chain(c) == validate_chain_(c, Len(c))
 Init ==
     /\ chains         = [n \in Nodes |-> <<GenesisBlock>>]
     /\ pending_inbox  = [n \in Nodes |-> <<>>]
-    /\ tampered_at    = [n \in Nodes |-> "none"]
+    /\ tampered_at    = [n \in Nodes |-> NoTamper]
     /\ load_throws    = [n \in Nodes |-> FALSE]
 
 \* -----------------------------------------------------------------
@@ -516,12 +528,32 @@ ApplyBlock(n) ==
 
 TamperHistoricalTimestamp(n) ==
     /\ n \in Nodes
-    /\ Len(chains[n]) >= 2
-       \* Need at least one block past genesis to tamper meaningfully.
-    /\ \E i \in 2..Len(chains[n]) :
-          \* i ranges over post-genesis blocks (1-indexed; index 1 is
-          \* genesis, which we don't tamper since it's pinned and the
-          \* chain identity is pre-validated against a hardcoded hash).
+    /\ tampered_at[n] = NoTamper
+       \* Model a single adversarial tamper per node (the S-021 /
+       \* T-4 attack model + the C++ scenario-5 unit test). Without
+       \* this guard, a SECOND tamper could restore the original
+       \* timestamp and heal the cascade while tampered_at stays
+       \* latched, spuriously falsifying INV_HistoricalTamperCascades
+       \* (the latch tracks "was tampered", not "is currently
+       \* inconsistent"). One-shot tampering keeps the ghost latch
+       \* faithful to the chain's actual integrity state.
+    /\ Len(chains[n]) >= 3
+       \* Need genesis + at least one INTERIOR block + a HEAD so that
+       \* an interior (non-head) block with a committed successor
+       \* exists to tamper — the S-021 / T-4 historical-tamper case.
+    /\ \E i \in 2..(Len(chains[n]) - 1) :
+          \* i ranges over post-genesis INTERIOR blocks (1-indexed;
+          \* index 1 is genesis, which we don't tamper since it's
+          \* pinned and pre-validated against a hardcoded hash; the
+          \* upper bound Len-1 excludes the HEAD block, which has no
+          \* committed successor yet — tampering the head and then
+          \* legitimately extending recomputes prev_hash from the
+          \* post-tamper head_hash, yielding a self-consistent chain
+          \* that validate_chain accepts. This is NOT the S-021 /
+          \* T-4 "historical tamper" attack, which requires a block
+          \* whose SUCCESSOR's prev_hash was fixed BEFORE the tamper.
+          \* Restricting to interior blocks keeps the action faithful
+          \* to the INV_HistoricalTamperCascades premise (k < Len).
        \E new_ts \in Timestamps :
           /\ new_ts /= chains[n][i].timestamp
           /\ LET old == chains[n][i] IN
@@ -715,7 +747,7 @@ INV_EqualTimestampAccepted ==
           \* without invalidating validate_chain (in the absence of a
           \* separate tamper event on this chain).
           (chains[n][i].timestamp = chains[n][i - 1].timestamp
-           /\ tampered_at[n] = "none")
+           /\ tampered_at[n] = NoTamper)
           => validate_chain(chains[n])
 
 \* -----------------------------------------------------------------
@@ -725,7 +757,7 @@ INV_EqualTimestampAccepted ==
 TypeOK ==
     /\ chains \in [Nodes -> Seq(Block)]
     /\ pending_inbox \in [Nodes -> Seq(Block)]
-    /\ tampered_at \in [Nodes -> (0..(MaxChainLength + 1)) \cup {"none"}]
+    /\ tampered_at \in [Nodes -> 0..(MaxChainLength + 1)]
     /\ load_throws \in [Nodes -> BOOLEAN]
 
 \* -----------------------------------------------------------------
