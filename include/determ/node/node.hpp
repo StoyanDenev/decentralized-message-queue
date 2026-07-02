@@ -112,7 +112,7 @@ struct Config {
     uint32_t                 k_block_sigs{3};
     // rev.8 per-height escalation. Loaded from GenesisConfig.
     bool                     bft_enabled{true};
-    uint32_t                 bft_escalation_threshold{5};
+    uint32_t                 bft_escalation_threshold{1};   // S-045: default 1 (was 5)
     // rev.9 sharding role. SINGLE = today's behavior. BEACON/SHARD activate
     // sharded paths in Stage B2+. Loaded from GenesisConfig.
     ChainRole                chain_role{ChainRole::SINGLE};

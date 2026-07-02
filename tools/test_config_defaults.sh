@@ -12,7 +12,7 @@
 #   - S-014: rpc_rate_per_sec / rpc_rate_burst = 0 (rate-limit disabled)
 #   - S-014: gossip_rate_per_sec / gossip_rate_burst = 0 (same)
 #   - bft_enabled = true (auto-escalation enabled)
-#   - bft_escalation_threshold = 5
+#   - bft_escalation_threshold = 1 (S-045: default lowered from 5)
 #   - m_creators = 3, k_block_sigs = m_creators (strong K-of-K default)
 #   - chain_role = SINGLE (unsharded)
 #   - sharding_mode = CURRENT (pre-R1 baseline)

@@ -4667,17 +4667,25 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
             // per-stuck-height abort-event ceiling K-1 (T-4).
             {
                 uint32_t K = cfg.k_block_sigs, M = cfg.m_creators;
-                uint32_t k_bft = (2 * K + 2) / 3;
+                uint32_t k_bft = static_cast<uint32_t>(
+                    chain::bft_committee_size(K));
                 if (K == 2) {
-                    std::cout << "WARNING (S-044):    K=2 single-claim abort quorum — one phase\n"
-                                 "                    straggle excludes a member; cascades wedge the\n"
-                                 "                    chain permanently (BFT escalation unsatisfiable\n"
-                                 "                    at K=2). Deploy k_block_sigs >= 3.\n";
+                    // Post S-044/F-a: K=2 no longer cascade-wedges (the max(2,K-1)
+                    // claim floor makes the single-claim abort quorum
+                    // unsatisfiable), but it becomes a crash-stop 2-of-2: a
+                    // genuinely dead member halts the height with no abort-based
+                    // reseat, and escalation is structurally unavailable at K=2.
+                    std::cout << "WARNING (S-044):    K=2 is crash-stop (2-of-2 unanimity). The F-a\n"
+                                 "                    claim floor removes the timing-skew cascade wedge,\n"
+                                 "                    but a genuinely dead member halts the height (no\n"
+                                 "                    abort-based reseat, no BFT escalation at K=2).\n"
+                                 "                    Deploy k_block_sigs >= 3 for fault tolerance.\n";
                 } else if (K >= 3) {
                     if (M < k_bft + 2) {
-                        std::cout << "WARNING (S-045):    escalation headroom M-k_bft = "
-                                  << (M - k_bft) << " < 2 — two distinct\n"
-                                     "                    straggles at one height halt the chain permanently.\n";
+                        std::cout << "NOTE (S-045):       escalation headroom M-k_bft = "
+                                  << (M - k_bft) << " < 2 — beyond one\n"
+                                     "                    distinct straggle the pool relies on BFT escalation;\n"
+                                     "                    two concurrent straggles at one height can halt it.\n";
                     }
                     if (cfg.bft_enabled
                         && cfg.bft_escalation_threshold > K - 1
@@ -4689,8 +4697,8 @@ static int cmd_genesis_tool_build(int argc, char** argv) {
                                   << ") and the pool is below threshold+k_bft="
                                   << (cfg.bft_escalation_threshold + k_bft)
                                   << " —\n"
-                                     "                    escalation is likely unreachable. Pin the threshold\n"
-                                     "                    <= K-1 or grow the pool.\n";
+                                     "                    escalation may be unreachable. The shipped default is\n"
+                                     "                    1 (always reachable); pin the threshold <= K-1.\n";
                     }
                 }
                 if (!cfg.bft_enabled && K >= 2 && M > K) {
@@ -12378,6 +12386,107 @@ int main(int argc, char** argv) {
                   << "\n";
         return fail == 0 ? 0 : 1;
     }
+    if (cmd == "test-p256-oprf-c99") {
+        // RFC 9497 OPRF(P-256, SHA-256) — the structural/negative leg. The
+        // byte-exactness gate is the 4 appendix vectors through both §3.13
+        // halves (tools/vectors/p256_oprf.json); THIS subcommand pins what
+        // those accept-side vectors cannot: the protocol's self-consistency
+        // identity and the reject paths.
+        int fail = 0;
+        auto check = [&](bool c, const std::string& m) {
+            if (c) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        uint8_t seed[32], sk0[32], sk1[32], blind[32];
+        for (int i = 0; i < 32; i++) { seed[i] = (uint8_t)(0x5a + i); blind[i] = (uint8_t)(i + 1); }
+        blind[0] = 0x0e;                       /* < n */
+        const uint8_t* info = (const uint8_t*)"determ oprf test";
+        const uint8_t* input = (const uint8_t*)"user-secret-input";
+
+        // (1) DeriveKeyPair: deterministic; mode-separated (the mode byte
+        //     enters via the HashToScalar DST — RFC gotcha: same seed+info
+        //     yield DIFFERENT keys per mode).
+        {
+            uint8_t sk0b[32];
+            bool ok = determ_p256_oprf_derive_key(sk0, seed, 32, info, 16, 0x00) == 0
+                   && determ_p256_oprf_derive_key(sk0b, seed, 32, info, 16, 0x00) == 0
+                   && std::memcmp(sk0, sk0b, 32) == 0
+                   && determ_p256_oprf_derive_key(sk1, seed, 32, info, 16, 0x01) == 0
+                   && std::memcmp(sk0, sk1, 32) != 0;
+            check(ok, "(1) derive_key deterministic; mode 0x00 vs 0x01 yield different keys (DST separation)");
+        }
+
+        // (2) The §3.3.1 identity: client blind -> evaluate -> finalize must
+        //     equal the server's direct Evaluate(sk, input) — recomputed here
+        //     as finalize over an UNBLINDED evaluation (blind = 1 path
+        //     simulated by hashing the direct sk*H(input) element).
+        {
+            uint8_t blinded[33], eval_[33], out_client[32];
+            uint8_t direct33[33], out_server[32];
+            uint8_t one[32] = {0}; one[31] = 1;
+            bool ok = determ_p256_oprf_blind(blinded, input, 17, blind, 0x00) == 0
+                   && determ_p256_oprf_evaluate(eval_, sk0, blinded) == 0
+                   && determ_p256_oprf_finalize(out_client, input, 17, blind, eval_) == 0;
+            // server side: element = H(input) (blind=1), eval = sk*element,
+            // finalize with blind=1 (inverse of 1 is 1).
+            ok = ok && determ_p256_oprf_blind(direct33, input, 17, one, 0x00) == 0
+                    && determ_p256_oprf_evaluate(direct33, sk0, direct33) == 0
+                    && determ_p256_oprf_finalize(out_server, input, 17, one, direct33) == 0
+                    && std::memcmp(out_client, out_server, 32) == 0;
+            check(ok, "(2) blind/evaluate/finalize == server-side direct Evaluate (the §3.3.1 identity)");
+        }
+
+        // (3) VOPRF: prove -> verify accepts; tampered c, tampered s,
+        //     tampered eval element, and wrong mode each REJECT.
+        {
+            uint8_t blinded[33], eval_[33], pk65[65], pk33[33], proof[64], r[32];
+            for (int i = 0; i < 32; i++) r[i] = (uint8_t)(0x31 ^ i);
+            r[0] = 0x07;
+            bool ok = determ_p256_oprf_blind(blinded, input, 17, blind, 0x01) == 0
+                   && determ_p256_oprf_evaluate(eval_, sk1, blinded) == 0
+                   && determ_p256_base_mul(pk65, sk1) == 0
+                   && determ_p256_point_compress(pk33, pk65) == 0
+                   && determ_p256_voprf_prove(proof, sk1, pk33, blinded, eval_, r, 0x01) == 0
+                   && determ_p256_voprf_verify(pk33, blinded, eval_, proof, 0x01) == 0;
+            uint8_t bad[64];
+            std::memcpy(bad, proof, 64); bad[5] ^= 1;     /* tamper c */
+            ok = ok && determ_p256_voprf_verify(pk33, blinded, eval_, bad, 0x01) == -1;
+            std::memcpy(bad, proof, 64); bad[40] ^= 1;    /* tamper s */
+            ok = ok && determ_p256_voprf_verify(pk33, blinded, eval_, bad, 0x01) == -1;
+            uint8_t bad_eval[33];
+            std::memcpy(bad_eval, eval_, 33); bad_eval[0] ^= 1;   /* flip parity */
+            ok = ok && determ_p256_voprf_verify(pk33, blinded, bad_eval, proof, 0x01) == -1;
+            ok = ok && determ_p256_voprf_verify(pk33, blinded, eval_, proof, 0x00) == -1;  /* wrong mode ctx */
+            check(ok, "(3) VOPRF prove->verify accepts; tampered c / s / eval / wrong-mode each reject");
+        }
+
+        // (4) A proof from a DIFFERENT key must not verify against this pk
+        //     (the DLEQ soundness shape), and invalid blinds are rejected.
+        {
+            uint8_t blinded[33], eval_[33], pk65[65], pk33[33], proof[64], r[32], out33[33];
+            uint8_t zero[32] = {0}, big[32];
+            std::memset(big, 0xff, 32);
+            for (int i = 0; i < 32; i++) r[i] = (uint8_t)(0x55 - i);
+            r[0] = 0x03;
+            bool ok = determ_p256_oprf_blind(blinded, input, 17, blind, 0x01) == 0
+                   && determ_p256_oprf_evaluate(eval_, sk1, blinded) == 0
+                   && determ_p256_base_mul(pk65, sk1) == 0
+                   && determ_p256_point_compress(pk33, pk65) == 0
+                   /* prove with the WRONG key sk0 against pk(sk1): */
+                   && determ_p256_voprf_prove(proof, sk0, pk33, blinded, eval_, r, 0x01) == 0
+                   && determ_p256_voprf_verify(pk33, blinded, eval_, proof, 0x01) == -1;
+            ok = ok && determ_p256_oprf_blind(out33, input, 17, zero, 0x00) == -1
+                    && determ_p256_oprf_blind(out33, input, 17, big, 0x00) == -1;
+            check(ok, "(4) DLEQ proof under the wrong key rejects; zero / >= n blinds rejected");
+        }
+
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": p256-oprf-c99 " << (fail == 0
+                      ? "protocol self-consistency + DLEQ reject paths held (RFC 9497; byte gate via §3.13)"
+                      : "had assertion failures")
+                  << "\n";
+        return fail == 0 ? 0 : 1;
+    }
     if (cmd == "ct-timing-probe") {
         // CRYPTO-C99-SPEC §3.12 / docs/proofs/TimingProbeDesign.md — the
         // in-house fix-vs-random timing-leakage probe (dudect method:
@@ -12938,7 +13047,7 @@ int main(int argc, char** argv) {
                                 "hkdf_sha256.json", "pbkdf2_sha256.json",
                                 "blake2b.json", "chacha20_poly1305.json",
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
-                                "p256.json", "p256_h2c.json" };
+                                "p256.json", "p256_h2c.json", "p256_oprf.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13126,6 +13235,43 @@ int main(int argc, char** argv) {
                             || hx(out+1, 32) != v["px_hex"]
                             || hx(out+33, 32) != v["py_hex"]) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name + " (unknown p256_h2c type '" + ty + "')"; break; }
+                } else if (prim == "p256_oprf") {
+                    // RFC 9497 A.3.1 (OPRF) + A.3.2 (VOPRF) — the FULL
+                    // protocol per vector: DeriveKeyPair from Seed+KeyInfo
+                    // (never trusting sks_hex), blind -> blinded, evaluate,
+                    // finalize output; VOPRF additionally pk == sk*G,
+                    // GenerateProof from ProofRandomScalar byte-equal, and
+                    // VerifyProof(stored bytes) == accept.
+                    uint8_t mode = (uint8_t)v.value("mode", 0);
+                    auto seedv = unhex(v["seed_hex"]); auto infov = unhex(v["key_info_hex"]);
+                    auto inputv = unhex(v["input_hex"]); auto blindv = unhex(v["blind_hex"]);
+                    uint8_t sk[32], blinded[33], eval_[33], outp[32];
+                    if (determ_p256_oprf_derive_key(sk, seedv.data(), seedv.size(),
+                            infov.data(), infov.size(), mode) != 0
+                        || hx(sk, 32) != v["sks_hex"]) { ok=false; bad=name + " (derive_key)"; break; }
+                    if (blindv.size() != 32
+                        || determ_p256_oprf_blind(blinded, inputv.empty()?nullptr:inputv.data(),
+                               inputv.size(), blindv.data(), mode) != 0
+                        || hx(blinded, 33) != v["blinded_element_hex"]) { ok=false; bad=name + " (blind)"; break; }
+                    if (determ_p256_oprf_evaluate(eval_, sk, blinded) != 0
+                        || hx(eval_, 33) != v["evaluation_element_hex"]) { ok=false; bad=name + " (evaluate)"; break; }
+                    if (determ_p256_oprf_finalize(outp, inputv.empty()?nullptr:inputv.data(),
+                            inputv.size(), blindv.data(), eval_) != 0
+                        || hx(outp, 32) != v["output_hex"]) { ok=false; bad=name + " (finalize)"; break; }
+                    if (v.value("type", "") == "voprf") {
+                        auto rv = unhex(v["proof_random_scalar_hex"]);
+                        uint8_t pk65[65], pk33[33], proof[64];
+                        if (determ_p256_base_mul(pk65, sk) != 0
+                            || determ_p256_point_compress(pk33, pk65) != 0
+                            || hx(pk33, 33) != v["pks_hex"]) { ok=false; bad=name + " (pks)"; break; }
+                        if (rv.size() != 32
+                            || determ_p256_voprf_prove(proof, sk, pk33, blinded, eval_,
+                                   rv.data(), mode) != 0
+                            || hx(proof, 64) != v["proof_hex"]) { ok=false; bad=name + " (proof)"; break; }
+                        auto storedproof = unhex(v["proof_hex"]);
+                        if (determ_p256_voprf_verify(pk33, blinded, eval_,
+                                storedproof.data(), mode) != 0) { ok=false; bad=name + " (verify)"; break; }
+                    }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
@@ -17716,7 +17862,7 @@ int main(int argc, char** argv) {
             check(c2.bft_enabled == c1.bft_enabled,
                   "default Config: bft_enabled (true) round-trips");
             check(c2.bft_escalation_threshold == c1.bft_escalation_threshold,
-                  "default Config: bft_escalation_threshold (5) round-trips");
+                  "default Config: bft_escalation_threshold (1) round-trips");
             check(c2.m_creators == c1.m_creators,
                   "default Config: m_creators (3) round-trips");
             check(c2.chain_role == c1.chain_role,
@@ -18681,9 +18827,9 @@ int main(int argc, char** argv) {
     // config.
     //
     // Locks in:
-    //   * M/K committee values per profile (the rev.7 published
-    //     defaults — "3/3 strong" for cluster, "3/2 weak" for web,
-    //     "5/4" for regional, "7/5" for global, "3/3 strong" for
+    //   * M/K committee values per profile ("3/3 strong" for cluster,
+    //     "4/3 weak" for web (S-044/S-045 retune from the historical
+    //     3/2), "5/4" for regional, "7/5" for global, "3/3 strong" for
     //     tactical).
     //   * chain_role + sharding_mode pairs (cluster=BEACON/CURRENT,
     //     web=SHARD/EXTENDED, regional=SHARD/CURRENT,
@@ -18722,9 +18868,10 @@ int main(int argc, char** argv) {
         // 1. cluster: BEACON + CURRENT + M=K=3 (strong MD).
         check_profile(PROFILE_CLUSTER, "CLUSTER",
                        3, 3, ChainRole::BEACON, ShardingMode::CURRENT);
-        // 2. web: SHARD + EXTENDED + M=3, K=2 (weak BFT).
+        // 2. web: SHARD + EXTENDED + M=4, K=3 (weak hybrid; S-044/S-045 retune
+        //    from the historical M=3/K=2 — K>=3 + MD margin 1).
         check_profile(PROFILE_WEB, "WEB",
-                       3, 2, ChainRole::SHARD, ShardingMode::EXTENDED);
+                       4, 3, ChainRole::SHARD, ShardingMode::EXTENDED);
         // 3. regional: SHARD + CURRENT + M=5, K=4.
         check_profile(PROFILE_REGIONAL, "REGIONAL",
                        5, 4, ChainRole::SHARD, ShardingMode::CURRENT);
@@ -18767,7 +18914,7 @@ int main(int argc, char** argv) {
                        PROFILE_CLUSTER.chain_role,
                        PROFILE_CLUSTER.sharding_mode);
 
-        // 9. web_test mirrors web (SHARD + EXTENDED, M=3, K=2).
+        // 9. web_test mirrors web (SHARD + EXTENDED, M=4, K=3).
         check_profile(PROFILE_WEB_TEST, "WEB_TEST",
                        PROFILE_WEB.m_creators,
                        PROFILE_WEB.k_block_sigs,
@@ -33442,8 +33589,8 @@ int main(int argc, char** argv) {
         //    escalation threshold trigger BFT-mode fallback automatically.
         check(c.bft_enabled == true,
               "bft_enabled default: true (auto-escalation)");
-        check(c.bft_escalation_threshold == 5,
-              "bft_escalation_threshold default: 5");
+        check(c.bft_escalation_threshold == 1,
+              "bft_escalation_threshold default: 1 (S-045)");
 
         // === Committee defaults ===
 
@@ -41435,7 +41582,7 @@ int main(int argc, char** argv) {
 
             // (1c) Economics + BFT escalation + inclusion defaults.
             check(c.bft_enabled == true
-                  && c.bft_escalation_threshold == 5
+                  && c.bft_escalation_threshold == 1
                   && c.inclusion_model == InclusionModel::STAKE_INCLUSION
                   && c.min_stake == 1000
                   && c.block_subsidy == 0
@@ -41444,7 +41591,7 @@ int main(int argc, char** argv) {
                   && c.governance_mode == 0
                   && c.genesis_message == DEFAULT_GENESIS_MESSAGE,
                   "(1) Default GenesisConfig: bft_enabled=true, "
-                  "escalation_threshold=5, STAKE_INCLUSION, "
+                  "escalation_threshold=1 (S-045), STAKE_INCLUSION, "
                   "min_stake=1000, subsidies/pool=0, "
                   "governance_mode=uncontrolled, default genesis_message");
         }

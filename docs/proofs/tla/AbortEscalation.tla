@@ -2,35 +2,39 @@
 (*
 Companion spec to AbortCascadeLiveness.md (FB67) — TLA+
 specification of the per-height round / abort / BFT-escalation state
-machine in `src/node/node.cpp`, purpose-built to exhibit two OPEN
-liveness findings as machine-checkable property violations:
+machine in `src/node/node.cpp`. Both findings it was built to exhibit
+are now MITIGATED (docs/SECURITY.md §S-044/§S-045); the shipped
+AbortEscalation.cfg now models the FIX (all invariants EXPECTED TO
+HOLD), and the pre-fix defect configuration is retained as the
+E1-historical regression reference. The two findings and the shipped
+fix:
 
-  * S-044 (SECURITY.md:1298-1308, High) — K=2 committees wedge
-    permanently under timing skew: the abort-claim quorum at K=2 is
-    K-1 = 1, so a single straggle excludes a member with ONE claim;
-    exclusions accumulate (current_aborts_ clears ONLY on block accept,
-    node.cpp:1856) until the eligible pool falls below K, and
-    check_if_selected silently returns forever (node.cpp:788). BFT
-    escalation cannot rescue K=2 because k_bft = ceil(2K/3) = 2 = K
-    (node.cpp:778) — no committee shrink exists.
-  * S-045 (SECURITY.md:1312-1318, Medium) — BFT escalation unreachable
-    under multi-member exclusion: escalation fires only when
-    `avail < k_target && bft_enabled && total_aborts >=
-    bft_escalation_threshold && avail >= k_bft` (node.cpp:781-784).
-    Rounds are what generate abort claims, so once aborts against
-    > pool - k_bft DISTINCT members accumulate while total_aborts is
-    still below the threshold (genesis default 5,
-    include/determ/chain/genesis.hpp:145), no round can run, the
-    counter is frozen, and there is no decay or retry timer.
+  * S-044 (was High) — K=2 committees wedged permanently under timing
+    skew: the abort-claim quorum at K=2 was K-1 = 1, so a single
+    straggle excluded a member with ONE claim; exclusions accumulated
+    (current_aborts_ clears ONLY on block accept, node.cpp:1856) until
+    the eligible pool fell below K, and check_if_selected silently
+    returns forever (node.cpp:788). BFT escalation could not rescue K=2
+    because k_bft = ceil(2K/3) = 2 = K — no committee shrink.
+    FIX (F-a): the quorum is now max(2, K-1) via chain::abort_claim_quorum
+    — unsatisfiable at K=2, so no single-claim abort forms (crash-stop,
+    modeled by QuorumFloor=2). Also PROFILE_WEB retuned M=3/K=2 -> M=4/K=3.
+  * S-045 (was High, upgraded from Medium) — BFT escalation unreachable
+    at the historical genesis-default threshold 5: rounds generate abort
+    events, so at M=K a single dead member's counter ceiling K-1 froze
+    below 5 forever. FIX: the genesis default threshold is now 1
+    (include/determ/chain/genesis.hpp) — reached by the first abort event,
+    so the counter never freezes below it (modeled by BftThreshold=1).
 
 STATUS: written, model-check pending (TLC unavailable in this
 environment). The spec is ready-to-check:
   $ java -jar tla2tools.jar -config AbortEscalation.cfg AbortEscalation.tla
-The shipped AbortEscalation.cfg is the PRIMARY S-044 exhibit (web
-profile posture); expected outcome there is documented below (E1) and
-in the .cfg — the wedge invariants are EXPECTED TO FAIL and the
-liveness property is EXPECTED TO BE VIOLATED. That failure IS the
-exhibit. Alternate exhibit configurations E2-E7 are tabulated below.
+The shipped AbortEscalation.cfg is now the PRIMARY SHIPPED-FIX exhibit
+(F-a QuorumFloor=2 + θ BftThreshold=1 on the M=K=3 stress posture);
+its invariants are EXPECTED TO HOLD and the liveness property EXPECTED
+TO HOLD — the fix removes the wedge. The pre-fix wedge configuration is
+E1-historical below (invariants EXPECTED TO FAIL — the defect the fix
+removes). Alternate configurations E2-E7 remain tabulated below.
 
 --------------------------------------------------------------------------
 Code anchors (each verified against src/ at spec-writing time):
@@ -81,9 +85,10 @@ Code anchors (each verified against src/ at spec-writing time):
                         spec abstracts it into the SkewStraggle
                         nondeterminism rather than modeling per-peer
                         generation vectors.
-  * include/determ/chain/params.hpp:142-145  PROFILE_WEB M=3/K=2 (the
-                        `determ init` DEFAULT — the exposed posture);
-                        :146-149 regional M=5/K=4; :138-141 cluster
+  * include/determ/chain/params.hpp  PROFILE_WEB now M=4/K=3 (the
+                        `determ init` DEFAULT; retuned from the pre-fix
+                        M=3/K=2 exposed posture by the S-044/S-045 fix);
+                        regional M=5/K=4; cluster
                         M=K=3; :178-181 tactical M=K=3; :216-220
                         web_test mirrors 3/2.
   * include/determ/chain/genesis.hpp:145  bft_escalation_threshold{5}

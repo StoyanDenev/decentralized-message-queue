@@ -124,7 +124,7 @@ Concrete-security bound: `2⁻²⁵⁶` per selective-abort attempt. See `docs/p
 When the K-of-K committee cannot complete — typically because a member is offline or partitioned away — the round aborts. Four conditions must hold for the next round to fall back to BFT consensus (`src/node/node.cpp::start_new_round`; full spec in PROTOCOL.md §5.3):
 
 1. `bft_enabled = true` (genesis-pinned, default `true`).
-2. `total_aborts ≥ bft_escalation_threshold` (genesis-pinned, default 5; Round-1 and Round-2 aborts both count).
+2. `total_aborts ≥ bft_escalation_threshold` (genesis-pinned, default 1; Round-1 and Round-2 aborts both count).
 3. Available pool (registry minus aborted-this-height domains) has dropped below `K`.
 4. Available pool is still ≥ `ceil(2K/3)`. If the pool collapses below this, the shard stalls — under EXTENDED sharding the R4 under-quorum merge mechanism may absorb the shard.
 
@@ -135,7 +135,7 @@ When all four hold, the round runs in BFT mode with two-level shrinkage:
 - A designated proposer is deterministically chosen from the committee via `proposer_idx(seed, abort_events, k_bft)` where `seed = epoch_committee_seed(epoch_rand, shard_id)` and the inputs are domain-separated by the ASCII tag `"bft-proposer"` (full algorithm in PROTOCOL.md §5.3.1). The proposer must sign; up to `k_bft − Q` other slots may carry sentinel-zero signatures.
 - The block tags `consensus_mode = BFT` and `bft_proposer = <domain>`.
 
-A known open limitation (S-044/S-045, SECURITY.md §3): the trigger's threshold condition is reachable only while rounds can still run, so at the default threshold the escalation never engages on the nominal pool of any shipped profile, and at K=2 the trigger conditions are mutually unsatisfiable. Operators relying on escalation should genesis-pin `bft_escalation_threshold ≤ K−1`; the formal reachability derivation is `docs/proofs/AbortCascadeLiveness.md` (FB67).
+S-044/S-045 (SECURITY.md §3) — the escalation-reachability and abort-cascade limitations — are mitigated. The genesis-default `bft_escalation_threshold` is now 1, so θ=1 is reached by the first abort event (which always forms) and the escalation counter can never freeze below the threshold, while gate 1 (available pool < `K`) still bars premature escalation when MD margin exists. The abort-claim quorum is now `max(2, K−1)` via `chain::abort_claim_quorum()`; this floor is a no-op for K≥3 and at K=2 makes the single-claim quorum unsatisfiable, so the K=2 wedge-by-cascade degrades to a crash-stop 2-of-2 rather than a permanent cascade. The formal reachability derivation is `docs/proofs/AbortCascadeLiveness.md` (FB67).
 
 BFT-mode safety is conditional on `f_h < k_bft/3` (the standard BFT bound applied to the smaller BFT committee), plus economic slashing recovery for any equivocator. See `docs/proofs/BFTSafety.md` (FA5) for the conditional safety argument.
 

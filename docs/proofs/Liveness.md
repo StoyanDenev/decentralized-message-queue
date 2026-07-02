@@ -12,7 +12,7 @@ Unlike the cryptographic-soundness proofs (FA1 safety, FA2 censorship, FA3 selec
 
 **Setup.** Fix a height `h`. Let `N := |V|` be the validator pool size at `h`. Let `p ∈ [0, 1)` be the per-validator unavailability rate over a round window — the probability that any given honest validator fails to broadcast its Phase-1 contribution before the round timer fires. (Sources: network jitter, momentary load spikes, restart events; **not** Byzantine behavior, which is modeled separately.)
 
-Let `K` be the genesis-pinned committee size. Let `k_bft := ⌈2K/3⌉` be the BFT-escalation shrunk committee size (i.e. `|K_h| = k_bft` in BFT mode; see BFTSafety.md §3). Let `Q := ⌈2·k_bft/3⌉` be the within-committee 2/3 quorum required to finalize a BFT-mode block. Let `T_threshold := bft_escalation_threshold` (genesis-pinned, default 5).
+Let `K` be the genesis-pinned committee size. Let `k_bft := ⌈2K/3⌉` be the BFT-escalation shrunk committee size (i.e. `|K_h| = k_bft` in BFT mode; see BFTSafety.md §3). Let `Q := ⌈2·k_bft/3⌉` be the within-committee 2/3 quorum required to finalize a BFT-mode block. Let `T_threshold := bft_escalation_threshold` (genesis-pinned, shipped default 1 post-S-045; the worked examples below use the pre-S-045 value 5 illustratively — see the note at the L-4.3 example).
 
 **Theorem T-4 (Liveness).** Under the assumptions:
 
@@ -34,7 +34,7 @@ In plain terms: the chain *can* stall transiently (a few rounds of aborts under 
 
 **Corollary T-4.1 (Steady-state throughput).** For `K = 3`, `p = 0.05`: `(1-p)^K = 0.857`, expected MD-mode rounds per block ≈ 1.17, throughput penalty over the noise-free baseline ≈ 17%.
 
-For `K = 3`, `p = 0.20`: `(1-p)^K = 0.512`, expected MD-mode rounds ≈ 1.95, but with `T_threshold = 5` aborts the chain escalates within ~5 rounds. BFT-mode then finalizes with a shrunken committee of `k_bft = ⌈2·3/3⌉ = 2` and within-committee quorum `Q = ⌈2·2/3⌉ = 2` — degenerate for `K = 3` (both shrink rules collapse), but distinct for `K ≥ 6`.
+For `K = 3`, `p = 0.20`: `(1-p)^K = 0.512`, expected MD-mode rounds ≈ 1.95, but with `T_threshold` aborts the chain escalates within ~`T_threshold` rounds (illustrated below at the pre-S-045 value 5; the shipped genesis default is now **`T_threshold = 1`**, so escalation fires on the first abort — see `AbortCascadeLiveness.md` §4.3, which also flags this FA4 retry model's boundary as finding F-3). BFT-mode then finalizes with a shrunken committee of `k_bft = ⌈2·3/3⌉ = 2` and within-committee quorum `Q = ⌈2·2/3⌉ = 2` — degenerate for `K = 3` (both shrink rules collapse), but distinct for `K ≥ 6`.
 
 ---
 
@@ -116,7 +116,7 @@ $$
 \Pr[\text{aborts} \geq T_{\text{threshold}}] = (1 - (1-p)^K)^{T_{\text{threshold}}}
 $$
 
-For `p = 0.20`, `K = 3`, `T_threshold = 5`: probability `≈ 0.488^5 ≈ 0.028`. So in 2.8% of heights, the chain hits the escalation threshold.
+For `p = 0.20`, `K = 3`, at the pre-S-045 `T_threshold = 5`: probability `≈ 0.488^5 ≈ 0.028`, so ~2.8% of heights hit the escalation threshold. At the shipped default `T_threshold = 1` the chain escalates on the *first* abort (`≈ 0.488` of heights with an abort), which strictly improves reachability — the S-045 fix (`AbortCascadeLiveness.md` T-4).
 
 **Step 2 — BFT-mode contribution.**
 
@@ -131,7 +131,7 @@ $$
 \mathbb{E}[\text{total rounds}] = \mathbb{E}[\text{MD rounds before escalation}] + \mathbb{E}[\text{BFT rounds after escalation}]
 $$
 
-For typical Determ parameters (`K=3, p=0.05, T_threshold=5`):
+For illustrative parameters (`K=3, p=0.05, T_threshold=5`, the pre-S-045 default; the shipped default `T_threshold=1` only *improves* reachability — escalation fires on the first abort):
 
 - `E[MD rounds] ≈ 1.17` (geometric on `q = 0.857`).
 - `Pr[hits escalation] ≈ 0.143^5 ≈ 5.9 × 10⁻⁵`.

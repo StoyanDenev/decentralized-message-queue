@@ -96,7 +96,7 @@ BlockValidator::Result BlockValidator::check_creator_selection(
     //   BFT blocks: m == ceil(2*k_block_sigs_/3) (escalated, smaller committee).
     size_t m         = b.creators.size();
     size_t k_full    = k_block_sigs_;
-    size_t k_bft     = (2 * k_full + 2) / 3;
+    size_t k_bft     = chain::bft_committee_size(k_full);
     if (k_full != 0) {
         bool md_ok  = (b.consensus_mode == ConsensusMode::MUTUAL_DISTRUST) && (m == k_full);
         bool bft_ok = (b.consensus_mode == ConsensusMode::BFT)             && (m == k_bft);
@@ -239,7 +239,7 @@ BlockValidator::Result BlockValidator::check_abort_certs(
     // bft_escalation_threshold, committee shrinks to ceil(2K/3). Otherwise
     // K_full. This must match what the producer used at the time.
     size_t k_full = k_block_sigs_;
-    size_t k_bft  = (2 * k_full + 2) / 3;
+    size_t k_bft  = chain::bft_committee_size(k_full);
 
     // Reconstruct the creator-set sequence using the same exclude+remix rule
     // as check_creator_selection.
@@ -282,10 +282,15 @@ BlockValidator::Result BlockValidator::check_abort_certs(
         if (!ae.claims_json.is_array())
             return {false, "abort_event[" + std::to_string(i) + "] claims missing"};
 
-        size_t needed = domains_at_event.size() > 0 ? domains_at_event.size() - 1 : 0;
+        // S-044 (F-a): the abort-claim quorum is max(2, K-1) — identical to the
+        // producer/gossip formation floor (chain::abort_claim_quorum). This is
+        // an EXACT-count check (!=) so it must move in lockstep with the two
+        // node.cpp sites; at K=2 the quorum is unsatisfiable so no K=2 block can
+        // ever carry an abort_event (crash-stop, AbortCascadeLiveness.md §4.1).
+        size_t needed = chain::abort_claim_quorum(domains_at_event.size());
         if (ae.claims_json.size() != needed)
             return {false, "abort_event[" + std::to_string(i)
-                         + "] claim count != M-1"};
+                         + "] claim count != max(2,K-1)"};
 
         std::set<std::string> seen_claimers;
         for (auto& cj : ae.claims_json) {

@@ -12,12 +12,12 @@
 #   4. Genesis hash includes committee_region (different region → different
 #      hash for an otherwise-identical config).
 #
-# Uses web_test profile (SHARD + EXTENDED, M=3 K=2). EXTENDED's S>=3
-# gate is satisfied by `initial_shard_count=3` in genesis even though
-# only shard_id=0 actually runs in this test. Genesis pins k_block_sigs=2
-# to match (hybrid 2-of-3): with K=2 < M=3 a single first-round abort still
-# leaves pool 2 >= K 2, so the rotating committee re-forms and the chain
-# advances. Node configs apply the sibling-standard relaxed test timers
+# Uses web_test profile (SHARD + EXTENDED, M=4 K=3), but this genesis pins
+# m_creators=3 / k_block_sigs=3 (strong 3-of-3 over the 3 eligible us-east
+# validators). EXTENDED's S>=3 gate is satisfied by `initial_shard_count=3`.
+# K=3 (S-044/S-045 fix — was K=2): a lone straggle needs 2 corroborating
+# claims (F-a floor is a no-op at K=3) so it excludes nobody, and a genuinely
+# stuck member escalates via the θ=1 default; the chain sustains production. Node configs apply the sibling-standard relaxed test timers
 # (tx_commit/block_sig=2000ms, abort_claim=1000ms — see test_multinode.sh);
 # the raw web_test 5ms phase windows lose to the staggered-start skew.
 #
@@ -78,7 +78,7 @@ cat > $T/gen.json <<EOF
 {
   "chain_id": "test-regional-shards",
   "m_creators": 3,
-  "k_block_sigs": 2,
+  "k_block_sigs": 3,
   "block_subsidy": 10,
   "chain_role": 2,
   "shard_id": 0,
@@ -150,19 +150,15 @@ for n in 1 2 3; do
 done
 
 echo
-echo "=== 5. Poll until at least one post-genesis block lands (height >= 2) ==="
-# KNOWN-BUG (S-044, SECURITY.md): K=2 committees wedge under ordinary
-# timing skew (single-claim abort quorum cascades until pool < K; aborts
-# clear only on block accept; BFT escalation unreachable at K=2). The web
-# posture under test here is K=2, so SUSTAINED production (the old
-# height>=5 bar) cannot be soundly asserted until S-044 is fixed. What CAN
-# be asserted — and is this test's actual intent — is REGION FILTERING:
-# every block produced before any cascade carries a K=2 committee drawn
-# exclusively from the us-east validators. Restore the height>=5 bar when
-# S-044 closes.
+echo "=== 5. Poll for SUSTAINED production (height >= 5) ==="
+# S-044/S-045 FIXED: this test now runs K=3 (M=K=3, was K=2). K>=3 disarms
+# the S-044 single-claim abort cascade (a lone straggle needs 2 corroborating
+# claims to exclude a member), so SUSTAINED production is restored (height>=5
+# is a hard bar again). REGION FILTERING remains the test's intent: every
+# block carries a K=3 committee drawn exclusively from the us-east validators.
 for _ in $(seq 1 200); do
   H=$(get_status_field 8771 height)
-  if [ "$H" != "-" ] && [ "$H" -ge 2 ] 2>/dev/null; then break; fi
+  if [ "$H" != "-" ] && [ "$H" -ge 5 ] 2>/dev/null; then break; fi
   sleep 0.3
 done
 
@@ -173,19 +169,14 @@ PASS=true
 FAILS=0
 bad() { echo "  bad: $1"; PASS=false; FAILS=$((FAILS+1)); }
 
-if [ "$H1" = "-" ] || [ "$H1" -lt 2 ] 2>/dev/null; then
-  bad "no post-genesis block produced with us-east-only validators online (height=$H1)"
-fi
-if [ "$H1" != "-" ] && [ "$H1" -ge 5 ] 2>/dev/null; then
-  echo "  note: height $H1 >= 5 — sustained K=2 production held this run (S-044 did not bite)"
-else
-  echo "  note: KNOWN-BUG S-044 — sustained K=2 production not asserted (observed height=$H1); see SECURITY.md"
+if [ "$H1" = "-" ] || [ "$H1" -lt 5 ] 2>/dev/null; then
+  bad "sustained production bar not met with us-east-only validators (height=$H1, want >= 5) — S-044/S-045 regression?"
 fi
 
 # Inspect EVERY existing post-genesis block 1..H-1 (height H means blocks
 # 0..H-1 exist) — each committee must be non-empty (a failed show-block /
-# dead RPC yields '' and must FAIL, never vacuously pass), exactly K=2
-# members (hybrid k_use=2 selection), and entirely from
+# dead RPC yields '' and must FAIL, never vacuously pass), exactly K=3
+# members (hybrid k_use=3 selection), and entirely from
 # {node1,node2,node3} (the us-east set).
 get_committee() {
   $DETERM show-block "$1" --rpc-port 8771 2>/dev/null | python -c "
@@ -216,8 +207,8 @@ if [ "$H1" != "-" ] && [ "$H1" -ge 2 ] 2>/dev/null; then
         *) bad "out-of-region member $member appeared on block #$b committee" ;;
       esac
     done
-    if [ "$NMEMBERS" -ne 2 ]; then
-      bad "block #$b committee has $NMEMBERS members, expected K=2"
+    if [ "$NMEMBERS" -ne 3 ]; then
+      bad "block #$b committee has $NMEMBERS members, expected K=3"
     fi
   done
 fi
@@ -239,7 +230,7 @@ fi
 echo
 if $PASS; then
   echo "  ok: committee_region=us-east + 6 creators (3 us-east, 3 eu-west)"
-  echo "  ok: only us-east validators selected ($COMMITTEE_BLOCKS blocks inspected, K=2 each)"
+  echo "  ok: only us-east validators selected ($COMMITTEE_BLOCKS blocks inspected, K=3 each)"
   echo "  ok: chain advanced to height $H1 with only in-region nodes online"
   echo "  ok: committee_region distinct in genesis hash (us-east != eu-west)"
   echo "  PASS: $T"

@@ -20,7 +20,16 @@
 # RFC 9380 Appendix J.1.1 + K.1 (p256_h2c.json — suite
 # P256_XMD:SHA-256_SSWU_RO_ hash_to_curve + expand_message_xmd SHA-256;
 # re-derived here end-to-end by a from-scratch §5.3.1/§5.2/§6.6.2/§3 pipeline
-# on hashlib.sha256 with curve p/a/b from the same p256_params() recovery).
+# on hashlib.sha256 with curve p/a/b from the same p256_params() recovery),
+# and RFC 9497 Appendix A.3 (p256_oprf.json — suite P256-SHA256, OPRF mode
+# 0x00 + VOPRF mode 0x01, batch size 1 only; re-derived here end-to-end by a
+# from-scratch §3.1/§3.2.1/§3.3.1/§3.3.2/§2.2 pipeline — contextString,
+# DeriveKeyPair from Seed+KeyInfo, Blind/BlindEvaluate/Finalize, and the full
+# DLEQ ComputeComposites(Fast)/GenerateProof(with the appendix
+# ProofRandomScalar)/VerifyProof — on the same h2c machinery, with the group
+# order n taken from RFC 9497 §4.3 and cross-checked against the library via
+# (n-1)*G == -G; the A.3.2.3 batch-size-2 vector is deliberately absent, as
+# the C99 protocol layer under test is single-element).
 # Where the same vector is hardcoded in a src/main.cpp
 # test-*-c99 dispatch block (SHA-2 empty/"abc", HMAC RFC 4231 cases 1-2, HKDF
 # A.1/A.3, PBKDF2 c=4096, four BLAKE2b cases, Ed25519 TEST 1, the full X25519
@@ -45,7 +54,7 @@ EXPECTED = {
     "sha256.json", "sha512.json", "hmac_sha256.json", "pbkdf2_sha256.json",
     "hkdf_sha256.json", "blake2b.json", "chacha20_poly1305.json",
     "aes256_gcm.json", "ed25519.json", "x25519.json", "p256.json",
-    "p256_h2c.json",
+    "p256_h2c.json", "p256_oprf.json",
 }
 
 try:
@@ -372,6 +381,182 @@ def chk_p256_h2c(vec, label):
     else:
         return "unknown p256_h2c vector type %r" % t
 
+# ---- RFC 9497 OPRF/VOPRF, suite P256-SHA256 (mode 0x00 / 0x01) ----
+# From-scratch re-derivation of the full protocol on the h2c machinery above:
+# contextString per §3.1, DeriveKeyPair per §3.2.1 (skSm re-derived from
+# Seed+KeyInfo, never trusted from the file), Blind/BlindEvaluate/Finalize per
+# §3.3.1, VOPRF per §3.3.2, and the DLEQ proof system per §2.2
+# (ComputeComposites(Fast), GenerateProof with the vector's fixed
+# ProofRandomScalar, VerifyProof). Curve p/a/b come from p256_params(); the
+# group order n is the RFC 9497 §4.3 Order() value, accepted only after a
+# library cross-check that (n-1)*G == -G (and n is 256 bits), so a corrupted
+# constant cannot validate.
+_P256_ORDER = []
+def p256_order():
+    if _P256_ORDER:
+        return _P256_ORDER[0]
+    p, a, b = p256_params()
+    n = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+    g1 = ec.derive_private_key(1, ec.SECP256R1()).public_key().public_numbers()
+    gn = ec.derive_private_key(n - 1, ec.SECP256R1()).public_key().public_numbers()
+    if n.bit_length() != 256 or (gn.x, gn.y) != (g1.x, p - g1.y):
+        raise ValueError("p256 order cross-check failed: (n-1)*G != -G")
+    _P256_ORDER.append((n, (g1.x, g1.y)))
+    return _P256_ORDER[0]
+
+def oprf_pt_add(p1, p2, p, a):
+    """identity-aware wrapper (None = point at infinity) over h2c_point_add"""
+    if p1 is None: return p2
+    if p2 is None: return p1
+    try:
+        return h2c_point_add(p1, p2, p, a)
+    except ValueError:
+        return None                       # P + (-P) = infinity
+
+def oprf_pt_mul(k, pt, p, a, n):
+    k %= n
+    r, q = None, pt
+    while k:
+        if k & 1: r = oprf_pt_add(r, q, p, a)
+        q = oprf_pt_add(q, q, p, a)
+        k >>= 1
+    return r
+
+def oprf_ser(pt):
+    if pt is None: raise ValueError("cannot serialize the identity element")
+    return bytes([2 + (pt[1] & 1)]) + pt[0].to_bytes(32, "big")
+
+def oprf_deser(buf, p, a, b, label):
+    if len(buf) != 33 or buf[0] not in (2, 3):
+        raise ValueError("%s is not a 33-byte compressed point" % label)
+    x = int.from_bytes(buf[1:], "big")
+    if x >= p: raise ValueError("%s x-coordinate out of range" % label)
+    g = (pow(x, 3, p) + a * x + b) % p
+    y = pow(g, (p + 1) // 4, p)
+    if y * y % p != g: raise ValueError("%s is not on the curve" % label)
+    if (y & 1) != (buf[0] & 1): y = p - y
+    return (x, y)
+
+def oprf_i2osp2(v): return v.to_bytes(2, "big")
+
+def oprf_hash_to_scalar(msg, ctx, n, dst_prefix=b"HashToScalar-"):
+    return int.from_bytes(h2c_expand_xmd(msg, dst_prefix + ctx, 48), "big") % n
+
+def oprf_hash_to_group(msg, ctx, p, a, b):
+    ub = h2c_expand_xmd(msg, b"HashToGroup-" + ctx, 96)
+    u0, u1 = (int.from_bytes(ub[:48], "big") % p,
+              int.from_bytes(ub[48:], "big") % p)
+    return oprf_pt_add(h2c_map_sswu(u0, p, a, b), h2c_map_sswu(u1, p, a, b), p, a)
+
+def oprf_derive_key_pair(seed, info, ctx, n):
+    di = seed + oprf_i2osp2(len(info)) + info
+    for counter in range(256):
+        sk = oprf_hash_to_scalar(di + bytes([counter]), ctx, n, b"DeriveKeyPair")
+        if sk != 0: return sk
+    raise ValueError("DeriveKeyPairError")
+
+def oprf_composites(k, B_pt, C, D, ctx, p, a, n):
+    """k=None -> ComputeComposites (§2.2.2); k=Scalar -> ComputeCompositesFast (§2.2.1)"""
+    Bm = oprf_ser(B_pt)
+    seed_dst = b"Seed-" + ctx
+    seed = hashlib.sha256(oprf_i2osp2(len(Bm)) + Bm +
+                          oprf_i2osp2(len(seed_dst)) + seed_dst).digest()
+    M = Z = None
+    for i, (c_pt, d_pt) in enumerate(zip(C, D)):
+        Ci, Di = oprf_ser(c_pt), oprf_ser(d_pt)
+        t = (oprf_i2osp2(len(seed)) + seed + oprf_i2osp2(i) +
+             oprf_i2osp2(len(Ci)) + Ci + oprf_i2osp2(len(Di)) + Di + b"Composite")
+        di = oprf_hash_to_scalar(t, ctx, n)
+        M = oprf_pt_add(oprf_pt_mul(di, c_pt, p, a, n), M, p, a)
+        if k is None:
+            Z = oprf_pt_add(oprf_pt_mul(di, d_pt, p, a, n), Z, p, a)
+    if k is not None:
+        Z = oprf_pt_mul(k, M, p, a, n)
+    return M, Z
+
+def oprf_challenge(B_pt, M, Z, t2, t3, ctx, n):
+    buf = b""
+    for e in (B_pt, M, Z, t2, t3):
+        s = oprf_ser(e)
+        buf += oprf_i2osp2(len(s)) + s
+    return oprf_hash_to_scalar(buf + b"Challenge", ctx, n)
+
+def chk_p256_oprf(vec, label):
+    t = vec.get("type")
+    if t not in ("oprf", "voprf"):
+        return "unknown p256_oprf vector type %r" % t
+    need(vec, ["mode", "seed_hex", "key_info_hex", "sks_hex", "input_hex",
+               "blind_hex", "blinded_element_hex", "evaluation_element_hex",
+               "output_hex"], label)
+    mode = int(vec["mode"])
+    if (t, mode) not in (("oprf", 0), ("voprf", 1)):
+        return "type %r / mode %d mismatch (oprf=0x00, voprf=0x01)" % (t, mode)
+    p, a, b = p256_params()
+    n, G1 = p256_order()
+    ctx = b"OPRFV1-" + bytes([mode]) + b"-P256-SHA256"
+    # DeriveKeyPair (§3.2.1): re-derive skSm from Seed+KeyInfo
+    sks = oprf_derive_key_pair(unhex(vec["seed_hex"], label + " seed_hex"),
+                               unhex(vec["key_info_hex"], label + " key_info_hex"),
+                               ctx, n)
+    want_sks = unhex(vec["sks_hex"], label + " sks_hex")
+    if len(want_sks) != 32 or sks != int.from_bytes(want_sks, "big"):
+        return "DeriveKeyPair(seed, key_info) %064x != sks_hex %s" % (sks, want_sks.hex())
+    inp   = unhex(vec["input_hex"], label + " input_hex")
+    blind = int.from_bytes(unhex(vec["blind_hex"], label + " blind_hex"), "big")
+    if not (0 < blind < n): return "blind_hex out of scalar range"
+    want_be = unhex(vec["blinded_element_hex"], label + " blinded_element_hex")
+    want_ee = unhex(vec["evaluation_element_hex"], label + " evaluation_element_hex")
+    want_out = unhex(vec["output_hex"], label + " output_hex")
+    if len(want_out) != 32: return "output_hex is not 32 bytes (Nh)"
+    # Blind (§3.3.1) with the vector's fixed blind scalar
+    input_pt = oprf_hash_to_group(inp, ctx, p, a, b)
+    if input_pt is None: return "HashToGroup(input) is the identity (InvalidInputError)"
+    got_be = oprf_ser(oprf_pt_mul(blind, input_pt, p, a, n))
+    if got_be != want_be:
+        return "recomputed BlindedElement %s != blinded_element_hex %s" % (got_be.hex(), want_be.hex())
+    # BlindEvaluate
+    be_pt = oprf_deser(want_be, p, a, b, label + " blinded_element_hex")
+    got_ee = oprf_ser(oprf_pt_mul(sks, be_pt, p, a, n))
+    if got_ee != want_ee:
+        return "recomputed EvaluationElement %s != evaluation_element_hex %s" % (got_ee.hex(), want_ee.hex())
+    # Finalize (§3.3.1): unblind + length-prefixed transcript hash
+    ee_pt = oprf_deser(want_ee, p, a, b, label + " evaluation_element_hex")
+    unb = oprf_ser(oprf_pt_mul(pow(blind, -1, n), ee_pt, p, a, n))
+    got_out = hashlib.sha256(oprf_i2osp2(len(inp)) + inp +
+                             oprf_i2osp2(len(unb)) + unb + b"Finalize").digest()
+    if got_out != want_out:
+        return "recomputed Output %s != output_hex %s" % (got_out.hex(), want_out.hex())
+    if t == "voprf":
+        need(vec, ["pks_hex", "proof_hex", "proof_random_scalar_hex"], label)
+        want_pks = unhex(vec["pks_hex"], label + " pks_hex")
+        got_pks = oprf_ser(oprf_pt_mul(sks, G1, p, a, n))
+        if got_pks != want_pks:
+            return "recomputed pkS %s != pks_hex %s" % (got_pks.hex(), want_pks.hex())
+        want_proof = unhex(vec["proof_hex"], label + " proof_hex")
+        if len(want_proof) != 64: return "proof_hex is not 64 bytes (c||s)"
+        r = int.from_bytes(unhex(vec["proof_random_scalar_hex"],
+                                 label + " proof_random_scalar_hex"), "big")
+        if not (0 < r < n): return "proof_random_scalar_hex out of scalar range"
+        pks_pt = oprf_deser(want_pks, p, a, b, label + " pks_hex")
+        # GenerateProof (§2.2.1) with fixed r, over one-item lists (§3.3.2)
+        M, Z = oprf_composites(sks, pks_pt, [be_pt], [ee_pt], ctx, p, a, n)
+        c = oprf_challenge(pks_pt, M, Z, oprf_pt_mul(r, G1, p, a, n),
+                           oprf_pt_mul(r, M, p, a, n), ctx, n)
+        s = (r - c * sks) % n
+        got_proof = c.to_bytes(32, "big") + s.to_bytes(32, "big")
+        if got_proof != want_proof:
+            return "recomputed Proof %s != proof_hex %s" % (got_proof.hex(), want_proof.hex())
+        # VerifyProof (§2.2.2) on the vector's proof bytes must pass
+        vc = int.from_bytes(want_proof[:32], "big")
+        vs = int.from_bytes(want_proof[32:], "big")
+        Mv, Zv = oprf_composites(None, pks_pt, [be_pt], [ee_pt], ctx, p, a, n)
+        t2 = oprf_pt_add(oprf_pt_mul(vs, G1, p, a, n),
+                         oprf_pt_mul(vc, pks_pt, p, a, n), p, a)
+        t3 = oprf_pt_add(oprf_pt_mul(vs, Mv, p, a, n),
+                         oprf_pt_mul(vc, Zv, p, a, n), p, a)
+        if oprf_challenge(pks_pt, Mv, Zv, t2, t3, ctx, n) != vc:
+            return "VerifyProof(proof_hex) failed — challenge mismatch"
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -385,6 +570,7 @@ CHECKERS = {
     "x25519":             chk_x25519,
     "p256":               chk_p256,
     "p256_h2c":           chk_p256_h2c,
+    "p256_oprf":          chk_p256_oprf,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

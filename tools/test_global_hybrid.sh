@@ -11,7 +11,7 @@
 # operators tune the genesis they actually deploy. This regression test
 # exercises the posture (role + mode + EXTENDED's S>=3 invariant) and
 # leaves K<M hybrid coverage to web_hybrid (which has the smaller
-# M=3 K=2 ratio where the race is bounded).
+# M=4 K=3 ratio where the race is bounded).
 #
 # What this exercises that other tests don't:
 #   - BEACON + EXTENDED posture combined (no other regression test).

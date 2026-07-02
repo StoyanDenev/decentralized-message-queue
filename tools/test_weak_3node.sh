@@ -5,17 +5,19 @@
 # epoch_blocks=1000 would hold ONE committee for the whole run).
 # tx_root = union of the K=3 lists (src/node/node.cpp).
 #
-# Why K=3, not the historical K=2: K=2 committees wedge under ordinary
-# timing skew — the abort-claim quorum at K=2 is K-1 = 1, so any single
-# phase straggle abort-excludes a member with ONE claim; the resulting
-# aborts_gen desync drops contribs and cascades further single-claim
-# aborts (aborts clear only on block accept) until the pool falls below
-# K and the chain halts permanently. Observed live in this test's K=2
-# forms (M=3 AND M=4) even at 2000ms timers; BFT escalation cannot
-# rescue because k_bft = ceil(2K/3) = 2 = K. Tracked in SECURITY.md
-# (S-044). At K=3 the quorum is 2 claims, so a single straggle cannot
-# exclude anyone. K=3-of-5 keeps this test's posture distinct from
-# test_weak_mode.sh's K=3-of-4.
+# Why K=3, not the historical K=2: K=2 committees wedged under ordinary
+# timing skew — the abort-claim quorum at K=2 was K-1 = 1, so any single
+# phase straggle abort-excluded a member with ONE claim; the resulting
+# aborts_gen desync dropped contribs and cascaded further single-claim
+# aborts (aborts clear only on block accept) until the pool fell below K
+# and the chain halted. Observed live in this test's K=2 forms (M=3 AND
+# M=4) even at 2000ms timers; BFT escalation could not rescue because
+# k_bft = ceil(2K/3) = 2 = K. This is S-044, now ✅ Mitigated (fix F-a:
+# the abort-claim quorum is max(2,K-1), unsatisfiable at K=2 — see
+# SECURITY.md §S-044). This test uses K=3 (the fix makes K>=3 the sound
+# posture; the shipped web default is now M=4/K=3): the quorum is 2
+# claims, so a single straggle cannot exclude anyone. K=3-of-5 keeps this
+# test's posture distinct from test_weak_mode.sh's K=3-of-4.
 #
 # Run from repo root: bash tools/test_weak_3node.sh
 set -u

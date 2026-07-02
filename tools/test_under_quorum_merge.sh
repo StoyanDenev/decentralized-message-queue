@@ -17,15 +17,13 @@
 #   * Cross-shard receipt routing across BEGIN/END boundaries.
 #
 # Topology: 1 SHARD chain (shard_id=0, region=us-east, S=3 satisfies
-# the EXTENDED >=3 gate). 4 validators all online (M=4, K=3). K=3 (not
-# the web profile's K=2) because K=2 committees wedge under ordinary
-# timing skew: the abort-claim quorum at K=2 is K-1=1, so any single
-# phase straggle abort-excludes a member with one claim; the resulting
-# aborts_gen desync drops contribs and cascades more single-claim aborts
-# until the pool falls below K and the chain halts permanently (aborts
-# clear only on block accept; BFT escalation is unreachable at K=2
-# because k_bft = ceil(2K/3) = 2 = K). Observed live on three sibling
-# tests — tracked in SECURITY.md (S-044). The merge-event machinery
+# the EXTENDED >=3 gate). 4 validators all online (M=4, K=3) — which is
+# now also the shipped `web` default (the S-044/S-045 retune from M=3/K=2).
+# K=3 because K=2 committees WEDGED under ordinary timing skew (the
+# abort-claim quorum at K=2 was K-1=1, so a single straggle excluded a
+# member with one claim, cascading until the pool fell below K). That is
+# S-044, now ✅ Mitigated (fix F-a makes the quorum max(2,K-1),
+# unsatisfiable at K=2; SECURITY.md §S-044). The merge-event machinery
 # under test here is K-independent (an apply-path feature gated only on
 # sharding_mode=extended), so K=3-of-4 preserves the intent exactly.
 # We submit MERGE_EVENT events with shard_id=0, partner_id=1

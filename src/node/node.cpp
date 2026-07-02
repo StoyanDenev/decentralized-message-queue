@@ -85,7 +85,7 @@ Config Config::from_json(const json& j) {
     c.m_creators      = j.value("m_creators",     uint32_t{3});
     c.k_block_sigs    = j.value("k_block_sigs",   c.m_creators);   // default = strong
     c.bft_enabled              = j.value("bft_enabled",              true);
-    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
+    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{1});  // S-045: default 1 (was 5)
     c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
     // A6: sharding_mode persisted alongside chain_role. Default
     // CURRENT preserves byte-identical behavior for pre-A6 configs that
@@ -775,7 +775,7 @@ void Node::check_if_selected() {
     // suspension (registry.cpp) still counts only round-1 to avoid
     // Phase-2-timing-skew false-positive suspensions.
     size_t total_aborts = current_aborts_.size();
-    size_t k_bft = (2 * cfg_.k_block_sigs + 2) / 3;     // ceil(2K/3)
+    size_t k_bft = chain::bft_committee_size(cfg_.k_block_sigs);   // ceil(2K/3)
     size_t k_use = k_target;
     chain::ConsensusMode round_mode = chain::ConsensusMode::MUTUAL_DISTRUST;
     if (avail_domains.size() < k_target
@@ -1269,11 +1269,16 @@ void Node::on_abort_claim(const AbortClaimMsg& msg) {
     if (bucket.find(msg.claimer) != bucket.end()) return;  // dup
     bucket[msg.claimer] = msg;
 
-    // Quorum check: M-1 distinct signers, all from current_creator_domains_,
-    // none equal to missing_creator.
-    size_t needed = current_creator_domains_.size() > 0
-                  ? current_creator_domains_.size() - 1
-                  : 0;
+    // Quorum check: max(2, K-1) distinct signers, all from
+    // current_creator_domains_, none equal to missing_creator.
+    // S-044 fix (F-a, AbortCascadeLiveness.md §4.1): the floor of 2 is a
+    // no-op for K>=3 (K-1>=2 already) but makes the K=2 quorum unsatisfiable
+    // (only one eligible claimer exists against a given missing member),
+    // so no single-claim abort event can form — trading K=2's wedge-by-
+    // cascade for a crash-stop halt-by-single-death. The validator mirror
+    // (validator.cpp check_abort_certs) and the gossip-adoption path
+    // (on_abort_event) apply the identical floor.
+    size_t needed = chain::abort_claim_quorum(current_creator_domains_.size());
     if (bucket.size() < needed) return;
 
     // Build the AbortEvent with the claim quorum.
@@ -1326,8 +1331,8 @@ void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
     // independently of whether we ever heard the individual AbortClaimMsgs
     // ourselves — that's the whole point of this message.
     if (!ev.claims_json.is_array()) return;
-    size_t needed = current_creator_domains_.size() > 0
-                  ? current_creator_domains_.size() - 1 : 0;
+    // S-044 (F-a): identical max(2, K-1) floor as the formation path.
+    size_t needed = chain::abort_claim_quorum(current_creator_domains_.size());
     if (ev.claims_json.size() < needed) return;
 
     std::set<std::string> seen_claimers;
@@ -1547,7 +1552,7 @@ void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
     }
 
     size_t k_full = cfg_.k_block_sigs;
-    size_t k_bft  = (2 * k_full + 2) / 3;
+    size_t k_bft  = chain::bft_committee_size(k_full);   // shared helper (S-043 hygiene)
     size_t expected_k = (tip.consensus_mode == chain::ConsensusMode::BFT) ? k_bft : k_full;
     if (avail.size() < expected_k) {
         std::cerr << "[node] shard tip: insufficient pool to derive committee for shard="

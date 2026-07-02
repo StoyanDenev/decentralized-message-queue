@@ -101,6 +101,33 @@ inline const char* to_string(CryptoProfile cp) {
     return "UNKNOWN";
 }
 
+// ─── Consensus committee-size helpers (SHARED producer/validator formulas) ──
+// These must be computed identically on the producer (Node::check_if_selected)
+// and validator (BlockValidator::check_creator_selection / check_abort_certs)
+// sides — an asymmetry between the two is the S-043 class of total-outage bug.
+// Defining them once here is the guard against that.
+//
+// bft_committee_size: the escalated committee size k_bft = ceil(2K/3), used when
+// the abort-adjusted pool cannot staff a full K-of-K committee.
+inline constexpr size_t bft_committee_size(size_t k_block_sigs) {
+    return (2 * k_block_sigs + 2) / 3;   // ceil(2K/3)
+}
+
+// abort_claim_quorum: the number of distinct AbortClaim signatures required to
+// form an AbortEvent against a missing committee member. S-044 fix (F-a,
+// AbortCascadeLiveness.md §4.1): floor of 2. For K>=3 this equals K-1 (no
+// change); for K=2 it makes the quorum UNSATISFIABLE (only one eligible claimer
+// exists against a given missing member, since claimer != missing_creator), so
+// no single-claim abort event can form — eliminating the K=2 wedge-by-cascade
+// in favour of a crash-stop halt-by-single-death. committee_size==0 yields 0
+// (degenerate; caller guards). The producer, gossip-adoption, and validator
+// paths all route through this one definition.
+inline constexpr size_t abort_claim_quorum(size_t committee_size) {
+    if (committee_size == 0) return 0;
+    size_t k_minus_1 = committee_size - 1;
+    return k_minus_1 < 2 ? 2 : k_minus_1;   // max(2, K-1)
+}
+
 struct TimingProfile {
     uint32_t      tx_commit_ms;
     uint32_t      block_sig_ms;
@@ -139,8 +166,18 @@ inline constexpr TimingProfile PROFILE_CLUSTER {
     50, 50, 25, 3, 3, ChainRole::BEACON, ShardingMode::CURRENT,
     CryptoProfile::FIPS
 };
+// Web profile — internet-facing / commercial hybrid. SHARD + EXTENDED,
+// MODERN crypto, 200 ms blocks. M=4 K=3 hybrid (weak, K<M): a 4-validator
+// pool signing 3-of-4, so ONE straggling/dead member still forms a full
+// K-of-K MD committee from the remaining 3 (MD margin M-K = 1) — the common
+// single-fault case runs in strong mutual-distrust mode, not a degraded BFT
+// fallback. S-044/S-045 fix (AbortCascadeLiveness.md, 2026): the historical
+// M=3 K=2 default was the exposed configuration — K=2 wedged under ordinary
+// timing skew (single-claim abort quorum) and M=K=3 froze escalation on one
+// dead node. M=4 K=3 clears both: K>=3 disarms the S-044 cascade and the F-a
+// claim floor, and MD margin 1 means single faults never depend on escalation.
 inline constexpr TimingProfile PROFILE_WEB {
-    200, 200, 100, 3, 2, ChainRole::SHARD, ShardingMode::EXTENDED,
+    200, 200, 100, 4, 3, ChainRole::SHARD, ShardingMode::EXTENDED,
     CryptoProfile::MODERN
 };
 inline constexpr TimingProfile PROFILE_REGIONAL {
@@ -212,9 +249,9 @@ inline constexpr TimingProfile PROFILE_CLUSTER_TEST {
     ChainRole::BEACON, ShardingMode::CURRENT,
     CryptoProfile::FIPS
 };
-// `web_test` mirrors prod `web`: SHARD + EXTENDED, M=3 K=2 hybrid.
+// `web_test` mirrors prod `web`: SHARD + EXTENDED, M=4 K=3 hybrid (S-044/S-045).
 inline constexpr TimingProfile PROFILE_WEB_TEST {
-    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 3, 2,
+    TEST_TX_COMMIT_MS, TEST_BLOCK_SIG_MS, TEST_ABORT_CLAIM_MS, 4, 3,
     ChainRole::SHARD, ShardingMode::EXTENDED,
     CryptoProfile::MODERN
 };

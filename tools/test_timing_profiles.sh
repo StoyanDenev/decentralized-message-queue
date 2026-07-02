@@ -19,7 +19,7 @@
 #
 #   Production profiles (20 assertions = 5 profiles × 4 fields):
 #     - cluster   = BEACON / CURRENT / M=K=3 (strong MD)
-#     - web       = SHARD / EXTENDED / M=3, K=2 (weak BFT)
+#     - web       = SHARD / EXTENDED / M=4, K=3 (weak hybrid; S-044/S-045 retune)
 #     - regional  = SHARD / CURRENT / M=5, K=4
 #     - global    = BEACON / EXTENDED / M=7, K=5
 #     - tactical  = SHARD / EXTENDED / M=K=3 (strong MD; drone swarm)

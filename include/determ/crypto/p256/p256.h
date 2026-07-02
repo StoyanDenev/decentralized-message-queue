@@ -110,6 +110,67 @@ int determ_p256_hash_to_scalar(uint8_t out[32],
 int determ_p256_point_add(uint8_t out[65], const uint8_t p[65],
                           const uint8_t q[65]);
 
+/* SEC1 compressed <-> uncompressed (the RFC 9497 wire format is compressed,
+ * Ne = 33). Compress validates the input point; decompress solves
+ * y² = x³ − 3x + b (p ≡ 3 mod 4 sqrt), picks the prefix parity, and rejects
+ * bad prefixes / x >= p / non-square right-hand sides. */
+int determ_p256_point_compress(uint8_t out33[33], const uint8_t in65[65]);
+int determ_p256_point_decompress(uint8_t out65[65], const uint8_t in33[33]);
+
+/* ── RFC 9497 OPRF(P-256, SHA-256) — §3.9b protocol layer ──────────────────
+ * Single-element protocol, modes OPRF (0x00) and VOPRF (0x01); elements on
+ * the wire are SEC1 COMPRESSED (33 bytes) per the ciphersuite; scalars are
+ * 32-byte big-endian; proof = SerializeScalar(c) || SerializeScalar(s).
+ * Deterministic APIs: callers supply the blind / proof-randomness scalars
+ * explicitly (testability against the RFC appendix vectors; production
+ * callers draw them from the CSPRNG). Validated byte-exactly against the
+ * RFC 9497 A.3.1/A.3.2 vectors via both §3.13 gate halves
+ * (tools/vectors/p256_oprf.json) + `determ test-p256-oprf-c99`. */
+
+/* DeriveKeyPair (§3.2.1): sk from (seed, info) via the counter loop;
+ * DST = "DeriveKeyPair" || contextString (NO hyphen — RFC quirk). -1 if the
+ * loop exhausts (probability ~2^-2048) or on expand bounds. */
+int determ_p256_oprf_derive_key(uint8_t sk[32],
+                                const uint8_t* seed, size_t seedlen,
+                                const uint8_t* info, size_t infolen,
+                                uint8_t mode);
+
+/* Blind (§3.3.1): blinded = blind * HashToGroup(input). -1 on invalid blind
+ * (zero / >= n). Constant-time in input + blind. */
+int determ_p256_oprf_blind(uint8_t blinded33[33],
+                           const uint8_t* input, size_t inputlen,
+                           const uint8_t blind[32], uint8_t mode);
+
+/* BlindEvaluate core (§3.3.1): eval = sk * blinded (mode-agnostic — the
+ * VOPRF proof is generated separately via voprf_prove). -1 on invalid
+ * scalar / element. */
+int determ_p256_oprf_evaluate(uint8_t eval33[33], const uint8_t sk[32],
+                              const uint8_t blinded33[33]);
+
+/* Finalize (§3.3.1): out = SHA-256(len2(input) || input || len2(N_c) ||
+ * compress(blind^-1 * eval) || "Finalize"). For VOPRF, run voprf_verify
+ * FIRST (this function does not verify). */
+int determ_p256_oprf_finalize(uint8_t out[32],
+                              const uint8_t* input, size_t inputlen,
+                              const uint8_t blind[32],
+                              const uint8_t eval33[33]);
+
+/* GenerateProof (§2.2.1, m = 1): DLEQ proof that eval = sk * blinded against
+ * pk = sk * G. r is the proof randomness (RFC vectors fix it). mode feeds
+ * the contextString (0x01 for VOPRF). proof = c || s, 64 bytes. */
+int determ_p256_voprf_prove(uint8_t proof[64], const uint8_t sk[32],
+                            const uint8_t pk33[33],
+                            const uint8_t blinded33[33],
+                            const uint8_t eval33[33],
+                            const uint8_t r[32], uint8_t mode);
+
+/* VerifyProof (§2.2.2, m = 1): 0 iff the proof verifies, -1 otherwise
+ * (including malformed inputs). Public-data operation. */
+int determ_p256_voprf_verify(const uint8_t pk33[33],
+                             const uint8_t blinded33[33],
+                             const uint8_t eval33[33],
+                             const uint8_t proof[64], uint8_t mode);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

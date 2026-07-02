@@ -31,7 +31,7 @@
 # Derived from profile timing in include/determ/chain/params.hpp:
 #   cluster    — 50ms blocks, BEACON, MIN_M=3 K=3        → ~3000 TPS expected ceiling (high)
 #   tactical   — 20ms blocks, SHARD, MIN_M=3 K=3         → ~5000 TPS expected ceiling (high)
-#   web        — 200ms blocks, SHARD+EXTENDED, M=3 K=2   → ~500 TPS expected ceiling (moderate)
+#   web        — 200ms blocks, SHARD+EXTENDED, M=4 K=3   → ~500 TPS expected ceiling (moderate)
 #   regional   — 300ms blocks, SHARD, M=5 K=4            → ~150 TPS expected ceiling (low)
 #   global     — 600ms blocks, BEACON+EXTENDED, M=7 K=5  → ~100 TPS expected ceiling (low)
 # These are rule-of-thumb planning numbers, not throughput claims; an

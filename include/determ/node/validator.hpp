@@ -131,7 +131,7 @@ private:
     uint32_t k_block_sigs_{0};
     uint32_t m_pool_{0};
     bool     bft_enabled_{true};
-    uint32_t bft_escalation_threshold_{5};
+    uint32_t bft_escalation_threshold_{1};   // S-045: default 1 (was 5)
     uint32_t epoch_blocks_{1000};
     ShardId  shard_id_{0};
     // rev.9 R2: committee region pin for this chain (empty = global).

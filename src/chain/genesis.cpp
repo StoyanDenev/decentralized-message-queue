@@ -170,7 +170,7 @@ GenesisConfig GenesisConfig::from_json(const json& j) {
             "S-007.");
     }
     c.bft_enabled              = j.value("bft_enabled",              true);
-    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{5});
+    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{1});  // S-045: default 1 (was 5)
     c.inclusion_model         = static_cast<InclusionModel>(j.value("inclusion_model", uint8_t{0}));
     c.min_stake                = j.value("min_stake",                uint64_t{1000});
     c.suspension_slash         = j.value("suspension_slash",         uint64_t{10});

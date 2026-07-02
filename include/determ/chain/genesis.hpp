@@ -137,12 +137,24 @@ struct GenesisConfig {
     uint64_t                        zeroth_pool_initial{0};
 
     // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
-    // `bft_escalation_threshold` consecutive Phase-1 aborts at the same
-    // height, the next round escalates from MD K-of-K to BFT ceil(2K/3) +
-    // designated proposer. False = MD-only (rev.7 behavior; chain may halt
-    // on persistent silent committee member, by design).
+    // `bft_escalation_threshold` aborts at the same height, the next round
+    // escalates from MD K-of-K to BFT ceil(2K/3) + designated proposer.
+    // False = MD-only (rev.7 behavior; chain may halt on persistent silent
+    // committee member, by design).
+    //
+    // S-045 fix (AbortCascadeLiveness.md §4.3 + T-4): default is 1, not 5. At
+    // M=K (zero MD margin) a single stuck member produces at most K-1 abort
+    // events per height (T-4 counter ceiling), so any default > K-1 froze
+    // escalation below the threshold FOREVER — the common one-dead-node halt.
+    // θ=1 is reached by the FIRST abort event (always forms), so the counter
+    // can never freeze below it. Gate 1 (`avail < k_target`) still bars
+    // premature escalation whenever MD margin exists, and the max(2,K-1) claim
+    // floor (S-044/F-a) means an abort event needs ≥2 honest observers — so θ=1
+    // does NOT let a single Byzantine node force BFT mode (S025 A_premature
+    // stays closed). Lower θ = escalate sooner when genuinely stuck, an
+    // analyzed-sound trade (S025 §5.3).
     bool                            bft_enabled{true};
-    uint32_t                        bft_escalation_threshold{5};
+    uint32_t                        bft_escalation_threshold{1};
 
     // Rev. 8 follow-on: validator inclusion policy. Default is
     // STAKE_INCLUSION (preserves rev.7/8 stake-based behavior).

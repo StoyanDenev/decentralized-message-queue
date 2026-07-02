@@ -20,13 +20,14 @@
 #                        m_creators default 3, k_block_sigs default = M)
 #   M  = m_creators     eligible pool per height (per shard/region)
 #
-#   claim quorum q = K - 1
-#       An abort quorum against a "missing" member needs only
-#       committee_size - 1 distinct claims: built in on_abort_claim
-#       (src/node/node.cpp:1274-1277, AbortEvent assembled :1279-1295) and
-#       re-validated on gossip adoption in on_abort_event
-#       (src/node/node.cpp:1325-1331 + :1354). At K=2, q=1: ONE peer's
-#       claim — no corroboration — excludes a member for the height.
+#   claim quorum q = max(2, K - 1)   [S-044 fix F-a]
+#       An abort quorum against a "missing" member needs max(2, K-1)
+#       distinct claims, via the shared helper chain::abort_claim_quorum()
+#       (include/determ/chain/params.hpp), applied in on_abort_claim,
+#       on_abort_event, and validator.cpp::check_abort_certs. For K>=3 this
+#       equals K-1 (unchanged); at K=2 it is 2 — UNSATISFIABLE (only one
+#       eligible claimer), so no single-claim abort can form. Pre-fix q was
+#       K-1 = 1 at K=2, which drove the S-044 cascade.
 #
 #   exclusion accumulation
 #       check_if_selected (src/node/node.cpp:729) drops every domain in
@@ -57,36 +58,37 @@
 #                                       PERMANENT unless escalation is
 #                                       reachable at that moment
 #
-# VERDICTS (exit code = verdict tier)
-#   CRITICAL (exit 2) — K == 2 (S-044): q = 1 single-claim abort quorum;
-#       k_bft = ceil(4/3) = 2 = K, so NO escalation headroom exists by
-#       construction; every straggle is an exclusion; permanent wedge under
-#       ordinary timing skew. The shipped `web` profile — the `determ init`
-#       DEFAULT — is M=3/K=2 (include/determ/chain/params.hpp:142-145);
-#       `web_test` inherits the posture (:216-220).
-#   WARNING (exit 1) — K >= 3 and escalation headroom M - k_bft < 2
-#       (S-045): two distinct straggles at one height drop avail below
-#       k_bft before total_aborts can plausibly reach the threshold =
-#       permanent halt. M=K=3 (cluster :138-141, tactical :178-181) lands
-#       here: k_bft = 2, headroom 1. Also WARNING: bft_enabled=false with
-#       K >= 3 — escalation is impossible outright, so wedge_min_distinct
-#       exclusions at one height halt the chain with no rescue path.
-#   OK (exit 0) — K >= 3 and headroom >= 2 with escalation enabled, e.g.
-#       regional M=5/K=4 (params.hpp:146-149, headroom 5-3=2) and global
-#       M=7/K=5 (:150-153, headroom 7-4=3). K <= 1 is also OK-with-note:
-#       a single-creator committee has no peers to claim aborts, so the
-#       cascade machinery never engages.
+# VERDICTS (exit code = verdict tier) — post S-044/S-045 fix.
+#   WARNING (exit 1) has three post-fix sources:
+#     * K == 2 (S-044 residual): the F-a quorum floor (max(2,K-1)) removed the
+#       cascade, but K=2 is now crash-stop — a genuinely dead member halts the
+#       height (no abort-based reseat, no escalation at K=2). No catastrophic
+#       cascade under healthy-node skew (so no longer CRITICAL), but no fault
+#       tolerance either; deploy K >= 3. The shipped `web` DEFAULT is now
+#       M=4/K=3 (include/determ/chain/params.hpp), so it does NOT land here.
+#     * bft_enabled == false with M == K: zero MD margin AND no escalation
+#       rescue — a single straggle blocks all rounds with no recovery.
+#     * bft_escalation_threshold > max(2,K-1) on a pool < threshold + k_bft
+#       (S-045 residual): an operator raised θ above the reachable ceiling.
+#       The shipped default θ=1 is always reachable, so this only fires when
+#       an operator overrides it upward.
+#   OK (exit 0):
+#     * MD margin M - K >= 1 (e.g. web M=4/K=3, regional M=5/K=4, global
+#       M=7/K=5): a single fault runs a full K-of-K MD round among survivors,
+#       no escalation dependence; escalation (θ=1) backstops further faults.
+#     * M == K with escalation reachable (θ <= max(2,K-1); default yes): a
+#       single fault escalates to a BFT ceil(2K/3) round (cluster/tactical
+#       M=K=3 land here). Provision M > K for strong-MD single-fault handling.
+#     * K <= 1: single-creator committee, the abort machinery never engages.
+#   ERROR (exit 3) — usage / file / parse error.
 #
-# EVIDENCE (live cluster runs, 2026-06-11 — see docs/SECURITY.md S-044):
-#   tools/test_weak_3node.sh (header :8-18) documents the observed K=2
-#   cascade; tools/test_web_hybrid.sh (:118) + tools/test_regional_shards.sh
-#   (:154) carry KNOWN-BUG S-044 notes in place of their sustained-
-#   production bars; tools/test_bft_escalation.sh is the GREEN single-dead-
-#   member case (same-member aborts keep avail = M-1 >= k_bft, the counter
-#   climbs, escalation fires) — the gap is MULTI-member exclusion.
-#
-# Canonical finding descriptions: docs/SECURITY.md sections S-044 (Open,
-# High, liveness) and S-045 (Open, Medium, liveness).
+# HISTORY (the OPEN-defect this tool was built for, now fixed): at K=2 the
+#   abort-claim quorum was q = K-1 = 1 (single-claim cascade under skew, S-044);
+#   and at M=K the escalation counter froze below the historical default θ=5
+#   (S-045). Both closed: F-a quorum floor + θ=1 default + web M=4/K=3. Live
+#   evidence of the fix: tools/test_bft_escalation.sh (θ=1 escalation) +
+#   tools/test_web_hybrid.sh (web M=4/K=3 sustains). Canonical: docs/SECURITY.md
+#   §S-044 / §S-045 (both Mitigated); derivations docs/proofs/AbortCascadeLiveness.md.
 #
 # --config notes: check_if_selected reads cfg_ — the NODE config — not the
 # genesis (node.cpp:756 k_target, :782 bft_enabled, :783 threshold). When
@@ -101,10 +103,11 @@
 #   tools/operator_liveness_posture.sh --genesis <gen.json>
 #                                      [--config <config.json>] [--json]
 #
-# Exit codes:
-#   0   OK       — posture tolerates single straggles + has escalation headroom
-#   1   WARNING  — S-045 exposure (headroom < 2, or escalation disabled)
-#   2   CRITICAL — S-044 exposure (K == 2)
+# Exit codes (post-fix; K=2 is no longer CRITICAL — the cascade is fixed):
+#   0   OK       — MD margin >= 1, or M=K with reachable escalation, or K<=1
+#   1   WARNING  — K=2 crash-stop residual, escalation-disabled M=K, or an
+#                  operator-raised θ above the reachable ceiling (S-044/S-045
+#                  residual posture guidance; not the old cascade)
 #   3   usage / file / parse error (verdict could not be computed —
 #       deliberately distinct from the verdict tiers so a missing python
 #       can never read as "OK posture")
@@ -136,10 +139,9 @@ Options:
   --json             Emit a machine-readable JSON object
   -h, --help         Show this help
 
-Exit codes:
-  0   OK       (tolerates single straggles; escalation headroom >= 2)
-  1   WARNING  (S-045: headroom < 2 distinct members, or BFT disabled)
-  2   CRITICAL (S-044: K == 2 — permanent wedge under timing skew)
+Exit codes (post S-044/S-045 fix):
+  0   OK       (MD margin >= 1, or M=K with reachable escalation, or K<=1)
+  1   WARNING  (K=2 crash-stop, escalation-disabled M=K, or θ above ceiling)
   3   usage / file / parse error
 EOF
 }
@@ -244,7 +246,7 @@ try:
     print("gen_bft_enabled %s"
           % ("true" if need_bool(g, "bft_enabled", True) else "false"))
     print("gen_bft_threshold %d"
-          % need_uint(g, "bft_escalation_threshold", 5))
+          % need_uint(g, "bft_escalation_threshold", 1))
 
     if len(sys.argv) > 2:
         c = load(sys.argv[2])
@@ -326,43 +328,56 @@ if [ "$K" -gt "$M" ] 2>/dev/null; then
   exit 3
 fi
 
-# ── the arithmetic (header comment carries the node.cpp pins) ─────────────────
-Q=$(( K - 1 ))                          # abort-claim quorum (node.cpp:1274-1277)
-K_BFT=$(( (2 * K + 2) / 3 ))            # ceil(2K/3)        (node.cpp:778)
-MARGIN=$(( M - K ))                     # single-abort margin
-HEADROOM=$(( M - K_BFT ))               # escalation headroom
-WEDGE_MIN=$(( M - K + 1 ))              # min distinct exclusions that wedge
+# ── the arithmetic (header comment carries the node.cpp / params.hpp pins) ────
+# Post S-044/S-045 fix: abort-claim quorum is max(2, K-1) (chain::abort_claim_quorum,
+# params.hpp); at K=2 that quorum is UNSATISFIABLE (one eligible claimer), so no
+# abort event forms — K=2 is crash-stop, not cascade. Escalation-default θ=1.
+if [ $(( K - 1 )) -lt 2 ]; then Q=2; else Q=$(( K - 1 )); fi   # max(2, K-1)
+K_BFT=$(( (2 * K + 2) / 3 ))            # ceil(2K/3)  (chain::bft_committee_size)
+MARGIN=$(( M - K ))                     # single-abort MD margin
+HEADROOM=$(( M - K_BFT ))               # escalation headroom (max |E| with BFT viable)
+WEDGE_MIN=$(( M - K + 1 ))              # min distinct exclusions that block MD rounds
+# Effective escalation threshold (config/genesis; shipped default 1).
+THETA=${BFT_THRESHOLD:-1}
 
-# ── verdict ───────────────────────────────────────────────────────────────────
+# ── verdict (post-fix semantics) ────────────────────────────────────────────────
 NOTES=()
 if [ "$K" -eq 2 ]; then
-  VERDICT="CRITICAL"
+  # F-a removed the cascade; K=2 is now crash-stop 2-of-2 with no fault tolerance.
+  VERDICT="WARNING"
   FINDING="S-044"
-  RC=2
-  MESSAGE="CRITICAL EXPOSURE (S-044): single-claim abort quorum (q=1); permanent wedge under ordinary timing skew; deploy K >= 3"
-  if [ "$BFT_ENABLED" != "true" ]; then
-    NOTES+=("bft_enabled=false is moot at K=2 — k_bft=2=K leaves no escalation headroom even when enabled")
-  fi
+  RC=1
+  MESSAGE="WARNING (S-044 mitigated, residual): K=2 is crash-stop — the F-a claim floor removes the timing-skew cascade, but a single dead member halts the height (no abort-based reseat, no escalation at K=2). Deploy K >= 3 for fault tolerance."
 elif [ "$K" -le 1 ]; then
   VERDICT="OK"
   FINDING="none"
   RC=0
-  MESSAGE="OK: K=$K single-creator committee — no peers to claim aborts; the S-044/S-045 cascade machinery never engages"
-elif [ "$BFT_ENABLED" != "true" ]; then
+  MESSAGE="OK: K=$K single-creator committee — no peers to claim aborts; the abort/escalation machinery never engages"
+elif [ "$BFT_ENABLED" != "true" ] && [ "$MARGIN" -lt 1 ]; then
+  # M=K with escalation disabled: no MD margin AND no escalation rescue.
   VERDICT="WARNING"
   FINDING="S-045"
   RC=1
-  MESSAGE="WARNING (S-045, elevated): bft_enabled=false — escalation impossible; $WEDGE_MIN distinct abort-excluded members at one height = permanent halt with no rescue path"
-elif [ "$HEADROOM" -lt 2 ]; then
+  MESSAGE="WARNING (S-045): bft_enabled=false with M=K (zero MD margin) — a single straggle blocks all rounds and there is no escalation rescue. Enable bft, or run M > K."
+elif [ "$BFT_ENABLED" = "true" ] && [ "$THETA" -gt "$Q" ] && [ "$M" -lt $(( THETA + K_BFT )) ]; then
+  # Operator raised θ above the per-stuck-height event ceiling max(2,K-1) on an
+  # under-provisioned pool — the S-045 counter-freeze the θ=1 default avoids.
   VERDICT="WARNING"
   FINDING="S-045"
   RC=1
-  MESSAGE="WARNING (S-045): escalation headroom < 2 distinct members; two distinct straggles at one height = permanent halt"
-else
+  MESSAGE="WARNING (S-045): bft_escalation_threshold=$THETA exceeds the per-stuck-height abort-event ceiling ($Q) and the pool M=$M is below threshold+k_bft=$(( THETA + K_BFT )) — escalation may be unreachable. The shipped default is 1 (always reachable); pin threshold <= K-1."
+elif [ "$MARGIN" -ge 1 ]; then
   VERDICT="OK"
   FINDING="none"
   RC=0
-  MESSAGE="OK: posture tolerates single straggles and has escalation headroom $HEADROOM"
+  MESSAGE="OK: MD margin M-K=$MARGIN — a single fault runs a full K-of-K MD round among survivors (no escalation dependence); escalation (θ=$THETA) backstops further faults up to headroom $HEADROOM."
+else
+  # M=K, escalation enabled, θ reachable: single fault handled by escalation.
+  VERDICT="OK"
+  FINDING="none"
+  RC=0
+  MESSAGE="OK: M=K (zero MD margin) but escalation is reachable (θ=$THETA <= ceiling $Q) — a single fault escalates to a BFT ceil(2K/3) round. Provision M > K for strong-MD single-fault handling."
+  NOTES+=("M=K relies on BFT escalation for the first fault; the new web default is M=4/K=3 (MD margin 1) which does not")
 fi
 
 [ "$MISMATCH" = "true" ] && \

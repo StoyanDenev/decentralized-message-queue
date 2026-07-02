@@ -30,21 +30,20 @@ mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 nodes ==="
 for n in 1 2 3; do
-  # cluster_test mirrors test_weak_3node.sh's M=3 K=2 expectation but
-  # avoids extended sharding (the `web` preset requires
-  # initial_shard_count >= 3, which we don't need for a chain-continuity
-  # smoke test).
+  # M=3 K=3 strong (was K=2 — the S-044/S-045 fix; K>=3 avoids the abort
+  # cascade), single-shard (avoids the `web` preset's initial_shard_count>=3
+  # requirement, unneeded for a chain-continuity smoke test).
   $DETERM init --data-dir $T/n$n --profile single_test 2>&1 | tail -1
   $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 > $T/p$n.json
 done
 
 echo
-echo "=== 2. Build genesis (M=3, K=2; single-shard via single_test profile) ==="
+echo "=== 2. Build genesis (M=3, K=3; single-shard via single_test profile) ==="
 cat > $T/gen.json <<EOF
 {
   "chain_id": "test-orphan-check",
   "m_creators": 3,
-  "k_block_sigs": 2,
+  "k_block_sigs": 3,
   "block_subsidy": 10,
   "initial_creators": [
 $(cat $T/p1.json | tr -d '\n'),

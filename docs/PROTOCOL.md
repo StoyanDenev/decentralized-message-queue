@@ -349,7 +349,7 @@ The same algorithm appears in `select_after_abort_m` (post-abort recommittee wit
 The next round produces a `consensus_mode = BFT` block iff **all four** of the following are true at re-selection time (`src/node/node.cpp::start_new_round`, ~L760–L770):
 
 1. `bft_enabled = true` (genesis-pinned).
-2. `total_aborts >= bft_escalation_threshold` (default 5; round-1 and round-2 aborts both count toward the threshold — any abort indicates a stuck round).
+2. `total_aborts >= bft_escalation_threshold` (default 1 — the first abort event always forms, so the counter can never freeze below the threshold; round-1 and round-2 aborts both count toward the threshold — any abort indicates a stuck round).
 3. `available_pool_size < K` — the abort-narrowed pool can no longer field a full K-of-K committee.
 4. `available_pool_size >= ceil(2K/3)` — the pool is still large enough to field a BFT committee. If it falls below this floor the shard simply stalls until the next height (or until R4 under-quorum merge kicks in).
 
@@ -360,7 +360,7 @@ When all four hold, the round runs in BFT mode with two-level shrinkage:
 
 The proposer must sign; up to `k_bft - required` positions may carry sentinel-zero signatures (all-zero Ed25519 signature; false-positive rate ~2⁻⁵¹²). Worked example: at the genesis-default K = 3, `k_bft = 2`, `required = 2` — no sentinels (effectively still K-of-K within the smaller committee). At K = 6, `k_bft = 4`, `required = 3` — one sentinel allowed. At K = 9, `k_bft = 6`, `required = 4` — two sentinels. Safety holds as long as the Byzantine fraction within `k_bft` is `< k_bft/3` (standard BFT bound; see `docs/proofs/BFTSafety.md` FA5).
 
-> **Known limitation — S-044/S-045 (OPEN, SECURITY.md §3).** The trigger's reachability is constrained in ways the mechanism description above does not convey: rounds are what generate abort events, and once the available pool drops below the current `k_use` the selection silently returns — so the abort counter's ceiling at a stuck height is whatever the last runnable round produced (`K−1` events for a single dead member at M=K). Consequences: at K=2, gates 3+4 (`avail < 2 ∧ avail ≥ 2`) are **unsatisfiable** — the escalation arm is dead code at any threshold (S-044, which also covers the K=2 single-claim abort-quorum cascade); and at the default `bft_escalation_threshold = 5`, escalation is unreachable on the nominal pool of every shipped profile — gate 2 cannot be met before the pool freezes (S-045; the formal derivation incl. the `N ≥ θ + k_bft` reachability bound is `docs/proofs/AbortCascadeLiveness.md` FB67). Deployments relying on escalation should genesis-pin `bft_escalation_threshold ≤ K−1` or run a registered pool ≥ `θ + k_bft`; `tools/operator_liveness_posture.sh` and the `genesis-tool build` advisories audit this offline.
+> **S-044/S-045 — ✅ MITIGATED (SECURITY.md §3).** Two shipped fixes close the escalation-reachability and abort-cascade gaps. **(1) Abort-claim quorum floor `max(2, K−1)`** — the shared helper `chain::abort_claim_quorum()` in `include/determ/chain/params.hpp` is now routed through `node.cpp::on_abort_claim` (formation), `node.cpp::on_abort_event` (gossip adoption), and `validator.cpp::check_abort_certs` (exact-count check). This is a no-op for K≥3; at K=2 the quorum is **unsatisfiable**, so no single-claim abort event forms and the former K=2 wedge-by-cascade degrades to a crash-stop 2-of-2 (a genuinely dead member halts the height; healthy-node timing skew no longer cascades). `k_bft` is likewise now via the shared helper `chain::bft_committee_size() = ceil(2K/3)`. **(2) Genesis-default `bft_escalation_threshold = 1`** — θ=1 is reached by the first abort event (which always forms), so the escalation counter can never freeze below the threshold; gate 1 (`avail < k_target`) still bars premature escalation when MD margin exists, and the quorum floor bars single-node forced escalation (S025 `A_premature` stays closed). The only residual permanent wedge is `avail < k_bft` — the **designed** R7/FA9 under-quorum-merge boundary, not a defect. Formal derivation: `docs/proofs/AbortCascadeLiveness.md`. Regression-locked by `tools/test_s044_gate_surface.sh` and validated live by `tools/test_bft_escalation.sh` (θ=1 default: 34 MD blocks then BFT escalation on node-kill).
 
 ### 5.3.1 `proposer_idx` — deterministic BFT proposer selection
 
@@ -392,7 +392,7 @@ Both the producer (`node.cpp::current_bft_proposer`) and the independent validat
 
 ### 5.4 Abort handling
 
-When a member's local timer fires with insufficient contributions, they sign and broadcast an `AbortClaimMsg` naming the first missing creator. **M-1 matching claims** form a quorum certificate (`AbortEvent`) that all peers can adopt to advance the round in lockstep.
+When a member's local timer fires with insufficient contributions, they sign and broadcast an `AbortClaimMsg` naming the first missing creator. **`max(2, K − 1)` matching claims** (per `chain::abort_claim_quorum()`; see §5.4 quorum semantics) form a quorum certificate (`AbortEvent`) that all peers can adopt to advance the round in lockstep.
 
 ```cpp
 struct AbortClaimMsg {
@@ -427,7 +427,7 @@ struct AbortEvent {
 
 `event_hash` mixes into the next round's randomness (§5.2 committee selection's `rand = SHA256(prev_rand ‖ abort_event.event_hash)`), so different abort sequences yield different committee re-selections — this is what defeats the "cartel keeps picking the same victim" pattern (S-011 closure depends on the rotation here being unpredictable to the cartel).
 
-Quorum semantics: `M - 1` matching claims (where `M = m_creators`, the committee size; one short of unanimity, since the aborting node won't sign a claim against themselves) is the certification threshold. Below quorum, a single claim is informational only and does not advance the round.
+Quorum semantics: the certification threshold is `chain::abort_claim_quorum() = max(2, K − 1)` matching claims (where `K = m_creators`, the committee size; for K≥3 this is `K − 1`, one short of unanimity since the aborting node won't sign a claim against themselves). The `max(2, …)` floor (S-044 FIX 1) makes the quorum **unsatisfiable at K=2** — no single-claim abort event forms, so the K=2 wedge-by-cascade degrades to a crash-stop 2-of-2. The same helper is enforced at formation (`node.cpp::on_abort_claim`), gossip adoption (`node.cpp::on_abort_event`), and validation (`validator.cpp::check_abort_certs`). Below quorum, a single claim is informational only and does not advance the round.
 
 ## 6. Equivocation slashing (rev.8 follow-on)
 
@@ -731,7 +731,7 @@ Genesis is block 0 with `initial_state` carrying creator/account allocations. It
   "m_creators":    3,           // committee size K (genesis-pinned)
   "k_block_sigs":  3,           // Phase-2 threshold; default = m_creators
   "bft_enabled":   true,
-  "bft_escalation_threshold": 5,
+  "bft_escalation_threshold": 1,
 
   // Economics (E1/E3/E4)
   "block_subsidy":  10,
@@ -826,7 +826,7 @@ Test surface: `tools/test_make_genesis_block.sh` exercises every invariant above
 | Profile | Timing (commit/sig/abort) | M / K | role / sharding_mode | Crypto | Confidential tx | Primary use case |
 |---|---|---|---|---|---|---|
 | **`cluster`**  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | **FIPS** | ❌ Unavailable | **In-house enterprise / financial services / banking settlement / regulated single-org / single-org CBDC / HIPAA healthcare. ~125 ms blocks.** |
-| `web` (default) | 200 / 200 / 100 | 3 / 2 (hybrid) | SHARD / EXTENDED | MODERN | ✅ Available | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
+| `web` (default) | 200 / 200 / 100 | 4 / 3 (hybrid) | SHARD / EXTENDED | MODERN | ✅ Available | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
 | `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | MODERN | ✅ Available | Regional / continental RTT, state lottery, multi-region commercial |
 | `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | MODERN | ✅ Available | Inter-continental hub-and-spoke, international CBDC federation |
 | **`tactical`** | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | **FIPS** | ❌ Unavailable | **Military / defense / drone swarm / embedded mobile units / DoD deployments. Sub-30 ms private link, region-pinned units.** |
@@ -847,7 +847,7 @@ Plus six CI/dev variants that hold round timers at `5 / 5 / 3` (`TEST_*_MS` in `
 |---|---|---|---|
 | `single_test`   | 3 / 3 | SINGLE / NONE | MODERN |
 | `cluster_test`  | 3 / 3 | BEACON / CURRENT | **FIPS** |
-| `web_test`      | 3 / 2 | SHARD / EXTENDED | MODERN |
+| `web_test`      | 4 / 3 | SHARD / EXTENDED | MODERN |
 | `regional_test` | 5 / 4 | SHARD / CURRENT | MODERN |
 | `global_test`   | 7 / 5 | BEACON / EXTENDED | MODERN |
 | `tactical_test` | 3 / 3 | SHARD / EXTENDED | **FIPS** |

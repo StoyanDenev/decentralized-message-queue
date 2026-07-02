@@ -15,6 +15,7 @@
 #include "determ/crypto/p256/p256.h"
 #include "determ/crypto/secure_zero.h"
 #include "determ/crypto/sha2/sha2.h"   /* expand_message_xmd (RFC 9380 §5.3.1) */
+#include "determ/crypto/ct.h"             /* DLEQ challenge compare (RFC 9497) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -779,4 +780,321 @@ int determ_p256_hash_to_curve(uint8_t out[65],
     determ_secure_zero(&q0, sizeof q0); determ_secure_zero(&q1, sizeof q1);
     determ_secure_zero(&r, sizeof r);
     return rc;
+}
+
+/* ═══ SEC1 compressed encoding + the RFC 9497 OPRF(P-256, SHA-256) layer ═══ */
+
+int determ_p256_point_compress(uint8_t out33[33], const uint8_t in65[65]) {
+    pt p;
+    p256_init();
+    if (decode_point(&p, in65) != 0) return -1;
+    out33[0] = (uint8_t)(0x02 | (in65[64] & 1));   /* parity of canonical Y */
+    memcpy(out33 + 1, in65 + 1, 32);
+    return 0;
+}
+
+int determ_p256_point_decompress(uint8_t out65[65], const uint8_t in33[33]) {
+    fe x, xm, gx, t, y, ym;
+    uint8_t y_be[32];
+    p256_init();
+    if (in33[0] != 0x02 && in33[0] != 0x03) return -1;
+    if (!be_lt(in33 + 1, P_BE)) return -1;
+    be_to_fe(x, in33 + 1);
+    to_mont(xm, x);
+    /* gx = x^3 - 3x + b (Montgomery) */
+    fe_mont_sqr(gx, xm); fe_mont_mul(gx, gx, xm);
+    fe_sub(gx, gx, xm); fe_sub(gx, gx, xm); fe_sub(gx, gx, xm);
+    fe_add(gx, gx, B_M);
+    fe_sqrt(ym, gx);
+    /* sqrt is only valid for residues — verify y^2 == gx (rejects
+     * non-square right-hand sides; also covers gx == 0 trivially). */
+    fe_mont_sqr(t, ym);
+    {
+        uint32_t diff = 0; int i;
+        for (i = 0; i < 8; i++) diff |= t[i] ^ gx[i];
+        if (diff != 0) return -1;
+    }
+    from_mont(y, ym);
+    fe_to_be(y_be, y);
+    if ((y_be[31] & 1) != (in33[0] & 1)) {            /* wrong parity: y = p - y */
+        fe zero;
+        memset(zero, 0, sizeof(fe));
+        fe_sub(ym, zero, ym);
+        from_mont(y, ym);
+        fe_to_be(y_be, y);
+    }
+    out65[0] = 0x04;
+    memcpy(out65 + 1, in33 + 1, 32);
+    memcpy(out65 + 33, y_be, 32);
+    return 0;
+}
+
+/* contextString = "OPRFV1-" || I2OSP(mode,1) || "-P256-SHA256" (RFC 9497
+ * §3.1). 20 bytes; the mode is a RAW byte between ASCII hyphens. */
+#define OPRF_CTX_LEN 20
+static void oprf_context(uint8_t ctx[OPRF_CTX_LEN], uint8_t mode) {
+    memcpy(ctx, "OPRFV1-", 7);
+    ctx[7] = mode;
+    memcpy(ctx + 8, "-P256-SHA256", 12);
+}
+
+/* DST = prefix || contextString into the caller buffer; returns the length. */
+static size_t oprf_dst(uint8_t* out, const char* prefix, uint8_t mode) {
+    size_t n = strlen(prefix);
+    memcpy(out, prefix, n);
+    oprf_context(out + n, mode);
+    return n + OPRF_CTX_LEN;
+}
+
+/* sc: r = a - b mod n (branchless; mirrors fe_sub over Nl). */
+static void sc_sub_raw(fe r, const fe a, const fe b) {
+    uint32_t t[8];
+    uint64_t brw = 0, c = 0;
+    uint32_t mask;
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint64_t d = (uint64_t)a[i] - b[i] - brw;
+        t[i] = (uint32_t)d; brw = (d >> 63) & 1;
+    }
+    mask = (uint32_t)0 - (uint32_t)brw;
+    for (i = 0; i < 8; i++) {
+        c += (uint64_t)t[i] + (Nl[i] & mask);
+        r[i] = (uint32_t)c; c >>= 32;
+    }
+}
+
+/* internal: compressed bytes -> pt; pt -> compressed bytes. */
+static int oprf_load33(pt* p, const uint8_t in33[33]) {
+    uint8_t u65[65];
+    if (determ_p256_point_decompress(u65, in33) != 0) return -1;
+    return decode_point(p, u65);
+}
+static int oprf_store33(uint8_t out33[33], const pt* p) {
+    uint8_t u65[65];
+    if (encode_point(u65, p) != 0) return -1;
+    out33[0] = (uint8_t)(0x02 | (u65[64] & 1));
+    memcpy(out33 + 1, u65 + 1, 32);
+    return 0;
+}
+
+int determ_p256_oprf_derive_key(uint8_t sk[32],
+                                const uint8_t* seed, size_t seedlen,
+                                const uint8_t* info, size_t infolen,
+                                uint8_t mode) {
+    /* §3.2.1: deriveInput = seed || I2OSP(len(info),2) || info; counter loop
+     * with DST = "DeriveKeyPair" || contextString (NO hyphen — RFC quirk). */
+    uint8_t dst[13 + OPRF_CTX_LEN];
+    size_t dstlen = oprf_dst(dst, "DeriveKeyPair", mode);
+    uint8_t stackbuf[256];
+    uint8_t* buf;
+    uint8_t* heap = 0;
+    size_t base = seedlen + 2 + infolen;
+    int counter;
+    int rc = -1;
+    if (base + 1 <= sizeof stackbuf) buf = stackbuf;
+    else { heap = (uint8_t*)malloc(base + 1); if (!heap) return -1; buf = heap; }
+    if (seedlen) memcpy(buf, seed, seedlen);
+    buf[seedlen] = (uint8_t)(infolen >> 8);
+    buf[seedlen + 1] = (uint8_t)infolen;
+    if (infolen) memcpy(buf + seedlen + 2, info, infolen);
+    for (counter = 0; counter <= 255; counter++) {
+        buf[base] = (uint8_t)counter;
+        if (determ_p256_hash_to_scalar(sk, buf, base + 1, dst, dstlen) != 0) break;
+        if (!be_is_zero(sk)) { rc = 0; break; }
+    }
+    if (heap) { determ_secure_zero(heap, base + 1); free(heap); }
+    else determ_secure_zero(stackbuf, sizeof stackbuf);
+    return rc;
+}
+
+int determ_p256_oprf_blind(uint8_t blinded33[33],
+                           const uint8_t* input, size_t inputlen,
+                           const uint8_t blind[32], uint8_t mode) {
+    uint8_t dst[12 + OPRF_CTX_LEN];
+    size_t dstlen = oprf_dst(dst, "HashToGroup-", mode);
+    uint8_t elem65[65];
+    pt p, r;
+    int rc;
+    p256_init();
+    if (!scalar_ok(blind)) return -1;
+    if (determ_p256_hash_to_curve(elem65, input, inputlen, dst, dstlen) != 0)
+        return -1;                                /* identity -> error (§3.3.1) */
+    if (decode_point(&p, elem65) != 0) return -1;
+    pt_scalar_mul(&r, blind, &p);
+    rc = oprf_store33(blinded33, &r);
+    determ_secure_zero(&r, sizeof r);
+    return rc;
+}
+
+int determ_p256_oprf_evaluate(uint8_t eval33[33], const uint8_t sk[32],
+                              const uint8_t blinded33[33]) {
+    pt p, r;
+    int rc;
+    p256_init();
+    if (!scalar_ok(sk)) return -1;
+    if (oprf_load33(&p, blinded33) != 0) return -1;
+    pt_scalar_mul(&r, sk, &p);
+    rc = oprf_store33(eval33, &r);
+    determ_secure_zero(&r, sizeof r);
+    return rc;
+}
+
+int determ_p256_oprf_finalize(uint8_t out[32],
+                              const uint8_t* input, size_t inputlen,
+                              const uint8_t blind[32],
+                              const uint8_t eval33[33]) {
+    uint8_t inv[32], n33[33];
+    pt p, r;
+    uint8_t stackbuf[512];
+    uint8_t* buf;
+    uint8_t* heap = 0;
+    size_t total = 2 + inputlen + 2 + 33 + 8, off = 0;
+    p256_init();
+    if (determ_p256_scalar_inv_mod_n(inv, blind) != 0) return -1;
+    if (oprf_load33(&p, eval33) != 0) return -1;
+    pt_scalar_mul(&r, inv, &p);
+    if (oprf_store33(n33, &r) != 0) return -1;
+    determ_secure_zero(&r, sizeof r);
+    determ_secure_zero(inv, sizeof inv);
+    if (total <= sizeof stackbuf) buf = stackbuf;
+    else { heap = (uint8_t*)malloc(total); if (!heap) return -1; buf = heap; }
+    buf[off++] = (uint8_t)(inputlen >> 8);
+    buf[off++] = (uint8_t)inputlen;
+    if (inputlen) { memcpy(buf + off, input, inputlen); off += inputlen; }
+    buf[off++] = 0x00; buf[off++] = 0x21;         /* len(unblindedElement) = 33 */
+    memcpy(buf + off, n33, 33); off += 33;
+    memcpy(buf + off, "Finalize", 8); off += 8;
+    determ_sha256(buf, off, out);
+    if (heap) { determ_secure_zero(heap, total); free(heap); }
+    else determ_secure_zero(stackbuf, sizeof stackbuf);
+    return 0;
+}
+
+/* ComputeComposites, m = 1 (§2.2.1): seed = Hash(len2(Bm) || Bm ||
+ * len2(seedDST) || seedDST); di = HashToScalar(len2(seed) || seed ||
+ * I2OSP(0,2) || len2(Ci) || Ci || len2(Di) || Di || "Composite").
+ * M = di*C; fast side Z = k*M, verify side Z = di*D. */
+static int oprf_composites(uint8_t di[32],
+                           const uint8_t pk33[33],
+                           const uint8_t c33[33], const uint8_t d33[33],
+                           uint8_t mode) {
+    uint8_t seed_dst[5 + OPRF_CTX_LEN];
+    size_t seed_dstlen = oprf_dst(seed_dst, "Seed-", mode);
+    uint8_t seed[32];
+    uint8_t st[2 + 33 + 2 + 5 + OPRF_CTX_LEN];
+    size_t off = 0;
+    uint8_t ct[2 + 32 + 2 + 2 + 33 + 2 + 33 + 9];
+    size_t coff = 0;
+    uint8_t h2s_dst[13 + OPRF_CTX_LEN];
+    size_t h2s_dstlen = oprf_dst(h2s_dst, "HashToScalar-", mode);
+    st[off++] = 0x00; st[off++] = 0x21;
+    memcpy(st + off, pk33, 33); off += 33;
+    st[off++] = (uint8_t)(seed_dstlen >> 8); st[off++] = (uint8_t)seed_dstlen;
+    memcpy(st + off, seed_dst, seed_dstlen); off += seed_dstlen;
+    determ_sha256(st, off, seed);
+    ct[coff++] = 0x00; ct[coff++] = 0x20;         /* len(seed) = 32 */
+    memcpy(ct + coff, seed, 32); coff += 32;
+    ct[coff++] = 0x00; ct[coff++] = 0x00;         /* i = 0 */
+    ct[coff++] = 0x00; ct[coff++] = 0x21;
+    memcpy(ct + coff, c33, 33); coff += 33;
+    ct[coff++] = 0x00; ct[coff++] = 0x21;
+    memcpy(ct + coff, d33, 33); coff += 33;
+    memcpy(ct + coff, "Composite", 9); coff += 9;
+    return determ_p256_hash_to_scalar(di, ct, coff, h2s_dst, h2s_dstlen);
+}
+
+/* challenge c = HashToScalar(len2 each of Bm, M, Z, t2, t3 || "Challenge") */
+static int oprf_challenge(uint8_t c[32], const uint8_t pk33[33],
+                          const uint8_t m33[33], const uint8_t z33[33],
+                          const uint8_t t2_33[33], const uint8_t t3_33[33],
+                          uint8_t mode) {
+    uint8_t h2s_dst[13 + OPRF_CTX_LEN];
+    size_t h2s_dstlen = oprf_dst(h2s_dst, "HashToScalar-", mode);
+    uint8_t tr[5 * 35 + 9];
+    size_t off = 0;
+    const uint8_t* elems[5];
+    int i;
+    elems[0] = pk33; elems[1] = m33; elems[2] = z33;
+    elems[3] = t2_33; elems[4] = t3_33;
+    for (i = 0; i < 5; i++) {
+        tr[off++] = 0x00; tr[off++] = 0x21;
+        memcpy(tr + off, elems[i], 33); off += 33;
+    }
+    memcpy(tr + off, "Challenge", 9); off += 9;
+    return determ_p256_hash_to_scalar(c, tr, off, h2s_dst, h2s_dstlen);
+}
+
+int determ_p256_voprf_prove(uint8_t proof[64], const uint8_t sk[32],
+                            const uint8_t pk33[33],
+                            const uint8_t blinded33[33],
+                            const uint8_t eval33[33],
+                            const uint8_t r[32], uint8_t mode) {
+    uint8_t di[32], m33[33], z33[33], t2_33[33], t3_33[33], c[32];
+    pt C, M, Z, T;
+    fe rfe, cm, km, ck, sfe;
+    fe one = {1,0,0,0,0,0,0,0};
+    p256_init(); sc_init();
+    if (!scalar_ok(sk) || !scalar_ok(r)) return -1;
+    if (oprf_load33(&C, blinded33) != 0) return -1;
+    if (oprf_composites(di, pk33, blinded33, eval33, mode) != 0) return -1;
+    pt_scalar_mul(&M, di, &C);                    /* M = di * C */
+    if (oprf_store33(m33, &M) != 0) return -1;
+    pt_scalar_mul(&Z, sk, &M);                    /* fast side: Z = k * M */
+    if (oprf_store33(z33, &Z) != 0) return -1;
+    {                                             /* t2 = r*G ; t3 = r*M */
+        pt G_;
+        memcpy(G_.X, GX_M, sizeof(fe)); memcpy(G_.Y, GY_M, sizeof(fe));
+        memcpy(G_.Z, ONE_M, sizeof(fe));
+        pt_scalar_mul(&T, r, &G_);
+        if (oprf_store33(t2_33, &T) != 0) return -1;
+        pt_scalar_mul(&T, r, &M);
+        if (oprf_store33(t3_33, &T) != 0) return -1;
+    }
+    if (oprf_challenge(c, pk33, m33, z33, t2_33, t3_33, mode) != 0) return -1;
+    /* s = r - c*k mod n (plain-domain in/out through the mod-n Montgomery) */
+    be_to_fe(rfe, r);
+    be_to_fe(cm, c);  sc_mont_mul(cm, cm, R2N);
+    be_to_fe(km, sk); sc_mont_mul(km, km, R2N);
+    sc_mont_mul(ck, cm, km);
+    sc_mont_mul(ck, ck, one);                     /* back to plain */
+    sc_sub_raw(sfe, rfe, ck);
+    memcpy(proof, c, 32);
+    fe_to_be(proof + 32, sfe);
+    determ_secure_zero(&T, sizeof T);
+    determ_secure_zero(km, sizeof km); determ_secure_zero(ck, sizeof ck);
+    determ_secure_zero(rfe, sizeof rfe); determ_secure_zero(sfe, sizeof sfe);
+    return 0;
+}
+
+int determ_p256_voprf_verify(const uint8_t pk33[33],
+                             const uint8_t blinded33[33],
+                             const uint8_t eval33[33],
+                             const uint8_t proof[64], uint8_t mode) {
+    uint8_t di[32], m33[33], z33[33], t2_33[33], t3_33[33], c2[32];
+    uint8_t sA65[65], cB65[65], t2_65[65], sM65[65], cZ65[65], t3_65[65];
+    uint8_t pk65[65], m65[65], z65[65];
+    pt C, D, M, Z;
+    const uint8_t* c = proof;
+    const uint8_t* s = proof + 32;
+    p256_init(); sc_init();
+    if (!be_lt(c, N_BE) || !be_lt(s, N_BE)) return -1;
+    if (be_is_zero(c) || be_is_zero(s)) return -1;   /* base/point_mul reject 0 */
+    if (oprf_load33(&C, blinded33) != 0 || oprf_load33(&D, eval33) != 0) return -1;
+    if (oprf_composites(di, pk33, blinded33, eval33, mode) != 0) return -1;
+    pt_scalar_mul(&M, di, &C);                    /* M = di * C */
+    pt_scalar_mul(&Z, di, &D);                    /* verify side: Z = di * D */
+    if (oprf_store33(m33, &M) != 0 || oprf_store33(z33, &Z) != 0) return -1;
+    /* t2 = s*G + c*B ; t3 = s*M + c*Z — public data; the exported API works */
+    if (determ_p256_point_decompress(pk65, pk33) != 0) return -1;
+    if (encode_point(m65, &M) != 0 || encode_point(z65, &Z) != 0) return -1;
+    if (determ_p256_base_mul(sA65, s) != 0) return -1;
+    if (determ_p256_point_mul(cB65, c, pk65) != 0) return -1;
+    if (determ_p256_point_add(t2_65, sA65, cB65) != 0) return -1;
+    if (determ_p256_point_mul(sM65, s, m65) != 0) return -1;
+    if (determ_p256_point_mul(cZ65, c, z65) != 0) return -1;
+    if (determ_p256_point_add(t3_65, sM65, cZ65) != 0) return -1;
+    if (determ_p256_point_compress(t2_33, t2_65) != 0) return -1;
+    if (determ_p256_point_compress(t3_33, t3_65) != 0) return -1;
+    if (oprf_challenge(c2, pk33, m33, z33, t2_33, t3_33, mode) != 0) return -1;
+    return determ_ct_memcmp(c2, c, 32) == 0 ? 0 : -1;
 }
