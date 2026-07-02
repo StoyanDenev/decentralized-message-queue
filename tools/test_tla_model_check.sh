@@ -36,8 +36,6 @@ ONLY=""
 # A quarantined spec is not run (it is guaranteed red); it appears in the
 # results table as QUARANTINED with its reason.
 QUARANTINE=(
-  "SnapshotIntegrity|triaged 2026-07-02: sentinel fix unmasked 3 pre-existing modeling bugs (proxy antecedents cannot express tamper-ordering); C++ round-trip exonerated (test_dapp_snapshot.sh 12/12); needs spec redesign"
-  "EpochCommitteeRotation|triaged 2026-07-02: beacon-blind abstract CHOOSE selector cannot satisfy any rotation liveness (production select_m_creators IS beacon-sensitive); safety invariants T-ER1..T-ER4 need a beacon-sensitive selector model; needs spec redesign"
 )
 
 while [ $# -gt 0 ]; do

@@ -1,868 +1,378 @@
 --------------------------- MODULE EpochCommitteeRotation ---------------------------
 (*
-FB34 — TLA+ specification of the cross-epoch committee rotation
-state machine. Models the per-epoch K-member committee draw from
-the active validator pool plus the active-set evolution (REGISTER /
-DEREGISTER) that drives committee rotation across epochs.
+FB34 — cross-epoch committee rotation state machine.
+REDESIGNED 2026-07-02 (was quarantined: the original abstract
+EpochCommitteeSelect used a CHOOSE whose second disjunct was a
+tautology, so the selector was beacon-blind — the committee could
+never rotate at a fixed pool and no rotation liveness could hold.
+Production IS beacon-sensitive, so the spec, not the code, was
+wrong. This redesign replaces the selector with a beacon-indexed
+ranked selection and restates the liveness contract honestly.)
 
-NOTE: no model-check this session — caller will TLC-validate. This
-module is syntactically self-contained and ready for `tlc -config
-EpochCommitteeRotation.cfg EpochCommitteeRotation.tla` once the
-TLC toolchain is installed in CI.
+Scope. Determ redraws the K-member block-signing committee every
+epoch: `crypto::select_m_creators(seed, N, K)` derives member
+indices from SHA-256 chains over the per-epoch seed
+`crypto::epoch_committee_seed(epoch_rand, shard_id)`
+(src/crypto/random.cpp:70-100 and :169-175), and every validator
+replays the same draw to cross-check a candidate block's creators
+(src/node/validator.cpp:89-132). epoch_rand is the chain's
+cumulative_rand anchored at the epoch boundary
+(src/node/node.cpp::current_epoch_rand), so the seed evolves as the
+chain produces blocks. The active pool evolves via REGISTER /
+DEREGISTER (src/chain/chain.cpp::apply_transactions).
 
-Scope. Formalizes the cross-epoch committee rotation contract that
-governs Determ's per-epoch K-member committee selection at the
-state-machine layer. The committee is redrawn at every epoch
-boundary via `crypto::select_m_creators` keyed on the per-epoch
-seed `crypto::epoch_committee_seed(epoch_rand, shard_id)`; each
-epoch carries a fresh draw, so the committee rotates as the beacon-
-sourced randomness evolves and as the active validator pool grows /
-shrinks via REGISTER / DEREGISTER transactions.
+The abstraction (spec-layer projection of select_m_creators):
 
-The contract this spec pins (three sub-claims, paired with the
-five invariants below):
+  EpochCommitteeSelect(pool, beacon, k) ==
+      the (beacon % n)-th k-subset of pool under a fixed total
+      order on subsets, where n = #k-subsets of pool.
 
-  (a) Deterministic per-epoch selection. For a fixed `(active_pool,
-      beacon, k)` triple, the committee is a pure deterministic
-      function of those inputs — same triple, same committee. The
-      structural witness is `select_m_creators`'s SHA-256-derived
-      randomness: every node consuming the same `random_state`
-      reproduces the same hybrid Fisher-Yates output (per S-020).
-      Modeled by the `EpochCommitteeSelect(pool, beacon, k)`
-      abstract operator: same inputs → same SUBSET.
-  (b) Cross-epoch rotation. Consecutive epochs with distinct
-      beacons (and / or distinct active pools) draw potentially
-      distinct committees — the committee does NOT freeze across
-      epochs (otherwise the rotation rationale collapses to a
-      static-committee model). The structural witness is the
-      `EpochCommitteeSelect`'s sensitivity to the beacon: distinct
-      beacons CAN produce distinct committees (the abstract
-      operator preserves this dependency; the cryptographic
-      tightness — uniformity of SHA-256-derived index selection —
-      is FB23 FrostVerify.tla / Preliminaries §2.1 territory).
-  (c) Active-set discipline. Every committee member at epoch e was
-      in the `active_validators` set at the moment of selection.
-      Zombie committees (members who deregistered before the epoch
-      began) and ghost committees (members who never registered)
-      are structurally impossible at apply time — captured by
-      `INV_CommitteeSubsetActive`.
+  * The fixed total order is the binary-encoding order
+    (S < T iff max of the symmetric difference lies in T —
+    equivalent to comparing Sum{2^v : v in S}). Any fixed order
+    works; this one needs no recursion.
+  * Beacons are modeled as naturals 1..MaxBeacon — the injective
+    beacon->index map the abstraction needs. Production's beacon
+    is a 256-bit hash; distinct hashes give independent draws.
+    The model keeps MaxBeacon <= K+1 <= n so distinct beacons
+    always give DISTINCT indices ("fresh seed => fresh draw").
+    In production a fresh seed repeats a committee with
+    probability 1/n per pair — below this abstraction's floor;
+    the model's injective regime is the deterministic projection
+    of that quasi-uniformity (S-020), not a claim of certainty
+    about any single pair of real seeds.
+  * Determinism: the operator is a pure function of (pool,
+    beacon, k) — the CHOOSE has a unique satisfying subset
+    (ranks are injective), so TLC's choice is forced.
+  * Beacon-sensitivity is MACHINE-CHECKED at startup by the
+    named ASSUME BeaconSensitivity below: every pool with more
+    than one K-subset has two beacons selecting different
+    committees. (The original spec's selector failed exactly
+    this; the ASSUME makes a regression impossible to miss.)
 
-Five paired theorems are pinned (per the rotation contract above
-plus the history-monotonicity property that fork-resolution and
-snapshot consistency depend on):
+State machine (four actions):
 
-  (T-ER1) DeterministicSelection. For every pair of epochs (e1, e2)
-          drawn from the same active set with the same beacon, the
-          committee outputs are byte-identical: `committee_history[e1]
-          = committee_history[e2]`. State-form witness of the
-          selection-function determinism contract — required for
-          every node to converge on the same committee independent
-          of message arrival order. The structural witness is the
-          `EpochCommitteeSelect`'s purity (a SUBSET-valued operator
-          determined by its inputs).
-  (T-ER2) CommitteeSizeIsK. Every committee in `committee_history`
-          has cardinality `K` (when the active pool has at least K
-          members; otherwise the committee equals the full active
-          pool — the under-quorum branch where R7
-          UnderQuorumMerge.tla kicks in). The structural witness:
-          `select_m_creators` requires `node_count >= m` (the early
-          throw at `src/crypto/random.cpp:71-72`) and returns
-          exactly `m` indices; the committee draw fails fast if
-          the pool is too small.
-  (T-ER3) CommitteeSubsetActive. Every committee member at epoch e
-          was in `active_validators` at the moment of the
-          AdvanceEpoch action that drew that epoch's committee.
-          Zombie / ghost committees are structurally excluded.
-          The structural witness: the AdvanceEpoch action draws
-          the committee from `active_validators` only — no
-          historical pool is consulted.
-  (T-ER4) HistoryMonotone. `committee_history` only grows across
-          epoch advances; existing entries are byte-identical
-          across all reachable states. The structural witness:
-          the AdvanceEpoch action's EXCEPT clause only adds a
-          new key to the function; existing keys are never
-          rewritten. This is the rotation-history analog of
-          ChainPrevHashLink.tla's INV_AppendOnly — legitimate
-          rotation never rewrites past committees.
-  (T-ER5) EventualRotation (forward-progress). Under fairness on
-          AdvanceEpoch + a beacon change OR a non-trivial pool
-          mutation between consecutive epochs, the committee
-          changes infinitely often. The state-form witness: if
-          the beacon and active set are constant across consecutive
-          epochs, the committee is also constant (T-ER1); under
-          fairness on the beacon-evolution actions (BeaconUpdate +
-          RegisterValidator + DeregisterValidator), the
-          combination of beacon + pool eventually changes, which
-          flips the committee on the next AdvanceEpoch (when the
-          pool has more than K members so multiple distinct
-          committees exist).
+  * AdvanceEpoch — epoch+1; draws committee_history[epoch+1] =
+    EpochCommitteeSelect(active_validators, beacon, K), snapshots
+    beacon_history / selected_from. Guard `beacon #
+    beacon_history[epoch]`: production's consecutive epoch seeds
+    differ (cumulative_rand accumulates one SHA-256 fold per
+    block across the ~epoch_blocks blocks between boundaries;
+    equality would be a SHA-256 collision — excluded by
+    Preliminaries A2). Guard `Cardinality(active_validators) > K`
+    pins the modeled regime (below).
+  * BeaconAdvance — beacon := (beacon % MaxBeacon) + 1. The
+    chain-randomness accumulator, lifted to a cycling counter so
+    TLC's state space stays finite. Beacon REUSE across
+    non-adjacent epochs is a deliberate artifact: it makes
+    INV_DeterministicSelection's antecedent reachable (two epochs
+    with the same (pool, beacon) must repeat the committee).
+  * RegisterValidator(v) / DeregisterValidator(v) — REGISTER /
+    DEREGISTER with activation/deactivation delays collapsed
+    (post-active_from / post-inactive_from state). No fairness:
+    pool churn is adversarial.
 
-The state machine. Four actions cover the epoch-rotation surface
-(plus a Stutter to bound TLC):
+Modeled regime — |active_validators| >= K+1 throughout (Init
+starts at K+1; Deregister keeps >= K+1). Rationale:
+  * |pool| = K: the K-subset is unique — committee = full pool,
+    rotation structurally impossible, and the code claims none.
+    Nothing to check beyond determinism, which the >= K+1 regime
+    already pins.
+  * |pool| < K: select_m_creators THROWS (random.cpp:71-72) and
+    the validator fail-closes ("insufficient eligible nodes",
+    validator.cpp:119-120). The pre-redesign spec's under-quorum
+    branch (committee = full active set when |pool| < K)
+    CONTRADICTED the code — the code never returns an undersized
+    committee; R7 under-quorum merge widens the pool instead.
+    That branch is DELETED, and T-ER2 is restated as the
+    unconditional |committee| = K the code actually guarantees
+    whenever it returns at all.
 
-  * AdvanceEpoch — increments `epoch`; draws a fresh committee
-    via `EpochCommitteeSelect(active_validators,
-    beacon_history[epoch+1], K)` and stores it in
-    `committee_history[epoch+1]`. The beacon for the new epoch
-    must already be set via BeaconUpdate (which models the
-    chain-randomness source feeding the per-epoch seed).
-  * RegisterValidator(v) — adds v to `active_validators` when
-    `v ∈ ValidatorPool \ active_validators`. Mirrors the
-    REGISTER tx apply path at `src/chain/chain.cpp::apply_transactions`
-    REGISTER branch + the `registrants_.active_from = height +
-    derive_delay(...)` activation delay (collapsed here — the
-    spec models the post-active-from state).
-  * DeregisterValidator(v) — removes v from `active_validators`
-    when `v ∈ active_validators`. Mirrors the DEREGISTER tx
-    apply path and the `registrants_.inactive_from = height +
-    derive_delay(...)` deactivation delay (collapsed; the spec
-    models the post-inactive-from state).
-  * BeaconUpdate(b) — updates the beacon for the NEXT epoch
-    (`beacon_history' = [beacon_history EXCEPT ![epoch+1] = b]`).
-    Models the chain-randomness source: the beacon for epoch e
-    is anchored at the cumulative_rand of the block at index =
-    e * epoch_blocks - 1 (see `src/node/node.cpp::current_epoch_rand`
-    at lines 914-934). The action is the abstract spec-layer
-    projection of that anchoring; the cryptographic uniformity
-    of `cumulative_rand` is FB23 / Preliminaries territory.
+Contract pinned (T-ER1..T-ER5):
 
-Modeling scope (kept tractable for TLC):
+  (T-ER1) INV_DeterministicSelection — same (pool, beacon) at two
+          epochs => identical committees. Cross-node convergence:
+          every node replaying the same seed + registry gets the
+          same committee (validator.cpp:126 recompute).
+  (T-ER2) INV_CommitteeSizeIsK — every recorded committee has
+          cardinality exactly K (restated; see regime note).
+  (T-ER3) INV_CommitteeSubsetActive — committee members were in
+          the active set snapshot at draw time (ghost field
+          selected_from). No zombie / ghost committees.
+  (T-ER4) INV_HistoryMonotone — committee/beacon/selected_from
+          histories have domain exactly 0..epoch, and every
+          recorded committee equals the selector replayed on its
+          recorded inputs (the spec-level analog of the
+          receiver-side cross-check at validator.cpp:126-132;
+          also pins append-only immutability: an overwritten
+          entry could no longer match its recorded inputs while
+          all invariants held earlier).
+  (T-ER5) PROP_EventualRotation — RESTATED. Honest form: in any
+          fair behavior whose active pool NEVER changes, some
+          pair of consecutive epochs has distinct committees
+          ([](pool = InitialActive) => <>rotation). Fairness:
+          SF(AdvanceEpoch) (epoch boundaries recur; SF because
+          the cycling beacon transiently disables the freshness
+          guard) + WF(BeaconAdvance) (the chain keeps producing
+          blocks). Why conditional on a quiet pool: with
+          adversarial REGISTER/DEREGISTER timing the committee
+          can be held constant at this abstraction (alternate
+          pools in which the same subset ranks at the alternating
+          beacon indices) — and in production, rotation under
+          adversarial churn is likewise only probabilistic
+          (S-020 bias-bound territory), so an unconditional
+          liveness claim would over-promise. The beacon-driven
+          claim the code DOES make — a static pool cannot freeze
+          the committee — is exactly the conditional form.
 
-  * `ValidatorPool` is a finite universe of validator domain IDs
-    (strings). Realistic production pools have ~10-100 validators
-    across active + inactive subsets; the model uses ~5 to keep
-    the state space exhaustible.
-  * `K` is the committee size constant (Nat ≥ 1). Production
-    profiles range K = 3 (cluster / tactical / single_test) up to
-    K = 7 (global), per `include/determ/chain/params.hpp`.
-    Reflected in the cfg as K = 3.
-  * `MaxEpoch` bounds epoch growth so TLC exhausts in seconds.
-    Production runs an unbounded sequence of epochs (~1 every
-    100 blocks at `epoch_blocks = 100`); the model bounds at 4
-    epochs which is enough to exercise: 0→1 (genesis epoch +
-    first rotation), 1→2 (consecutive distinct beacons), 2→3
-    (same beacon with mutated pool — the rotation-on-pool-change
-    branch), 3→4 (saturation; Stutter pins the bound).
-  * `BeaconValues` is a finite universe of beacon hashes used as
-    `epoch_committee_seed` inputs. Three values is enough to
-    exercise: (a) same beacon across epochs → same committee
-    (T-ER1 determinism); (b) distinct beacons → potentially
-    distinct committees (T-ER5 rotation); (c) beacon-change with
-    pool-change interleaved (combined determinism + rotation
-    surface).
-  * `EpochCommitteeSelect(pool, beacon, k)` is an abstract
-    SUBSET-valued operator: deterministic on its three inputs;
-    returns a SUBSET of `pool` of cardinality `min(k,
-    |pool|)`. This is the spec-layer projection of
-    `crypto::select_m_creators(epoch_committee_seed(...), ...)`
-    composed with the hybrid Fisher-Yates per S-020 + the
-    rejection-sampling fallback at the small-K branch.
-    Cryptographic tightness (uniform index selection over
-    [0, N)) is FB23 / Preliminaries territory.
-  * `committee_history` is a partial function `Nat → SUBSET
-    ValidatorPool` (modeled as a TLA function over the active
-    domain `{0, 1, ..., epoch}`). The append-only growth
-    discipline is the structural witness for T-ER4.
-  * `beacon_history` is a partial function `Nat → BeaconValues`
-    (modeled similarly). Updated by BeaconUpdate which can fire
-    one step ahead of AdvanceEpoch (modeling the chain producing
-    blocks within an epoch and accumulating randomness for the
-    next epoch's seed).
-  * R4 region-aware selection is NOT modeled here. R4's
-    region overlay (eligible_in_region + under-quorum merge per
-    chain.cpp::shards_absorbed_by) is a per-shard refinement on
-    top of this base rotation; FB31 SnapshotIntegrity.tla and
-    FB14 Sharding.tla cover the regional-overlay state machines.
-    This spec covers the BASE rotation contract that R4 layers
-    onto.
+  PROP_NoCommitteeFreeze (pre-redesign) — DELETED. Rationale: its
+  "same committee for more than MaxEpoch/2 epochs implies a
+  beacon/pool change" bound was not a claim the code makes (the
+  real no-freeze guarantee is probabilistic), and its TLC
+  encoding was unfalsifiable at the old beacon-blind selector.
+  Its honest content is split across ASSUME BeaconSensitivity
+  (the selector cannot ignore the beacon) and the restated
+  PROP_EventualRotation (a static pool cannot freeze the
+  committee).
 
-Five invariants codify T-ER1..T-ER4 + a type predicate:
+Not modeled (unchanged from the original scope): cryptographic
+uniformity of the SHA-256 index stream (Preliminaries A3 / S-020
+bias bound), per-block within-epoch replay and abort-mixed rand
+(FB1 Consensus.tla), R4 region overlay + R7 under-quorum merge,
+registration delay distribution (S-035), snapshot lifecycle of the
+registry (FB31).
 
-  INV_TypeOK — shape predicate for all variables.
-  INV_CommitteeSizeIsK (T-ER2) — every committee in
-        committee_history has cardinality K when
-        |active_validators| >= K at the time of selection;
-        otherwise equals the full active set (under-quorum branch).
-        The structural witness: the EpochCommitteeSelect operator
-        either returns exactly k indices (the K << |pool| branch
-        via rejection sampling at random.cpp:73-86) or the partial
-        Fisher-Yates (random.cpp:87-100) — both return exactly
-        min(k, |pool|) members.
-  INV_CommitteeSubsetActive (T-ER3) — every committee member at
-        epoch e was in active_validators at the time of selection.
-        State-form witness: the AdvanceEpoch action draws from
-        active_validators (the live registry); no historical pool
-        is consulted. The captured-at-select-time discipline is
-        structural: the spec stores the committee in
-        committee_history[e] right after the draw, so the member-
-        set lookup against active_validators at any later state
-        is sound provided active_validators only changes via
-        Register/Deregister (the lookup is on the SET that was
-        sampled, not on a possibly-mutated future SET).
-  INV_DeterministicSelection (T-ER1) — for every pair (e1, e2) in
-        the domain of committee_history with beacon_history[e1] =
-        beacon_history[e2] AND the same active set at the time of
-        selection (captured via the ghost field selected_from), the
-        committees are byte-identical. The state-form witness of
-        the EpochCommitteeSelect's purity — required for cross-node
-        consensus convergence under the same chain head.
-  INV_HistoryMonotone (T-ER4) — committee_history only grows
-        across AdvanceEpoch actions; existing entries are
-        byte-identical across all reachable states. The structural
-        witness: the AdvanceEpoch action's EXCEPT clause adds a
-        new key (epoch+1); pre-existing keys are not touched.
-        The rotation-history analog of ChainPrevHashLink.tla's
-        INV_AppendOnly.
-
-Two temporal properties pin the headline rotation claims:
-
-  PROP_EventualRotation (T-ER5) — under fairness on AdvanceEpoch
-    + on either BeaconUpdate or RegisterValidator / DeregisterValidator
-    (the pool-mutation actions), the committee changes infinitely
-    often when |active_validators| > K (so multiple distinct
-    committees exist; under |active_validators| = K the committee
-    is structurally the full active set and CAN'T rotate without
-    a pool change). The forward-progress contract: the rotation
-    rationale (defeating long-run committee capture by adversarial
-    sticky-membership) requires actual rotation in the limit.
-  PROP_NoCommitteeFreeze — if |active_validators| >= K + 1 (so
-    multiple distinct K-committees exist within the pool), the
-    same committee cannot persist for more than `MaxEpoch / 2`
-    consecutive epochs without a beacon change OR a pool change.
-    The state-machine witness for the no-stuck-committee contract:
-    even under adversarial beacon + pool stability, the spec's
-    bounded-epoch enumeration shows the committee changes within
-    a bounded window — at finite MaxEpoch the bound collapses to
-    "the committee changes at LEAST once across the bounded
-    schedule when the cardinality-based condition holds". TLC
-    validates the contract over the bounded schedule; the
-    unbounded-MaxEpoch generalization is a temporal-induction
-    argument anchored at the same state-form witness.
-
-To check (assuming TLC installed):
-  $ tlc EpochCommitteeRotation.tla -config EpochCommitteeRotation.cfg
-
-Recommended config (state space ~10^4, < 30s):
-  ValidatorPool = {v1, v2, v3, v4, v5}, K = 3, MaxEpoch = 4,
-  BeaconValues = {b1, b2, b3}.
+To check:
+  $ bash tools/test_tla_model_check.sh --only EpochCommitteeRotation
+  (or: tlc -deadlock -config EpochCommitteeRotation.cfg
+       EpochCommitteeRotation.tla)
 
 Cross-references:
-  - src/crypto/random.cpp:70-100 (`select_m_creators` — the hybrid
-    Fisher-Yates K-of-N selector that the spec's
-    EpochCommitteeSelect abstracts; S-020 closure).
-  - src/crypto/random.cpp:169-175 (`epoch_committee_seed` — the
-    per-epoch + per-shard seed derivation that combines epoch_rand
-    with shard_id under the "shard-committee" domain separator;
-    the beacon-anchoring point for the rotation surface).
-  - src/node/node.cpp:909-934 (`Node::current_epoch_index` +
-    `Node::current_epoch_rand` — the epoch derivation logic
-    `epoch_index = chain_.height() / cfg_.epoch_blocks` and the
-    cumulative_rand anchoring at epoch_start - 1).
-  - src/node/validator.cpp:88-91 (`epoch_index = b.index /
-    epoch_blocks_` + `epoch_start = epoch_index * epoch_blocks_`
-    + the resolve_epoch_rand + epoch_committee_seed call).
-  - src/chain/chain.cpp::apply_transactions REGISTER + DEREGISTER
-    branches (the active-set mutation surface that
-    RegisterValidator / DeregisterValidator abstract).
-  - include/determ/chain/params.hpp (the K constant per profile —
-    cluster K=3, regional K=4, global K=5, tactical K=2; the spec
-    uses K=3 as the default cfg).
-  - docs/proofs/tla/ChainPrevHashLink.tla (FB30) — sibling FB-track
-    spec; INV_AppendOnly's append-only ghost-history pattern is
-    the structural template for this spec's INV_HistoryMonotone.
-  - docs/proofs/tla/Consensus.tla (FB1) — the K-of-K committee
-    safety invariant that this spec's per-epoch committee draw
-    feeds; FB1 covers the within-epoch consensus surface; this
-    spec covers the across-epoch rotation surface.
-  - docs/proofs/tla/Sharding.tla (FB2) — sibling shard-aware
-    state machine; the per-shard committee derivation uses the
-    same epoch_committee_seed but with the shard_id parameter;
-    this spec abstracts the shard dimension into the
-    EpochCommitteeSelect's beacon input (the cfg uses a single
-    shard implicitly).
-  - docs/proofs/tla/F2ViewReconciliation.tla (FB22) — closely
-    related sibling: F2 handles the within-round committee view
-    reconciliation; this spec covers the across-epoch committee
-    rotation that drives the per-round committee membership.
-  - docs/proofs/EquivocationSlashing.md (FA6) — the slashing
-    surface that responds to within-epoch equivocations; the
-    rotation contract here ensures the at-risk committee changes
-    across epochs.
-  - docs/proofs/RegionalSharding.md (R4) — the region-aware
-    overlay on top of this base rotation; R4 layers
-    eligible_in_region filtering plus under-quorum merge onto the
-    base rotation that this spec covers.
-  - docs/proofs/UnderQuorumMerge.md (R7) — the under-quorum
-    branch when |active_validators| < K; this spec's
-    `INV_CommitteeSizeIsK` accommodates the full-pool fallback
-    case in its disjunction.
-  - SECURITY.md §S-020 (hybrid Fisher-Yates closure) — the
-    selection-function determinism + bias bound that
-    EpochCommitteeSelect abstracts.
-  - SECURITY.md §S-024 (formally-accepted epoch_blocks parameter
-    + its bias bound) — the epoch parameter the spec's MaxEpoch
-    constant abstracts.
+  - src/crypto/random.cpp:70-100  select_m_creators (hybrid
+    rejection-sampling / partial-Fisher-Yates selector; S-020).
+  - src/crypto/random.cpp:169-175 epoch_committee_seed.
+  - src/node/node.cpp:909-934     current_epoch_index /
+    current_epoch_rand (beacon anchoring).
+  - src/node/validator.cpp:89-132 receiver-side replay of the
+    draw (the T-ER4 replay conjunct's ground truth).
+  - src/chain/chain.cpp::apply_transactions REGISTER/DEREGISTER.
+  - include/determ/chain/params.hpp (K per profile; cfg uses K=3).
+  - docs/proofs/tla/Consensus.tla (FB1, within-epoch surface),
+    F2ViewReconciliation.tla (FB22), ChainPrevHashLink.tla (FB30,
+    append-only ghost-history pattern INV_HistoryMonotone mirrors).
+  - docs/proofs/UnderQuorumMerge.md (R7) — owns |pool| < K.
+  - SECURITY.md S-020 (selector determinism + bias bound),
+    S-024 (epoch_blocks), Preliminaries A2/A3.
 *)
 
-EXTENDS Integers, Sequences, FiniteSets, TLC
+EXTENDS Integers, FiniteSets, TLC
 
 CONSTANTS
-    ValidatorPool,      \* finite universe of validator domain IDs
-                         \* (SUBSET of strings — registered validator
-                         \*  domains across all active/inactive history)
-    K,                  \* committee size (Nat ≥ 1; per genesis_config
-                         \*  block_sig_committee_size)
-    MaxEpoch,           \* spec-time bound on the number of epochs the
-                         \*  model enumerates (Nat ≥ 1; production has
-                         \*  unbounded epochs)
-    BeaconValues         \* finite universe of beacon hashes feeding
-                         \*  epoch_committee_seed; SUBSET of opaque
-                         \*  beacon-hash values
+    ValidatorPool,   \* finite SUBSET of Nat — validator ids
+    K,               \* committee size (block_sig_committee_size)
+    MaxEpoch,        \* TLC bound on epoch count (production: unbounded)
+    MaxBeacon        \* beacon universe 1..MaxBeacon (production: 2^256 hashes)
 
 ASSUME ConfigOK ==
-    /\ Cardinality(ValidatorPool) >= K
-       \* Need at least K validators in the universe so some committee
-       \* draw is feasible (genesis pre-registers >= K validators per
-       \* the chain bootstrap contract).
+    /\ ValidatorPool \subseteq Nat
     /\ K \in Nat /\ K >= 1
-    /\ MaxEpoch \in Nat /\ MaxEpoch >= 1
-    /\ Cardinality(BeaconValues) >= 2
-       \* >= 2 so BeaconUpdate has a distinct alternative value to
-       \* swap to (witnesses the rotation surface reachably).
+    /\ Cardinality(ValidatorPool) >= K + 1   \* multi-candidate regime
+    /\ MaxEpoch \in Nat /\ MaxEpoch >= 2     \* >= 2 draws so a rotation pair exists
+    /\ MaxBeacon \in Nat /\ MaxBeacon >= 2   \* freshness guard needs an alternative
+    /\ MaxBeacon <= K + 1
+       \* Injective beacon->index regime: every reachable pool has
+       \* n = C(|pool|, K) >= C(K+1, K) = K+1 >= MaxBeacon candidate
+       \* committees, so distinct beacons always map to distinct
+       \* candidate indices (b % n = b for b in 1..MaxBeacon-1, and
+       \* the values stay pairwise distinct mod n). This is the
+       \* deterministic projection of "fresh seed => fresh draw".
 
 \* -----------------------------------------------------------------
-\* §1. Helpers — abstract committee-selection operator.
+\* §1. Selector — beacon-indexed ranked k-subset.
 \* -----------------------------------------------------------------
-\*
-\* EpochCommitteeSelect(pool, beacon, k):
-\*   The abstract spec-layer projection of
-\*   `crypto::select_m_creators(crypto::epoch_committee_seed(epoch_rand,
-\*   shard_id), avail_domains.size(), m)`. Returns a SUBSET of `pool`
-\*   of cardinality `min(k, |pool|)` that is a deterministic function
-\*   of its three inputs (same `(pool, beacon, k)` triple ⇒ same
-\*   output).
-\*
-\* The deterministic-function property is the structural witness
-\* for INV_DeterministicSelection (T-ER1). The cryptographic
-\* uniformity property (the index selection is uniform over [0, |pool|)
-\* per S-020) is NOT modeled here — that's FB23 FrostVerify.tla / the
-\* Preliminaries §2.3 CSPRNG uniformity assumption A3. This spec
-\* asserts purity only: distinct inputs may produce distinct outputs,
-\* but the same input always produces the same output.
-\*
-\* For TLC tractability we materialize the selection via a CHOOSE
-\* over the candidates SUBSET universe. The key property TLC checks
-\* is PURITY: the same `(pool, beacon, k)` triple ALWAYS returns
-\* the same SUBSET. CHOOSE is the standard TLA+ idiom for a
-\* deterministic-but-underspecified function: the chosen element
-\* is determined by TLA+'s enumeration order, but the IMPORTANT
-\* contract is that it is a deterministic function of the inputs.
-\*
-\* The beacon dependency is threaded via the `BeaconOrdinal`
-\* abstraction below: each beacon value maps to a deterministic
-\* ordinal that influences which candidate CHOOSE picks. Two
-\* distinct beacons CAN produce distinct ordinals (and therefore
-\* potentially distinct committees); the same beacon ALWAYS
-\* produces the same ordinal (and therefore the same committee).
-\*
-\* (Note: for K >= |pool|, the committee equals the full pool by
-\* definition — the under-quorum branch where no rotation is
-\* structurally possible at this pool size.)
 
-\* For the purity-only contract: CHOOSE on a deterministic predicate
-\* over a deterministic candidates set is itself deterministic; the
-\* same `(pool, beacon, k)` triple ALWAYS reproduces the same
-\* SUBSET. CHOOSE may select a beacon-INDEPENDENT element in some
-\* TLC enumerations (CHOOSE picks the first element under TLA+
-\* enumeration order, which doesn't strictly depend on the beacon
-\* value within the predicate body); the spec's
-\* INV_DeterministicSelection only requires the bidirectional
-\* purity contract: same inputs → same output. The "distinct
-\* beacons → potentially different committees" property is the
-\* CONVERSE direction (a permission, not a requirement) and is
-\* exercised reachably in TLC traces via the BeaconUpdate action
-\* + the PROP_EventualRotation forward-progress witness — which
-\* uses the active-set evolution (Register/Deregister) as the
-\* primary rotation driver, with beacon-evolution as a secondary
-\* driver.
+MaxOf(S) == CHOOSE x \in S : \A y \in S : y <= x
+
+\* Strict total order on distinct finite sets of naturals:
+\* S < T  iff  max(S symdiff T) \in T  — equivalent to comparing the
+\* binary encodings Sum{2^v : v \in S}. Fixed, input-independent.
+SubsetLess(S, T) ==
+    LET D == (S \ T) \cup (T \ S)
+    IN  /\ D # {}
+        /\ MaxOf(D) \in T
+
+\* The (beacon % n)-th k-subset of pool under SubsetLess order.
+\* Pure function of (pool, beacon, k): ranks are injective, so the
+\* CHOOSE has a unique satisfier. Abstracts select_m_creators(
+\* epoch_committee_seed(beacon, shard), |pool|, k) — determinism and
+\* beacon-sensitivity are kept; uniformity (S-020) is not modeled.
 EpochCommitteeSelect(pool, beacon, k) ==
-    LET effective_k == IF Cardinality(pool) <= k
-                       THEN Cardinality(pool)
-                       ELSE k
-        candidates  == { S \in SUBSET pool : Cardinality(S) = effective_k }
-    IN  IF candidates = {}
-        THEN {}
-        ELSE \* Deterministic selection — the same (pool, beacon, k)
-             \* triple always reproduces the same SUBSET. The beacon
-             \* is threaded into the predicate as a witness of the
-             \* abstract pre-image discriminator (the C++ side's
-             \* SHA-256-derived random_state is what makes distinct
-             \* beacons select distinct committees on uniform
-             \* probability; the spec abstracts this to "potentially
-             \* distinct" since the abstract uniformity is
-             \* Preliminaries §2.3 territory).
-             CHOOSE S \in candidates :
-                \A T \in candidates :
-                   \/ T = S
-                   \/ <<"COMMITTEE-RANK", beacon, S>>
-                      \in {<<"COMMITTEE-RANK", beacon, U>> : U \in candidates}
+    LET ek    == IF Cardinality(pool) <= k THEN Cardinality(pool) ELSE k
+        cands == { S \in SUBSET pool : Cardinality(S) = ek }
+        n     == Cardinality(cands)
+        idx   == beacon % n
+    IN  CHOOSE S \in cands :
+            Cardinality({ T \in cands : SubsetLess(T, S) }) = idx
+
+\* Machine-checked beacon-sensitivity (requirement the original
+\* beacon-blind selector failed): every pool with more than one
+\* K-subset has two beacons that select different committees.
+ASSUME BeaconSensitivity ==
+    \A P \in SUBSET ValidatorPool :
+        Cardinality(P) > K =>
+            \E b1, b2 \in 1..MaxBeacon :
+                /\ b1 # b2
+                /\ EpochCommitteeSelect(P, b1, K) # EpochCommitteeSelect(P, b2, K)
 
 \* -----------------------------------------------------------------
 \* §2. Variables.
 \* -----------------------------------------------------------------
 
 VARIABLES
-    epoch,                  \* Nat — current epoch number (monotone
-                             \*  non-decreasing across AdvanceEpoch)
-    committee_history,      \* function {0..epoch} -> SUBSET ValidatorPool —
-                             \*  per-epoch K-committee record; only
-                             \*  grown by AdvanceEpoch
-    beacon_history,         \* function {0..epoch+1} -> BeaconValues —
-                             \*  per-epoch beacon feeding the seed;
-                             \*  BeaconUpdate may advance one step
-                             \*  ahead of AdvanceEpoch (modeling the
-                             \*  chain accumulating randomness for
-                             \*  the next epoch's seed)
-    active_validators,      \* SUBSET ValidatorPool — currently
-                             \*  registered validators (mutated by
-                             \*  RegisterValidator / DeregisterValidator)
-    selected_from           \* function {0..epoch} -> SUBSET ValidatorPool —
-                             \*  ghost field: snapshot of
-                             \*  active_validators at the moment
-                             \*  committee_history[e] was drawn.
-                             \*  Required for INV_DeterministicSelection's
-                             \*  "same active set at the time of
-                             \*  selection" antecedent; the live
-                             \*  active_validators may have evolved
-                             \*  post-selection via Register/Deregister.
+    epoch,              \* Nat — current epoch (monotone via AdvanceEpoch)
+    beacon,             \* 1..MaxBeacon — live chain-randomness accumulator
+    committee_history,  \* {0..epoch} -> SUBSET ValidatorPool — per-epoch draw
+    beacon_history,     \* {0..epoch} -> 1..MaxBeacon — beacon at each draw
+    active_validators,  \* SUBSET ValidatorPool — live registry
+    selected_from       \* {0..epoch} -> SUBSET ValidatorPool — ghost:
+                        \*   active_validators snapshot at each draw
 
-vars == <<epoch, committee_history, beacon_history, active_validators,
-          selected_from>>
+vars == <<epoch, beacon, committee_history, beacon_history,
+          active_validators, selected_from>>
 
 \* -----------------------------------------------------------------
-\* §3. Initial state.
+\* §3. Initial state — genesis epoch 0.
 \* -----------------------------------------------------------------
-\*
-\* Epoch 0 is the genesis epoch: the initial committee is drawn from
-\* the initial active set (the chain's bootstrap validator set —
-\* typically K..2K validators per the genesis_config pre-registration
-\* contract). The beacon for epoch 0 is CHOSEN from BeaconValues; the
-\* beacon for epoch 1 is ALSO pre-set (modeling the chain's
-\* accumulated randomness through the first epoch_blocks blocks
-\* being available before epoch 1 starts).
 
-InitialActive == CHOOSE S \in SUBSET ValidatorPool : Cardinality(S) = K
-InitialBeacon == CHOOSE b \in BeaconValues : TRUE
+InitialActive == CHOOSE S \in SUBSET ValidatorPool : Cardinality(S) = K + 1
+InitialBeacon == 1
 
 Init ==
     /\ epoch = 0
+    /\ beacon = InitialBeacon
     /\ active_validators = InitialActive
-    /\ beacon_history = (0 :> InitialBeacon) @@ (1 :> InitialBeacon)
+    /\ beacon_history    = (0 :> InitialBeacon)
     /\ committee_history = (0 :> EpochCommitteeSelect(InitialActive,
-                                                       InitialBeacon, K))
-    /\ selected_from = (0 :> InitialActive)
+                                                      InitialBeacon, K))
+    /\ selected_from     = (0 :> InitialActive)
 
 \* -----------------------------------------------------------------
 \* §4. Actions.
 \* -----------------------------------------------------------------
 
-\* AdvanceEpoch: epoch -> epoch+1; draws the new committee from
-\* `active_validators` keyed by `beacon_history[epoch+1]` (which
-\* BeaconUpdate must have set already). Stores the committee in
-\* `committee_history[epoch+1]` and snapshots the live
-\* active_validators into `selected_from[epoch+1]` for the
-\* deterministic-selection invariant's antecedent.
-\*
-\* Pre-condition: epoch < MaxEpoch (bounds TLC); beacon_history[epoch+1]
-\* is defined (BeaconUpdate has fired); Cardinality(active_validators)
-\* >= 1 (no empty-set committee — degenerate under-quorum case
-\* handled by R7 UnderQuorumMerge.tla).
-
 AdvanceEpoch ==
     /\ epoch < MaxEpoch
-    /\ (epoch + 1) \in DOMAIN beacon_history
-    /\ Cardinality(active_validators) >= 1
+    /\ beacon # beacon_history[epoch]
+       \* fresh seed: consecutive epoch seeds differ (A2 — equality
+       \* would be a cumulative_rand SHA-256 collision)
+    /\ Cardinality(active_validators) > K
+       \* modeled regime (see header); code fail-fasts below K
     /\ epoch' = epoch + 1
-    /\ LET new_beacon == beacon_history[epoch + 1] IN
-       LET new_committee == EpochCommitteeSelect(active_validators,
-                                                  new_beacon, K) IN
-       /\ committee_history' = (epoch + 1 :> new_committee)
-                              @@ committee_history
-       /\ selected_from'    = (epoch + 1 :> active_validators)
-                              @@ selected_from
-    /\ UNCHANGED <<beacon_history, active_validators>>
+    /\ committee_history' = committee_history
+           @@ ((epoch + 1) :> EpochCommitteeSelect(active_validators,
+                                                   beacon, K))
+    /\ beacon_history'    = beacon_history @@ ((epoch + 1) :> beacon)
+    /\ selected_from'     = selected_from  @@ ((epoch + 1) :> active_validators)
+    /\ UNCHANGED <<beacon, active_validators>>
 
-\* RegisterValidator(v): v in ValidatorPool \ active_validators ->
-\* add to active_validators. Mirrors the REGISTER tx apply path
-\* (with the active_from delay collapsed — the spec models the
-\* post-activation state).
+BeaconAdvance ==
+    /\ beacon' = (beacon % MaxBeacon) + 1
+    /\ UNCHANGED <<epoch, committee_history, beacon_history,
+                   active_validators, selected_from>>
 
 RegisterValidator(v) ==
-    /\ v \in ValidatorPool
-    /\ v \notin active_validators
+    /\ v \in ValidatorPool \ active_validators
     /\ active_validators' = active_validators \cup {v}
-    /\ UNCHANGED <<epoch, committee_history, beacon_history,
+    /\ UNCHANGED <<epoch, beacon, committee_history, beacon_history,
                    selected_from>>
-
-\* DeregisterValidator(v): v in active_validators -> remove from
-\* active_validators. Mirrors the DEREGISTER tx apply path (with
-\* the inactive_from delay collapsed — the spec models the
-\* post-deactivation state). The validator may have been in a
-\* past committee (committee_history captures historical snapshots
-\* via selected_from; current_active is what next AdvanceEpoch
-\* samples from).
 
 DeregisterValidator(v) ==
     /\ v \in active_validators
-    /\ Cardinality(active_validators) > 1
-       \* Keep at least one validator active so AdvanceEpoch's
-       \* `Cardinality(active_validators) >= 1` pre-condition stays
-       \* satisfiable (under-quorum cases are R7 territory).
+    /\ Cardinality(active_validators) >= K + 2   \* stay in the >= K+1 regime
     /\ active_validators' = active_validators \ {v}
-    /\ UNCHANGED <<epoch, committee_history, beacon_history,
+    /\ UNCHANGED <<epoch, beacon, committee_history, beacon_history,
                    selected_from>>
-
-\* BeaconUpdate(b): updates the beacon for the NEXT epoch
-\* (`beacon_history[epoch+1] = b`). Models the chain accumulating
-\* randomness through the current epoch_blocks and producing the
-\* seed for the next epoch. May fire repeatedly per epoch (the
-\* chain accumulates randomness over many blocks); only the most
-\* recent value before AdvanceEpoch matters for the next
-\* committee draw.
-
-BeaconUpdate(b) ==
-    /\ b \in BeaconValues
-    /\ epoch < MaxEpoch
-    /\ beacon_history' = (epoch + 1 :> b) @@ beacon_history
-    /\ UNCHANGED <<epoch, committee_history, active_validators,
-                   selected_from>>
-
-\* Stutter (TLC bounds the state space; invariants are evaluated
-\* at every reachable state along the way).
-
-Stutter ==
-    /\ epoch >= MaxEpoch
-    /\ UNCHANGED vars
 
 Next ==
     \/ AdvanceEpoch
+    \/ BeaconAdvance
     \/ \E v \in ValidatorPool : RegisterValidator(v)
     \/ \E v \in ValidatorPool : DeregisterValidator(v)
-    \/ \E b \in BeaconValues : BeaconUpdate(b)
-    \/ Stutter
 
+\* Fairness: SF on AdvanceEpoch (epoch boundaries recur; SF, not WF,
+\* because the cycling beacon transiently re-disables the freshness
+\* guard) + WF on BeaconAdvance (block production continues). Pool
+\* churn is left unfair — adversarial.
 Spec == Init /\ [][Next]_vars
-             /\ WF_vars(AdvanceEpoch)
-             /\ WF_vars(\E b \in BeaconValues : BeaconUpdate(b))
-             /\ WF_vars(\E v \in ValidatorPool : RegisterValidator(v))
-             /\ WF_vars(\E v \in ValidatorPool : DeregisterValidator(v))
+             /\ SF_vars(AdvanceEpoch)
+             /\ WF_vars(BeaconAdvance)
 
 \* -----------------------------------------------------------------
 \* §5. Invariants — T-ER1..T-ER4 + TypeOK.
 \* -----------------------------------------------------------------
 
-\* TypeOK — shape predicate for all variables.
-\*
-\* committee_history's domain grows monotonically across AdvanceEpoch;
-\* at any state it's a function {0..epoch} -> SUBSET ValidatorPool.
-\* selected_from has the same domain shape. beacon_history's domain
-\* is {0..epoch+1} (BeaconUpdate may set the next epoch's beacon
-\* one step ahead).
-
 TypeOK ==
     /\ epoch \in 0..MaxEpoch
-    /\ active_validators \in SUBSET ValidatorPool
+    /\ beacon \in 1..MaxBeacon
+    /\ active_validators \subseteq ValidatorPool
+    /\ Cardinality(active_validators) >= K + 1   \* regime floor
     /\ DOMAIN committee_history \subseteq 0..MaxEpoch
-    /\ DOMAIN selected_from \subseteq 0..MaxEpoch
-    /\ DOMAIN beacon_history \subseteq 0..(MaxEpoch + 1)
+    /\ DOMAIN beacon_history    \subseteq 0..MaxEpoch
+    /\ DOMAIN selected_from     \subseteq 0..MaxEpoch
     /\ \A e \in DOMAIN committee_history :
-          committee_history[e] \in SUBSET ValidatorPool
-    /\ \A e \in DOMAIN selected_from :
-          selected_from[e] \in SUBSET ValidatorPool
-    /\ \A e \in DOMAIN beacon_history :
-          beacon_history[e] \in BeaconValues
+          committee_history[e] \subseteq ValidatorPool
+    /\ \A e \in DOMAIN beacon_history : beacon_history[e] \in 1..MaxBeacon
+    /\ \A e \in DOMAIN selected_from : selected_from[e] \subseteq ValidatorPool
 
-\* INV_CommitteeSizeIsK (T-ER2).
-\*
-\* Every committee in committee_history has cardinality K when the
-\* active pool at the time of selection had at least K members;
-\* otherwise the committee equals the full active set (the under-
-\* quorum branch where R7 UnderQuorumMerge.tla kicks in).
-\*
-\* Structural witness: EpochCommitteeSelect's effective_k computation
-\* picks min(k, |pool|); the candidates set is non-empty by
-\* construction; CHOOSE returns a member of cardinality effective_k.
-
+\* T-ER2 — every recorded committee has cardinality exactly K.
+\* (Under-quorum fallback branch deleted: the code throws below K
+\* rather than returning an undersized committee — see header.)
 INV_CommitteeSizeIsK ==
     \A e \in DOMAIN committee_history :
-       LET sel_pool == selected_from[e] IN
-       IF Cardinality(sel_pool) >= K
-       THEN Cardinality(committee_history[e]) = K
-       ELSE Cardinality(committee_history[e]) = Cardinality(sel_pool)
+        Cardinality(committee_history[e]) = K
 
-\* INV_CommitteeSubsetActive (T-ER3).
-\*
-\* Every committee member at epoch e was in active_validators at the
-\* moment of selection. The ghost field selected_from[e] captures
-\* the live active_validators at the AdvanceEpoch firing; no
-\* historical pool is consulted by EpochCommitteeSelect.
-\*
-\* Structural witness: AdvanceEpoch passes active_validators to
-\* EpochCommitteeSelect, which returns a SUBSET of its first
-\* argument. The selected_from snapshot is set atomically with
-\* committee_history so the lookup is sound.
-
+\* T-ER3 — committee members were active at draw time (ghost
+\* snapshot selected_from; the live set may evolve afterwards).
 INV_CommitteeSubsetActive ==
     \A e \in DOMAIN committee_history :
-       committee_history[e] \subseteq selected_from[e]
+        committee_history[e] \subseteq selected_from[e]
 
-\* INV_DeterministicSelection (T-ER1).
-\*
-\* For every pair (e1, e2) in the domain of committee_history with
-\* the same beacon AND the same active set at the time of
-\* selection, the committees are byte-identical. State-form
-\* witness of the EpochCommitteeSelect's purity — required for
-\* cross-node consensus convergence under the same chain head.
-\*
-\* Structural witness: EpochCommitteeSelect(pool, beacon, k) is
-\* deterministic on its three inputs (the CHOOSE picks the
-\* unique tagged-tuple winner). If (pool, beacon, k) are
-\* identical across (e1, e2), the SUBSET output is identical.
-
+\* T-ER1 — same (pool, beacon) at two epochs => same committee.
+\* Reachably non-trivial: the cycling beacon can repeat a value at
+\* a later epoch with the pool restored (e.g. epochs 0 and 2).
 INV_DeterministicSelection ==
-    \A e1 \in DOMAIN committee_history :
-       \A e2 \in DOMAIN committee_history :
-          (e1 \in DOMAIN beacon_history /\ e2 \in DOMAIN beacon_history
-           /\ beacon_history[e1] = beacon_history[e2]
-           /\ selected_from[e1] = selected_from[e2])
-          => committee_history[e1] = committee_history[e2]
+    \A e1, e2 \in DOMAIN committee_history :
+        (/\ beacon_history[e1] = beacon_history[e2]
+         /\ selected_from[e1]  = selected_from[e2])
+        => committee_history[e1] = committee_history[e2]
 
-\* INV_HistoryMonotone (T-ER4).
-\*
-\* committee_history only grows across AdvanceEpoch actions;
-\* existing entries are byte-identical across all reachable states.
-\* Structural witness: the AdvanceEpoch action's
-\* `(epoch + 1 :> new_committee) @@ committee_history` clause
-\* PREPENDS a new key; the `@@` operator preserves existing
-\* keys' values verbatim. No other action mutates
-\* committee_history.
-\*
-\* The invariant body asserts that the domain is exactly the
-\* prefix {0..epoch} — a stronger form of "only grows" that
-\* doubles as the domain-shape predicate. Combined with the
-\* TypeOK predicate, this pins both the shape and the monotone-
-\* domain property.
-
+\* T-ER4 — histories cover exactly 0..epoch and every entry replays:
+\* committee_history[e] equals the selector applied to its recorded
+\* inputs (validator.cpp:126-132's cross-check, spec-level). The
+\* replay conjunct doubles as the immutability pin: a rewritten
+\* entry could no longer match its recorded inputs.
 INV_HistoryMonotone ==
     /\ DOMAIN committee_history = 0..epoch
-    /\ DOMAIN selected_from    = 0..epoch
-    /\ \A e \in DOMAIN committee_history :
-          committee_history[e] = EpochCommitteeSelect(
-              selected_from[e],
-              beacon_history[e],
-              K)
+    /\ DOMAIN beacon_history    = 0..epoch
+    /\ DOMAIN selected_from     = 0..epoch
+    /\ \A e \in 0..epoch :
+          committee_history[e] = EpochCommitteeSelect(selected_from[e],
+                                                      beacon_history[e], K)
 
 \* -----------------------------------------------------------------
-\* §6. Temporal properties.
+\* §6. Liveness — T-ER5 (restated; see header).
 \* -----------------------------------------------------------------
 
-\* PROP_EventualRotation (T-ER5).
-\*
-\* Under fairness on AdvanceEpoch + on either BeaconUpdate or
-\* Register/Deregister, the committee changes infinitely often
-\* when |active_validators| > K (so multiple distinct committees
-\* exist within the pool).
-\*
-\* The forward-progress contract: the rotation rationale (defeating
-\* long-run committee capture by adversarial sticky-membership)
-\* requires actual rotation in the limit. The bounded-MaxEpoch
-\* form of this asserts: across any bounded schedule with
-\* |active_validators| > K maintained throughout AND at least one
-\* beacon-change or pool-change between consecutive AdvanceEpoch
-\* firings, the committee at SOME epoch differs from the
-\* committee at the prior epoch.
-\*
-\* The TLA+ liveness body: eventually some pair of consecutive
-\* epochs has different committees, witnessing rotation.
+RotationPair ==
+    \E e \in DOMAIN committee_history :
+        /\ (e + 1) \in DOMAIN committee_history
+        /\ committee_history[e] # committee_history[e + 1]
 
+\* A behavior whose pool never changes must rotate: fresh beacons at
+\* a fixed pool select distinct candidate indices (injective regime,
+\* ConfigOK). Behaviors with pool churn make no rotation promise at
+\* this abstraction (probabilistic in production — header, T-ER5).
 PROP_EventualRotation ==
-    <>(\E e \in DOMAIN committee_history :
-          /\ (e + 1) \in DOMAIN committee_history
-          /\ committee_history[e] # committee_history[e + 1])
+    [](active_validators = InitialActive) => <>RotationPair
 
-\* PROP_NoCommitteeFreeze.
-\*
-\* If |active_validators| >= K + 1 (so multiple distinct
-\* K-committees exist within the pool), the same committee
-\* cannot persist for more than `MaxEpoch / 2` consecutive
-\* epochs without a beacon change OR a pool change.
-\*
-\* State-machine witness for the no-stuck-committee contract:
-\* even under adversarial beacon + pool stability, the spec's
-\* bounded-epoch enumeration shows the committee changes
-\* within a bounded window — at finite MaxEpoch the bound
-\* collapses to "the committee changes at LEAST once across
-\* the bounded schedule when the cardinality-based condition
-\* holds".
-\*
-\* Bounded form: across the MaxEpoch-bounded schedule, it is
-\* eventually the case that for some e, beacon_history[e+1] /=
-\* beacon_history[e] OR selected_from[e+1] /= selected_from[e]
-\* OR committee_history[e+1] /= committee_history[e]. The
-\* "committee freezes for half the bounded run" anti-condition
-\* fails (witness: TLC enumerates a schedule reaching this).
-
-PROP_NoCommitteeFreeze ==
-    [](Cardinality(active_validators) >= K + 1
-       => <>(\E e \in DOMAIN committee_history :
-               /\ (e + 1) \in DOMAIN committee_history
-               /\ \/ beacon_history[e + 1] # beacon_history[e]
-                  \/ selected_from[e + 1] # selected_from[e]
-                  \/ committee_history[e + 1] # committee_history[e]))
-
-\* -----------------------------------------------------------------
-\* §7. Soundness commentary — what TLC checks vs. what is abstracted.
-\* -----------------------------------------------------------------
-\*
-\* The rotation contract is pinned at the state-machine layer by
-\* the five invariants + two temporal properties. The abstraction
-\* boundary:
-\*
-\*   * EpochCommitteeSelect's purity is what TLC checks — same
-\*     `(pool, beacon, k)` ⇒ same SUBSET output. The cryptographic
-\*     uniformity property (S-020's hybrid Fisher-Yates produces
-\*     a uniform random K-subset given a uniform SHA-256-derived
-\*     index stream) is NOT modeled here. That's FB23 FrostVerify.tla
-\*     + Preliminaries §2.3 CSPRNG uniformity territory.
-\*
-\*   * The beacon-evolution mechanics (cumulative_rand accumulating
-\*     across the chain's block production within an epoch) are
-\*     abstracted as the BeaconUpdate action. The actual chain-
-\*     layer accumulation is at `src/node/node.cpp::current_epoch_rand`
-\*     lines 914-934 (anchored at `chain_.at(epoch_start -
-\*     1).cumulative_rand`); the spec lifts this to a pure
-\*     beacon-value-from-finite-universe abstraction.
-\*
-\*   * Activation / deactivation delays (REGISTER's `active_from
-\*     = height + derive_delay(height)` + DEREGISTER's
-\*     `inactive_from = height + derive_delay(height)`) are
-\*     collapsed — the spec models the post-active-from /
-\*     post-inactive-from state. The randomized delay's distribution
-\*     bounds + their interaction with the per-epoch committee
-\*     draw is a separate concern (covered by S-035 + test-
-\*     randomized-delay R*).
-\*
-\*   * R4 region-aware filtering and R7 under-quorum merge are
-\*     NOT modeled. The spec covers the BASE rotation contract;
-\*     R4 layers `eligible_in_region` on top of `active_validators`;
-\*     R7 widens the pool with refugees when under-quorum. These
-\*     are separate FB-track surfaces (Sharding.tla + a future
-\*     UnderQuorumMerge.tla territory).
-\*
-\*   * The within-epoch consensus surface (K-of-K block-sig phase,
-\*     proposer rotation under aborts, equivocation slashing) is
-\*     NOT modeled here. This spec covers across-epoch committee
-\*     rotation only; the within-epoch surface is FB1 Consensus.tla
-\*     + FB22 F2ViewReconciliation.tla territory.
-\*
-\* What this spec adds beyond existing FB-track surfaces:
-\*
-\*   * The state-machine witness that committee rotation is
-\*     deterministic (T-ER1) AND grows monotonically (T-ER4) AND
-\*     stays subset-bounded by the live active set (T-ER3) AND
-\*     respects the K committee-size contract (T-ER2) across
-\*     every reachable interleaving of AdvanceEpoch / Register /
-\*     Deregister / BeaconUpdate.
-\*
-\*   * The forward-progress witness (T-ER5): rotation is not just
-\*     legal but eventual under fairness. The bounded-MaxEpoch
-\*     form captures the no-stuck-committee discipline that
-\*     PROP_NoCommitteeFreeze formalizes.
-\*
-\* What the spec does NOT check (consistent with the §scope above):
-\*
-\*   * Cryptographic uniformity of the SHA-256-derived index
-\*     stream feeding `select_m_creators` (FB23 + Preliminaries
-\*     territory).
-\*   * Quantitative bias bounds on the K/N ratio (S-020 closure
-\*     narrative — the spec asserts the structural form; the
-\*     bias-bound is the analytic side).
-\*   * The chain-layer apply discipline that gates REGISTER /
-\*     DEREGISTER (FB5 AccountState.tla + FB8 StakeLifecycle.tla
-\*     territory).
-\*   * Snapshot / restore round-trip of the registry state (FB31
-\*     SnapshotIntegrity.tla covers the `s:` namespace's snapshot
-\*     lifecycle that this spec's active_validators abstracts).
-
-============================================================================
-\* Cross-references.
-\*
-\* C++ enforcement:
-\*   src/crypto/random.cpp:70-100    : select_m_creators (the hybrid
-\*       Fisher-Yates K-of-N selector that EpochCommitteeSelect
-\*       abstracts; S-020 closure).
-\*   src/crypto/random.cpp:169-175   : epoch_committee_seed (the
-\*       per-epoch + per-shard seed derivation that combines
-\*       epoch_rand with shard_id under the "shard-committee"
-\*       domain separator).
-\*   src/node/node.cpp:909-934       : Node::current_epoch_index +
-\*       Node::current_epoch_rand (the epoch derivation logic
-\*       `epoch_index = chain_.height() / cfg_.epoch_blocks`).
-\*   src/node/validator.cpp:88-91   : the validator's per-block
-\*       epoch_index + epoch_start + resolve_epoch_rand +
-\*       epoch_committee_seed call sequence; the receiver-side
-\*       cross-check that the candidate block's committee matches
-\*       the deterministic draw from the epoch seed.
-\*   src/chain/chain.cpp::apply_transactions REGISTER + DEREGISTER
-\*       branches — the active-set mutation surface that
-\*       RegisterValidator / DeregisterValidator abstract.
-\*
-\* SECURITY.md §S-020 (hybrid Fisher-Yates closure) — the
-\*   selection-function determinism + bias bound that
-\*   EpochCommitteeSelect's purity abstracts.
-\*
-\* SECURITY.md §S-024 (formally-accepted epoch_blocks parameter
-\*   + its bias bound) — the epoch parameter the spec's
-\*   MaxEpoch constant abstracts.
-\*
-\* Preliminaries.md §2.1 (A2 SHA-256 collision resistance) +
-\*   §2.3 (A3 CSPRNG uniformity) : the cryptographic
-\*   assumptions underlying EpochCommitteeSelect's determinism +
-\*   uniformity. The spec asserts the determinism side (purity);
-\*   the uniformity side is the FB23 / Preliminaries side.
-\*
-\* FB22 F2ViewReconciliation.tla (v2.7 F2 view-reconciliation),
-\* FB23 FrostVerify.tla (Ed25519 EUF-CMA model),
-\* FB24 MakeContribCommitment.tla (S-030 D2 commit-binding),
-\* FB25 RateLimiterEviction.tla (S-014 F-1 lifetime-bound),
-\* FB26 BlockchainStateIntegrity.tla (S-021 + S-033 + S-038),
-\* FB27 JsonValidation.tla (S-018 clear-diagnostic),
-\* FB28 S006ContribMsgEquivocation.tla (S-006 Phase-1 detection),
-\* FB29 BlockTimestampMonotonic.tla (R24A5 timestamp monotonicity),
-\* FB30 ChainPrevHashLink.tla (R25 prev_hash chain-link state
-\*   machine — INV_AppendOnly's append-only ghost pattern is the
-\*   structural template this spec's INV_HistoryMonotone mirrors),
-\* FB31 SnapshotIntegrity.tla (S-012 + S-037 + S-038 snapshot
-\*   integrity composition),
-\* FB32 CrossShardReceiptRoundtrip.tla (cross-shard receipt
-\*   lifecycle composition),
-\* FB33 MempoolAdmission.tla (bounded mempool admission state
-\*   machine; S-008 + S-002 + FA-Apply-3 + FB23) : sibling
-\*   FB-track specs; style template for this module.
-\*
-\* Runtime regressions:
-\*   tools/test_committee_determinism.sh — the in-process test
-\*     that pins the EpochCommitteeSelect's purity contract at the
-\*     C++ layer (if present; otherwise the property is implicit
-\*     in the cross-node consensus tests like
-\*     tools/test_chain_sync_continuity.sh).
-\*   tools/test_block_validator_extensive.sh — the
-\*     check_creator_selection regression that exercises the
-\*     receiver-side cross-check at validator.cpp:88-132; INV_3
-\*     CommitteeSubsetActive's structural witness.
-\*   tools/test_node_registry.sh — REGISTER + DEREGISTER apply
-\*     surface that this spec's Register/Deregister abstracts.
-\*
-\* Doc updates:
-\*   CHECK-RESULTS.md FB34 row — added.
 ============================================================================
