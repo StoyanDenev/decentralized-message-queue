@@ -96,10 +96,27 @@ byte-exactly by both §3.13 gate halves against `tools/vectors/p256_h2c.json` �
 15 genuine RFC 9380 appendix vectors (K.1 + J.1.1) fetched from rfc-editor.org
 and re-verified by two independent python implementations before import.
 
+## §3.9b OPRF protocol layer (same module)
+
+The RFC 9497 OPRF(P-256, SHA-256) protocol is SHIPPED on top of the
+groundwork, single-element, modes OPRF (0x00) and VOPRF (0x01):
+`determ_p256_oprf_derive_key` / `_blind` / `_evaluate` / `_finalize` and the
+VOPRF DLEQ `determ_p256_voprf_prove` / `_verify` (ComputeComposites +
+GenerateProof/VerifyProof), plus SEC1 `_point_compress` / `_decompress` (the
+OPRF wire format is compressed, Ne=33) and the enablers `_point_add` /
+`_hash_to_scalar`. Written entirely against the module's PUBLIC API. Deterministic
+APIs take the blind / proof-randomness scalars explicitly (testability against
+the appendix vectors; production callers draw them from the CSPRNG). Validated
+by `determ test-p256-oprf-c99` (protocol self-consistency + DLEQ reject paths)
+and byte-exactly by both §3.13 gate halves against `tools/vectors/p256_oprf.json`
+— 4 genuine RFC 9497 A.3.1/A.3.2 appendix vectors fetched from rfc-editor.org
+and re-verified by two independent python RFC 9497 implementations before
+import; the protocol was implemented from the FETCHED RFC text, not memory.
+
 ## Known limitations / future work
 
-- The voprf PROTOCOL layer (blind/evaluate/unblind flow, DLEQ proofs) is the
-  remaining §3.9b work; the cryptographic groundwork above is complete.
+- Single-element only: batch (m>1) DLEQ proofs and the POPRF mode (0x02) are
+  out of the §3.9b scope (add if a batch/POPRF consumer appears).
 - ECDSA-P256 sign/verify is NOT implemented — out of the §3.8c seed's scope
   (ECDSA lands only if a FIPS-profile signing consumer appears).
 - No compressed-point (0x02/0x03) decode — SEC1 uncompressed only.

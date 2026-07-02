@@ -621,11 +621,13 @@ Original plan (retained for the deviation record):
   vector-gate halves via `tools/vectors/p256.json` (11 hazmat-verified
   vectors generated with library-recovered curve parameters — no memory
   constants on either side). Provenance: `src/crypto/p256/README.md`.
-- Remaining: hash-to-curve + mod-n inversion land with the §3.9b OPRF-P256
-  consumer; ECDSA only if a FIPS-profile signing consumer appears;
-  compressed-point decode; NIST CAVP vector imports (generated-vector
-  coverage stands in meanwhile); ConstantTimeInventory + timing-probe rows
-  (next §3.12 sweep).
+- SHIPPED with §3.9b: hash-to-curve, mod-n arithmetic, SEC1 compressed
+  point encode/decode, and the full RFC 9497 OPRF-P256 consumer. Still
+  remaining: ECDSA-P256 (only if a FIPS-profile signing consumer appears);
+  NIST CAVP vector imports (the generated + RFC-appendix coverage stands in
+  meanwhile); the ConstantTimeInventory per-mechanism rows for the P-256
+  module (the tranche-3 timing-probe targets are already registered; the
+  inventory sweep is the next §3.12 follow-up).
 
 ### 3.9a OPRF on secp256k1 from voprf draft + RFC 9380 (~7 days)
 
@@ -634,7 +636,7 @@ Original plan (retained for the deviation record):
 - DLEQ proof generation + verification (for verifiable OPRF)
 - Test vectors from voprf draft + RFC 9380
 
-### 3.9b OPRF on NIST P-256 — **GROUNDWORK SHIPPED** (h2c + mod-n; protocol layer remains)
+### 3.9b OPRF on NIST P-256 — **SHIPPED** (RFC 9497 P256-SHA256, OPRF + VOPRF, single-element)
 
 SHIPPED (src/crypto/p256/p256.c): the two cryptographic prerequisites —
 RFC 9380 hash-to-curve suite P256_XMD:SHA-256_SSWU_RO_ (expand_message_xmd,
@@ -647,9 +649,27 @@ oracle + structural h2c gates) and BOTH §3.13 gate halves over
 tools/vectors/p256_h2c.json — 15 GENUINE RFC 9380 appendix vectors (K.1 ×10 +
 J.1.1 ×5), fetched from rfc-editor.org and re-verified by two independent
 pure-python implementations (297/297 checks) before import; the C99 output is
-byte-exact against all 15. Remaining for full §3.9b (the voprf PROTOCOL
-layer): blind/evaluate/unblind message flow, DLEQ proof generation +
-verification on P-256, and the voprf-draft test vectors.
+byte-exact against all 15.
+
+The voprf PROTOCOL layer is now SHIPPED too (RFC 9497 P256-SHA256,
+single-element): `determ_p256_oprf_derive_key` / `_blind` / `_evaluate` /
+`_finalize` (modes OPRF 0x00 + VOPRF 0x01) and the VOPRF DLEQ
+`determ_p256_voprf_prove` / `_verify` (ComputeComposites + GenerateProof/
+VerifyProof), plus SEC1 `_point_compress` / `_decompress` (the wire format is
+compressed, Ne=33) and the two enablers `_point_add` / `_hash_to_scalar`. The
+protocol layer is written entirely against the module's PUBLIC API (proving
+API sufficiency for downstream consumers). Validated: `determ
+test-p256-oprf-c99` (protocol self-consistency — the §3.3.1 blind/evaluate/
+finalize == direct-Evaluate identity — plus the DLEQ reject paths: tampered
+c / s / eval element / wrong-mode / wrong-key all rejected) AND BOTH §3.13
+gate halves over `tools/vectors/p256_oprf.json` — 4 GENUINE RFC 9497
+A.3.1/A.3.2 appendix vectors (OPRF + VOPRF), fetched from rfc-editor.org and
+re-verified by two independent pure-python RFC 9497 implementations
+(72/72 + 297/297 h2c-anchored) before import; the C99 output including the
+64-byte proof is byte-exact against all 4, and the protocol pseudocode was
+implemented from the FETCHED RFC text, not memory. Remaining for the wider
+§3.9 (out of the §3.9b single-element scope): batch (m>1) proofs, the POPRF
+mode (0x02), and — if a distinct consumer appears — the §3.9a secp256k1 OPRF.
 
 Original plan (retained):
 

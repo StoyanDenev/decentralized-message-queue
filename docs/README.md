@@ -145,7 +145,7 @@ Run the full suite with:
 
 ```bash
 bash tools/run_all.sh                          # all tests + PASS/FAIL summary
-FAST=1 bash tools/run_all.sh                   # in-process subset only (166 tests, ~2-3 min, no flakes)
+FAST=1 bash tools/run_all.sh                   # in-process subset only (167 tests, ~2-3 min, no flakes)
 QUIET=1 bash tools/run_all.sh                  # summary only (no per-test stdout)
 ONLY_PATTERN='test_dapp' bash tools/run_all.sh # subset by regex
 SKIP_PATTERN='test_equiv' bash tools/run_all.sh # skip known-flaky on a platform
