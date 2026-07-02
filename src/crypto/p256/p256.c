@@ -278,13 +278,20 @@ static void pt_scalar_mul(pt* acc, const uint8_t scalar_be[32], const pt* base) 
 /* ── encode / decode / checks (public data — plain branches) ────────────── */
 
 /* big-endian compare: returns 1 iff a < b */
+/* Constant-time big-endian a < b: no early return (P256-CT-1). Reached via
+ * scalar_ok on SECRET scalars (blind / sk / ECDH scalar), so the original
+ * first-differing-byte short-circuit leaked the scalar's leading-byte
+ * structure. Branchless byte-wise borrow chain (LSB-first): a < b iff the
+ * full subtraction borrows out; running time depends only on the fixed
+ * length. Mirrors ed25519's sc_lt_L borrow-chain discipline. */
 static int be_lt(const uint8_t a[32], const uint8_t b[32]) {
+    uint32_t borrow = 0;
     int i;
-    for (i = 0; i < 32; i++) {
-        if (a[i] < b[i]) return 1;
-        if (a[i] > b[i]) return 0;
+    for (i = 31; i >= 0; i--) {
+        uint32_t d = (uint32_t)a[i] - (uint32_t)b[i] - borrow;
+        borrow = (d >> 8) & 1u;      /* set iff a[i] - b[i] - borrow < 0 */
     }
-    return 0;
+    return (int)borrow;              /* a < b iff the final borrow is set */
 }
 static int be_is_zero(const uint8_t a[32]) {
     uint32_t r = 0; int i;
@@ -491,6 +498,7 @@ int determ_p256_scalar_inv_mod_n(uint8_t r[32], const uint8_t a[32]) {
     sc_mont_mul(t, acc, one);
     fe_to_be(r, t);
     determ_secure_zero(am, sizeof am); determ_secure_zero(acc, sizeof acc);
+    determ_secure_zero(t, sizeof t);   /* transiently held a and a^-1 (audit §3.3 Info) */
     return 0;
 }
 
@@ -949,15 +957,18 @@ int determ_p256_oprf_finalize(uint8_t out[32],
     uint8_t* buf;
     uint8_t* heap = 0;
     size_t total = 2 + inputlen + 2 + 33 + 8, off = 0;
+    int rc = -1;
+    /* inv = blind^-1 is the client's secret material; a malicious server can
+     * drive the eval-decode reject below to leave it on the stack, so all
+     * exit paths scrub via the cleanup label (audit §3.1 Low / §3.2 Info). */
     p256_init();
-    if (determ_p256_scalar_inv_mod_n(inv, blind) != 0) return -1;
-    if (oprf_load33(&p, eval33) != 0) return -1;
+    if (determ_p256_scalar_inv_mod_n(inv, blind) != 0) return -1;   /* inv unset */
+    if (oprf_load33(&p, eval33) != 0) goto cleanup;
     pt_scalar_mul(&r, inv, &p);
-    if (oprf_store33(n33, &r) != 0) return -1;
+    if (oprf_store33(n33, &r) != 0) goto cleanup;
     determ_secure_zero(&r, sizeof r);
-    determ_secure_zero(inv, sizeof inv);
     if (total <= sizeof stackbuf) buf = stackbuf;
-    else { heap = (uint8_t*)malloc(total); if (!heap) return -1; buf = heap; }
+    else { heap = (uint8_t*)malloc(total); if (!heap) goto cleanup; buf = heap; }
     buf[off++] = (uint8_t)(inputlen >> 8);
     buf[off++] = (uint8_t)inputlen;
     if (inputlen) { memcpy(buf + off, input, inputlen); off += inputlen; }
@@ -967,7 +978,12 @@ int determ_p256_oprf_finalize(uint8_t out[32],
     determ_sha256(buf, off, out);
     if (heap) { determ_secure_zero(heap, total); free(heap); }
     else determ_secure_zero(stackbuf, sizeof stackbuf);
-    return 0;
+    rc = 0;
+cleanup:
+    determ_secure_zero(inv, sizeof inv);
+    determ_secure_zero(n33, sizeof n33);
+    determ_secure_zero(&p, sizeof p);
+    return rc;
 }
 
 /* ComputeComposites, m = 1 (§2.2.1): seed = Hash(len2(Bm) || Bm ||

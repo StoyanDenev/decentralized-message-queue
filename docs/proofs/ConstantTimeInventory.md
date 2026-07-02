@@ -4,7 +4,7 @@
 
 **Subject:** the secret-input surface and constant-time mechanisms of every module
 in the libsodium-free C99 cryptographic stack — `src/crypto/{sha2,blake2,argon2,
-chacha20,aes,ed25519,x25519,frost}/` — as implemented, function by function.
+chacha20,aes,ed25519,x25519,frost,p256}/` — as implemented, function by function.
 
 **Purpose:** this is the seed inventory for CRYPTO-C99-SPEC.md §3.12 (the
 dudect/ctgrind constant-time verification framework). §3.12 needs a concrete list
@@ -21,7 +21,9 @@ ARX, branchless carry/mask arithmetic, no-table arithmetic S-box, cswap ladder,
 no-short-circuit aggregate compare); the residual data-dependent control flow is
 exhaustively keyed on public values (lengths, public encodings, protocol-mandated
 public constants) with one deliberate by-design exception (Argon2id's
-data-dependent passes, RFC 9106) and two Info-level discipline notes (§4.2).
+data-dependent passes, RFC 9106), two Info-level discipline notes, and one Low
+CT residual — the P-256 `scalar_ok` range check (P256-CT-1) — REMEDIATED
+in-session (§4.2; `be_lt` made branchless).
 
 ---
 
@@ -83,6 +85,7 @@ nothing beyond those lengths.
 | ed25519 | seed, clamped scalar a, prefix, nonce r, S intermediates; FROST scalars via the group API | cswap ladder (`scalarmult`/`sel25519`); branchless `car25519`/`modL`/`sc_lt_L` | verify R-compare → `determ_ct_memcmp` |
 | x25519 | DH scalar, shared secret | Montgomery cswap ladder (`sel25519`), fixed 255 iterations | low-order check = branchless OR-aggregate (result is the public return) |
 | frost | dealer secret + poly coefficients, shares s_i, nonces d_i/e_i, partials z_i, DKG a_0 + PoP nonce, PSS δ coefficients | all secret scalars flow only through the ed25519 CT scalar/point layer | VSS/PoP point compares → `determ_ct_memcmp` (public operands; discipline) |
+| p256 (NIST P-256 / OPRF-P256) | ECDH/base-mul scalar, OPRF blind + input, OPRF server key sk, mod-n scalar operands | double-and-add-always RCB ladder (`pt_scalar_mul` uniform `pt_add`+`pt_cswap`/bit); mask-select field ops (`fe_add`/`fe_sub`/`fe_cswap`/`fe_cmov`); branchless SSWU; Fermat inversions on public exponents | VOPRF DLEQ challenge compare → `determ_ct_memcmp` (public operands; the encodings compared elsewhere are public) |
 
 ---
 
@@ -398,6 +401,116 @@ exactly this.
 `determ_ed25519_point_mul`/`point_add` (public encodings). One discipline note:
 `determ_frost_pss_verify_commit` — see §4.2 CTI-1.
 
+### 2.9 p256 — NIST P-256 (secp256r1) + OPRF-P256 (RFC 9497)
+
+**File:** `src/crypto/p256/p256.c` (public API in
+`include/determ/crypto/p256/p256.h`). CRYPTO-C99-SPEC.md §3.8c (the FIPS-profile
+curve — supplants secp256k1 in the `tactical`/`cluster` profiles) with the §3.9b
+OPRF groundwork (RFC 9380 hash-to-curve) and protocol layer (RFC 9497
+OPRF/VOPRF) in the same module. From-scratch C99, no vendored code (same posture
+as the §2.6 gf[16] Ed25519).
+
+**Secret inputs.**
+- The **scalar** in `determ_p256_base_mul` (`[k]G` — the keygen/DH scalar) and
+  `determ_p256_point_mul` (`[k]P` — the ECDH core; the shared secret is the
+  result's X coordinate); the OPRF **blind** and OPRF **server key `sk`**, both
+  of which reach the same `pt_scalar_mul` ladder via
+  `determ_p256_oprf_blind`/`_evaluate`/`voprf_prove`.
+- The **mod-n scalar operands** of `determ_p256_scalar_mul_mod_n` /
+  `determ_p256_scalar_inv_mod_n` (the OPRF blind-inverse and the `s = r − c·k`
+  proof arithmetic in `determ_p256_voprf_prove` — `sk`, the blind, and the proof
+  randomness `r`).
+- The OPRF **input** `msg` behind `u` in
+  `determ_p256_hash_to_curve`/`_hash_to_scalar` (a user secret in the OPRF
+  setting, per the module header) — it flows through `expand_message_xmd` and the
+  SSWU map.
+
+Public throughout: the SEC1 point encodings, the DST, the curve parameters
+(`p`/`n`/`b`/`Gx`/`Gy`), the OPRF context string / mode byte, and the DLEQ
+proof `(c, s)` and commitments (broadcast values).
+
+**CT mechanisms as implemented.**
+- **Double-and-add-always ladder:** `pt_scalar_mul` runs a fixed 256 iterations;
+  every bit executes **both** a complete doubling `pt_add(acc, acc, acc)` and a
+  complete addition `pt_add(&tmp, acc, base)` unconditionally, and the secret bit
+  flows only through `pt_cswap` → `fe_cswap`, whose select is the arithmetic mask
+  `mask = 0 − swap` with XOR-swap — no secret-dependent branch, index, or table.
+  The Renes–Costello–Batina complete addition formula (`pt_add`, RCB 2016 alg. 4,
+  `a = −3`) is exception-free, so the **same** instruction sequence handles
+  `P+Q`, `P+P`, and `P+O`; the ladder needs no special cases. `tmp` is wiped
+  with `determ_secure_zero` after the loop.
+- **Mask-select field arithmetic:** `fe_add`/`fe_sub` (mod p) perform the
+  conditional subtract/add-back branchlessly via a `use_s`/`mask` select
+  (`use_s = 0 − ((c | (1 − brw)) & 1)`; `mask = 0 − brw`) rather than an `if`;
+  `fe_mont_mul`'s CIOS final reduction uses the same `use_s` blend; `fe_cswap`
+  (the ladder swap) and `fe_cmov` (`r = mask ? a : r`) are the two masked-move
+  primitives. The mod-n analogues `sc_add_raw`/`sc_sub_raw`/`sc_mont_mul` are the
+  same shape over `Nl`.
+- **Branchless SSWU:** `sswu_map` (RFC 9380 §6.6.2 simplified SSWU, `Z = −10`)
+  selects the square branch with `fe_is_square_mask` (the Legendre symbol
+  `a^((p−1)/2)` collapsed to an all-ones/all-zero mask) feeding `fe_cmov`
+  (`x_out`/`t` select via `e2`; the `tv1′ == 0` fixup via `e1` from
+  `fe_is_zero_mask`), and applies the `sgn0` sign fixup as a masked move
+  (`sgn_mask = 0 − (fe_sgn0(y1) ^ fe_sgn0(u))` → `fe_cmov(y_out, y2, ...)`) — no
+  branch on the secret-derived field values.
+- **Fermat inversions iterate PUBLIC constant exponents:** `fe_inv` (`a^(p−2)`),
+  `determ_p256_scalar_inv_mod_n` (`a^(n−2)`), `fe_sqrt` (`a^((p+1)/4)`), and the
+  Legendre power in `fe_is_square_mask` (`a^((p−1)/2)`) all iterate the fixed
+  bits of a **public** exponent (`e[]` derived once from `P_BE`/`N_BE`) via
+  `fe_pow_pub`/the inline square-and-multiply — the `if ((e[i] >> bit) & 1)`
+  branch keys on a public constant, never on the base. Annotated `/* public bit */`
+  at each site.
+
+**Comparisons.** The **VOPRF DLEQ challenge compare** in
+`determ_p256_voprf_verify` — recomputed challenge `c2` vs the proof's `c` —
+routes through **`determ_ct_memcmp`** (`return determ_ct_memcmp(c2, c, 32) == 0
+? 0 : -1;`, §3.10). Both operands are public here (`c` is part of the transmitted
+proof), so this is uniform discipline, not a leak fix — the same class as C3/C7.
+The point-encoding compares elsewhere in the module — the `on_curve_m` /
+`decode_point` OR-aggregate curve check and the `fe`-diff checks in
+`point_decompress` — operate on **public** SEC1 encodings and public validity
+outcomes. The scalar-range gate `be_lt` (`be_is_zero` is a branchless
+OR-aggregate and is fine) is the one exception: it short-circuits on the first
+differing byte and is invoked on **secret** scalars (`scalar_ok(blind)` /
+`scalar_ok(sk)` in the OPRF layer; `scalar_ok(scalar_be)` in
+`base_mul`/`point_mul`; `be_lt(a, N_BE)` in `scalar_mul_mod_n` /
+`scalar_inv_mod_n`), so its running time is secret-dependent — see finding
+**P256-CT-1** in §4.2.
+
+**Residual non-CT (justified).**
+- **The `determ_p256_oprf_derive_key` counter loop** (`for (counter = 0; counter
+  <= 255; counter++)` with an early `break` once `be_is_zero(sk)` is false) is
+  data-dependent, but the counter is a **rejection-sampling artifact on the
+  PUBLIC `(seed, info)`** (RFC 9497 §3.2.1 DeriveKeyPair) — it is not a per-user
+  secret; the near-certain single iteration and its termination depend on the
+  hash of public inputs, not on any secret scalar. Same class as the §4.1.3
+  public-validity rejections.
+- **Public-validity branches on public operands:** the `in[0] != 0x04` prefix
+  and `be_lt(..., P_BE)` coordinate gates in `decode_point` (the coordinate is a
+  public point encoding); the point-at-infinity `znz == 0` reject in
+  `encode_point`; the `0x02`/`0x03` prefix and parity branches in
+  `point_compress`/`_decompress`. Each branch outcome is (or determines) the
+  function's public return value, and each reads only public data. (The
+  `scalar_ok` `>= n` gate's *outcome* is likewise public, but it reads a secret
+  scalar via a short-circuiting `be_lt` — a real residual timing dependence
+  broken out as finding **P256-CT-1**, §4.2, not a clean public-operand branch.)
+- **The one-time `p256_init`/`sc_init`/`sswu_ready` flags** (`if (p256_ready)
+  return;` etc.) — a public first-call guard, not secret-dependent.
+- **The §4.1.5 64-bit multiply-latency assumption** applies here too:
+  `fe_mont_mul`/`sc_mont_mul` multiply secret-valued limbs with the C `*`
+  operator (constant-latency on x86-64/ARM64; operand-dependent on some small
+  cores) — an architectural assumption to re-validate per target, not a source
+  defect.
+
+**Probe-target mapping (→ §3.12).** The tranche-3 `determ ct-timing-probe`
+targets registered for this module (see `TimingProbeDesign.md` §4 and the
+`src/main.cpp` target table) are **`p256-base-mul`** (secret = scalar; exercises
+the RCB ladder), **`p256-h2c`** (secret = fixed-length msg; exercises the
+branchless SSWU + `expand_message_xmd`), and **`p256-sc-mul`** (secret = both
+mod-n operands; exercises `sc_mont_mul`). First measured runs read clean
+(max |t| < 1.5 at smoke sample sizes); the §5 targets below fold them into the
+inventory's measurement plan (target 13).
+
 ---
 
 ## 3. Comparison census
@@ -416,6 +529,10 @@ Every comparison in the stack that touches secret-adjacent data, in one table:
 | C8 | `determ_frost_pss_commit` zero-hole check | δ_0 vs zero (protocol-mandated public constant) | branchless OR-aggregate (hardened per audit §8b) |
 | C9 | `determ_x25519` contributory check | DH output vs all-zero | OR-aggregate; branch result = the public return value |
 | C10 | `determ_frost_pss_verify_commit` identity check | public commitment C_0 vs `[0]B` | `determ_ct_memcmp`, 32 bytes (as-found per-byte early-return loop remediated in-session — see CTI-1 below) |
+| C11 | `determ_p256_voprf_verify` DLEQ challenge check | recomputed challenge c2 vs proof c (both public — c is transmitted) | `determ_ct_memcmp`, 32 bytes — uniform discipline, not a leak fix |
+| C12 | `on_curve_m` / `decode_point` curve-membership check (p256) | public point encoding vs `y² = x³ − 3x + b` | OR-aggregate over 8 limbs, single branch on aggregate (public operand) |
+| C13 | `fe_add`/`fe_sub`/`fe_mont_mul` mod-p reduction, `sc_*` mod-n reduction (p256) | field/scalar element vs modulus p/n | masked conditional subtract/add-back (`use_s`/`mask` select, no branch) |
+| C14 | `be_lt(scalar, N_BE)` via `scalar_ok` (p256) | **secret** scalar (blind/sk/ECDH scalar) vs order n | branchless LSB-first borrow chain (no early return) — **finding P256-CT-1** (§4.2), ✅ REMEDIATED in-session |
 
 ---
 
@@ -487,8 +604,48 @@ this was a one-line consistency gap against the audit §5.1 convention, same
 exploitation-requires-secondary-disclosure caveat as the other Low/Info
 zeroization items there.
 
-No other finding: no secret-dependent branch, secret-indexed memory access, or
-short-circuiting secret compare exists in any of the eight modules as read.
+**P256-CT-1 — `scalar_ok`'s `be_lt(secret, N_BE)` range check was variable-time
+on secret scalars.** ✅ **REMEDIATED in-session** (the same session this
+inventory was written): `be_lt` was rewritten as a branchless LSB-first
+byte-wise borrow chain (no early return; a < b iff the full subtraction
+borrows out) — the exact precedent the fix note below recommends. All 30
+P-256 vectors stay byte-exact after the change (the compare is
+behavior-preserving, only its timing changed), so the header claims
+`p256.h` "constant-time in the scalar" and `README` are now accurate.
+- **Severity:** Low — **Category:** constant-time (secret-dependent branch
+  timing; small exploitable signal for uniformly-random secrets, larger for
+  structured/small secrets)
+- **Location:** `src/crypto/p256/p256.c`, `be_lt` (lines 281–288, the
+  `if (a[i] < b[i]) return 1; if (a[i] > b[i]) return 0;` early-return loop) as
+  reached through `scalar_ok` (line 295–297) from the secret-scalar entry points
+  `determ_p256_base_mul`/`_point_mul` (lines 343, 358), `determ_p256_oprf_blind`
+  /`_evaluate` (lines 919, 934), `determ_p256_voprf_prove` (line 1037), and
+  directly as `be_lt(a, N_BE)` in `determ_p256_scalar_mul_mod_n`/`_inv_mod_n`
+  (lines 466, 481).
+
+`be_lt` short-circuits at the first byte where the secret scalar differs from
+`n`, so its running time reveals how many leading bytes of the secret equal the
+corresponding bytes of `n` (`N_BE = ff ff ff ff 00 00 00 00 ff …`). For a
+uniformly-random scalar `< n` the top byte is `< 0xff` with probability 255/256,
+so the loop almost always exits at iteration 0 and the practical signal is small
+— but it is not zero, and it grows for structured secrets (a small blind, or an
+`sk` chosen near `n`). This is the ONE short-circuiting compare on a secret
+operand in the module; the sibling curve modules avoid the analogue by handling
+secret scalars constant-time (X25519 clamps rather than range-checks; Ed25519's
+`sc_lt_L` is the branchless byte-wise borrow chain of C4 and runs on the
+*public* signature scalar, not the secret). The fix taken mirrors that
+precedent: `be_lt` is now a constant-time byte-wise borrow-chain comparator
+(equivalent to `sc_lt_L`/`fe_sub`'s masked form). NOTE the registered
+`p256-base-mul` probe generator masks `scalar[0] &= 0x0f` (src/main.cpp
+~L12719), forcing an iteration-0 exit, so the tranche-3 probe would NOT have
+surfaced this — a secret-class run that includes high-MSB scalars is the
+recommended empirical follow-up to confirm the fix under dudect.
+
+The remaining equality/aggregate compares are clean: no secret-indexed memory
+access, and no *other* short-circuiting secret compare exists in any of the nine
+modules as read (`be_is_zero` is a branchless OR-aggregate; the DLEQ compare
+routes through `determ_ct_memcmp`; the curve-membership and reduction selects are
+the branchless C12/C13 forms).
 
 ---
 
@@ -555,10 +712,22 @@ Q6) — CT is an object-code property, so re-run per compiler/flag bump.
     fix-vs-random password at fixed pwlen: confirms §2.1/§2.2's "branches key
     on lengths only" for the keyed consumers (the unkeyed hashes need no run —
     no secret input exists).
+13. **P-256 secret path** (tranche-3 probe targets, §2.9) —
+    `determ_p256_base_mul` fix-vs-random scalar (covers the RCB
+    double-and-add-always ladder `pt_scalar_mul`/`fe_cswap` and the mask-select
+    field core `fe_add`/`fe_sub`/`fe_mont_mul`; scalar bit-pattern classes
+    low- vs high-Hamming-weight specifically attack the ladder claim, as in
+    target 6), `determ_p256_scalar_mul_mod_n` fix-vs-random operands (the mod-n
+    `sc_mont_mul` reduction, C13), and `determ_p256_hash_to_curve` fix-vs-random
+    fixed-length msg (the branchless SSWU `fe_is_square_mask`/`fe_cmov`/`fe_sqrt`
+    + `expand_message_xmd`). Registered as `p256-base-mul` / `p256-sc-mul` /
+    `p256-h2c` in `determ ct-timing-probe`. The C11 DLEQ compare is measured
+    inside target 1 (`determ_ct_memcmp`); the `derive_key` counter loop (§2.9
+    residual) is public-`(seed,info)`-driven and is NOT a secret-class run.
 
 Each target maps back to a named mechanism in §2; a §3.12 failure therefore
 localizes immediately to the function whose claim broke. Conversely, when all
-twelve pass, every row of the §1.4 table is measured rather than reviewed —
+thirteen pass, every row of the §1.4 table is measured rather than reviewed —
 which is the §3.12 exit criterion.
 
 ---
@@ -579,7 +748,11 @@ which is the §3.12 exit criterion.
   the functional pins for `determ_ct_memcmp`/`determ_secure_zero`; explicitly
   defers the timing property to §3.12 (this document's §5).
 - Per-primitive validation wrappers: `tools/test_{sha2,chacha20,aes,ed25519,
-  x25519,blake2b,xchacha,argon2id,frost}_c99.sh` (byte-equal correctness — the
-  orthogonal dimension §1.1 of the audit).
+  x25519,blake2b,xchacha,argon2id,frost,p256,p256_h2c,p256_oprf}_c99.sh`
+  (byte-equal correctness — the orthogonal dimension §1.1 of the audit).
+- `src/crypto/p256/README.md` — the §2.9 module's construction overview, the
+  6-assertion `determ test-p256-c99` gate, and the §3.13 vector-file coverage
+  (`tools/vectors/p256{,_h2c,_oprf}.json`); `TimingProbeDesign.md` §4 — the
+  tranche-3 probe-target registrations (`p256-base-mul`/`-h2c`/`-sc-mul`).
 
 *End of inventory.*
