@@ -472,6 +472,10 @@ In-process tests (deterministic, no network):
                                               ops vs OpenSSL BIGNUM; RFC 9380
                                               SSWU hash-to-curve structural
                                               contract (vectors via §3.13)
+  determ test-p256-oprf-c99                   §3.9b: RFC 9497 OPRF/VOPRF
+                                              (P-256, SHA-256) protocol —
+                                              blind/evaluate/finalize + DLEQ
+                                              reject paths (vectors via §3.13)
   determ test-ct-c99                          v2.10 Phase 0: §3.10 constant-time
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
