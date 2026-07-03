@@ -333,7 +333,15 @@ std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
         std::vector<uint8_t> key;
         key.reserve(2 + 8 + 32);
         key.push_back('i'); key.push_back(':');
-        for (int i = 7; i >= 0; --i) key.push_back((src >> (8*i)) & 0xff);
+        // src is ShardId (uint32_t) but the key encodes it as 8 big-endian
+        // bytes; shifting a 32-bit value by 32..56 is UNDEFINED BEHAVIOR and
+        // resolves differently per compiler (MSVC folds to 0; x86 GCC masks
+        // the shift count mod 32) — a cross-toolchain state_root divergence,
+        // i.e. a consensus fork. Widen to uint64_t so the encoding is
+        // well-defined and identical everywhere. Byte-invariant vs the prior
+        // MSVC output (a <2^32 value has zero high bytes either way).
+        for (int i = 7; i >= 0; --i)
+            key.push_back((static_cast<uint64_t>(src) >> (8*i)) & 0xff);
         key.insert(key.end(), tx_hash.begin(), tx_hash.end());
         crypto::SHA256Builder b;
         uint8_t marker = 1; b.append(&marker, 1);  // presence marker
