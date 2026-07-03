@@ -83,9 +83,9 @@ The remaining three discriminators (`Account.view_key_mechanism`, `Account.audit
 
 | Item | Source | Status |
 |---|---|---|
-| `DETERM_CRYPTO` CMake option (modern/fips/universal) | C99-12 | ✅ Done (task #12) |
-| `crypto_profile_build` C++ header | C99-13 | ✅ Done (task #13) |
-| Genesis-vs-build compat assert | C99-14 | ✅ Done (task #14) |
+| `DETERM_CRYPTO` CMake option (modern/fips/universal) | C99-12 | ❌ REMOVED 2026-07-03 (DECISION-LOG: linked identical code; superseded by single build + pluggable CMVP-validated module for FIPS) |
+| `crypto_profile_build` C++ header | C99-13 | ❌ REMOVED 2026-07-03 (with C99-12) |
+| Genesis-vs-build compat assert | C99-14 | ❌ REMOVED 2026-07-03 (with C99-12; `crypto_profile` stays as the preset posture marker) |
 | `src/crypto/{modern,fips,universal}/` subtree | C99-15 | ✅ Done (task #15) |
 | Build matrix verification | C99-16 | ✅ Done (task #16) |
 | C99-11 tactical/cluster civilian profiles | C99-11 revise | ✅ Done (task #18) |

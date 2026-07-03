@@ -5,35 +5,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
-# ── Build-time crypto profile (per docs/proofs/CRYPTO-C99-SPEC.md §2.Q10) ──
-# Selects which cryptographic primitive set links into the binary:
-#   modern    — XChaCha20-Poly1305, Argon2id, secp256k1, Bulletproofs
-#               (cryptographically strongest; default; not FIPS-validated)
-#   fips      — AES-256-GCM, PBKDF2, NIST P-256
-#               (FIPS 140-2/3 module boundary; no confidential transactions)
-#   universal — both, namespaced; CI / DSF / cross-validation only,
-#               NOT for production FIPS deployment (breaks module boundary).
-#
-# A built binary refuses to load a genesis whose CryptoProfile disagrees
-# with this selection (universal accepts both). The compile definition
-# DETERM_CRYPTO_PROFILE_BUILD (0=MODERN, 1=FIPS, 2=UNIVERSAL) flows to
-# include/determ/crypto/profile_build.hpp.
-set(DETERM_CRYPTO "modern" CACHE STRING
-    "Crypto stack to link: modern | fips | universal")
-set_property(CACHE DETERM_CRYPTO PROPERTY STRINGS modern fips universal)
-
-if(DETERM_CRYPTO STREQUAL "modern")
-  set(DETERM_CRYPTO_PROFILE_BUILD_VALUE 0)
-elseif(DETERM_CRYPTO STREQUAL "fips")
-  set(DETERM_CRYPTO_PROFILE_BUILD_VALUE 1)
-elseif(DETERM_CRYPTO STREQUAL "universal")
-  set(DETERM_CRYPTO_PROFILE_BUILD_VALUE 2)
-else()
-  message(FATAL_ERROR "DETERM_CRYPTO must be one of: modern, fips, universal (got '${DETERM_CRYPTO}')")
-endif()
-add_compile_definitions(DETERM_CRYPTO_PROFILE_BUILD=${DETERM_CRYPTO_PROFILE_BUILD_VALUE})
-message(STATUS "Determ crypto profile (build): ${DETERM_CRYPTO}")
-
 include(FetchContent)
 
 # ── OpenSSL (no Perl required) ──────────────────────────────────────────────

@@ -410,6 +410,24 @@ above are the regression gate.
 
 ### Q10: Profile bundling — crypto choice tied to TimingProfile
 
+> **AMENDED 2026-07-03 (authority: Stoyan Denev — `DECISION-LOG.md 2026-07-03`).**
+> The build-time half of this decision is SUPERSEDED: the
+> `-DDETERM_CRYPTO={modern|fips|universal}` tri-state and its
+> `profile_build.hpp` genesis-compat gate are REMOVED. They linked
+> identical code in every variant (all modules ship in the one
+> `determ-crypto-c99` library), so the "FIPS module boundary" they
+> claimed did not exist — and CMVP validation, not algorithm selection,
+> is what confers FIPS 140 compliance, which a from-scratch stack cannot
+> deliver. What SURVIVES: the profile presets' `crypto_profile` column as
+> the documented ALGORITHM POSTURE per deployment archetype. What
+> REPLACES the build split for the FIPS market: **FIPS deployments pair
+> the FIPS posture with a pluggable CMVP-validated crypto module** (a
+> provider interface delegating the FIPS-relevant primitives to a
+> certified module, e.g. a validated OpenSSL 3.x FIPS provider). The
+> provider interface is FUTURE work, gated on a concrete FIPS customer;
+> this amendment records the strategy so the market position is retained
+> honestly.
+
 **Decision: cryptographic profile (MODERN vs FIPS) is bundled into `TimingProfile` and selected by profile name at genesis. No separate `crypto_profile` genesis field.**
 
 Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile crypto_profile` field. Choosing a profile (`tactical`, `web`, `regional`, `global`, `cluster`) automatically selects the bundled cryptographic stack.

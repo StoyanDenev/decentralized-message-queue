@@ -136,6 +136,15 @@ struct TimingProfile {
     uint32_t      k_block_sigs;
     ChainRole     chain_role;
     ShardingMode  sharding_mode;
+    // Documented ALGORITHM POSTURE of the deployment archetype (MODERN =
+    // XChaCha20-Poly1305/Argon2id preference; FIPS = AES-256-GCM/PBKDF2/
+    // P-256, FIPS-approved algorithms only). One binary serves both
+    // postures (DECISION-LOG.md 2026-07-03: the former DETERM_CRYPTO
+    // build tri-state was removed — it linked identical code and could
+    // not confer FIPS 140 compliance). Actual FIPS 140 compliance is a
+    // DEPLOYMENT property: a FIPS deployment pairs this posture with a
+    // pluggable CMVP-validated crypto module (future provider interface);
+    // algorithm selection alone does not confer compliance.
     CryptoProfile crypto_profile;
 };
 

@@ -6,7 +6,6 @@
 #include <determ/chain/chain.hpp>
 #include <determ/chain/block.hpp>
 #include <determ/chain/params.hpp>
-#include <determ/crypto/profile_build.hpp>
 #include <determ/crypto/keys.hpp>
 #include <determ/crypto/frost.hpp>
 #include <determ/crypto/merkle.hpp>
@@ -1395,14 +1394,6 @@ static int cmd_init(int argc, char** argv) {
         std::cerr << "Unknown --profile " << profile
                   << " (expected: cluster|web|regional|global|tactical|"
                   << "single_test|cluster_test|web_test|regional_test|global_test|tactical_test)\n";
-        return 1;
-    }
-    // FIPS module boundary: refuse to start if the linked crypto stack
-    // cannot serve the profile's CryptoProfile (see profile_build.hpp).
-    if (auto* err = crypto::check_genesis_compatibility(tp.crypto_profile)) {
-        std::cerr << "Crypto profile mismatch: " << err
-                  << " (profile '" << profile << "' requires "
-                  << chain::to_string(tp.crypto_profile) << ")\n";
         return 1;
     }
     cfg.tx_commit_ms   = tp.tx_commit_ms;
