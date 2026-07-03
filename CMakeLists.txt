@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
+# ── DETERM_UBSAN: instrument ONLY Determ's own targets (determ +
+# determ-crypto-c99) with -fsanitize=undefined, NOT the vendored FetchContent
+# deps (OpenSSL/asio/json build + cache normally). Target-scoped rather than
+# global CMAKE_CXX_FLAGS so the heavy OpenSSL tree is not rebuilt under the
+# sanitizer. Enables the tools/ci_local.sh --sanitize consensus-UB gate
+# (the state_root-fork class, DECISION-LOG 2026-07-03). GCC/Clang only.
+option(DETERM_UBSAN "Instrument Determ's own targets with UBSan (GCC/Clang)" OFF)
+
 include(FetchContent)
 
 # ── OpenSSL (no Perl required) ──────────────────────────────────────────────
@@ -142,6 +150,16 @@ endif()
 
 if(UNIX)
   target_link_libraries(determ PRIVATE pthread)
+endif()
+
+# UBSan on Determ's own code only (see the DETERM_UBSAN option above). The
+# vendored deps stay uninstrumented, so the OpenSSL tree is reused from cache
+# and the sanitized build is just the ~18 Determ TUs.
+if(DETERM_UBSAN)
+  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=undefined)
+  target_compile_options(determ            PRIVATE -fsanitize=undefined)
+  target_link_options(determ               PRIVATE -fsanitize=undefined)
+  message(STATUS "DETERM_UBSAN: determ + determ-crypto-c99 instrumented with UBSan")
 endif()
 
 # ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────

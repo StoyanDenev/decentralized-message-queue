@@ -34,3 +34,17 @@ jobs:
       - name: Build + FAST + guards
         shell: bash
         run: bash tools/ci_local.sh --jobs 4
+
+  # UBSan pass over the consensus surface — the undefined-behavior net for
+  # the state_root-fork class (2026-07-03). UBSan is scoped to Determ's own
+  # targets (-DDETERM_UBSAN=ON), so the vendored deps are not instrumented.
+  # Separate job: Linux/GCC-only.
+  ubsan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install python cryptography (vector-gate oracle)
+        run: python3 -m pip install --user cryptography
+      - name: UBSan build + run consensus subcommands
+        run: bash tools/ci_local.sh --sanitize --jobs 4
