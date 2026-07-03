@@ -480,6 +480,10 @@ In-process tests (deterministic, no network):
                                               primitives — determ_ct_memcmp
                                               equality/contract pins + fuzz vs
                                               memcmp; determ_secure_zero wipe
+  determ test-rng-c99                         §3.15 OS-entropy shim smoke gate:
+                                              contract edges + non-zero +
+                                              distinct draws + 64KiB chunked
+                                              fill + coarse uniformity bounds
   determ test-c99-vectors [dir]               §3.13 binary half: every KAT in
                                               tools/vectors/*.json (python-
                                               vetted) byte-equal through the
@@ -11192,11 +11196,129 @@ int main(int argc, char** argv) {
                   "AES-256-GCM decrypt rejects an AAD-length mismatch");
         }
 
+        // (5) Arbitrary-IV-length entry points (SP 800-38D §7.1 GHASH-J0
+        //     derivation for ivlen != 12): cross-validate ciphertext + tag
+        //     against OpenSSL EVP (SET_IVLEN) per IV length, then round-trip
+        //     + tamper-reject + the ivlen==0/==12 contract edges.
+        {
+            bool iv_ok = true; long iv_at = -1;
+            const size_t ivlens[] = {1, 8, 16, 20, 32, 60};
+            uint8_t key[32];
+            for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i * 11 + 3);
+            const char* msg = "arbitrary-IV GHASH J0 derivation";
+            size_t pl = std::strlen(msg);
+            uint8_t aad[4] = {1, 2, 3, 4};
+            for (size_t vi = 0; vi < sizeof(ivlens)/sizeof(ivlens[0]); ++vi) {
+                size_t il = ivlens[vi];
+                std::vector<uint8_t> iv(il);
+                for (size_t i = 0; i < il; i++) iv[i] = (uint8_t)(i * 7 + vi + 1);
+                std::vector<uint8_t> ct(pl), octt(pl), back(pl);
+                uint8_t mytag[16], otag[16];
+                if (determ_aes256_gcm_encrypt_iv(key, iv.data(), il, aad, 4,
+                        (const uint8_t*)msg, pl, ct.data(), mytag) != 0) {
+                    iv_ok = false; iv_at = (long)il; break;
+                }
+                // OpenSSL oracle with the same non-default IV length.
+                EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new();
+                int outl = 0;
+                EVP_EncryptInit_ex(c, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, (int)il, nullptr);
+                EVP_EncryptInit_ex(c, nullptr, nullptr, key, iv.data());
+                EVP_EncryptUpdate(c, nullptr, &outl, aad, 4);
+                EVP_EncryptUpdate(c, octt.data(), &outl, (const uint8_t*)msg, (int)pl);
+                EVP_EncryptFinal_ex(c, octt.data() + outl, &outl);
+                EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 16, otag);
+                EVP_CIPHER_CTX_free(c);
+                if (std::memcmp(ct.data(), octt.data(), pl) != 0 ||
+                    std::memcmp(mytag, otag, 16) != 0) { iv_ok = false; iv_at = (long)il; break; }
+                // Round-trip + tamper on the same IV length.
+                if (determ_aes256_gcm_decrypt_iv(key, iv.data(), il, aad, 4,
+                        ct.data(), pl, mytag, back.data()) != 0 ||
+                    std::memcmp(back.data(), msg, pl) != 0) { iv_ok = false; iv_at = (long)il; break; }
+                uint8_t badtag[16]; std::memcpy(badtag, mytag, 16); badtag[15] ^= 0x80;
+                if (determ_aes256_gcm_decrypt_iv(key, iv.data(), il, aad, 4,
+                        ct.data(), pl, badtag, back.data()) != -1) { iv_ok = false; iv_at = (long)il; break; }
+            }
+            check(iv_ok, iv_ok ? "GCM arbitrary-IV (1/8/16/20/32/60B): C99 == OpenSSL + round-trip + tamper-reject"
+                               : "GCM arbitrary-IV diverges at ivlen=" + std::to_string(iv_at));
+            // Contract edges: ivlen==0 rejected; ivlen==12 via _iv == fixed-IV entry point.
+            {
+                uint8_t iv12[12]; for (int i = 0; i < 12; i++) iv12[i] = (uint8_t)(90 - i);
+                std::vector<uint8_t> ct1(pl), ct2(pl); uint8_t t1[16], t2[16], dummy[16];
+                check(determ_aes256_gcm_encrypt_iv(key, iv12, 0, nullptr, 0,
+                        (const uint8_t*)msg, pl, ct1.data(), dummy) == -1,
+                      "GCM _iv rejects ivlen == 0 (SP 800-38D: len(IV) >= 1)");
+                (void)determ_aes256_gcm_encrypt_iv(key, iv12, 12, aad, 4,
+                        (const uint8_t*)msg, pl, ct1.data(), t1);
+                determ_aes256_gcm_encrypt(key, iv12, aad, 4,
+                        (const uint8_t*)msg, pl, ct2.data(), t2);
+                check(std::memcmp(ct1.data(), ct2.data(), pl) == 0 && std::memcmp(t1, t2, 16) == 0,
+                      "GCM _iv with ivlen==12 is byte-identical to the fixed-IV entry point");
+            }
+        }
+
         std::cout << "\n  " << (fail==0 ? "PASS" : "FAIL")
                   << ": aes-c99 "
                   << (fail==0 ? "all cross-validation + KATs matched" : "had failures")
                   << " (libsodium-free C99 AES-256-GCM vs OpenSSL — the §Q9 gate; constant-time S-box + branchless GHASH)\n";
         return fail==0 ? 0 : 1;
+    }
+
+    if (cmd == "test-rng-c99") {
+        // Gate for the §3.15 OS-entropy shim (src/crypto/rng/). An RNG cannot
+        // be KAT-tested; this is a SMOKE gate for the failure modes a broken
+        // shim would actually exhibit: all-zero output (uninitialized / failed
+        // call used anyway), repeated output (no reseed / static buffer),
+        // truncated fill (chunking bug), and a grossly non-uniform byte
+        // distribution (severe entropy failure). Statistical bounds are loose
+        // (false-positive probability < 2^-40) — this detects catastrophic
+        // breakage, not subtle bias; the real guarantee is the OS CSPRNG's.
+        int fail = 0;
+        auto check = [&](bool cond, const std::string& m) {
+            if (cond) std::cout << "  PASS: " << m << "\n";
+            else { std::cout << "  FAIL: " << m << "\n"; fail++; }
+        };
+        // (1) Basic contract: n==0 no-op success; 32-byte draw succeeds.
+        check(determ_rng_bytes(nullptr, 0) == 0, "rng: n==0 is a no-op success");
+        uint8_t a[32] = {0}, b[32] = {0};
+        check(determ_rng_bytes(a, 32) == 0 && determ_rng_bytes(b, 32) == 0,
+              "rng: two 32-byte draws succeed");
+        // (2) Non-zero + distinct: P(any 32-byte CSPRNG output all-zero or
+        //     colliding) ~ 2^-256 — a hit means the shim is broken.
+        bool a_zero = true; for (int i = 0; i < 32; i++) if (a[i]) { a_zero = false; break; }
+        check(!a_zero, "rng: 32-byte draw is not all-zero");
+        check(std::memcmp(a, b, 32) != 0, "rng: consecutive draws differ");
+        // (3) Large fill exercises any chunking path + tail handling: every
+        //     256-byte window of a 64 KiB fill must contain >= 2 distinct
+        //     byte values (an all-constant window ~ 2^-2048 for a real RNG).
+        {
+            std::vector<uint8_t> big(65536);
+            bool ok = (determ_rng_bytes(big.data(), big.size()) == 0);
+            bool windows_ok = true;
+            for (size_t w = 0; ok && w + 256 <= big.size(); w += 256) {
+                bool distinct = false;
+                for (size_t i = 1; i < 256; i++)
+                    if (big[w + i] != big[w]) { distinct = true; break; }
+                if (!distinct) { windows_ok = false; break; }
+            }
+            check(ok && windows_ok, "rng: 64 KiB fill succeeds with no constant 256-byte window");
+            // (4) Coarse uniformity: over 64 KiB, each byte value's expected
+            //     count is 256; require every count in [64, 1024] (>4-sigma
+            //     slack on both sides — catches stuck-bit / masked outputs).
+            if (ok) {
+                size_t cnt[256] = {0};
+                for (size_t i = 0; i < big.size(); i++) cnt[big[i]]++;
+                bool uniform = true; int bad_val = -1;
+                for (int v = 0; v < 256; v++)
+                    if (cnt[v] < 64 || cnt[v] > 1024) { uniform = false; bad_val = v; break; }
+                check(uniform, uniform ? "rng: byte-value distribution within loose uniformity bounds"
+                                       : "rng: byte value " + std::to_string(bad_val) + " count out of bounds");
+            }
+        }
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": rng-c99 " << (fail == 0 ? "all assertions" : "had failures")
+                  << " (§3.15 OS-entropy shim smoke gate: contract + non-zero + distinct + chunked fill + coarse uniformity)\n";
+        return fail == 0 ? 0 : 1;
     }
 
     if (cmd == "test-ed25519-scalar-reduce") {
@@ -13165,7 +13287,8 @@ int main(int argc, char** argv) {
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
                                 "p256.json", "p256_h2c.json", "p256_oprf.json",
                                 "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
-                                "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json" };
+                                "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
+                                "aes_gcm_decrypt.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13261,6 +13384,29 @@ int main(int argc, char** argv) {
                             dptr(ct), ct.size(), exp_tag.data(),
                             rt.empty()?nullptr:rt.data()) != 0
                         || rt != pt) { ok=false; bad=name + " (decrypt round-trip)"; break; }
+                } else if (prim == "aes256_gcm_decrypt") {
+                    // Decrypt-direction + arbitrary-IV corpus (python
+                    // cryptography AESGCM oracle): result PASS must decrypt
+                    // to plaintext_hex; result FAIL (tampered tag/ct/aad or
+                    // wrong key) must be REJECTED. IV length is free (the
+                    // SP 800-38D GHASH-J0 path for ivlen != 12).
+                    auto key = unhex(v["key_hex"]); auto iv = unhex(v["iv_hex"]);
+                    auto aad = unhex(v["aad_hex"]); auto ct = unhex(v["ciphertext_hex"]);
+                    auto tag = unhex(v["tag_hex"]);
+                    if (key.size() != 32 || tag.size() != 16 || iv.empty()) {
+                        ok=false; bad=name + " (bad key/tag/iv len)"; break; }
+                    std::string res = v.value("result", "");
+                    std::vector<uint8_t> pt(ct.size());
+                    int rc = determ_aes256_gcm_decrypt_iv(key.data(), iv.data(), iv.size(),
+                                dptr(aad), aad.size(), dptr(ct), ct.size(),
+                                tag.data(), pt.empty()?nullptr:pt.data());
+                    if (res == "PASS") {
+                        if (rc != 0
+                            || hx(dptr(pt), pt.size()) != v["plaintext_hex"].get<std::string>()) {
+                            ok=false; bad=name + " (expected decrypt success)"; break; }
+                    } else if (res == "FAIL") {
+                        if (rc == 0) { ok=false; bad=name + " (tampered vector ACCEPTED)"; break; }
+                    } else { ok=false; bad=name + " (unknown result field)"; break; }
                 } else if (prim == "ed25519") {
                     auto seed = unhex(v["seed_hex"]); auto msg = unhex(v["msg_hex"]);
                     if (seed.size() != 32) { ok=false; bad=name + " (bad seed len)"; break; }

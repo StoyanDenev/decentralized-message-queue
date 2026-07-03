@@ -51,6 +51,22 @@ int  determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
                                const uint8_t *ct, size_t ctlen,
                                const uint8_t tag[16], uint8_t *pt);
 
+/* Arbitrary-IV-length variants (SP 800-38D §7.1: ivlen != 12 derives the
+ * pre-counter block via J0 = GHASH_H(IV || pad || [ivlen*8]_64); ivlen == 12
+ * is the same fast path as the fixed-IV entry points above, which are now
+ * thin wrappers over these). Returns 0 on success; -1 on ivlen == 0
+ * (encrypt) or ivlen == 0 / authentication failure (decrypt). */
+int  determ_aes256_gcm_encrypt_iv(const uint8_t key[32],
+                                  const uint8_t *iv, size_t ivlen,
+                                  const uint8_t *aad, size_t aadlen,
+                                  const uint8_t *pt, size_t ptlen,
+                                  uint8_t *ct, uint8_t tag[16]);
+int  determ_aes256_gcm_decrypt_iv(const uint8_t key[32],
+                                  const uint8_t *iv, size_t ivlen,
+                                  const uint8_t *aad, size_t aadlen,
+                                  const uint8_t *ct, size_t ctlen,
+                                  const uint8_t tag[16], uint8_t *pt);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

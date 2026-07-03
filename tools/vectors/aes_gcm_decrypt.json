@@ -1,0 +1,168 @@
+{
+  "primitive": "aes256_gcm_decrypt",
+  "source": "generated decrypt-direction + arbitrary-IV vectors for the C99 AES-256-GCM (src/crypto/aes/aes_gcm.c: determ_aes256_gcm_decrypt fixes iv=12B; determ_aes256_gcm_decrypt_iv takes any ivlen >= 1); every ciphertext/tag byte mechanically produced on 2026-07-03 by the independent oracle cryptography.hazmat.primitives.ciphers.aead.AESGCM (python 'cryptography' 48.0.0) \u2014 keys/IVs/plaintexts/AAD are deterministic SHA-256 label streams (domain 'determ aes_gcm_decrypt v1|<label>|<ctr32be>', see gen_aes_gcm_decrypt.py provenance in the generating session), so the file is reproducible; every result=PASS vector was round-tripped through AESGCM.decrypt and every result=FAIL vector confirmed to raise InvalidTag before writing. Classes: 6 PASS decrypt with 12-byte IV spanning ptlen {0,1,16,17,64,100} x AAD present/absent; 4 FAIL (tag 1-bit flip, ciphertext 1-bit flip, AAD 1-bit flip, wrong key \u2014 FAIL vectors omit plaintext_hex per the CAVP decrypt .rsp convention, a verifier must reject and release NO plaintext); 6 PASS with arbitrary IV lengths {8,16,20,32,60} pinning the SP 800-38D ivlen!=12 derivation J0 = GHASH_H(IV || 0-pad-to-block || [0]_64 || [len(IV)*8]_64)",
+  "_meta": {
+    "oracle": "python cryptography.hazmat.primitives.ciphers.aead.AESGCM",
+    "oracle_version": "48.0.0",
+    "generated": "2026-07-03",
+    "results": "PASS = decrypt must return plaintext_hex; FAIL = decrypt must reject (no plaintext_hex field present)"
+  },
+  "vectors": [
+    {
+      "name": "decrypt PASS ivlen=12 ptlen=0 aadlen=0",
+      "result": "PASS",
+      "key_hex": "cbc5ec01ea5c7ee9a9b53972fc3a0b660a30ac7e3f9c445562df386f2a48a975",
+      "iv_hex": "886744092f132c395cbbf499",
+      "aad_hex": "",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "37ee003ebbd9aae68f592d5ef15a46f3"
+    },
+    {
+      "name": "decrypt PASS ivlen=12 ptlen=1 aadlen=16",
+      "result": "PASS",
+      "key_hex": "2f97bfd7308ba444541b5d466154cb2a9bf71481329e43b4bda8e25653dc909d",
+      "iv_hex": "f5279e622d92f2cc054a4038",
+      "aad_hex": "ade1366ca0ae226979ec7126498fd184",
+      "plaintext_hex": "d9",
+      "ciphertext_hex": "8b",
+      "tag_hex": "04d7d2032504c11f0fd74e6ec7042e0d"
+    },
+    {
+      "name": "decrypt PASS ivlen=12 ptlen=16 aadlen=0",
+      "result": "PASS",
+      "key_hex": "646cdc5bdc64ab732bcb4bb60953122906858f0ed93e8a6d84d3dc058f182bff",
+      "iv_hex": "54272364b347c09443fbc2c7",
+      "aad_hex": "",
+      "plaintext_hex": "c3fcf2407f50e99249d6011fa426b5cc",
+      "ciphertext_hex": "848ffc3c1fabc508cf25e44b3db1e82c",
+      "tag_hex": "ac63bcf3bae03a83bfc03d506067da07"
+    },
+    {
+      "name": "decrypt PASS ivlen=12 ptlen=17 aadlen=20",
+      "result": "PASS",
+      "key_hex": "38390ad96d38db2f1ca6b403d67ebba2fb924e48ebf53466e01e4efe447a243d",
+      "iv_hex": "6e3c97f4a944538d20cc9589",
+      "aad_hex": "96cd9048a5f8f9a4e3ce047d44d40ab1e03de8ba",
+      "plaintext_hex": "8a7a618282f2fbb5fcc2cf2f2f21446c74",
+      "ciphertext_hex": "5f244ed1b8dc26f793d4623f163660fa17",
+      "tag_hex": "54b9004534625da132f2464452b71185"
+    },
+    {
+      "name": "decrypt PASS ivlen=12 ptlen=64 aadlen=32",
+      "result": "PASS",
+      "key_hex": "4106a66145cc67769ceb43de5c10c24307c83dcd96ab11e5ffab2136a90e9476",
+      "iv_hex": "d79b099a418d6560771d524b",
+      "aad_hex": "03e690251b2563a148ed107db4a93ec6f7ed1b41ea9466f4ee358006e07d0ba6",
+      "plaintext_hex": "80202e8ef3ffd1fd1fb85b55d048715de8ad1e47d0af98af75735c63dad682851a40d5d2c82f76bf69eb21f530134d5cb9566ff6ec0e4b51c318362f0457581d",
+      "ciphertext_hex": "376dcc68272857a24862b614e12481eb1dc7f4f82e2aad0975a531d02c1c8cbf1fb98af12a4006e0a31f1245943c8076d68877e1e9ec20125bce0f6055b6220f",
+      "tag_hex": "637a56499b257e4cfe59f15312ea1cc5"
+    },
+    {
+      "name": "decrypt PASS ivlen=12 ptlen=100 aadlen=0",
+      "result": "PASS",
+      "key_hex": "9c365a2b5832414dfe6479a75e4b6069999b5b161eb664ef8801cb81b6806136",
+      "iv_hex": "13744cf48d54f87ace6f98ee",
+      "aad_hex": "",
+      "plaintext_hex": "1f3462ecfb60c43826d906ce7a3534cd7b740c2db6817001b146dd1f4eea0428f26382046f6fd9124fb62248581cae43b9582b67898d6794ed91d4cad92e0caaede02155f529154f0b2ef2174d1060de5414031189132d9f04d50b5cf1094633f0533f5c",
+      "ciphertext_hex": "d378a06fb493908e4c77f151fd1f72b47111ff23fc0bd75b317a4f7eea19eff33431eb8180a340bbd128774316fc18e39763a687beb9b820dbccc3ad50a1eeb160751f9e843206612ec67436bb581ebc82cf95dc20a64f78963390406fa2df5509e7d4bf",
+      "tag_hex": "0f880771e46f2ab3dbf439a791759172"
+    },
+    {
+      "name": "decrypt FAIL tag tampered (bit 0 of tag[0] flipped; base ivlen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "c620bc053dea9e30919ef2238ce3b8124174143f5a8bfa3915a9c281113dca77",
+      "iv_hex": "55dc14022bc533c0902abf0b",
+      "aad_hex": "d914b8b6552ac13a4b976b628b220fa41915e5a526d7f612",
+      "ciphertext_hex": "a891558656c4d123812aa5229a97b010498476346912e5ec6c6910033f7d079e",
+      "tag_hex": "66e4c13a2a0f1d3bad41280d8d39ae12"
+    },
+    {
+      "name": "decrypt FAIL ciphertext tampered (bit 7 of ct[0] flipped; base ivlen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "c620bc053dea9e30919ef2238ce3b8124174143f5a8bfa3915a9c281113dca77",
+      "iv_hex": "55dc14022bc533c0902abf0b",
+      "aad_hex": "d914b8b6552ac13a4b976b628b220fa41915e5a526d7f612",
+      "ciphertext_hex": "2891558656c4d123812aa5229a97b010498476346912e5ec6c6910033f7d079e",
+      "tag_hex": "67e4c13a2a0f1d3bad41280d8d39ae12"
+    },
+    {
+      "name": "decrypt FAIL AAD tampered (bit 0 of aad[0] flipped; base ivlen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "c620bc053dea9e30919ef2238ce3b8124174143f5a8bfa3915a9c281113dca77",
+      "iv_hex": "55dc14022bc533c0902abf0b",
+      "aad_hex": "d814b8b6552ac13a4b976b628b220fa41915e5a526d7f612",
+      "ciphertext_hex": "a891558656c4d123812aa5229a97b010498476346912e5ec6c6910033f7d079e",
+      "tag_hex": "67e4c13a2a0f1d3bad41280d8d39ae12"
+    },
+    {
+      "name": "decrypt FAIL wrong key (bit 0 of key[31] flipped; ct/tag valid under the original key; base ivlen=12 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "c620bc053dea9e30919ef2238ce3b8124174143f5a8bfa3915a9c281113dca76",
+      "iv_hex": "55dc14022bc533c0902abf0b",
+      "aad_hex": "d914b8b6552ac13a4b976b628b220fa41915e5a526d7f612",
+      "ciphertext_hex": "a891558656c4d123812aa5229a97b010498476346912e5ec6c6910033f7d079e",
+      "tag_hex": "67e4c13a2a0f1d3bad41280d8d39ae12"
+    },
+    {
+      "name": "decrypt PASS arbitrary-IV (GHASH J0 path) ivlen=8 ptlen=13 aadlen=0",
+      "result": "PASS",
+      "key_hex": "cd34d7ff34898ae7a2dc6b5666eae36383811e796ac04425b397f9e983bb78ef",
+      "iv_hex": "eb58db116d7ec80c",
+      "aad_hex": "",
+      "plaintext_hex": "5cec9f867d9b4cf027a30b2d80",
+      "ciphertext_hex": "b3be52f45ed07226d28822234b",
+      "tag_hex": "ebe965fdf82fb82c1800f36f492b6604"
+    },
+    {
+      "name": "decrypt PASS arbitrary-IV (GHASH J0 path) ivlen=16 ptlen=16 aadlen=24",
+      "result": "PASS",
+      "key_hex": "6e9b0f721bd569ee2d0c62542be410877be5a90bea4b2bc174aaef0b0550c4d9",
+      "iv_hex": "259d285c0052fdf527002f5be316242c",
+      "aad_hex": "a143616ef3d7b283d854bba6ace972f064017b655a3f7275",
+      "plaintext_hex": "82f455385b12eec3c9142e0bf2f8ba76",
+      "ciphertext_hex": "749a6f3c2cf5963d9be90ef2c0a6e9f1",
+      "tag_hex": "e3b3b5d621172816aa7d5166c1d2e8a6"
+    },
+    {
+      "name": "decrypt PASS arbitrary-IV (GHASH J0 path) ivlen=20 ptlen=0 aadlen=16",
+      "result": "PASS",
+      "key_hex": "be8cfbc28e75c6f624880312c6ff2844d6a162a20e9345a6001d8ecdcd816be0",
+      "iv_hex": "50e143288c2ccf243ec253e58f95c6c1098829b8",
+      "aad_hex": "68b553289b229cbf855104cddcfe94b8",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "1e284a6c8093f6ca09f1c5b336356c59"
+    },
+    {
+      "name": "decrypt PASS arbitrary-IV (GHASH J0 path) ivlen=32 ptlen=33 aadlen=0",
+      "result": "PASS",
+      "key_hex": "cd5c664bc4e2464497a67104c781f8e1dab62ce7905440dfc30de5782c8e3a31",
+      "iv_hex": "62cadc85e97f19f8580f456a394fa4fc151c4211b4656ca9a4614bc17b539f53",
+      "aad_hex": "",
+      "plaintext_hex": "6765fb09e2df2b1eb3e249781d0587fd54841f090228cb37e1c5760ae5d79b72ba",
+      "ciphertext_hex": "f97cf9cd8c19bb1dae3561a683cb56b0dbd2d4edc16a0109faed01599788d147db",
+      "tag_hex": "8ee8a692bea4d60736e2c70de2e6bdc4"
+    },
+    {
+      "name": "decrypt PASS arbitrary-IV (GHASH J0 path) ivlen=60 ptlen=64 aadlen=40",
+      "result": "PASS",
+      "key_hex": "6b7622619ae0c0120d03821983618cdbfa6c79742e82d78848bd237a3e067a4e",
+      "iv_hex": "55292e3ec8ef5e30944b172eba8a27b18a06e7c5e0ca476689019ae689dfc408dc549db99ca95f5065a96379b549031f2910071f3498dce80e6643d2",
+      "aad_hex": "e5dc35cc6ea8f5ae61ebd20d41940b156fbc3b8d3677ad15d0143fe34b53c4b3e2dfae8b14097117",
+      "plaintext_hex": "b506b011d24325e6dd8131b681a46cd520a251656cf38d8f40bc0225b7154ea320936cd8a6c7a6778fe400f76938e4d521749002b7aac45a86fa0c2919f30c5d",
+      "ciphertext_hex": "9ecd29b85b2ddf2a353a3c9b08ad09531a57004b87229fe5aaaf29b5140c7f0f40bf3d1af52c3dded99339297f3ae6c8e7931b90032e88be1977f33eaa2fe358",
+      "tag_hex": "54b9e6b108ddf2e7c640d69f37964ac7"
+    },
+    {
+      "name": "decrypt PASS arbitrary-IV (GHASH J0 path) ivlen=16 ptlen=0 aadlen=0",
+      "result": "PASS",
+      "key_hex": "d03185771174bf996d2d5bffaf6ac1897ed7be25e84ef6731b4dee9fa0ed0164",
+      "iv_hex": "ab3b009f9794d696a2d27838ce2069c2",
+      "aad_hex": "",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "8c4195a4ddbcee46f84d1b6f337a0c43"
+    }
+  ]
+}

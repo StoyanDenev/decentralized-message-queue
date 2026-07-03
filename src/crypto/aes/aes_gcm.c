@@ -105,37 +105,62 @@ static void gcm_crypt(const determ_aes256_ctx *ctx, const uint8_t J0[16],
     determ_secure_zero(ks, sizeof ks);     /* last AES keystream block */
 }
 
-void determ_aes256_gcm_encrypt(const uint8_t key[32], const uint8_t iv[12],
-                               const uint8_t *aad, size_t aadlen,
-                               const uint8_t *pt, size_t ptlen,
-                               uint8_t *ct, uint8_t tag[16]) {
+/* SP 800-38D §7.1 pre-counter block J0 from an IV of ANY length >= 1.
+ * ivlen == 12 (the recommended 96-bit form): J0 = IV || 0^31 || 1 — no GHASH.
+ * Otherwise: J0 = GHASH_H( IV || 0-pad-to-block || [0]_64 || [ivlen*8]_64 ). */
+static void gcm_j0(const uint8_t H[16], const uint8_t *iv, size_t ivlen,
+                   uint8_t J0[16]) {
+    if (ivlen == 12u) {
+        memcpy(J0, iv, 12);
+        J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
+        return;
+    }
+    memset(J0, 0, 16);
+    ghash_update(J0, H, iv, ivlen);      /* absorbs IV, zero-padding the tail */
+    {
+        uint8_t lenblk[16];
+        size_t i;
+        memset(lenblk, 0, 8);
+        put_u64_be(lenblk + 8, (uint64_t)ivlen * 8u);
+        for (i = 0; i < 16; i++) J0[i] ^= lenblk[i];
+        ghash_mul(J0, H);
+    }
+}
+
+int determ_aes256_gcm_encrypt_iv(const uint8_t key[32],
+                                 const uint8_t *iv, size_t ivlen,
+                                 const uint8_t *aad, size_t aadlen,
+                                 const uint8_t *pt, size_t ptlen,
+                                 uint8_t *ct, uint8_t tag[16]) {
     determ_aes256_ctx ctx;
     uint8_t H[16];
     uint8_t J0[16];
+    if (ivlen == 0u) return -1;                       /* SP 800-38D: len(IV) >= 1 */
     determ_aes256_init(&ctx, key);
     memset(H, 0, 16);
     determ_aes256_encrypt_block(&ctx, H, H);          /* H = E_K(0^128) */
-    memcpy(J0, iv, 12);
-    J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;    /* J0 = IV || 0^31 || 1 */
+    gcm_j0(H, iv, ivlen, J0);
     gcm_crypt(&ctx, J0, pt, ptlen, ct);
     gcm_tag(&ctx, H, J0, aad, aadlen, ct, ptlen, tag);
     determ_secure_zero(&ctx, sizeof ctx);  /* expanded round-key schedule (= the key) */
     determ_secure_zero(H, sizeof H);        /* GHASH subkey E_K(0^128) */
+    return 0;
 }
 
-int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
-                              const uint8_t *aad, size_t aadlen,
-                              const uint8_t *ct, size_t ctlen,
-                              const uint8_t tag[16], uint8_t *pt) {
+int determ_aes256_gcm_decrypt_iv(const uint8_t key[32],
+                                 const uint8_t *iv, size_t ivlen,
+                                 const uint8_t *aad, size_t aadlen,
+                                 const uint8_t *ct, size_t ctlen,
+                                 const uint8_t tag[16], uint8_t *pt) {
     determ_aes256_ctx ctx;
     uint8_t H[16];
     uint8_t J0[16];
     uint8_t expect[16];
+    if (ivlen == 0u) return -1;                       /* SP 800-38D: len(IV) >= 1 */
     determ_aes256_init(&ctx, key);
     memset(H, 0, 16);
     determ_aes256_encrypt_block(&ctx, H, H);
-    memcpy(J0, iv, 12);
-    J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
+    gcm_j0(H, iv, ivlen, J0);
     gcm_tag(&ctx, H, J0, aad, aadlen, ct, ctlen, expect);
     if (determ_ct_memcmp(expect, tag, 16) != 0) {                   /* authentication failure */
         determ_secure_zero(&ctx, sizeof ctx);
@@ -148,4 +173,21 @@ int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
     determ_secure_zero(H, sizeof H);
     determ_secure_zero(expect, sizeof expect);      /* recomputed tag is key-derived (CTI-2) */
     return 0;
+}
+
+void determ_aes256_gcm_encrypt(const uint8_t key[32], const uint8_t iv[12],
+                               const uint8_t *aad, size_t aadlen,
+                               const uint8_t *pt, size_t ptlen,
+                               uint8_t *ct, uint8_t tag[16]) {
+    /* 96-bit-IV wrapper; ivlen=12 can't hit the ivlen==0 error path. */
+    (void)determ_aes256_gcm_encrypt_iv(key, iv, 12u, aad, aadlen,
+                                       pt, ptlen, ct, tag);
+}
+
+int determ_aes256_gcm_decrypt(const uint8_t key[32], const uint8_t iv[12],
+                              const uint8_t *aad, size_t aadlen,
+                              const uint8_t *ct, size_t ctlen,
+                              const uint8_t tag[16], uint8_t *pt) {
+    return determ_aes256_gcm_decrypt_iv(key, iv, 12u, aad, aadlen,
+                                        ct, ctlen, tag, pt);
 }

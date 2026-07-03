@@ -119,6 +119,9 @@ add_library(determ-crypto-c99 STATIC
   # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
   # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
   "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"
+  # RFC 4648 Base64 (strict decode) — the 1c wallet-envelope codec, replacing
+  # OpenSSL EVP_EncodeBlock/EVP_DecodeBlock (the wallet's last OpenSSL class).
+  "${CMAKE_SOURCE_DIR}/src/crypto/base64/base64.c"
 )
 target_include_directories(determ-crypto-c99 PUBLIC include)
 if(WIN32)
@@ -137,10 +140,11 @@ target_include_directories(determ PRIVATE
 
 # §3.15 (2026-07-03): the daemon's CONSENSUS crypto (SHA-256 builder, Ed25519
 # sign/verify, entropy) now runs on determ-crypto-c99. libcrypto remains
-# linked ONLY for (a) the §Q9 test-oracle subcommands in src/main.cpp
+# linked ONLY for the §Q9 test-oracle subcommands in src/main.cpp
 # (test-*-c99 cross-validate the C99 stack against an independent
-# implementation — by design a non-determ backend) and (b) the wallet-shared
-# helpers compiled into the daemon. libssl (TLS) was never used by any
+# implementation — by design a non-determ backend). After 1c (same day)
+# this is the LAST OpenSSL consumer in the tree: determ-light and
+# determ-wallet link zero OpenSSL. libssl (TLS) was never used by any
 # target — no TLS anywhere in src/net — and is dropped.
 target_link_libraries(determ PRIVATE
   determ-crypto-c99
@@ -177,18 +181,18 @@ endif()
 
 # ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────
 # Separate binary so wallet secret material never shares address space with
-# the networked `determ` daemon. Recovery uses Shamir + OpenSSL AEAD envelopes
-# (passphrase scheme). The OPAQUE/liboprf track was DE-SCOPED 2026-07-03
-# (DECISION-LOG) — it was consumer-less AI-era scaffolding pointing at a
-# ristretto255/libopaque road the project already rejected for OPRF-P256.
+# the networked `determ` daemon. 1c (2026-07-03): the wallet links ZERO
+# OpenSSL — every crypto class migrated to determ-crypto-c99 (PBKDF2 +
+# AES-256-GCM envelopes, HKDF/HMAC, Ed25519 keygen/derive, OS entropy,
+# base64), format-compatible byte-for-byte with the OpenSSL-era output.
+# Recovery uses Shamir + c99 AEAD envelopes (passphrase scheme); the
+# OPAQUE/liboprf track was DE-SCOPED 2026-07-03 (DECISION-LOG).
 file(GLOB_RECURSE WALLET_SOURCES "wallet/*.cpp")
 add_executable(determ-wallet ${WALLET_SOURCES})
 target_include_directories(determ-wallet PRIVATE
   wallet
-  ${openssl_SOURCE_DIR}/include
 )
 target_link_libraries(determ-wallet PRIVATE
-  crypto
   determ-crypto-c99
   nlohmann_json::nlohmann_json
 )

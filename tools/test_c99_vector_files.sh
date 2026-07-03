@@ -56,7 +56,7 @@ EXPECTED = {
     "aes256_gcm.json", "ed25519.json", "x25519.json", "p256.json",
     "p256_h2c.json", "p256_oprf.json",
     "sha2_cavp_sha256.json", "sha2_cavp_sha512.json", "aes_gcm_cavp.json",
-    "frost_ed25519_rfc9591.json",
+    "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
 }
 
 try:
@@ -163,6 +163,33 @@ def chk_aead(vec, label, cls, nonce_field):
         return "recomputed ct||tag %s != vector %s" % (got.hex(), (ct + tag).hex())
     back = cls(key).decrypt(nonce, ct + tag, aad if aad else None)
     if back != pt: return "decrypt(ct||tag) != plaintext"
+
+def chk_aes256_gcm_decrypt(vec, label):
+    # Decrypt-direction corpus: result PASS must decrypt to plaintext_hex;
+    # result FAIL (tampered tag/ct/aad, wrong key) must be REJECTED by the
+    # oracle too — proving the vector genuinely fails, not just that the C99
+    # side rejects it. Arbitrary IV lengths exercise the GHASH-J0 path.
+    need(vec, ["result", "key_hex", "iv_hex", "aad_hex",
+               "ciphertext_hex", "tag_hex"], label)
+    key = unhex(vec["key_hex"], label + " key_hex")
+    iv  = unhex(vec["iv_hex"], label + " iv_hex")
+    aad = unhex(vec["aad_hex"], label + " aad_hex")
+    ct  = unhex(vec["ciphertext_hex"], label + " ciphertext_hex")
+    tag = unhex(vec["tag_hex"], label + " tag_hex")
+    if len(tag) != 16: return "tag_hex is not 16 bytes"
+    try:
+        got = AESGCM(key).decrypt(iv, ct + tag, aad if aad else None)
+        decrypted = True
+    except Exception:
+        decrypted = False
+    if vec["result"] == "PASS":
+        if not decrypted: return "PASS vector failed to decrypt under the oracle"
+        pt = unhex(vec["plaintext_hex"], label + " plaintext_hex")
+        if got != pt: return "oracle plaintext != vector plaintext_hex"
+    elif vec["result"] == "FAIL":
+        if decrypted: return "FAIL vector DECRYPTED under the oracle (not genuinely tampered)"
+    else:
+        return "unknown result %r" % vec["result"]
 
 def chk_ed25519(vec, label):
     need(vec, ["seed_hex", "public_key_hex", "msg_hex", "signature_hex"], label)
@@ -621,6 +648,7 @@ CHECKERS = {
     "p256_h2c":           chk_p256_h2c,
     "p256_oprf":          chk_p256_oprf,
     "frost_ed25519_rfc9591": chk_frost_ed25519_rfc9591,
+    "aes256_gcm_decrypt": chk_aes256_gcm_decrypt,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
