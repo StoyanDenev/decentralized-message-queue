@@ -13225,7 +13225,7 @@ int main(int argc, char** argv) {
                         msg.swap(e); }
                     uint8_t out[32];
                     determ_sha256(dptr(msg), msg.size(), out);
-                    if (hx(out,32) != v["digest_hex"]) { ok=false; bad=name; break; }
+                    if (hx(out,32) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
                 } else if (prim == "sha512") {
                     auto msg = unhex(v["msg_hex"]);
                     size_t rep = v.value("repeat", 1);
@@ -13234,34 +13234,34 @@ int main(int argc, char** argv) {
                         msg.swap(e); }
                     uint8_t out[64];
                     determ_sha512(dptr(msg), msg.size(), out);
-                    if (hx(out,64) != v["digest_hex"]) { ok=false; bad=name; break; }
+                    if (hx(out,64) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
                 } else if (prim == "hmac_sha256") {
                     auto key = unhex(v["key_hex"]); auto msg = unhex(v["msg_hex"]);
                     size_t maclen = v.value("mac_len", 32);
                     uint8_t out[32];
                     if (determ_hmac_sha256(dptr(key), key.size(), dptr(msg), msg.size(), out) != 0
-                        || hx(out, maclen) != v["mac_hex"]) { ok=false; bad=name; break; }
+                        || hx(out, maclen) != v["mac_hex"].get<std::string>()) { ok=false; bad=name; break; }
                 } else if (prim == "hkdf_sha256") {
                     auto ikm = unhex(v["ikm_hex"]); auto salt = unhex(v["salt_hex"]);
                     auto info = unhex(v["info_hex"]); size_t L = v["length"];
                     std::vector<uint8_t> out(L);
                     if (determ_hkdf_sha256(dptr(salt), salt.size(), dptr(ikm), ikm.size(),
                                            dptr(info), info.size(), out.data(), L) != 0
-                        || hx(out.data(), L) != v["okm_hex"]) { ok=false; bad=name; break; }
+                        || hx(out.data(), L) != v["okm_hex"].get<std::string>()) { ok=false; bad=name; break; }
                 } else if (prim == "pbkdf2_hmac_sha256") {
                     auto pw = unhex(v["password_hex"]); auto salt = unhex(v["salt_hex"]);
                     uint32_t iters = v["iterations"]; size_t dklen = v["dklen"];
                     std::vector<uint8_t> out(dklen);
                     if (determ_pbkdf2_hmac_sha256(dptr(pw), pw.size(), dptr(salt), salt.size(),
                                                   iters, out.data(), dklen) != 0
-                        || hx(out.data(), dklen) != v["dk_hex"]) { ok=false; bad=name; break; }
+                        || hx(out.data(), dklen) != v["dk_hex"].get<std::string>()) { ok=false; bad=name; break; }
                 } else if (prim == "blake2b") {
                     auto key = unhex(v["key_hex"]); auto msg = unhex(v["msg_hex"]);
                     size_t outlen = v["outlen"];
                     std::vector<uint8_t> out(outlen);
                     if (determ_blake2b(out.data(), outlen, dptr(key), key.size(),
                                        dptr(msg), msg.size()) != 0
-                        || hx(out.data(), outlen) != v["digest_hex"]) { ok=false; bad=name; break; }
+                        || hx(out.data(), outlen) != v["digest_hex"].get<std::string>()) { ok=false; bad=name; break; }
                 } else if (prim == "chacha20_poly1305") {
                     auto key = unhex(v["key_hex"]); auto nonce = unhex(v["nonce_hex"]);
                     auto aad = unhex(v["aad_hex"]); auto pt = unhex(v["plaintext_hex"]);
@@ -13270,8 +13270,8 @@ int main(int argc, char** argv) {
                     if (determ_chacha20_poly1305_encrypt(key.data(), nonce.data(),
                             dptr(aad), aad.size(), dptr(pt), pt.size(),
                             ct.empty()?nullptr:ct.data(), tag) != 0
-                        || hx(dptr(ct), ct.size()) != v["ciphertext_hex"]
-                        || hx(tag,16) != v["tag_hex"]) { ok=false; bad=name; break; }
+                        || hx(dptr(ct), ct.size()) != v["ciphertext_hex"].get<std::string>()
+                        || hx(tag,16) != v["tag_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     std::vector<uint8_t> rt(ct.size());
                     auto exp_tag = unhex(v["tag_hex"]);
                     if (determ_chacha20_poly1305_decrypt(key.data(), nonce.data(),
@@ -13286,8 +13286,8 @@ int main(int argc, char** argv) {
                     determ_aes256_gcm_encrypt(key.data(), iv.data(), dptr(aad), aad.size(),
                                               dptr(pt), pt.size(),
                                               ct.empty()?nullptr:ct.data(), tag);
-                    if (hx(dptr(ct), ct.size()) != v["ciphertext_hex"]
-                        || hx(tag,16) != v["tag_hex"]) { ok=false; bad=name; break; }
+                    if (hx(dptr(ct), ct.size()) != v["ciphertext_hex"].get<std::string>()
+                        || hx(tag,16) != v["tag_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     std::vector<uint8_t> rt(ct.size());
                     auto exp_tag = unhex(v["tag_hex"]);
                     if (determ_aes256_gcm_decrypt(key.data(), iv.data(), dptr(aad), aad.size(),
@@ -13299,9 +13299,9 @@ int main(int argc, char** argv) {
                     if (seed.size() != 32) { ok=false; bad=name + " (bad seed len)"; break; }
                     uint8_t pk[32], sig[64];
                     determ_ed25519_pubkey_from_seed(seed.data(), pk);
-                    if (hx(pk,32) != v["public_key_hex"]) { ok=false; bad=name + " (pubkey)"; break; }
+                    if (hx(pk,32) != v["public_key_hex"].get<std::string>()) { ok=false; bad=name + " (pubkey)"; break; }
                     if (determ_ed25519_sign(seed.data(), pk, dptr(msg), msg.size(), sig) != 0
-                        || hx(sig,64) != v["signature_hex"]) { ok=false; bad=name + " (sign)"; break; }
+                        || hx(sig,64) != v["signature_hex"].get<std::string>()) { ok=false; bad=name + " (sign)"; break; }
                     if (determ_ed25519_verify(pk, dptr(msg), msg.size(), sig) != 0) {
                         ok=false; bad=name + " (verify)"; break; }
                 } else if (prim == "x25519") {
@@ -13315,19 +13315,19 @@ int main(int argc, char** argv) {
                         if (a.size() != 32 || b.size() != 32) { ok=false; bad=name + " (bad len)"; break; }
                         uint8_t pa[32], pb[32], s1[32], s2[32];
                         if (determ_x25519_base(pa, a.data()) != 0
-                            || hx(pa,32) != v["public_a_hex"]) { ok=false; bad=name + " (public_a)"; break; }
+                            || hx(pa,32) != v["public_a_hex"].get<std::string>()) { ok=false; bad=name + " (public_a)"; break; }
                         if (determ_x25519_base(pb, b.data()) != 0
-                            || hx(pb,32) != v["public_b_hex"]) { ok=false; bad=name + " (public_b)"; break; }
+                            || hx(pb,32) != v["public_b_hex"].get<std::string>()) { ok=false; bad=name + " (public_b)"; break; }
                         if (determ_x25519(s1, a.data(), pb) != 0
                             || determ_x25519(s2, b.data(), pa) != 0
-                            || hx(s1,32) != v["shared_hex"]
-                            || hx(s2,32) != v["shared_hex"]) { ok=false; bad=name + " (shared)"; break; }
+                            || hx(s1,32) != v["shared_hex"].get<std::string>()
+                            || hx(s2,32) != v["shared_hex"].get<std::string>()) { ok=false; bad=name + " (shared)"; break; }
                     } else {
                         auto scalar = unhex(v["scalar_hex"]); auto u = unhex(v["u_hex"]);
                         if (scalar.size() != 32 || u.size() != 32) { ok=false; bad=name + " (bad len)"; break; }
                         uint8_t out[32];
                         if (determ_x25519(out, scalar.data(), u.data()) != 0
-                            || hx(out,32) != v["output_hex"]) { ok=false; bad=name; break; }
+                            || hx(out,32) != v["output_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     }
                 } else if (prim == "p256") {
                     // Three shapes per the "type" discriminator (big-endian /
@@ -13341,7 +13341,7 @@ int main(int argc, char** argv) {
                         if (k.size() != 32) { ok=false; bad=name + " (bad scalar len)"; break; }
                         uint8_t out[65];
                         if (determ_p256_base_mul(out, k.data()) != 0
-                            || hx(out,65) != v["public_uncompressed_hex"]) { ok=false; bad=name; break; }
+                            || hx(out,65) != v["public_uncompressed_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else if (ty == "ecdh") {
                         auto a = unhex(v["private_a_hex"]); auto b = unhex(v["private_b_hex"]);
                         auto pa = unhex(v["public_a_uncompressed_hex"]);
@@ -13349,14 +13349,14 @@ int main(int argc, char** argv) {
                         if (a.size()!=32 || b.size()!=32 || pa.size()!=65 || pb.size()!=65) {
                             ok=false; bad=name + " (bad len)"; break; }
                         uint8_t ga[65], gb[65], s1[65], s2[65];
-                        if (determ_p256_base_mul(ga, a.data()) != 0 || hx(ga,65) != v["public_a_uncompressed_hex"]) {
+                        if (determ_p256_base_mul(ga, a.data()) != 0 || hx(ga,65) != v["public_a_uncompressed_hex"].get<std::string>()) {
                             ok=false; bad=name + " (public_a)"; break; }
-                        if (determ_p256_base_mul(gb, b.data()) != 0 || hx(gb,65) != v["public_b_uncompressed_hex"]) {
+                        if (determ_p256_base_mul(gb, b.data()) != 0 || hx(gb,65) != v["public_b_uncompressed_hex"].get<std::string>()) {
                             ok=false; bad=name + " (public_b)"; break; }
                         if (determ_p256_point_mul(s1, a.data(), pb.data()) != 0
                             || determ_p256_point_mul(s2, b.data(), pa.data()) != 0
-                            || hx(s1+1,32) != v["shared_x_hex"]
-                            || hx(s2+1,32) != v["shared_x_hex"]) { ok=false; bad=name + " (shared)"; break; }
+                            || hx(s1+1,32) != v["shared_x_hex"].get<std::string>()
+                            || hx(s2+1,32) != v["shared_x_hex"].get<std::string>()) { ok=false; bad=name + " (shared)"; break; }
                     } else if (ty == "invalid_point") {
                         auto pt = unhex(v["point_uncompressed_hex"]);
                         if (pt.size() != 65) { ok=false; bad=name + " (bad len)"; break; }
@@ -13377,14 +13377,14 @@ int main(int argc, char** argv) {
                         if (determ_p256_expand_message_xmd(out.data(), L,
                                 msgv.empty()?nullptr:msgv.data(), msgv.size(),
                                 dstv.data(), dstv.size()) != 0
-                            || hx(out.data(), L) != v["uniform_bytes_hex"]) { ok=false; bad=name; break; }
+                            || hx(out.data(), L) != v["uniform_bytes_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else if (ty == "hash_to_curve") {
                         uint8_t out[65];
                         if (determ_p256_hash_to_curve(out,
                                 msgv.empty()?nullptr:msgv.data(), msgv.size(),
                                 dstv.data(), dstv.size()) != 0
-                            || hx(out+1, 32) != v["px_hex"]
-                            || hx(out+33, 32) != v["py_hex"]) { ok=false; bad=name; break; }
+                            || hx(out+1, 32) != v["px_hex"].get<std::string>()
+                            || hx(out+33, 32) != v["py_hex"].get<std::string>()) { ok=false; bad=name; break; }
                     } else { ok=false; bad=name + " (unknown p256_h2c type '" + ty + "')"; break; }
                 } else if (prim == "p256_oprf") {
                     // RFC 9497 A.3.1 (OPRF) + A.3.2 (VOPRF) — the FULL
@@ -13399,26 +13399,26 @@ int main(int argc, char** argv) {
                     uint8_t sk[32], blinded[33], eval_[33], outp[32];
                     if (determ_p256_oprf_derive_key(sk, seedv.data(), seedv.size(),
                             infov.data(), infov.size(), mode) != 0
-                        || hx(sk, 32) != v["sks_hex"]) { ok=false; bad=name + " (derive_key)"; break; }
+                        || hx(sk, 32) != v["sks_hex"].get<std::string>()) { ok=false; bad=name + " (derive_key)"; break; }
                     if (blindv.size() != 32
                         || determ_p256_oprf_blind(blinded, inputv.empty()?nullptr:inputv.data(),
                                inputv.size(), blindv.data(), mode) != 0
-                        || hx(blinded, 33) != v["blinded_element_hex"]) { ok=false; bad=name + " (blind)"; break; }
+                        || hx(blinded, 33) != v["blinded_element_hex"].get<std::string>()) { ok=false; bad=name + " (blind)"; break; }
                     if (determ_p256_oprf_evaluate(eval_, sk, blinded) != 0
-                        || hx(eval_, 33) != v["evaluation_element_hex"]) { ok=false; bad=name + " (evaluate)"; break; }
+                        || hx(eval_, 33) != v["evaluation_element_hex"].get<std::string>()) { ok=false; bad=name + " (evaluate)"; break; }
                     if (determ_p256_oprf_finalize(outp, inputv.empty()?nullptr:inputv.data(),
                             inputv.size(), blindv.data(), eval_) != 0
-                        || hx(outp, 32) != v["output_hex"]) { ok=false; bad=name + " (finalize)"; break; }
+                        || hx(outp, 32) != v["output_hex"].get<std::string>()) { ok=false; bad=name + " (finalize)"; break; }
                     if (v.value("type", "") == "voprf") {
                         auto rv = unhex(v["proof_random_scalar_hex"]);
                         uint8_t pk65[65], pk33[33], proof[64];
                         if (determ_p256_base_mul(pk65, sk) != 0
                             || determ_p256_point_compress(pk33, pk65) != 0
-                            || hx(pk33, 33) != v["pks_hex"]) { ok=false; bad=name + " (pks)"; break; }
+                            || hx(pk33, 33) != v["pks_hex"].get<std::string>()) { ok=false; bad=name + " (pks)"; break; }
                         if (rv.size() != 32
                             || determ_p256_voprf_prove(proof, sk, pk33, blinded, eval_,
                                    rv.data(), mode) != 0
-                            || hx(proof, 64) != v["proof_hex"]) { ok=false; bad=name + " (proof)"; break; }
+                            || hx(proof, 64) != v["proof_hex"].get<std::string>()) { ok=false; bad=name + " (proof)"; break; }
                         auto storedproof = unhex(v["proof_hex"]);
                         if (determ_p256_voprf_verify(pk33, blinded, eval_,
                                 storedproof.data(), mode) != 0) { ok=false; bad=name + " (verify)"; break; }
@@ -13451,11 +13451,11 @@ int main(int argc, char** argv) {
                     if ((int)coeffs.size() != (t - 1) * 32 || skv.size() != 32
                         || determ_frost_keygen_trusted(skv.data(), coeffs.data(), t, nmax,
                                shares.data(), gpk, spks.data()) != 0
-                        || hx(gpk, 32) != v["group_public_key_hex"]) { ok=false; bad=name + " (keygen group_pk)"; break; }
+                        || hx(gpk, 32) != v["group_public_key_hex"].get<std::string>()) { ok=false; bad=name + " (keygen group_pk)"; break; }
                     for (auto& ps : v["participant_shares"]) {
                         int id = ps["identifier"];
                         if (hx(shares.data() + (size_t)(id - 1) * 32, 32)
-                                != ps["participant_share_hex"]) { ok=false; bad=name + " (share f(" + std::to_string(id) + "))"; break; }
+                                != ps["participant_share_hex"].get<std::string>()) { ok=false; bad=name + " (share f(" + std::to_string(id) + "))"; break; }
                     }
                     if (!ok) break;
                     // reconstruct from the signing subset
@@ -13467,7 +13467,7 @@ int main(int argc, char** argv) {
                     }
                     uint8_t rec[32];
                     if (determ_frost_reconstruct(xs.data(), sub.data(), t, rec) != 0
-                        || hx(rec, 32) != v["group_secret_key_hex"]) { ok=false; bad=name + " (reconstruct)"; break; }
+                        || hx(rec, 32) != v["group_secret_key_hex"].get<std::string>()) { ok=false; bad=name + " (reconstruct)"; break; }
                     if (sigv.size() != 64 || pkv.size() != 32
                         || determ_ed25519_verify(pkv.data(), msgv.empty()?nullptr:msgv.data(),
                                msgv.size(), sigv.data()) != 0) { ok=false; bad=name + " (rfc sig ed25519-verify)"; break; }

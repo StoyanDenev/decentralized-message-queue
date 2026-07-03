@@ -414,6 +414,10 @@ Separate executable from the `determ` daemon. Secret material never enters the c
 - `1` — parsing error, missing argument, RPC failure, or assertion failure
 - `2` — cryptographic failure (AEAD tag mismatch, recovery reconstruction failed)
 
+## Continuous-integration gate (`tools/ci_local.sh`)
+
+`tools/ci_local.sh` is the second-platform verification gate: it builds all three binaries (`determ`, `determ-wallet`, `determ-light`) and runs the `FAST=1` regression suite + the offline doc-coherence guards on the CURRENT platform's toolchain, pointing the suite at the freshly-built binaries via the `DETERM_BIN` / `DETERM_WALLET_BIN` / `DETERM_LIGHT_BIN` overrides. Its purpose is to run the green surface on a SECOND toolchain (GCC/Linux) next to the primary MSVC/Windows dev box — from Windows, `wsl -d Ubuntu -- bash -lc 'cd /mnt/c/sauromatae && tools/ci_local.sh'`. Flags: `--build-dir DIR` (default `build-linux` on Linux, `build` on Windows), `--skip-build`, `--jobs N`. **Exit codes**: 0 build + FAST + guards all green; non-zero on the first failing stage. `.github/workflows/ci.yml` runs the identical content on `ubuntu-latest` + `windows-latest` when the repo is pushed to a GitHub remote with Actions enabled (inert until then).
+
 ## Operator analytical scripts (tools/operator_*.sh)
 
 Lightweight bash wrappers that compose multiple `determ` CLI/RPC calls into single-purpose operator diagnostic workflows. All are read-only (RPC only), require a daemon already listening on the supplied `--rpc-port` (default `7778`), source `tools/common.sh` for the platform-detected binary path, and accept `--help` for inline usage. Distinct from `tools/test_*.sh` (regression tests with embedded fixtures + assertions): operator scripts target a live production/staging daemon and emit a 1-line digest plus a meaningful exit code suitable for monitoring-system alert gates.

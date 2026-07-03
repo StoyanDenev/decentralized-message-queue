@@ -41,3 +41,4 @@ Thumbs.db
 tools/tlc/
 docs/proofs/tla/*_TTrace_*
 docs/proofs/tla/states/
+build-linux/
