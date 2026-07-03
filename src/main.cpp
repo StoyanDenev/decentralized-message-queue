@@ -13290,7 +13290,9 @@ int main(int argc, char** argv) {
                                 "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json",
                                 "aes_gcm_decrypt.json",
                                 "chacha20_poly1305_decrypt.json",
-                                "argon2id.json" };
+                                "argon2id.json",
+                                "xchacha20_poly1305_decrypt.json",
+                                "ed25519_verify_strict.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13431,6 +13433,49 @@ int main(int argc, char** argv) {
                             ok=false; bad=name + " (expected decrypt success)"; break; }
                     } else if (res == "FAIL") {
                         if (rc == 0) { ok=false; bad=name + " (tampered vector ACCEPTED)"; break; }
+                    } else { ok=false; bad=name + " (unknown result field)"; break; }
+                } else if (prim == "xchacha20_poly1305_decrypt") {
+                    // R52 decrypt-direction corpus (pynacl/libsodium oracle):
+                    // same PASS/FAIL contract as the sibling AEAD decrypt
+                    // corpora, 24-byte extended nonce.
+                    auto key = unhex(v["key_hex"]); auto nonce = unhex(v["nonce_hex"]);
+                    auto aad = unhex(v["aad_hex"]); auto ct = unhex(v["ciphertext_hex"]);
+                    auto tag = unhex(v["tag_hex"]);
+                    if (key.size() != 32 || nonce.size() != 24 || tag.size() != 16) {
+                        ok=false; bad=name + " (bad key/nonce/tag len)"; break; }
+                    std::string res = v.value("result", "");
+                    std::vector<uint8_t> pt(ct.size());
+                    int rc = determ_xchacha20_poly1305_decrypt(key.data(), nonce.data(),
+                                dptr(aad), aad.size(), dptr(ct), ct.size(),
+                                tag.data(), pt.empty()?nullptr:pt.data());
+                    if (res == "PASS") {
+                        if (rc != 0
+                            || hx(dptr(pt), pt.size()) != v["plaintext_hex"].get<std::string>()) {
+                            ok=false; bad=name + " (expected decrypt success)"; break; }
+                    } else if (res == "FAIL") {
+                        if (rc == 0) { ok=false; bad=name + " (tampered vector ACCEPTED)"; break; }
+                    } else { ok=false; bad=name + " (unknown result field)"; break; }
+                } else if (prim == "ed25519_verify_strict") {
+                    // R52: the STRICT-verifier consensus-rule pin. PASS = the
+                    // RFC 8032 §7.1 published vectors MUST verify; FAIL = the
+                    // (R,S+L) malleability twins, 1-bit tampers, and
+                    // non-canonical pubkeys (y >= q) MUST be rejected — the
+                    // exact reject surface the §3.15 migration locked in
+                    // pre-genesis as THE signature-validity rule.
+                    auto pk  = unhex(v["public_key_hex"]);
+                    auto msg = unhex(v["msg_hex"]);
+                    auto sig = unhex(v["signature_hex"]);
+                    if (pk.size() != 32 || sig.size() != 64) {
+                        ok=false; bad=name + " (bad pk/sig len)"; break; }
+                    std::string res = v.value("result", "");
+                    int rc = determ_ed25519_verify(pk.data(), dptr(msg), msg.size(),
+                                                   sig.data());
+                    if (res == "PASS") {
+                        if (rc != 0) { ok=false; bad=name + " (canonical sig REJECTED)"; break; }
+                    } else if (res == "FAIL") {
+                        if (rc == 0) { ok=false;
+                            bad=name + " (non-canonical/tampered sig ACCEPTED — "
+                                       "the strict consensus rule is broken)"; break; }
                     } else { ok=false; bad=name + " (unknown result field)"; break; }
                 } else if (prim == "argon2id") {
                     // R51 Argon2id corpus (argon2-cffi oracle, itself proven

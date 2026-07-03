@@ -1,0 +1,83 @@
+{
+  "primitive": "ed25519_verify_strict",
+  "source": "verify-direction negative corpus pinning the SS3.15 STRICT RFC 8032 consensus verifier (include/determ/crypto/ed25519/ed25519.h determ_ed25519_verify): PASS vectors are RFC 8032 SS7.1 TEST 1/2/3 published values transcribed exactly (anchor-grade); FAIL vectors are mechanically constructed on 2026-07-03 (gen_ed25519_verify_strict.py, generating session scratchpad) from the PASS material: S'=S+L little-endian malleation per PASS vector (the (R,S+L) twin a lenient verifier may accept - strict S < L gate MUST reject), 1-bit flips in R and in msg, and non-canonical pubkey encodings y=q+1 >= q with both sign-bit variants (q = 2^255-19, L = 2^252 + 27742317777372353535851937790883648493)",
+  "_meta": {
+    "oracle": "pynacl (libsodium) nacl.signing.VerifyKey.verify",
+    "oracle_version": "1.6.2",
+    "oracle_note": "all 10 vectors confirmed against libsodium: every PASS verifies, every FAIL raises (libsodium enforces S < L and canonical pk)",
+    "generated": "2026-07-03",
+    "results": "PASS = determ_ed25519_verify must return 0; FAIL = determ_ed25519_verify must return -1 (reject)"
+  },
+  "vectors": [
+    {
+      "name": "RFC 8032 7.1 TEST 1 (empty message) - MUST verify",
+      "result": "PASS",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "msg_hex": "",
+      "signature_hex": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 2 (1-byte message 0x72) - MUST verify",
+      "result": "PASS",
+      "public_key_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "msg_hex": "72",
+      "signature_hex": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 3 (2-byte message 0xaf82) - MUST verify",
+      "result": "PASS",
+      "public_key_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "msg_hex": "af82",
+      "signature_hex": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 1 (empty message) malleated S'=S+L - strict verifier MUST reject (S >= L)",
+      "result": "FAIL",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "msg_hex": "",
+      "signature_hex": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901554c8c7872aa064e049dbb3013fbf29380d25bf5f0595bbe24655141438e7a101b"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 2 (1-byte message 0x72) malleated S'=S+L - strict verifier MUST reject (S >= L)",
+      "result": "FAIL",
+      "public_key_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "msg_hex": "72",
+      "signature_hex": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69daf52db7415978abc61b2c2eb6aeebfca0387b2eaeb4302aeeb00d291612bb0c10"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 3 (2-byte message 0xaf82) malleated S'=S+L - strict verifier MUST reject (S >= L)",
+      "result": "FAIL",
+      "public_key_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "msg_hex": "af82",
+      "signature_hex": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac05d391b0a77904e98404ef037747a56e4a7c15e9716ed28dc027beceea1ec41a"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 1 (empty message) with R bit 0 of byte 0 flipped - MUST reject",
+      "result": "FAIL",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "msg_hex": "",
+      "signature_hex": "e4564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    },
+    {
+      "name": "RFC 8032 7.1 TEST 2 (1-byte message 0x72) with msg bit 0 of byte 0 flipped (0x72 -> 0x73) - MUST reject",
+      "result": "FAIL",
+      "public_key_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "msg_hex": "73",
+      "signature_hex": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+    },
+    {
+      "name": "non-canonical pubkey y=q+1 sign_bit=0 (y >= q) - MUST reject at pk decode",
+      "result": "FAIL",
+      "public_key_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "msg_hex": "af82",
+      "signature_hex": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+    },
+    {
+      "name": "non-canonical pubkey y=q+1 sign_bit=1 (y >= q) - MUST reject at pk decode",
+      "result": "FAIL",
+      "public_key_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "msg_hex": "af82",
+      "signature_hex": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+    }
+  ]
+}

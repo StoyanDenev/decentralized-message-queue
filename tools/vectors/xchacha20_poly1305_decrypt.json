@@ -1,0 +1,118 @@
+{
+  "primitive": "xchacha20_poly1305_decrypt",
+  "source": "generated decrypt-direction vectors for the C99 XChaCha20-Poly1305 extended-nonce AEAD (draft-irtf-cfrg-xchacha, HChaCha20 subkey derivation + RFC 8439 ChaCha20-Poly1305); every ciphertext/tag byte mechanically produced on 2026-07-03 by the independent oracle pynacl crypto_aead_xchacha20poly1305_ietf (libsodium binding, pynacl 1.6.2) \u2014 keys/nonces/plaintexts/AAD are deterministic SHA-256 label streams (domain 'determ xchacha20_poly1305_decrypt v1|<label>|<ctr32be>', see gen_xchacha20_poly1305_decrypt.py provenance in the generating session), so the file is reproducible; every result=PASS vector was round-tripped through the oracle decrypt and every result=FAIL vector confirmed to raise CryptoError before writing. Classes: 6 PASS decrypt with 24-byte nonce spanning ptlen {0,1,16,32,64,100} (the ptlen=32 case carries 24-byte AAD) + 1 PASS anchor = the draft-irtf-cfrg-xchacha appendix A.3 published vector (key=80..9f, nonce=40..57, aad=505152 53c0..c7, 114-byte 'Ladies and Gentlemen...' plaintext; ct/tag recomputed via the oracle rather than transcribed); 4 FAIL (tag 1-bit flip, ciphertext 1-bit flip, AAD 1-bit flip, wrong key \u2014 FAIL vectors omit plaintext_hex per the CAVP decrypt .rsp convention, a verifier must reject and release NO plaintext)",
+  "_meta": {
+    "oracle": "pynacl (libsodium) nacl.bindings.crypto_aead_xchacha20poly1305_ietf_encrypt/decrypt",
+    "oracle_version": "1.6.2",
+    "generated": "2026-07-03",
+    "results": "PASS = decrypt must return plaintext_hex; FAIL = decrypt must reject (no plaintext_hex field present)"
+  },
+  "vectors": [
+    {
+      "name": "decrypt PASS noncelen=24 ptlen=0 aadlen=0",
+      "result": "PASS",
+      "key_hex": "eef0ccfee3464e5f5a93be08a866f4b6cecc8b188ced006873d59b330771d8f8",
+      "nonce_hex": "f28de2c07f9a4d925001e0b610938304509fd15a02c47518",
+      "aad_hex": "",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "695f367223810eccd906896836f48726"
+    },
+    {
+      "name": "decrypt PASS noncelen=24 ptlen=1 aadlen=0",
+      "result": "PASS",
+      "key_hex": "d4cca1eb1aebd9120f5118b738a64e64c741eecb30ba2af8e0516c8d92424586",
+      "nonce_hex": "5295f3a4ce20aa83e30caa4f30589f5285dc7e0a3aa9db44",
+      "aad_hex": "",
+      "plaintext_hex": "bf",
+      "ciphertext_hex": "c5",
+      "tag_hex": "719a50cd8be8cd7a1d18a71e901bb88c"
+    },
+    {
+      "name": "decrypt PASS noncelen=24 ptlen=16 aadlen=0",
+      "result": "PASS",
+      "key_hex": "ce0b9c0fa9c01a9e4155f55b0232ac7676248664273b2bb1c482455e3e738bd9",
+      "nonce_hex": "dc3915355e8e0698417aeabe3b3103b1734d85636a7c3ef6",
+      "aad_hex": "",
+      "plaintext_hex": "bc090dad400af2f5290d417c9f9ddb41",
+      "ciphertext_hex": "94ae2a59db929d295f1dd3328b386a6d",
+      "tag_hex": "811e51f0a6dd5e15cb5a978fc7b0bbc2"
+    },
+    {
+      "name": "decrypt PASS noncelen=24 ptlen=64 aadlen=0",
+      "result": "PASS",
+      "key_hex": "1cbc231c7fe49fc77357ddffb7f02ce764529d1a5b4ee7688a82e9e10a799775",
+      "nonce_hex": "953a99ca357a4bee9948f7797f9ff2eaa9d98df4abd5f1cc",
+      "aad_hex": "",
+      "plaintext_hex": "2a3bbe3cf4a7f4a9a91b57059f690657a2a82863f6be158538b653b7d482a3bd05742029bb8f79ea25ed8e5d3d83205daadcc306ffece6fe636303278d8447c6",
+      "ciphertext_hex": "e1bdf393d10c7789a91c319912bdf6ab3611a9c24db93d9a7fdf0f1c2c10f110211a46685286dafee0dafcbd45297ff5394ce249cc8e823af04bf565d9b30211",
+      "tag_hex": "b00e43606bc46902f65ad5e329b55f3d"
+    },
+    {
+      "name": "decrypt PASS noncelen=24 ptlen=100 aadlen=0",
+      "result": "PASS",
+      "key_hex": "4690b9985395527feb7d2f71314c44c8b8cacc90da0a3b6f600005757bc9274f",
+      "nonce_hex": "43a27ac7f5e9104e09c596c776e1cd9841d1c8c2e31c6c2e",
+      "aad_hex": "",
+      "plaintext_hex": "8dda3a477804678abd8e2a429a9996eb1c785f18fecbfdc63084e89a2776af749dcd83827d7de8ad67e2d828aacfc73eb2b5455cb7189ad78f025a552f06d47a551787041b2023e2a10a4322c7ea5f6785f8ecd074c4e3550a08f71310d2935bb0fc9fa1",
+      "ciphertext_hex": "a1e6466e29c06419a88ce60c78c0a5130216ab31ae26cc33ba9f7dd63721a296a32bad8fa4965ab2d5ad9600a8325c05602a28b66b5cb9a2c8af9fe0825cd3fca0ff219f18ede6f4a3b6b038510dbacd7ca84224c38e22872a040194d4553308a601a106",
+      "tag_hex": "9d477294dcb5a39d23e0151f0c350ac9"
+    },
+    {
+      "name": "decrypt PASS noncelen=24 ptlen=32 aadlen=24",
+      "result": "PASS",
+      "key_hex": "8f45221a8bb653a2b613ba40b3863757db422dc86231e218f3826fb9e7f85c6f",
+      "nonce_hex": "7724f3e3512b294559492dd21685ce571cb7983c30f82cd7",
+      "aad_hex": "2339ce5b634139abc31d1eb3496c21788caccfbb72a3f326",
+      "plaintext_hex": "c955491244545727878df49fcde13a4ed4551688c2e054f67e7968535590eb48",
+      "ciphertext_hex": "428fbef05461d2b834f81297cadd881dc54aed3f1ca01564db212e87dabfb00c",
+      "tag_hex": "0d80a4b8cd46675907b5f0803bee2a4e"
+    },
+    {
+      "name": "decrypt PASS draft-irtf-cfrg-xchacha A.3 anchor (ptlen=114 aadlen=12, ct/tag recomputed via oracle)",
+      "result": "PASS",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "nonce_hex": "404142434445464748494a4b4c4d4e4f5051525354555657",
+      "aad_hex": "50515253c0c1c2c3c4c5c6c7",
+      "plaintext_hex": "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
+      "ciphertext_hex": "bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed2902c21396cbb731c7f1b0b4aa6440bf3a82f4eda7e39ae64c6708c54c216cb96b72e1213b4522f8c9ba40db5d945b11b69b982c1bb9e3f3fac2bc369488f76b2383565d3fff921f9664c97637da9768812f615c68b13b52e",
+      "tag_hex": "c0875924c1c7987947deafd8780acf49"
+    },
+    {
+      "name": "decrypt FAIL tag tampered (bit 0 of tag[0] flipped; base noncelen=24 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "4d59a2428ec5f019e1202d1357a24c7c4f23b42e56fbdf7faa22494313f3ca82",
+      "nonce_hex": "962bbf4728cfdf990a799df174578b7c0061b5660cfbaf5e",
+      "aad_hex": "4b79409964f39563c04ea023f2ff3ab3a34a5b9074a2f988",
+      "ciphertext_hex": "68cdfafa626b8631f28cdd8f7a50b214f4ada9776c79faccfaeb09e27d08136b",
+      "tag_hex": "9f226ce40206f679ac64e3cf8d43fcc4"
+    },
+    {
+      "name": "decrypt FAIL ciphertext tampered (bit 7 of ct[0] flipped; base noncelen=24 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "4d59a2428ec5f019e1202d1357a24c7c4f23b42e56fbdf7faa22494313f3ca82",
+      "nonce_hex": "962bbf4728cfdf990a799df174578b7c0061b5660cfbaf5e",
+      "aad_hex": "4b79409964f39563c04ea023f2ff3ab3a34a5b9074a2f988",
+      "ciphertext_hex": "e8cdfafa626b8631f28cdd8f7a50b214f4ada9776c79faccfaeb09e27d08136b",
+      "tag_hex": "9e226ce40206f679ac64e3cf8d43fcc4"
+    },
+    {
+      "name": "decrypt FAIL AAD tampered (bit 0 of aad[0] flipped; base noncelen=24 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "4d59a2428ec5f019e1202d1357a24c7c4f23b42e56fbdf7faa22494313f3ca82",
+      "nonce_hex": "962bbf4728cfdf990a799df174578b7c0061b5660cfbaf5e",
+      "aad_hex": "4a79409964f39563c04ea023f2ff3ab3a34a5b9074a2f988",
+      "ciphertext_hex": "68cdfafa626b8631f28cdd8f7a50b214f4ada9776c79faccfaeb09e27d08136b",
+      "tag_hex": "9e226ce40206f679ac64e3cf8d43fcc4"
+    },
+    {
+      "name": "decrypt FAIL wrong key (bit 0 of key[31] flipped; ct/tag valid under the original key; base noncelen=24 ptlen=32 aadlen=24)",
+      "result": "FAIL",
+      "key_hex": "4d59a2428ec5f019e1202d1357a24c7c4f23b42e56fbdf7faa22494313f3ca83",
+      "nonce_hex": "962bbf4728cfdf990a799df174578b7c0061b5660cfbaf5e",
+      "aad_hex": "4b79409964f39563c04ea023f2ff3ab3a34a5b9074a2f988",
+      "ciphertext_hex": "68cdfafa626b8631f28cdd8f7a50b214f4ada9776c79faccfaeb09e27d08136b",
+      "tag_hex": "9e226ce40206f679ac64e3cf8d43fcc4"
+    }
+  ]
+}

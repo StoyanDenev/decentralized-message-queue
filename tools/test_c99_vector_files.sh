@@ -58,6 +58,7 @@ EXPECTED = {
     "sha2_cavp_sha256.json", "sha2_cavp_sha512.json", "aes_gcm_cavp.json",
     "frost_ed25519_rfc9591.json", "aes_gcm_decrypt.json",
     "chacha20_poly1305_decrypt.json", "argon2id.json",
+    "xchacha20_poly1305_decrypt.json", "ed25519_verify_strict.json",
 }
 
 try:
@@ -215,6 +216,66 @@ def chk_chacha20_poly1305_decrypt(vec, label):
         if got != pt: return "oracle plaintext != vector plaintext_hex"
     elif vec["result"] == "FAIL":
         if decrypted: return "FAIL vector DECRYPTED under the oracle (not genuinely tampered)"
+    else:
+        return "unknown result %r" % vec["result"]
+
+def chk_xchacha20_poly1305_decrypt(vec, label):
+    # XChaCha20-Poly1305 decrypt-direction corpus. hazmat has no XChaCha;
+    # the oracle is pynacl (libsodium bindings). Missing pynacl is a
+    # FAILURE, not a skip (fail-closed, same posture as cryptography /
+    # argon2-cffi). Install: pip install pynacl.
+    need(vec, ["result", "key_hex", "nonce_hex", "aad_hex",
+               "ciphertext_hex", "tag_hex"], label)
+    try:
+        from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_decrypt
+    except Exception as e:
+        return "pynacl not importable (%s) — pip install pynacl" % e
+    key   = unhex(vec["key_hex"], label + " key_hex")
+    nonce = unhex(vec["nonce_hex"], label + " nonce_hex")
+    aad   = unhex(vec["aad_hex"], label + " aad_hex")
+    ct    = unhex(vec["ciphertext_hex"], label + " ciphertext_hex")
+    tag   = unhex(vec["tag_hex"], label + " tag_hex")
+    if len(nonce) != 24: return "nonce_hex is not 24 bytes"
+    if len(tag) != 16: return "tag_hex is not 16 bytes"
+    try:
+        got = crypto_aead_xchacha20poly1305_ietf_decrypt(
+            ct + tag, aad if aad else None, nonce, key)
+        decrypted = True
+    except Exception:
+        decrypted = False
+    if vec["result"] == "PASS":
+        if not decrypted: return "PASS vector failed to decrypt under the oracle"
+        pt = unhex(vec["plaintext_hex"], label + " plaintext_hex")
+        if got != pt: return "oracle plaintext != vector plaintext_hex"
+    elif vec["result"] == "FAIL":
+        if decrypted: return "FAIL vector DECRYPTED under the oracle (not genuinely tampered)"
+    else:
+        return "unknown result %r" % vec["result"]
+
+def chk_ed25519_verify_strict(vec, label):
+    # The strict-verifier consensus-rule pin. Oracle = pynacl/libsodium,
+    # which is ALSO strict (rejects S >= L + non-canonical pubkeys) — so
+    # PASS must verify and FAIL must be rejected under the oracle too,
+    # proving each FAIL vector is genuinely non-canonical/tampered rather
+    # than merely C99-rejected. Missing pynacl is a FAILURE (fail-closed).
+    need(vec, ["result", "public_key_hex", "msg_hex", "signature_hex"], label)
+    try:
+        from nacl.signing import VerifyKey
+        from nacl.exceptions import BadSignatureError
+    except Exception as e:
+        return "pynacl not importable (%s) — pip install pynacl" % e
+    pk  = unhex(vec["public_key_hex"], label + " public_key_hex")
+    msg = unhex(vec["msg_hex"], label + " msg_hex")
+    sig = unhex(vec["signature_hex"], label + " signature_hex")
+    try:
+        VerifyKey(pk).verify(msg, sig)
+        verified = True
+    except Exception:
+        verified = False
+    if vec["result"] == "PASS":
+        if not verified: return "PASS vector rejected by the strict oracle"
+    elif vec["result"] == "FAIL":
+        if verified: return "FAIL vector ACCEPTED by the strict oracle (not genuinely non-canonical)"
     else:
         return "unknown result %r" % vec["result"]
 
@@ -703,6 +764,8 @@ CHECKERS = {
     "aes256_gcm_decrypt": chk_aes256_gcm_decrypt,
     "chacha20_poly1305_decrypt": chk_chacha20_poly1305_decrypt,
     "argon2id": chk_argon2id,
+    "xchacha20_poly1305_decrypt": chk_xchacha20_poly1305_decrypt,
+    "ed25519_verify_strict": chk_ed25519_verify_strict,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))
