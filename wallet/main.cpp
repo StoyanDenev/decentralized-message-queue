@@ -9,7 +9,6 @@
 //
 // v1.x scope (Phase 2, follow-on):
 //   * envelope encrypt / decrypt (AEAD wrapping)
-//   * OPAQUE registration + AKE (via libopaque)
 //   * create-recovery / recover end-to-end flows
 //
 // Build target: determ-wallet (separate from `determ` daemon binary).
@@ -22,14 +21,18 @@
 #include "shamir.hpp"
 #include "envelope.hpp"
 #include "recovery.hpp"
-#include "opaque_primitives.hpp"
-#include "opaque_adapter.hpp"
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <sodium.h>
+
+// Local one-shot libsodium init (the former primitives::init_libsodium, whose
+// home opaque_primitives.cpp was deleted with the DE-SCOPED OPAQUE track).
+// TRANSITIONAL: the §3.15 migration replaces the wallet's sodium primitives
+// with determ::c99 and removes this along with the sodium dependency.
+namespace { inline bool init_libsodium() { return sodium_init() >= 0; } }
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -1491,7 +1494,7 @@ int cmd_account_derive_batch(int argc, char** argv) {
     }
 
     // ── Init libsodium for the Ed25519 seed-keypair primitive ───────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "account-derive-batch: libsodium init failed\n";
         return 1;
     }
@@ -1722,7 +1725,7 @@ int cmd_account_import(int argc, char** argv) {
     // alias for cases where the caller wants to be unambiguous about the
     // curve. Using the same primitive that message-sign uses keeps the
     // wallet's secret-handling surface uniform on libsodium.
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "account-import: libsodium init failed\n";
         return 1;
     }
@@ -1966,7 +1969,7 @@ int cmd_account_import_many(int argc, char** argv) {
     }
 
     // ── Init libsodium once for the whole batch ─────────────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "account-import-many: libsodium init failed\n";
         return 1;
     }
@@ -5760,7 +5763,7 @@ int cmd_account_recover(int argc, char** argv) {
     // Same primitive as account-import (crypto_sign_ed25519_seed_keypair).
     // The 64-byte sk it produces is seed||pubkey; we hold both halves
     // separately so we zero sk immediately after the call.
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "account-recover: libsodium init failed\n";
         return 1;
     }
@@ -6514,11 +6517,11 @@ int cmd_create_recovery(int argc, char** argv) {
         || threshold <= 0 || share_count <= 0) {
         std::cerr << "Usage: determ-wallet create-recovery "
                      "--seed <hex> --password <str> -t T -n N --out <file> "
-                     "[--scheme {passphrase|opaque}]\n";
+                     "[--scheme passphrase]\n";
         return 1;
     }
-    if (scheme != "passphrase" && scheme != "opaque") {
-        std::cerr << "--scheme must be 'passphrase' or 'opaque'\n"; return 1;
+    if (scheme != "passphrase") {
+        std::cerr << "--scheme must be 'passphrase'\n"; return 1;
     }
     std::vector<uint8_t> seed;
     try { seed = from_hex(seed_hex); }
@@ -6530,12 +6533,7 @@ int cmd_create_recovery(int argc, char** argv) {
     }
     auto checksum = recovery::seed_pubkey_checksum(seed);   // empty if seed != 32B
     try {
-        auto setup = (scheme == "opaque")
-            ? recovery::create_opaque(seed, password,
-                                        static_cast<uint8_t>(threshold),
-                                        static_cast<uint8_t>(share_count),
-                                        checksum)
-            : recovery::create       (seed, password,
+        auto setup = recovery::create(seed, password,
                                         static_cast<uint8_t>(threshold),
                                         static_cast<uint8_t>(share_count),
                                         checksum);
@@ -6596,91 +6594,6 @@ int cmd_recover(int argc, char** argv) {
     }
     std::cout << to_hex(*secret) << "\n";
     return 0;
-}
-
-// A2 Phase 4: smoke test for the libsodium primitives that libopaque
-// (Phase 5) will compose. Verifies the FetchContent integration is
-// wired correctly + the OPRF math works deterministically.
-int cmd_oprf_smoke(int argc, char** argv) {
-    (void)argc; (void)argv;
-    if (!primitives::init_libsodium()) {
-        std::cerr << "init_libsodium failed\n"; return 1;
-    }
-    // 1. Generate two random ristretto255 scalars (the user's blind r
-    //    and the simulated server's key k).
-    auto r = primitives::ristretto255_scalar_random();
-    auto k = primitives::ristretto255_scalar_random();
-    if (r.size() != 32 || k.size() != 32) {
-        std::cerr << "scalar_random returned wrong size\n"; return 1;
-    }
-    // 2. Blind a password into a point (mock client-side OPRF step).
-    std::vector<uint8_t> password = {'h','u','n','t','e','r','2'};
-    auto blinded = primitives::ristretto255_point_blind(password, r);
-    if (blinded.size() != 32) {
-        std::cerr << "point_blind failed\n"; return 1;
-    }
-    // 3. Argon2id stretch (mock OPAQUE password stretching). Uses
-    //    libsodium-required 16-byte salt and minimum opslimit for
-    //    quick smoke testing.
-    auto salt = primitives::random_bytes(16);
-    auto stretched = primitives::argon2id(password, salt, 32, 1, 8 * 1024 * 1024);
-    if (stretched.size() != 32) {
-        std::cerr << "argon2id failed\n"; return 1;
-    }
-    std::cout << "scalar_r  (32B):  " << to_hex(r) << "\n";
-    std::cout << "scalar_k  (32B):  " << to_hex(k) << "\n";
-    std::cout << "blinded   (32B):  " << to_hex(blinded) << "\n";
-    std::cout << "argon2id  (32B):  " << to_hex(stretched) << "\n";
-    std::cout << "libsodium primitives OK\n";
-    return 0;
-}
-
-// A2 Phase 5: exercise the OPAQUE adapter directly. Used by the
-// regression test to confirm the adapter's register/authenticate
-// round-trip works and that wrong passwords are rejected.
-int cmd_opaque_handshake(int argc, char** argv) {
-    std::string mode, password, record_hex;
-    int guardian_id = 0;
-    for (int i = 0; i < argc; ++i) {
-        std::string a = argv[i];
-        if      (a == "--mode"        && i + 1 < argc) mode        = argv[++i];
-        else if (a == "--password"    && i + 1 < argc) password    = argv[++i];
-        else if (a == "--guardian-id" && i + 1 < argc) { if (!arg_i32("opaque-handshake", "--guardian-id", argv[++i], guardian_id)) return 1; }
-        else if (a == "--record"      && i + 1 < argc) record_hex  = argv[++i];
-    }
-    if (mode.empty() || password.empty() || guardian_id < 0 || guardian_id > 255) {
-        std::cerr << "Usage: determ-wallet opaque-handshake "
-                     "--mode {register|authenticate} --password <str> "
-                     "--guardian-id <0..255> [--record <hex>]\n";
-        return 1;
-    }
-    if (mode == "register") {
-        auto r = opaque_adapter::register_password(password,
-                       static_cast<uint8_t>(guardian_id));
-        if (!r) { std::cerr << "register failed\n"; return 1; }
-        std::cout << "suite:      " << opaque_adapter::suite_name() << "\n";
-        std::cout << "is_stub:    " << (opaque_adapter::is_stub() ? "true" : "false") << "\n";
-        std::cout << "record:     " << to_hex(r->record)     << "\n";
-        std::cout << "export_key: " << to_hex(r->export_key) << "\n";
-        return 0;
-    }
-    if (mode == "authenticate") {
-        if (record_hex.empty()) {
-            std::cerr << "authenticate requires --record\n"; return 1;
-        }
-        std::vector<uint8_t> record;
-        try { record = from_hex(record_hex); }
-        catch (std::exception& e) {
-            std::cerr << "record hex: " << e.what() << "\n"; return 1;
-        }
-        auto k = opaque_adapter::authenticate_password(password, record,
-                       static_cast<uint8_t>(guardian_id));
-        if (!k) { std::cerr << "authenticate failed\n"; return 2; }
-        std::cout << "export_key: " << to_hex(*k) << "\n";
-        return 0;
-    }
-    std::cerr << "Unknown --mode: " << mode << "\n";
-    return 1;
 }
 
 // Read a `--message <spec>` arg. The spec is either an inline string or
@@ -6860,7 +6773,7 @@ int cmd_message_sign(int argc, char** argv) {
     // domain tag itself — a "I am present in domain X" beacon).
 
     // Init libsodium (idempotent; safe to call repeatedly).
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "message-sign: libsodium init failed\n";
         return 1;
     }
@@ -7019,7 +6932,7 @@ int cmd_message_verify(int argc, char** argv) {
         }
     }
 
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "message-verify: libsodium init failed\n";
         return 1;
     }
@@ -7226,7 +7139,7 @@ int cmd_derive_shared_secret(int argc, char** argv) {
     }
 
     // ── Init libsodium ─────────────────────────────────────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "derive-shared-secret: libsodium init failed\n";
         return 1;
     }
@@ -7759,7 +7672,7 @@ int cmd_encrypt_message(int argc, char** argv) {
     std::vector<uint8_t> plaintext = std::move(*pt_opt);
 
     // ── Init libsodium + derive X25519 shared secret ──────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "encrypt-message: libsodium init failed\n";
         return 1;
     }
@@ -7930,7 +7843,7 @@ int cmd_decrypt_message(int argc, char** argv) {
     std::vector<uint8_t> ct_with_tag(wire.begin() + 12, wire.end());
 
     // ── Init libsodium + derive X25519 shared secret ──────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "decrypt-message: libsodium init failed\n";
         return 1;
     }
@@ -8249,7 +8162,7 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     SHA256(sb.data(), sb.size(), sb_sha.data());
 
     // Init libsodium (idempotent) and verify the sig.
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "tx-sign-verify: libsodium init failed\n";
         return 1;
     }
@@ -8517,7 +8430,7 @@ int cmd_verify_equivocation(int argc, char** argv) {
     if (!decode_fixed("--digest-b", digest_b_hex, 64,  32, dig_b)) return 1;
     if (!decode_fixed("--sig-b",    sig_b_hex,    128, 64, sg_b))  return 1;
 
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "verify-equivocation: libsodium init failed\n";
         return 1;
     }
@@ -8848,7 +8761,7 @@ int cmd_committee_signature_verify(int argc, char** argv) {
         }
     }
 
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "committee-signature-verify: libsodium init failed\n";
         return 1;
     }
@@ -9565,7 +9478,7 @@ int cmd_cold_sign(int argc, char** argv) {
     SHA256(sb.data(), sb.size(), sb_sha.data());
 
     // ── Ed25519 sign over signing_bytes ─────────────────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         sodium_memzero(priv_seed.data(), priv_seed.size());
         std::cerr << "cold-sign: libsodium init failed\n";
         return 1;
@@ -9955,7 +9868,7 @@ int cmd_sign_anon_tx(int argc, char** argv) {
 
     // ── Derive the pubkey + verify address-vs-derivation (S-028 + key
     //    integrity) ──────────────────────────────────────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         sodium_memzero(priv_seed.data(), priv_seed.size());
         std::cerr << "sign-anon-tx: libsodium init failed\n";
         return 2;
@@ -10594,7 +10507,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
     }
 
     // ── Derive pubkey + verify address-vs-derivation ──────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         sodium_memzero(priv_seed.data(), priv_seed.size());
         if (!priv_seed_hex_holder.empty()) {
             sodium_memzero(priv_seed_hex_holder.data(),
@@ -12062,7 +11975,7 @@ int cmd_validate_tx(int argc, char** argv) {
     };
 
     if (sig_can_be_parsed && !sb.empty()) {
-        if (!primitives::init_libsodium()) {
+        if (!init_libsodium()) {
             std::cerr << "validate-tx: libsodium init failed\n";
             return 1;
         }
@@ -12586,7 +12499,7 @@ static bool verify_one_envelope(const nlohmann::json& j,
                      "verify --pubkey for domain senders)";
         return false;
     }
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         out_reason = "libsodium init failed";
         return false;
     }
@@ -16174,7 +16087,7 @@ int cmd_sign_arbitrary(int argc, char** argv) {
     std::vector<uint8_t> signing_bytes = build_signing_bytes(msg);
 
     // ── Ed25519 sign over signing_bytes ─────────────────────────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "sign-arbitrary: libsodium init failed\n";
         return 1;
     }
@@ -16389,7 +16302,7 @@ int cmd_verify_arbitrary(int argc, char** argv) {
     // Reconstruct signing_bytes = domain_sep || msg, then verify.
     std::vector<uint8_t> signing_bytes = build_signing_bytes(msg);
 
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         std::cerr << "verify-arbitrary: libsodium init failed\n";
         return 1;
     }
@@ -17022,7 +16935,7 @@ int cmd_bulk_send(int argc, char** argv) {
     }
 
     // ── Init libsodium + derive keypair from the priv seed ────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         sodium_memzero(priv_seed.data(), priv_seed.size());
         std::cerr << "bulk-send: libsodium init failed\n";
         return 1;
@@ -17586,7 +17499,7 @@ int cmd_bulk_stake(int argc, char** argv) {
     }
 
     // ── Init libsodium + derive keypair from the priv seed ────────────────
-    if (!primitives::init_libsodium()) {
+    if (!init_libsodium()) {
         sodium_memzero(priv_seed.data(), priv_seed.size());
         std::cerr << "bulk-stake: libsodium init failed\n";
         return 1;
@@ -25159,8 +25072,6 @@ void print_usage() {
         "                  [--scheme {passphrase|opaque}]\n"
         "  recover --in <file> --password <str>       Reconstruct the secret\n"
         "          [--guardians <i,j,k,...>]\n"
-        "  oprf-smoke                                 Verify libsodium primitives wired\n"
-        "  opaque-handshake --mode {register|authenticate}\n"
         "                   --password <str> --guardian-id <0..255> [--record <hex>]\n"
         "                                             Exercise the OPAQUE adapter (stub in Phase 5)\n"
         "  version                                    Print version banner\n"
@@ -25245,8 +25156,6 @@ int main(int argc, char** argv) {
     if (cmd == "rpc-auth")        return cmd_rpc_auth       (argc - 2, argv + 2);
     if (cmd == "create-recovery") return cmd_create_recovery(argc - 2, argv + 2);
     if (cmd == "recover")         return cmd_recover        (argc - 2, argv + 2);
-    if (cmd == "oprf-smoke")      return cmd_oprf_smoke     (argc - 2, argv + 2);
-    if (cmd == "opaque-handshake") return cmd_opaque_handshake(argc - 2, argv + 2);
     if (cmd == "version") {
         std::cout << "determ-wallet v1.x Phase 5 (Shamir + AEAD envelope + "
                      "passphrase recovery + libsodium primitives + "
