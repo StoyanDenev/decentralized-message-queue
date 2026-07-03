@@ -94,10 +94,14 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
 # include/determ/crypto.hpp (header-only, rides the PUBLIC include dir).
 # Per-module provenance + validation evidence: src/crypto/<module>/README.md.
 # The src/*.cpp glob above does not pick up .c files; list them explicitly.
-# §3.14 remaining: per-module sub-libraries, the cross-compilation matrix,
-# and the libsodium drop (gated on §3.15 — determ-wallet links sodium:
-# ~200 call sites across wallet/main.cpp (Ed25519 sign/verify/derive, X25519,
-# sodium_memzero) plus the OPAQUE stub; the daemon and determ-light do NOT).
+# libsodium drop: DONE (2026-07-03) — no Determ binary links libsodium.
+# The daemon and determ-light never did; determ-wallet, the last consumer,
+# migrated its ~200 call sites (Ed25519 sign/verify/derive, X25519,
+# sodium_memzero) in wallet/main.cpp to determ::c99 via an API-compatible
+# shim (§3.15), and the OPAQUE stub was DELETED with the liboprf track
+# (DECISION-LOG.md 2026-07-03). libsodium.a survives only as the byte-equal
+# cross-validation oracle (tools/c99_libsodium_xval.c). §3.14 remaining:
+# the per-module sub-library split + the cross-compilation matrix.
 add_library(determ-crypto-c99 STATIC
   # §3.10 shared primitives — secure_zero (hygiene) + ct_memcmp (CT compare),
   # consumed by every module below.
