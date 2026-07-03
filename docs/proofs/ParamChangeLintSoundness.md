@@ -21,7 +21,7 @@ The exit code is monitor-friendly: `0` for EFFECTIVE / HOOK_ONLY (the change wil
 
 ## 0. Implementation status and the object proved
 
-**`int cmd_param_change_lint(int, char**)` is IMPLEMENTED and SHIPPED in `wallet/main.cpp:23230-23361`** (dispatched on `param-change-lint` at `wallet/main.cpp:25209`). The two on-chain rules it reimplements are read directly off source:
+**`int cmd_param_change_lint(int, char**)` is IMPLEMENTED and SHIPPED in `wallet/main.cpp:23106-23237`** (dispatched on `param-change-lint` at `wallet/main.cpp:25078`). The two on-chain rules it reimplements are read directly off source:
 
 - The validator's whitelist gate — `kWhitelist` (9 names) at `src/node/validator.cpp:677-682`, applied at `src/node/validator.cpp:683-686` (`kWhitelist.find(name) == kWhitelist.end()` ⇒ reject).
 - The activation decode — `activate_pending_params`' `parse_u64` lambda (`value.size() != 8` ⇒ return `false`, no write) at `src/chain/chain.cpp:476-482`, the three numeric chain-scalar dispatches at `src/chain/chain.cpp:483-485`, and the unconditional hook forward at `src/chain/chain.cpp:493`.
@@ -315,7 +315,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | PCL-4 | chain unconditional hook forward | `src/chain/chain.cpp:493` | `param_changed_hook_(name, value)` — the only effect path for the 6 non-scalar names. |
 | PCL-4 | wallet HOOK_ONLY detail | `wallet/main.cpp:23338-23340` | "forwarded … effect depends on whether the operator's Node wired the hook." |
 | PCL-E | wallet exit-code map | `wallet/main.cpp:23343-23360` | `ok = EFFECTIVE||HOOK_ONLY`; exit 0/2; 1 on parse faults. |
-| PCL-E | dispatch | `wallet/main.cpp:25209` | `param-change-lint` → `cmd_param_change_lint`. |
+| PCL-E | dispatch | `wallet/main.cpp:25078` | `param-change-lint` → `cmd_param_change_lint`. |
 
 **Coherence guard (F-PCL5).** The byte-equivalence of the wallet mirror to the validator/chain sources is protected by the offline `tools/test_*.sh` family (the doc-tier / surface guards described in `docs/SECURITY.md`); a divergence between the wallet's `kWhitelist`/`kNumericScalars` and `validator.cpp:677-682` / `chain.cpp:483-485` is a coherence-drift regression those guards are positioned to catch. The companion `param-change-verify` (signatures) and `param-change-build` (assembly) round out the offline governance preflight toolchain.
 

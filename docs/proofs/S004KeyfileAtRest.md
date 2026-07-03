@@ -19,7 +19,7 @@ Line 1: "DETERM-NODE-V1 " ‖ hex(pk) ‖ "\n"
 Line 2: serialize(envelope::encrypt(J, P, aad := utf8(hex(pk)), iter)) ‖ "\n"
 ```
 
-— per `wallet/main.cpp:3151-3152`, with the `DWE1` envelope's canonical hex serialization shape `<magic>.<salt>.<iters>.<nonce>.<aad>.<ct>` from `wallet/envelope.cpp:196-211`. The AAD bytes are the UTF-8 encoding of the lowercase pubkey hex string (`wallet/main.cpp:3107` + `:3364`), binding the envelope to the keypair's public identity.
+— per `wallet/main.cpp:3151-3152`, with the `DWE1` envelope's canonical hex serialization shape `<magic>.<salt>.<iters>.<nonce>.<aad>.<ct>` from `wallet/envelope.cpp:127-142`. The AAD bytes are the UTF-8 encoding of the lowercase pubkey hex string (`wallet/main.cpp:3107` + `:3364`), binding the envelope to the keypair's public identity.
 
 **Theorem T-1 (PBKDF2 Soundness — offline brute-force lower bound).** Let `Key := PBKDF2-HMAC-SHA-256(P, s, iter, dkLen=32)` denote the 32-byte AES key derived per `wallet/envelope.cpp:19-33`. Under (A6) HMAC-SHA-256 PRF assumption + (A2) SHA-256 collision resistance, an adversary `A_offline` holding `(envelope, hex(pk))` but not `P` must perform expected work
 
@@ -75,7 +75,7 @@ The cryptographic primitives chosen — PBKDF2-HMAC-SHA-256 + AES-256-GCM — ar
 
 ### 2.2 Wire format details
 
-The encrypted keyfile is a 2-line text file. **Line 1** is the human-readable header `DETERM-NODE-V1 <hex(pk)>` — the version tag (used as AAD-binding context), then the public key (used as both the AAD-binding payload and an operator-visible identifier). **Line 2** is the canonical `DWE1` envelope serialization: 6 dot-separated lowercase hex fields per `wallet/envelope.cpp:196-211`:
+The encrypted keyfile is a 2-line text file. **Line 1** is the human-readable header `DETERM-NODE-V1 <hex(pk)>` — the version tag (used as AAD-binding context), then the public key (used as both the AAD-binding payload and an operator-visible identifier). **Line 2** is the canonical `DWE1` envelope serialization: 6 dot-separated lowercase hex fields per `wallet/envelope.cpp:127-142`:
 
 ```
 <magic_4B>.<salt_16B>.<iters_4B>.<nonce_12B>.<aad_variable>.<ct_+_tag>
@@ -384,7 +384,7 @@ In particular: there is no "post-AEAD-success but pre-pubkey-check" failure mode
 
 **Severity:** None (informational).
 
-**Recommendation:** Maintain `iter = 600,000` until 2028. The OWASP 2027 update is expected to raise the recommendation to 1,000,000+ as GPU HMAC throughput continues to scale. The envelope's wire format includes `pbkdf2_iters` as a u32 field (`wallet/envelope.hpp:46-50` + `wallet/envelope.cpp:200-202`), so a future migration to a higher iteration count is forward-compatible — existing keyfiles continue to work at their original iteration count, new keyfiles use the updated default. **No code change recommended at this time.**
+**Recommendation:** Maintain `iter = 600,000` until 2028. The OWASP 2027 update is expected to raise the recommendation to 1,000,000+ as GPU HMAC throughput continues to scale. The envelope's wire format includes `pbkdf2_iters` as a u32 field (`wallet/envelope.hpp:46-50` + `wallet/envelope.cpp:131-133`), so a future migration to a higher iteration count is forward-compatible — existing keyfiles continue to work at their original iteration count, new keyfiles use the updated default. **No code change recommended at this time.**
 
 **Finding F-2 (Operator passphrase entropy is OUT OF SCOPE for the bound — operator policy required).** T-1's effective security `B_eff = H_pw + log2(iter)` is parameterized by the operator's passphrase entropy `H_pw`. The S-004 closure's cryptographic primitives provide the `log2(iter) ≈ 19.2` bits of cost amplification, but the underlying `H_pw` is operator-controlled and outside the scope of any cryptographic primitive.
 
@@ -497,7 +497,7 @@ This proof was added as part of the analytic-closure sweep for S-004; it does no
 - `wallet/envelope.cpp:19-33` — `derive_key` via OpenSSL `PKCS5_PBKDF2_HMAC` + EVP_sha256.
 - `wallet/envelope.cpp:37-103` — `encrypt` (the AEAD wrap path).
 - `wallet/envelope.cpp:105-167` — `decrypt` (the AEAD unwrap path; AAD-precondition + tag-verify).
-- `wallet/envelope.cpp:196-247` — `serialize` / `deserialize` (the canonical dot-separated hex format).
+- `wallet/envelope.cpp:127-178` — `serialize` / `deserialize` (the canonical dot-separated hex format).
 - `wallet/main.cpp:2981-3186` — `cmd_keyfile_create` (operator-side encrypt flow).
 - `wallet/main.cpp:3107` — AAD set to `utf8(pubkey_hex)`.
 - `wallet/main.cpp:3151-3152` — 2-line file format (`DETERM-NODE-V1 <pubkey_hex>` header + envelope blob).

@@ -25,13 +25,18 @@ Public entry points (`include/determ/crypto/aes/aes.h`):
 | `determ_aes256_init` | expand a 32-byte key into `determ_aes256_ctx` (240-byte schedule) |
 | `determ_aes256_encrypt_block` | one 16-byte block, encrypt direction |
 | `determ_aes256_sbox_selftest` | returns 1 iff the CT arithmetic S-box equals the canonical FIPS-197 table over all 256 inputs |
-| `determ_aes256_gcm_encrypt` | AEAD seal: 96-bit IV, AAD, plaintext → ciphertext + 16-byte tag |
-| `determ_aes256_gcm_decrypt` | AEAD open: verifies the tag (constant-time) before writing any plaintext; 0 on success, −1 on auth failure |
+| `determ_aes256_gcm_encrypt` | AEAD seal: 96-bit IV, AAD, plaintext → ciphertext + 16-byte tag (thin wrapper over `_encrypt_iv` with ivlen=12) |
+| `determ_aes256_gcm_decrypt` | AEAD open: verifies the tag (constant-time) before writing any plaintext; 0 on success, −1 on auth failure (wrapper over `_decrypt_iv`) |
+| `determ_aes256_gcm_encrypt_iv` / `_decrypt_iv` | arbitrary-IV-length variants (SP 800-38D §7.1); −1 on ivlen == 0 |
 
 GCM construction as implemented in `aes_gcm.c`:
 
-- `H = E_K(0^128)` (GHASH subkey), `J0 = IV ‖ 0^31 ‖ 1` — the 96-bit-IV fast
-  path only; arbitrary-length IVs (GHASH-derived J0) are not implemented.
+- `H = E_K(0^128)` (GHASH subkey). `J0`: ivlen == 12 takes the fast path
+  `IV ‖ 0^31 ‖ 1`; any other ivlen ≥ 1 derives
+  `J0 = GHASH_H(IV ‖ 0-pad ‖ [0]_64 ‖ [ivlen·8]_64)` (`gcm_j0`) — validated
+  against OpenSSL EVP per IV length {1,8,16,20,32,60} by `determ test-aes-c99`
+  §5 and against the python `cryptography` oracle by
+  `tools/vectors/aes_gcm_decrypt.json` (via `test-c99-vectors`).
 - GCTR keystream starts at `inc32(J0)`; `inc32` increments the last 32 bits big-endian.
 - `tag = GHASH(H, AAD ‖ pad, CT ‖ pad, len64(AAD)‖len64(CT)) ⊕ E_K(J0)`
   (`gcm_tag`), MSB-first bit order, `R = 0xe1‖0^120` reduction (`ghash_mul`).

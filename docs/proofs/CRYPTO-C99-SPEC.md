@@ -894,15 +894,22 @@ Original plan (retained):
   (`tools/c99_libsodium_xval.c` + the per-primitive `determ test-*-c99` gates);
   existing in-process `determ test-*` subcommands and the wallet test suite
   continue passing.
-- Remaining: the daemon/light OpenSSL migration SHIPPED above (no sodium
-  migration was ever owed there). Residuals: (a) the WALLET still runs its
-  keyfile/backup envelopes on OpenSSL (PBKDF2 + AES-256-GCM + RAND_bytes +
-  EVP base64) — migrating it needs the c99 AES-GCM decrypt direction (a
-  documented §3.5 gap) and is a separable follow-up; (b) opportunistic — the
-  v2.17/S-004 keyfile envelope could derive via the shipped `determ_argon2id`
-  instead of PBKDF2 (an on-disk format change, §3.6); (c) the vendored
-  OpenSSL (1.1.1w) is now wallet + §Q9-oracle-only — bumping or isolating it
-  is the 1c follow-up, no longer consensus-relevant.
+- **1c EXECUTED (2026-07-03, same day):** the WALLET is now ZERO-OpenSSL too.
+  Every class migrated to `determ::c99`, format-compatible byte-for-byte:
+  envelopes (PBKDF2 → `determ_pbkdf2_hmac_sha256`, AES-256-GCM →
+  `determ_aes256_gcm_*` — the "decrypt direction gap" turned out to be a
+  stale claim (decrypt existed); the REAL §3.5 gap was arbitrary-length IVs,
+  closed the same day via the SP 800-38D `gcm_j0` derivation +
+  `_encrypt_iv`/`_decrypt_iv`), entropy (`determ_rng_bytes`), HKDF/HMAC
+  (`determ_hmac_sha256`), Ed25519 keygen/derive, one-shot SHA-256, and
+  base64 (new strict RFC 4648 module `src/crypto/base64/` — the wallet's
+  last OpenSSL class). `determ-wallet` links only `determ-crypto-c99`.
+  **The vendored OpenSSL (1.1.1w) is now §Q9-test-oracle-only** (inside
+  `determ`'s `test-*-c99` subcommands — by design an independent non-determ
+  implementation); it is in NO production code path in any binary.
+  Remaining residual: opportunistic — the v2.17/S-004 keyfile envelope could
+  derive via the shipped `determ_argon2id` instead of PBKDF2 (an on-disk
+  format change, §3.6).
 
 ### 3.16 Documentation (~3 days)
 

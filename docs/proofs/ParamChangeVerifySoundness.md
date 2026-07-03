@@ -20,7 +20,7 @@ The proof's posture mirrors `OfflineBlockVerifySoundness.md` (the wallet `block-
 
 ## 0. Implementation status
 
-**`int cmd_param_change_verify(int, char**)` is IMPLEMENTED and SHIPPED in `wallet/main.cpp:23382-23545`** (dispatched on `param-change-verify` at `wallet/main.cpp:25210`), exercised offline by `tools/test_wallet_param_change_verify.sh`. It is the OFFLINE, read-only dual of the daemon's PARAM_CHANGE multisig gate in `src/node/validator.cpp:688-725`. Both the reimplemented surface and its daemon reference are read directly off source for this document:
+**`int cmd_param_change_verify(int, char**)` is IMPLEMENTED and SHIPPED in `wallet/main.cpp:23258-23421`** (dispatched on `param-change-verify` at `wallet/main.cpp:25079`), exercised offline by `tools/test_wallet_param_change_verify.sh`. It is the OFFLINE, read-only dual of the daemon's PARAM_CHANGE multisig gate in `src/node/validator.cpp:688-725`. Both the reimplemented surface and its daemon reference are read directly off source for this document:
 
 - **Wallet decode + `sig_msg` rebuild + verify loop** — `cmd_param_change_verify` (`wallet/main.cpp:23429-23510`): payload hex-decode, length-prefixed field walk, canonical `sig_msg` assembly (`:23451-23457`), per-`(idx, sig)` `crypto_sign_verify_detached` (`:23502`), distinct/in-range tracking (`:23496-23499`), and the `good >= threshold` verdict (`:23509-23510`).
 - **Daemon reference gate** — `Validator::validate` PARAM_CHANGE case (`src/node/validator.cpp:636-726`): payload decode (`:644-672`), whitelist (`:677-686`, **out of scope here**, see §4.2), `sig_msg` assembly (`:693-701`), per-`(idx, sig)` `verify` over `param_keyholders_[idx]` (`:703-719`), and the `good_sigs < param_threshold_` reject (`:720-725`).
@@ -290,7 +290,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | Theorem | Surface | File:lines | Role |
 |---|---|---|---|
 | — | `cmd_param_change_verify` (the verifier) | `wallet/main.cpp:23382-23545` | Arg parse, decode, `sig_msg` rebuild, verify loop, verdict, exit 0/1/2. |
-| — | dispatch | `wallet/main.cpp:25210` | `param-change-verify` → `cmd_param_change_verify`. |
+| — | dispatch | `wallet/main.cpp:25079` | `param-change-verify` → `cmd_param_change_verify`. |
 | PCV-1 | wallet payload decode | `wallet/main.cpp:23429-23448` | `name_len|name|value_len LE|value|eff LE|sig_count` walk. |
 | PCV-1 | wallet `sig_msg` rebuild | `wallet/main.cpp:23451-23457` | The reconstruction proved byte-identical. |
 | PCV-1 | daemon decode reference | `src/node/validator.cpp:644-672` | The byte-identical reference decode. |
@@ -317,7 +317,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 
 ## 7. Status
 
-- **Implementation.** **SHIPPED.** `int cmd_param_change_verify` is in `wallet/main.cpp:23382-23545` (dispatched on `param-change-verify` at `:25210`), exercised offline by `tools/test_wallet_param_change_verify.sh`. It is the OFFLINE, read-only reimplementation of the daemon's PARAM_CHANGE multisig gate (`src/node/validator.cpp:688-725`).
+- **Implementation.** **SHIPPED.** `int cmd_param_change_verify` is in `wallet/main.cpp:23258-23421` (dispatched on `param-change-verify` at `:25079`), exercised offline by `tools/test_wallet_param_change_verify.sh`. It is the OFFLINE, read-only reimplementation of the daemon's PARAM_CHANGE multisig gate (`src/node/validator.cpp:688-725`).
 - **Proof.** Complete (this document). PCV-1 (`sig_msg` byte-equivalence — the wallet rebuilds the validator's exact `nlen|name|vlen LE|value|eff LE` tuple; **no digest conditional**, the message is self-determined from the payload); PCV-2 (per-keyholder Ed25519 soundness under A1 — a counted-valid pair is a genuine signature by the claimed keyholder, `≤ K·2⁻¹²⁸`); PCV-3 (distinct-index + in-range + threshold equivalence — the wallet's `¬dup ∧ ¬oor ∧ good ≥ t` matches the daemon's accept condition, the control-flow difference is verdict-preserving, fail-closed); PCV-4 (the honest boundary — keyholder set + threshold are operator-supplied on-chain governance state; the verifier is read-only and signs nothing). Composite verdict + bound PCV-E (`≤ K·ε_{A1}`; deterministic decode/assembly/gate add no term; the set/threshold provenance is NOT in the bound).
 - **Cryptographic assumptions used.** A1 (Ed25519 EUF-CMA, the per-keyholder signature check). A2, A3 **not** used — the gate signs a flat length-prefixed tuple, not a hash. Per `Preliminaries.md §2.0`.
 - **The single trust boundary (load-bearing).** The keyholder pubkey set + threshold are **on-chain governance state** (`param_keyholders_`, `param_threshold_`) not carried in the PARAM_CHANGE payload, so the operator supplies them. A PASS is sound for the supplied set + threshold and is a faithful prediction of the validator's signature-gate verdict **iff** they equal the chain's values (including index ordering) at the validating height (F-PCV1). The verifier additionally does not reimplement the whitelist layer (F-PCV2, covered by `GovernanceWhitelistSoundness.md` GW-1) or the governance-mode gate (F-PCV4), and tolerates trailing payload bytes the validator rejects (F-PCV3).

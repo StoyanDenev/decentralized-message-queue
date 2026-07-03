@@ -49,7 +49,7 @@ Phase 2 (live, skipped with --static-only):
     test-aes-c99          test-ed25519-c99    test-ed25519-scalar-reduce
     test-frost-c99        test-x25519-c99     test-blake2b-c99
     test-xchacha-c99      test-argon2id-c99   test-ct-c99
-    test-c99-vectors      test-c99-api
+    test-rng-c99          test-c99-vectors    test-c99-api
   Each battery must exit 0 AND emit its terminal PASS summary marker;
   the script prints a per-test OK/FAILED row and a final verdict.
 
@@ -157,14 +157,15 @@ fi
 
 echo
 echo "=== Phase 2: live battery ($DETERM) ==="
-# All 14 in-process C99-family subcommands, in `determ help` order.
+# All 15 in-process C99-family subcommands, in `determ help` order
+# (test-rng-c99 added with the §3.15 OS-entropy shim, R50).
 # Every one emits a terminal "PASS: <name> "/"FAIL: <name> " summary
 # line from its src/main.cpp dispatch block (name = subcommand minus
 # the "test-" prefix), which is what the marker gate below greps.
 BATTERY="test-ed25519-vectors test-sha2-c99 test-chacha20-c99 test-aes-c99 \
          test-ed25519-c99 test-ed25519-scalar-reduce test-frost-c99 \
          test-x25519-c99 test-blake2b-c99 test-xchacha-c99 \
-         test-argon2id-c99 test-ct-c99 test-c99-vectors test-c99-api"
+         test-argon2id-c99 test-ct-c99 test-rng-c99 test-c99-vectors test-c99-api"
 FAILED=0
 TOTAL=0
 for t in $BATTERY; do

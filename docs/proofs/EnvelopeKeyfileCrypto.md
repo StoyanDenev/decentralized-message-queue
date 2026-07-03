@@ -73,7 +73,7 @@ All constants below are read directly from the implementation and are load-beari
 | `DEFAULT_PBKDF2_ITERS` | **600,000** iterations | `wallet/envelope.hpp:46` |
 | `DEFAULT_SALT_LEN` | 16 bytes | `wallet/envelope.hpp:50` |
 
-The `DWE1` magic is the format/version tag, not a cryptographic domain separator fed into the AEAD; it gates `deserialize` (`wallet/envelope.cpp:228`) and identifies the wire format to inspection tools. The cryptographic domain-separation / context-binding role is played by the caller-supplied `aad` field (§3.4).
+The `DWE1` magic is the format/version tag, not a cryptographic domain separator fed into the AEAD; it gates `deserialize` (`wallet/envelope.cpp:159`) and identifies the wire format to inspection tools. The cryptographic domain-separation / context-binding role is played by the caller-supplied `aad` field (§3.4).
 
 ### 3.2 Envelope layout
 
@@ -91,13 +91,13 @@ Envelope {
 
 The cryptographic payload is the conceptual tuple `[salt | nonce | ciphertext | tag]`, with the 16-byte tag occupying the final `TAG_LEN` bytes of the `ciphertext` vector (appended at encrypt time via `EVP_CTRL_GCM_GET_TAG`, `wallet/envelope.cpp:92-99`). The `pbkdf2_iters` and `aad` fields are stored so that decryption is self-describing — the verifier needs no out-of-band parameters beyond the passphrase.
 
-The canonical serialization (`serialize`, `wallet/envelope.cpp:196-211`) is six dot-separated lowercase-hex fields:
+The canonical serialization (`serialize`, `wallet/envelope.cpp:127-142`) is six dot-separated lowercase-hex fields:
 
 ```
 <magic_4B> . <salt_16B> . <iters_4B_LE> . <nonce_12B> . <aad_var> . <ciphertext+tag_var>
 ```
 
-`deserialize` (`wallet/envelope.cpp:213-247`) splits on `.`, requires exactly six parts, checks the magic equals `MAGIC_LE`, requires `salt.size() >= 8`, requires `nonce.size() == NONCE_LEN`, and requires `ciphertext.size() >= TAG_LEN`. A blob failing any check yields `std::nullopt` — malformed envelopes never reach the AEAD path.
+`deserialize` (`wallet/envelope.cpp:144-178`) splits on `.`, requires exactly six parts, checks the magic equals `MAGIC_LE`, requires `salt.size() >= 8`, requires `nonce.size() == NONCE_LEN`, and requires `ciphertext.size() >= TAG_LEN`. A blob failing any check yields `std::nullopt` — malformed envelopes never reach the AEAD path.
 
 ### 3.3 Key derivation
 
@@ -160,7 +160,7 @@ The four theorems are assembled from six lemmas about the primitive's mechanics.
 
 **Lemma L-5 (fresh nonce + fresh salt per encryption).** Each `encrypt` invocation draws an independent 16-byte salt and 12-byte nonce from `RAND_bytes` (`wallet/envelope.cpp:46-49`), failing closed if `RAND_bytes` fails (`:47-49`). *Proof.* Direct from the source: both buffers are filled by `RAND_bytes` immediately before use, and a non-`1` return throws before any key/ciphertext is produced. Under (C3) the draws are computationally uniform and independent. Consequently (i) the `(Key, nonce)` pair is fresh per envelope — the GCM nonce-reuse catastrophe is avoided since each fresh salt yields a fresh `Key` even at fixed `P` (L-1), so the same `(Key, nonce)` recurs only on a simultaneous salt-and-nonce collision, probability `≤ 2^-(128+96)` per pair — and (ii) the salt is unpredictable in advance. ∎
 
-**Lemma L-6 (salt is an independent KDF input, public but per-target).** Under (C1), for distinct salts `s_i ≠ s_j`, the keys `Key_i = PBKDF2(P, s_i, iter)` and `Key_j = PBKDF2(P, s_j, iter)` are independent pseudorandom values even when `P` is identical. *Proof.* The salt is a direct argument to the HMAC-PRF seed `HMAC(P, s ‖ INT(1))` (L-1); by (C1) distinct seeds yield independent PRF outputs. The salt is stored in cleartext in the envelope (`serialize`, `wallet/envelope.cpp:205`), so the adversary reads `s_i`; this is correct — the salt provides input-separation (uniqueness), not secrecy. A guessing table built for `s_i` has zero applicability to `s_j` because the entire derivation chain differs from the first HMAC. ∎
+**Lemma L-6 (salt is an independent KDF input, public but per-target).** Under (C1), for distinct salts `s_i ≠ s_j`, the keys `Key_i = PBKDF2(P, s_i, iter)` and `Key_j = PBKDF2(P, s_j, iter)` are independent pseudorandom values even when `P` is identical. *Proof.* The salt is a direct argument to the HMAC-PRF seed `HMAC(P, s ‖ INT(1))` (L-1); by (C1) distinct seeds yield independent PRF outputs. The salt is stored in cleartext in the envelope (`serialize`, `wallet/envelope.cpp:136`), so the adversary reads `s_i`; this is correct — the salt provides input-separation (uniqueness), not secrecy. A guessing table built for `s_i` has zero applicability to `s_j` because the entire derivation chain differs from the first HMAC. ∎
 
 ---
 
@@ -326,7 +326,7 @@ These are acknowledged limitations of the envelope primitive. None invalidates K
 | Key derivation | `wallet/envelope.cpp:19-33` | `derive_key` via `PKCS5_PBKDF2_HMAC` + `EVP_sha256`, 32-byte output (KE-1, KE-4) |
 | AEAD encrypt | `wallet/envelope.cpp:37-103` | salt/nonce from `RAND_bytes` (`:46-49`); `EVP_aes_256_gcm`; AAD bind (`:69-75`); tag append (`:92-99`) (KE-2, KE-3) |
 | AEAD decrypt (fail-closed) | `wallet/envelope.cpp:105-167` | structural pre-checks (`:109-111`); AAD precondition (`:114`); tag-verify gate at `EVP_DecryptFinal_ex` (`:161`); `nullopt` on failure (`:163`) (KE-1, KE-2) |
-| Canonical serialization | `wallet/envelope.cpp:196-247` | `<magic>.<salt>.<iters>.<nonce>.<aad>.<ct>`; `deserialize` magic + size gates (`:228-242`) |
+| Canonical serialization | `wallet/envelope.cpp:127-178` | `<magic>.<salt>.<iters>.<nonce>.<aad>.<ct>`; `deserialize` magic + size gates (`:159-173`) |
 | Raw envelope CLI | `wallet/main.cpp:924-1009` | `cmd_envelope_encrypt` / `cmd_envelope_decrypt` — exercises the primitive directly with caller-chosen `--plaintext`/`--password`/`--aad`/`--iters` |
 | Envelope inspection CLI | `wallet/main.cpp:1013-1099` | `cmd_envelope_inspect` — metadata-only (`format`, `salt_len`, `pbkdf2_iters`, `nonce`, `aad`) without passphrase |
 | Node-keyfile create caller | `wallet/main.cpp:2861-3199` | `keyfile-create`: `DETERM-NODE-V1 <pubkey>` header + envelope; pubkey-as-AAD (application layer — see `S004KeyfileAtRest.md`) |
