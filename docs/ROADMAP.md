@@ -16,7 +16,7 @@
 | Item | Status | Docs |
 |---|---|---|
 | **v2.7 F2 view reconciliation** | **SHIPPED** (S-016 + S-030-D2 consensus closure; commits 850d2c3..48c4b45) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
-| **C99 crypto stack** | **SHIPPED** through every non-gated section (§3.1-§3.6, §3.8, §3.8b/c, §3.9b, §3.10-§3.14 seeds; FROST module FROZEN 2026-07-03); §3.7/§3.9a secp256k1 **DE-SCOPED 2026-07-03** (DECISION-LOG); §3.15 caller migration is the one gated follow-up | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
+| **C99 crypto stack** | **SHIPPED** through every non-gated section (§3.1-§3.6, §3.8, §3.8b/c, §3.9b, §3.10-§3.14 seeds; FROST module FROZEN 2026-07-03); §3.7/§3.9a secp256k1 **DE-SCOPED 2026-07-03** (DECISION-LOG); **§3.15 daemon+light migration SHIPPED 2026-07-03** (consensus path OpenSSL-free; determ-light links zero OpenSSL; goldens byte-invariant on MSVC+GCC) — remaining OpenSSL surface is wallet-envelope + §Q9-test-oracle only (the 1c follow-up) | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
 | **RPC anti-replay window** | HMAC-auth extension (v2.16+) | `proofs/RpcAuthReplayWindowSoundness.md` |
 
 ---

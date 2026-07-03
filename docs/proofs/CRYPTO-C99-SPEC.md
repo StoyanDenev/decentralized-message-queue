@@ -849,8 +849,30 @@ Original plan (retained):
   exists); the cross-compilation matrix (x86-64 / ARM64, Linux/Windows/MINIX
   — only MSVC x64 exercised so far).
 
-### 3.15 Migration of existing callers — **SUBSTANTIALLY DONE for the wallet** (2026-07-03)
+### 3.15 Migration of existing callers — **DAEMON + LIGHT SHIPPED; wallet SUBSTANTIALLY DONE** (2026-07-03)
 
+- **DAEMON/CONSENSUS PATH MIGRATED (2026-07-03, authorized by Stoyan — the 1b
+  decision).** The daemon's consensus crypto now runs entirely on
+  `determ::c99`: `SHA256Builder` (`src/crypto/sha256.cpp`) on the exported
+  streaming `determ_sha256_init/update/final` (new in `sha2.h` — the one-shot
+  is reimplemented on the same engine, so CAVP + §Q9 keep validating both);
+  Ed25519 keygen/sign/verify (`src/crypto/keys.cpp`) on
+  `determ_ed25519_pubkey_from_seed`/`_sign`/`_verify`; entropy on the new
+  §3.15 OS shim `determ_rng_bytes` (`src/crypto/rng/` — BCryptGenRandom /
+  getrandom+urandom; the stack's one non-synthesizable primitive); RPC-auth
+  HMAC on `determ_hmac_sha256` (fail-closed); `light/keyfile.cpp` derivation
+  on the same c99 calls. **`determ-light` links ZERO OpenSSL**; `determ`
+  keeps libcrypto ONLY as the independent §Q9 test-oracle backend inside the
+  `test-*-c99` subcommands (by design a non-determ implementation) — libssl
+  (never used; no TLS anywhere) is dropped from all targets. Byte-invariance
+  proven: `test-consensus-vectors` goldens held byte-for-byte on both MSVC
+  and GCC post-swap, and `test-ed25519-vectors` (the designed backend-swap
+  detector) passes with `crypto::sign/verify` on the C99 backend. The strict
+  RFC 8032 verifier (S < L, canonical pubkey — stricter than OpenSSL's
+  lenient decoder on adversarial encodings) is locked in PRE-GENESIS as the
+  consensus signature-validity rule (DECISION-LOG.md 2026-07-03): no live
+  fleet existed to fork, so the safer rule ships without any rolling-upgrade
+  machinery. The EOL OpenSSL 1.1.1w liability is out of the consensus path.
 - **`determ-wallet` migrated off libsodium.** The daemon (`determ`) and
   `determ-light` never linked sodium; the wallet was the last consumer, and
   its libsodium call sites now run entirely on `determ::c99` via an
@@ -872,11 +894,15 @@ Original plan (retained):
   (`tools/c99_libsodium_xval.c` + the per-primitive `determ test-*-c99` gates);
   existing in-process `determ test-*` subcommands and the wallet test suite
   continue passing.
-- Remaining: no daemon/light migration is owed (they were never sodium
-  consumers); the only residual is opportunistic — the v2.17/S-004 keyfile
-  envelope still derives via OpenSSL PBKDF2 rather than the shipped
-  `determ_argon2id` (an on-disk format change, §3.6), independent of any
-  libsodium dependency.
+- Remaining: the daemon/light OpenSSL migration SHIPPED above (no sodium
+  migration was ever owed there). Residuals: (a) the WALLET still runs its
+  keyfile/backup envelopes on OpenSSL (PBKDF2 + AES-256-GCM + RAND_bytes +
+  EVP base64) — migrating it needs the c99 AES-GCM decrypt direction (a
+  documented §3.5 gap) and is a separable follow-up; (b) opportunistic — the
+  v2.17/S-004 keyfile envelope could derive via the shipped `determ_argon2id`
+  instead of PBKDF2 (an on-disk format change, §3.6); (c) the vendored
+  OpenSSL (1.1.1w) is now wallet + §Q9-oracle-only — bumping or isolating it
+  is the 1c follow-up, no longer consensus-relevant.
 
 ### 3.16 Documentation (~3 days)
 

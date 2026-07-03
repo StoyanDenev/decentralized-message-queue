@@ -781,7 +781,7 @@ Suggested external-bind defaults: `rate=500`, `burst=1000`. Healthy consensus is
 
 ### S-015 — Delay-worker thread join blocks consensus path
 
-**Severity:** Medium (latency amplification) • **Status:** Open • **Sources:** Audit 3.6
+**Severity:** Medium (latency amplification) • **Status:** ✅ Closed by M-F (the delay-hash module was deleted in commit `1b9b086` — no worker thread exists, so there is no join; the code described below no longer exists) • **Sources:** Audit 3.6
 
 **What's open.** `start_delay_compute` (`node.cpp:490`) does `if (delay_worker_.joinable()) delay_worker_.join();` before spawning the new worker. The previous worker only checks `delay_cancel_` *after* finishing its full T iterations (`node.cpp:497`). If `reset_round` fires during a delay-hash, the join blocks for up to T_delay before the new round can start.
 

@@ -271,17 +271,21 @@ Verification: 1 occurrence — a doc-only comment fossil in the `MsgType::BLOCK_
 ### 4.5 `grep -r "EVP_MD_CTX" src/`
 
 ```
-src/crypto/sha256.cpp:11:    EVP_MD_CTX* ctx;
-src/crypto/sha256.cpp:14:SHA256Builder::SHA256Builder() : impl_(new Impl{EVP_MD_CTX_new()}) {
-src/crypto/sha256.cpp:15:    if (!impl_->ctx) throw std::runtime_error("EVP_MD_CTX_new failed");
-src/crypto/sha256.cpp:21:    EVP_MD_CTX_free(impl_->ctx);
-src/crypto/keys.cpp:65:    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-src/crypto/keys.cpp:74:    EVP_MD_CTX_free(ctx);
-src/crypto/keys.cpp:83:    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-src/crypto/keys.cpp:88:    EVP_MD_CTX_free(ctx);
+(no matches)
 ```
 
-Verification: 8 occurrences across 2 files. Both files are the live SHA-256 (sha256.cpp — the `SHA256Builder` wrapper used by `compute_block_digest`, `compute_block_rand`, Merkle paths, state_root accumulator) and Ed25519 (keys.cpp — the per-sign / per-verify digest computation) implementations. `EVP_MD_CTX` is OpenSSL's general-purpose digest context — it is shared by every hash user in the codebase, *not* delay-hash-specific. None of these references invoke any function from the deleted module.
+Verification (updated 2026-07-03): zero occurrences. At the time of the
+original S-009 audit this grep returned 8 occurrences across 2 files —
+`sha256.cpp` (the `SHA256Builder` pimpl: ctx member, `EVP_MD_CTX_new` in the
+ctor, the null-check throw, `EVP_MD_CTX_free` in the dtor) and `keys.cpp`
+(one `EVP_MD_CTX_new`/`_free` pair each in `sign` and `verify`) — and the
+finding was that `EVP_MD_CTX` is OpenSSL's general-purpose digest context
+shared by every hash user, *not* delay-hash-specific, with none of the
+references invoking any function from the deleted module. The §3.15 backend
+migration (2026-07-03, DECISION-LOG.md) then moved both files onto the C99
+`determ::c99` engine, removing `EVP_MD_CTX` from `src/` entirely — the
+original conclusion (the deleted delay-hash module is unreferenced) now
+holds vacuously.
 
 ### 4.6 `grep -r "EVP_MD_CTX" include/`
 

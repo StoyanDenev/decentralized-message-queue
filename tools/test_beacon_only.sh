@@ -48,17 +48,11 @@ rm -rf $T
 mkdir -p $T/n1 $T/n2 $T/n3
 
 echo "=== 1. Init 3 BEACON-role nodes with cluster_test profile ==="
-# cluster_test mandates CryptoProfile::FIPS; a binary built with
-# -DDETERM_CRYPTO=modern refuses it at init. That is a build capability
-# gate, not a chain defect — SKIP (suite convention: PASS marker + SKIP
-# note) so this stays meaningful on modern-crypto dev builds while FIPS
-# builds run it fully (same handling as test_tactical.sh).
+# (The old "Crypto profile mismatch" SKIP branch is gone: the DETERM_CRYPTO
+# build tri-state and its init-time gate were REMOVED 2026-07-03 — single
+# build, every binary carries the full crypto stack — so cluster_test init
+# always succeeds and this test always runs its full cluster flow.)
 INIT_OUT=$($DETERM init --data-dir $T/n1 --profile cluster_test 2>&1)
-if echo "$INIT_OUT" | grep -q "Crypto profile mismatch"; then
-  echo "  SKIP: $INIT_OUT"
-  echo "  PASS: test_beacon_only (SKIP — cluster_test mandates FIPS; binary built DETERM_CRYPTO=modern)"
-  exit 0
-fi
 echo "$INIT_OUT" | tail -1
 $DETERM genesis-tool peer-info node1 --data-dir $T/n1 --stake 1000 > $T/p1.json
 for n in 2 3; do
