@@ -59,7 +59,6 @@ guard_rejects "bulk-stake --fee (u64)"                bulk-stake --fee nope
 guard_rejects "shamir-split --threshold (i32)"        shamir-split --threshold qq
 guard_rejects "shamir split -t (i32)"                 shamir split --secret deadbeef -t tt -n 5
 guard_rejects "envelope encrypt --iters (u32)"        envelope encrypt --iters nn
-guard_rejects "opaque-handshake --guardian-id (i32)"  opaque-handshake --guardian-id gg
 guard_rejects "tx-history-export --from (i64)"        tx-history-export --from ff
 guard_rejects "account-balance-history --checkpoint-every (i64)" account-balance-history --checkpoint-every cc
 guard_rejects "create-recovery -t (i32)"              create-recovery -t xx -n 3

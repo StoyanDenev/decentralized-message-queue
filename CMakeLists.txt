@@ -169,20 +169,6 @@ if(UNIX)
   target_link_libraries(determ PRIVATE pthread)
 endif()
 
-# ── libsodium (wallet Ed25519/X25519 primitives — migration target §3.15) ──
-# Vendored via the CMake-friendly jedisct1/libsodium-cmake fork. Builds
-# cleanly on Windows MSVC + Unix without autotools.
-set(SODIUM_DISABLE_TESTS         ON CACHE BOOL "" FORCE)
-set(SODIUM_MINIMAL                OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  sodium
-  GIT_REPOSITORY https://github.com/robinlinden/libsodium-cmake.git
-  # sha-pinned 2026-07-03 (was: master, an unpinned moving branch of a
-  # third-party fork feeding the seed-handling wallet binary).
-  GIT_TAG        9b2848dfc1b917a9410f0de9d81059b26cbfaa8d
-)
-FetchContent_MakeAvailable(sodium)
-
 # ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────
 # Separate binary so wallet secret material never shares address space with
 # the networked `determ` daemon. Recovery uses Shamir + OpenSSL AEAD envelopes
@@ -197,7 +183,7 @@ target_include_directories(determ-wallet PRIVATE
 )
 target_link_libraries(determ-wallet PRIVATE
   crypto
-  sodium
+  determ-crypto-c99
   nlohmann_json::nlohmann_json
 )
 if(WIN32)

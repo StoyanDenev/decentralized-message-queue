@@ -26,13 +26,59 @@
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
-#include <sodium.h>
-
-// Local one-shot libsodium init (the former primitives::init_libsodium, whose
-// home opaque_primitives.cpp was deleted with the DE-SCOPED OPAQUE track).
-// TRANSITIONAL: the §3.15 migration replaces the wallet's sodium primitives
-// with determ::c99 and removes this along with the sodium dependency.
-namespace { inline bool init_libsodium() { return sodium_init() >= 0; } }
+// ── libsodium-free crypto shim (CRYPTO-C99-SPEC §3.15) ──────────────────────
+// The wallet's secret-handling crypto now runs entirely on determ::c99 (the
+// daemon's libsodium-free stack). This block reproduces the handful of
+// libsodium API names the wallet used, 1:1, over the C99 primitives — every
+// one proven byte-equal to libsodium (tools/c99_libsodium_xval.c + the former
+// wallet _xval-crypto cross-check, 5/5 on the MSVC toolchain before removal).
+// libsodium is NO LONGER linked. Secret keys are the standard 64-byte
+// Ed25519 layout seed(32)||pubkey(32); the C99 sign/convert primitives take
+// the 32-byte seed, so the shim slices sk[0..31].
+#include <determ/crypto/ed25519/ed25519.h>
+#include <determ/crypto/x25519/x25519.h>
+#include <determ/crypto/secure_zero.h>
+#include <openssl/evp.h>
+namespace {
+inline bool init_libsodium() { return true; }   // C99 needs no global init
+constexpr size_t crypto_sign_PUBLICKEYBYTES = 32;
+constexpr size_t crypto_sign_SECRETKEYBYTES = 64;   // seed(32) || pubkey(32)
+constexpr size_t crypto_sign_SEEDBYTES      = 32;
+constexpr size_t crypto_sign_BYTES          = 64;
+constexpr size_t crypto_scalarmult_BYTES    = 32;
+constexpr size_t crypto_scalarmult_SCALARBYTES = 32;
+inline void determ_secure_zero_c(void* p, size_t n) { determ_secure_zero(p, n); }
+inline int crypto_sign_ed25519_seed_keypair(unsigned char* pk, unsigned char* sk,
+                                            const unsigned char* seed) {
+    determ_ed25519_pubkey_from_seed(seed, pk);
+    memcpy(sk, seed, 32); memcpy(sk + 32, pk, 32);
+    return 0;
+}
+inline int crypto_sign_seed_keypair(unsigned char* pk, unsigned char* sk,
+                                    const unsigned char* seed) {
+    return crypto_sign_ed25519_seed_keypair(pk, sk, seed);
+}
+inline int crypto_sign_detached(unsigned char* sig, unsigned long long* siglen,
+                                const unsigned char* m, unsigned long long mlen,
+                                const unsigned char* sk) {
+    if (siglen) *siglen = 64;
+    return determ_ed25519_sign(sk, sk + 32, m, (size_t)mlen, sig);  /* seed, pk */
+}
+inline int crypto_sign_verify_detached(const unsigned char* sig, const unsigned char* m,
+                                       unsigned long long mlen, const unsigned char* pk) {
+    return determ_ed25519_verify(pk, m, (size_t)mlen, sig);
+}
+inline int crypto_sign_ed25519_sk_to_curve25519(unsigned char* x_sk, const unsigned char* sk) {
+    determ_ed25519_seed_to_x25519_sk(sk, x_sk);   /* seed = sk[0..31] */
+    return 0;
+}
+inline int crypto_sign_ed25519_pk_to_curve25519(unsigned char* x_pk, const unsigned char* ed_pk) {
+    return determ_ed25519_pk_to_x25519_pk(ed_pk, x_pk);
+}
+inline int crypto_scalarmult(unsigned char* q, const unsigned char* n, const unsigned char* p) {
+    return determ_x25519(q, n, p);   /* -1 on all-zero (low-order) result, as libsodium */
+}
+} // namespace
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -1535,8 +1581,8 @@ int cmd_account_derive_batch(int argc, char** argv) {
             // range; the probability that a single output happens to be
             // rejected by ed25519 keygen is effectively zero. If we ever
             // hit this, the OS RNG / SHA-256 / libsodium are mis-wired.
-            sodium_memzero(sub_seed.data(), sub_seed.size());
-            sodium_memzero(sk.data(),       sk.size());
+            determ_secure_zero(sub_seed.data(), sub_seed.size());
+            determ_secure_zero(sk.data(),       sk.size());
             std::cerr << "account-derive-batch: crypto_sign_ed25519_seed_"
                          "keypair failed at index " << i
                       << " (this is essentially impossible for SHA-256-"
@@ -1547,7 +1593,7 @@ int cmd_account_derive_batch(int argc, char** argv) {
         // and the leading 32 B of sk. Zero the libsodium sk; serialize
         // the sub_seed as the privkey_hex (the canonical wallet-format
         // 32-byte seed, matching account-create-batch).
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
 
         std::string address = "0x" + to_hex(pub);
         std::string privkey_hex = to_hex(sub_seed);
@@ -1556,7 +1602,7 @@ int cmd_account_derive_batch(int argc, char** argv) {
             {"address",     address},
             {"privkey_hex", privkey_hex},
         });
-        sodium_memzero(sub_seed.data(), sub_seed.size());
+        determ_secure_zero(sub_seed.data(), sub_seed.size());
     }
 
     // ── Build the output JSON document ──────────────────────────────────────
@@ -1568,7 +1614,7 @@ int cmd_account_derive_batch(int argc, char** argv) {
     // ── Zero the master seed bytes now that derivation is done ─────────────
     // doc still holds the per-account privkey_hex strings (which is the
     // intended output); only the original master seed is wiped here.
-    sodium_memzero(seed_bytes.data(), seed_bytes.size());
+    determ_secure_zero(seed_bytes.data(), seed_bytes.size());
 
     // ── Dispatch on output mode ─────────────────────────────────────────────
     if (!out_path.empty()) {
@@ -1745,7 +1791,7 @@ int cmd_account_import(int argc, char** argv) {
     // Zero the libsodium-derived 64-byte sk — it contains seed||pubkey, both
     // of which already live in `seed` / `derived_pub`, so the duplicate is
     // unnecessary post-derivation. seed itself stays live for the JSON emit.
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
 
     // ── 64-byte-form pubkey mismatch check (defense-in-depth) ───────────────
     // Same logic as keyfile-create: if the operator pasted a 64-byte form,
@@ -2043,7 +2089,7 @@ int cmd_account_import_many(int argc, char** argv) {
         std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
         if (crypto_sign_ed25519_seed_keypair(derived_pub.data(), sk.data(),
                                              seed.data()) != 0) {
-            sodium_memzero(seed.data(), seed.size());
+            determ_secure_zero(seed.data(), seed.size());
             out_rec["status"] = "error";
             out_rec["reason"] = "crypto_sign_ed25519_seed_keypair failed "
                                 "(seed not a valid Ed25519 private key)";
@@ -2051,14 +2097,14 @@ int cmd_account_import_many(int argc, char** argv) {
             ++error_count;
             continue;
         }
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
 
         // 64-byte form tail check (mirrors single-record account-import) -------
         if (priv_bytes.size() == 64) {
             std::array<uint8_t, 32> supplied_pub{};
             std::memcpy(supplied_pub.data(), priv_bytes.data() + 32, 32);
             if (supplied_pub != derived_pub) {
-                sodium_memzero(seed.data(), seed.size());
+                determ_secure_zero(seed.data(), seed.size());
                 out_rec["status"] = "error";
                 out_rec["reason"] = "64-byte privkey_hex tail does not match "
                                     "seed-derived pubkey";
@@ -2079,7 +2125,7 @@ int cmd_account_import_many(int argc, char** argv) {
         // customers). Empty supplied address is permissive — operator
         // chose not to supply, we use the derived form.
         if (!address.empty() && address != derived_addr) {
-            sodium_memzero(seed.data(), seed.size());
+            determ_secure_zero(seed.data(), seed.size());
             out_rec["status"] = "error";
             out_rec["reason"] = "address field does not match seed-derived "
                                 "address (supplied=" + address
@@ -2100,7 +2146,7 @@ int cmd_account_import_many(int argc, char** argv) {
         // import from overwriting the first under the same filename
         // (deterministic behavior — order in the input array matters).
         if (seen_addresses.count(address)) {
-            sodium_memzero(seed.data(), seed.size());
+            determ_secure_zero(seed.data(), seed.size());
             out_rec["status"] = "skipped";
             out_rec["reason"] = "duplicate address (already imported earlier "
                                 "in this batch)";
@@ -2119,7 +2165,7 @@ int cmd_account_import_many(int argc, char** argv) {
         std::filesystem::path out_path = std::filesystem::path(out_dir) / filename;
 
         if (std::filesystem::exists(out_path) && !force) {
-            sodium_memzero(seed.data(), seed.size());
+            determ_secure_zero(seed.data(), seed.size());
             out_rec["status"] = "error";
             out_rec["reason"] = "output file already exists: "
                               + out_path.string()
@@ -2186,7 +2232,7 @@ int cmd_account_import_many(int argc, char** argv) {
             }
         }
 
-        sodium_memzero(seed.data(), seed.size());
+        determ_secure_zero(seed.data(), seed.size());
 
         if (!write_ok) {
             out_rec["status"] = "error";
@@ -4162,7 +4208,7 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     }
     std::string new_passphrase = passphrase_from_source(new_pass_src, err);
     if (new_passphrase.empty()) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
         std::cerr << "keyfile-rotate: (new passphrase) " << err << "\n";
         return 1;
     }
@@ -4173,8 +4219,8 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     // having typed the same passphrase twice is almost always a typo.
     // Refuse unless --force-same-passphrase is explicit.
     if (old_passphrase == new_passphrase && !force_same_passphrase) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
-        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(new_passphrase.data(), new_passphrase.size());
         if (json_out) {
             nlohmann::json r;
             r["rotated"]                = false;
@@ -4199,16 +4245,16 @@ int cmd_keyfile_rotate(int argc, char** argv) {
         std::filesystem::path p(out_path);
         auto parent = p.parent_path();
         if (!parent.empty() && !std::filesystem::exists(parent)) {
-            sodium_memzero(old_passphrase.data(), old_passphrase.size());
-            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+            determ_secure_zero(new_passphrase.data(), new_passphrase.size());
             std::cerr << "keyfile-rotate: --out parent directory does not "
                          "exist: " << parent.string()
                       << "\n  (operator must pre-create; no mkdirp)\n";
             return 1;
         }
         if (std::filesystem::exists(p) && !force) {
-            sodium_memzero(old_passphrase.data(), old_passphrase.size());
-            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+            determ_secure_zero(new_passphrase.data(), new_passphrase.size());
             std::cerr << "keyfile-rotate: --out file already exists: "
                       << out_path
                       << "\n  (refusing to overwrite; pass --force to override "
@@ -4220,8 +4266,8 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     // ── Deserialize the envelope blob ──────────────────────────────────────
     auto env_opt = envelope::deserialize(blob_line);
     if (!env_opt) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
-        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(new_passphrase.data(), new_passphrase.size());
         std::cerr << "keyfile-rotate: --in envelope blob is malformed "
                      "(not a valid DWE1 serialization)\n";
         return 1;
@@ -4232,8 +4278,8 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
     auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);
     if (!pt_opt) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
-        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(new_passphrase.data(), new_passphrase.size());
         std::cerr << "keyfile-rotate: old passphrase wrong or corrupted "
                      "keyfile\n";
         return 2;
@@ -4250,11 +4296,11 @@ int cmd_keyfile_rotate(int argc, char** argv) {
     // we zero on every return path including exceptions.
     auto secure_zero_all = [&]() {
         if (!pt_bytes.empty())
-            sodium_memzero(pt_bytes.data(), pt_bytes.size());
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
         if (!old_passphrase.empty())
-            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+            determ_secure_zero(old_passphrase.data(), old_passphrase.size());
         if (!new_passphrase.empty())
-            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            determ_secure_zero(new_passphrase.data(), new_passphrase.size());
     };
 
     // ── Validate decrypted plaintext is canonical {"pubkey","priv_seed"} ───
@@ -4342,7 +4388,7 @@ int cmd_keyfile_rotate(int argc, char** argv) {
             return 1;
         }
         bool rt_match = (*rt_pt == pt_bytes);
-        sodium_memzero(rt_pt->data(), rt_pt->size());
+        determ_secure_zero(rt_pt->data(), rt_pt->size());
         if (!rt_match) {
             secure_zero_all();
             std::cerr << "keyfile-rotate: internal: round-trip plaintext "
@@ -4663,7 +4709,7 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
     }
     std::string new_passphrase = passphrase_from_source("env:" + new_env, err);
     if (new_passphrase.empty()) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
         std::cerr << "keyfile-reencrypt: (new passphrase) " << err
                   << "\n  (set the NEW passphrase in environment variable "
                   << new_env << ")\n";
@@ -4675,16 +4721,16 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
         std::filesystem::path p(out_path);
         auto parent = p.parent_path();
         if (!parent.empty() && !std::filesystem::exists(parent)) {
-            sodium_memzero(old_passphrase.data(), old_passphrase.size());
-            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+            determ_secure_zero(new_passphrase.data(), new_passphrase.size());
             std::cerr << "keyfile-reencrypt: --out parent directory does not "
                          "exist: " << parent.string()
                       << "\n  (operator must pre-create; no mkdirp)\n";
             return 1;
         }
         if (std::filesystem::exists(p) && !force) {
-            sodium_memzero(old_passphrase.data(), old_passphrase.size());
-            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+            determ_secure_zero(new_passphrase.data(), new_passphrase.size());
             std::cerr << "keyfile-reencrypt: --out file already exists: "
                       << out_path
                       << "\n  (refusing to overwrite; pass --force to override)\n";
@@ -4695,8 +4741,8 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
     // ── Deserialize the envelope blob ──────────────────────────────────────
     auto env_opt = envelope::deserialize(blob_line);
     if (!env_opt) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
-        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(new_passphrase.data(), new_passphrase.size());
         std::cerr << "keyfile-reencrypt: --in envelope blob is malformed "
                      "(not a valid DWE1 serialization)\n";
         return 1;
@@ -4711,8 +4757,8 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
     std::vector<uint8_t> aad(header_pubkey_hex.begin(), header_pubkey_hex.end());
     auto pt_opt = envelope::decrypt(*env_opt, old_passphrase, aad);
     if (!pt_opt) {
-        sodium_memzero(old_passphrase.data(), old_passphrase.size());
-        sodium_memzero(new_passphrase.data(), new_passphrase.size());
+        determ_secure_zero(old_passphrase.data(), old_passphrase.size());
+        determ_secure_zero(new_passphrase.data(), new_passphrase.size());
         std::cerr << "keyfile-reencrypt: old passphrase wrong or corrupted "
                      "keyfile\n";
         return 2;
@@ -4724,11 +4770,11 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
     std::vector<uint8_t> pt_bytes = std::move(*pt_opt);
     auto secure_zero_all = [&]() {
         if (!pt_bytes.empty())
-            sodium_memzero(pt_bytes.data(), pt_bytes.size());
+            determ_secure_zero(pt_bytes.data(), pt_bytes.size());
         if (!old_passphrase.empty())
-            sodium_memzero(old_passphrase.data(), old_passphrase.size());
+            determ_secure_zero(old_passphrase.data(), old_passphrase.size());
         if (!new_passphrase.empty())
-            sodium_memzero(new_passphrase.data(), new_passphrase.size());
+            determ_secure_zero(new_passphrase.data(), new_passphrase.size());
     };
 
     // ── Validate decrypted plaintext is canonical {"pubkey","priv_seed"} ───
@@ -4819,7 +4865,7 @@ int cmd_keyfile_reencrypt(int argc, char** argv) {
             return 1;
         }
         bool rt_match = (*rt_pt == pt_bytes);
-        sodium_memzero(rt_pt->data(), rt_pt->size());
+        determ_secure_zero(rt_pt->data(), rt_pt->size());
         if (!rt_match) {
             secure_zero_all();
             std::cerr << "keyfile-reencrypt: internal: round-trip plaintext "
@@ -5778,12 +5824,12 @@ int cmd_account_recover(int argc, char** argv) {
         std::cerr << "account-recover: crypto_sign_ed25519_seed_keypair failed "
                      "(recovered seed not a valid Ed25519 private key — "
                      "almost certainly a corrupted Shamir reconstruction)\n";
-        sodium_memzero(seed.data(), seed.size());
+        determ_secure_zero(seed.data(), seed.size());
         return 2;
     }
     // Zero the libsodium 64-byte sk — its content (seed||pubkey) is already
     // held in `seed` / `derived_pub`, so the duplicate is unnecessary.
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
 
     // ── Build the anon-account record ──────────────────────────────────
     // Matches account-import / account-create-batch byte-for-byte:
@@ -5797,7 +5843,7 @@ int cmd_account_recover(int argc, char** argv) {
     };
 
     // Zero the local seed copy now that we've serialized it to hex.
-    sodium_memzero(seed.data(), seed.size());
+    determ_secure_zero(seed.data(), seed.size());
 
     // ── Emit result ────────────────────────────────────────────────────
     if (!out_path.empty()) {
@@ -6814,7 +6860,7 @@ int cmd_message_sign(int argc, char** argv) {
     // priv_seed (operator-supplied), but the libsodium-derived sk
     // contains the seed concatenated with the pubkey; sodium_memzero
     // is the libsodium-blessed scrub.
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
 
     if (json_out) {
         nlohmann::json r;
@@ -7173,14 +7219,14 @@ int cmd_derive_shared_secret(int argc, char** argv) {
     std::array<uint8_t, crypto_scalarmult_SCALARBYTES> my_x25519_sk{};
     if (crypto_sign_ed25519_sk_to_curve25519(my_x25519_sk.data(),
                                               ed_sk.data()) != 0) {
-        sodium_memzero(ed_sk.data(),         ed_sk.size());
-        sodium_memzero(my_x25519_sk.data(),  my_x25519_sk.size());
+        determ_secure_zero(ed_sk.data(),         ed_sk.size());
+        determ_secure_zero(my_x25519_sk.data(),  my_x25519_sk.size());
         std::cerr << "derive-shared-secret: crypto_sign_ed25519_sk_to_"
                      "curve25519 failed\n";
         return 2;
     }
     // ed_sk is no longer needed (X25519 SK already derived). Scrub it.
-    sodium_memzero(ed_sk.data(), ed_sk.size());
+    determ_secure_zero(ed_sk.data(), ed_sk.size());
 
     // ── Step 3: peer Ed25519 PK -> peer X25519 PK ──────────────────────────
     // Maps the Edwards-curve y-coordinate to the Montgomery u-coordinate
@@ -7189,7 +7235,7 @@ int cmd_derive_shared_secret(int argc, char** argv) {
     std::array<uint8_t, crypto_scalarmult_BYTES> peer_x25519_pk{};
     if (crypto_sign_ed25519_pk_to_curve25519(peer_x25519_pk.data(),
                                               peer_pub_bytes.data()) != 0) {
-        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
         std::cerr << "derive-shared-secret: crypto_sign_ed25519_pk_to_"
                      "curve25519 failed (peer pubkey not a valid Ed25519 "
                      "pubkey)\n";
@@ -7204,15 +7250,15 @@ int cmd_derive_shared_secret(int argc, char** argv) {
     if (crypto_scalarmult(shared.data(),
                            my_x25519_sk.data(),
                            peer_x25519_pk.data()) != 0) {
-        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
-        sodium_memzero(shared.data(),       shared.size());
+        determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
+        determ_secure_zero(shared.data(),       shared.size());
         std::cerr << "derive-shared-secret: crypto_scalarmult failed "
                      "(degenerate shared point — peer pubkey likely in a "
                      "small subgroup)\n";
         return 2;
     }
     // Scrub the X25519 SK now that the shared secret is computed.
-    sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+    determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
 
     // ── Emit the one-line JSON output ──────────────────────────────────────
     // {"shared_secret_hex":"<64 lowercase hex>"}
@@ -7291,17 +7337,17 @@ bool derive_shared_secret_bytes(
     std::array<uint8_t, crypto_scalarmult_SCALARBYTES> my_x25519_sk{};
     if (crypto_sign_ed25519_sk_to_curve25519(my_x25519_sk.data(),
                                               ed_sk.data()) != 0) {
-        sodium_memzero(ed_sk.data(),        ed_sk.size());
-        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        determ_secure_zero(ed_sk.data(),        ed_sk.size());
+        determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
         err_kind_out = "sk-to-curve25519-failed";
         return false;
     }
-    sodium_memzero(ed_sk.data(), ed_sk.size());
+    determ_secure_zero(ed_sk.data(), ed_sk.size());
 
     std::array<uint8_t, crypto_scalarmult_BYTES> peer_x25519_pk{};
     if (crypto_sign_ed25519_pk_to_curve25519(peer_x25519_pk.data(),
                                               peer_pub.data()) != 0) {
-        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+        determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
         err_kind_out = "pk-to-curve25519-failed";
         return false;
     }
@@ -7309,12 +7355,12 @@ bool derive_shared_secret_bytes(
     if (crypto_scalarmult(shared_out.data(),
                            my_x25519_sk.data(),
                            peer_x25519_pk.data()) != 0) {
-        sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
-        sodium_memzero(shared_out.data(),    shared_out.size());
+        determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
+        determ_secure_zero(shared_out.data(),    shared_out.size());
         err_kind_out = "scalarmult-failed";
         return false;
     }
-    sodium_memzero(my_x25519_sk.data(), my_x25519_sk.size());
+    determ_secure_zero(my_x25519_sk.data(), my_x25519_sk.size());
     return true;
 }
 
@@ -7340,7 +7386,7 @@ bool hkdf_sha256_32(const std::array<uint8_t, 32>& ikm,
               ikm.data(),  ikm.size(),
               prk, &prk_len)
         || prk_len != 32) {
-        sodium_memzero(prk, sizeof(prk));
+        determ_secure_zero(prk, sizeof(prk));
         err_kind_out = "hkdf-extract-failed";
         return false;
     }
@@ -7359,15 +7405,15 @@ bool hkdf_sha256_32(const std::array<uint8_t, 32>& ikm,
               expand_msg.data(), expand_msg.size(),
               okm, &okm_len)
         || okm_len != 32) {
-        sodium_memzero(prk, sizeof(prk));
-        sodium_memzero(okm, sizeof(okm));
+        determ_secure_zero(prk, sizeof(prk));
+        determ_secure_zero(okm, sizeof(okm));
         err_kind_out = "hkdf-expand-failed";
         return false;
     }
-    sodium_memzero(prk, sizeof(prk));
+    determ_secure_zero(prk, sizeof(prk));
 
     std::memcpy(key_out.data(), okm, 32);
-    sodium_memzero(okm, sizeof(okm));
+    determ_secure_zero(okm, sizeof(okm));
     return true;
 }
 
@@ -7681,7 +7727,7 @@ int cmd_encrypt_message(int argc, char** argv) {
     std::string err_kind;
     if (!derive_shared_secret_bytes(priv_seed, peer_pub_bytes,
                                       shared, my_pub, err_kind)) {
-        sodium_memzero(shared.data(), shared.size());
+        determ_secure_zero(shared.data(), shared.size());
         std::cerr << "encrypt-message: X25519 derivation failed ("
                   << err_kind << ")\n";
         return 2;
@@ -7695,13 +7741,13 @@ int cmd_encrypt_message(int argc, char** argv) {
     if (!hkdf_sha256_32(shared, salt,
                          std::string("DETERM-CHAT-AEAD-v1"),
                          aead_key, err_kind)) {
-        sodium_memzero(shared.data(),    shared.size());
-        sodium_memzero(aead_key.data(),  aead_key.size());
+        determ_secure_zero(shared.data(),    shared.size());
+        determ_secure_zero(aead_key.data(),  aead_key.size());
         std::cerr << "encrypt-message: HKDF derivation failed ("
                   << err_kind << ")\n";
         return 1;
     }
-    sodium_memzero(shared.data(), shared.size());
+    determ_secure_zero(shared.data(), shared.size());
 
     // ── Generate fresh random 12-byte nonce ────────────────────────────────
     // Fresh nonce per message: identical plaintexts produce different
@@ -7709,7 +7755,7 @@ int cmd_encrypt_message(int argc, char** argv) {
     // is impossible by construction.
     std::array<uint8_t, 12> nonce{};
     if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
-        sodium_memzero(aead_key.data(), aead_key.size());
+        determ_secure_zero(aead_key.data(), aead_key.size());
         std::cerr << "encrypt-message: RAND_bytes failed for nonce\n";
         return 1;
     }
@@ -7719,11 +7765,11 @@ int cmd_encrypt_message(int argc, char** argv) {
     try {
         ciphertext = aes256_gcm_encrypt_raw(aead_key, nonce, plaintext);
     } catch (std::exception& e) {
-        sodium_memzero(aead_key.data(), aead_key.size());
+        determ_secure_zero(aead_key.data(), aead_key.size());
         std::cerr << "encrypt-message: " << e.what() << "\n";
         return 1;
     }
-    sodium_memzero(aead_key.data(), aead_key.size());
+    determ_secure_zero(aead_key.data(), aead_key.size());
 
     // ── Compose wire format: nonce(12) || ciphertext_with_tag ─────────────
     std::vector<uint8_t> wire;
@@ -7852,7 +7898,7 @@ int cmd_decrypt_message(int argc, char** argv) {
     std::string err_kind;
     if (!derive_shared_secret_bytes(priv_seed, peer_pub_bytes,
                                       shared, my_pub, err_kind)) {
-        sodium_memzero(shared.data(), shared.size());
+        determ_secure_zero(shared.data(), shared.size());
         std::cerr << "decrypt-message: X25519 derivation failed ("
                   << err_kind << ")\n";
         return 2;
@@ -7864,24 +7910,24 @@ int cmd_decrypt_message(int argc, char** argv) {
     if (!hkdf_sha256_32(shared, salt,
                          std::string("DETERM-CHAT-AEAD-v1"),
                          aead_key, err_kind)) {
-        sodium_memzero(shared.data(),    shared.size());
-        sodium_memzero(aead_key.data(),  aead_key.size());
+        determ_secure_zero(shared.data(),    shared.size());
+        determ_secure_zero(aead_key.data(),  aead_key.size());
         std::cerr << "decrypt-message: HKDF derivation failed ("
                   << err_kind << ")\n";
         return 1;
     }
-    sodium_memzero(shared.data(), shared.size());
+    determ_secure_zero(shared.data(), shared.size());
 
     // ── AES-256-GCM decrypt (tag-verify or fail closed) ───────────────────
     std::optional<std::vector<uint8_t>> pt_opt;
     try {
         pt_opt = aes256_gcm_decrypt_raw(aead_key, nonce, ct_with_tag);
     } catch (std::exception& e) {
-        sodium_memzero(aead_key.data(), aead_key.size());
+        determ_secure_zero(aead_key.data(), aead_key.size());
         std::cerr << "decrypt-message: " << e.what() << "\n";
         return 1;
     }
-    sodium_memzero(aead_key.data(), aead_key.size());
+    determ_secure_zero(aead_key.data(), aead_key.size());
 
     if (!pt_opt) {
         // Tag-verify failure — emit the canonical error JSON and exit 2.
@@ -9449,7 +9495,7 @@ int cmd_cold_sign(int argc, char** argv) {
         std::cerr << "cold-sign: keyfile.address does not match tx.from "
                      "(keyfile=" << keyfile_address
                   << " tx.from=" << from_str << ")\n";
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         return 1;
     }
 
@@ -9479,31 +9525,31 @@ int cmd_cold_sign(int argc, char** argv) {
 
     // ── Ed25519 sign over signing_bytes ─────────────────────────────────
     if (!init_libsodium()) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         std::cerr << "cold-sign: libsodium init failed\n";
         return 1;
     }
     std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
     std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
     if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "cold-sign: crypto_sign_seed_keypair failed\n";
         return 1;
     }
     // priv_seed not needed past keypair derivation; scrub.
-    sodium_memzero(priv_seed.data(), priv_seed.size());
+    determ_secure_zero(priv_seed.data(), priv_seed.size());
 
     std::array<uint8_t, crypto_sign_BYTES> sig{};
     unsigned long long sig_len = 0;
     if (crypto_sign_detached(sig.data(), &sig_len,
                               sb.data(), sb.size(),
                               sk.data()) != 0) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "cold-sign: crypto_sign_detached failed\n";
         return 1;
     }
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
     if (sig_len != crypto_sign_BYTES) {
         std::cerr << "cold-sign: unexpected sig length " << sig_len << "\n";
         return 1;
@@ -9869,27 +9915,27 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     // ── Derive the pubkey + verify address-vs-derivation (S-028 + key
     //    integrity) ──────────────────────────────────────────────────────
     if (!init_libsodium()) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         std::cerr << "sign-anon-tx: libsodium init failed\n";
         return 2;
     }
     std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
     std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
     if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
-        sodium_memzero(sk.data(),        sk.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(sk.data(),        sk.size());
         std::cerr << "sign-anon-tx: crypto_sign_seed_keypair failed\n";
         return 2;
     }
     // priv_seed not needed past keypair derivation; scrub.
-    sodium_memzero(priv_seed.data(), priv_seed.size());
+    determ_secure_zero(priv_seed.data(), priv_seed.size());
 
     // Address derivation: anon_address = "0x" + lowercase 64-hex of pubkey
     // (matches src/wallet/account.cpp::make_anon_address + every other
     // anon-shape derivation in this binary).
     std::string derived_addr = "0x" + to_hex(pub);
     if (derived_addr != keyfile_address) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "sign-anon-tx: --keyfile address mismatch: keyfile."
                      "address=" << keyfile_address
                   << " derived-from-priv=" << derived_addr
@@ -9906,7 +9952,7 @@ int cmd_sign_anon_tx(int argc, char** argv) {
             if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
         }
         if (hint_lower != derived_pub_hex) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "sign-anon-tx: --keyfile ed_pub_hex mismatch: "
                          "ed_pub_hex=" << pub_hex_hint
                       << " derived=" << derived_pub_hex
@@ -9951,11 +9997,11 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     if (crypto_sign_detached(sig.data(), &sig_len,
                               sb.data(), sb.size(),
                               sk.data()) != 0) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "sign-anon-tx: crypto_sign_detached failed\n";
         return 2;
     }
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
     if (sig_len != crypto_sign_BYTES) {
         std::cerr << "sign-anon-tx: unexpected sig length " << sig_len << "\n";
         return 2;
@@ -10338,7 +10384,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         auto pt_opt = envelope::decrypt(*env_opt, passphrase, aad);
         // Scrub passphrase ASAP — past this point we only need the plaintext
         // priv_seed.
-        sodium_memzero(passphrase.data(), passphrase.size());
+        determ_secure_zero(passphrase.data(), passphrase.size());
         if (!pt_opt) {
             std::cerr << "tx-batch-sign: wrong passphrase or corrupted "
                          "keyfile\n";
@@ -10347,16 +10393,16 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         std::string pt_str(pt_opt->begin(), pt_opt->end());
         // Scrub the optional plaintext buffer; nlohmann will copy the
         // string contents into its own structures below.
-        sodium_memzero(pt_opt->data(), pt_opt->size());
+        determ_secure_zero(pt_opt->data(), pt_opt->size());
         nlohmann::json keyfile_json;
         try { keyfile_json = nlohmann::json::parse(pt_str); }
         catch (std::exception& e) {
-            sodium_memzero(pt_str.data(), pt_str.size());
+            determ_secure_zero(pt_str.data(), pt_str.size());
             std::cerr << "tx-batch-sign: decrypted keyfile plaintext is "
                          "not valid JSON: " << e.what() << "\n";
             return 1;
         }
-        sodium_memzero(pt_str.data(), pt_str.size());
+        determ_secure_zero(pt_str.data(), pt_str.size());
         if (!keyfile_json.is_object()
             || !keyfile_json.contains("pubkey")
             || !keyfile_json.contains("priv_seed")
@@ -10494,9 +10540,9 @@ int cmd_tx_batch_sign(int argc, char** argv) {
             return true;
         };
         if (!is_canonical_anon_local(keyfile_address)) {
-            sodium_memzero(priv_seed.data(), priv_seed.size());
+            determ_secure_zero(priv_seed.data(), priv_seed.size());
             if (!priv_seed_hex_holder.empty()) {
-                sodium_memzero(priv_seed_hex_holder.data(),
+                determ_secure_zero(priv_seed_hex_holder.data(),
                                 priv_seed_hex_holder.size());
             }
             std::cerr << "tx-batch-sign: --keyfile address is not canonical "
@@ -10508,9 +10554,9 @@ int cmd_tx_batch_sign(int argc, char** argv) {
 
     // ── Derive pubkey + verify address-vs-derivation ──────────────────────
     if (!init_libsodium()) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         if (!priv_seed_hex_holder.empty()) {
-            sodium_memzero(priv_seed_hex_holder.data(),
+            determ_secure_zero(priv_seed_hex_holder.data(),
                             priv_seed_hex_holder.size());
         }
         std::cerr << "tx-batch-sign: libsodium init failed\n";
@@ -10520,24 +10566,24 @@ int cmd_tx_batch_sign(int argc, char** argv) {
     std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
     if (crypto_sign_seed_keypair(pub.data(), sk.data(),
                                   priv_seed.data()) != 0) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(sk.data(), sk.size());
         if (!priv_seed_hex_holder.empty()) {
-            sodium_memzero(priv_seed_hex_holder.data(),
+            determ_secure_zero(priv_seed_hex_holder.data(),
                             priv_seed_hex_holder.size());
         }
         std::cerr << "tx-batch-sign: crypto_sign_seed_keypair failed\n";
         return 2;
     }
-    sodium_memzero(priv_seed.data(), priv_seed.size());
+    determ_secure_zero(priv_seed.data(), priv_seed.size());
     if (!priv_seed_hex_holder.empty()) {
-        sodium_memzero(priv_seed_hex_holder.data(),
+        determ_secure_zero(priv_seed_hex_holder.data(),
                         priv_seed_hex_holder.size());
     }
 
     std::string derived_addr = "0x" + to_hex(pub);
     if (derived_addr != keyfile_address) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "tx-batch-sign: --keyfile address mismatch: keyfile="
                   << keyfile_address << " derived-from-priv=" << derived_addr
                   << "\n  (keyfile is corrupt or wrong shape — address "
@@ -10563,49 +10609,49 @@ int cmd_tx_batch_sign(int argc, char** argv) {
     for (size_t idx = 0; idx < N; ++idx) {
         const auto& rec = in_j[idx];
         if (!rec.is_object()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] is not a JSON object\n";
             return 1;
         }
         // Required fields per spec: type/from/to/amount/fee/nonce.
         if (!rec.contains("type") || !rec["type"].is_string()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] missing or wrong-typed 'type' "
                          "(expected string mnemonic)\n";
             return 1;
         }
         if (!rec.contains("from") || !rec["from"].is_string()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] missing or wrong-typed 'from' "
                          "(expected string)\n";
             return 1;
         }
         if (!rec.contains("to") || !rec["to"].is_string()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] missing or wrong-typed 'to' "
                          "(expected string)\n";
             return 1;
         }
         if (!rec.contains("amount") || !rec["amount"].is_number()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] missing or wrong-typed 'amount' "
                          "(expected non-negative integer)\n";
             return 1;
         }
         if (!rec.contains("fee") || !rec["fee"].is_number()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] missing or wrong-typed 'fee' "
                          "(expected non-negative integer)\n";
             return 1;
         }
         if (!rec.contains("nonce") || !rec["nonce"].is_number()) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] missing or wrong-typed 'nonce' "
                          "(expected non-negative integer)\n";
@@ -10615,7 +10661,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         const std::string type_str = rec["type"].get<std::string>();
         const int tx_type_int = type_mnemonic_to_int(type_str);
         if (tx_type_int < 0) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] unsupported 'type' '" << type_str
                       << "' (expected TRANSFER / STAKE / UNSTAKE)\n";
@@ -10629,7 +10675,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         if (rec["amount"].is_number_integer()
             && !rec["amount"].is_number_unsigned()
             && rec["amount"].get<int64_t>() < 0) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] 'amount' must be non-negative; got "
                       << rec["amount"].get<int64_t>() << "\n";
@@ -10638,7 +10684,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         if (rec["fee"].is_number_integer()
             && !rec["fee"].is_number_unsigned()
             && rec["fee"].get<int64_t>() < 0) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] 'fee' must be non-negative; got "
                       << rec["fee"].get<int64_t>() << "\n";
@@ -10647,7 +10693,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         if (rec["nonce"].is_number_integer()
             && !rec["nonce"].is_number_unsigned()
             && rec["nonce"].get<int64_t>() < 0) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] 'nonce' must be non-negative; got "
                       << rec["nonce"].get<int64_t>() << "\n";
@@ -10665,7 +10711,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
 
         // TRANSFER amount > 0 (chain rule).
         if (tx_type_int == 0 && amount == 0) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] TRANSFER amount must be > 0 (chain rule)\n";
             return 1;
@@ -10675,7 +10721,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         // batches only. If an operator wants to sign txs from multiple
         // accounts, they run this command once per keyfile.
         if (from_str != keyfile_address) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: input[" << idx
                       << "] 'from' (" << from_str
                       << ") does not match --keyfile address ("
@@ -10710,13 +10756,13 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         if (crypto_sign_detached(sig.data(), &sig_len,
                                   sb.data(), sb.size(),
                                   sk.data()) != 0) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: crypto_sign_detached failed at "
                          "input[" << idx << "]\n";
             return 2;
         }
         if (sig_len != crypto_sign_BYTES) {
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "tx-batch-sign: unexpected sig length " << sig_len
                       << " at input[" << idx << "]\n";
             return 2;
@@ -10738,7 +10784,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         out_arr.push_back(std::move(envj));
     }
     // All sigs done — scrub the secret key.
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
 
     // ── Write --out ───────────────────────────────────────────────────────
     // Use compact dump (no whitespace) so the file is byte-stable across
@@ -15921,39 +15967,37 @@ std::vector<uint8_t> build_signing_bytes(const std::vector<uint8_t>& msg) {
     return sb;
 }
 
-// Base64-encode bytes (URL-safe variant disabled — use standard Base64
-// with '+' '/' '=' so the bundle round-trips through any JSON decoder
-// + any base64 library without configuration). libsodium ships
-// sodium_bin2base64 / sodium_base642bin which we use for FIPS-friendly
-// portable Base64 (avoids dragging in another dependency).
+// Base64-encode bytes (standard alphabet '+' '/' '=' so the bundle
+// round-trips through any JSON decoder + any base64 library without
+// configuration). Backed by OpenSSL EVP (already linked); the former
+// libsodium sodium_bin2base64/sodium_base642bin were removed with the
+// §3.15 sodium migration.
 std::string b64_encode(const std::vector<uint8_t>& bytes) {
-    const size_t enc_len = sodium_base64_ENCODED_LEN(bytes.size(),
-                                                      sodium_base64_VARIANT_ORIGINAL);
-    std::string out(enc_len, '\0');
-    sodium_bin2base64(out.data(), enc_len,
-                       bytes.data(), bytes.size(),
-                       sodium_base64_VARIANT_ORIGINAL);
-    // sodium writes a trailing NUL inside the buffer; std::string size
-    // already accounts for it, strip the trailing '\0' for clean output.
-    if (!out.empty() && out.back() == '\0') out.pop_back();
+    if (bytes.empty()) return std::string();
+    // Standard Base64 (+ / =) via OpenSSL EVP — same alphabet/padding as the
+    // former sodium VARIANT_ORIGINAL, so existing bundles round-trip.
+    std::string out((size_t)(4 * ((bytes.size() + 2) / 3)), '\0');
+    int n = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(&out[0]),
+                            bytes.data(), (int)bytes.size());
+    out.resize(n > 0 ? (size_t)n : 0);
     return out;
 }
 
 // Inverse of b64_encode. Returns false on malformed input.
 bool b64_decode(const std::string& s, std::vector<uint8_t>& out,
                  std::string& err) {
-    out.assign(s.size(), 0);
-    size_t decoded_len = 0;
-    if (sodium_base642bin(out.data(), out.size(),
-                           s.data(), s.size(),
-                           /*ignore=*/nullptr,
-                           &decoded_len,
-                           /*end=*/nullptr,
-                           sodium_base64_VARIANT_ORIGINAL) != 0) {
-        err = "base64 decode failed (malformed input)";
-        return false;
-    }
-    out.resize(decoded_len);
+    if (s.empty()) { out.clear(); return true; }
+    if (s.size() % 4 != 0) { err = "base64 decode failed (malformed input)"; return false; }
+    out.assign(s.size() / 4 * 3, 0);
+    int n = EVP_DecodeBlock(out.data(),
+                            reinterpret_cast<const unsigned char*>(s.data()), (int)s.size());
+    if (n < 0) { err = "base64 decode failed (malformed input)"; return false; }
+    // EVP_DecodeBlock returns a multiple of 3; drop the bytes that the '='
+    // padding stood in for so the length matches the original input.
+    size_t pad = 0;
+    if (s.size() >= 1 && s[s.size() - 1] == '=') pad++;
+    if (s.size() >= 2 && s[s.size() - 2] == '=') pad++;
+    out.resize((size_t)n - pad);
     return true;
 }
 
@@ -16102,11 +16146,11 @@ int cmd_sign_arbitrary(int argc, char** argv) {
     if (crypto_sign_detached(sig.data(), &sig_len,
                               signing_bytes.data(), signing_bytes.size(),
                               sk.data()) != 0) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "sign-arbitrary: crypto_sign_detached failed\n";
         return 1;
     }
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
     if (sig_len != crypto_sign_BYTES) {
         std::cerr << "sign-arbitrary: unexpected sig length " << sig_len << "\n";
         return 1;
@@ -16930,21 +16974,21 @@ int cmd_bulk_send(int argc, char** argv) {
 
     if (rows.empty()) {
         std::cerr << "bulk-send: --batch-file parsed to zero rows\n";
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         return 1;
     }
 
     // ── Init libsodium + derive keypair from the priv seed ────────────────
     if (!init_libsodium()) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         std::cerr << "bulk-send: libsodium init failed\n";
         return 1;
     }
     std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
     std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
     if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "bulk-send: crypto_sign_seed_keypair failed\n";
         return 1;
     }
@@ -16952,8 +16996,8 @@ int cmd_bulk_send(int argc, char** argv) {
     // make_anon_address is "0x" + lowercase 64-hex of the pubkey.
     std::string derived_addr = "0x" + to_hex(pub);
     if (derived_addr != keyfile_address) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "bulk-send: --priv-keyfile address mismatch: "
                      "keyfile.address=" << keyfile_address
                   << " derived=" << derived_addr
@@ -16961,13 +17005,13 @@ int cmd_bulk_send(int argc, char** argv) {
         return 1;
     }
     // priv_seed not needed past keypair derivation; scrub.
-    sodium_memzero(priv_seed.data(), priv_seed.size());
+    determ_secure_zero(priv_seed.data(), priv_seed.size());
 
     // ── Optional: connect to RPC, fetch starting nonce ────────────────────
 #ifdef _WIN32
     WinsockInit wsa;
     if (!wsa.ok && !dry_run) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "bulk-send: WSAStartup failed\n";
         return 1;
     }
@@ -16985,7 +17029,7 @@ int cmd_bulk_send(int argc, char** argv) {
             // (or operator-supplied --starting-nonce). For real submission
             // we cannot proceed.
             if (!dry_run) {
-                sodium_memzero(sk.data(), sk.size());
+                determ_secure_zero(sk.data(), sk.size());
                 std::cerr << "bulk-send: " << conn_err << "\n";
                 return 1;
             }
@@ -17002,7 +17046,7 @@ int cmd_bulk_send(int argc, char** argv) {
             } catch (std::exception& e) {
                 if (!dry_run) {
                     close_sock(rpc_sock);
-                    sodium_memzero(sk.data(), sk.size());
+                    determ_secure_zero(sk.data(), sk.size());
                     std::cerr << "bulk-send: nonce query failed: "
                               << e.what() << "\n";
                     return 1;
@@ -17130,7 +17174,7 @@ int cmd_bulk_send(int argc, char** argv) {
     }
 
     if (rpc_sock != kInvalidSock) close_sock(rpc_sock);
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
 
     nlohmann::json out;
     out["keyfile"]        = priv_keyfile;
@@ -17312,7 +17356,7 @@ int cmd_bulk_stake(int argc, char** argv) {
     std::ifstream sf(stake_list, std::ios::binary);
     if (!sf) {
         std::cerr << "bulk-stake: cannot open --stake-list: " << stake_list << "\n";
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         return 1;
     }
     std::string body((std::istreambuf_iterator<char>(sf)),
@@ -17338,7 +17382,7 @@ int cmd_bulk_stake(int argc, char** argv) {
         catch (std::exception& e) {
             std::cerr << "bulk-stake: --stake-list JSON parse error: "
                       << e.what() << "\n";
-            sodium_memzero(priv_seed.data(), priv_seed.size());
+            determ_secure_zero(priv_seed.data(), priv_seed.size());
             return 1;
         }
         // Accept either {"stakes":[...]} or a bare [...] for parity
@@ -17352,7 +17396,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             std::cerr << "bulk-stake: --stake-list JSON must be "
                          "{\"stakes\":[{domain,amount,fee?}, ...]} "
                          "or a bare array of {domain,amount,fee?} objects\n";
-            sodium_memzero(priv_seed.data(), priv_seed.size());
+            determ_secure_zero(priv_seed.data(), priv_seed.size());
             return 1;
         }
         for (size_t i = 0; i < arr->size(); ++i) {
@@ -17360,19 +17404,19 @@ int cmd_bulk_stake(int argc, char** argv) {
             if (!row.is_object()) {
                 std::cerr << "bulk-stake: --stake-list row " << i
                           << " is not a JSON object\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             if (!row.contains("domain") || !row["domain"].is_string()) {
                 std::cerr << "bulk-stake: --stake-list row " << i
                           << " missing string field 'domain'\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             if (!row.contains("amount") || !row["amount"].is_number()) {
                 std::cerr << "bulk-stake: --stake-list row " << i
                           << " missing numeric field 'amount'\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             StakeRow sr;
@@ -17386,7 +17430,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             if (sr.amount == 0) {
                 std::cerr << "bulk-stake: --stake-list row " << i
                           << " amount must be positive (got 0)\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             std::optional<uint64_t> row_fee;
@@ -17443,7 +17487,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             if (cols.size() < 2) {
                 std::cerr << "bulk-stake: --stake-list CSV line " << lineno
                           << " expected `domain,amount[,fee]`; got '" << line << "'\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             for (auto& c : cols) {
@@ -17458,7 +17502,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             if (sr.domain.empty()) {
                 std::cerr << "bulk-stake: --stake-list CSV line " << lineno
                           << " domain is empty\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             try {
@@ -17466,13 +17510,13 @@ int cmd_bulk_stake(int argc, char** argv) {
             } catch (std::exception&) {
                 std::cerr << "bulk-stake: --stake-list CSV line " << lineno
                           << " amount '" << cols[1] << "' is not a u64\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             if (sr.amount == 0) {
                 std::cerr << "bulk-stake: --stake-list CSV line " << lineno
                           << " amount must be positive (got 0)\n";
-                sodium_memzero(priv_seed.data(), priv_seed.size());
+                determ_secure_zero(priv_seed.data(), priv_seed.size());
                 return 1;
             }
             std::optional<uint64_t> row_fee;
@@ -17481,7 +17525,7 @@ int cmd_bulk_stake(int argc, char** argv) {
                 catch (std::exception&) {
                     std::cerr << "bulk-stake: --stake-list CSV line " << lineno
                               << " fee '" << cols[2] << "' is not a u64\n";
-                    sodium_memzero(priv_seed.data(), priv_seed.size());
+                    determ_secure_zero(priv_seed.data(), priv_seed.size());
                     return 1;
                 }
             }
@@ -17494,21 +17538,21 @@ int cmd_bulk_stake(int argc, char** argv) {
 
     if (rows.empty()) {
         std::cerr << "bulk-stake: --stake-list parsed to zero rows\n";
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         return 1;
     }
 
     // ── Init libsodium + derive keypair from the priv seed ────────────────
     if (!init_libsodium()) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
         std::cerr << "bulk-stake: libsodium init failed\n";
         return 1;
     }
     std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
     std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
     if (crypto_sign_seed_keypair(pub.data(), sk.data(), priv_seed.data()) != 0) {
-        sodium_memzero(priv_seed.data(), priv_seed.size());
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(priv_seed.data(), priv_seed.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "bulk-stake: crypto_sign_seed_keypair failed\n";
         return 1;
     }
@@ -17525,8 +17569,8 @@ int cmd_bulk_stake(int argc, char** argv) {
     if (keyfile_is_anon) {
         std::string derived_addr = "0x" + to_hex(pub);
         if (derived_addr != keyfile_address) {
-            sodium_memzero(priv_seed.data(), priv_seed.size());
-            sodium_memzero(sk.data(), sk.size());
+            determ_secure_zero(priv_seed.data(), priv_seed.size());
+            determ_secure_zero(sk.data(), sk.size());
             std::cerr << "bulk-stake: --priv-keyfile address mismatch: "
                          "keyfile.address=" << keyfile_address
                       << " derived=" << derived_addr
@@ -17534,13 +17578,13 @@ int cmd_bulk_stake(int argc, char** argv) {
             return 1;
         }
     }
-    sodium_memzero(priv_seed.data(), priv_seed.size());
+    determ_secure_zero(priv_seed.data(), priv_seed.size());
 
     // ── Optional: connect to RPC, fetch starting nonce ────────────────────
 #ifdef _WIN32
     WinsockInit wsa;
     if (!wsa.ok && !dry_run) {
-        sodium_memzero(sk.data(), sk.size());
+        determ_secure_zero(sk.data(), sk.size());
         std::cerr << "bulk-stake: WSAStartup failed\n";
         return 1;
     }
@@ -17555,7 +17599,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             static_cast<uint16_t>(rpc_port), conn_err);
         if (rpc_sock == kInvalidSock) {
             if (!dry_run) {
-                sodium_memzero(sk.data(), sk.size());
+                determ_secure_zero(sk.data(), sk.size());
                 std::cerr << "bulk-stake: " << conn_err << "\n";
                 return 1;
             }
@@ -17572,7 +17616,7 @@ int cmd_bulk_stake(int argc, char** argv) {
             } catch (std::exception& e) {
                 if (!dry_run) {
                     close_sock(rpc_sock);
-                    sodium_memzero(sk.data(), sk.size());
+                    determ_secure_zero(sk.data(), sk.size());
                     std::cerr << "bulk-stake: nonce query failed: "
                               << e.what() << "\n";
                     return 1;
@@ -17703,7 +17747,7 @@ int cmd_bulk_stake(int argc, char** argv) {
     }
 
     if (rpc_sock != kInvalidSock) close_sock(rpc_sock);
-    sodium_memzero(sk.data(), sk.size());
+    determ_secure_zero(sk.data(), sk.size());
 
     nlohmann::json out;
     out["keyfile"]        = priv_keyfile;
@@ -25077,8 +25121,7 @@ void print_usage() {
         "  version                                    Print version banner\n"
         "\n"
         "Pending (Phase 4):\n"
-        "  OPAQUE per-guardian AKE replaces passphrase-only authentication\n"
-        "  for create-recovery / recover (libopaque + libsodium integration).\n";
+        "  Recovery: Shamir split + OpenSSL AEAD envelopes (passphrase scheme).\n";
 }
 
 } // namespace
