@@ -31,7 +31,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.17 Passphrase-encrypted keyfiles (S-004) | ✅ shipped | AES-256-GCM envelope |
 | v2.18 DAPP_REGISTER tx + on-chain DApp registry | ✅ shipped | Theme 7 substrate |
 | v2.19 DAPP_CALL tx + payload routing | ✅ shipped | Theme 7 substrate |
-| v2.20 Streaming subscription RPC | ⚠️ partial (spec resolved) | Polling shipped; full streaming pending. Spec resolved in §v2.20 below: `dapp_subscribe(domain, topic?, since?)` newline-JSON streaming with bounded per-subscriber queue, kill-on-backpressure semantics, catch-up replay window, heartbeat cadence, per-IP rate-limit via existing `net::RateLimiter` |
+| v2.20 Streaming subscription RPC | ✅ shipped (R53, 2026-07-03) | `dapp_subscribe(domain, topic?, since?, heartbeat_blocks?, queue_max?)` newline-JSON streaming: bounded per-subscriber queue with **kill-on-overflow** (never drop-oldest — a live connection's `seq` stream is gapless by construction), atomic catch-up/live `[since,H) ∪ [H,∞)` partition, block-based heartbeats, weighted `net::RateLimiter` consume (S-014). `determ dapp-subscribe` CLI. FB71 `tla/SubscriberBackpressure.tla` machine-checks the backpressure protocol; `StreamingSubscriptionSoundness.md` (SS-1..SS-6) is the delivery contract; `tools/test_dapp_subscribe.sh` is the live-cluster regression |
 | v2.21+ DApp ecosystem items | 🔒 deferred | See V2-DAPP-DESIGN.md |
 | v2.22 Confidential transactions (Bulletproofs) | ⏳ spec resolved, implementation pending | Theme 8. **MODERN crypto profile only** (unavailable in FIPS profiles: `tactical` + `cluster`). Option C resolved in `v2.22-PRIVACY-SPEC.md`: per-epoch HKDF view-key derivation, Bulletproofs over secp256k1 via libsecp256k1-zkp, ephemeral X25519 DH for amount handshake, dual-mode audit disclosure. ~2.5-3 months to ship from spec-review acceptance |
 | v2.23 Cross-chain bridge (IBC-style) | ⏳ not started | Theme 8 |
@@ -39,7 +39,7 @@ The intent is not "Ethereum but better" — Determ stays in its lane: a payment 
 | v2.25 Distributed identity provider (DSSO) | 🔄 reclassified as post-v1.0 DApp (2026-05-24) | Theme 9 originally framed DSSO as chain-level substrate; reclassified as a chain-aware DApp on top of v2.18 + v2.19 + v2.26 substrate per `proofs/DECISION-LOG.md` 2026-05-24 entry and `proofs/Improvements.md §8.1`. Substrate spec below preserved as historical reference. |
 | v2.26 On-chain key rotation | ⏳ not started | Theme 9. ROTATE_KEY tx + rotation-aware sig verification; enables wallet-key churn without re-registration; precondition for v2.25 production |
 
-**Shipped: 11 (v2.7 F2 + partner_subset_hash + timestamp-median digest closures landed — S-030-D2 fully consensus-closed). Active: 0 (v2.10 block-beacon DE-SCOPED, see its row). Partial: 1 (v2.20). Outstanding: 9. Reclassified: 1 (v2.25 → post-v1.0 DApp per 2026-05-24). Deferred: 3 (v2.9, v2.13, v2.21+).**
+**Shipped: 12 (v2.7 F2 + partner_subset_hash + timestamp-median digest closures landed — S-030-D2 fully consensus-closed; v2.20 streaming subscription shipped R53). Active: 0 (v2.10 block-beacon DE-SCOPED, see its row). Partial: 0. Outstanding: 9. Reclassified: 1 (v2.25 → post-v1.0 DApp per 2026-05-24). Deferred: 3 (v2.9, v2.13, v2.21+).**
 
 For the live shipped-items list, run `git log --oneline | grep -iE 'v2\\.'` — the table above is best-effort accurate as of this revision.
 
@@ -1155,9 +1155,11 @@ Full design: [`V2-DAPP-DESIGN.md`](V2-DAPP-DESIGN.md). Summary:
 
 **Closes:** none directly — first application of the Theme-7 substrate.
 
-### v2.20 — Streaming subscription RPC — ⚠️ partial (polling shipped, streaming pending)
+### v2.20 — Streaming subscription RPC — ✅ shipped (R53, 2026-07-03)
 
-**Status.** v2.19 shipped the **polling** subset under the `dapp_messages` RPC (retrospective query with `from_height` / `to_height` / `topic` filters, 256-event pages). The **streaming** subset documented below is the remaining ~3 days of work.
+**Status.** SHIPPED. v2.19 shipped the **polling** subset (`dapp_messages`); R53 shipped the **streaming** subset — `dapp_subscribe` in `src/node/node.cpp` (`rpc_dapp_subscribe` / `on_block_finalized_for_subscribers` / `subscriber_session` / `shutdown_subscribers`), the RPC-layer takeover in `src/rpc/rpc.cpp` (`handle_session`), the weighted `RateLimiter::consume(key, cost)` in `include/determ/net/rate_limiter.hpp`, and the `determ dapp-subscribe` CLI. The design below is the as-built contract; two deviations from the original sketch are noted inline (`heartbeat_blocks` / `queue_max` became client-tunable request params; the writer is a per-subscriber `std::thread` doing bounded blocking writes rather than an asio async worker, which the SO_SNDTIMEO write-timeout + kill-on-overflow close together bound). Proofs: FB71 `tla/SubscriberBackpressure.tla` (machine-checked backpressure), `StreamingSubscriptionSoundness.md` (SS-1..SS-6). Regression: `tools/test_dapp_subscribe.sh` (live 3-node).
+
+The rest of this section is retained as the design of record.
 
 **Problem statement.** Polling `dapp_messages` has three intrinsic costs that scale poorly past moderate event rates:
 
