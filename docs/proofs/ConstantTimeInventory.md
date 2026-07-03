@@ -638,8 +638,10 @@ precedent: `be_lt` is now a constant-time byte-wise borrow-chain comparator
 (equivalent to `sc_lt_L`/`fe_sub`'s masked form). NOTE the registered
 `p256-base-mul` probe generator masks `scalar[0] &= 0x0f` (src/main.cpp
 ~L12719), forcing an iteration-0 exit, so the tranche-3 probe would NOT have
-surfaced this — a secret-class run that includes high-MSB scalars is the
-recommended empirical follow-up to confirm the fix under dudect.
+surfaced this. FOLLOW-UP DONE (same session): the p256-base-mul/p256-sc-mul
+generators now use full-range [1, n) rejection-sampled secrets with an
+n-prefix FIX class (first 16 BE bytes of n), and smoke runs on the branchless
+be_lt show max |t| = 2.6-2.7 at small samples — no leakage evidence.
 
 The remaining equality/aggregate compares are clean: no secret-indexed memory
 access, and no *other* short-circuiting secret compare exists in any of the nine

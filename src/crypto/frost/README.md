@@ -161,11 +161,19 @@ directory.
 
 Only items the spec or audit actually records:
 
-- **RFC 9591 binding-factor interop vectors** (spec §3.8; audit §7 documented
+- **RFC 9591 binding-factor interop** (spec §3.8; audit §7 documented
   non-goal): the binding-factor/H1..H5 derivation is self-consistent and the
   aggregate verifies under OpenSSL, but it is not byte-exact to the RFC 9591
-  ciphersuite. Appendix C test vectors and the zcash/frost-ed25519 (Rust)
-  output cross-check are the tracked follow-ups.
+  ciphersuite. PARTIALLY CLOSED (R48): the RFC 9591 Appendix E.1 vector now
+  gates the byte-reproducible subset through both §3.13 halves
+  (`tools/vectors/frost_ed25519_rfc9591.json`) — keygen_trusted reproduces
+  the E.1 Shamir shares + group pk BYTE-EXACT, reconstruct recovers the
+  vector sk, the RFC aggregate verifies under the C99 Ed25519 verifier, and
+  determ_frost_sign fed the RFC's own nonces yields a valid group-key
+  signature. Byte-exact R/sig-share interop needs an RFC-mode binding-factor
+  transcript (replacing the deliberate DETERM-FROST-RHO separation of §2) —
+  a protocol change that stays authorization-gated; the zcash/frost-ed25519
+  (Rust) cross-check remains open with it.
 - **DKG complaint-phase / ceremony orchestration** (spec §3.8): this module ships
   the per-message verification predicates; broadcast, complaint handling, and
   epoch plumbing are caller-side. The previously tracked "wiring into

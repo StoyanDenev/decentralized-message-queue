@@ -4,7 +4,7 @@
 
 > **NOTICE 2026-06-07 — FROST removed from v1.1 chain consensus path.** Per `FROST_DEVIATION_NOTICE.md`, FROST was identified as a Claude-introduced design deviation, not part of Stoyan Denev's original Determ design. The §3.8 FROST-Ed25519 implementation under `src/crypto/frost/` is retained as a library (DApp-layer use post-launch is allowed) but is NOT part of the v1.1 consensus path, NOT part of the v1.1-locked formal-verification surface, and any re-introduction into chain consensus requires Stoyan's explicit sign-off per `FROST_DEVIATION_NOTICE.md §3`. All §3.1–§3.7 primitives (SHA-2, HMAC, HKDF, PBKDF2, ChaCha20-Poly1305, AES-256-GCM, Ed25519, X25519, BLAKE2b) remain in v1.1 scope; only §3.8 FROST is excluded from the consensus-path commitment.
 
-**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.10 constant-time primitives (`determ_ct_memcmp` + `determ_secure_zero` — the one §3.10 piece every other module consumes), §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), §3.8c NIST P-256 (from-scratch Montgomery field + RCB complete addition + CT ladder — the FIPS-profile curve; constants gated vs OpenSSL EC_GROUP), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; binding-factor RFC-9591-byte-exact interop vectors are a documented follow-up). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
+**Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.10 constant-time primitives (`determ_ct_memcmp` + `determ_secure_zero` — the one §3.10 piece every other module consumes), §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), §3.8c NIST P-256 (from-scratch Montgomery field + RCB complete addition + CT ladder — the FIPS-profile curve; constants gated vs OpenSSL EC_GROUP), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; RFC 9591 E.1 interop now gated via `tools/vectors/frost_ed25519_rfc9591.json` through both §3.13 halves — keygen shares + group pk byte-exact, reconstruct recovers the vector sk, the RFC aggregate verifies under the C99 Ed25519, and determ_frost_sign with the RFC's own nonces yields a valid group-key signature; the binding-factor transcript itself stays deliberately domain-separated (DETERM-FROST-RHO, src/crypto/frost/README.md §5), so byte-exact R/sig-share interop would need an RFC-mode transcript — a protocol change that remains authorization-gated). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lives in [V210ImplementationRoadmap.md](V210ImplementationRoadmap.md).
 
 **Companion documents:**
 - `v2.10-DKG-SPEC.md` — FROST-Ed25519 threshold-randomness spec (consumer of this stack)
@@ -623,11 +623,13 @@ Original plan (retained for the deviation record):
   constants on either side). Provenance: `src/crypto/p256/README.md`.
 - SHIPPED with §3.9b: hash-to-curve, mod-n arithmetic, SEC1 compressed
   point encode/decode, and the full RFC 9497 OPRF-P256 consumer. Still
-  remaining: ECDSA-P256 (only if a FIPS-profile signing consumer appears);
-  NIST CAVP vector imports (the generated + RFC-appendix coverage stands in
-  meanwhile); the ConstantTimeInventory per-mechanism rows for the P-256
-  module (the tranche-3 timing-probe targets are already registered; the
-  inventory sweep is the next §3.12 follow-up).
+  remaining: ECDSA-P256 (only if a FIPS-profile signing consumer appears)
+  and P-256-specific NIST CAVP imports (SHA-2/GCM CAVP landed via §3.13;
+  the hazmat-verified + RFC-appendix P-256 coverage stands in meanwhile).
+  The ConstantTimeInventory §2.9 rows + P256CryptoStackAudit shipped with
+  the R47 audit round (P256-CT-1 + 3 zeroization findings, all remediated
+  in-session); the tranche-3 probe generators now use full-range [1, n)
+  secret scalars.
 
 ### 3.9a OPRF on secp256k1 from voprf draft + RFC 9380 (~7 days)
 
@@ -714,37 +716,60 @@ Original plan (retained):
   Conventions: `std::span` in, `std::array`/`std::vector` out; parameter
   errors throw `std::runtime_error`; AEAD auth failure + X25519 low-order
   return `std::nullopt` (normal adversarial outcomes, not exceptions).
+- The `determ::c99::p256` + `determ::c99::oprf_p256` namespaces cover the
+  §3.8c/§3.9b surfaces (base_mul/point_mul/point_check/add/compress/
+  decompress/mod-n ops/hash_to_curve/hash_to_scalar; derive_key/blind/
+  evaluate/finalize/prove/verify) under the same error model — an invalid
+  OWN scalar throws (separated from the C layer's conflated -1 by a cheap
+  public validity check), adversarial peer inputs return nullopt/false.
 - Validated by `determ test-c99-api` (wrapper output == raw C API output per
-  primitive, with KAT anchors; the full AEAD tamper -> nullopt contract).
+  primitive, with KAT anchors; the full AEAD tamper -> nullopt contract;
+  P-256 DH commutativity + compress round-trip + OPRF protocol identity +
+  VOPRF tamper/wrong-mode rejects).
 - Remaining for full §3.11: RAII incremental/streaming state (BLAKE2b first —
   the only shipped streaming C API), the caller-refactor mechanical-edit test
-  (lands with §3.15), and umbrella rows for §3.7/§3.8c/§3.9 as they ship.
+  (lands with §3.15), and umbrella rows for §3.7/§3.9a as they ship.
 
 ### 3.12 Constant-time verification framework — **SEEDED** (in-house probe shipped; vendoring still gated)
 
 - `determ ct-timing-probe` — IN-HOUSE fix-vs-random Welch-t leakage probe
   implemented from the published dudect method (design + statistical
   soundness analysis: `TimingProbeDesign.md`; targets: ConstantTimeInventory
-  §5). First tranche: ct-memcmp (4 mismatch-position classes),
-  chacha/gcm-tag-verify, ed25519-sign, x25519, sha256-content negative
-  control. REPORTING tool by design — measurement mode stays out of
+  §5). 23 registered targets across four tranches: the tranche-1 core
+  (ct-memcmp with 4 mismatch-position classes, chacha/gcm-tag-verify,
+  ed25519-sign, x25519, sha256-content negative control), tranche 2
+  (aes-core, chacha20-core, poly1305-key, ed25519-pubkey, sc-canonical
+  boundary scalars, hmac-key), tranche 3 (p256-base-mul / p256-h2c /
+  p256-sc-mul — full-range [1, n) secret classes incl. an n-prefix FIX
+  class, the P256-CT-1 lesson), tranche 4 (x25519-base, sc-muladd,
+  hmac-sha512, blake2b-keyed, pbkdf2, frost-reconstruct, frost-dkg,
+  frost-sign-partial — closing the design-§4 id list except the dedicated
+  `ghash` id, which is a static internal exercised via
+  gcm-tag-verify/aes-core). REPORTING tool by design — measurement mode stays out of
   run_all.sh/FAST (environmentally flaky); only the deterministic `--selftest`
   statistics fixture is suite-eligible (`tools/test_ct_timing_selftest.sh`).
 - Vendoring dudect or ctgrind (third-party code into the tree) remains
   FLAGGED awaiting authorization per TimingProbeDesign.md §1; the ctgrind
   taint-analysis leg needs the Linux/WSL2 valgrind environment either way.
-- Remaining: the rest of the §4 target list; per-build report archiving
+- Remaining: per-build report archiving
   (CSV + build recipe per TimingProbeDesign.md §6); CI wiring decision.
 
 ### 3.13 Test-vector validation — **SEEDED** (both halves live for the shipped primitives)
 
-- `tools/vectors/<primitive>.json` — 10 files / 52 vectors for the shipped
+- `tools/vectors/<primitive>.json` — 17 files / 129 vectors for the shipped
   families (SHA-256/512 incl. the million-'a' `repeat` form, HMAC RFC 4231
   TC1-7, HKDF A.1-A.3 + TC2-long + L∈{0,32,8160} edges, PBKDF2, BLAKE2b incl.
   two-block keyed + 64-byte-key edges, ChaCha20-Poly1305 + AES-256-GCM incl.
   generated block-boundary cases, Ed25519 incl. §7.1 TEST SHA(abc), X25519
   incl. the full §6.1 DH exchange + the §5.2 iterated vector at 1 and 1,000
-  iterations). Mixed provenance is declared per-file in each `source` field
+  iterations; the P-256 family per §3.8c/§3.9b — p256.json hazmat-verified
+  grid, p256_h2c.json RFC 9380 appendix, p256_oprf.json RFC 9497 A.3.1/A.3.2;
+  NIST CAVP imports — sha2_cavp_sha256/sha512.json, 30 entries verbatim from
+  shabytetestvectors.zip, + aes_gcm_cavp.json, 16 entries from
+  gcmEncryptExtIV256.rsp, both fetched from csrc.nist.gov with the zip/rsp
+  SHA-256 pinned in each `source` field; and frost_ed25519_rfc9591.json —
+  the RFC 9591 E.1 FROST(Ed25519, SHA-512) 2-of-3 signing vector, §3.8
+  note). Mixed provenance is declared per-file in each `source` field
   (published RFC/NIST KATs + cryptography.hazmat-generated boundary cases).
   No-fabrication rule: every vector was mechanically recomputed before
   inclusion; argon2id omitted (no local oracle) — its KATs stay pinned in
@@ -761,8 +786,8 @@ Original plan (retained):
   wrong. AEAD entries also assert the decrypt round-trip; Ed25519 asserts
   pubkey + sign + verify; missing file / unknown discriminator is a hard FAIL.
 - Remaining for full §3.13: vectors for future primitives as they ship
-  (secp256k1, P-256, OPRF), libsodium cross-validation during §3.15 migration,
-  CI wiring.
+  (secp256k1 §3.7/§3.9a, gated), libsodium cross-validation during the §3.15
+  migration, CI wiring.
 
 ### 3.14 Build system + module structure — **SEEDED** (aggregate static lib)
 

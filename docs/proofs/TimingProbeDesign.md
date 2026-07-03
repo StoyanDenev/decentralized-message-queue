@@ -14,8 +14,16 @@ sha256-content negative control; tranche 2 (same session) added aes-core,
 chacha20-core, poly1305-key, ed25519-pubkey, sc-canonical (the five
 boundary-scalar classes {0, L−1, L, 2L−1, random} of §4 target 7), and
 hmac-key; tranche 3 added the P-256 module: p256-base-mul, p256-h2c,
-p256-sc-mul — 15 targets total — plus the rest of the §3.2 CLI surface
-(`--seconds`, `--batch`, `--csv`, `--json`). `--selftest` (the §5.5 bit-exact
+p256-sc-mul (generators upgraded post-R47 to full-range [1, n) secret
+scalars with an n-prefix FIX class — the original scalar[0] &= 0x0f masking
+would have blinded the probe to P256-CT-1-class short-circuit leaks) plus
+the rest of the §3.2 CLI surface (`--seconds`, `--batch`, `--csv`,
+`--json`); tranche 4 added x25519-base, sc-muladd (the FROST z_i core),
+hmac-sha512, blake2b-keyed, pbkdf2, frost-reconstruct, frost-dkg, and
+frost-sign-partial — 23 targets total, closing the §4 id list except the
+dedicated `ghash` id (a static internal to aes_gcm.c, exercised indirectly
+via gcm-tag-verify/aes-core; exporting it for measurement alone was
+rejected per KISS). `--selftest` (the §5.5 bit-exact
 statistics fixture) is in the regular suite as
 `tools/test_ct_timing_selftest.sh`; measurement mode stays out of run_all.sh
 per §3.1. First measured runs on the dev host (MSVC -O2, rdtsc): max |t|
