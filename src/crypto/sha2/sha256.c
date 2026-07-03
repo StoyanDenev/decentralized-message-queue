@@ -64,38 +64,77 @@ static void sha256_block(uint32_t h[8], const uint8_t p[64]) {
     determ_secure_zero(w, sizeof w);
 }
 
-void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
-    uint32_t h[8] = {
+/* ── Incremental engine (§3.15) ───────────────────────────────────────────────
+ * The streaming init/update/final form. The one-shot below is a thin wrapper,
+ * so the CAVP + §Q9 gates that validate determ_sha256 validate this engine. */
+
+void determ_sha256_init(determ_sha256_ctx *ctx) {
+    static const uint32_t H0[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
     };
-    uint64_t bitlen = (uint64_t)len * 8u;
-    size_t full = len / 64u;
-    size_t rem;
-    size_t padlen;
+    memcpy(ctx->h, H0, sizeof H0);
+    ctx->total  = 0u;
+    ctx->buflen = 0u;
+}
+
+void determ_sha256_update(determ_sha256_ctx *ctx, const uint8_t *data, size_t len) {
+    ctx->total += len;
+    /* Top up a pending partial block first. */
+    if (ctx->buflen) {
+        size_t need = 64u - ctx->buflen;
+        size_t take = (len < need) ? len : need;
+        memcpy(ctx->buf + ctx->buflen, data, take);
+        ctx->buflen += take;
+        data += take;
+        len  -= take;
+        if (ctx->buflen == 64u) {
+            sha256_block(ctx->h, ctx->buf);
+            ctx->buflen = 0u;
+        }
+    }
+    /* Full blocks straight from the input (no copy). */
+    while (len >= 64u) {
+        sha256_block(ctx->h, data);
+        data += 64u;
+        len  -= 64u;
+    }
+    if (len) {
+        memcpy(ctx->buf, data, len);
+        ctx->buflen = len;
+    }
+}
+
+void determ_sha256_final(determ_sha256_ctx *ctx, uint8_t out[32]) {
+    uint64_t bitlen = ctx->total * 8u;
+    size_t rem = ctx->buflen;
+    size_t padlen = (rem < 56u) ? 64u : 128u;
     uint8_t tail[128];
-    size_t i;   /* size_t (not unsigned): the block loop counts up to `full`,
-                 * which is a size_t — an `unsigned` counter would wrap before
-                 * reaching `full` for inputs >= 256 GiB and never terminate. */
+    size_t i;
 
-    for (i = 0; i < full; i++) sha256_block(h, data + i * 64u);
-
-    rem = len - full * 64u;
-    if (rem) memcpy(tail, data + full * 64u, rem);
+    if (rem) memcpy(tail, ctx->buf, rem);
     tail[rem] = 0x80u;
-    padlen = (rem < 56u) ? 64u : 128u;
     memset(tail + rem + 1u, 0, padlen - rem - 1u - 8u);
     for (i = 0; i < 8u; i++)
         tail[padlen - 1u - i] = (uint8_t)(bitlen >> (8u * i));
-    sha256_block(h, tail);
-    if (padlen == 128u) sha256_block(h, tail + 64u);
+    sha256_block(ctx->h, tail);
+    if (padlen == 128u) sha256_block(ctx->h, tail + 64u);
 
     for (i = 0; i < 8u; i++) {
-        out[i * 4u]      = (uint8_t)(h[i] >> 24);
-        out[i * 4u + 1u] = (uint8_t)(h[i] >> 16);
-        out[i * 4u + 2u] = (uint8_t)(h[i] >> 8);
-        out[i * 4u + 3u] = (uint8_t)(h[i]);
+        out[i * 4u]      = (uint8_t)(ctx->h[i] >> 24);
+        out[i * 4u + 1u] = (uint8_t)(ctx->h[i] >> 16);
+        out[i * 4u + 2u] = (uint8_t)(ctx->h[i] >> 8);
+        out[i * 4u + 3u] = (uint8_t)(ctx->h[i]);
     }
-    /* tail holds up to the final 127 input bytes (key-derived for keyed callers). */
+    /* The buffer may hold the final bytes of keyed input (HMAC/PBKDF2 callers);
+     * the ctx is single-use — scrub the whole thing. */
     determ_secure_zero(tail, sizeof tail);
+    determ_secure_zero(ctx, sizeof *ctx);
+}
+
+void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
+    determ_sha256_ctx ctx;
+    determ_sha256_init(&ctx);
+    determ_sha256_update(&ctx, data, len);
+    determ_sha256_final(&ctx, out);   /* zeroizes ctx */
 }

@@ -33,6 +33,25 @@ extern "C" {
 /* One-shot SHA-256. `out` must point to at least 32 bytes. */
 void determ_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
 
+/* Incremental (streaming) SHA-256 — the init/update/final form of the same
+ * FIPS 180-4 engine, exported for the daemon's SHA256Builder (§3.15: the
+ * consensus path hashes blocks/state leaves incrementally; OpenSSL's
+ * EVP_DigestInit/Update/Final shape is reproduced 1:1). The one-shot
+ * determ_sha256 is implemented on this engine, so the CAVP + §Q9 gates that
+ * validate it validate this too. determ_sha256_final zeroizes the ctx (the
+ * buffer may hold secret material for keyed callers); a ctx is single-use —
+ * call determ_sha256_init again to rehash. */
+typedef struct {
+    uint32_t h[8];      /* chaining state */
+    uint64_t total;     /* total bytes absorbed */
+    uint8_t  buf[64];   /* partial-block buffer */
+    size_t   buflen;    /* valid bytes in buf (< 64) */
+} determ_sha256_ctx;
+
+void determ_sha256_init(determ_sha256_ctx *ctx);
+void determ_sha256_update(determ_sha256_ctx *ctx, const uint8_t *data, size_t len);
+void determ_sha256_final(determ_sha256_ctx *ctx, uint8_t out[32]);
+
 /* One-shot SHA-512. `out` must point to at least 64 bytes. */
 void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]);
 
