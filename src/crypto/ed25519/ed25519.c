@@ -443,3 +443,37 @@ int determ_ed25519_sc_is_canonical(const u8 s[32]) { return sc_lt_L(s); }
 /* 1 iff the 32-byte point encoding p has a canonical y < q (RFC 8032 §5.1.3),
  * else 0 — the "one point = one encoding" gate used by the Ed25519 verifier. */
 int determ_ed25519_point_is_canonical(const u8 p[32]) { return point_y_is_canonical(p); }
+
+/* ── Ed25519 → X25519 key conversions (RFC 7748 birational map) ──────────────
+ * The wallet reuses one Ed25519 identity for both signing and X25519 ECDH; the
+ * two functions below reproduce libsodium's crypto_sign_ed25519_{sk,pk}_to_
+ * curve25519 byte-for-byte (cross-validated in tools/c99_libsodium_xval.c). */
+
+/* x_sk = clamp(SHA-512(seed)[0..31]) — the X25519 scalar derived from an
+ * Ed25519 seed. Identical to libsodium's sk_to_curve25519, which hashes only
+ * the seed half of its 64-byte secret key. */
+void determ_ed25519_seed_to_x25519_sk(const u8 seed[32], u8 x_sk[32]) {
+    u8 h[64];
+    determ_sha512(seed, 32, h);
+    h[0]  &= 248;
+    h[31] &= 127;
+    h[31] |= 64;
+    memcpy(x_sk, h, 32);
+    determ_secure_zero(h, sizeof h);
+}
+
+/* x_pk = (1 + y) / (1 - y) mod p, the Edwards-y → Montgomery-u map. Returns 0,
+ * or -1 if the Ed25519 point is off-curve / non-canonical (matches libsodium's
+ * validating pk_to_curve25519). unpack25519 masks o[15] &= 0x7fff, so `y` is
+ * the pure y-coordinate with the x-sign bit already dropped. */
+int determ_ed25519_pk_to_x25519_pk(const u8 ed_pk[32], u8 x_pk[32]) {
+    gf r[4], y, one_minus_y, one_plus_y, u;
+    if (point_unpack(r, ed_pk)) return -1;   /* on-curve + canonical-y gate */
+    unpack25519(y, ed_pk);
+    Z(one_minus_y, gf1, y);                  /* 1 - y */
+    inv25519(one_minus_y, one_minus_y);      /* 1 / (1 - y) */
+    A(one_plus_y, gf1, y);                   /* 1 + y */
+    M(u, one_plus_y, one_minus_y);           /* (1 + y) / (1 - y) */
+    pack25519(x_pk, u);
+    return 0;
+}

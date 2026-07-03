@@ -19,6 +19,7 @@
 #include <determ/crypto/argon2/argon2id.h>
 #include <determ/crypto/blake2/blake2b.h>
 #include <determ/crypto/x25519/x25519.h>
+#include <determ/crypto/ed25519/ed25519.h>
 #include <determ/crypto/chacha20/xchacha20_poly1305.h>
 #include <sodium.h>
 #include <stdio.h>
@@ -111,11 +112,58 @@ static void test_argon2id(void) {
     expect(ok, "Argon2id C99 == libsodium crypto_pwhash_argon2id (t{1,2,3} x m{8,16,32,64,256} KiB)");
 }
 
+/* Ed25519 sign/verify/pubkey + the Ed25519->X25519 conversions the wallet
+ * relies on, all byte-equal against libsodium (the §3.15 wallet migration
+ * replaces exactly these libsodium calls with the C99 equivalents). */
+static void test_ed25519(void) {
+    int si, ok_pub = 1, ok_sig = 1, ok_vrf = 1, ok_sk = 1, ok_pk = 1;
+    for (si = 0; si < 64; si++) {
+        unsigned char seed[32], msg[96];
+        unsigned char c_pk[32], c_sig[64], c_xsk[32], c_xpk[32];
+        unsigned char s_pk[32], s_sk[64], s_sig[64], s_xsk[32], s_xpk[32];
+        size_t ml = (size_t)(si + 1);
+        fill(seed, 32, (unsigned)(si + 3));
+        fill(msg, ml, (unsigned)(si + 100));
+
+        /* libsodium reference: seed_keypair -> pk + 64-byte sk (seed||pk) */
+        crypto_sign_ed25519_seed_keypair(s_pk, s_sk, seed);
+        /* C99 pubkey */
+        determ_ed25519_pubkey_from_seed(seed, c_pk);
+        if (memcmp(c_pk, s_pk, 32) != 0) ok_pub = 0;
+
+        /* sign: C99 (seed,pk) vs libsodium detached over the 64-byte sk */
+        determ_ed25519_sign(seed, c_pk, msg, ml, c_sig);
+        crypto_sign_detached(s_sig, NULL, msg, ml, s_sk);
+        if (memcmp(c_sig, s_sig, 64) != 0) ok_sig = 0;
+
+        /* verify: C99 accepts the libsodium signature, rejects a tamper */
+        if (determ_ed25519_verify(s_pk, msg, ml, s_sig) != 0) ok_vrf = 0;
+        { unsigned char bad[64]; memcpy(bad, s_sig, 64); bad[0] ^= 1;
+          if (determ_ed25519_verify(s_pk, msg, ml, bad) == 0) ok_vrf = 0; }
+
+        /* sk -> x25519 scalar: C99 takes the seed, libsodium the 64-byte sk */
+        determ_ed25519_seed_to_x25519_sk(seed, c_xsk);
+        crypto_sign_ed25519_sk_to_curve25519(s_xsk, s_sk);
+        if (memcmp(c_xsk, s_xsk, 32) != 0) ok_sk = 0;
+
+        /* pk -> x25519 pubkey */
+        if (determ_ed25519_pk_to_x25519_pk(s_pk, c_xpk) != 0) ok_pk = 0;
+        if (crypto_sign_ed25519_pk_to_curve25519(s_xpk, s_pk) != 0) ok_pk = 0;
+        if (memcmp(c_xpk, s_xpk, 32) != 0) ok_pk = 0;
+    }
+    expect(ok_pub, "Ed25519 pubkey_from_seed C99 == libsodium seed_keypair (64 seeds)");
+    expect(ok_sig, "Ed25519 sign C99 == libsodium crypto_sign_detached (64 seeds x msg)");
+    expect(ok_vrf, "Ed25519 verify C99 accepts libsodium sigs + rejects tamper (64)");
+    expect(ok_sk,  "Ed25519 seed->x25519 sk C99 == libsodium sk_to_curve25519 (64)");
+    expect(ok_pk,  "Ed25519 pk->x25519 pk C99 == libsodium pk_to_curve25519 (64)");
+}
+
 int main(void) {
     if (sodium_init() < 0) { printf("  FAIL: sodium_init\n"); return 2; }
     printf("=== Determ C99 crypto stack vs libsodium (live byte-equal) ===\n");
     test_blake2b();
     test_x25519();
+    test_ed25519();
     test_xchacha();
     test_argon2id();
     printf("\n  %s: c99-libsodium-xval %d/%d comparisons matched\n",

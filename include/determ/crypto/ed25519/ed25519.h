@@ -46,6 +46,15 @@ int determ_ed25519_sign(const uint8_t seed[32], const uint8_t pk[32],
 int determ_ed25519_verify(const uint8_t pk[32],
                           const uint8_t *msg, size_t msglen, const uint8_t sig[64]);
 
+/* Ed25519 -> X25519 key conversions (RFC 7748 birational map), reproducing
+ * libsodium's crypto_sign_ed25519_{sk,pk}_to_curve25519 byte-for-byte so a
+ * wallet can reuse one Ed25519 identity for X25519 ECDH. The sk conversion
+ * takes the 32-byte SEED (not libsodium's 64-byte sk — same output, since
+ * libsodium hashes only the seed half). The pk conversion returns -1 on an
+ * off-curve / non-canonical input. */
+void determ_ed25519_seed_to_x25519_sk(const uint8_t seed[32], uint8_t x_sk[32]);
+int  determ_ed25519_pk_to_x25519_pk(const uint8_t ed_pk[32], uint8_t x_pk[32]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
