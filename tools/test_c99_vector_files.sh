@@ -55,11 +55,13 @@ EXPECTED = {
     "hkdf_sha256.json", "blake2b.json", "chacha20_poly1305.json",
     "aes256_gcm.json", "ed25519.json", "x25519.json", "p256.json",
     "p256_h2c.json", "p256_oprf.json",
+    "sha2_cavp_sha256.json", "sha2_cavp_sha512.json", "aes_gcm_cavp.json",
+    "frost_ed25519_rfc9591.json",
 }
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -557,6 +559,53 @@ def chk_p256_oprf(vec, label):
         if oprf_challenge(pks_pt, Mv, Zv, t2, t3, ctx, n) != vc:
             return "VerifyProof(proof_hex) failed — challenge mismatch"
 
+def chk_frost_ed25519_rfc9591(vec, label):
+    # RFC 9591 E.1 FROST(Ed25519, SHA-512): the scalar-arithmetic subset a
+    # python oracle can recompute WITHOUT edwards point math — (a) the Shamir
+    # shares f(i) = sk + c1*i mod L, (b) the aggregate z = sum(z_i) mod L,
+    # (c) the aggregate signature verifying as plain Ed25519 under the group
+    # public key (pyca is the second independent oracle). The full point-side
+    # re-derivation (public shares, binding factors per §4.4, R) was done at
+    # import time (R48) and is recorded in the file's source string; the
+    # BINARY half additionally re-derives shares/group_pk through
+    # determ_frost_keygen_trusted. L is the standard Ed25519 group order —
+    # self-checking here: a wrong L fails the share equations against the
+    # RFC-published values.
+    if vec.get("type") != "frost_sign":
+        return "unknown frost_ed25519_rfc9591 vector type %r" % vec.get("type")
+    need(vec, ["group_secret_key_hex", "group_public_key_hex", "message_hex",
+               "share_polynomial_coefficients_hex", "participant_shares",
+               "round_two_outputs", "sig_hex", "min_participants",
+               "max_participants"], label)
+    L = 2**252 + 27742317777372353535851937790883648493
+    sk = int.from_bytes(unhex(vec["group_secret_key_hex"], label + " sk"), "little")
+    coeffs = [int.from_bytes(unhex(c, label + " coeff"), "little")
+              for c in vec["share_polynomial_coefficients_hex"]]
+    if len(coeffs) != int(vec["min_participants"]) - 1:
+        return "coefficient count != t-1"
+    for ps in vec["participant_shares"]:
+        i = int(ps["identifier"])
+        want = unhex(ps["participant_share_hex"], label + " share")
+        f = sk
+        for k, c in enumerate(coeffs, start=1):
+            f = (f + c * pow(i, k, L)) % L
+        if f.to_bytes(32, "little") != want:
+            return "Shamir share f(%d) mismatch: %064x != %s" % (i, f, want.hex())
+    sig = unhex(vec["sig_hex"], label + " sig_hex")
+    if len(sig) != 64: return "sig_hex is not 64 bytes"
+    zsum = 0
+    for rt in vec["round_two_outputs"]:
+        zsum = (zsum + int.from_bytes(unhex(rt["sig_share_hex"], label + " z"),
+                                      "little")) % L
+    if zsum.to_bytes(32, "little") != sig[32:]:
+        return "sum(sig_shares) mod L != sig[32:] (aggregate z mismatch)"
+    try:
+        Ed25519PublicKey.from_public_bytes(
+            unhex(vec["group_public_key_hex"], label + " pk")
+        ).verify(sig, unhex(vec["message_hex"], label + " msg"))
+    except Exception as e:
+        return "aggregate signature does not verify as plain Ed25519 under the group pk (%s)" % e
+
 CHECKERS = {
     "sha256":             lambda v, l: chk_sha(v, l, "sha256", 32),
     "sha512":             lambda v, l: chk_sha(v, l, "sha512", 64),
@@ -571,6 +620,7 @@ CHECKERS = {
     "p256":               chk_p256,
     "p256_h2c":           chk_p256_h2c,
     "p256_oprf":          chk_p256_oprf,
+    "frost_ed25519_rfc9591": chk_frost_ed25519_rfc9591,
 }
 
 files = sorted(glob.glob(os.path.join("tools", "vectors", "*.json")))

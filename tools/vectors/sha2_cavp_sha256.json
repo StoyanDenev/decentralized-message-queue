@@ -1,0 +1,81 @@
+{
+  "primitive": "sha256",
+  "source": "NIST CAVP byte-oriented SHA test vectors (shabytetestvectors.zip, csrc.nist.gov/Projects/cryptographic-algorithm-validation-program/secure-hashing), sha256: 12 ShortMsg entries spanning Len=0..512 bits across the padding/block boundaries + first 3 LongMsg entries; every digest recomputed via python hashlib at extraction time; single-primitive split (this runner keys recomputation on the file-level primitive), companion file: sha2_cavp_sha512.json",
+  "vectors": [
+    {
+      "name": "CAVP SHA256ShortMsg Len=0 (0 bytes)",
+      "msg_hex": "",
+      "digest_hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=8 (1 bytes)",
+      "msg_hex": "d3",
+      "digest_hex": "28969cdfa74a12c82f3bad960b0b000aca2ac329deea5c2328ebc6f2ba9802c1"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=64 (8 bytes)",
+      "msg_hex": "5738c929c4f4ccb6",
+      "digest_hex": "963bb88f27f512777aab6c8b1a02c70ec0ad651d428f870036e1917120fb48bf"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=128 (16 bytes)",
+      "msg_hex": "0a27847cdc98bd6f62220b046edd762b",
+      "digest_hex": "80c25ec1600587e7f28b18b1b18e3cdc89928e39cab3bc25e4d4a4c139bcedc4"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=256 (32 bytes)",
+      "msg_hex": "09fc1accc230a205e4a208e64a8f204291f581a12756392da4b8c0cf5ef02b95",
+      "digest_hex": "4f44c1c7fbebb6f9601829f3897bfd650c56fa07844be76489076356ac1886a4"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=344 (43 bytes)",
+      "msg_hex": "3f7a059b65d6cb0249204aac10b9f1a4ac9e5868adebbe935a9eb5b9019e1c938bfc4e5c5378997a3947f2",
+      "digest_hex": "bfce809534eefe871273964d32f091fe756c71a7f512ef5f2300bcd57f699e74"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=440 (55 bytes)",
+      "msg_hex": "3ebfb06db8c38d5ba037f1363e118550aad94606e26835a01af05078533cc25f2f39573c04b632f62f68c294ab31f2a3e2a1a0d8c2be51",
+      "digest_hex": "6595a2ef537a69ba8583dfbf7f5bec0ab1f93ce4c8ee1916eff44a93af5749c4"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=448 (56 bytes)",
+      "msg_hex": "2d52447d1244d2ebc28650e7b05654bad35b3a68eedc7f8515306b496d75f3e73385dd1b002625024b81a02f2fd6dffb6e6d561cb7d0bd7a",
+      "digest_hex": "cfb88d6faf2de3a69d36195acec2e255e2af2b7d933997f348e09f6ce5758360"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=456 (57 bytes)",
+      "msg_hex": "4cace422e4a015a75492b3b3bbfbdf3758eaff4fe504b46a26c90dacc119fa9050f603d2b58b398cad6d6d9fa922a154d9e0bc4389968274b0",
+      "digest_hex": "4d54b2d284a6794581224e08f675541c8feab6eefa3ac1cfe5da4e03e62f72e4"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=496 (62 bytes)",
+      "msg_hex": "6511a2242ddb273178e19a82c57c85cb05a6887ff2014cf1a31cb9ba5df1695aadb25c22b3c5ed51c10d047d256b8e3442842ae4e6c525f8d7a5a944af2a",
+      "digest_hex": "d6859c0b5a0b66376a24f56b2ab104286ed0078634ba19112ace0d6d60a9c1ae"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=504 (63 bytes)",
+      "msg_hex": "e2f76e97606a872e317439f1a03fcd92e632e5bd4e7cbc4e97f1afc19a16fde92d77cbe546416b51640cddb92af996534dfd81edb17c4424cf1ac4d75aceeb",
+      "digest_hex": "18041bd4665083001fba8c5411d2d748e8abbfdcdfd9218cb02b68a78e7d4c23"
+    },
+    {
+      "name": "CAVP SHA256ShortMsg Len=512 (64 bytes)",
+      "msg_hex": "5a86b737eaea8ee976a0a24da63e7ed7eefad18a101c1211e2b3650c5187c2a8a650547208251f6d4237e661c7bf4c77f335390394c37fa1a9f9be836ac28509",
+      "digest_hex": "42e61e174fbb3897d6dd6cef3dd2802fe67b331953b06114a65c772859dfc1aa"
+    },
+    {
+      "name": "CAVP SHA256LongMsg Len=1304 (163 bytes)",
+      "msg_hex": "451101250ec6f26652249d59dc974b7361d571a8101cdfd36aba3b5854d3ae086b5fdd4597721b66e3c0dc5d8c606d9657d0e323283a5217d1f53f2f284f57b85c8a61ac8924711f895c5ed90ef17745ed2d728abd22a5f7a13479a462d71b56c19a74a40b655c58edfe0a188ad2cf46cbf30524f65d423c837dd1ff2bf462ac4198007345bb44dbb7b1c861298cdf61982a833afc728fae1eda2f87aa2c9480858bec",
+      "digest_hex": "3c593aa539fdcdae516cdf2f15000f6634185c88f505b39775fb9ab137a10aa2"
+    },
+    {
+      "name": "CAVP SHA256LongMsg Len=2096 (262 bytes)",
+      "msg_hex": "6b918fb1a5ad1f9c5e5dbdf10a93a9c8f6bca89f37e79c9fe12a57227941b173ac79d8d440cde8c64c4ebc84a4c803d198a296f3de060900cc427f58ca6ec373084f95dd6c7c427ecfbf781f68be572a88dbcbb188581ab200bfb99a3a816407e7dd6dd21003554d4f7a99c93ebfce5c302ff0e11f26f83fe669acefb0c1bbb8b1e909bd14aa48ba3445c88b0e1190eef765ad898ab8ca2fe507015f1578f10dce3c11a55fb9434ee6e9ad6cc0fdc4684447a9b3b156b908646360f24fec2d8fa69e2c93db78708fcd2eef743dcb9353819b8d667c48ed54cd436fb1476598c4a1d7028e6f2ff50751db36ab6bc32435152a00abd3d58d9a8770d9a3e52d5a3628ae3c9e0325",
+      "digest_hex": "46500b6ae1ab40bde097ef168b0f3199049b55545a1588792d39d594f493dca7"
+    },
+    {
+      "name": "CAVP SHA256LongMsg Len=2888 (361 bytes)",
+      "msg_hex": "82829690aa3733c62b90d3297886952fc1dc473d67bb7d6bb299e088c65fc95ed3ca0f368d111d9fdcc9476cd4065efce7c481be598537f3f53bbbb6ff67973a69837454499e31398b463288e3aafb8b0600fdba1a25af806b83e1425f384e9eac7570f0c823981ba2cd3d868fba94648759623991e30f997c3bfb33d019150f0467a914f1eb79cd8727106dbf7d5310d0975943a6067cc79029b09239511417d922c7c7ac3dfdd8a41c52455b3c5e164b8289e141d820910f17a9668129743d936f7312e1604bc35f73ab164a3fddfe5fe19b1a4a9f237f61cb8eb792e95d099a1455fb789d8d1622f6c5e976cef951737e36f7a9a4ad19ee0d068e53d9f60457d9148d5a3ce85a546b45c5c631d995f11f037e472fe4e81fa7b9f2ac4068b5308858cd6d8586165c9bd6b322afa755408da9b90a87f3735a5f50eb8568daa58ee7cbc59abf8fd2a44e1eba72928816c890d1b0dbf6004208ff7381c697755adac0137cca342b1693",
+      "digest_hex": "5f4e16a72d6c9857da0ba009ccacd4f26d7f6bf6c1b78a2ed35e68fcb15b8e40"
+    }
+  ]
+}

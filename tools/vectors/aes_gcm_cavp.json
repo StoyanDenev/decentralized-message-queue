@@ -1,0 +1,150 @@
+{
+  "primitive": "aes256_gcm",
+  "source": "NIST CAVP GCM test vectors, gcmtestvectors.zip from csrc.nist.gov (zip sha256=f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023), file gcmEncryptExtIV256.rsp (sha256=4448b4998c3f58cd9f5542ddf7c573189a721ff3d3ac24cd5177bb4910a787f8); 16 Count=0 entries selected from the [Keylen=256][IVlen=96][Taglen=128] blocks \u2014 the exact shape of the C99 API (determ_aes256_gcm_* fixes iv=12B, tag=16B) \u2014 spanning PTlen {0,104,128,256,408} x AADlen {0,128,160,384,720} bits incl. non-block-aligned pt (13B) and the longest pt (51B) / aad (90B); every entry recomputed encrypt+decrypt via cryptography.hazmat AESGCM before writing (CRYPTO-C99-SPEC.md 'AES-256-GCM: NIST CAVP vectors')",
+  "vectors": [
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=0][AADlen=0][Taglen=128] Count=0",
+      "key_hex": "b52c505a37d78eda5dd34f20c22540ea1b58963cf8e5bf8ffa85f9f2492505b4",
+      "iv_hex": "516c33929df5a3284ff463d7",
+      "aad_hex": "",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "bdc1ac884d332457a1d2664f168c76f0"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=0][AADlen=128][Taglen=128] Count=0",
+      "key_hex": "78dc4e0aaf52d935c3c01eea57428f00ca1fd475f5da86a49c8dd73d68c8e223",
+      "iv_hex": "d79cf22d504cc793c3fb6c8a",
+      "aad_hex": "b96baa8c1c75a671bfb2d08d06be5f36",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "3e5d486aa2e30b22e040b85723a06e76"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=0][AADlen=160][Taglen=128] Count=0",
+      "key_hex": "886cff5f3e6b8d0e1ad0a38fcdb26de97e8acbe79f6bed66959a598fa5047d65",
+      "iv_hex": "3a8efa1cd74bbab5448f9945",
+      "aad_hex": "519fee519d25c7a304d6c6aa1897ee1eb8c59655",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "f6d47505ec96c98a42dc3ae719877b87"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=0][AADlen=384][Taglen=128] Count=0",
+      "key_hex": "f4069bb739d07d0cafdcbc609ca01597f985c43db63bbaaa0debbb04d384e49c",
+      "iv_hex": "d25ff30fdc3d464fe173e805",
+      "aad_hex": "3e1449c4837f0892f9d55127c75c4b25d69be334baf5f19394d2d8bb460cbf2120e14736d0f634aa792feca20e455f11",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "805ec2931c2181e5bfb74fa0a975f0cf"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=0][AADlen=720][Taglen=128] Count=0",
+      "key_hex": "03ccb7dbc7b8425465c2c3fc39ed0593929ffd02a45ff583bd89b79c6f646fe9",
+      "iv_hex": "fd119985533bd5520b301d12",
+      "aad_hex": "98e68c10bf4b5ae62d434928fc6405147c6301417303ef3a703dcfd2c0c339a4d0a89bd29fe61fecf1066ab06d7a5c31a48ffbfed22f749b17e9bd0dc1c6f8fbd6fd4587184db964d5456132106d782338c3f117ec05229b0899",
+      "plaintext_hex": "",
+      "ciphertext_hex": "",
+      "tag_hex": "cf54e7141349b66f248154427810c87a"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=104][AADlen=0][Taglen=128] Count=0",
+      "key_hex": "82c4f12eeec3b2d3d157b0f992d292b237478d2cecc1d5f161389b97f999057a",
+      "iv_hex": "7b40b20f5f397177990ef2d1",
+      "aad_hex": "",
+      "plaintext_hex": "982a296ee1cd7086afad976945",
+      "ciphertext_hex": "ec8e05a0471d6b43a59ca5335f",
+      "tag_hex": "113ddeafc62373cac2f5951bb9165249"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=104][AADlen=720][Taglen=128] Count=0",
+      "key_hex": "ff9506b4d46ba54128876fadfcc673a4c927c618ea7d95cfcaa508cbc8f7fc66",
+      "iv_hex": "3742ad2208a0484345eee1be",
+      "aad_hex": "f1360a27fdc244be8739d85af6491c762a693aafe668c449515fdeeedb6a90aeee3891bbc8b69adc6a6426cb12fcdebc32c9f58c5259d128b91efa28620a3a9a0168b0ff5e76951cb41647ba4aa1f87fac0d97ac580e42cffc7e",
+      "plaintext_hex": "7fd0d6cadc92cad27bb2d7d8c8",
+      "ciphertext_hex": "bdb8346b28eb4d7226493611a6",
+      "tag_hex": "7484d827b767647f44c7f94a39f8175c"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=128][AADlen=0][Taglen=128] Count=0",
+      "key_hex": "31bdadd96698c204aa9ce1448ea94ae1fb4a9a0b3c9d773b51bb1822666b8f22",
+      "iv_hex": "0d18e06c7c725ac9e362e1ce",
+      "aad_hex": "",
+      "plaintext_hex": "2db5168e932556f8089a0622981d017d",
+      "ciphertext_hex": "fa4362189661d163fcd6a56d8bf0405a",
+      "tag_hex": "d636ac1bbedd5cc3ee727dc2ab4a9489"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=128][AADlen=128][Taglen=128] Count=0",
+      "key_hex": "92e11dcdaa866f5ce790fd24501f92509aacf4cb8b1339d50c9c1240935dd08b",
+      "iv_hex": "ac93a1a6145299bde902f21a",
+      "aad_hex": "1e0889016f67601c8ebea4943bc23ad6",
+      "plaintext_hex": "2d71bcfa914e4ac045b2aa60955fad24",
+      "ciphertext_hex": "8995ae2e6df3dbf96fac7b7137bae67f",
+      "tag_hex": "eca5aa77d51d4a0a14d9c51e1da474ab"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=128][AADlen=720][Taglen=128] Count=0",
+      "key_hex": "80d755e24d129e68a5259ec2cf618e39317074a83c8961d3768ceb2ed8d5c3d7",
+      "iv_hex": "7598c07ba7b16cd12cf50813",
+      "aad_hex": "0e94f4c48fd0c9690c853ad2a5e197c5de262137b69ed0cdfa28d8d12413e4ffff15374e1cccb0423e8ed829a954a335ed705a272ad7f9abd1057c849bb0d54b768e9d79879ec552461cc04adb6ca0040c5dd5bc733d21a93702",
+      "plaintext_hex": "5e7fd1298c4f15aa0f1c1e47217aa7a9",
+      "ciphertext_hex": "5762a38cf3f2fdf3645d2f6696a7eead",
+      "tag_hex": "8a6708e69468915c5367573924fe1ae3"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=256][AADlen=0][Taglen=128] Count=0",
+      "key_hex": "268ed1b5d7c9c7304f9cae5fc437b4cd3aebe2ec65f0d85c3918d3d3b5bba89b",
+      "iv_hex": "9ed9d8180564e0e945f5e5d4",
+      "aad_hex": "",
+      "plaintext_hex": "fe29a40d8ebf57262bdb87191d01843f4ca4b2de97d88273154a0b7d9e2fdb80",
+      "ciphertext_hex": "791a4a026f16f3a5ea06274bf02baab469860abde5e645f3dd473a5acddeecfc",
+      "tag_hex": "05b2b74db0662550435ef1900e136b15"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=256][AADlen=160][Taglen=128] Count=0",
+      "key_hex": "5853c020946b35f2c58ec427152b840420c40029636adcbb027471378cfdde0f",
+      "iv_hex": "eec313dd07cc1b3e6b068a47",
+      "aad_hex": "1389b522c24a774181700553f0246bbabdd38d6f",
+      "plaintext_hex": "ce7458e56aef9061cb0c42ec2315565e6168f5a6249ffd31610b6d17ab64935e",
+      "ciphertext_hex": "eadc3b8766a77ded1a58cb727eca2a9790496c298654cda78febf0da16b6903b",
+      "tag_hex": "3d49a5b32fde7eafcce90079217ffb57"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=256][AADlen=384][Taglen=128] Count=0",
+      "key_hex": "dc776f0156c15d032623854b625c61868e5db84b7b6f9fbd3672f12f0025e0f6",
+      "iv_hex": "67130951c4a57f6ae7f13241",
+      "aad_hex": "fd0920faeb7b212932280a009bac969145e5c316cf3922622c3705c3457c4e9f124b2076994323fbcfb523f8ed16d241",
+      "plaintext_hex": "9378a727a5119595ad631b12a5a6bc8a91756ef09c8d6eaa2b718fe86876da20",
+      "ciphertext_hex": "6d958c20870d401a3c1f7a0ac092c97774d451c09f7aae992a8841ff0ab9d60d",
+      "tag_hex": "b876831b4ecd7242963b040aa45c4114"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=408][AADlen=0][Taglen=128] Count=0",
+      "key_hex": "1fded32d5999de4a76e0f8082108823aef60417e1896cf4218a2fa90f632ec8a",
+      "iv_hex": "1f3afa4711e9474f32e70462",
+      "aad_hex": "",
+      "plaintext_hex": "06b2c75853df9aeb17befd33cea81c630b0fc53667ff45199c629c8e15dce41e530aa792f796b8138eeab2e86c7b7bee1d40b0",
+      "ciphertext_hex": "91fbd061ddc5a7fcc9513fcdfdc9c3a7c5d4d64cedf6a9c24ab8a77c36eefbf1c5dc00bc50121b96456c8cd8b6ff1f8b3e480f",
+      "tag_hex": "30096d340f3d5c42d82a6f475def23eb"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=408][AADlen=128][Taglen=128] Count=0",
+      "key_hex": "5fe01c4baf01cbe07796d5aaef6ec1f45193a98a223594ae4f0ef4952e82e330",
+      "iv_hex": "bd587321566c7f1a5dd8652d",
+      "aad_hex": "9013617817dda947e135ee6dd3653382",
+      "plaintext_hex": "881dc6c7a5d4509f3c4bd2daab08f165ddc204489aa8134562a4eac3d0bcad7965847b102733bb63d1e5c598ece0c3e5dadddd",
+      "ciphertext_hex": "16e375b4973b339d3f746c1c5a568bc7526e909ddff1e19c95c94a6ccff210c9a4a40679de5760c396ac0e2ceb1234f9f5fe26",
+      "tag_hex": "abd3d26d65a6275f7a4f56b422acab49"
+    },
+    {
+      "name": "CAVP gcmEncryptExtIV256.rsp [Keylen=256][IVlen=96][PTlen=408][AADlen=720][Taglen=128] Count=0",
+      "key_hex": "148579a3cbca86d5520d66c0ec71ca5f7e41ba78e56dc6eebd566fed547fe691",
+      "iv_hex": "b08a5ea1927499c6ecbfd4e0",
+      "aad_hex": "e4f963f015ffbb99ee3349bbaf7e8e8e6c2a71c230a48f9d59860a29091d2747e01a5ca572347e247d25f56ba7ae8e05cde2be3c97931292c02370208ecd097ef692687fecf2f419d3200162a6480a57dad408a0dfeb492e2c5d",
+      "plaintext_hex": "9d0b15fdf1bd595f91f8b3abc0f7dec927dfd4799935a1795d9ce00c9b879434420fe42c275a7cd7b39d638fb81ca52b49dc41",
+      "ciphertext_hex": "2097e372950a5e9383c675e89eea1c314f999159f5611344b298cda45e62843716f215f82ee663919c64002a5c198d7878fd3f",
+      "tag_hex": "adbecdb0d5c2224d804d2886ff9a5760"
+    }
+  ]
+}

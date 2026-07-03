@@ -13206,7 +13206,9 @@ int main(int argc, char** argv) {
                                 "hkdf_sha256.json", "pbkdf2_sha256.json",
                                 "blake2b.json", "chacha20_poly1305.json",
                                 "aes256_gcm.json", "ed25519.json", "x25519.json",
-                                "p256.json", "p256_h2c.json", "p256_oprf.json" };
+                                "p256.json", "p256_h2c.json", "p256_oprf.json",
+                                "sha2_cavp_sha256.json", "sha2_cavp_sha512.json",
+                                "aes_gcm_cavp.json", "frost_ed25519_rfc9591.json" };
 
         for (const char* fn : files) {
             std::string path = vdir + "/" + fn;
@@ -13431,6 +13433,66 @@ int main(int argc, char** argv) {
                         if (determ_p256_voprf_verify(pk33, blinded, eval_,
                                 storedproof.data(), mode) != 0) { ok=false; bad=name + " (verify)"; break; }
                     }
+                } else if (prim == "frost_ed25519_rfc9591") {
+                    // RFC 9591 E.1 — the byte-reproducible subset through the
+                    // shipped C99 FROST API: (a) keygen_trusted(sk, coeffs)
+                    // reproduces all n Shamir shares + the group public key
+                    // byte-exact; (b) reconstruct over the participant subset
+                    // recovers sk; (c) the RFC's aggregate signature verifies
+                    // under OUR from-scratch Ed25519 verifier; (d) our
+                    // frost_sign with the RFC's nonces + shares yields a
+                    // signature that ALSO verifies under the group key. The
+                    // signature bytes themselves are NOT compared: the Determ
+                    // binding-factor transcript is deliberately
+                    // domain-separated from RFC 9591 §4.4 (DETERM-FROST-RHO;
+                    // see src/crypto/frost/README.md), so R differs by design.
+                    int t = v["min_participants"], nmax = v["max_participants"];
+                    auto skv  = unhex(v["group_secret_key_hex"]);
+                    auto pkv  = unhex(v["group_public_key_hex"]);
+                    auto msgv = unhex(v["message_hex"]);
+                    auto sigv = unhex(v["sig_hex"]);
+                    std::vector<uint8_t> coeffs;
+                    for (auto& c : v["share_polynomial_coefficients_hex"]) {
+                        auto cb = unhex(c.get<std::string>());
+                        coeffs.insert(coeffs.end(), cb.begin(), cb.end());
+                    }
+                    std::vector<uint8_t> shares((size_t)nmax * 32), spks((size_t)nmax * 32);
+                    uint8_t gpk[32];
+                    if ((int)coeffs.size() != (t - 1) * 32 || skv.size() != 32
+                        || determ_frost_keygen_trusted(skv.data(), coeffs.data(), t, nmax,
+                               shares.data(), gpk, spks.data()) != 0
+                        || hx(gpk, 32) != v["group_public_key_hex"]) { ok=false; bad=name + " (keygen group_pk)"; break; }
+                    for (auto& ps : v["participant_shares"]) {
+                        int id = ps["identifier"];
+                        if (hx(shares.data() + (size_t)(id - 1) * 32, 32)
+                                != ps["participant_share_hex"]) { ok=false; bad=name + " (share f(" + std::to_string(id) + "))"; break; }
+                    }
+                    if (!ok) break;
+                    // reconstruct from the signing subset
+                    std::vector<int> xs; std::vector<uint8_t> sub;
+                    for (auto& pid : v["participant_list"]) {
+                        int id = pid; xs.push_back(id);
+                        sub.insert(sub.end(), shares.begin() + (size_t)(id-1)*32,
+                                              shares.begin() + (size_t)id*32);
+                    }
+                    uint8_t rec[32];
+                    if (determ_frost_reconstruct(xs.data(), sub.data(), t, rec) != 0
+                        || hx(rec, 32) != v["group_secret_key_hex"]) { ok=false; bad=name + " (reconstruct)"; break; }
+                    if (sigv.size() != 64 || pkv.size() != 32
+                        || determ_ed25519_verify(pkv.data(), msgv.empty()?nullptr:msgv.data(),
+                               msgv.size(), sigv.data()) != 0) { ok=false; bad=name + " (rfc sig ed25519-verify)"; break; }
+                    std::vector<uint8_t> dsub, esub;
+                    for (auto& r1 : v["round_one_outputs"]) {
+                        auto dv = unhex(r1["hiding_nonce_hex"].get<std::string>());
+                        auto ev = unhex(r1["binding_nonce_hex"].get<std::string>());
+                        dsub.insert(dsub.end(), dv.begin(), dv.end());
+                        esub.insert(esub.end(), ev.begin(), ev.end());
+                    }
+                    uint8_t oursig[64];
+                    if (determ_frost_sign(xs.data(), sub.data(), dsub.data(), esub.data(), t,
+                            msgv.empty()?nullptr:msgv.data(), msgv.size(), gpk, oursig) != 0
+                        || determ_ed25519_verify(gpk, msgv.empty()?nullptr:msgv.data(),
+                               msgv.size(), oursig) != 0) { ok=false; bad=name + " (determ frost_sign w/ RFC nonces)"; break; }
                 } else {
                     ok = false; bad = "unknown primitive discriminator '" + prim + "'";
                     break;
