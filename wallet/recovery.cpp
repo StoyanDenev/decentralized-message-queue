@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include "recovery.hpp"
-#include <openssl/evp.h>
-#include <openssl/sha.h>
+#include <determ/crypto/ed25519/ed25519.h>
+#include <determ/crypto/sha2/sha2.h>
 #include <nlohmann/json.hpp>
 #include <iomanip>
 #include <sstream>
@@ -55,18 +55,10 @@ std::vector<uint8_t> make_aad(uint8_t guardian_id, uint32_t version) {
 
 std::vector<uint8_t> seed_pubkey_checksum(const std::vector<uint8_t>& seed) {
     if (seed.size() != 32) return {};
-    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-        EVP_PKEY_ED25519, nullptr, seed.data(), 32);
-    if (!pkey) return {};
     uint8_t pub[32];
-    size_t pub_len = 32;
-    if (EVP_PKEY_get_raw_public_key(pkey, pub, &pub_len) != 1 || pub_len != 32) {
-        EVP_PKEY_free(pkey);
-        return {};
-    }
-    EVP_PKEY_free(pkey);
+    determ_ed25519_pubkey_from_seed(seed.data(), pub);   // 1c: c99 backend
     std::vector<uint8_t> digest(32);
-    SHA256(pub, 32, digest.data());
+    determ_sha256(pub, 32, digest.data());
     return digest;
 }
 

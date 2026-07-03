@@ -22,10 +22,10 @@
 #include "envelope.hpp"
 #include "recovery.hpp"
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>
-#include <openssl/sha.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
+#include <determ/crypto/sha2/sha2.h>
+#include <determ/crypto/aes/aes.h>
+#include <determ/crypto/rng/rng.h>
+#include <determ/crypto/base64/base64.h>
 // ── libsodium-free crypto shim (CRYPTO-C99-SPEC §3.15) ──────────────────────
 // The wallet's secret-handling crypto now runs entirely on determ::c99 (the
 // daemon's libsodium-free stack). This block reproduces the handful of
@@ -38,7 +38,6 @@
 #include <determ/crypto/ed25519/ed25519.h>
 #include <determ/crypto/x25519/x25519.h>
 #include <determ/crypto/secure_zero.h>
-#include <openssl/evp.h>
 namespace {
 inline bool init_libsodium() { return true; }   // C99 needs no global init
 constexpr size_t crypto_sign_PUBLICKEYBYTES = 32;
@@ -1296,45 +1295,17 @@ int cmd_account_create_batch(int argc, char** argv) {
         }
     }
 
-    // Build the accounts array via OpenSSL Ed25519 keygen. EVP_PKEY_keygen
-    // ultimately pulls from OpenSSL's CSPRNG (seeded from the OS RNG at
-    // library init), so each iteration gets fresh material.
+    // Build the accounts array via c99 Ed25519 keygen (1c): a fresh 32-byte
+    // RFC 8032 seed from the OS CSPRNG per iteration, pubkey derived in-tree.
     nlohmann::json arr = nlohmann::json::array();
     for (int i = 0; i < count; ++i) {
-        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
-        if (!ctx) {
-            std::cerr << "account-create-batch: EVP_PKEY_CTX_new_id failed\n";
-            return 1;
-        }
-        if (EVP_PKEY_keygen_init(ctx) <= 0) {
-            EVP_PKEY_CTX_free(ctx);
-            std::cerr << "account-create-batch: EVP_PKEY_keygen_init failed\n";
-            return 1;
-        }
-        EVP_PKEY* pkey = nullptr;
-        if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-            EVP_PKEY_CTX_free(ctx);
-            std::cerr << "account-create-batch: EVP_PKEY_keygen failed\n";
-            return 1;
-        }
-        EVP_PKEY_CTX_free(ctx);
         std::array<uint8_t, 32> pub{};
         std::array<uint8_t, 32> priv_seed{};
-        size_t len = pub.size();
-        if (EVP_PKEY_get_raw_public_key(pkey, pub.data(), &len) <= 0
-            || len != 32) {
-            EVP_PKEY_free(pkey);
-            std::cerr << "account-create-batch: get_raw_public_key failed\n";
+        if (determ_rng_bytes(priv_seed.data(), priv_seed.size()) != 0) {
+            std::cerr << "account-create-batch: OS entropy source failed\n";
             return 1;
         }
-        len = priv_seed.size();
-        if (EVP_PKEY_get_raw_private_key(pkey, priv_seed.data(), &len) <= 0
-            || len != 32) {
-            EVP_PKEY_free(pkey);
-            std::cerr << "account-create-batch: get_raw_private_key failed\n";
-            return 1;
-        }
-        EVP_PKEY_free(pkey);
+        determ_ed25519_pubkey_from_seed(priv_seed.data(), pub.data());
 
         std::string address = "0x" + to_hex(pub);           // matches make_anon_address
         std::string privkey_hex = to_hex(priv_seed);        // 64 lowercase hex
@@ -1550,7 +1521,7 @@ int cmd_account_derive_batch(int argc, char** argv) {
 
     // ── Compute master_seed_hash for output (does NOT leak the seed) ────────
     std::array<uint8_t, 32> master_hash{};
-    SHA256(seed_bytes.data(), seed_bytes.size(), master_hash.data());
+    determ_sha256(seed_bytes.data(), seed_bytes.size(), master_hash.data());
 
     // ── Derive accounts deterministically ───────────────────────────────────
     // seed_i = SHA-256(master_seed || u32_le(i))
@@ -1571,7 +1542,7 @@ int cmd_account_derive_batch(int argc, char** argv) {
         preimage[35] = static_cast<uint8_t>((idx >> 24) & 0xff);
 
         std::array<uint8_t, 32> sub_seed{};
-        SHA256(preimage.data(), preimage.size(), sub_seed.data());
+        determ_sha256(preimage.data(), preimage.size(), sub_seed.data());
 
         std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> pub{};
         std::array<uint8_t, crypto_sign_SECRETKEYBYTES> sk{};
@@ -3566,23 +3537,7 @@ int cmd_keyfile_create(int argc, char** argv) {
     std::array<uint8_t, 32> seed{};
     std::memcpy(seed.data(), priv_bytes.data(), 32);
     std::array<uint8_t, 32> derived_pub{};
-    {
-        EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-            EVP_PKEY_ED25519, nullptr, seed.data(), 32);
-        if (!pkey) {
-            std::cerr << "keyfile-create: EVP_PKEY_new_raw_private_key failed "
-                         "(seed not a valid Ed25519 private key)\n";
-            return 1;
-        }
-        size_t pub_len = derived_pub.size();
-        if (EVP_PKEY_get_raw_public_key(pkey, derived_pub.data(), &pub_len) <= 0
-            || pub_len != 32) {
-            EVP_PKEY_free(pkey);
-            std::cerr << "keyfile-create: EVP_PKEY_get_raw_public_key failed\n";
-            return 1;
-        }
-        EVP_PKEY_free(pkey);
-    }
+    determ_ed25519_pubkey_from_seed(seed.data(), derived_pub.data());
     if (priv_bytes.size() == 64) {
         std::array<uint8_t, 32> supplied_pub{};
         std::memcpy(supplied_pub.data(), priv_bytes.data() + 32, 32);
@@ -6708,7 +6663,7 @@ std::array<uint8_t, 32> domain_commit(const std::string& domain_tag,
     buf.insert(buf.end(), domain_tag.begin(), domain_tag.end());
     buf.insert(buf.end(), msg.begin(),        msg.end());
     std::array<uint8_t, 32> out{};
-    SHA256(buf.data(), buf.size(), out.data());
+    determ_sha256(buf.data(), buf.size(), out.data());
     return out;
 }
 
@@ -7380,12 +7335,8 @@ bool hkdf_sha256_32(const std::array<uint8_t, 32>& ikm,
                       std::string&                   err_kind_out) {
     // Extract: PRK = HMAC-SHA-256(salt, IKM)
     unsigned char prk[32]{};
-    unsigned int  prk_len = 0;
-    if (!HMAC(EVP_sha256(),
-              salt.data(), static_cast<int>(salt.size()),
-              ikm.data(),  ikm.size(),
-              prk, &prk_len)
-        || prk_len != 32) {
+    if (determ_hmac_sha256(salt.data(), salt.size(),
+                           ikm.data(), ikm.size(), prk) != 0) {
         determ_secure_zero(prk, sizeof(prk));
         err_kind_out = "hkdf-extract-failed";
         return false;
@@ -7399,12 +7350,8 @@ bool hkdf_sha256_32(const std::array<uint8_t, 32>& ikm,
     expand_msg.push_back(0x01);
 
     unsigned char okm[32]{};
-    unsigned int  okm_len = 0;
-    if (!HMAC(EVP_sha256(),
-              prk, prk_len,
-              expand_msg.data(), expand_msg.size(),
-              okm, &okm_len)
-        || okm_len != 32) {
+    if (determ_hmac_sha256(prk, 32,
+                           expand_msg.data(), expand_msg.size(), okm) != 0) {
         determ_secure_zero(prk, sizeof(prk));
         determ_secure_zero(okm, sizeof(okm));
         err_kind_out = "hkdf-expand-failed";
@@ -7444,44 +7391,13 @@ std::vector<uint8_t> aes256_gcm_encrypt_raw(
         const std::array<uint8_t, 32>& key,
         const std::array<uint8_t, 12>& nonce,
         const std::vector<uint8_t>&     plaintext) {
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("aead: EVP_CIPHER_CTX_new failed");
-
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
-                              nullptr, nullptr) != 1
-        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1
-        || EVP_EncryptInit_ex(ctx, nullptr, nullptr,
-                                  key.data(), nonce.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: EncryptInit failed");
-    }
-
+    // 1c: c99 AES-256-GCM one-shot (validated byte-equal vs OpenSSL by
+    // `determ test-aes-c99`); layout unchanged: ct-body || 16-byte tag.
     std::vector<uint8_t> out(plaintext.size() + 16);
-    int outlen = 0;
-    if (!plaintext.empty()
-        && EVP_EncryptUpdate(ctx, out.data(), &outlen,
-                                plaintext.data(),
-                                static_cast<int>(plaintext.size())) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: EncryptUpdate failed");
-    }
-    int ct_len = outlen;
-
-    if (EVP_EncryptFinal_ex(ctx, out.data() + ct_len, &outlen) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: EncryptFinal failed");
-    }
-    ct_len += outlen;
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16,
-                                out.data() + ct_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: GET_TAG failed");
-    }
-    ct_len += 16;
-    out.resize(static_cast<size_t>(ct_len));
-
-    EVP_CIPHER_CTX_free(ctx);
+    determ_aes256_gcm_encrypt(key.data(), nonce.data(), nullptr, 0,
+                              plaintext.empty() ? nullptr : plaintext.data(),
+                              plaintext.size(),
+                              out.data(), out.data() + plaintext.size());
     return out;
 }
 
@@ -7495,43 +7411,15 @@ std::optional<std::vector<uint8_t>> aes256_gcm_decrypt_raw(
         const std::vector<uint8_t>&     ciphertext_with_tag) {
     if (ciphertext_with_tag.size() < 16) return std::nullopt;
 
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("aead: EVP_CIPHER_CTX_new failed");
-
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
-                              nullptr, nullptr) != 1
-        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1
-        || EVP_DecryptInit_ex(ctx, nullptr, nullptr,
-                                  key.data(), nonce.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: DecryptInit failed");
-    }
-
+    // 1c: c99 AES-256-GCM decrypt (CT tag compare inside; fail-closed).
     const size_t ct_body_len = ciphertext_with_tag.size() - 16;
     std::vector<uint8_t> pt(ct_body_len);
-    int outlen = 0;
-    if (ct_body_len > 0
-        && EVP_DecryptUpdate(ctx, pt.data(), &outlen,
-                                ciphertext_with_tag.data(),
-                                static_cast<int>(ct_body_len)) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: DecryptUpdate failed");
-    }
-    int pt_len = outlen;
-
-    // Set expected tag from the trailing 16 bytes of the input buffer.
-    std::vector<uint8_t> tag(ciphertext_with_tag.end() - 16,
-                                ciphertext_with_tag.end());
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, tag.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("aead: SET_TAG failed");
-    }
-
-    int rc = EVP_DecryptFinal_ex(ctx, pt.data() + pt_len, &outlen);
-    EVP_CIPHER_CTX_free(ctx);
-    if (rc != 1) return std::nullopt;     // tag verify failed
-    pt_len += outlen;
-    pt.resize(static_cast<size_t>(pt_len));
+    if (determ_aes256_gcm_decrypt(key.data(), nonce.data(), nullptr, 0,
+                                  ct_body_len ? ciphertext_with_tag.data() : nullptr,
+                                  ct_body_len,
+                                  ciphertext_with_tag.data() + ct_body_len,
+                                  pt.data()) != 0)
+        return std::nullopt;     // tag verify failed
     return pt;
 }
 
@@ -7754,9 +7642,9 @@ int cmd_encrypt_message(int argc, char** argv) {
     // ciphertexts, and nonce-reuse-with-same-key (catastrophic for GCM)
     // is impossible by construction.
     std::array<uint8_t, 12> nonce{};
-    if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
+    if (determ_rng_bytes(nonce.data(), nonce.size()) != 0) {
         determ_secure_zero(aead_key.data(), aead_key.size());
-        std::cerr << "encrypt-message: RAND_bytes failed for nonce\n";
+        std::cerr << "encrypt-message: OS entropy source failed for nonce\n";
         return 1;
     }
 
@@ -8205,7 +8093,7 @@ int cmd_tx_sign_verify(int argc, char** argv) {
     // in the JSON + as the tx_root leaf) AND the value we expose as
     // computed_signing_bytes_sha256 for the operator to cross-check.
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
     // Init libsodium (idempotent) and verify the sig.
     if (!init_libsodium()) {
@@ -9521,7 +9409,7 @@ int cmd_cold_sign(int argc, char** argv) {
     // SHA-256(signing_bytes) — both the chain's Transaction::compute_hash
     // result AND what we emit in the success status line as tx_hash_hex.
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
     // ── Ed25519 sign over signing_bytes ─────────────────────────────────
     if (!init_libsodium()) {
@@ -9989,7 +9877,7 @@ int cmd_sign_anon_tx(int argc, char** argv) {
     // SHA-256(signing_bytes) — both the chain's Transaction::compute_hash
     // result AND what we emit in the success envelope as `hash`.
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
     // ── Ed25519 sign over signing_bytes ───────────────────────────────────
     std::array<uint8_t, crypto_sign_BYTES> sig{};
@@ -10748,7 +10636,7 @@ int cmd_tx_batch_sign(int argc, char** argv) {
         // nothing, so we skip the insert.
 
         std::array<uint8_t, 32> sb_sha{};
-        SHA256(sb.data(), sb.size(), sb_sha.data());
+        determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
         // ── Ed25519 sign over signing_bytes ──────────────────────────────
         std::array<uint8_t, crypto_sign_BYTES> sig{};
@@ -11965,7 +11853,7 @@ int cmd_validate_tx(int argc, char** argv) {
             sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
 
             std::array<uint8_t, 32> sb_sha{};
-            SHA256(sb.data(), sb.size(), sb_sha.data());
+            determ_sha256(sb.data(), sb.size(), sb_sha.data());
             signing_bytes_hex = to_hex(sb_sha);
             tx_hash_recomputed_hex = signing_bytes_hex;
             hash_attempted = true;
@@ -12504,7 +12392,7 @@ static bool verify_one_envelope(const nlohmann::json& j,
     sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
 
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
     const std::string recomputed = to_hex(sb_sha);
 
     // Case-insensitive hash compare (some tools emit upper-case; chain
@@ -13156,7 +13044,7 @@ int cmd_decode_wire_frame(int argc, char** argv) {
 //   i: (default — receipt key)  body = u64_be(src_shard) || tx_hash[32]
 //                                      (40 bytes) → applied_inbound_
 //                                      receipts_ leaf. The present-receipt
-//                                      value is SHA256(0x01); we emit that
+//                                      value is determ_sha256(0x01); we emit that
 //                                      expected value_hash too so the
 //                                      caller can bind a returned proof to
 //                                      THIS receipt (matches determ-light
@@ -13179,7 +13067,7 @@ int cmd_decode_wire_frame(int argc, char** argv) {
 //                          returned `key_bytes` for a hit; the caller
 //                          compares the two to confirm the proof is for
 //                          THIS leaf, not some aliased one.
-//   * value_hash (i: only) — SHA256(0x01), the present-receipt marker
+//   * value_hash (i: only) — determ_sha256(0x01), the present-receipt marker
 //                          value, for proof binding.
 //
 // Exit codes: 0 success, 1 args / range error.
@@ -13320,10 +13208,10 @@ int cmd_receipt_key(int argc, char** argv) {
         for (int i = 7; i >= 0; --i)
             body.push_back(static_cast<uint8_t>((src_shard >> (8 * i)) & 0xff));
         body.insert(body.end(), tx_hash.begin(), tx_hash.end());
-        // Present-receipt committed value = SHA256(0x01).
+        // Present-receipt committed value = determ_sha256(0x01).
         std::array<uint8_t, 32> mv{};
         const uint8_t marker = 1;
-        SHA256(&marker, 1, mv.data());
+        determ_sha256(&marker, 1, mv.data());
         value_hash_hex = to_hex(mv);
     } else if (ns == "m") {
         if (!have_shard) {
@@ -13921,7 +13809,7 @@ int cmd_shard_route(int argc, char** argv) {
     preimage.insert(preimage.end(), addr.begin(), addr.end());
 
     std::array<uint8_t, 32> digest{};
-    SHA256(preimage.data(), preimage.size(), digest.data());
+    determ_sha256(preimage.data(), preimage.size(), digest.data());
 
     uint32_t shard = 0;
     if (shard_count > 1) {
@@ -14153,7 +14041,7 @@ int cmd_block_tx_root(int argc, char** argv) {
     buf.reserve(u.size() * 32);
     for (auto& h : u) buf.insert(buf.end(), h.begin(), h.end());
     std::array<uint8_t, 32> root{};
-    SHA256(buf.data(), buf.size(), root.data());
+    determ_sha256(buf.data(), buf.size(), root.data());
     const std::string recomputed_hex = to_hex(root);
     const size_t      leaf_count     = u.size();
 
@@ -14511,7 +14399,7 @@ int cmd_merkle_root(int argc, char** argv) {
 
     auto sha256 = [](const std::vector<uint8_t>& in) {
         std::array<uint8_t, 32> out{};
-        SHA256(in.data(), in.size(), out.data());
+        determ_sha256(in.data(), in.size(), out.data());
         return out;
     };
     auto be_u32 = [](std::vector<uint8_t>& buf, uint32_t v) {
@@ -14752,7 +14640,7 @@ int cmd_merkle_proof(int argc, char** argv) {
 
     auto sha256 = [](const std::vector<uint8_t>& in) {
         std::array<uint8_t, 32> out{};
-        SHA256(in.data(), in.size(), out.data());
+        determ_sha256(in.data(), in.size(), out.data());
         return out;
     };
     auto be_u32 = [](std::vector<uint8_t>& buf, uint32_t v) {
@@ -15148,7 +15036,7 @@ int cmd_derive_tx_hash(int argc, char** argv) {
     sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
 
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
     const std::string signing_bytes_hex = to_hex(sb);
     const std::string recomputed_hash_hex = to_hex(sb_sha);
 
@@ -15818,7 +15706,7 @@ int cmd_inspect_tx(int argc, char** argv) {
     sb.insert(sb.end(), payload_bytes.begin(), payload_bytes.end());
 
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
     const std::string signing_bytes_hex   = to_hex(sb);
     const std::string computed_hash       = to_hex(sb_sha);
 
@@ -15974,12 +15862,12 @@ std::vector<uint8_t> build_signing_bytes(const std::vector<uint8_t>& msg) {
 // §3.15 sodium migration.
 std::string b64_encode(const std::vector<uint8_t>& bytes) {
     if (bytes.empty()) return std::string();
-    // Standard Base64 (+ / =) via OpenSSL EVP — same alphabet/padding as the
-    // former sodium VARIANT_ORIGINAL, so existing bundles round-trip.
-    std::string out((size_t)(4 * ((bytes.size() + 2) / 3)), '\0');
-    int n = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(&out[0]),
-                            bytes.data(), (int)bytes.size());
-    out.resize(n > 0 ? (size_t)n : 0);
+    // Standard Base64 (+ / =) via the c99 RFC 4648 codec (1c) — same
+    // alphabet/padding as OpenSSL EVP_EncodeBlock and the former sodium
+    // VARIANT_ORIGINAL, so existing bundles round-trip.
+    std::string out(DETERM_BASE64_ENC_LEN(bytes.size()), '\0');
+    size_t n = determ_base64_encode(bytes.data(), bytes.size(), &out[0]);
+    out.resize(n);
     return out;
 }
 
@@ -15987,17 +15875,14 @@ std::string b64_encode(const std::vector<uint8_t>& bytes) {
 bool b64_decode(const std::string& s, std::vector<uint8_t>& out,
                  std::string& err) {
     if (s.empty()) { out.clear(); return true; }
-    if (s.size() % 4 != 0) { err = "base64 decode failed (malformed input)"; return false; }
+    // c99 strict RFC 4648 decode (1c): exact count returned, bad chars /
+    // padding / non-canonical trailing bits rejected. Stricter than the
+    // former EVP_DecodeBlock on malformed input; the wallet only decodes
+    // its own canonical encodings, so round-trip behavior is unchanged.
     out.assign(s.size() / 4 * 3, 0);
-    int n = EVP_DecodeBlock(out.data(),
-                            reinterpret_cast<const unsigned char*>(s.data()), (int)s.size());
+    long n = determ_base64_decode(s.data(), s.size(), out.data());
     if (n < 0) { err = "base64 decode failed (malformed input)"; return false; }
-    // EVP_DecodeBlock returns a multiple of 3; drop the bytes that the '='
-    // padding stood in for so the length matches the original input.
-    size_t pad = 0;
-    if (s.size() >= 1 && s[s.size() - 1] == '=') pad++;
-    if (s.size() >= 2 && s[s.size() - 2] == '=') pad++;
-    out.resize((size_t)n - pad);
+    out.resize((size_t)n);
     return true;
 }
 
@@ -17098,7 +16983,7 @@ int cmd_bulk_send(int argc, char** argv) {
         // payload = empty for TRANSFER; nothing appended.
 
         std::array<uint8_t, 32> sb_sha{};
-        SHA256(sb.data(), sb.size(), sb_sha.data());
+        determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
         std::array<uint8_t, crypto_sign_BYTES> sig{};
         unsigned long long sig_len = 0;
@@ -17678,7 +17563,7 @@ int cmd_bulk_stake(int argc, char** argv) {
         sb.insert(sb.end(), payload.begin(), payload.end());
 
         std::array<uint8_t, 32> sb_sha{};
-        SHA256(sb.data(), sb.size(), sb_sha.data());
+        determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
         std::array<uint8_t, crypto_sign_BYTES> sig{};
         unsigned long long sig_len = 0;
@@ -21442,7 +21327,7 @@ int cmd_state_proof_verify(int argc, char** argv) {
     // duplicate-last convention.
     auto sha256 = [](const std::vector<uint8_t>& in) {
         std::array<uint8_t, 32> out{};
-        SHA256(in.data(), in.size(), out.data());
+        determ_sha256(in.data(), in.size(), out.data());
         return out;
     };
     // leaf_hash = SHA-256(0x00 || u32_be(key_len) || key || value_hash)
@@ -21994,7 +21879,7 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
         vbuf.insert(vbuf.end(), meta.begin(), meta.end());
     }
     std::array<uint8_t, 32> derived_vh{};
-    SHA256(vbuf.data(), vbuf.size(), derived_vh.data());
+    determ_sha256(vbuf.data(), vbuf.size(), derived_vh.data());
     std::string derived_value_hash = to_hex(derived_vh);
 
     // Re-derive key_bytes = "d:" + domain (ASCII) for THIS domain.
@@ -22010,7 +21895,7 @@ int cmd_verify_dapp_registration(int argc, char** argv) {
     //    state-proof-verify path above). ──
     auto sha256 = [](const std::vector<uint8_t>& in) {
         std::array<uint8_t, 32> out{};
-        SHA256(in.data(), in.size(), out.data());
+        determ_sha256(in.data(), in.size(), out.data());
         return out;
     };
     auto leaf_hash = [&](const std::vector<uint8_t>& key,
@@ -22527,7 +22412,7 @@ int cmd_verify_stake_unlock(int argc, char** argv) {
     u64_be(vbuf, e_locked);
     u64_be(vbuf, e_unlock_height);
     std::array<uint8_t, 32> derived_vh{};
-    SHA256(vbuf.data(), vbuf.size(), derived_vh.data());
+    determ_sha256(vbuf.data(), vbuf.size(), derived_vh.data());
     std::string derived_value_hash = to_hex(derived_vh);
 
     // Re-derive key_bytes = "s:" + domain (ASCII) for THIS domain.
@@ -22542,7 +22427,7 @@ int cmd_verify_stake_unlock(int argc, char** argv) {
     // ── Merkle walk (in-process; identical to the state-proof-verify path). ──
     auto sha256 = [](const std::vector<uint8_t>& in) {
         std::array<uint8_t, 32> out{};
-        SHA256(in.data(), in.size(), out.data());
+        determ_sha256(in.data(), in.size(), out.data());
         return out;
     };
     auto leaf_hash = [&](const std::vector<uint8_t>& key,
@@ -23119,7 +23004,7 @@ int cmd_param_change_build(int argc, char** argv) {
 
     // tx_hash = SHA-256(signing_bytes) — matches Transaction::compute_hash.
     std::array<uint8_t, 32> sb_sha{};
-    SHA256(sb.data(), sb.size(), sb_sha.data());
+    determ_sha256(sb.data(), sb.size(), sb_sha.data());
 
     // ── Build the unsigned canonical tx JSON ──────────────────────────────
     // numeric type=6 + field name "sig" (128 zero-hex placeholder) so the
@@ -23804,17 +23689,15 @@ int cmd_rpc_auth(int argc, char** argv) {
     // canonical = method + "|" + params.dump()   (src/rpc/rpc.cpp::canonical_for_hmac)
     std::string canonical = method + "|" + params_obj.dump();
 
-    // auth = lowercase-hex( HMAC-SHA-256(key, canonical) )
-    unsigned char mac[EVP_MAX_MD_SIZE];
-    unsigned int  mac_len = 0;
-    if (!HMAC(EVP_sha256(),
-              key.data(), static_cast<int>(key.size()),
-              reinterpret_cast<const unsigned char*>(canonical.data()),
-              canonical.size(),
-              mac, &mac_len)) {
+    // auth = lowercase-hex( HMAC-SHA-256(key, canonical) )  — c99 HMAC (1c),
+    // byte-equal to the server's (src/rpc/rpc.cpp also runs determ_hmac_sha256).
+    unsigned char mac[32];
+    if (determ_hmac_sha256(key.data(), key.size(),
+                           reinterpret_cast<const unsigned char*>(canonical.data()),
+                           canonical.size(), mac) != 0) {
         return emit_err("HMAC-SHA-256 computation failed");
     }
-    std::vector<uint8_t> mac_bytes(mac, mac + mac_len);
+    std::vector<uint8_t> mac_bytes(mac, mac + 32);
     std::string expected_auth = to_hex(mac_bytes);
 
     if (!verify_mode) {

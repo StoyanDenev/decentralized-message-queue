@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
 #include "shamir.hpp"
-#include <openssl/rand.h>
+#include <determ/crypto/rng/rng.h>
 #include <stdexcept>
 #include <set>
 
@@ -77,8 +77,8 @@ std::vector<Share> split(const std::vector<uint8_t>& secret,
     for (size_t b = 0; b < n; ++b) {
         coeffs[0] = secret[b];
         if (T > 1) {
-            if (RAND_bytes(coeffs.data() + 1, static_cast<int>(T - 1)) != 1)
-                throw std::runtime_error("shamir: RAND_bytes failed");
+            if (determ_rng_bytes(coeffs.data() + 1, T - 1) != 0)
+                throw std::runtime_error("shamir: OS entropy source failed");
         }
         for (auto& share : shares) {
             share.y[b] = poly_eval(coeffs.data(), T, share.x);

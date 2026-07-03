@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Determ Contributors
+//
+// 1c (2026-07-03): the envelope now runs on determ::c99 (PBKDF2-HMAC-SHA256,
+// AES-256-GCM, OS entropy) instead of OpenSSL. FORMAT-COMPATIBLE byte-for-
+// byte: both primitives are validated byte-equal vs OpenSSL (`determ
+// test-sha2-c99` / `test-aes-c99` §Q9 gates), the nonce stays 12 bytes and
+// the on-disk layout (ct || 16-byte tag, "DWE1" hex serialization) is
+// untouched — every existing envelope decrypts identically.
 #include "envelope.hpp"
-#include <openssl/evp.h>
-#include <openssl/rand.h>
+#include <determ/crypto/sha2/sha2.h>
+#include <determ/crypto/aes/aes.h>
+#include <determ/crypto/rng/rng.h>
+#include <determ/crypto/secure_zero.h>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -20,13 +29,9 @@ std::vector<uint8_t> derive_key(const std::string& password,
                                   const std::vector<uint8_t>& salt,
                                   uint32_t iters) {
     std::vector<uint8_t> key(KEY_LEN);
-    if (PKCS5_PBKDF2_HMAC(password.data(),
-                            static_cast<int>(password.size()),
-                            salt.data(), static_cast<int>(salt.size()),
-                            static_cast<int>(iters),
-                            EVP_sha256(),
-                            static_cast<int>(KEY_LEN),
-                            key.data()) != 1) {
+    if (determ_pbkdf2_hmac_sha256(
+            reinterpret_cast<const uint8_t*>(password.data()), password.size(),
+            salt.data(), salt.size(), iters, key.data(), KEY_LEN) != 0) {
         throw std::runtime_error("envelope: PBKDF2 derivation failed");
     }
     return key;
@@ -44,61 +49,23 @@ Envelope encrypt(const std::vector<uint8_t>& plaintext,
     Envelope env;
     env.salt.resize(DEFAULT_SALT_LEN);
     env.nonce.resize(NONCE_LEN);
-    if (RAND_bytes(env.salt.data(),  static_cast<int>(env.salt.size()))  != 1
-        || RAND_bytes(env.nonce.data(), static_cast<int>(env.nonce.size())) != 1)
-        throw std::runtime_error("envelope: RAND_bytes failed");
+    if (determ_rng_bytes(env.salt.data(),  env.salt.size())  != 0
+        || determ_rng_bytes(env.nonce.data(), env.nonce.size()) != 0)
+        throw std::runtime_error("envelope: OS entropy source failed");
     env.pbkdf2_iters = iters;
     env.aad = aad;
 
     auto key = derive_key(password, env.salt, iters);
 
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) throw std::runtime_error("envelope: EVP_CIPHER_CTX_new failed");
-
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
-                              nullptr, nullptr) != 1
-        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                                  static_cast<int>(NONCE_LEN), nullptr) != 1
-        || EVP_EncryptInit_ex(ctx, nullptr, nullptr,
-                                  key.data(), env.nonce.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("envelope: EncryptInit failed");
-    }
-
-    int outlen = 0;
-    if (!aad.empty()) {
-        if (EVP_EncryptUpdate(ctx, nullptr, &outlen,
-                                 aad.data(), static_cast<int>(aad.size())) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            throw std::runtime_error("envelope: EncryptUpdate(AAD) failed");
-        }
-    }
-
+    // ciphertext layout unchanged: ct-body || 16-byte tag.
     env.ciphertext.resize(plaintext.size() + TAG_LEN);
-    if (EVP_EncryptUpdate(ctx, env.ciphertext.data(), &outlen,
-                             plaintext.data(),
-                             static_cast<int>(plaintext.size())) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("envelope: EncryptUpdate(pt) failed");
-    }
-    int ct_len = outlen;
-
-    if (EVP_EncryptFinal_ex(ctx, env.ciphertext.data() + ct_len, &outlen) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("envelope: EncryptFinal failed");
-    }
-    ct_len += outlen;
-
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
-                               static_cast<int>(TAG_LEN),
-                               env.ciphertext.data() + ct_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("envelope: GET_TAG failed");
-    }
-    ct_len += static_cast<int>(TAG_LEN);
-    env.ciphertext.resize(static_cast<size_t>(ct_len));
-
-    EVP_CIPHER_CTX_free(ctx);
+    determ_aes256_gcm_encrypt(key.data(), env.nonce.data(),
+                              aad.empty() ? nullptr : aad.data(), aad.size(),
+                              plaintext.empty() ? nullptr : plaintext.data(),
+                              plaintext.size(),
+                              env.ciphertext.data(),
+                              env.ciphertext.data() + plaintext.size());
+    determ_secure_zero(key.data(), key.size());
     return env;
 }
 
@@ -115,54 +82,18 @@ decrypt(const Envelope& env,
 
     auto key = derive_key(password, env.salt, env.pbkdf2_iters);
 
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return std::nullopt;
-
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
-                              nullptr, nullptr) != 1
-        || EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                                  static_cast<int>(NONCE_LEN), nullptr) != 1
-        || EVP_DecryptInit_ex(ctx, nullptr, nullptr,
-                                  key.data(), env.nonce.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return std::nullopt;
-    }
-
-    int outlen = 0;
-    if (!env.aad.empty()) {
-        if (EVP_DecryptUpdate(ctx, nullptr, &outlen,
-                                 env.aad.data(),
-                                 static_cast<int>(env.aad.size())) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return std::nullopt;
-        }
-    }
-
+    // Tag = the trailing 16 bytes of env.ciphertext; CT tag compare +
+    // fail-closed inside determ_aes256_gcm_decrypt.
     const size_t ct_body_len = env.ciphertext.size() - TAG_LEN;
     std::vector<uint8_t> pt(ct_body_len);
-    if (EVP_DecryptUpdate(ctx, pt.data(), &outlen,
-                             env.ciphertext.data(),
-                             static_cast<int>(ct_body_len)) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return std::nullopt;
-    }
-    int pt_len = outlen;
-
-    // Tag verification — the trailing 16 bytes of env.ciphertext.
-    std::vector<uint8_t> tag(env.ciphertext.end() - TAG_LEN,
-                                env.ciphertext.end());
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
-                               static_cast<int>(TAG_LEN),
-                               tag.data()) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return std::nullopt;
-    }
-
-    int rc = EVP_DecryptFinal_ex(ctx, pt.data() + pt_len, &outlen);
-    EVP_CIPHER_CTX_free(ctx);
-    if (rc != 1) return std::nullopt;
-    pt_len += outlen;
-    pt.resize(static_cast<size_t>(pt_len));
+    int rc = determ_aes256_gcm_decrypt(
+        key.data(), env.nonce.data(),
+        env.aad.empty() ? nullptr : env.aad.data(), env.aad.size(),
+        ct_body_len ? env.ciphertext.data() : nullptr, ct_body_len,
+        env.ciphertext.data() + ct_body_len,
+        pt.data());
+    determ_secure_zero(key.data(), key.size());
+    if (rc != 0) return std::nullopt;
     return pt;
 }
 
