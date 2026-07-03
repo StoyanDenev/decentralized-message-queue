@@ -38021,6 +38021,129 @@ int main(int argc, char** argv) {
         return fail == 0 ? 0 : 1;
     }
 
+    if (cmd == "test-consensus-vectors") {
+        // CROSS-TOOLCHAIN consensus-determinism contract. The sibling
+        // test-state-root-determinism proves determinism WITHIN one build
+        // (same binary, repeated); it cannot see a compiler-dependent
+        // divergence. This test pins GOLDEN hex for genesis_hash +
+        // compute_state_root() + head block_hash over a fixed battery of
+        // scenarios — including the composite i:/m:/p: namespaces where a
+        // uint32 shift-UB once forked state_root across MSVC vs GCC
+        // (DECISION-LOG 2026-07-03). Every build (MSVC, GCC, any future
+        // target) MUST reproduce these bytes; a mismatch is a consensus
+        // fork surfaced at test time. Run `test-consensus-vectors --emit`
+        // to print the current build's values when intentionally
+        // regenerating the goldens.
+        using namespace determ;
+        using namespace determ::chain;
+        bool emit = (argc > 2 && std::string(argv[2]) == "--emit");
+        int fail = 0;
+        std::vector<std::pair<std::string,std::string>> vals;  // name -> hex
+        auto record = [&](const std::string& name, const Hash& h) {
+            vals.emplace_back(name, to_hex(h));
+        };
+
+        // Shared deterministic genesis (no time, no randomness).
+        auto base_cfg = []() {
+            GenesisConfig cfg;
+            cfg.chain_id = "determ-consensus-vectors-v1";
+            GenesisCreator a; a.domain = "alice";
+            for (size_t i = 0; i < a.ed_pub.size(); ++i) a.ed_pub[i] = uint8_t(0x10 + i);
+            a.initial_stake = 0;
+            cfg.initial_creators = {a};
+            GenesisAllocation ab, bb;
+            ab.domain = "alice"; ab.balance = 1000;
+            bb.domain = "bob";   bb.balance = 200;
+            cfg.initial_balances = {ab, bb};
+            return cfg;
+        };
+        GenesisConfig cfg = base_cfg();
+        record("V1.genesis_hash", compute_genesis_hash(cfg));
+
+        // V1: bare genesis chain.
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            record("V1.state_root", c.compute_state_root());
+            record("V1.head_hash",  c.head().compute_hash());
+        }
+        // V2: + applied inbound receipt (i: composite namespace — the fork surface).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            Hash salt{}; c.set_shard_routing(4, salt, ShardId{0});
+            Hash txh{}; txh[0] = 0x77;
+            CrossShardReceipt r;
+            r.src_shard = ShardId{1}; r.dst_shard = ShardId{0};
+            r.src_block_index = 1; r.tx_hash = txh;
+            r.from = "remote"; r.to = "bob"; r.amount = 10; r.fee = 0; r.nonce = 0;
+            Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"}; b.inbound_receipts.push_back(r);
+            c.append(b);
+            record("V2.state_root", c.compute_state_root());
+        }
+        // V3: + MERGE_BEGIN (m: composite namespace).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            Hash salt{}; c.set_shard_routing(4, salt, ShardId{0});
+            MergeEvent ev; ev.event_type = MergeEvent::BEGIN;
+            ev.shard_id = ShardId{1}; ev.partner_id = ShardId{2};
+            ev.effective_height = 100; ev.evidence_window_start = 0;
+            ev.merging_shard_region = "us-east";
+            Transaction tx; tx.type = TxType::MERGE_EVENT;
+            tx.from = "alice"; tx.fee = 0; tx.nonce = 0;
+            tx.payload = ev.encode();
+            Block b; b.index = 1; b.prev_hash = c.head().compute_hash();
+            b.creators = {"alice"}; b.transactions.push_back(tx);
+            c.append(b);
+            record("V3.state_root", c.compute_state_root());
+        }
+        // V4: + staged param change (p: composite namespace).
+        {
+            Chain c; c.append(make_genesis_block(cfg));
+            std::vector<uint8_t> pval = {'1','0','0','0'};
+            c.stage_param_change(500, "min_stake", pval);
+            record("V4.state_root", c.compute_state_root());
+        }
+
+        if (emit) {
+            for (auto& [n, h] : vals) std::cout << "  " << n << " = " << h << "\n";
+            std::cout << "\n  (emit mode — copy into GOLD[] and rebuild)\n";
+            return 0;
+        }
+
+        // GOLDEN table — byte-identical across every toolchain. Captured on
+        // MSVC x64 2026-07-03 (post the chain.cpp:336 shift-UB fix) and
+        // confirmed reproduced bit-for-bit on GCC 13 / Linux x86-64.
+        // Regenerate deliberately via `--emit` only when a consensus change
+        // is INTENDED to move these (and re-verify on both toolchains).
+        static const std::pair<const char*, const char*> GOLD[] = {
+            {"V1.genesis_hash", "8d21b794be51409ffd04b0955771b165365de71257e83687b1c6db835e7ac20d"},
+            {"V1.state_root",   "21b09c12982790728a8b8e4477a290ff23a2afe99ecafed80b16689df41065a9"},
+            {"V1.head_hash",    "8d21b794be51409ffd04b0955771b165365de71257e83687b1c6db835e7ac20d"},
+            {"V2.state_root",   "3e9cf86f6224e8a878fa403746be84966f121b84a911002b794d1c3213bbc56b"},
+            {"V3.state_root",   "9bee083cd1c70dd50a523a0dcfd5353787edc708206ea8d5b7a2058ccd0d6e28"},
+            {"V4.state_root",   "bf6d6f7cff25709842800698b518a3c49f2f313d4396a12f69c2f2e0a8be6155"},
+        };
+        size_t n_gold = sizeof(GOLD)/sizeof(GOLD[0]);
+        for (auto& [name, hex] : vals) {
+            const char* want = nullptr;
+            for (size_t i = 0; i < n_gold; ++i)
+                if (name == GOLD[i].first) { want = GOLD[i].second; break; }
+            bool ok = (want != nullptr) && (hex == want);
+            if (ok) std::cout << "  PASS: " << name << " == golden\n";
+            else {
+                std::cout << "  FAIL: " << name << " = " << hex
+                          << (want ? std::string(" != golden ") + want : " (no golden)")
+                          << "\n";
+                fail++;
+            }
+        }
+        std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
+                  << ": consensus-vectors "
+                  << (fail == 0 ? "all golden state_root/digest vectors reproduced"
+                                : "had cross-toolchain divergence") << "\n";
+        return fail == 0 ? 0 : 1;
+    }
+
     // S-038 / v2.1 Merkle structural pins — lock in the sorted-leaves
     // balanced binary Merkle tree shape that the S-033 state_root
     // commitment + v2.2 light-client inclusion proofs depend on.
