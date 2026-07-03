@@ -19,7 +19,11 @@ static void car25519(gf o) {
         o[i] += (1LL << 16);
         c = o[i] >> 16;
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c << 16;
+        /* c can be negative (signed limb); `c << 16` on a negative value is
+         * UB per C (caught by UBSan). Shift as unsigned then reinterpret:
+         * bit-identical to the intended 2's-complement result on every real
+         * platform, so the field output stays byte-equal to libsodium. */
+        o[i] -= (i64)((uint64_t)c << 16);
     }
 }
 

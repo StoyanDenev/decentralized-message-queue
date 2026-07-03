@@ -54,7 +54,11 @@ static void car25519(gf o) {
         o[i] += (1LL << 16);
         c = o[i] >> 16;
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c << 16;
+        /* c can be negative (signed limb); `c << 16` on a negative value is
+         * UB per C (caught by UBSan). Shift as unsigned then reinterpret:
+         * bit-identical to the intended 2's-complement result on every real
+         * platform, so the field output stays byte-equal to libsodium. */
+        o[i] -= (i64)((uint64_t)c << 16);
     }
 }
 
@@ -183,7 +187,9 @@ static void modL(u8 *r, i64 x[64]) {
         for (j = i - 32; j < i - 12; ++j) {
             x[j] += carry - 16 * x[i] * L[j - (i - 32)];
             carry = (x[j] + 128) >> 8;
-            x[j] -= carry << 8;
+            /* carry may be negative; shift as unsigned (see car25519) —
+             * byte-invariant, but well-defined for UBSan. */
+            x[j] -= (i64)((uint64_t)carry << 8);
         }
         x[j] += carry;
         x[i] = 0;
