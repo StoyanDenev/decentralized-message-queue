@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -281,6 +282,167 @@ inline std::optional<Point> dh(const Scalar& scalar, const Point& peer) {
     return out;
 }
 } // namespace x25519
+
+// ─── NIST P-256 (§3.8c) + RFC 9497 OPRF-P256 (§3.9b) ───────────────────────
+// Wire shapes per the C layer: scalars 32B BIG-endian; points SEC1
+// uncompressed (65B, 0x04||X||Y) or compressed (33B — the OPRF element size).
+// nullopt = a NORMAL adversarial-input outcome (peer-supplied point fails
+// decode / infinity / DLEQ reject); throw = caller bug (invalid own scalar).
+
+namespace p256 {
+using Scalar          = std::array<uint8_t, 32>;
+using Point           = std::array<uint8_t, 65>;
+using CompressedPoint = std::array<uint8_t, 33>;
+
+namespace detail2 {
+// Cheap public validity check (nonzero && < n) so the wrappers can separate
+// "caller bug: invalid own scalar" (throw) from "adversarial peer input"
+// (nullopt) — the C layer returns one -1 for both. Public data only.
+inline bool scalar_valid(const Scalar& s) {
+    uint8_t pb[32], nb[32], bb[32], gx[32], gy[32];
+    determ_p256_params(pb, nb, bb, gx, gy);
+    bool nonzero = false;
+    for (auto b : s) if (b) { nonzero = true; break; }
+    return nonzero && std::memcmp(s.data(), nb, 32) < 0;
+}
+} // namespace detail2
+
+inline Point base_mul(const Scalar& scalar) {
+    Point out;
+    detail::require(determ_p256_base_mul(out.data(), scalar.data()),
+                    "p256 base_mul: invalid scalar (zero or >= n)");
+    return out;
+}
+// ECDH core: nullopt on a bad peer point / infinity (adversarial-peer
+// outcome); throws only on an invalid OWN scalar.
+inline std::optional<Point> point_mul(const Scalar& scalar, const Point& peer) {
+    if (!detail2::scalar_valid(scalar))
+        throw std::runtime_error("determ::c99: p256 point_mul: invalid scalar");
+    Point out;
+    if (determ_p256_point_mul(out.data(), scalar.data(), peer.data()) != 0)
+        return std::nullopt;   // bad peer point or infinity result
+    return out;
+}
+inline bool point_check(const Point& pt) {
+    return determ_p256_point_check(pt.data()) == 0;
+}
+inline std::optional<Point> add(const Point& a, const Point& b) {
+    Point out;   // nullopt: bad encoding or P + (-P) = infinity
+    if (determ_p256_point_add(out.data(), a.data(), b.data()) != 0)
+        return std::nullopt;
+    return out;
+}
+inline std::optional<CompressedPoint> compress(const Point& pt) {
+    CompressedPoint out;
+    if (determ_p256_point_compress(out.data(), pt.data()) != 0)
+        return std::nullopt;
+    return out;
+}
+inline std::optional<Point> decompress(const CompressedPoint& pt) {
+    Point out;   // nullopt: bad prefix / x >= p / non-square RHS
+    if (determ_p256_point_decompress(out.data(), pt.data()) != 0)
+        return std::nullopt;
+    return out;
+}
+inline Scalar scalar_mul_mod_n(const Scalar& a, const Scalar& b) {
+    Scalar r;
+    detail::require(determ_p256_scalar_mul_mod_n(r.data(), a.data(), b.data()),
+                    "p256 scalar_mul_mod_n: operand >= n");
+    return r;
+}
+inline Scalar scalar_inv_mod_n(const Scalar& a) {
+    Scalar r;
+    detail::require(determ_p256_scalar_inv_mod_n(r.data(), a.data()),
+                    "p256 scalar_inv_mod_n: a == 0 or a >= n");
+    return r;
+}
+inline Point hash_to_curve(std::span<const uint8_t> msg,
+                           std::span<const uint8_t> dst) {
+    Point out;
+    detail::require(determ_p256_hash_to_curve(out.data(),
+                                              detail::ptr(msg), msg.size(),
+                                              detail::ptr(dst), dst.size()),
+                    "p256 hash_to_curve: DST/length bounds");
+    return out;
+}
+inline Scalar hash_to_scalar(std::span<const uint8_t> msg,
+                             std::span<const uint8_t> dst) {
+    Scalar out;
+    detail::require(determ_p256_hash_to_scalar(out.data(),
+                                               detail::ptr(msg), msg.size(),
+                                               detail::ptr(dst), dst.size()),
+                    "p256 hash_to_scalar: DST/length bounds");
+    return out;
+}
+} // namespace p256
+
+namespace oprf_p256 {
+using p256::Scalar;
+using p256::CompressedPoint;
+using Proof = std::array<uint8_t, 64>;      // SerializeScalar(c) || (s)
+constexpr uint8_t MODE_OPRF  = 0x00;
+constexpr uint8_t MODE_VOPRF = 0x01;
+
+inline Scalar derive_key(std::span<const uint8_t> seed,
+                         std::span<const uint8_t> info, uint8_t mode) {
+    Scalar sk;
+    detail::require(determ_p256_oprf_derive_key(sk.data(),
+                                                detail::ptr(seed), seed.size(),
+                                                detail::ptr(info), info.size(),
+                                                mode),
+                    "oprf_p256 derive_key failed");
+    return sk;
+}
+inline CompressedPoint blind(std::span<const uint8_t> input,
+                             const Scalar& blind_scalar, uint8_t mode) {
+    CompressedPoint out;
+    detail::require(determ_p256_oprf_blind(out.data(),
+                                           detail::ptr(input), input.size(),
+                                           blind_scalar.data(), mode),
+                    "oprf_p256 blind: invalid blind (zero or >= n)");
+    return out;
+}
+// Server side: nullopt on a malformed client element (adversarial input);
+// throws on an invalid OWN key.
+inline std::optional<CompressedPoint> evaluate(const Scalar& sk,
+                                               const CompressedPoint& blinded) {
+    if (!p256::detail2::scalar_valid(sk))
+        throw std::runtime_error("determ::c99: oprf_p256 evaluate: invalid sk");
+    CompressedPoint out;
+    if (determ_p256_oprf_evaluate(out.data(), sk.data(), blinded.data()) != 0)
+        return std::nullopt;   // malformed client element
+    return out;
+}
+// Client side: nullopt on a malformed server evaluation (adversarial input).
+// For VOPRF run verify() FIRST — finalize does not verify.
+inline std::optional<std::array<uint8_t, 32>> finalize(
+        std::span<const uint8_t> input,
+        const Scalar& blind_scalar,
+        const CompressedPoint& eval) {
+    std::array<uint8_t, 32> out;
+    if (determ_p256_oprf_finalize(out.data(),
+                                  detail::ptr(input), input.size(),
+                                  blind_scalar.data(), eval.data()) != 0)
+        return std::nullopt;
+    return out;
+}
+inline Proof prove(const Scalar& sk, const CompressedPoint& pk,
+                   const CompressedPoint& blinded, const CompressedPoint& eval,
+                   const Scalar& r, uint8_t mode) {
+    Proof proof;
+    detail::require(determ_p256_voprf_prove(proof.data(), sk.data(), pk.data(),
+                                            blinded.data(), eval.data(),
+                                            r.data(), mode),
+                    "oprf_p256 prove: invalid scalar/element");
+    return proof;
+}
+inline bool verify(const CompressedPoint& pk, const CompressedPoint& blinded,
+                   const CompressedPoint& eval, const Proof& proof,
+                   uint8_t mode) {
+    return determ_p256_voprf_verify(pk.data(), blinded.data(), eval.data(),
+                                    proof.data(), mode) == 0;
+}
+} // namespace oprf_p256
 
 // ─── Constant-time / hygiene (§3.10) ────────────────────────────────────────
 

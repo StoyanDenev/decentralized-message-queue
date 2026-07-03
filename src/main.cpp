@@ -12670,6 +12670,18 @@ int main(int argc, char** argv) {
         uint8_t gcm_fixtag_wrong[16]; std::memcpy(gcm_fixtag_wrong, gcm_tag_good, 16); gcm_fixtag_wrong[0] ^= 1;
         uint8_t bufA[32], bufB[32];
         for (int i = 0; i < 32; i++) bufA[i] = (uint8_t)(i + 1);
+        // P-256 order n (BE, library-recovered — no transcribed constant) +
+        // full-range [1, n) rejection sampler for the p256 secret classes.
+        uint8_t p256_n_be[32];
+        { uint8_t pb[32], bb[32], gx[32], gy[32];
+          determ_p256_params(pb, p256_n_be, bb, gx, gy); }
+        auto p256_rnd_scalar = [&](uint8_t* s) {
+            for (;;) {
+                rnd_fill(s, 32);
+                if (std::memcmp(s, p256_n_be, 32) >= 0) continue;   // >= n
+                for (int i = 0; i < 32; i++) if (s[i]) return;      // nonzero
+            }
+        };
         // Ed25519 group order L (little-endian) + the §5 target-7 boundary
         // scalars: L-1 (canonical max), L and 2L-1 (non-canonical).
         uint8_t Lle[32] = {0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,
@@ -12714,16 +12726,23 @@ int main(int argc, char** argv) {
                 else if (c == 3) std::memcpy(scalar, L2m1, 32);
                 else             rnd_fill(scalar, 32);
             } else if (id == "p256-base-mul") {
-                // P-256 scalars are BE; keep < n by zeroing the top byte.
-                if (c == 0) { std::memcpy(scalar, fixscalar, 32); scalar[0] = 0x0f; }
-                else { rnd_fill(scalar, 32); scalar[0] &= 0x0f; scalar[31] |= 1; }
+                // Full-range P-256 secret classes (P256-CT-1 lesson: the old
+                // scalar[0] &= 0x0f masking forced the range-gate compare to
+                // exit at byte 0, blinding the probe to short-circuit leaks).
+                // FIX class shares n's first 16 BE bytes then drops below it
+                // (byte 16 = 0x00 < n[16] = 0xbc) — the maximal-prefix stress
+                // case for any byte-compare on the scalar; RND class is
+                // rejection-sampled over the full [1, n) range.
+                if (c == 0) { std::memcpy(scalar, p256_n_be, 16);
+                              std::memset(scalar + 16, 0, 16); scalar[31] = 1; }
+                else p256_rnd_scalar(scalar);
             } else if (id == "p256-h2c") {
                 if (c == 0) std::memcpy(msg, fixmsg, 64); else rnd_fill(msg, 64);
             } else if (id == "p256-sc-mul") {
-                if (c == 0) { std::memcpy(scalar, fixscalar, 32); scalar[0] = 0x0f;
-                              std::memcpy(seed, fixseed, 32); seed[0] = 0x0f; }
-                else { rnd_fill(scalar, 32); scalar[0] &= 0x0f;
-                       rnd_fill(seed, 32);   seed[0] &= 0x0f; }
+                if (c == 0) { std::memcpy(scalar, p256_n_be, 16);
+                              std::memset(scalar + 16, 0, 16); scalar[31] = 1;
+                              std::memcpy(seed, scalar, 32); seed[30] = 0x7f; }
+                else { p256_rnd_scalar(scalar); p256_rnd_scalar(seed); }
             }
             // ---- timed region ----
             uint64_t t0 = now_ticks();
@@ -13013,6 +13032,73 @@ int main(int argc, char** argv) {
             secure_zero(buf);
             for (auto bch : buf) if (bch != 0) ok = false;
             check(ok, "(10) ct_equal equal/differ/length-mismatch contract; secure_zero wipes");
+        }
+
+        // (11) P-256: wrapper == raw C API (base_mul / DH / compress round-trip
+        //      / mod-n ops); error model — invalid own scalar throws, bad peer
+        //      point is nullopt (a NORMAL adversarial outcome).
+        {
+            p256::Scalar a{}, b{}; a[31] = 7; b[31] = 11;
+            auto A = p256::base_mul(a);
+            uint8_t rA[65]; determ_p256_base_mul(rA, a.data());
+            auto B = p256::base_mul(b);
+            auto abP = p256::point_mul(a, B);        // DH: [a]([b]G)
+            auto baP = p256::point_mul(b, A);
+            auto c33 = p256::compress(A);
+            std::optional<p256::Point> back;
+            if (c33) back = p256::decompress(*c33);
+            auto ab   = p256::scalar_mul_mod_n(a, b);
+            uint8_t rab[32]; determ_p256_scalar_mul_mod_n(rab, a.data(), b.data());
+            auto inv  = p256::scalar_inv_mod_n(a);
+            auto one  = p256::scalar_mul_mod_n(a, inv);
+            p256::Scalar onechk{}; onechk[31] = 1;
+            bool threw = false;
+            try { p256::base_mul(p256::Scalar{}); } catch (const std::runtime_error&) { threw = true; }
+            p256::Point badpt{}; badpt[0] = 0x05;    // bad SEC1 prefix
+            bool ok = std::memcmp(A.data(), rA, 65) == 0
+                   && abP && baP && *abP == *baP && p256::point_check(*abP)
+                   && c33 && back && *back == A
+                   && std::memcmp(ab.data(), rab, 32) == 0 && one == onechk
+                   && threw && !p256::point_mul(a, badpt).has_value();
+            check(ok, "(11) p256 wrapper: base_mul == raw; DH commutes; compress round-trips; "
+                      "a*a^-1 == 1; zero scalar throws; bad peer point -> nullopt");
+        }
+
+        // (12) OPRF-P256: the wrapper reproduces the protocol identity
+        //      (blind/evaluate/finalize == direct evaluate of HashToGroup) and
+        //      the VOPRF prove/verify contract incl. tamper reject.
+        {
+            using namespace oprf_p256;
+            std::vector<uint8_t> seed(32, 0xa3), info = {'t','e','s','t'},
+                                 input = {'i','n','p','u','t'};
+            auto sk = derive_key(seed, info, MODE_OPRF);
+            p256::Scalar bl{}; bl[31] = 42;
+            auto blinded = blind(input, bl, MODE_OPRF);
+            auto eval = evaluate(sk, blinded);
+            std::optional<std::array<uint8_t, 32>> out, direct;
+            if (eval) out = finalize(input, bl, *eval);
+            // direct path: Finalize(input, 1, sk*HashToGroup(input)) — blind=1
+            p256::Scalar oneS{}; oneS[31] = 1;
+            auto direct_b = blind(input, oneS, MODE_OPRF);
+            auto direct_e = evaluate(sk, direct_b);
+            if (direct_e) direct = finalize(input, oneS, *direct_e);
+            // VOPRF: prove under a fixed r, verify, then tamper.
+            auto skv = derive_key(seed, info, MODE_VOPRF);
+            auto pkP = p256::base_mul(skv);
+            auto pk  = p256::compress(pkP);
+            auto bv  = blind(input, bl, MODE_VOPRF);
+            auto ev  = evaluate(skv, bv);
+            p256::Scalar r{}; r[31] = 99;
+            bool ok = out && direct && *out == *direct && pk && ev;
+            if (ok) {
+                auto proof = prove(skv, *pk, bv, *ev, r, MODE_VOPRF);
+                auto bad = proof; bad[0] ^= 1;
+                ok = verify(*pk, bv, *ev, proof, MODE_VOPRF)
+                  && !verify(*pk, bv, *ev, bad, MODE_VOPRF)
+                  && !verify(*pk, bv, *ev, proof, MODE_OPRF);
+            }
+            check(ok, "(12) oprf_p256 wrapper: blind/evaluate/finalize == direct evaluate; "
+                      "VOPRF prove->verify accepts, tampered proof + wrong mode reject");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
