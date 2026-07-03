@@ -276,18 +276,38 @@ struct ContribMsg {
     uint64    block_index;
     string    signer;
     Hash      prev_hash;
-    uint64    aborts_gen;     // # of abort_events seen at this height
-    Hash[]    tx_hashes;      // sorted ascending unique
-    Hash      dh_input;       // SHA256(secret || pubkey) — Phase-1 commitment
-    Signature ed_sig;         // Ed25519 over make_contrib_commitment(...)
+    uint64    aborts_gen;         // # of abort_events seen at this height
+    Hash[]    tx_hashes;          // sorted ascending unique
+    Hash      dh_input;           // SHA256(secret || pubkey) — Phase-1 commitment
+    // v2.7 F2 view-reconciliation (F2-SPEC.md §Q1/Q3/Q4): the member's
+    // committed view of the three pool-fed fields, as Merkle roots + the
+    // sorted lists (each list capped at 64 entries, validator-enforced).
+    Hash      view_eq_root;       Hash[] view_eq_list;
+    Hash      view_abort_root;    Hash[] view_abort_list;
+    Hash      view_inbound_root;  Hash[] view_inbound_list;
+    uint64    proposer_time;      // S-030-D2: member's committed local unix time
+    Signature ed_sig;             // Ed25519 over make_contrib_commitment(...)
 };
 ```
 
-`make_contrib_commitment(index, prev_hash, tx_hashes, dh_input)`:
+`make_contrib_commitment` (src/node/producer.cpp) — the signed Phase-1 commitment:
 ```
 inner_root = SHA256(concat(tx_hashes))
-commit     = SHA256(index (u64) || prev_hash || inner_root || dh_input)
+commit     = SHA256( index (u64) || prev_hash || inner_root || dh_input
+                     || [ "DTM-F2-v1" || view_eq_root || view_abort_root
+                          || view_inbound_root ]      # iff any view root non-zero
+                     || [ "DTM-TS-v1" || proposer_time (u64) ] )  # iff non-zero
 ```
+
+The two bracketed tails are domain-separated appendages: when ALL three view
+roots are zero AND `proposer_time == 0`, the commitment is byte-identical to
+the legacy v1 shape (pre-F2 compatibility; post-activation the producer always
+populates them, so the v1 short-circuit is structurally unreachable in
+production). The `DTM-F2-v1` / `DTM-TS-v1` tags prevent cross-shape preimage
+replay. The Phase-1 signature over `proposer_time` is what feeds the
+timestamp median reconciliation (block `timestamp =
+reconcile_median_time(creator_proposer_times)`, digest-bound — §4.3) without
+letting a member equivocate on its committed time.
 
 **Phase 2: BlockSig.** Once K Phase-1 messages have arrived (sealing the dh_input commitments), each member computes the placeholder `delay_seed = SHA256(index ‖ prev_hash ‖ tx_root ‖ ordered_dh_inputs)`, signs `compute_block_digest(...)`, and broadcasts:
 ```cpp
@@ -510,7 +530,7 @@ The destination's K-of-K signing of the block is the collective on-chain attesta
 
 Step 6 above describes the *eligible* set for inclusion. Reference implementations also wait **`CROSS_SHARD_RECEIPT_LATENCY = 3`** destination-chain blocks between local first-observation of a receipt (via bundle gossip — step 4) and admission to a produced block. The latency gives committee members time to converge on the same eligible set; without it, momentary pool divergence under gossip-async produces different tentative blocks → K-of-K fails → round retries. The soak threshold is a producer-side behavior, not a wire-format requirement; receivers do not validate it. Alternative implementations that skip the soak are still consensus-compatible (they'll just trigger more round retries under load).
 
-The v2.7 F2 (`docs/proofs/F2-SPEC.md`) consensus-layer closure replaces this with a strict-determinism Phase-1 intersection commitment via `ContribMsg.inbound_keys`. Until v2.7 F2 ships, the 3-block soak is the deployed partial mitigation.
+The v2.7 F2 (`docs/proofs/F2-SPEC.md`) consensus-layer closure **SHIPPED** and supersedes this as the primary mechanism: a strict-determinism Phase-1 intersection commitment via the ContribMsg view fields (§5.1). The 3-block soak is retained beneath it as a liveness pre-filter.
 
 ## 9. Wire protocol
 
@@ -826,18 +846,18 @@ Test surface: `tools/test_make_genesis_block.sh` exercises every invariant above
 | Profile | Timing (commit/sig/abort) | M / K | role / sharding_mode | Crypto | Confidential tx | Primary use case |
 |---|---|---|---|---|---|---|
 | **`cluster`**  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | **FIPS** | ❌ Unavailable | **In-house enterprise / financial services / banking settlement / regulated single-org / single-org CBDC / HIPAA healthcare. ~125 ms blocks.** |
-| `web` (default) | 200 / 200 / 100 | 4 / 3 (hybrid) | SHARD / EXTENDED | MODERN | ✅ Available | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
-| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | MODERN | ✅ Available | Regional / continental RTT, state lottery, multi-region commercial |
-| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | MODERN | ✅ Available | Inter-continental hub-and-spoke, international CBDC federation |
+| `web` (default) | 200 / 200 / 100 | 4 / 3 (hybrid) | SHARD / EXTENDED | MODERN | ❌ De-scoped (2026-07-03) | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
+| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | MODERN | ❌ De-scoped (2026-07-03) | Regional / continental RTT, state lottery, multi-region commercial |
+| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | MODERN | ❌ De-scoped (2026-07-03) | Inter-continental hub-and-spoke, international CBDC federation |
 | **`tactical`** | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | **FIPS** | ❌ Unavailable | **Military / defense / drone swarm / embedded mobile units / DoD deployments. Sub-30 ms private link, region-pinned units.** |
 
 **Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack for deployments where FIPS 140-2/3 compliance is non-negotiable:
 
 - **FIPS profile stack:** AES-256-GCM AEAD (FIPS 197 + SP 800-38D), PBKDF2-HMAC-SHA-256 KDF (SP 800-132), NIST P-256 prime-order operations (FIPS 186-5), Ed25519 signatures (FIPS 186-5 since 2023), X25519 KX (SP 800-186), SHA-256/SHA-512 (FIPS 180-4), HMAC/HKDF (FIPS 198/SP 800-56C).
-- **FIPS feature unavailability:** Confidential transactions (v2.22 Bulletproofs) cannot be used in FIPS profiles because NIST has not standardized zero-knowledge range proof constructions. FIPS deployments use clear-amount TRANSFER with v2.24 audit hooks for regulator access.
+- **Confidential transactions (v2.22) are DE-SCOPED project-wide (2026-07-03)** — no profile ships them (the historical FIPS-specific rationale — NIST has not standardized zero-knowledge range proofs — stands independently). All deployments use clear-amount TRANSFER with v2.24 audit hooks for regulator access.
 - **FIPS use cases:** military embedded systems (tactical), in-house bank settlement (cluster), single-org CBDC components (cluster), healthcare-HIPAA-strict deployments (cluster), DoD/government contracts.
 
-The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, secp256k1 + Bulletproofs (Bitcoin-grade libsecp256k1-zkp; full v2.22 confidential-transaction support), Ed25519 signatures, X25519 KX. Cryptographically strongest defaults but not FIPS-validated.
+The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, Ed25519 signatures, X25519 KX. Cryptographically strongest defaults but not FIPS-validated. (The formerly-listed secp256k1 + Bulletproofs confidential-transaction component was **DE-SCOPED 2026-07-03** — no secp256k1 code exists in the tree; `DECISION-LOG.md 2026-07-03`.)
 
 **See `docs/proofs/CRYPTO-C99-SPEC.md` §2.Q10** for full profile-to-crypto mapping, feature availability matrix, and rationale for bundling.
 

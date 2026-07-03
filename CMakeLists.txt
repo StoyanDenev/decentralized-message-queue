@@ -95,8 +95,9 @@ list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
 # Per-module provenance + validation evidence: src/crypto/<module>/README.md.
 # The src/*.cpp glob above does not pick up .c files; list them explicitly.
 # §3.14 remaining: per-module sub-libraries, the cross-compilation matrix,
-# and the libsodium drop (gated on §3.15 — the wallet OPAQUE stub still
-# links sodium).
+# and the libsodium drop (gated on §3.15 — determ-wallet links sodium:
+# ~200 call sites across wallet/main.cpp (Ed25519 sign/verify/derive, X25519,
+# sodium_memzero) plus the OPAQUE stub; the daemon and determ-light do NOT).
 add_library(determ-crypto-c99 STATIC
   # §3.10 shared primitives — secure_zero (hygiene) + ct_memcmp (CT compare),
   # consumed by every module below.
@@ -176,7 +177,9 @@ set(SODIUM_MINIMAL                OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   sodium
   GIT_REPOSITORY https://github.com/robinlinden/libsodium-cmake.git
-  GIT_TAG        master
+  # sha-pinned 2026-07-03 (was: master, an unpinned moving branch of a
+  # third-party fork feeding the seed-handling wallet binary).
+  GIT_TAG        9b2848dfc1b917a9410f0de9d81059b26cbfaa8d
 )
 FetchContent_MakeAvailable(sodium)
 

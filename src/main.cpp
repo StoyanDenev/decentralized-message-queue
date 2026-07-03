@@ -8996,20 +8996,19 @@ int main(int argc, char** argv) {
                   "compute_block_digest: zero partner_subset_hash keeps byte-identical v1 digest");
         }
 
-        // 19. timestamp excluded — now the SOLE genuinely-uncovered S-030-D2
-        //     residual digest field (partner_subset_hash was closed in
-        //     assertion 18). timestamp CANNOT be bound the same way: honest
-        //     members' clocks differ within the validator's ±30s window, so a
-        //     raw append would make two honest members sign divergent digests
-        //     and spuriously abort the round. Binding it needs the assembler-
-        //     proposed / members-validate-±30s reconciliation (a ContribMsg
-        //     wire-format change, F2-SPEC §6.3 review-gated), and timestamp
-        //     does not drive deterministic apply. See S030-D2-Analysis.md §5.
+        // 19. timestamp on the LEGACY path (empty creator_proposer_times) is
+        //     excluded from the digest — backward-compat by design. Since
+        //     f99eeb8 the production path BINDS it: each member commits
+        //     proposer_time in its Phase-1 ContribMsg (DTM-TS-v1 domain sep),
+        //     build_body sets timestamp = reconcile_median_time(...), and
+        //     compute_block_digest appends it whenever creator_proposer_times
+        //     is non-empty (positive binding: test-timestamp-reconciliation).
+        //     S-030-D2 has NO open digest residual. See S030-D2-Analysis.md.
         {
             Block b = baseline;
             b.timestamp = 999;
             check(compute_block_digest(b) == dig_baseline,
-                  "compute_block_digest: timestamp EXCLUDED (sole S-030-D2 residual; §5 non-fix)");
+                  "compute_block_digest: timestamp excluded on the legacy path only (bound via median reconciliation when proposer_times present)");
         }
 
         // === F2 POSITIVE BINDING (shipped v2.7 F2 — the three pool-fed

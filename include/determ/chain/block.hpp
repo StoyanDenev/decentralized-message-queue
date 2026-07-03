@@ -482,15 +482,13 @@ struct Block {
     // without ever needing to see the partner's subset.
     //
     // Zero-hash (default) means "no partner" — the block was produced
-    // under regular non-merged consensus. Validator (Phase 3) gates:
-    //   * non-zero partner_subset_hash requires the chain to know that
-    //     this shard is currently absorbing or absorbed (consult
-    //     Chain::merge_state_).
-    //   * zero partner_subset_hash on a chain currently in a merge
-    //     transition window is also valid — merge BEGIN/END happens at
-    //     effective_height boundaries; not every block in a merged
-    //     window need carry the union digest (only blocks whose
-    //     committee is the merged committee do).
+    // under regular non-merged consensus. DORMANT at v1.1: no production
+    // code path sets a non-zero value (only Block::from_json can carry
+    // one); the merged-committee producer branch is downstream (R4
+    // Phase 3+), and no validator merge-state gate exists yet. The field
+    // is nonetheless DEFENSIVELY digest-bound (compute_block_digest
+    // appends it when non-zero, commit 8585a50) so a future merge path
+    // cannot ship with it unbound.
     Hash partner_subset_hash{};
 
     // S-033 / v2.1 foundation: cryptographic commitment to state-after-apply.

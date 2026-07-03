@@ -388,6 +388,8 @@ Three implementation paths exist:
 
 **Decision authority.** This decision is NOT pre-resolved in `Improvements.md §7.5/§7.6` or `DECISION-LOG.md`. The §7.6.7 text says "address-derivation preimage MUST include `pubkey_form` discriminator" but does not specify the formula. This document RECOMMENDS Option A; the implementation thread MUST get explicit user / decision-authority sign-off before shipping the address-derivation change because it is a substantive deviation from the current code path.
 
+> **RESOLVED 2026-07-03 (authority: Stoyan Denev, `DECISION-LOG.md 2026-07-03`): Option A is NOT adopted — the current formula is FROZEN as-is.** Anon addresses stay Ed25519-only raw-hex for the chain's lifetime; §7.6.7 is satisfied vacuously (one pubkey form, no cross-form aliasing possible). The Option-A cost analysis above stands as the record of what was weighed and declined.
+
 **Migration risk for shipped addresses.** If v1.0 is pre-mainnet (per the no-migrations / pre-launch posture confirmed in `IMPLEMENTATION-SEQUENCING.md §4.4`), there are NO shipped mainnet addresses to migrate; only test fixtures and operator-tooling artifacts that bake in specific hex strings. Mainnet launches with the post-§7.5.7 formula or it never adopts it; there is no hybrid path.
 
 ### 4.6 Domain addresses (not affected)

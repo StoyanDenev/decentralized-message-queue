@@ -46,7 +46,7 @@ entire source of the recurring "is this still consistent?" churn.
 - `docs/V2-DESIGN.md` — full v2 design space (10 of 25 shipped; rest future)
 - `docs/V2-DAPP-DESIGN.md` — DApp themes (v2.18/v2.19 substrate shipped; rest future)
 - `docs/proofs/Beaconless-v2-SPEC.md` — beaconless cross-shard architecture
-- `docs/proofs/v2.10-DKG-SPEC.md` — threshold-randomness DKG (block-beacon **de-scoped**; DKG retained for Beaconless-v2 / DSSO)
+- `docs/proofs/v2.10-DKG-SPEC.md` — threshold-randomness DKG (block-beacon **de-scoped**; FROST module **FROZEN 2026-07-03**, NOTICE §6 amendment — design record only)
 - `docs/proofs/V210-PhaseD-RandomnessWiring.md` — FROST block-beacon wiring (**de-scoped**, historical)
 - `docs/proofs/V210ImplementationRoadmap.md` — v2.10 roadmap (block-beacon **de-scoped**)
 - `docs/proofs/v2.22-PRIVACY-SPEC.md` — confidential transactions
@@ -101,7 +101,7 @@ decisions stop leaking into T3) at near-zero merge/link risk.
 - Scaling    → Beaconless-v2-SPEC (cross-shard randomness now MPDH, §Q6)
 - Privacy    → v2.22-PRIVACY-SPEC, PFS_DEPLOYMENT_GUIDANCE
 - Identity   → Theme 9 DSSO / v2.25, v2.26-ROTATION-SPEC
-- Threshold  → v2.10-DKG-SPEC  (block-beacon DE-SCOPED; DKG kept for Beaconless-v2 / DSSO)
+- Threshold  → v2.10-DKG-SPEC  (block-beacon DE-SCOPED; FROST FROZEN 2026-07-03 — design record only)
 - Post-quantum → v2.8  (in V2-DESIGN)
 - Tooling    → DSF-SPEC (deterministic simulation)
 - Portability→ C99-MINIX-PORT

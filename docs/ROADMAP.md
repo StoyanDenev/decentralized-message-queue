@@ -11,12 +11,12 @@
 
 ---
 
-## Near-term (1.0.x trajectory) — committed, imminent, not yet shipped
+## Near-term (1.0.x trajectory) — per-row status
 
 | Item | Status | Docs |
 |---|---|---|
-| **v2.7 F2 view reconciliation** | last permissionless-readiness gate (~3–4d) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
-| **C99 crypto stack** — remaining phases | Phase 0 shipped (SHA/HMAC/PBKDF2/ChaCha20/AES/Ed25519/FROST); later phases near-term | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
+| **v2.7 F2 view reconciliation** | **SHIPPED** (S-016 + S-030-D2 consensus closure; commits 850d2c3..48c4b45) | `proofs/F2-SPEC.md`, `proofs/F2ViewReconciliationAnalysis.md`, `proofs/S030-D2-Analysis.md`, `proofs/tla/F2ViewReconciliation.tla`, `proofs/tla/MakeContribCommitment.tla`, `proofs/tla/MakeBlockSigPrimitive.tla`, `proofs/tla/MergeEventAcceptGate.tla` |
+| **C99 crypto stack** | **SHIPPED** through every non-gated section (§3.1-§3.6, §3.8, §3.8b/c, §3.9b, §3.10-§3.14 seeds; FROST module FROZEN 2026-07-03); §3.7/§3.9a secp256k1 **DE-SCOPED 2026-07-03** (DECISION-LOG); §3.15 caller migration is the one gated follow-up | `proofs/CRYPTO-C99-SPEC.md`, `proofs/tla/FrostVerify.tla` |
 | **RPC anti-replay window** | HMAC-auth extension (v2.16+) | `proofs/RpcAuthReplayWindowSoundness.md` |
 
 ---
@@ -26,13 +26,13 @@
 | Theme | Docs |
 |---|---|
 | **Scaling** — beaconless cross-shard architecture | `proofs/Beaconless-v2-SPEC.md` (cross-shard randomness now **MPDH commit-reveal**, §Q6, 2026-06-07) |
-| **Privacy** — confidential transactions | `proofs/v2.22-PRIVACY-SPEC.md`, `proofs/PFS_DEPLOYMENT_GUIDANCE.md` |
+| **Privacy** — confidential transactions | `proofs/v2.22-PRIVACY-SPEC.md`, `proofs/PFS_DEPLOYMENT_GUIDANCE.md` — implementation **DE-SCOPED 2026-07-03** (design record only; DECISION-LOG) |
 | **Identity** — distributed IdP / DSSO + key rotation | Theme 9 / v2.25 (in `V2-DESIGN.md`), `proofs/v2.26-ROTATION-SPEC.md` |
-| **Threshold crypto** — DKG ceremony | `proofs/v2.10-DKG-SPEC.md` — **block-beacon application DE-SCOPED**; the DKG is retained for Beaconless-v2 cross-shard randomness + DSSO |
+| **Threshold crypto** — DKG ceremony | `proofs/v2.10-DKG-SPEC.md` — **block-beacon DE-SCOPED**; FROST module **FROZEN 2026-07-03** (FROST_DEVIATION_NOTICE §6 amendment — retained for audit history + test coverage only; no consumer claim) |
 | **Post-quantum** — Dilithium/Falcon migration | v2.8 (in `V2-DESIGN.md`) |
 | **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
 | **Portability** — C99 / MINIX reimplementation | `C99-MINIX-PORT.md` |
-| **Launch** — v1.1 mainnet + address-derivation decision | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
+| **Launch** — v1.1 mainnet (address-derivation decision **DECIDED 2026-07-03**: formula frozen as-is — DECISION-LOG) | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
 | **Trustless reads** — supply-counter trustless read (deferred) | `proofs/SupplyProofSoundness.md` — command reverted R41; needs daemon-side height-pinned counter read (or raw-value `state_proof`); soundness SU-1..SU-4 stands as the spec |
 | **Full design space** | `V2-DESIGN.md` (v2 themes; 10 of 25 shipped), `V2-DAPP-DESIGN.md` (DApp themes; v2.18/v2.19 substrate shipped) |
 

@@ -568,7 +568,14 @@ Original plan (retained for the deviation record):
   byte-equal drop-in THERE, while an envelope PBKDF2→Argon2id switch is an
   on-disk format change. See `src/crypto/argon2/README.md` §5.)
 
-### 3.7 secp256k1 + libsecp256k1-zkp (~10 days)
+### 3.7 secp256k1 + libsecp256k1-zkp — **DE-SCOPED** (2026-07-03)
+
+> **DE-SCOPED (2026-07-03, authority: Stoyan Denev — `DECISION-LOG.md 2026-07-03`).**
+> No consumer exists: v2.22 confidential transactions is FUTURE-tier design-only
+> (zero code) and DSSO was re-based to X25519 DLT-A (2026-06-07). Vendoring
+> ~9K LOC of third-party curve code would add a lifetime audit obligation for
+> nothing shipped. The section below is retained as the design record; reviving
+> it requires a new decision with a real consumer.
 
 - Vendor libsecp256k1 from Bitcoin Core, pinned version
 - Vendor libsecp256k1-zkp from Blockstream / Grin
@@ -637,7 +644,10 @@ Original plan (retained for the deviation record):
   in-session); the tranche-3 probe generators now use full-range [1, n)
   secret scalars.
 
-### 3.9a OPRF on secp256k1 from voprf draft + RFC 9380 (~7 days)
+### 3.9a OPRF on secp256k1 from voprf draft + RFC 9380 — **DE-SCOPED** (2026-07-03)
+
+> **DE-SCOPED with §3.7** (same decision + rationale; the shipped §3.9b
+> OPRF-P256 covers the OPRF need for the profiles that ship).
 
 - Implement OPRF-secp256k1 cipher suite from voprf draft (used by MODERN profile)
 - Hash-to-curve for secp256k1 per RFC 9380 (SSWU map)
@@ -806,7 +816,9 @@ Original plan (retained):
   splitting buys nothing until a second consumer with a partial-module need
   exists); the cross-compilation matrix (x86-64 / ARM64, Linux/Windows/MINIX
   — only MSVC x64 exercised so far); the libsodium drop (gated on §3.15: the
-  wallet OPAQUE stub still links sodium).
+  wallet links sodium — ~200 call sites across wallet/main.cpp
+  (Ed25519 sign/verify/derive, X25519, sodium_memzero) plus the OPAQUE stub;
+  the daemon and determ-light do NOT link sodium).
 
 ### 3.15 Migration of existing callers (~5 days)
 
